@@ -1,0 +1,45 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Generate Platform App token
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+
+      - name: Dispatch centralized release-deploy
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          gh workflow run release-deploy.yaml \
+            --repo mctlhq/mctl-gitops \
+            --ref main \
+            -f repo=mctlhq/mctl-telegram \
+            -f git_ref="$TAG" \
+            -f image_name=ghcr.io/mctlhq/mctl-telegram \
+            -f image_tag="$TAG" \
+            -f team_name=labs \
+            -f component_name=mctl-telegram
