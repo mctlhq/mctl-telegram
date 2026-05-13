@@ -81,7 +81,7 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 		if err != nil {
 			continue
 		}
-		out = append(out, decodeMessages(hist, t.hint, take)...)
+		out = append(out, decodeMessages(hist, t.hint, users, chats, take)...)
 	}
 	return out, nil
 }
@@ -104,7 +104,7 @@ func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64
 	return nil
 }
 
-func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, max int) []Message {
+func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int) []Message {
 	var raw []tg.MessageClass
 	switch v := r.(type) {
 	case *tg.MessagesMessages:
@@ -124,6 +124,7 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, max int) []Message
 			ID:        msg.ID,
 			Peer:      hint.ID,
 			PeerTitle: hint.Title,
+			From:      resolveSender(msg.FromID, users, chats),
 			Text:      msg.Message,
 			Date:      time.Unix(int64(msg.Date), 0).UTC(),
 		})
@@ -132,6 +133,31 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, max int) []Message
 		}
 	}
 	return out
+}
+
+func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) string {
+	if from == nil {
+		return ""
+	}
+	switch v := from.(type) {
+	case *tg.PeerUser:
+		if u, ok := users[v.UserID]; ok {
+			if u.Username != "" {
+				return "@" + u.Username
+			}
+			return strings.TrimSpace(u.FirstName + " " + u.LastName)
+		}
+	case *tg.PeerChannel:
+		if c, ok := chats[v.ChannelID]; ok {
+			if ch, ok2 := c.(*tg.Channel); ok2 {
+				if ch.Username != "" {
+					return "@" + ch.Username
+				}
+				return ch.Title
+			}
+		}
+	}
+	return ""
 }
 
 // GetMessages fetches the last `limit` messages from a specific peer
@@ -177,7 +203,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		if err != nil {
 			return nil, fmt.Errorf("MessagesGetHistory: %w", err)
 		}
-		return decodeMessages(hist, hint, limit), nil
+		return decodeMessages(hist, hint, users, chats, limit), nil
 	}
 	return nil, fmt.Errorf("peer %q not found in dialogs", peerSpec)
 }
