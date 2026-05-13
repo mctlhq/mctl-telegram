@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mctl-telegram — MCP connector</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 760px;
+    margin: 2.5rem auto;
+    padding: 0 1.25rem;
+    color: #1f2328;
+    background: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre { background: #161b22; color: #e6edf3; }
+    a { color: #58a6ff; }
+    .card { background: #161b22; border-color: #30363d; }
+    .muted { color: #8b949e; }
+  }
+  h1 { font-size: 1.75rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
+  .lead { color: #57606a; margin: .25rem 0 2rem; }
+  .muted { color: #57606a; font-size: .9rem; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .88em;
+  }
+  code { background: #eaeef2; padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: #eaeef2;
+    padding: .75rem 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    line-height: 1.4;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin: 1rem 0;
+  }
+  .url { word-break: break-all; }
+  ol { padding-left: 1.25rem; }
+  ol li { margin: .35rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: .75rem 0; }
+  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  @media (prefers-color-scheme: dark) { td, th { border-color: #30363d; } }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: #ddf4ff; color: #0969da; font-size: .75rem; font-weight: 600; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <h1>mctl-telegram <span class="badge">MCP</span></h1>
+  <p class="lead">Remote MCP server exposing your Telegram user-account (read dialogs, read unread, send draft) to Claude.ai and other MCP clients.</p>
+
+  <div class="card">
+    <strong>MCP endpoint</strong><br>
+    <code class="url">{{.MCPURL}}</code><br>
+    <span class="muted">Streamable HTTP — works via <code>POST</code> with <code>Accept: application/json, text/event-stream</code>. Opening it in a browser is expected to be blank.</span>
+  </div>
+
+  <h2>1. Add as a custom connector in Claude.ai</h2>
+  <ol>
+    <li>Open <a href="https://claude.ai/settings/connectors" target="_blank" rel="noopener">claude.ai → Settings → Connectors</a> and click <em>Add custom connector</em>.</li>
+    <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
+    <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers the authorization server from the well-known document at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and redirects to <code>{{.AuthServer}}</code> for GitHub login.</li>
+    <li>Sign in with the GitHub account that has access to your mctl tenant. The issued JWT is verified by mctl-telegram via shared HMAC.</li>
+  </ol>
+
+  <h2>2. Available tools</h2>
+  <table>
+    <thead><tr><th>Tool</th><th>Annotation</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>list_dialogs</code></td><td>readOnly</td><td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td></tr>
+      <tr><td><code>get_unread_messages</code></td><td>readOnly</td><td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td></tr>
+      <tr><td><code>send_message</code></td><td>destructive</td><td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires server <code>ALLOW_SEND=true</code> + scope <code>telegram:messages:send</code> + per-account <code>send_enabled=true</code> + <code>mode=send</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Smoke-test from your terminal</h2>
+  <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
+  <pre>curl -s {{.WellKnownURL}}
+
+curl -s -X POST {{.MCPURL}} \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'</pre>
+
+  <h2>4. First-time Telegram login</h2>
+  <p>Until the in-browser <code>/telegram/connect</code> flow ships, the operator runs the CLI binary <code>mctl-telegram-login</code> bundled in the same image. It performs phone → SMS code → optional 2FA password and persists an AES-256-GCM-encrypted MTProto session keyed to your GitHub login. The full recipe lives in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.</p>
+
+  <p class="muted">Source: <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> · Auth server: <code>{{.AuthServer}}</code> · Resource: <code>{{.PublicBaseURL}}</code></p>
+</body>
+</html>

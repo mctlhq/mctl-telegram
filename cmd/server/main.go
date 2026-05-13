@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 func main() {
@@ -79,17 +80,21 @@ func main() {
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
 	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg))
+	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath))
 
 	provider := selectProvider(cfg, store)
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
 
-	mux.Group(func(r chi.Router) {
-		r.Use(auth.Middleware(provider, cfg.AuthRequired))
-		r.Use(limiter.Middleware())
-		r.Mount(cfg.MCPPath, mcpSrv.HTTPHandler())
-	})
+	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
+	// runs, so unauthenticated humans still see instructions instead of
+	// a 401. MCP clients (Accept: application/json, text/event-stream)
+	// fall through and hit the full auth+ratelimit+MCP chain.
+	mcpHandler := auth.Middleware(provider, cfg.AuthRequired)(
+		limiter.Middleware()(mcpSrv.HTTPHandler()),
+	)
+	mux.Mount(cfg.MCPPath, web.BrowserRedirect(mcpHandler, "/"))
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
