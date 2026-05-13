@@ -30,6 +30,7 @@ func (s *Server) HTTPHandler() http.Handler {
 	)
 	srv.AddTool(s.toolListDialogs())
 	srv.AddTool(s.toolGetUnreadMessages())
+	srv.AddTool(s.toolGetMessages())
 	srv.AddTool(s.toolSendMessage())
 
 	return mcpserver.NewStreamableHTTPServer(

@@ -134,6 +134,54 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, max int) []Message
 	return out
 }
 
+// GetMessages fetches the last `limit` messages from a specific peer
+// regardless of read/unread state.
+func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
+	if peerSpec == "" {
+		return nil, fmt.Errorf("peer is required")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	api := c.API()
+
+	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		Limit:      200,
+		OffsetPeer: &tg.InputPeerEmpty{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+	}
+	users, chats, dialogs := decodeDialogsResult(dlgRes)
+
+	for _, dc := range dialogs {
+		d, ok := dc.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		hint := dialogFromPeer(d, users, chats)
+		if hint == nil {
+			continue
+		}
+		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
+			continue
+		}
+		input := inputPeerFromPeer(d.Peer, users, chats)
+		if input == nil {
+			return nil, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
+		}
+		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  input,
+			Limit: limit,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("MessagesGetHistory: %w", err)
+		}
+		return decodeMessages(hist, hint, limit), nil
+	}
+	return nil, fmt.Errorf("peer %q not found in dialogs", peerSpec)
+}
+
 func matchUsername(have, want string) bool {
 	have = strings.TrimPrefix(strings.ToLower(have), "@")
 	want = strings.TrimPrefix(strings.ToLower(want), "@")

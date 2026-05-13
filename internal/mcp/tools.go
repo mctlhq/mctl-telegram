@@ -158,6 +158,51 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 	return tool, handler
 }
 
+func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_messages",
+		mcplib.WithTitleAnnotation("Get Messages"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Fetch recent messages from a specific peer (full history, not just unread).
+
+Inputs:
+  peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
+  limit — int, default 50, max 200.
+
+Output: JSON array of {id, peer, peer_title, text, date}.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer to fetch messages from (@username or user/chat/channel id)."),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Max messages to return (default 50, max 200)."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if err := requireScope(id, "telegram:messages:read"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		limit := intArg(args, "limit", 50)
+		if peer == "" {
+			return mcplib.NewToolResultError("peer is required"), nil
+		}
+		var msgs []telegram.Message
+		err := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			var err error
+			msgs, err = telegram.GetMessages(ctx, c, peer, limit)
+			return err
+		})
+		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err)
+		if err != nil {
+			return toolErr("get_messages: %v", err), nil
+		}
+		return jsonResult(map[string]any{"messages": msgs})
+	}
+	return tool, handler
+}
+
 func evaluateSendGate(id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
 		return false, "mode=draft (default) — call with mode:'send' to send for real"
