@@ -80,6 +80,8 @@ func main() {
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
 	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg))
+	mux.Get("/favicon.svg", web.Favicon())
+	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath))
 
 	provider := selectProvider(cfg, store)

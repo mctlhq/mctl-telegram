@@ -12,6 +12,18 @@ import (
 //go:embed landing.html
 var landingHTML string
 
+//go:embed favicon.svg
+var faviconSVG []byte
+
+// Favicon returns the SVG favicon at /favicon.svg and /favicon.ico.
+func Favicon() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(faviconSVG)
+	}
+}
+
 var landingTmpl = template.Must(template.New("landing").Parse(landingHTML))
 
 type landingData struct {
