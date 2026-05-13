@@ -74,6 +74,7 @@ func DefaultGroupScopes() map[string][]string {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
+			"telegram:messages:pin",
 			"admin:users",
 		},
 		// mctl-api issues "admins" for org admins (IsAdmin check in ResolveGroups).
@@ -81,6 +82,7 @@ func DefaultGroupScopes() map[string][]string {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
+			"telegram:messages:pin",
 			"admin:users",
 		},
 	}

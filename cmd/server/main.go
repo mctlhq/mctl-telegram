@@ -158,7 +158,7 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 // though tg-mcp lives on a different host.
 func protectedResource(cfg *config.Config) http.HandlerFunc {
 	body := []byte(fmt.Sprintf(
-		`{"resource":%q,"authorization_servers":["https://api.mctl.ai"],"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send"]}`,
+		`{"resource":%q,"authorization_servers":["https://api.mctl.ai"],"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin"]}`,
 		cfg.PublicBaseURL,
 	))
 	return func(w http.ResponseWriter, _ *http.Request) {

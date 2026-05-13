@@ -203,6 +203,60 @@ Output: JSON array of {id, peer, peer_title, text, date}.`),
 	return tool, handler
 }
 
+func (s *Server) toolPinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("pin_message",
+		mcplib.WithTitleAnnotation("Pin / Unpin Telegram Message"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Pin or unpin a message in a Telegram chat. Requires the operator to have "Pin Messages" admin rights in the target chat.
+
+Inputs:
+  peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
+  message_id — required: integer ID of the message to pin/unpin.
+  unpin — optional bool, default false. Set to true to unpin.
+
+Use get_messages to find message IDs before calling this tool.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer (chat/group/channel) containing the message."),
+		),
+		mcplib.WithNumber("message_id",
+			mcplib.Required(),
+			mcplib.Description("ID of the message to pin or unpin."),
+		),
+		mcplib.WithBoolean("unpin",
+			mcplib.Description("Set to true to unpin instead of pin (default: false)."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if err := requireScope(id, "telegram:messages:pin"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		messageID := intArg(args, "message_id", 0)
+		unpin := boolArg(args, "unpin", false)
+		if peer == "" || messageID == 0 {
+			return mcplib.NewToolResultError("peer and message_id are required"), nil
+		}
+		var err error
+		poolErr := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			return telegram.PinMessage(ctx, c, peer, messageID, unpin)
+		})
+		err = poolErr
+		action := "pinned"
+		if unpin {
+			action = "unpinned"
+		}
+		s.audit(ctx, id, "pin_message:"+action, telegram.RedactPeer(peer), err)
+		if err != nil {
+			return toolErr("pin_message: %v", err), nil
+		}
+		return jsonResult(map[string]any{"status": action, "peer": peer, "message_id": messageID})
+	}
+	return tool, handler
+}
+
 func evaluateSendGate(id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
 		return false, "mode=draft (default) — call with mode:'send' to send for real"
@@ -253,6 +307,13 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 
 func stringArg(args map[string]any, key, def string) string {
 	if v, ok := args[key].(string); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+func boolArg(args map[string]any, key string, def bool) bool {
+	if v, ok := args[key].(bool); ok {
 		return v
 	}
 	return def
