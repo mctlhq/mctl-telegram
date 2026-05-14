@@ -18,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -108,6 +109,25 @@ func main() {
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter)
 
+	// Bridge token endpoint: authenticated users exchange their MCP JWT for
+	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
+	// uses to register its websocket connection at GET /bridge.
+	if secret := cfg.OAUTHJWTSecret; secret != "" {
+		mux.With(auth.Middleware(provider, true)).Post("/api/bridge/token",
+			bridge.NewBridgeTokenHandler(provider, []byte(secret)))
+	}
+
+	// Websocket bridge endpoint: Local Bridge daemons connect here.
+	// Uses a separate provider that enforces aud=bridge so regular MCP
+	// tokens cannot be used to hijack the bridge channel.
+	hub := bridge.NewHub()
+	bridgeProvider := selectBridgeProvider(cfg, store)
+	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
+
+	// Wire the hub into the MCP server so tool calls for local-mode users
+	// are forwarded to their daemon instead of the hosted MTProto pool.
+	mcpSrv = mcpSrv.WithHub(hub)
+
 	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
 	// runs, so unauthenticated humans still see instructions instead of
 	// a 401. MCP clients (Accept: application/json, text/event-stream)
@@ -170,6 +190,37 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		return localdev.New(store, cfg.OperatorLogin)
 	default:
 		slog.Warn("unknown AUTH_MODE, falling back to local-dev", "auth_mode", cfg.AuthMode)
+		return localdev.New(store, cfg.OperatorLogin)
+	}
+}
+
+// selectBridgeProvider builds an auth.Provider for the /bridge websocket
+// endpoint. It behaves like selectProvider but enforces AudienceRequired=true
+// and ExpectedAudience="bridge" so only tokens issued by NewBridgeTokenHandler
+// are accepted. Regular MCP tokens (no aud or aud != "bridge") are rejected,
+// preventing cross-channel token reuse.
+//
+// In local-dev mode, the bridge endpoint falls back to the same localdev
+// bypass — useful when running without a real JWT secret.
+func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
+	switch strings.ToLower(cfg.AuthMode) {
+	case "shared-hmac":
+		if cfg.OAUTHJWTSecret == "" {
+			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
+			return localdev.New(store, cfg.OperatorLogin)
+		}
+		p, err := sharedhmac.New(store, sharedhmac.Config{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   "https://api.mctl.ai",
+			ExpectedAudience: "bridge",
+			AudienceRequired: true,
+		})
+		if err != nil {
+			slog.Error("bridge: shared-hmac init failed; bridge endpoint disabled", "err", err)
+			os.Exit(1)
+		}
+		return p
+	default:
 		return localdev.New(store, cfg.OperatorLogin)
 	}
 }

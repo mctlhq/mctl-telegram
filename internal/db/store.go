@@ -430,6 +430,27 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	return out, nil
 }
 
+// GetAccountMode returns the mode ('hosted' or 'local') for the user's active
+// account. Returns "hosted" and no error when the user has no active account
+// (safe default that keeps the existing hosted-mode behaviour for users who
+// haven't been migrated to Local Bridge).
+func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error) {
+	var mode string
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 ORDER BY connected_at DESC LIMIT 1`,
+		userID,
+	).Scan(&mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "hosted", nil
+	}
+	if err != nil {
+		return "hosted", fmt.Errorf("query account mode: %w", err)
+	}
+	return mode, nil
+}
+
 // SweepAuditLog removes audit rows older than `retention`. Returns the
 // number of rows removed. Called from the audit-retention sweeper.
 // retention <= 0 is treated as a no-op so an operator who sets

@@ -7,14 +7,63 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
+
+// bridgeResultErr converts a CallToolResult to an error for audit logging.
+// bridgeCall never returns a non-nil Go error; errors are embedded in the
+// result's IsError flag. This helper surfaces them so audit rows reflect
+// the actual outcome.
+func bridgeResultErr(res *mcplib.CallToolResult) error {
+	if res != nil && res.IsError {
+		return fmt.Errorf("bridge call error")
+	}
+	return nil
+}
+
+// bridgeCall forwards a tool invocation to the Local Bridge daemon registered
+// for the user. It returns a clean error result (never a Go error) because MCP
+// tools surface errors via *mcplib.CallToolResult, not Go error returns.
+func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string, args any) (*mcplib.CallToolResult, error) {
+	if !s.Hub.HasDaemon(id.UserID) {
+		return toolErr("local-bridge daemon not connected — run `mctl-telegram-local daemon`"), nil
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return toolErr("bridge: marshal args: %v", err), nil
+	}
+	callID := uuid.New().String()
+	env := bridge.EncodeCall(callID, tool, argsJSON)
+	resp, err := s.Hub.Call(ctx, id.UserID, env)
+	if err != nil {
+		if errors.Is(err, bridge.ErrNoDaemonConnected) {
+			return toolErr("local-bridge daemon not connected — run `mctl-telegram-local daemon`"), nil
+		}
+		if errors.Is(err, bridge.ErrCallTimeout) {
+			return toolErr("local-bridge call timed out — daemon may be unresponsive"), nil
+		}
+		return toolErr("local-bridge call: %v", err), nil
+	}
+	switch resp.Type {
+	case bridge.TypeResponse:
+		if resp.Result == nil {
+			return mcplib.NewToolResultText("null"), nil
+		}
+		return mcplib.NewToolResultText(string(resp.Result)), nil
+	case bridge.TypeError:
+		return toolErr("%s", resp.Error), nil
+	default:
+		return toolErr("bridge: unexpected response type %q", resp.Type), nil
+	}
+}
 
 func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("list_dialogs",
@@ -41,6 +90,14 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
+		if s.Hub != nil {
+			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
+			if err == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "list_dialogs", args)
+				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res))
+				return res, err2
+			}
+		}
 		limit := intArg(args, "limit", 50)
 		query := stringArg(args, "query", "")
 		var dialogs []telegram.Dialog
@@ -83,6 +140,14 @@ Empty result means no unread messages match (including: peer has unread but text
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
+		if s.Hub != nil {
+			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
+			if err == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
+				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res))
+				return res, err2
+			}
+		}
 		peer := stringArg(args, "peer", "")
 		limit := intArg(args, "limit", 50)
 		var msgs []telegram.Message
@@ -231,6 +296,14 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			// Dry-run never touches Telegram so we don't require TG_API_* configured.
 			result, err = telegram.SendMessage(ctx, nil, peer, text, false, dryReason)
 		} else {
+			if s.Hub != nil {
+				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+				if modeErr == nil && accountMode == "local" {
+					res, err2 := s.bridgeCall(ctx, id, "send_message", args)
+					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+					return res, err2
+				}
+			}
 			err = s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 				var inner error
 				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason)
@@ -283,10 +356,18 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		}
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
-		limit := intArg(args, "limit", 50)
 		if peer == "" {
 			return mcplib.NewToolResultError("peer is required"), nil
 		}
+		if s.Hub != nil {
+			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
+			if err == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "get_messages", args)
+				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res))
+				return res, err2
+			}
+		}
+		limit := intArg(args, "limit", 50)
 		var msgs []telegram.Message
 		err := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
@@ -422,6 +503,14 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 			}
 		}
 		var err error
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "pin_message", args)
+				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+				return res, err2
+			}
+		}
 		poolErr := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			return telegram.PinMessage(ctx, c, peer, messageID, unpin)
 		})
