@@ -86,6 +86,21 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// Local Bridge scaffolding (M4). `mode` distinguishes the legacy
+	// server-side MTProto path (hosted) from the upcoming Local Bridge
+	// path where MTProto runs on the user's machine and tg.mctl.ai is a
+	// relay only; `bridge_token_hash` is the SHA-256 of the most-recent
+	// short-lived JWT a daemon has used to register, used to drop stale
+	// connections when a new token rotates in. Defaults to 'hosted' so
+	// existing rows keep their behaviour.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "mode",
+		"TEXT NOT NULL DEFAULT 'hosted'", "TEXT NOT NULL DEFAULT 'hosted'"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
 	// Backfill: rows that pre-date the columns get last_used_at = connected_at
 	// and expires_at = connected_at + 90 days. We do this on every Migrate run
 	// rather than as a one-shot script because the platform's gitops loop is
@@ -171,7 +186,9 @@ func sqliteSchema() []string {
 			connected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			revoked_at DATETIME,
 			last_used_at DATETIME,
-			expires_at DATETIME
+			expires_at DATETIME,
+			mode TEXT NOT NULL DEFAULT 'hosted',
+			bridge_token_hash BLOB
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
@@ -208,7 +225,9 @@ func pgSchema() []string {
 			connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			revoked_at TIMESTAMPTZ,
 			last_used_at TIMESTAMPTZ,
-			expires_at TIMESTAMPTZ
+			expires_at TIMESTAMPTZ,
+			mode TEXT NOT NULL DEFAULT 'hosted',
+			bridge_token_hash BYTEA
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
