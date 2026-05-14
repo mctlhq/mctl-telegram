@@ -78,43 +78,33 @@ func New(store *db.Store, cfg Config) (*Provider, error) {
 }
 
 // DefaultGroupScopes maps GitHub team / mctl-tenant names to scope sets.
-//
-// BREAKING (M2.6, 0.8.0): the catch-all "admins" group no longer carries
-// write scopes by default. A user with only "admins" gets read-only access;
-// send/pin requires explicit membership in telegram-mcp-senders (send) or
-// platform-admins (full). Motivation: minting tokens with write power by
-// default makes the most common identity over-privileged for the most
-// common workflow (browsing). Operators who want pre-M2.6 behaviour set up
-// explicit group membership at the mctl-api side.
-//
-// platform-admins keeps the full set — that is the operator/dev group, not
-// a default catch-all.
+// platform-admins inherits everything plus admin:users.
 func DefaultGroupScopes() map[string][]string {
-	read := []string{
-		"telegram:dialogs:read",
-		"telegram:messages:read",
-	}
-	senders := []string{
-		"telegram:dialogs:read",
-		"telegram:messages:read",
-		"telegram:messages:send",
-	}
-	full := []string{
-		"telegram:dialogs:read",
-		"telegram:messages:read",
-		"telegram:messages:send",
-		"telegram:messages:pin",
-		"admin:users",
-	}
 	return map[string][]string{
-		"telegram-mcp-readers": read,
-		"telegram-mcp-senders": senders,
-		"platform-admins":      full,
-		// mctl-api issues "admins" for org admins. Pre-M2.6 this group
-		// inherited full scopes; now it is read-only by default. Promote
-		// org admins to platform-admins or telegram-mcp-senders when they
-		// genuinely need writes.
-		"admins": read,
+		"telegram-mcp-readers": {
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+		},
+		"telegram-mcp-senders": {
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+			"telegram:messages:send",
+		},
+		"platform-admins": {
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+			"telegram:messages:send",
+			"telegram:messages:pin",
+			"admin:users",
+		},
+		// mctl-api issues "admins" for org admins (IsAdmin check in ResolveGroups).
+		"admins": {
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+			"telegram:messages:send",
+			"telegram:messages:pin",
+			"admin:users",
+		},
 	}
 }
 
