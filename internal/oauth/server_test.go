@@ -267,6 +267,58 @@ func TestAuthorize_MissingPKCE(t *testing.T) {
 	}
 }
 
+func TestAuthorize_RejectsBadImplicitRedirect(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	cases := []struct {
+		name     string
+		redirect string
+	}{
+		{"non-https external", "http://attacker.example/cb"},
+		{"untrusted host", "https://attacker.example/cb"},
+		{"malformed", "://bad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := url.Values{
+				"response_type":         {"code"},
+				"client_id":             {"unknown-implicit"},
+				"redirect_uri":          {tc.redirect},
+				"code_challenge":        {challenge},
+				"code_challenge_method": {"S256"},
+			}
+			req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+			rec := httptest.NewRecorder()
+			mux.serve("GET", "/oauth/authorize", rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for %s, got %d", tc.name, rec.Code)
+			}
+		})
+	}
+}
+
+func TestAuthorize_AllowsLoopbackHTTP(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"unknown-impl"},
+		"redirect_uri":          {"http://localhost:9000/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for loopback http, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAuthorize_RejectsUnknownClient_WhenImplicitDisabled(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.AllowImplicitClient = false })
 	mux := newMockRouter()

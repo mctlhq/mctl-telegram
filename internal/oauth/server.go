@@ -83,8 +83,14 @@ type Config struct {
 	CodeTTL time.Duration
 	// AllowImplicitClient allows /oauth/authorize without prior /oauth/register.
 	// Set to true to make Claude.ai onboarding trivial; the redirect_uri is
-	// still validated against the supplied client_id pattern.
+	// still validated against AllowedImplicitHosts before being accepted.
 	AllowImplicitClient bool
+	// AllowedImplicitHosts is the hostname allowlist applied to redirect_uri
+	// when AllowImplicitClient is true and the client_id has not been
+	// registered. Empty list ⇒ a built-in default (claude.ai, claude.com,
+	// localhost, 127.0.0.1) is used. The check is exact-match on the
+	// URL's Host (including any port); never substring-match.
+	AllowedImplicitHosts []string
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the widget
@@ -150,6 +156,14 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.AdminTelegramIDs == nil {
 		cfg.AdminTelegramIDs = map[int64]bool{}
+	}
+	if len(cfg.AllowedImplicitHosts) == 0 {
+		cfg.AllowedImplicitHosts = []string{
+			"claude.ai",
+			"claude.com",
+			"localhost",
+			"127.0.0.1",
+		}
 	}
 	issuer, err := localjwt.NewIssuer(cfg.JWTSecret, cfg.Issuer)
 	if err != nil {
@@ -552,27 +566,48 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 // ----- helpers -----
 
 // validateClient confirms client_id was registered with redirect_uri (or, if
-// AllowImplicitClient is true and the client_id was never registered, that we
-// accept it as an implicit public client). Implicit acceptance is the
-// usability win that lets Claude.ai connectors work without an extra setup
-// step; the binding is still enforced at the /oauth/token endpoint because
-// the code-bound redirect_uri must equal the token-supplied one.
+// AllowImplicitClient is true and the client_id was never registered, that
+// redirect_uri's host appears in AllowedImplicitHosts).
+//
+// Implicit-client acceptance lets Claude.ai connectors work without an extra
+// setup step. The host allowlist prevents the OAuth flow from being abused as
+// an open redirector: even though the eventual /oauth/token call binds the
+// code to the redirect_uri (so an attacker without the code_verifier cannot
+// exchange a hijacked code), shipping a URL fragment to an attacker-controlled
+// host would still leak the authorization_code briefly. Constraining the host
+// closes that window.
 func (s *Server) validateClient(clientID, redirectURI string) error {
 	s.mu.Lock()
 	reg, ok := s.clients[clientID]
 	s.mu.Unlock()
-	if !ok {
-		if s.cfg.AllowImplicitClient {
-			return nil
+	if ok {
+		for _, u := range reg.RedirectURIs {
+			if u == redirectURI {
+				return nil
+			}
 		}
+		return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
+	}
+	if !s.cfg.AllowImplicitClient {
 		return fmt.Errorf("unknown client_id %q (call /oauth/register first)", clientID)
 	}
-	for _, u := range reg.RedirectURIs {
-		if u == redirectURI {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return fmt.Errorf("redirect_uri is not a valid URL: %w", err)
+	}
+	// http:// is acceptable only for loopback addresses (RFC 8252 §7.3).
+	if u.Scheme != "https" {
+		if u.Scheme != "http" || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1") {
+			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http://localhost)", u.Scheme)
+		}
+	}
+	host := u.Hostname()
+	for _, allowed := range s.cfg.AllowedImplicitHosts {
+		if host == allowed {
 			return nil
 		}
 	}
-	return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
+	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
 }
 
 func (s *Server) lookupClientName(clientID string) string {
