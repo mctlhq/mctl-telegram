@@ -1,8 +1,14 @@
 # Security policy
 
-## Reporting
+## Supported versions
 
-Email **dmitri+security@mctl.ai** with vulnerability reports. Please **do not** open public GitHub issues. We respond within 72 hours and disclose fixes in the CHANGELOG once a release ships.
+Only the latest release and the `main` branch receive security fixes. Older tagged releases are not backported.
+
+## Reporting a vulnerability
+
+Email **dmitri+security@mctl.ai** with vulnerability reports. Please **do not** open public GitHub issues for security vulnerabilities. We respond within 72 hours and disclose fixes in the CHANGELOG once a release ships.
+
+When reporting, please **do not include** Telegram session strings, OAuth tokens, API credentials, phone numbers, chat IDs, or private message content in your report.
 
 ## Threat model
 

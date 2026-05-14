@@ -8,4 +8,13 @@
 .vscode/
 .env
 .env.local
+.env.*
 node_modules/
+.claude/worktrees/
+local
+*.db
+*.sqlite
+*.sqlite3
+coverage.out
+dist/
+tmp/
