@@ -16,10 +16,16 @@ type Server struct {
 	Store     *db.Store
 	Pool      *telegram.ClientPool
 	AllowSend bool
+	Confirms  *ConfirmStore
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
-	return &Server{Store: store, Pool: pool, AllowSend: allowSend}
+	return &Server{
+		Store:     store,
+		Pool:      pool,
+		AllowSend: allowSend,
+		Confirms:  NewConfirmStore(),
+	}
 }
 
 func (s *Server) HTTPHandler() http.Handler {
@@ -31,7 +37,9 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolListDialogs())
 	srv.AddTool(s.toolGetUnreadMessages())
 	srv.AddTool(s.toolGetMessages())
+	srv.AddTool(s.toolPrepareSendMessage())
 	srv.AddTool(s.toolSendMessage())
+	srv.AddTool(s.toolPreparePinMessage())
 	srv.AddTool(s.toolPinMessage())
 	srv.AddTool(s.toolDisconnectAccount())
 	srv.AddTool(s.toolDeleteAccount())

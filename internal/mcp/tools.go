@@ -99,6 +99,58 @@ Empty result means no unread messages match (including: peer has unread but text
 	return tool, handler
 }
 
+func (s *Server) toolPrepareSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("prepare_send_message",
+		mcplib.WithTitleAnnotation("Prepare a Telegram send"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Snapshot a send_message call you intend to confirm momentarily.
+
+Returns a one-shot confirmation_id valid for 60s that send_message must echo back with mode=send. The pair is bound to (peer, text) — changing either between prepare and confirm invalidates the confirmation. The prepare step itself is read-only and never reaches Telegram.
+
+Inputs (required):
+  peer — same accepted forms as send_message.
+  text — message body (plain text).
+
+Output: {confirmation_id, peer_redacted, text_preview, payload_hash, expires_at}.
+
+The two-step flow exists so an LLM cannot quietly drift the payload between agreeing on a draft with the user and reaching for the live send: any mutation forces a fresh prepare round.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer to send to."),
+		),
+		mcplib.WithString("text",
+			mcplib.Required(),
+			mcplib.Description("Message text the live send_message will use."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		text := stringArg(args, "text", "")
+		if peer == "" || text == "" {
+			return mcplib.NewToolResultError("peer and text are required"), nil
+		}
+		hash := HashSendPayload(peer, text)
+		c, err := s.Confirms.Issue(id.UserID, "send", hash)
+		if err != nil {
+			return toolErr("prepare_send_message: %v", err), nil
+		}
+		s.audit(ctx, id, "prepare_send_message", telegram.RedactPeer(peer), nil)
+		return jsonResult(map[string]any{
+			"confirmation_id": c.ID,
+			"peer_redacted":   telegram.RedactPeer(peer),
+			"text_preview":    truncate(text, 200),
+			"payload_hash":    hash,
+			"expires_at":      c.ExpiresAt.UTC(),
+		})
+	}
+	return tool, handler
+}
+
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
@@ -110,8 +162,9 @@ Inputs (required):
   text — message body (plain text).
 Inputs (optional):
   mode — "draft" (default) or "send". Default is dry-run.
+  confirmation_id — REQUIRED when mode="send". Obtain it from prepare_send_message; valid for 60s, single-shot, and must echo the same (peer, text). Without it, mode="send" is rejected.
 
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, mode="send". Otherwise the response is a dry-run preview with reason in dry_reason.`),
+Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true, mode="send", and a fresh matching confirmation_id. Any missing piece returns a dry-run preview with reason in dry_reason.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -124,6 +177,9 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			mcplib.Description("draft (default) or send."),
 			mcplib.Enum("draft", "send"),
 		),
+		mcplib.WithString("confirmation_id",
+			mcplib.Description("Confirmation id from prepare_send_message. Required when mode=send."),
+		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		id := auth.From(ctx)
@@ -131,10 +187,30 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		peer := stringArg(args, "peer", "")
 		text := stringArg(args, "text", "")
 		mode := stringArg(args, "mode", "draft")
+		confID := stringArg(args, "confirmation_id", "")
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
+		// Even when every other gate is open, mode=send still requires a
+		// matching confirmation_id. We consume it here so a downstream
+		// failure cannot be silently retried with the same id.
+		if realSend {
+			if confID == "" {
+				realSend = false
+				dryReason = "mode=send requires confirmation_id — call prepare_send_message first"
+			} else if _, cerr := s.Confirms.Consume(confID, id.UserID, HashSendPayload(peer, text)); cerr != nil {
+				realSend = false
+				switch {
+				case errors.Is(cerr, ErrConfirmationMismatch):
+					dryReason = "confirmation_id was issued for a different (peer, text) — re-run prepare_send_message"
+				case errors.Is(cerr, ErrConfirmationWrongUser):
+					dryReason = "confirmation_id belongs to another identity"
+				default:
+					dryReason = "confirmation_id not found, expired, or already used"
+				}
+			}
+		}
 		var result *telegram.SendResult
 		var err error
 		if !realSend {
@@ -158,6 +234,13 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		return jsonResult(result)
 	}
 	return tool, handler
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
@@ -205,6 +288,62 @@ Output: JSON array of {id, peer, peer_title, text, date}.`),
 	return tool, handler
 }
 
+func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("prepare_pin_message",
+		mcplib.WithTitleAnnotation("Prepare a pin/unpin"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
+
+Returns a one-shot confirmation_id valid for 60s that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
+
+Inputs (required): peer, message_id. Optional: unpin (default false).
+Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expires_at}.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer containing the message."),
+		),
+		mcplib.WithNumber("message_id",
+			mcplib.Required(),
+			mcplib.Description("ID of the message."),
+		),
+		mcplib.WithBoolean("unpin",
+			mcplib.Description("Set to true to prepare an unpin (default: false)."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		messageID := intArg(args, "message_id", 0)
+		unpin := boolArg(args, "unpin", false)
+		if peer == "" || messageID == 0 {
+			return mcplib.NewToolResultError("peer and message_id are required"), nil
+		}
+		hash := HashPinPayload(peer, int64(messageID), unpin)
+		action := "pin"
+		if unpin {
+			action = "unpin"
+		}
+		c, err := s.Confirms.Issue(id.UserID, action, hash)
+		if err != nil {
+			return toolErr("prepare_pin_message: %v", err), nil
+		}
+		s.audit(ctx, id, "prepare_pin_message", telegram.RedactPeer(peer), nil)
+		return jsonResult(map[string]any{
+			"confirmation_id": c.ID,
+			"peer_redacted":   telegram.RedactPeer(peer),
+			"message_id":      messageID,
+			"unpin":           unpin,
+			"payload_hash":    hash,
+			"expires_at":      c.ExpiresAt.UTC(),
+		})
+	}
+	return tool, handler
+}
+
 func (s *Server) toolPinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pin_message",
 		mcplib.WithTitleAnnotation("Pin / Unpin Telegram Message"),
@@ -215,8 +354,9 @@ Inputs:
   peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
   message_id — required: integer ID of the message to pin/unpin.
   unpin — optional bool, default false. Set to true to unpin.
+  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 60s, single-shot, must echo same (peer, message_id, unpin).
 
-Use get_messages to find message IDs before calling this tool.`),
+Use get_messages to find message IDs before calling this tool. The two-step prepare→confirm flow exists to keep an LLM from drifting the (peer, message_id) silently between agreeing on what to pin and the live pin call.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer (chat/group/channel) containing the message."),
@@ -228,6 +368,10 @@ Use get_messages to find message IDs before calling this tool.`),
 		mcplib.WithBoolean("unpin",
 			mcplib.Description("Set to true to unpin instead of pin (default: false)."),
 		),
+		mcplib.WithString("confirmation_id",
+			mcplib.Required(),
+			mcplib.Description("Confirmation id from prepare_pin_message."),
+		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		id := auth.From(ctx)
@@ -238,8 +382,22 @@ Use get_messages to find message IDs before calling this tool.`),
 		peer := stringArg(args, "peer", "")
 		messageID := intArg(args, "message_id", 0)
 		unpin := boolArg(args, "unpin", false)
+		confID := stringArg(args, "confirmation_id", "")
 		if peer == "" || messageID == 0 {
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
+		}
+		if confID == "" {
+			return mcplib.NewToolResultError("confirmation_id required — call prepare_pin_message first"), nil
+		}
+		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashPinPayload(peer, int64(messageID), unpin)); cerr != nil {
+			switch {
+			case errors.Is(cerr, ErrConfirmationMismatch):
+				return mcplib.NewToolResultError("confirmation_id was issued for a different (peer, message_id, unpin) — re-run prepare_pin_message"), nil
+			case errors.Is(cerr, ErrConfirmationWrongUser):
+				return mcplib.NewToolResultError("confirmation_id belongs to another identity"), nil
+			default:
+				return mcplib.NewToolResultError("confirmation_id not found, expired, or already used"), nil
+			}
 		}
 		var err error
 		poolErr := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
