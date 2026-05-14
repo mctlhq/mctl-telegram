@@ -249,6 +249,80 @@ func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 	return enabled, nil
 }
 
+// AuditEntry is the user-visible projection of an audit_logs row. It mirrors
+// the schema 1:1 except for the JSON tag names, which match the response
+// shape exposed at GET /api/audit and the get_my_audit_log MCP tool.
+type AuditEntry struct {
+	Ts            time.Time `json:"ts"`
+	ToolName      string    `json:"tool_name"`
+	PeerRedacted  string    `json:"peer_redacted,omitempty"`
+	Status        string    `json:"status"`
+	ErrorRedacted string    `json:"error,omitempty"`
+}
+
+// ListAuditFor returns the user's most recent audit-log rows, newest first.
+// limit is clamped to [1, 500]; non-positive limits collapse to 50. before
+// is optional — when zero, no upper time bound is applied; when set, only
+// rows strictly older than before are returned (useful for keyset pagination
+// driven by the client). Returns an empty slice when there is nothing.
+//
+// The query only ever returns rows owned by userID, so this is safe to call
+// directly from an MCP tool or HTTP handler that has already authenticated
+// the caller — there is no cross-user leakage path.
+func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, before time.Time) ([]AuditEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	var rows *sql.Rows
+	var err error
+	if before.IsZero() {
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT created_at, tool_name, peer_redacted, status, error FROM audit_logs
+			 WHERE user_id = $1
+			 ORDER BY id DESC LIMIT $2`,
+			userID, limit,
+		)
+	} else {
+		rows, err = s.DB.QueryContext(ctx,
+			`SELECT created_at, tool_name, peer_redacted, status, error FROM audit_logs
+			 WHERE user_id = $1 AND created_at < $2
+			 ORDER BY id DESC LIMIT $3`,
+			userID, before, limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query audit: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AuditEntry, 0, limit)
+	for rows.Next() {
+		var (
+			ts     time.Time
+			tool   string
+			peer   sql.NullString
+			status string
+			errCol sql.NullString
+		)
+		if err := rows.Scan(&ts, &tool, &peer, &status, &errCol); err != nil {
+			return nil, fmt.Errorf("scan audit: %w", err)
+		}
+		out = append(out, AuditEntry{
+			Ts:            ts,
+			ToolName:      tool,
+			PeerRedacted:  peer.String,
+			Status:        status,
+			ErrorRedacted: errCol.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return out, nil
+}
+
 // LogToolCall writes one audit row. Errors are non-fatal to the caller.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg string) {
 	_, _ = s.DB.ExecContext(ctx,

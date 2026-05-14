@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -333,6 +334,57 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		return jsonResult(map[string]any{
 			"deleted":      true,
 			"rows_removed": rows,
+		})
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetMyAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_my_audit_log",
+		mcplib.WithTitleAnnotation("Read your own audit log"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Return the audit-log rows recorded for tool calls and HTTP account actions made by your identity.
+
+Inputs (all optional):
+  limit  — int, default 50, max 500. Newest entries first.
+  before — RFC3339 timestamp. When set, only entries strictly older than this are returned. Use the "ts" of the last entry from a previous page as the next "before" for keyset pagination.
+
+Output: JSON array of {ts, tool_name, peer_redacted, status, error}. Peer values are redacted by RedactPeer at write time, so dialog identifiers never appear here in clear text. Message bodies, phone numbers, and session bytes are never written to the table.
+
+This tool is part of the self-service transparency surface — operators cannot disable it for an authenticated user.`),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Max rows to return (default 50, max 500)."),
+		),
+		mcplib.WithString("before",
+			mcplib.Description("RFC3339 timestamp; only entries strictly older than this are returned."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		args := req.GetArguments()
+		limit := intArg(args, "limit", 50)
+		var before time.Time
+		if raw := stringArg(args, "before", ""); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return mcplib.NewToolResultError("before must be RFC3339 (e.g. 2026-05-14T00:00:00Z)"), nil
+			}
+			before = parsed
+		}
+		entries, err := s.Store.ListAuditFor(ctx, id.UserID, limit, before)
+		// Note: we intentionally do NOT audit-log this call itself — it
+		// would create a recursive audit-of-audit row on every page fetch
+		// without adding signal. If we change this in M3 hash-chain work,
+		// re-evaluate then.
+		if err != nil {
+			return toolErr("get_my_audit_log: %v", err), nil
+		}
+		return jsonResult(map[string]any{
+			"entries": entries,
+			"count":   len(entries),
 		})
 	}
 	return tool, handler
