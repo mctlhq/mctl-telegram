@@ -16,19 +16,23 @@ import (
 )
 
 const (
-	localUserID     = int64(1)
 	reconnectBase   = 2 * time.Second
 	reconnectMax    = 60 * time.Second
 	pingInterval    = 25 * time.Second
-	tokenRefreshAdv = 5 * time.Minute // refresh bridge token this far before expiry
+	tokenRefreshAdv = 5 * time.Minute
 )
 
 // runDaemon runs the persistent websocket loop against the bridge server.
-// It reconnects with exponential backoff when the connection drops.
-func runDaemon(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, pool *tg.ClientPool) error {
+// It reloads the bridge token on every attempt (picks up a freshly rotated
+// token) and reconnects with exponential backoff when the connection drops.
+func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64) error {
 	backoff := reconnectBase
 	for {
-		err := daemonSession(ctx, cfg, bt, pool)
+		bt, err := loadBridgeToken()
+		if err != nil {
+			return fmt.Errorf("load bridge token: %w", err)
+		}
+		err = daemonSession(ctx, cfg, bt, pool, userID)
 		if err == nil || ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -47,7 +51,12 @@ func runDaemon(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, pool 
 
 // daemonSession runs one websocket connection to the bridge server until it
 // drops or ctx is cancelled. Returns nil on clean disconnect, error otherwise.
-func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, pool *tg.ClientPool) error {
+//
+// coder/websocket ties the connection lifetime to the context passed to
+// wsjson.Read — cancelling or timing out that context closes the underlying
+// connection. We therefore use a plain blocking read in a dedicated goroutine
+// and handle pings in a separate ticker goroutine, communicating via channels.
+func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, pool *tg.ClientPool, userID int64) error {
 	wsURL := bridgeWSURL(cfg.Server)
 	slog.Info("connecting to bridge", "url", wsURL)
 
@@ -63,83 +72,96 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 
 	slog.Info("bridge connected")
 
-	// Expiry-aware token refresh ticker: fire tokenRefreshAdv before expiry.
-	expiry, err := bridgeTokenExpiry(bt)
-	if err != nil {
+	if expiry, err := bridgeTokenExpiry(bt); err != nil {
 		slog.Warn("could not parse bridge token expiry; auto-refresh disabled", "err", err)
-		expiry = time.Time{}
+	} else if !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
+		slog.Warn("bridge token nearing expiry; run connect again",
+			"expires_at", expiry.Format(time.RFC3339),
+			"remaining", time.Until(expiry).Round(time.Second))
 	}
+
+	recv := make(chan bridge.Envelope, 8)
+	readErr := make(chan error, 1)
+
+	go func() {
+		for {
+			var env bridge.Envelope
+			if err := wsjson.Read(ctx, conn, &env); err != nil {
+				select {
+				case readErr <- err:
+				default:
+				}
+				return
+			}
+			select {
+			case recv <- env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
-
-	// Read frames and dispatch.
-	for {
-		// Check if token refresh is needed before blocking on receive.
-		if !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
-			slog.Warn("bridge token nearing expiry; cannot auto-refresh without MCP token (run connect again)",
-				"expires_at", expiry.Format(time.RFC3339),
-				"remaining", time.Until(expiry).Round(time.Second))
+	pingErr := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-pingTicker.C:
+				ping := bridge.Envelope{Type: bridge.TypePing, ID: "ping"}
+				if werr := wsjson.Write(ctx, conn, ping); werr != nil {
+					select {
+					case pingErr <- fmt.Errorf("write ping: %w", werr):
+					default:
+					}
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
 		}
+	}()
 
-		// We need a non-blocking path for ping and context cancellation.
-		// Use a short read timeout and handle ErrDeadlineExceeded inline.
-		readCtx, readCancel := context.WithTimeout(ctx, 5*time.Second)
-		var env bridge.Envelope
-		readErr := wsjson.Read(readCtx, conn, &env)
-		readCancel()
-
-		if readErr != nil {
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close(websocket.StatusNormalClosure, "shutdown")
+			return nil
+		case err := <-pingErr:
+			return err
+		case err := <-readErr:
 			if ctx.Err() != nil {
-				// Graceful shutdown.
-				_ = conn.Close(websocket.StatusNormalClosure, "shutdown")
 				return nil
 			}
-			if isTimeoutError(readErr) {
-				// Timeout — send ping and re-loop.
-				select {
-				case <-pingTicker.C:
-					ping := bridge.Envelope{Type: bridge.TypePing, ID: "ping"}
-					if werr := wsjson.Write(ctx, conn, ping); werr != nil {
-						return fmt.Errorf("write ping: %w", werr)
+			return fmt.Errorf("read: %w", err)
+		case env := <-recv:
+			switch env.Type {
+			case bridge.TypePing:
+				pong := bridge.Envelope{Type: bridge.TypePong, ID: env.ID}
+				if werr := wsjson.Write(ctx, conn, pong); werr != nil {
+					return fmt.Errorf("write pong: %w", werr)
+				}
+			case bridge.TypeCall:
+				go func(e bridge.Envelope) {
+					resp := dispatchCall(ctx, pool, userID, e)
+					if werr := wsjson.Write(ctx, conn, resp); werr != nil {
+						slog.Warn("write response failed", "id", e.ID, "err", werr)
 					}
-				default:
-				}
-				continue
+				}(env)
+			default:
+				slog.Debug("unexpected frame type", "type", env.Type, "id", env.ID)
 			}
-			return fmt.Errorf("read: %w", readErr)
-		}
-
-		switch env.Type {
-		case bridge.TypePing:
-			pong := bridge.Envelope{Type: bridge.TypePong, ID: env.ID}
-			if werr := wsjson.Write(ctx, conn, pong); werr != nil {
-				return fmt.Errorf("write pong: %w", werr)
-			}
-
-		case bridge.TypeCall:
-			// Dispatch in a goroutine so the read loop stays unblocked.
-			go func(e bridge.Envelope) {
-				resp := dispatchCall(ctx, pool, e)
-				if werr := wsjson.Write(ctx, conn, resp); werr != nil {
-					slog.Warn("write response failed", "id", e.ID, "err", werr)
-				}
-			}(env)
-
-		default:
-			// Unexpected frame — ignore.
-			slog.Debug("unexpected frame type", "type", env.Type, "id", env.ID)
 		}
 	}
 }
 
 // dispatchCall routes a TypeCall envelope to the appropriate Telegram function
 // and returns a TypeResponse or TypeError envelope.
-func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope) bridge.Envelope {
+func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
 	slog.Info("dispatch", "tool", env.Tool, "id", env.ID)
 
 	var (
-		result json.RawMessage
+		result  json.RawMessage
 		dispErr error
 	)
 
@@ -156,7 +178,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope)
 			args.Limit = 50
 		}
 		var dialogs []tg.Dialog
-		dispErr = pool.Borrow(ctx, localUserID, func(ctx context.Context, c *telegram.Client) error {
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			dialogs, err = tg.ListDialogs(ctx, c, args.Limit, args.Query)
 			return err
@@ -177,7 +199,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope)
 			args.Limit = 50
 		}
 		var msgs []tg.Message
-		dispErr = pool.Borrow(ctx, localUserID, func(ctx context.Context, c *telegram.Client) error {
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			msgs, err = tg.GetUnreadMessages(ctx, c, args.Peer, args.Limit)
 			return err
@@ -198,7 +220,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope)
 			args.Limit = 50
 		}
 		var msgs []tg.Message
-		dispErr = pool.Borrow(ctx, localUserID, func(ctx context.Context, c *telegram.Client) error {
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit)
 			return err
@@ -223,7 +245,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope)
 			dryReason = "mode=draft"
 		}
 		var sendResult *tg.SendResult
-		dispErr = pool.Borrow(ctx, localUserID, func(ctx context.Context, c *telegram.Client) error {
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			sendResult, err = tg.SendMessage(ctx, c, args.Peer, args.Text, realSend, dryReason)
 			return err
@@ -241,7 +263,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, env bridge.Envelope)
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("pin_message: bad args: %v", err))
 		}
-		dispErr = pool.Borrow(ctx, localUserID, func(ctx context.Context, c *telegram.Client) error {
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			return tg.PinMessage(ctx, c, args.Peer, args.MessageID, args.Unpin)
 		})
 		if dispErr == nil {
@@ -279,7 +301,6 @@ func envArgs(env bridge.Envelope) json.RawMessage {
 
 // bridgeWSURL converts an https:// server URL to a wss:// websocket URL.
 func bridgeWSURL(server string) string {
-	// Replace scheme for websocket.
 	s := server
 	switch {
 	case strings.HasPrefix(s, "https://"):
@@ -287,20 +308,6 @@ func bridgeWSURL(server string) string {
 	case strings.HasPrefix(s, "http://"):
 		s = "ws://" + s[len("http://"):]
 	}
-	// Strip trailing slash.
 	s = strings.TrimRight(s, "/")
 	return s + "/bridge"
-}
-
-// isTimeoutError checks whether an error is a context deadline exceeded /
-// websocket read deadline error. We use a timeout on each read to be able
-// to send pings without a dedicated goroutine.
-func isTimeoutError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "deadline exceeded") ||
-		strings.Contains(msg, "i/o timeout")
 }

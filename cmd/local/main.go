@@ -29,11 +29,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -164,13 +164,6 @@ func runLogin(args []string) {
 	store, closeDB, uid := openLocalStore(ctx, keyHex)
 	defer closeDB()
 
-	// For login, we use the localdev provider pattern: seed the single user.
-	provider := localdev.New(store, "local")
-	uid, err = provider.EnsureSeedUser(ctx)
-	if err != nil {
-		die(fmt.Errorf("ensure seed user: %w", err))
-	}
-
 	stdin := bufio.NewReader(os.Stdin)
 	askCode := func(ctx context.Context) (string, error) {
 		fmt.Print("Enter the Telegram code: ")
@@ -236,6 +229,10 @@ func runConnect(args []string) {
 	srv := cfg.Server
 	if *server != "" {
 		srv = *server
+		cfg.Server = srv
+		if err := saveConfig(cfg); err != nil {
+			die(fmt.Errorf("persist server override: %w", err))
+		}
 	}
 
 	tokenURL := strings.TrimRight(srv, "/") + "/api/bridge/token"
@@ -307,7 +304,7 @@ func runDaemonCmd() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store, closeDB, _ := openLocalStore(ctx, keyHex)
+	store, closeDB, uid := openLocalStore(ctx, keyHex)
 	defer closeDB()
 
 	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store)
@@ -322,8 +319,8 @@ func runDaemonCmd() {
 		cancel()
 	}()
 
-	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt)
-	if err := runDaemon(ctx, cfg, bt, pool); err != nil && !errors.Is(err, context.Canceled) {
+	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt, "user_id", uid)
+	if err := runDaemon(ctx, cfg, pool, uid); err != nil && !errors.Is(err, context.Canceled) {
 		die(err)
 	}
 	slog.Info("daemon stopped")
@@ -413,8 +410,8 @@ func promptStr(r *bufio.Reader, prompt string) string {
 func promptInt(r *bufio.Reader, prompt string) int {
 	for {
 		s := promptStr(r, prompt)
-		var n int
-		if _, err := fmt.Sscanf(s, "%d", &n); err == nil && n > 0 {
+		n, err := strconv.Atoi(s)
+		if err == nil && n > 0 {
 			return n
 		}
 		fmt.Fprintln(os.Stderr, "Please enter a positive integer.")
