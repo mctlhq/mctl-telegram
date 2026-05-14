@@ -11,9 +11,12 @@ import (
 
 // AccountCloser is the subset of *telegram.ClientPool that account handlers
 // need. Kept narrow so the web package does not have to import telegram (and
-// to make tests trivial).
+// to make tests trivial). RemoveAtomic is required for disconnect/delete to
+// be race-free against concurrent Borrow; Close stays around because the
+// abstraction also covers tests that don't exercise concurrency.
 type AccountCloser interface {
 	Close(userID int64) bool
+	RemoveAtomic(userID int64, fn func() error) error
 }
 
 // AccountHandlers exposes self-service controls for the authenticated user.
@@ -57,6 +60,7 @@ func (h *AccountHandlers) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := h.Store.GetActiveAccount(r.Context(), id.UserID)
+	h.audit(r, id, "GET /api/account", err)
 	if err != nil {
 		slog.Warn("account.get", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "lookup failed")
@@ -71,14 +75,20 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	// Close the pooled MTProto client BEFORE the DB revoke. With the
-	// opposite order a parallel tool request whose acquire() already
-	// took the mutex could still reuse the client to reach Telegram
-	// after the DB row was flipped to revoked.
+	// Pool eviction and DB revoke share the pool mutex via RemoveAtomic
+	// so a concurrent Borrow() cannot race between them. See
+	// telegram.ClientPool.RemoveAtomic for the full rationale.
+	var had bool
+	var err error
 	if h.Pool != nil {
-		h.Pool.Close(id.UserID)
+		err = h.Pool.RemoveAtomic(id.UserID, func() error {
+			var e error
+			had, e = h.Store.RevokeActiveSession(r.Context(), id.UserID)
+			return e
+		})
+	} else {
+		had, err = h.Store.RevokeActiveSession(r.Context(), id.UserID)
 	}
-	had, err := h.Store.RevokeActiveSession(r.Context(), id.UserID)
 	h.audit(r, id, "POST /api/account/disconnect", err)
 	if err != nil {
 		slog.Warn("account.disconnect", "err", err)
@@ -97,11 +107,17 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	// Pool.Close before DB delete — same ordering rationale as disconnect.
+	var rows int64
+	var err error
 	if h.Pool != nil {
-		h.Pool.Close(id.UserID)
+		err = h.Pool.RemoveAtomic(id.UserID, func() error {
+			var e error
+			rows, e = h.Store.HardDeleteAccount(r.Context(), id.UserID)
+			return e
+		})
+	} else {
+		rows, err = h.Store.HardDeleteAccount(r.Context(), id.UserID)
 	}
-	rows, err := h.Store.HardDeleteAccount(r.Context(), id.UserID)
 	h.audit(r, id, "DELETE /api/account", err)
 	if err != nil {
 		slog.Warn("account.delete", "err", err)

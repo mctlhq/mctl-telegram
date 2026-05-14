@@ -275,20 +275,19 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
-		// Close the pool entry FIRST. Borrow()->acquire() takes the same
-		// mutex as Close, and Close marks the entry stopped+removes it
-		// under the lock, so any concurrent tool call either runs to
-		// completion on a now-orphaned client (worst case: one final
-		// in-flight call already past acquire) or is forced to allocate
-		// a fresh entry, which will then immediately fail because the
-		// DB-revoke below makes LoadSession return no session. Doing
-		// the DB revoke first opens the window codex flagged: a parallel
-		// Borrow() could still piggyback on the existing client and
-		// reach Telegram after the row is already revoked.
-		if s.Pool != nil {
-			s.Pool.Close(id.UserID)
-		}
-		had, err := s.Store.RevokeActiveSession(ctx, id.UserID)
+		// Pool eviction and DB revoke happen under the same mutex that
+		// acquire() takes. A concurrent Borrow() blocks until both are
+		// committed, so it cannot observe the doomed pool entry AND it
+		// cannot allocate a fresh one against a still-active DB row.
+		// Either order without the shared lock leaves a race window
+		// where an interleaving Borrow still reaches Telegram after we
+		// returned 200 to the user.
+		var had bool
+		err := s.Pool.RemoveAtomic(id.UserID, func() error {
+			var e error
+			had, e = s.Store.RevokeActiveSession(ctx, id.UserID)
+			return e
+		})
 		s.audit(ctx, id, "disconnect_telegram_account", "", err)
 		if err != nil {
 			return toolErr("disconnect: %v", err), nil
@@ -318,11 +317,15 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
-		// Pool.Close BEFORE the DB delete (see disconnect handler comment).
-		if s.Pool != nil {
-			s.Pool.Close(id.UserID)
-		}
-		rows, err := s.Store.HardDeleteAccount(ctx, id.UserID)
+		// RemoveAtomic for the same reason as disconnect — eviction and
+		// DB delete must commit under one lock so a concurrent Borrow()
+		// cannot allocate a fresh client against a still-existing row.
+		var rows int64
+		err := s.Pool.RemoveAtomic(id.UserID, func() error {
+			var e error
+			rows, e = s.Store.HardDeleteAccount(ctx, id.UserID)
+			return e
+		})
 		s.audit(ctx, id, "delete_telegram_account", "", err)
 		if err != nil {
 			return toolErr("delete: %v", err), nil

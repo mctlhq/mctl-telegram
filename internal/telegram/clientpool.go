@@ -146,14 +146,15 @@ func (p *ClientPool) touch(userID int64) {
 
 // Close evicts the pool entry for a single user, cancelling the running
 // client. Returns true if there was an entry to evict. Safe to call when
-// no entry exists. Used by self-service disconnect/delete so a Borrow()
-// issued immediately afterwards does not piggyback on the doomed client.
+// no entry exists.
 //
-// The entry is marked stopped and removed from the map under the same
-// mutex that protects acquire(), so a concurrent Borrow() cannot observe
-// the doomed entry in any reusable state — it will allocate a fresh one.
-// run()'s deferred cleanup will see the entry already gone and its
-// delete() becomes a no-op, which is intentional.
+// NOTE: Close alone is NOT race-free against a concurrent Borrow that
+// arrives during the gap between Close and any subsequent DB-side
+// revocation: acquire() may build a fresh entry and the new entry's
+// SessionStorage may load the not-yet-revoked session. Self-service
+// disconnect/delete must use RemoveAtomic instead, which holds the pool
+// mutex across the DB call so acquire() blocks until both the eviction
+// and the DB revoke are committed.
 func (p *ClientPool) Close(userID int64) bool {
 	p.mu.Lock()
 	e, ok := p.entries[userID]
@@ -167,6 +168,40 @@ func (p *ClientPool) Close(userID int64) bool {
 	}
 	e.cancel()
 	return true
+}
+
+// RemoveAtomic evicts the pool entry for the user AND runs fn() while
+// holding the same mutex acquire() takes. Returns fn()'s error (or nil
+// if fn was nil). Used to make self-service disconnect/delete atomic
+// against concurrent Borrow:
+//
+//  1. acquire() blocks on p.mu until RemoveAtomic releases it
+//  2. inside RemoveAtomic the entry is marked stopped + removed from the
+//     map *and* the DB-side revocation runs to completion
+//  3. by the time acquire() resumes, the entry is gone AND the DB row no
+//     longer has an active session, so the fresh entry's SessionStorage
+//     load returns nil and gotd refuses to start
+//
+// fn is expected to be short-lived (single DB UPDATE/DELETE). It runs
+// under the pool mutex, so it must not call any other pool method or
+// it would deadlock. cancel() on the evicted entry runs after the lock
+// is released to avoid blocking on run()'s cleanup goroutine.
+func (p *ClientPool) RemoveAtomic(userID int64, fn func() error) error {
+	p.mu.Lock()
+	e, hadEntry := p.entries[userID]
+	if hadEntry {
+		e.stopped = true
+		delete(p.entries, userID)
+	}
+	var err error
+	if fn != nil {
+		err = fn()
+	}
+	p.mu.Unlock()
+	if hadEntry {
+		e.cancel()
+	}
+	return err
 }
 
 func (p *ClientPool) Shutdown() {
