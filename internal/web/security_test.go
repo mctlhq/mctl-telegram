@@ -21,6 +21,9 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Not zero-knowledge",
 		"Cryptographic invariants",
 		"dmitri+security@mctl.ai",
+		"Tamper-evident audit log",
+		"Prompt-injection content boundary",
+		"Session TTL",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/security missing %q", must)
@@ -38,7 +41,8 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Data inventory",
 		"What is NOT stored",
-		"Self-service deletion",
+		"Self-service controls",
+		"audit/verify",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/privacy missing %q", must)
