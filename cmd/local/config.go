@@ -1,0 +1,196 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"golang.org/x/crypto/argon2"
+)
+
+// localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
+type localConfig struct {
+	APIID   int    `json:"api_id"`
+	APIHash string `json:"api_hash"`
+	Server  string `json:"server"`
+	KeySalt string `json:"key_salt"` // base64-encoded 16-byte Argon2id salt
+}
+
+// bridgeTokenFile is the persisted JSON at ~/.config/mctl-telegram-local/bridge_token.json.
+type bridgeTokenFile struct {
+	MCPToken    string `json:"mcp_token"`
+	BridgeToken string `json:"bridge_token"`
+	ExpiresAt   string `json:"expires_at"`
+}
+
+const (
+	configDir       = ".config/mctl-telegram-local"
+	configFileName  = "config.json"
+	bridgeTokenName = "bridge_token.json"
+	dbFileName      = "state.db"
+)
+
+func configDirPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	return filepath.Join(home, configDir), nil
+}
+
+func configFilePath() (string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, configFileName), nil
+}
+
+func bridgeTokenFilePath() (string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, bridgeTokenName), nil
+}
+
+func dbFilePath() (string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, dbFileName), nil
+}
+
+func loadConfig() (*localConfig, error) {
+	p, err := configFilePath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("config not found — run `mctl-telegram-local init` first")
+		}
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var cfg localConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if cfg.APIID == 0 || cfg.APIHash == "" {
+		return nil, fmt.Errorf("config is incomplete — re-run `mctl-telegram-local init`")
+	}
+	return &cfg, nil
+}
+
+func saveConfig(cfg *localConfig) error {
+	dir, err := configDirPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	p := filepath.Join(dir, configFileName)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	return nil
+}
+
+func loadBridgeToken() (*bridgeTokenFile, error) {
+	p, err := bridgeTokenFilePath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("bridge token not found — run `mctl-telegram-local connect --token <mcp-token>` first")
+		}
+		return nil, fmt.Errorf("read bridge token: %w", err)
+	}
+	var bt bridgeTokenFile
+	if err := json.Unmarshal(data, &bt); err != nil {
+		return nil, fmt.Errorf("parse bridge token: %w", err)
+	}
+	if bt.BridgeToken == "" {
+		return nil, fmt.Errorf("bridge token file is invalid — re-run `mctl-telegram-local connect`")
+	}
+	return &bt, nil
+}
+
+func saveBridgeToken(bt *bridgeTokenFile) error {
+	dir, err := configDirPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(bt, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal bridge token: %w", err)
+	}
+	p := filepath.Join(dir, bridgeTokenName)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		return fmt.Errorf("write bridge token: %w", err)
+	}
+	return nil
+}
+
+// deriveKey derives a 32-byte AES key from a passphrase and base64-encoded salt
+// using Argon2id. The salt is 16 bytes. Argon2id parameters match the init command.
+func deriveKey(passphrase []byte, saltB64 string) ([]byte, error) {
+	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		return nil, fmt.Errorf("decode salt: %w", err)
+	}
+	if len(salt) != 16 {
+		return nil, fmt.Errorf("salt must be 16 bytes, got %d", len(salt))
+	}
+	key := argon2.IDKey(passphrase, salt, 1, 64*1024, 4, 32)
+	return key, nil
+}
+
+// generateSalt generates a fresh random 16-byte salt and returns its base64 encoding.
+func generateSalt() (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(salt), nil
+}
+
+// bridgeTokenExpiry parses the ExpiresAt field from a bridgeTokenFile.
+func bridgeTokenExpiry(bt *bridgeTokenFile) (time.Time, error) {
+	if bt.ExpiresAt == "" {
+		return time.Time{}, fmt.Errorf("bridge token has no expiry — re-run connect")
+	}
+	t, err := time.Parse(time.RFC3339, bt.ExpiresAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse expires_at %q: %w", bt.ExpiresAt, err)
+	}
+	return t, nil
+}
+
+// encryptionKeyHex converts a 32-byte key to the 64-char hex string that
+// internal/config.Load() expects from ENCRYPTION_KEY.
+func encryptionKeyHex(key []byte) string {
+	const hextable = "0123456789abcdef"
+	out := make([]byte, len(key)*2)
+	for i, b := range key {
+		out[i*2] = hextable[b>>4]
+		out[i*2+1] = hextable[b&0xf]
+	}
+	return string(out)
+}
