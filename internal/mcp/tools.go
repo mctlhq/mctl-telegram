@@ -275,10 +275,20 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
-		had, err := s.Store.RevokeActiveSession(ctx, id.UserID)
-		if err == nil && s.Pool != nil {
+		// Close the pool entry FIRST. Borrow()->acquire() takes the same
+		// mutex as Close, and Close marks the entry stopped+removes it
+		// under the lock, so any concurrent tool call either runs to
+		// completion on a now-orphaned client (worst case: one final
+		// in-flight call already past acquire) or is forced to allocate
+		// a fresh entry, which will then immediately fail because the
+		// DB-revoke below makes LoadSession return no session. Doing
+		// the DB revoke first opens the window codex flagged: a parallel
+		// Borrow() could still piggyback on the existing client and
+		// reach Telegram after the row is already revoked.
+		if s.Pool != nil {
 			s.Pool.Close(id.UserID)
 		}
+		had, err := s.Store.RevokeActiveSession(ctx, id.UserID)
 		s.audit(ctx, id, "disconnect_telegram_account", "", err)
 		if err != nil {
 			return toolErr("disconnect: %v", err), nil
@@ -308,10 +318,11 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
-		rows, err := s.Store.HardDeleteAccount(ctx, id.UserID)
-		if err == nil && s.Pool != nil {
+		// Pool.Close BEFORE the DB delete (see disconnect handler comment).
+		if s.Pool != nil {
 			s.Pool.Close(id.UserID)
 		}
+		rows, err := s.Store.HardDeleteAccount(ctx, id.UserID)
 		s.audit(ctx, id, "delete_telegram_account", "", err)
 		if err != nil {
 			return toolErr("delete: %v", err), nil

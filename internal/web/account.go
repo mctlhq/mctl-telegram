@@ -71,10 +71,14 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	had, err := h.Store.RevokeActiveSession(r.Context(), id.UserID)
-	if err == nil && h.Pool != nil {
+	// Close the pooled MTProto client BEFORE the DB revoke. With the
+	// opposite order a parallel tool request whose acquire() already
+	// took the mutex could still reuse the client to reach Telegram
+	// after the DB row was flipped to revoked.
+	if h.Pool != nil {
 		h.Pool.Close(id.UserID)
 	}
+	had, err := h.Store.RevokeActiveSession(r.Context(), id.UserID)
 	h.audit(r, id, "POST /api/account/disconnect", err)
 	if err != nil {
 		slog.Warn("account.disconnect", "err", err)
@@ -93,10 +97,11 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	rows, err := h.Store.HardDeleteAccount(r.Context(), id.UserID)
-	if err == nil && h.Pool != nil {
+	// Pool.Close before DB delete — same ordering rationale as disconnect.
+	if h.Pool != nil {
 		h.Pool.Close(id.UserID)
 	}
+	rows, err := h.Store.HardDeleteAccount(r.Context(), id.UserID)
 	h.audit(r, id, "DELETE /api/account", err)
 	if err != nil {
 		slog.Warn("account.delete", "err", err)
