@@ -55,6 +55,7 @@ func (h *AccountHandlers) Register(mux interface {
 	mux.Post("/disconnect", h.disconnect)
 	mux.Delete("/", h.delete)
 	mux.Get("/audit", h.auditLog)
+	mux.Get("/audit/verify", h.auditVerify)
 }
 
 func (h *AccountHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +180,26 @@ func (h *AccountHandlers) auditLog(w http.ResponseWriter, r *http.Request) {
 		"entries": entries,
 		"count":   len(entries),
 	})
+}
+
+// auditVerify handles GET /api/account/audit/verify. Walks the caller's
+// audit-log rows and recomputes the hash chain. Returns the verification
+// result verbatim (OK / Verified / FirstBadID / Reason). Anonymous-safe
+// in the sense that the SQL filter still pins to id.UserID, but the
+// endpoint itself requires authentication.
+func (h *AccountHandlers) auditVerify(w http.ResponseWriter, r *http.Request) {
+	id := auth.From(r.Context())
+	if id == nil {
+		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	res, err := h.Store.VerifyAuditChain(r.Context(), id.UserID)
+	if err != nil {
+		slog.Warn("account.audit_verify", "err", err)
+		writeAccountErr(w, http.StatusInternalServerError, "verify failed")
+		return
+	}
+	writeAccountJSON(w, http.StatusOK, res)
 }
 
 func (h *AccountHandlers) audit(r *http.Request, id *auth.Identity, tool string, err error) {

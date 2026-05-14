@@ -75,6 +75,17 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	// Hash-chain columns on audit_logs (M3.1). Tamper-evident: each new
+	// row stores SHA-256(prev_hash || canonical(row)); VerifyAuditChain
+	// recomputes the chain and reports the first mismatch.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "prev_hash",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "entry_hash",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
 	// Backfill: rows that pre-date the columns get last_used_at = connected_at
 	// and expires_at = connected_at + 90 days. We do this on every Migrate run
 	// rather than as a one-shot script because the platform's gitops loop is
@@ -170,7 +181,9 @@ func sqliteSchema() []string {
 			peer_redacted TEXT,
 			status TEXT NOT NULL,
 			error TEXT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			prev_hash BLOB,
+			entry_hash BLOB
 		)`,
 	}
 }
@@ -205,7 +218,9 @@ func pgSchema() []string {
 			peer_redacted TEXT,
 			status TEXT NOT NULL,
 			error TEXT,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			prev_hash BYTEA,
+			entry_hash BYTEA
 		)`,
 	}
 }
