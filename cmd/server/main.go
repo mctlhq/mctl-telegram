@@ -137,8 +137,10 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "shared-hmac":
 		p, err := sharedhmac.New(store, sharedhmac.Config{
-			Secret:         []byte(cfg.OAUTHJWTSecret),
-			ExpectedIssuer: "https://api.mctl.ai",
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   "https://api.mctl.ai",
+			ExpectedAudience: cfg.OAUTHJWTAudience,
+			AudienceRequired: cfg.OAUTHJWTAudReq,
 		})
 		if err != nil {
 			slog.Error("shared-hmac init failed; refusing to start", "err", err)
