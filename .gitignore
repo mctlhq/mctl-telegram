@@ -11,7 +11,7 @@
 .env.*
 node_modules/
 .claude/worktrees/
-local
+/local
 *.db
 *.sqlite
 *.sqlite3

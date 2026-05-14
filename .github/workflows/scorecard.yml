@@ -1,7 +1,6 @@
 name: Scorecard
 
 on:
-  branch_protection_rule:
   schedule:
     - cron: '30 2 * * 1'
   push:
