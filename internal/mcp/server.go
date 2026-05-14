@@ -9,6 +9,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -21,6 +22,9 @@ type Server struct {
 	// Limiter is the per-identity / per-peer write-action limiter.
 	// Optional: when nil, AllowPeer checks are skipped.
 	Limiter *audit.RateLimiter
+	// Hub routes MCP tool calls to Local Bridge daemons. When nil, all
+	// tools fall back to Pool.Borrow (hosted mode only).
+	Hub *bridge.Hub
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -37,6 +41,14 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 // middleware. Returns the receiver for chaining.
 func (s *Server) WithLimiter(l *audit.RateLimiter) *Server {
 	s.Limiter = l
+	return s
+}
+
+// WithHub wires the Local Bridge Hub so that tools dispatched for a
+// local-mode user are forwarded to the daemon instead of Pool.Borrow.
+// Returns the receiver for chaining.
+func (s *Server) WithHub(h *bridge.Hub) *Server {
+	s.Hub = h
 	return s
 }
 
