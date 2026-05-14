@@ -82,13 +82,16 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 // effort — a failure to write the new blob does not surface to the caller
 // (the next read will retry).
 func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
-	var blob []byte
+	var (
+		rowID int64
+		blob  []byte
+	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT session_encrypted FROM telegram_accounts
+		`SELECT id, session_encrypted FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 ORDER BY connected_at DESC LIMIT 1`,
 		userID,
-	).Scan(&blob)
+	).Scan(&rowID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -102,12 +105,20 @@ func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
 	// Lazy migration: only rewrap when we are running with real encryption.
 	// Local-dev (VersionPlaintext) rows stay as-is to avoid surprising
 	// developers who deleted ENCRYPTION_KEY.
+	//
+	// The UPDATE is CAS-bound to (row id, original ciphertext): if anyone
+	// rotated the blob between our SELECT and this UPDATE (concurrent
+	// SaveSession, UpdateSessionBlob, or a parallel migration write), the
+	// WHERE clause won't match and the migration becomes a no-op. The next
+	// LoadSession on whatever the row currently holds will retry. This
+	// prevents the lost-update scenario flagged by codex on PR #3 where a
+	// stale v1 plaintext could overwrite a newer v2 blob.
 	if s.Crypt.Enabled() && s.Crypt.BlobVersion(blob) == crypto.VersionMaster {
 		if newBlob, sealErr := s.Crypt.SealForUser(pt, userID); sealErr == nil {
 			_, _ = s.DB.ExecContext(ctx,
 				`UPDATE telegram_accounts SET session_encrypted = $1
-				 WHERE user_id = $2 AND revoked_at IS NULL`,
-				newBlob, userID,
+				 WHERE id = $2 AND session_encrypted = $3`,
+				newBlob, rowID, blob,
 			)
 		}
 	}
