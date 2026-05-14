@@ -33,7 +33,7 @@ type AccountCloser interface {
 // All handlers require an *auth.Identity in context — wire them behind the
 // same auth middleware as the MCP endpoint. Anonymous requests get 401.
 // Audit rows are written through the same Store.LogToolCall path used by MCP
-// tools so /api/account calls show up in get_my_audit_log too.
+// tools so /api/account calls show up in get_my_auditLog too.
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
@@ -54,7 +54,7 @@ func (h *AccountHandlers) Register(mux interface {
 	mux.Get("/", h.get)
 	mux.Post("/disconnect", h.disconnect)
 	mux.Delete("/", h.delete)
-	mux.Get("/audit", h.audit_log)
+	mux.Get("/audit", h.auditLog)
 }
 
 func (h *AccountHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -134,17 +134,17 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// audit_log handles GET /api/account/audit. Query params:
+// auditLog handles GET /api/account/audit. Query params:
 //
 //	limit  — int, default 50, max 500
 //	before — RFC3339; only entries strictly older than this are returned
 //
-// Returns {"entries":[…], "count":N}. Like the matching get_my_audit_log
+// Returns {"entries":[…], "count":N}. Like the matching get_my_auditLog
 // MCP tool, this handler never reads cross-user rows — the SQL filter is
 // pinned to id.UserID resolved from the authenticated identity. We
 // intentionally do NOT audit this call itself to avoid recursive
 // audit-of-audit rows on every page fetch.
-func (h *AccountHandlers) audit_log(w http.ResponseWriter, r *http.Request) {
+func (h *AccountHandlers) auditLog(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
@@ -171,7 +171,7 @@ func (h *AccountHandlers) audit_log(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, err := h.Store.ListAuditFor(r.Context(), id.UserID, limit, before)
 	if err != nil {
-		slog.Warn("account.audit_log", "err", err)
+		slog.Warn("account.auditLog", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
