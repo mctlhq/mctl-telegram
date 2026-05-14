@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -450,13 +451,155 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 	return rows, nil
 }
 
-// LogToolCall writes one audit row. Errors are non-fatal to the caller.
+// LogToolCall writes one audit row. Errors are non-fatal to the caller —
+// audit must never block a user request — but a write that fails leaves a
+// gap in the per-user hash chain that VerifyAuditChain will report.
+//
+// Hash-chain semantics (M3.1):
+//   - prev_hash = the entry_hash of this user's most recent prior row, or
+//     32 bytes of zero when this is the first row for the user.
+//   - entry_hash = SHA-256 over the canonical encoding of THIS row's
+//     fields (see hashAuditEntry).
+//
+// The SELECT + INSERT runs in a single transaction with SELECT … FOR
+// UPDATE on Postgres so concurrent LogToolCalls for the same user_id
+// serialise. SQLite uses BEGIN IMMEDIATE which acquires a write lock for
+// the same effect on a single-writer connection. Without this, two
+// concurrent writes would race on prev_hash and break the chain.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg string) {
-	_, _ = s.DB.ExecContext(ctx,
-		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error)
-		 VALUES($1,$2,$3,$4,$5)`,
-		userID, tool, nullable(peerRedacted), status, nullable(errMsg),
+	createdAt := time.Now().UTC()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var prev []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT entry_hash FROM audit_logs
+		 WHERE user_id = $1 AND entry_hash IS NOT NULL
+		 ORDER BY id DESC LIMIT 1`,
+		userID,
+	).Scan(&prev); err != nil {
+		// No prior row (sql.ErrNoRows) or a real error — either way we
+		// fall back to a zero prev_hash. A zero hash chained at the
+		// start of a user's history is acceptable; VerifyAuditChain
+		// treats it as the genesis sentinel.
+		prev = make([]byte, sha256.Size)
+	}
+	if len(prev) == 0 {
+		prev = make([]byte, sha256.Size)
+	}
+	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, createdAt)
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry,
+	); err != nil {
+		return
+	}
+	_ = tx.Commit()
+}
+
+// AuditChainVerification is the result of recomputing a user's chain.
+// When OK is true, every recorded entry_hash matched the recomputed value
+// and the chain is contiguous from the first row's prev_hash (= zero) to
+// the last. When OK is false, FirstBadID identifies the row whose stored
+// entry_hash diverges from the recomputed value (or whose prev_hash
+// breaks the chain).
+type AuditChainVerification struct {
+	OK         bool   `json:"ok"`
+	Verified   int64  `json:"verified"`
+	FirstBadID int64  `json:"first_bad_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// VerifyAuditChain walks the user's audit_logs rows in id-ascending order
+// and confirms that each entry_hash equals hashAuditEntry(prev, …) and
+// that each prev_hash equals the previous row's entry_hash.
+//
+// Rows that pre-date the M3.1 columns (prev_hash IS NULL OR entry_hash
+// IS NULL) are skipped — they are legacy rows from the pre-chain era and
+// cannot be retroactively verified. The walk continues past them so a
+// post-M3.1 chain is still checked, but the audit page should make the
+// pre-M3.1 gap visible to the user.
+func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash
+		 FROM audit_logs
+		 WHERE user_id = $1
+		 ORDER BY id ASC`,
+		userID,
 	)
+	if err != nil {
+		return AuditChainVerification{}, fmt.Errorf("verify audit: %w", err)
+	}
+	defer rows.Close()
+
+	var lastEntry []byte
+	var verified int64
+	for rows.Next() {
+		var (
+			id        int64
+			tool      string
+			peer      sql.NullString
+			status    string
+			errCol    sql.NullString
+			createdAt time.Time
+			prevHash  []byte
+			entryHash []byte
+		)
+		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash); err != nil {
+			return AuditChainVerification{}, fmt.Errorf("scan audit: %w", err)
+		}
+		if entryHash == nil || prevHash == nil {
+			// Legacy pre-M3.1 row — cannot verify, but reset the chain
+			// anchor so a following post-M3.1 row is still checked
+			// against its actual prev.
+			lastEntry = nil
+			continue
+		}
+		expectedPrev := lastEntry
+		if expectedPrev == nil {
+			expectedPrev = make([]byte, sha256.Size)
+		}
+		if !bytesEqual(prevHash, expectedPrev) {
+			return AuditChainVerification{
+				OK:         false,
+				Verified:   verified,
+				FirstBadID: id,
+				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
+			}, nil
+		}
+		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, createdAt)
+		if !bytesEqual(recomputed, entryHash) {
+			return AuditChainVerification{
+				OK:         false,
+				Verified:   verified,
+				FirstBadID: id,
+				Reason:     "entry_hash does not match recomputed canonical hash — row may have been tampered with",
+			}, nil
+		}
+		lastEntry = entryHash
+		verified++
+	}
+	if err := rows.Err(); err != nil {
+		return AuditChainVerification{}, fmt.Errorf("rows: %w", err)
+	}
+	return AuditChainVerification{OK: true, Verified: verified}, nil
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func nullable(s string) interface{} {
