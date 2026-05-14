@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 
+	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -132,7 +133,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
-		realSend, dryReason := evaluateSendGate(id, mode, s.AllowSend)
+		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
 		var result *telegram.SendResult
 		var err error
 		if !realSend {
@@ -257,7 +258,73 @@ Use get_messages to find message IDs before calling this tool.`),
 	return tool, handler
 }
 
-func evaluateSendGate(id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
+func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("disconnect_telegram_account",
+		mcplib.WithTitleAnnotation("Disconnect Telegram account"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Disconnect your Telegram account from this server.
+
+Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
+
+This tool is part of self-service controls — you do not need an operator to disconnect.
+
+No inputs. Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
+	)
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		had, err := s.Store.RevokeActiveSession(ctx, id.UserID)
+		if err == nil && s.Pool != nil {
+			s.Pool.Close(id.UserID)
+		}
+		s.audit(ctx, id, "disconnect_telegram_account", "", err)
+		if err != nil {
+			return toolErr("disconnect: %v", err), nil
+		}
+		return jsonResult(map[string]any{
+			"disconnected":       true,
+			"had_active_session": had,
+		})
+	}
+	return tool, handler
+}
+
+func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("delete_telegram_account",
+		mcplib.WithTitleAnnotation("Delete Telegram account (hard delete)"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
+
+Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to reconnect, the operator must re-run the login CLI.
+
+For a softer alternative that keeps the row but disables it, use disconnect_telegram_account.
+
+No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
+	)
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		rows, err := s.Store.HardDeleteAccount(ctx, id.UserID)
+		if err == nil && s.Pool != nil {
+			s.Pool.Close(id.UserID)
+		}
+		s.audit(ctx, id, "delete_telegram_account", "", err)
+		if err != nil {
+			return toolErr("delete: %v", err), nil
+		}
+		return jsonResult(map[string]any{
+			"deleted":      true,
+			"rows_removed": rows,
+		})
+	}
+	return tool, handler
+}
+
+func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
 		return false, "mode=draft (default) — call with mode:'send' to send for real"
 	}
@@ -269,6 +336,16 @@ func evaluateSendGate(id *auth.Identity, mode string, allowSend bool) (real bool
 	}
 	if !id.HasScope("telegram:messages:send") {
 		return false, "identity missing telegram:messages:send scope"
+	}
+	if store == nil {
+		return false, "store unavailable — cannot verify per-account send_enabled"
+	}
+	enabled, err := store.IsSendEnabled(ctx, id.UserID)
+	if err != nil {
+		return false, "failed to check per-account send_enabled — defaulting to dry-run"
+	}
+	if !enabled {
+		return false, "per-account send_enabled=false — contact the operator to enable real sends for your account"
 	}
 	return true, ""
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 )
@@ -14,6 +15,17 @@ import (
 type Store struct {
 	DB    *sql.DB
 	Crypt *crypto.AESGCM
+}
+
+// AccountInfo is the user-visible projection of a telegram_accounts row,
+// suitable for GET /api/account responses. PII like telegram_user_id stays
+// hidden; only connection-state fields are surfaced.
+type AccountInfo struct {
+	Connected   bool      `json:"connected"`
+	DisplayName string    `json:"display_name,omitempty"`
+	Username    string    `json:"username,omitempty"`
+	SendEnabled bool      `json:"send_enabled"`
+	ConnectedAt time.Time `json:"connected_at,omitempty"`
 }
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
@@ -119,6 +131,89 @@ func (s *Store) UpdateSessionBlob(ctx context.Context, userID int64, plaintext [
 		}
 	}
 	return nil
+}
+
+// RevokeActiveSession marks the active telegram_accounts row for a user as
+// revoked. Returns true if a row was actually flipped. Idempotent: calling
+// it twice in a row only flips the first time. Used by the self-service
+// disconnect MCP tool / HTTP endpoint.
+func (s *Store) RevokeActiveSession(ctx context.Context, userID int64) (bool, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("revoke session: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows > 0, nil
+}
+
+// HardDeleteAccount removes every telegram_accounts row for the user
+// regardless of revoked state. Audit rows (FK ON DELETE no action, user_id
+// nullable) survive — they reference the user, not the account. Returns the
+// number of rows removed.
+func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`DELETE FROM telegram_accounts WHERE user_id = $1`,
+		userID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
+}
+
+// GetActiveAccount returns the active telegram account for a user, or
+// Connected=false if none. Used by GET /api/account.
+func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInfo, error) {
+	var (
+		displayName sql.NullString
+		username    sql.NullString
+		sendEnabled bool
+		connectedAt time.Time
+	)
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT display_name, username, send_enabled, connected_at FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 ORDER BY connected_at DESC LIMIT 1`,
+		userID,
+	).Scan(&displayName, &username, &sendEnabled, &connectedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &AccountInfo{Connected: false}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query account: %w", err)
+	}
+	return &AccountInfo{
+		Connected:   true,
+		DisplayName: displayName.String,
+		Username:    username.String,
+		SendEnabled: sendEnabled,
+		ConnectedAt: connectedAt,
+	}, nil
+}
+
+// IsSendEnabled reads telegram_accounts.send_enabled for the user's active
+// session. Returns false (no error) when there is no active session — the
+// caller will already reject for a different reason in that case.
+func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
+	var enabled bool
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT send_enabled FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 ORDER BY connected_at DESC LIMIT 1`,
+		userID,
+	).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query send_enabled: %w", err)
+	}
+	return enabled, nil
 }
 
 // LogToolCall writes one audit row. Errors are non-fatal to the caller.

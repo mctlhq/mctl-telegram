@@ -26,12 +26,12 @@ type ClientPool struct {
 }
 
 type entry struct {
-	client     *telegram.Client
-	lastUsed   time.Time
-	cancel     context.CancelFunc
-	ready      chan struct{}
-	runErr     error
-	stopped    bool
+	client   *telegram.Client
+	lastUsed time.Time
+	cancel   context.CancelFunc
+	ready    chan struct{}
+	runErr   error
+	stopped  bool
 }
 
 func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Store) *ClientPool {
@@ -142,6 +142,21 @@ func (p *ClientPool) touch(userID int64) {
 	if e, ok := p.entries[userID]; ok {
 		e.lastUsed = time.Now()
 	}
+}
+
+// Close evicts the pool entry for a single user, cancelling the running
+// client. Returns true if there was an entry to evict. Safe to call when
+// no entry exists. Used by self-service disconnect/delete so a Borrow()
+// issued immediately afterwards does not piggyback on the doomed client.
+func (p *ClientPool) Close(userID int64) bool {
+	p.mu.Lock()
+	e, ok := p.entries[userID]
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
+	e.cancel()
+	return true
 }
 
 func (p *ClientPool) Shutdown() {
