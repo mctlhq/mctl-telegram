@@ -23,7 +23,11 @@ const pingInterval = 25 * time.Second
 //
 // Only accounts whose telegram_accounts.mode is 'local' are accepted; a
 // hosted-mode account attempting to register here receives HTTP 400.
-func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store) http.HandlerFunc {
+//
+// serverCtx should be the process-level shutdown context (from
+// signal.NotifyContext). Using r.Context() would inherit the HTTP server's
+// Timeout middleware and close daemon connections every 60 s.
+func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
@@ -66,7 +70,7 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store) http.Ha
 
 		// Parent context for both goroutines. Cancelling it stops the
 		// reader and the writer cleanly without leaking goroutines.
-		ctx, cancel := context.WithCancel(r.Context())
+		ctx, cancel := context.WithCancel(serverCtx)
 		defer cancel()
 
 		done := make(chan struct{}, 2)

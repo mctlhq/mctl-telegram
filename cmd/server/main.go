@@ -122,7 +122,7 @@ func main() {
 	// tokens cannot be used to hijack the bridge channel.
 	hub := bridge.NewHub()
 	bridgeProvider := selectBridgeProvider(cfg, store)
-	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store))
+	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 
 	// Wire the hub into the MCP server so tool calls for local-mode users
 	// are forwarded to their daemon instead of the hosted MTProto pool.
