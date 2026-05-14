@@ -36,14 +36,22 @@ type landingData struct {
 // Landing renders the connection-instructions HTML at PublicBaseURL/.
 // MCPPath is rendered into the page so the operator sees the exact URL
 // to paste into Claude.ai's "Add custom connector" dialog.
-func Landing(publicBaseURL, mcpPath string) http.HandlerFunc {
+//
+// authServer is the issuer URL used by the OAuth flow. For the Telegram-native
+// auth model this is the same as publicBaseURL — mctl-telegram is its own
+// authorization server. The legacy "shared-hmac" mode points it at
+// https://api.mctl.ai; main.go decides which one to pass in.
+func Landing(publicBaseURL, mcpPath, authServer string) http.HandlerFunc {
 	base := strings.TrimRight(publicBaseURL, "/")
 	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
+	if authServer == "" {
+		authServer = base
+	}
 	data := landingData{
 		PublicBaseURL: base,
 		MCPURL:        base + mcpPath,
 		WellKnownURL:  base + "/.well-known/oauth-protected-resource",
-		AuthServer:    "https://api.mctl.ai",
+		AuthServer:    authServer,
 	}
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

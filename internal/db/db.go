@@ -101,6 +101,44 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// Telegram-native identity columns (users): replaces github_login as the
+	// primary key. github_login becomes nullable so widget-issued user rows
+	// (which never have a GitHub login) can coexist with legacy ones during
+	// the rollout.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_login_id",
+		"BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_username",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_display_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	// Unique index on telegram_login_id (partial — NULLs ignored) so multiple
+	// pre-migration rows without telegram_login_id remain valid.
+	idxStmts := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_login_id ON users(telegram_login_id) WHERE telegram_login_id IS NOT NULL`,
+	}
+	for _, s := range idxStmts {
+		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("create index: %w\nstmt: %s", err, s)
+		}
+	}
+	// Drop the NOT NULL constraint on users.github_login if present. SQLite
+	// cannot alter constraints in-place; in production we run on Postgres
+	// (where ALTER COLUMN DROP NOT NULL works) and the SQLite branch keeps
+	// the legacy schema for local-dev — that's fine because local-dev never
+	// inserts NULL into the column (OperatorLogin is always set).
+	if pg {
+		if _, err := dbConn.ExecContext(ctx,
+			`ALTER TABLE users ALTER COLUMN github_login DROP NOT NULL`,
+		); err != nil {
+			return fmt.Errorf("drop not null on users.github_login: %w", err)
+		}
+	}
 	// Backfill: rows that pre-date the columns get last_used_at = connected_at
 	// and expires_at = connected_at + 90 days. We do this on every Migrate run
 	// rather than as a one-shot script because the platform's gitops loop is

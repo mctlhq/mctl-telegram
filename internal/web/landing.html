@@ -95,8 +95,9 @@
   <ol>
     <li>Open <a href="https://claude.ai/settings/connectors" target="_blank" rel="noopener">claude.ai → Settings → Connectors</a> and click <em>Add custom connector</em>.</li>
     <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
-    <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers the authorization server from the well-known document at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and redirects to <code>{{.AuthServer}}</code> for GitHub login.</li>
-    <li>Sign in with the GitHub account that has access to your mctl tenant. The issued JWT is verified by mctl-telegram via shared HMAC.</li>
+    <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers this server as its own authorization server via the well-known documents at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+    <li>You will see a <em>“Connect Telegram to Claude”</em> page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
+    <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
   </ol>
 
   <h2>2. Available tools</h2>
@@ -149,16 +150,15 @@
   </table>
 
   <h2>3. Scopes and permissions</h2>
-  <p class="muted">Scopes are derived from your GitHub-team / mctl-tenant groups via the shared-HMAC verifier.</p>
+  <p class="muted">Scopes are derived from your Telegram identity. Operators on the admin allowlist (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set; everyone else authenticates but receives no scopes and will be rejected at the per-tool gate.</p>
   <table>
-    <thead><tr><th>Group</th><th>Scopes granted</th></tr></thead>
+    <thead><tr><th>Telegram identity</th><th>Scopes granted</th></tr></thead>
     <tbody>
-      <tr><td><code>telegram-mcp-readers</code></td><td>dialogs:read, messages:read</td></tr>
-      <tr><td><code>admins</code></td><td>dialogs:read, messages:read <em>(read-only by default)</em></td></tr>
-      <tr><td><code>telegram-mcp-senders</code></td><td>dialogs:read, messages:read, messages:send, messages:pin</td></tr>
-      <tr><td><code>platform-admins</code></td><td>all telegram:* scopes plus <code>admin:users</code></td></tr>
+      <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all telegram:* scopes plus <code>admin:users</code></td></tr>
+      <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
     </tbody>
   </table>
+  <p class="muted">For backward compatibility the server can still be run under <code>AUTH_MODE=shared-hmac-legacy</code>, in which case the original GitHub-group→scope mapping applies. The default mode is <code>local-jwt</code>.</p>
 
   <h2>4. What we store</h2>
   <table>
@@ -166,7 +166,7 @@
     <tbody>
       <tr>
         <td><code>users</code></td>
-        <td>github_login, optional email</td>
+        <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
         <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
       </tr>
       <tr>
@@ -202,7 +202,7 @@ curl -s -X POST {{.MCPURL}} \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'</pre>
 
   <h2>7. First-time Telegram login</h2>
-  <p>Until an in-browser <code>/telegram/connect</code> flow ships, the operator runs the CLI binary <code>mctl-telegram-login</code> bundled in the same image. It performs phone → SMS code → optional 2FA password and persists an AES-256-GCM-encrypted MTProto session keyed to your GitHub login. The full recipe lives in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>. Self-service flows are tracked in the roadmap.</p>
+  <p>Sign-in via Claude.ai connector authenticates you (Telegram Login Widget). To grant the server read/send access to your Telegram messages, the operator runs the CLI binary <code>mctl-telegram-login</code> bundled in the same image, which performs phone → SMS code → optional 2FA password and persists an AES-256-GCM-encrypted MTProto session keyed to your Telegram user id. The full recipe lives in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>. An in-browser <code>/oauth/telegram/enable_access</code> flow that lets users do this themselves is on the roadmap.</p>
 
   <p class="muted">Source: <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · Auth server: <code>{{.AuthServer}}</code> · Resource: <code>{{.PublicBaseURL}}</code></p>
 </body>

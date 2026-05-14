@@ -54,6 +54,60 @@ func (s *Store) EnsureUser(ctx context.Context, login, email, provider string) (
 	return id, nil
 }
 
+// EnsureUserByTelegramID is the Telegram-native counterpart of EnsureUser.
+// It is the canonical identity-binding call for the localjwt provider and
+// the OAuth Login Widget callback: given a Telegram user id (and optional
+// username/displayName), it returns the internal users.id row, creating one
+// if absent.
+//
+// SQLite still requires github_login NOT NULL — we satisfy the constraint by
+// stamping a synthetic "tg:<id>" string so legacy code that joins on
+// github_login keeps working. New code should always prefer telegram_login_id.
+// On Postgres the column has been dropped to nullable, but we still stamp
+// the synthetic value for cross-dialect consistency.
+//
+// The optional username/displayName are updated on every call so the row
+// stays fresh when Telegram returns newer values during widget reauth.
+func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username, displayName string) (int64, error) {
+	if tgID <= 0 {
+		return 0, errors.New("telegram id must be positive")
+	}
+	syntheticLogin := fmt.Sprintf("tg:%d", tgID)
+	// Try update first — fast path when the row exists.
+	var id int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE telegram_login_id=$1`, tgID,
+	).Scan(&id)
+	if err == nil {
+		// Touch the metadata fields if the caller knows newer values.
+		if username != "" || displayName != "" {
+			_, _ = s.DB.ExecContext(ctx,
+				`UPDATE users SET telegram_username = COALESCE(NULLIF($1,''), telegram_username),
+				                    telegram_display_name = COALESCE(NULLIF($2,''), telegram_display_name)
+				 WHERE id = $3`,
+				username, displayName, id,
+			)
+		}
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("select user by tg_id: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO users(github_login, provider, telegram_login_id, telegram_username, telegram_display_name)
+		 VALUES($1,$2,$3,$4,$5)`,
+		syntheticLogin, "tg-mcp", tgID, nullable(username), nullable(displayName),
+	); err != nil {
+		return 0, fmt.Errorf("insert user by tg_id: %w", err)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE telegram_login_id=$1`, tgID,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("select user by tg_id after insert: %w", err)
+	}
+	return id, nil
+}
+
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
 // Any prior active row for the user is marked revoked. Writes always use
 // SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read

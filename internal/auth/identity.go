@@ -5,13 +5,22 @@ import (
 	"net/http"
 )
 
+// Identity captures everything the MCP middleware needs to know about a
+// caller. Subject is the canonical identifier — for Telegram-issued tokens it
+// is "tg:<telegram_id>"; for the legacy GitHub-OAuth path it is the GitHub
+// login. GitHubLogin remains a separate field for backwards compatibility
+// with code that already reads it, but new code should prefer Subject and
+// TelegramID/TelegramUsername.
 type Identity struct {
-	UserID      int64
-	GitHubLogin string
-	Email       string
-	Provider    string
-	Groups      []string
-	Scopes      []string
+	UserID           int64
+	Subject          string
+	GitHubLogin      string
+	TelegramID       int64
+	TelegramUsername string
+	Email            string
+	Provider         string
+	Groups           []string
+	Scopes           []string
 }
 
 func (i *Identity) HasScope(s string) bool {
