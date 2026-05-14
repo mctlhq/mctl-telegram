@@ -2,6 +2,10 @@ package sharedhmac
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -195,6 +199,60 @@ func TestAuthenticate_AudienceArray_AnyMatchPasses(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+tok)
 	if _, err := p.Authenticate(req); err != nil {
 		t.Fatalf("expected success on multi-audience with match, got %v", err)
+	}
+}
+
+// forgeJWTWithRawAudience signs a JWT body that already contains the desired
+// `aud` JSON fragment verbatim — useful for forging malformed shapes the
+// IssueTestToken*** helpers won't produce.
+func forgeJWTWithRawAudience(t *testing.T, secret []byte, audRaw string) string {
+	t.Helper()
+	hdr := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	body := fmt.Sprintf(
+		`{"iss":"https://api.mctl.ai","sub":"x","groups":["platform-admins"],"iat":%d,"exp":%d,"aud":%s}`,
+		time.Now().Unix(), time.Now().Add(time.Minute).Unix(), audRaw,
+	)
+	bodyB64 := base64.RawURLEncoding.EncodeToString([]byte(body))
+	sigInput := hdr + "." + bodyB64
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(sigInput))
+	return sigInput + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func TestAuthenticate_MalformedAudienceRejected(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		// Even in transitional mode, malformed aud must NOT be treated as
+		// absent — the policy says "if aud is present it must match",
+		// and a number/object/mixed-array is "present, but unmatchable".
+	})
+	tok := forgeJWTWithRawAudience(t, secret, `42`)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err == nil {
+		t.Fatal("malformed aud (number) must be rejected, not silently treated as absent")
+	}
+}
+
+func TestAuthenticate_MixedTypeAudienceArrayRejected(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+	})
+	// Array contains a non-string even though the matching string is in
+	// there too. The whole claim is malformed, must be rejected.
+	tok := forgeJWTWithRawAudience(t, secret, `["https://tg.mctl.ai",7]`)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err == nil {
+		t.Fatal("mixed-type aud array must be rejected even if it contains the right string")
 	}
 }
 

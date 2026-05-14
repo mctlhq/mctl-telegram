@@ -6,6 +6,7 @@
 package sharedhmac
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -229,39 +230,58 @@ func verifyJWT(token string, secret []byte, expectedIssuer string) (*jwtPayload,
 	if time.Now().Unix() > p.ExpiresAt {
 		return nil, errors.New("JWT expired")
 	}
-	p.Audience = audienceList(p.AudienceRaw)
+	aud, err := audienceList(p.AudienceRaw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT audience claim: %w", err)
+	}
+	p.Audience = aud
 	return &p, nil
 }
 
 // audienceList normalises the polymorphic `aud` claim into a string slice.
-// Absent / null / empty array all collapse to nil so the policy check
-// treats them identically. Malformed `aud` values (e.g. numbers) are
-// silently ignored — the JWT remains valid for its other claims.
-func audienceList(raw json.RawMessage) []string {
+// RFC 7519 §4.1.3 permits two shapes: a single string or an array of
+// strings. We also accept absent / null / explicit-empty as a synonym for
+// "no audience". Anything else (number, object, mixed-type array, array of
+// empty strings) is a malformed claim and returns a non-nil error so the
+// caller can reject the JWT outright instead of silently treating it as
+// absent — which would bypass the transitional audience policy.
+func audienceList(raw json.RawMessage) ([]string, error) {
+	// Absent claim — len 0 reflects "no aud key in payload".
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	// Single string form.
 	var single string
-	if err := json.Unmarshal(raw, &single); err == nil {
+	if err := json.Unmarshal(trimmed, &single); err == nil {
 		if single == "" {
-			return nil
+			return nil, errors.New("audience must not be an empty string")
 		}
-		return []string{single}
+		return []string{single}, nil
 	}
-	var arr []string
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		out := arr[:0]
-		for _, a := range arr {
-			if a != "" {
-				out = append(out, a)
-			}
-		}
-		if len(out) == 0 {
-			return nil
-		}
-		return out
+	// Array form. Require every element to be a non-empty string.
+	var arr []json.RawMessage
+	if err := json.Unmarshal(trimmed, &arr); err != nil {
+		return nil, fmt.Errorf("audience must be a string or array of strings, got %s", raw)
 	}
-	return nil
+	if len(arr) == 0 {
+		return nil, nil // explicit empty array == absent
+	}
+	out := make([]string, 0, len(arr))
+	for i, elem := range arr {
+		var s string
+		if err := json.Unmarshal(elem, &s); err != nil {
+			return nil, fmt.Errorf("audience[%d] is not a string", i)
+		}
+		if s == "" {
+			return nil, fmt.Errorf("audience[%d] is an empty string", i)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // IssueTestToken is exported strictly for tests that need to forge a token
