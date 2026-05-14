@@ -26,12 +26,12 @@ type ClientPool struct {
 }
 
 type entry struct {
-	client     *telegram.Client
-	lastUsed   time.Time
-	cancel     context.CancelFunc
-	ready      chan struct{}
-	runErr     error
-	stopped    bool
+	client   *telegram.Client
+	lastUsed time.Time
+	cancel   context.CancelFunc
+	ready    chan struct{}
+	runErr   error
+	stopped  bool
 }
 
 func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Store) *ClientPool {
@@ -142,6 +142,66 @@ func (p *ClientPool) touch(userID int64) {
 	if e, ok := p.entries[userID]; ok {
 		e.lastUsed = time.Now()
 	}
+}
+
+// Close evicts the pool entry for a single user, cancelling the running
+// client. Returns true if there was an entry to evict. Safe to call when
+// no entry exists.
+//
+// NOTE: Close alone is NOT race-free against a concurrent Borrow that
+// arrives during the gap between Close and any subsequent DB-side
+// revocation: acquire() may build a fresh entry and the new entry's
+// SessionStorage may load the not-yet-revoked session. Self-service
+// disconnect/delete must use RemoveAtomic instead, which holds the pool
+// mutex across the DB call so acquire() blocks until both the eviction
+// and the DB revoke are committed.
+func (p *ClientPool) Close(userID int64) bool {
+	p.mu.Lock()
+	e, ok := p.entries[userID]
+	if ok {
+		e.stopped = true
+		delete(p.entries, userID)
+	}
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
+	e.cancel()
+	return true
+}
+
+// RemoveAtomic evicts the pool entry for the user AND runs fn() while
+// holding the same mutex acquire() takes. Returns fn()'s error (or nil
+// if fn was nil). Used to make self-service disconnect/delete atomic
+// against concurrent Borrow:
+//
+//  1. acquire() blocks on p.mu until RemoveAtomic releases it
+//  2. inside RemoveAtomic the entry is marked stopped + removed from the
+//     map *and* the DB-side revocation runs to completion
+//  3. by the time acquire() resumes, the entry is gone AND the DB row no
+//     longer has an active session, so the fresh entry's SessionStorage
+//     load returns nil and gotd refuses to start
+//
+// fn is expected to be short-lived (single DB UPDATE/DELETE). It runs
+// under the pool mutex, so it must not call any other pool method or
+// it would deadlock. cancel() on the evicted entry runs after the lock
+// is released to avoid blocking on run()'s cleanup goroutine.
+func (p *ClientPool) RemoveAtomic(userID int64, fn func() error) error {
+	p.mu.Lock()
+	e, hadEntry := p.entries[userID]
+	if hadEntry {
+		e.stopped = true
+		delete(p.entries, userID)
+	}
+	var err error
+	if fn != nil {
+		err = fn()
+	}
+	p.mu.Unlock()
+	if hadEntry {
+		e.cancel()
+	}
+	return err
 }
 
 func (p *ClientPool) Shutdown() {

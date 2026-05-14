@@ -86,6 +86,13 @@ func main() {
 
 	provider := selectProvider(cfg, store)
 
+	// Account endpoints — self-service disconnect/delete + status.
+	// Mounted behind the same auth middleware as MCP so anon traffic gets 401.
+	accountMux := chi.NewRouter()
+	accountHandlers := web.NewAccountHandlers(store, pool)
+	accountHandlers.Register(accountMux)
+	mux.Mount("/api/account", auth.Middleware(provider, true)(accountMux))
+
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
 

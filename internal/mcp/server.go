@@ -25,7 +25,7 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 func (s *Server) HTTPHandler() http.Handler {
 	srv := mcpserver.NewMCPServer(
 		"mctl-telegram",
-		"0.2.0",
+		"0.6.0",
 		mcpserver.WithToolCapabilities(true),
 	)
 	srv.AddTool(s.toolListDialogs())
@@ -33,6 +33,8 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolGetMessages())
 	srv.AddTool(s.toolSendMessage())
 	srv.AddTool(s.toolPinMessage())
+	srv.AddTool(s.toolDisconnectAccount())
+	srv.AddTool(s.toolDeleteAccount())
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,
