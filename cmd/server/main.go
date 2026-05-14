@@ -77,6 +77,9 @@ func main() {
 	// is the authoritative gate; this sweeper just bounds how long an
 	// abandoned row sits as a live record before being marked.
 	go sweeper.Sessions(ctx, store)
+	// Audit-log retention: trims rows older than AUDIT_RETENTION_DAYS
+	// (default 90). AUDIT_RETENTION_DAYS=0 keeps rows forever.
+	go sweeper.AuditLog(ctx, store, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
