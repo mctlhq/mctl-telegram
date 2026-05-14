@@ -8,21 +8,23 @@ import (
 )
 
 type Config struct {
-	Addr               string
-	PublicBaseURL      string
-	MCPPath            string
-	AuthMode           string
-	AuthRequired       bool
-	OperatorLogin      string
-	DatabaseURL        string
-	OAUTHJWTSecret     string
-	TGAPIID            int
-	TGAPIHash          string
-	EncryptionKey      []byte
-	AllowSend          bool
-	IdleClientTimeout  time.Duration
-	RateLimitPerUser   int
-	LogLevel           string
+	Addr              string
+	PublicBaseURL     string
+	MCPPath           string
+	AuthMode          string
+	AuthRequired      bool
+	OperatorLogin     string
+	DatabaseURL       string
+	OAUTHJWTSecret    string
+	OAUTHJWTAudience  string // expected `aud` claim; empty disables the check
+	OAUTHJWTAudReq    bool   // when true, tokens without aud are rejected
+	TGAPIID           int
+	TGAPIHash         string
+	EncryptionKey     []byte
+	AllowSend         bool
+	IdleClientTimeout time.Duration
+	RateLimitPerUser  int
+	LogLevel          string
 }
 
 func Load() (*Config, error) {
@@ -35,6 +37,8 @@ func Load() (*Config, error) {
 		OperatorLogin:     envOr("OPERATOR_GITHUB_LOGIN", "operator"),
 		DatabaseURL:       envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
 		OAUTHJWTSecret:    os.Getenv("OAUTH_JWT_SECRET"),
+		OAUTHJWTAudience:  os.Getenv("OAUTH_JWT_AUDIENCE"),
+		OAUTHJWTAudReq:    envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		TGAPIHash:         os.Getenv("TG_API_HASH"),
 		AllowSend:         envBool("ALLOW_SEND", false),
 		IdleClientTimeout: envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),

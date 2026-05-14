@@ -93,6 +93,111 @@ func TestAuthenticate_NoBearer(t *testing.T) {
 	}
 }
 
+func TestAuthenticate_AudienceUnconfigured_AnyTokenPasses(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{Secret: secret, ExpectedIssuer: "https://api.mctl.ai"})
+	tok, _ := IssueTestTokenWithAudience(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"}, []string{"https://elsewhere/"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err != nil {
+		t.Fatalf("expected success when audience policy is disabled, got %v", err)
+	}
+}
+
+func TestAuthenticate_AudienceTransitional_MissingTokenPasses(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		AudienceRequired: false,
+	})
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err != nil {
+		t.Fatalf("transitional mode should allow tokens without aud, got %v", err)
+	}
+}
+
+func TestAuthenticate_AudienceTransitional_MismatchRejected(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		AudienceRequired: false,
+	})
+	tok, _ := IssueTestTokenWithAudience(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"}, []string{"https://elsewhere/"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err == nil {
+		t.Fatal("present-but-wrong audience must be rejected even in transitional mode")
+	}
+}
+
+func TestAuthenticate_AudienceStrict_MissingRejected(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		AudienceRequired: true,
+	})
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err == nil {
+		t.Fatal("strict mode must reject tokens without aud claim")
+	}
+}
+
+func TestAuthenticate_AudienceStrict_MatchPasses(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		AudienceRequired: true,
+	})
+	tok, _ := IssueTestTokenWithAudience(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"}, []string{"https://tg.mctl.ai"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err != nil {
+		t.Fatalf("expected success on matching audience, got %v", err)
+	}
+}
+
+func TestAuthenticate_AudienceArray_AnyMatchPasses(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{
+		Secret:           secret,
+		ExpectedIssuer:   "https://api.mctl.ai",
+		ExpectedAudience: "https://tg.mctl.ai",
+		AudienceRequired: true,
+	})
+	// Multi-audience token: one of the values matches.
+	tok, _ := IssueTestTokenWithAudience(secret, "https://api.mctl.ai", "x",
+		[]string{"platform-admins"},
+		[]string{"https://api.mctl.ai", "https://tg.mctl.ai"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if _, err := p.Authenticate(req); err != nil {
+		t.Fatalf("expected success on multi-audience with match, got %v", err)
+	}
+}
+
 func TestAuthenticate_GroupGate(t *testing.T) {
 	store := newTestStore(t)
 	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
