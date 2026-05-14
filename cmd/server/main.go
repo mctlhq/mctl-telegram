@@ -22,6 +22,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 )
@@ -70,6 +71,12 @@ func main() {
 	store := db.NewStore(rawDB, cryp)
 	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store)
 	defer pool.Shutdown()
+
+	// Periodic background job that revokes sessions whose idle (30d) or
+	// absolute (90d) TTL has elapsed. CheckSessionValid on every Borrow
+	// is the authoritative gate; this sweeper just bounds how long an
+	// abandoned row sits as a live record before being marked.
+	go sweeper.Sessions(ctx, store)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)

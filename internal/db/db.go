@@ -62,6 +62,81 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 			return fmt.Errorf("migrate: %w\nstmt: %s", err, s)
 		}
 	}
+	// Idempotent ALTER passes for columns added after the initial schema.
+	// Each is wrapped in dialect-specific existence checks because CREATE
+	// TABLE IF NOT EXISTS does not update existing tables, and we cannot
+	// modify the original CREATE TABLE without breaking deployments that
+	// already have rows.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "last_used_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "expires_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	// Backfill: rows that pre-date the columns get last_used_at = connected_at
+	// and expires_at = connected_at + 90 days. We do this on every Migrate run
+	// rather than as a one-shot script because the platform's gitops loop is
+	// re-run on every deploy and we want this to converge regardless.
+	backfill := []string{
+		`UPDATE telegram_accounts
+		 SET last_used_at = connected_at
+		 WHERE last_used_at IS NULL`,
+	}
+	if pg {
+		backfill = append(backfill,
+			`UPDATE telegram_accounts
+			 SET expires_at = connected_at + INTERVAL '90 days'
+			 WHERE expires_at IS NULL`,
+		)
+	} else {
+		// SQLite has no INTERVAL syntax; use the datetime() function.
+		backfill = append(backfill,
+			`UPDATE telegram_accounts
+			 SET expires_at = datetime(connected_at, '+90 days')
+			 WHERE expires_at IS NULL`,
+		)
+	}
+	for _, s := range backfill {
+		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("backfill: %w\nstmt: %s", err, s)
+		}
+	}
+	return nil
+}
+
+// addColumnIfMissing runs an ALTER TABLE ... ADD COLUMN that is a no-op when
+// the column is already present. Postgres has `ADD COLUMN IF NOT EXISTS`
+// natively; SQLite needs us to inspect pragma_table_info first and skip the
+// ALTER when the column is there. Used by Migrate() to fold post-launch
+// schema additions into a single idempotent pass.
+func addColumnIfMissing(ctx context.Context, dbConn *sql.DB, pg bool, table, column, pgType, sqliteType string) error {
+	if pg {
+		stmt := fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`,
+			table, column, pgType,
+		)
+		if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", table, column, err)
+		}
+		return nil
+	}
+	// SQLite path: check column existence via pragma_table_info.
+	var count int
+	if err := dbConn.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, column,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, sqliteType)
+	if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
 	return nil
 }
 
@@ -83,7 +158,9 @@ func sqliteSchema() []string {
 			session_encrypted BLOB NOT NULL,
 			send_enabled INTEGER NOT NULL DEFAULT 0,
 			connected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			revoked_at DATETIME
+			revoked_at DATETIME,
+			last_used_at DATETIME,
+			expires_at DATETIME
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
@@ -116,7 +193,9 @@ func pgSchema() []string {
 			session_encrypted BYTEA NOT NULL,
 			send_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 			connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			revoked_at TIMESTAMPTZ
+			revoked_at TIMESTAMPTZ,
+			last_used_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (

@@ -46,9 +46,22 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 
 // Borrow returns a connected *telegram.Client for the user. The caller MUST
 // only use it until fn returns; the pool refreshes the lastUsed marker.
+//
+// Pre-flight: the session's idle and absolute TTLs are checked against the
+// DB *before* acquire(). An expired session is revoked in-place and the
+// caller receives db.ErrSessionExpired so the user sees a clean error
+// instead of an opaque MTProto failure later. After fn returns, the
+// session's last_used_at is bumped so the idle-TTL clock resets while
+// the user is active.
 func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx context.Context, c *telegram.Client) error) error {
 	if p.APIID == 0 || p.APIHash == "" {
 		return fmt.Errorf("telegram api credentials not configured (TG_API_ID / TG_API_HASH)")
+	}
+
+	if p.Store != nil {
+		if _, err := p.Store.CheckSessionValid(ctx, userID); err != nil {
+			return err
+		}
 	}
 
 	e, err := p.acquire(userID)
@@ -66,6 +79,9 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	}
 
 	p.touch(userID)
+	if p.Store != nil {
+		p.Store.MarkLastUsed(ctx, userID)
+	}
 	return fn(ctx, e.client)
 }
 
