@@ -95,14 +95,14 @@ func runInit() {
 	apiHash := promptStr(stdin, "TG_API_HASH: ")
 
 	fmt.Print("Passphrase (encrypts local session DB): ")
-	pass1, err := term.ReadPassword(int(syscall.Stdin))
+	pass1, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		die(fmt.Errorf("read passphrase: %w", err))
 	}
 
 	fmt.Print("Confirm passphrase: ")
-	pass2, err := term.ReadPassword(int(syscall.Stdin))
+	pass2, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		die(fmt.Errorf("read passphrase confirm: %w", err))
@@ -120,11 +120,17 @@ func runInit() {
 		die(err)
 	}
 
+	initKey, err := deriveKey(pass1, saltB64)
+	if err != nil {
+		die(fmt.Errorf("derive key: %w", err))
+	}
+
 	cfg := &localConfig{
-		APIID:   apiID,
-		APIHash: apiHash,
-		Server:  "https://tg.mctl.ai",
-		KeySalt: saltB64,
+		APIID:    apiID,
+		APIHash:  apiHash,
+		Server:   "https://tg.mctl.ai",
+		KeySalt:  saltB64,
+		KeyCheck: deriveKeyCheck(initKey),
 	}
 	if err := saveConfig(cfg); err != nil {
 		die(err)
@@ -154,11 +160,7 @@ func runLogin(args []string) {
 	}
 
 	key := promptPassphrase("Passphrase: ")
-	_, err = deriveKey(key, cfg.KeySalt)
-	if err != nil {
-		die(fmt.Errorf("derive key: %w", err))
-	}
-	keyHex := encryptionKeyHex(mustDeriveKey(key, cfg.KeySalt))
+	keyHex := encryptionKeyHex(mustDeriveVerifiedKey(key, cfg))
 
 	ctx := context.Background()
 	store, closeDB, uid := openLocalStore(ctx, keyHex)
@@ -175,7 +177,7 @@ func runLogin(args []string) {
 	}
 	askPassword := func(ctx context.Context) (string, error) {
 		fmt.Print("Enter 2FA cloud password: ")
-		pw, err := term.ReadPassword(int(syscall.Stdin))
+		pw, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if err != nil {
 			return "", err
@@ -230,9 +232,7 @@ func runConnect(args []string) {
 	if *server != "" {
 		srv = *server
 		cfg.Server = srv
-		if err := saveConfig(cfg); err != nil {
-			die(fmt.Errorf("persist server override: %w", err))
-		}
+		// Don't persist yet — save only after the token exchange succeeds.
 	}
 
 	tokenURL := strings.TrimRight(srv, "/") + "/api/bridge/token"
@@ -276,6 +276,13 @@ func runConnect(args []string) {
 		die(err)
 	}
 
+	// Persist server override now that the exchange succeeded.
+	if *server != "" {
+		if err := saveConfig(cfg); err != nil {
+			slog.Warn("could not persist server override", "err", err)
+		}
+	}
+
 	fmt.Printf("Connected. Bridge token saved (expires %s).\n", tok.ExpiresAt)
 	fmt.Println("Run `mctl-telegram-local daemon` to start.")
 }
@@ -299,7 +306,7 @@ func runDaemonCmd() {
 	}
 
 	key := promptPassphrase("Passphrase: ")
-	keyHex := encryptionKeyHex(mustDeriveKey(key, cfg.KeySalt))
+	keyHex := encryptionKeyHex(mustDeriveVerifiedKey(key, cfg))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -376,7 +383,7 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 // promptPassphrase reads a passphrase without echo from the terminal.
 func promptPassphrase(prompt string) []byte {
 	fmt.Print(prompt)
-	pw, err := term.ReadPassword(int(syscall.Stdin))
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		die(fmt.Errorf("read passphrase: %w", err))
@@ -392,6 +399,17 @@ func mustDeriveKey(passphrase []byte, saltB64 string) []byte {
 	key, err := deriveKey(passphrase, saltB64)
 	if err != nil {
 		die(err)
+	}
+	return key
+}
+
+// mustDeriveVerifiedKey derives the key and checks it against cfg.KeyCheck.
+// If the check fails the passphrase is wrong; die early rather than letting
+// an AES-GCM error surface later with no clear explanation.
+func mustDeriveVerifiedKey(passphrase []byte, cfg *localConfig) []byte {
+	key := mustDeriveKey(passphrase, cfg.KeySalt)
+	if cfg.KeyCheck != "" && deriveKeyCheck(key) != cfg.KeyCheck {
+		die(errors.New("wrong passphrase"))
 	}
 	return key
 }

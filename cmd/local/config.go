@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,10 +16,11 @@ import (
 
 // localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
 type localConfig struct {
-	APIID   int    `json:"api_id"`
-	APIHash string `json:"api_hash"`
-	Server  string `json:"server"`
-	KeySalt string `json:"key_salt"` // base64-encoded 16-byte Argon2id salt
+	APIID    int    `json:"api_id"`
+	APIHash  string `json:"api_hash"`
+	Server   string `json:"server"`
+	KeySalt  string `json:"key_salt"`  // base64-encoded 16-byte Argon2id salt
+	KeyCheck string `json:"key_check"` // HMAC-SHA256(key, "mctl-telegram-local-check")[:16], base64
 }
 
 // bridgeTokenFile is the persisted JSON at ~/.config/mctl-telegram-local/bridge_token.json.
@@ -160,6 +163,15 @@ func deriveKey(passphrase []byte, saltB64 string) ([]byte, error) {
 	}
 	key := argon2.IDKey(passphrase, salt, 1, 64*1024, 4, 32)
 	return key, nil
+}
+
+// deriveKeyCheck computes a 16-byte HMAC verifier from the derived key.
+// Stored in config so a wrong passphrase is detected early rather than
+// surfacing as a cryptic AES-GCM decryption error.
+func deriveKeyCheck(key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("mctl-telegram-local-check"))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil)[:16])
 }
 
 // generateSalt generates a fresh random 16-byte salt and returns its base64 encoding.
