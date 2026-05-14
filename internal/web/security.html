@@ -106,7 +106,7 @@
 
   <h2>Cryptographic invariants</h2>
   <ul>
-    <li><code>ENCRYPTION_KEY</code> MUST be 32 random bytes, hex-encoded (64 chars). The service refuses to start otherwise.</li>
+    <li><code>ENCRYPTION_KEY</code> is expected to be 32 random bytes, hex-encoded (64 chars). The service refuses to start with any other length. Production deployments MUST set it; leaving it unset is allowed for local-dev only and emits a startup warning that session bytes will land on disk in cleartext.</li>
     <li>MTProto session blobs are AES-256-GCM sealed with a per-user subkey derived via HKDF-SHA256: <code>subkey = HKDF(master, salt=user_id_be64, info="mctl-telegram-session-v2", L=32)</code>. Each row has cryptographically independent keys.</li>
     <li>Legacy v1 blobs (single global key) are migrated to v2 in-place on first read. Cleanup of the legacy decrypt path is tracked for ~90 days after rollout.</li>
     <li>Audit log NEVER contains: message <code>text</code>, decoded phone digits, 2FA password, MTProto session bytes, JWT secret, or encryption keys. The slog redaction handler strips these keys before any line reaches stdout.</li>
