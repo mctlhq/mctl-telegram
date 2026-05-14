@@ -76,6 +76,27 @@ func (h *Hub) Unregister(userID int64) {
 	}
 }
 
+// UnregisterSend is like Unregister but only removes the entry when it
+// still holds the given send channel. This prevents a reconnect race
+// where an old websocket handler's cleanup path calls Unregister after
+// Hub.Register has already replaced the entry with a new daemon
+// connection, which would evict the live connection.
+func (h *Hub) UnregisterSend(userID int64, send chan Envelope) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	dc, ok := h.conn[userID]
+	if !ok {
+		return
+	}
+	// Only unregister if the map entry still belongs to this connection.
+	// If a newer daemon already called Register, dc.send is a different
+	// channel; leave the new entry intact.
+	if dc.send == send {
+		delete(h.conn, userID)
+		close(dc.send)
+	}
+}
+
 // Call queues an envelope for the daemon and waits up to DeadlineCall
 // for a matching response. Returns ErrNoDaemonConnected when there is
 // no registered daemon; ErrCallTimeout on no response. Concurrent

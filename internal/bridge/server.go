@@ -120,9 +120,12 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store) http.Ha
 		}()
 
 		// Wait for either goroutine to finish, then clean up.
+		// Use UnregisterSend instead of Unregister: if a new daemon already
+		// called Register(userID) and replaced the map entry, this leaves the
+		// new connection intact rather than evicting it.
 		<-done
 		cancel()
-		hub.Unregister(id.UserID)
+		hub.UnregisterSend(id.UserID, send)
 		_ = conn.Close(websocket.StatusNormalClosure, "done")
 		slog.Info("bridge: daemon disconnected", "user_id", id.UserID, "login", id.GitHubLogin)
 	}

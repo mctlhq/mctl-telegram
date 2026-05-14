@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -16,6 +17,17 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
+
+// bridgeResultErr converts a CallToolResult to an error for audit logging.
+// bridgeCall never returns a non-nil Go error; errors are embedded in the
+// result's IsError flag. This helper surfaces them so audit rows reflect
+// the actual outcome.
+func bridgeResultErr(res *mcplib.CallToolResult) error {
+	if res != nil && res.IsError {
+		return fmt.Errorf("bridge call error")
+	}
+	return nil
+}
 
 // bridgeCall forwards a tool invocation to the Local Bridge daemon registered
 // for the user. It returns a clean error result (never a Go error) because MCP
@@ -28,7 +40,7 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 	if err != nil {
 		return toolErr("bridge: marshal args: %v", err), nil
 	}
-	callID := fmt.Sprintf("%d", time.Now().UnixNano())
+	callID := uuid.New().String()
 	env := bridge.EncodeCall(callID, tool, argsJSON)
 	resp, err := s.Hub.Call(ctx, id.UserID, env)
 	if err != nil {
@@ -40,13 +52,17 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 		}
 		return toolErr("local-bridge call: %v", err), nil
 	}
-	if resp.Type == bridge.TypeError {
+	switch resp.Type {
+	case bridge.TypeResponse:
+		if resp.Result == nil {
+			return mcplib.NewToolResultText("null"), nil
+		}
+		return mcplib.NewToolResultText(string(resp.Result)), nil
+	case bridge.TypeError:
 		return toolErr("%s", resp.Error), nil
+	default:
+		return toolErr("bridge: unexpected response type %q", resp.Type), nil
 	}
-	if resp.Result == nil {
-		return mcplib.NewToolResultText("null"), nil
-	}
-	return mcplib.NewToolResultText(string(resp.Result)), nil
 }
 
 func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
@@ -77,7 +93,9 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		if s.Hub != nil {
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
-				return s.bridgeCall(ctx, id, "list_dialogs", args)
+				res, err2 := s.bridgeCall(ctx, id, "list_dialogs", args)
+				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res))
+				return res, err2
 			}
 		}
 		limit := intArg(args, "limit", 50)
@@ -125,7 +143,9 @@ Empty result means no unread messages match (including: peer has unread but text
 		if s.Hub != nil {
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
-				return s.bridgeCall(ctx, id, "get_unread_messages", args)
+				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
+				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res))
+				return res, err2
 			}
 		}
 		peer := stringArg(args, "peer", "")
@@ -278,8 +298,9 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		} else if s.Hub != nil {
 			accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && accountMode == "local" {
-				s.audit(ctx, id, "send_message:dispatched-to-bridge", telegram.RedactPeer(peer), nil)
-				return s.bridgeCall(ctx, id, "send_message", args)
+				res, err2 := s.bridgeCall(ctx, id, "send_message", args)
+				s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+				return res, err2
 			}
 			err = s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 				var inner error
@@ -345,7 +366,9 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		if s.Hub != nil {
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
-				return s.bridgeCall(ctx, id, "get_messages", args)
+				res, err2 := s.bridgeCall(ctx, id, "get_messages", args)
+				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res))
+				return res, err2
 			}
 		}
 		limit := intArg(args, "limit", 50)
@@ -487,7 +510,9 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		if s.Hub != nil {
 			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && mode == "local" {
-				return s.bridgeCall(ctx, id, "pin_message", args)
+				res, err2 := s.bridgeCall(ctx, id, "pin_message", args)
+				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+				return res, err2
 			}
 		}
 		poolErr := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
