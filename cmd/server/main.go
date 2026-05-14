@@ -102,8 +102,8 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter)
 
 	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
 	// runs, so unauthenticated humans still see instructions instead of

@@ -8,6 +8,7 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -17,6 +18,9 @@ type Server struct {
 	Pool      *telegram.ClientPool
 	AllowSend bool
 	Confirms  *ConfirmStore
+	// Limiter is the per-identity / per-peer write-action limiter.
+	// Optional: when nil, AllowPeer checks are skipped.
+	Limiter *audit.RateLimiter
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -26,6 +30,14 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 		AllowSend: allowSend,
 		Confirms:  NewConfirmStore(),
 	}
+}
+
+// WithLimiter wires a shared *audit.RateLimiter so destructive tools can
+// take a per-(identity, peer) tap on the same bucket store used by HTTP
+// middleware. Returns the receiver for chaining.
+func (s *Server) WithLimiter(l *audit.RateLimiter) *Server {
+	s.Limiter = l
+	return s
 }
 
 func (s *Server) HTTPHandler() http.Handler {

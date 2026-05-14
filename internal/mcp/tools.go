@@ -10,6 +10,7 @@ import (
 	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -134,12 +135,22 @@ The two-step flow exists so an LLM cannot quietly drift the payload between agre
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
+		peerRedacted := telegram.RedactPeer(peer)
+		// Per-peer rate limit on the prepare step: if a caller exhausts
+		// the per-peer budget, refuse to issue a confirmation. The token
+		// is consumed at prepare time so a quick prepare→prepare loop
+		// can't sidestep the cap. Returning an error keeps the surface
+		// honest — there is no draft preview for prepare.
+		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil)
+			return mcplib.NewToolResultError("per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
+		}
 		hash := HashSendPayload(peer, text)
 		c, err := s.Confirms.Issue(id.UserID, "send", hash)
 		if err != nil {
 			return toolErr("prepare_send_message: %v", err), nil
 		}
-		s.audit(ctx, id, "prepare_send_message", telegram.RedactPeer(peer), nil)
+		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil)
 		return jsonResult(map[string]any{
 			"confirmation_id": c.ID,
 			"peer_redacted":   telegram.RedactPeer(peer),
@@ -321,6 +332,11 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 		unpin := boolArg(args, "unpin", false)
 		if peer == "" || messageID == 0 {
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
+		}
+		peerRedacted := telegram.RedactPeer(peer)
+		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, nil)
+			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
 		action := "pin"
