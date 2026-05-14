@@ -256,6 +256,55 @@ func TestAuthenticate_MixedTypeAudienceArrayRejected(t *testing.T) {
 	}
 }
 
+func TestDefaultGroupScopes_AdminsIsReadOnly(t *testing.T) {
+	scopes := DefaultGroupScopes()
+	admins, ok := scopes["admins"]
+	if !ok {
+		t.Fatal("admins group must exist in the default map")
+	}
+	got := map[string]bool{}
+	for _, s := range admins {
+		got[s] = true
+	}
+	for _, must := range []string{"telegram:dialogs:read", "telegram:messages:read"} {
+		if !got[must] {
+			t.Fatalf("admins must grant %s", must)
+		}
+	}
+	for _, banned := range []string{
+		"telegram:messages:send",
+		"telegram:messages:pin",
+		"admin:users",
+	} {
+		if got[banned] {
+			t.Fatalf("admins must NOT grant %s by default (M2.6 breaking change)", banned)
+		}
+	}
+}
+
+func TestDefaultGroupScopes_PlatformAdminsRetainsFullSet(t *testing.T) {
+	scopes := DefaultGroupScopes()
+	pa, ok := scopes["platform-admins"]
+	if !ok {
+		t.Fatal("platform-admins must exist")
+	}
+	got := map[string]bool{}
+	for _, s := range pa {
+		got[s] = true
+	}
+	for _, must := range []string{
+		"telegram:dialogs:read",
+		"telegram:messages:read",
+		"telegram:messages:send",
+		"telegram:messages:pin",
+		"admin:users",
+	} {
+		if !got[must] {
+			t.Fatalf("platform-admins must grant %s", must)
+		}
+	}
+}
+
 func TestAuthenticate_GroupGate(t *testing.T) {
 	store := newTestStore(t)
 	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
