@@ -42,9 +42,11 @@ func (s *Store) EnsureUser(ctx context.Context, login, email, provider string) (
 }
 
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
-// Any prior active row for the user is marked revoked.
+// Any prior active row for the user is marked revoked. Writes always use
+// SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read
+// by LoadSession.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
-	blob, err := s.Crypt.Seal(plaintext)
+	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
 		return fmt.Errorf("encrypt session: %w", err)
 	}
@@ -70,33 +72,64 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	return tx.Commit()
 }
 
-// LoadSession returns the decrypted session blob for the active telegram account of the user.
-// Returns (nil, nil) when no active session.
+// LoadSession returns the decrypted session blob for the active telegram
+// account of the user. Returns (nil, nil) when no active session.
+//
+// Performs lazy migration from VersionMaster (v1, single global key) to
+// VersionPerUser (v2, HKDF-derived per-user subkey): when an old row is
+// successfully decrypted, the plaintext is re-sealed under the v2 scheme
+// and the column is rewritten in-place. The migration is silent and best
+// effort — a failure to write the new blob does not surface to the caller
+// (the next read will retry).
 func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
-	var blob []byte
+	var (
+		rowID int64
+		blob  []byte
+	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT session_encrypted FROM telegram_accounts
+		`SELECT id, session_encrypted FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 ORDER BY connected_at DESC LIMIT 1`,
 		userID,
-	).Scan(&blob)
+	).Scan(&rowID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query session: %w", err)
 	}
-	pt, err := s.Crypt.Open(blob)
+	pt, err := s.Crypt.OpenForUser(blob, userID)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt session: %w", err)
+	}
+	// Lazy migration: only rewrap when we are running with real encryption.
+	// Local-dev (VersionPlaintext) rows stay as-is to avoid surprising
+	// developers who deleted ENCRYPTION_KEY.
+	//
+	// The UPDATE is CAS-bound to (row id, original ciphertext): if anyone
+	// rotated the blob between our SELECT and this UPDATE (concurrent
+	// SaveSession, UpdateSessionBlob, or a parallel migration write), the
+	// WHERE clause won't match and the migration becomes a no-op. The next
+	// LoadSession on whatever the row currently holds will retry. This
+	// prevents the lost-update scenario flagged by codex on PR #3 where a
+	// stale v1 plaintext could overwrite a newer v2 blob.
+	if s.Crypt.Enabled() && s.Crypt.BlobVersion(blob) == crypto.VersionMaster {
+		if newBlob, sealErr := s.Crypt.SealForUser(pt, userID); sealErr == nil {
+			_, _ = s.DB.ExecContext(ctx,
+				`UPDATE telegram_accounts SET session_encrypted = $1
+				 WHERE id = $2 AND session_encrypted = $3`,
+				newBlob, rowID, blob,
+			)
+		}
 	}
 	return pt, nil
 }
 
-// UpdateSessionBlob is called by the gotd SessionStorage when MTProto rotates session bytes.
-// Creates a row if no active session exists yet (rare — usually login created one first).
+// UpdateSessionBlob is called by the gotd SessionStorage when MTProto rotates
+// session bytes. Creates a row if no active session exists yet (rare —
+// usually login created one first). Always writes VersionPerUser.
 func (s *Store) UpdateSessionBlob(ctx context.Context, userID int64, plaintext []byte) error {
-	blob, err := s.Crypt.Seal(plaintext)
+	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
 		return err
 	}
