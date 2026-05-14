@@ -256,6 +256,57 @@ func TestAuthenticate_MixedTypeAudienceArrayRejected(t *testing.T) {
 	}
 }
 
+// TestDefaultGroupScopes_AdminsIsReadOnly verifies the M2.6 invariant: users
+// in the "admins" group must NOT receive write scopes by default.
+func TestDefaultGroupScopes_AdminsIsReadOnly(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, err := New(store, Config{Secret: secret, ExpectedIssuer: "https://api.mctl.ai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "someuser", []string{"admins"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if id.HasScope("telegram:messages:send") {
+		t.Error("admins group must NOT have telegram:messages:send by default")
+	}
+	if id.HasScope("telegram:messages:pin") {
+		t.Error("admins group must NOT have telegram:messages:pin by default")
+	}
+	if id.HasScope("admin:users") {
+		t.Error("admins group must NOT have admin:users by default")
+	}
+	if !id.HasScope("telegram:dialogs:read") || !id.HasScope("telegram:messages:read") {
+		t.Errorf("admins group must retain read scopes, got %v", id.Scopes)
+	}
+}
+
+// TestDefaultGroupScopes_SendersHavePin verifies telegram-mcp-senders gets
+// messages:pin in addition to messages:send (M2.6).
+func TestDefaultGroupScopes_SendersHavePin(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{Secret: secret, ExpectedIssuer: "https://api.mctl.ai"})
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "sender", []string{"telegram-mcp-senders"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if !id.HasScope("telegram:messages:send") || !id.HasScope("telegram:messages:pin") {
+		t.Errorf("telegram-mcp-senders must have send+pin, got %v", id.Scopes)
+	}
+	if id.HasScope("admin:users") {
+		t.Error("telegram-mcp-senders must NOT have admin:users")
+	}
+}
+
 func TestAuthenticate_GroupGate(t *testing.T) {
 	store := newTestStore(t)
 	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
