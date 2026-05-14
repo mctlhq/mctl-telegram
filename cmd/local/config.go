@@ -14,6 +14,37 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// writeFileAtomic writes data to path via a temp-file + fsync + rename so a
+// crash mid-write never leaves a partially-written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath) // no-op if rename succeeded
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp: %w", err)
+	}
+	return nil
+}
+
 // localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
 type localConfig struct {
 	APIID    int    `json:"api_id"`
@@ -103,8 +134,7 @@ func saveConfig(cfg *localConfig) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	p := filepath.Join(dir, configFileName)
-	if err := os.WriteFile(p, data, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, configFileName), data, 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
@@ -144,8 +174,7 @@ func saveBridgeToken(bt *bridgeTokenFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal bridge token: %w", err)
 	}
-	p := filepath.Join(dir, bridgeTokenName)
-	if err := os.WriteFile(p, data, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, bridgeTokenName), data, 0o600); err != nil {
 		return fmt.Errorf("write bridge token: %w", err)
 	}
 	return nil

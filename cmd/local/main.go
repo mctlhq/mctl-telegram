@@ -279,7 +279,7 @@ func runConnect(args []string) {
 	// Persist server override now that the exchange succeeded.
 	if *server != "" {
 		if err := saveConfig(cfg); err != nil {
-			slog.Warn("could not persist server override", "err", err)
+			die(fmt.Errorf("persist server override: %w", err))
 		}
 	}
 

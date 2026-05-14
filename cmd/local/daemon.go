@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -43,6 +45,47 @@ const (
 	tokenRefreshAdv = 5 * time.Minute
 )
 
+// refreshBridgeToken exchanges bt.MCPToken for a fresh bridge token and
+// persists it. Returns the new bridgeTokenFile on success.
+func refreshBridgeToken(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile) (*bridgeTokenFile, error) {
+	tokenURL := strings.TrimRight(cfg.Server, "/") + "/api/bridge/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bt.MCPToken)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", tokenURL, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tok struct {
+		BridgeToken string `json:"bridge_token"`
+		ExpiresAt   string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if tok.BridgeToken == "" {
+		return nil, fmt.Errorf("server returned empty bridge_token")
+	}
+	newBT := &bridgeTokenFile{
+		MCPToken:    bt.MCPToken,
+		BridgeToken: tok.BridgeToken,
+		ExpiresAt:   tok.ExpiresAt,
+	}
+	if err := saveBridgeToken(newBT); err != nil {
+		return nil, fmt.Errorf("save refreshed token: %w", err)
+	}
+	return newBT, nil
+}
+
 // runDaemon runs the persistent websocket loop against the bridge server.
 // It reloads the bridge token on every attempt (picks up a freshly rotated
 // token) and reconnects with exponential backoff when the connection drops.
@@ -54,6 +97,15 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 		bt, err := loadBridgeToken()
 		if err != nil {
 			return fmt.Errorf("load bridge token: %w", err)
+		}
+		if expiry, expErr := bridgeTokenExpiry(bt); expErr == nil && !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
+			slog.Info("bridge token nearing expiry, refreshing", "expires_at", expiry.Format(time.RFC3339))
+			if newBT, refreshErr := refreshBridgeToken(ctx, cfg, bt); refreshErr != nil {
+				slog.Warn("bridge token refresh failed; attempting to connect anyway", "err", refreshErr)
+			} else {
+				bt = newBT
+				slog.Info("bridge token refreshed", "expires_at", newBT.ExpiresAt)
+			}
 		}
 		sessionStart := time.Now()
 		err = daemonSession(ctx, cfg, bt, pool, userID)
@@ -175,9 +227,13 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 				if werr := wsjson.Write(ctx, conn, pong); werr != nil {
 					return fmt.Errorf("write pong: %w", werr)
 				}
+			case bridge.TypePong:
+				slog.Debug("pong received", "id", env.ID)
 			case bridge.TypeCall:
 				go func(e bridge.Envelope) {
-					resp := dispatchCall(sessionCtx, pool, userID, e)
+					callCtx, callCancel := context.WithTimeout(sessionCtx, bridge.DeadlineCall)
+					defer callCancel()
+					resp := dispatchCall(callCtx, pool, userID, e)
 					if werr := wsjson.Write(ctx, conn, resp); werr != nil {
 						slog.Warn("write response failed", "id", e.ID, "err", werr)
 					}
