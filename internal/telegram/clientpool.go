@@ -148,9 +148,19 @@ func (p *ClientPool) touch(userID int64) {
 // client. Returns true if there was an entry to evict. Safe to call when
 // no entry exists. Used by self-service disconnect/delete so a Borrow()
 // issued immediately afterwards does not piggyback on the doomed client.
+//
+// The entry is marked stopped and removed from the map under the same
+// mutex that protects acquire(), so a concurrent Borrow() cannot observe
+// the doomed entry in any reusable state — it will allocate a fresh one.
+// run()'s deferred cleanup will see the entry already gone and its
+// delete() becomes a no-op, which is intentional.
 func (p *ClientPool) Close(userID int64) bool {
 	p.mu.Lock()
 	e, ok := p.entries[userID]
+	if ok {
+		e.stopped = true
+		delete(p.entries, userID)
+	}
 	p.mu.Unlock()
 	if !ok {
 		return false
