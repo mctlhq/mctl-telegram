@@ -83,6 +83,8 @@ func main() {
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath))
+	mux.Get("/security", web.Security())
+	mux.Get("/privacy", web.Privacy())
 
 	provider := selectProvider(cfg, store)
 
