@@ -187,6 +187,8 @@
     <li><strong>Disconnect (soft):</strong> call MCP tool <code>disconnect_telegram_account</code>, or <code>POST /api/account/disconnect</code>. Marks the session revoked and immediately tears down the in-memory MTProto client.</li>
     <li><strong>Delete (hard):</strong> call MCP tool <code>delete_telegram_account</code>, or <code>DELETE /api/account</code>. Removes the encrypted session blob and all per-account metadata.</li>
     <li><strong>Status:</strong> <code>GET /api/account</code> returns connection state, display name, and the per-account <code>send_enabled</code> flag.</li>
+    <li><strong>Audit log:</strong> <code>get_my_audit_log</code> MCP tool or <code>GET /api/account/audit</code> — newest-first, RFC3339 <code>before</code> cursor for keyset pagination.</li>
+    <li><strong>Verify your audit chain:</strong> <code>GET /api/account/audit/verify</code> recomputes the SHA-256 hash chain over your rows and reports <code>{ok, verified}</code> or <code>{ok:false, first_bad_id, reason}</code>.</li>
     <li><strong>Revoke from Telegram's side:</strong> Telegram app → Settings → Devices → close the session named after this app. This will not delete data here but will sever the MTProto link Telegram-side.</li>
   </ul>
 

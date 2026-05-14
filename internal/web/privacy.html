@@ -90,11 +90,14 @@
     <li>Your IP address beyond what the platform ingress logs at L4/L7 (not persisted by this service)</li>
   </ul>
 
-  <h2>Self-service deletion</h2>
-  <p>You can remove your data at any time without operator involvement:</p>
+  <h2>Self-service controls</h2>
+  <p>You can remove your data and inspect what was recorded at any time without operator involvement:</p>
   <pre>POST /api/account/disconnect    # mark session revoked (keeps row, no Telegram access)
-DELETE /api/account              # remove the encrypted session blob and row entirely</pre>
-  <p>Or call the equivalent MCP tools: <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>. Both flows immediately tear down the in-memory MTProto client so a concurrent request cannot piggyback on the doomed session.</p>
+DELETE /api/account              # remove the encrypted session blob and row entirely
+GET  /api/account                # connection status + per-account send_enabled flag
+GET  /api/account/audit          # newest-first audit rows (limit, before)
+GET  /api/account/audit/verify   # recompute the hash chain and prove audit was not tampered with</pre>
+  <p>Equivalent MCP tools: <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, <code>get_my_audit_log</code>. Disconnect and delete tear down the in-memory MTProto client atomically with the DB write so a concurrent request cannot piggyback on the doomed session.</p>
 
   <h2>Who can access your data</h2>
   <ul>

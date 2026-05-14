@@ -129,7 +129,27 @@
   </ul>
 
   <h2>Rate limiting</h2>
-  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
+  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. Destructive prepare steps (<code>prepare_send_message</code>, <code>prepare_pin_message</code>) also consume a per-(identity, peer) bucket — 20 actions per peer per hour — so a single bad actor cannot fan a payload at one recipient up to the global ceiling. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
+
+  <h2>Session TTL</h2>
+  <p>Each MTProto session carries two expiry knobs, enforced by the request path and a background sweeper:</p>
+  <ul>
+    <li><strong>Idle TTL — 30 days.</strong> <code>last_used_at</code> older than 30 days revokes the row on next Borrow.</li>
+    <li><strong>Absolute TTL — 90 days.</strong> <code>expires_at</code> (stamped on insert) in the past revokes the row.</li>
+    <li>An hourly sweeper applies the same predicate to abandoned rows so they don't sit live in storage between requests.</li>
+  </ul>
+
+  <h2>Tamper-evident audit log</h2>
+  <p>Every <code>audit_logs</code> row gains <code>prev_hash</code> + <code>entry_hash</code> columns. Each entry is anchored by the SHA-256 of the previous entry's hash plus a canonical encoding of the current row. You can ask the server to recompute and verify your chain at any time:</p>
+  <pre>GET /api/account/audit/verify
+{
+  "ok": true,
+  "verified": 42
+}</pre>
+  <p>A non-OK response includes <code>first_bad_id</code> and a human-readable <code>reason</code>. Pre-M3.1 legacy rows are skipped (they pre-date the chain).</p>
+
+  <h2>Prompt-injection content boundary</h2>
+  <p>Read tools (<code>get_unread_messages</code>, <code>get_messages</code>) wrap every Telegram message body in <code>&lt;telegram-content origin="telegram" peer="<i>redacted</i>" untrusted="true"&gt;…&lt;/telegram-content&gt;</code>. A top-level <code>notice</code> field repeats the same guidance in prose. Adversarial closing-tag literals inside a message body are escaped to the underscore form so a sender cannot break out of the untrusted block. The wrapping is best-effort signalling — clients are free to ignore it — but it gives an LLM a clear data-vs-instructions boundary that prompt-injection text cannot remove on its own.</p>
 
   <p class="muted"><a href="/">← back to setup</a> · <a href="/privacy">privacy policy</a> · <a href="https://github.com/mctlhq/mctl-telegram/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md in repo</a></p>
 </body>
