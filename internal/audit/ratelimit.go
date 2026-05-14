@@ -59,6 +59,52 @@ func (r *RateLimiter) allow(key string) bool {
 	return true
 }
 
+// PeerSendCap is the default per-(identity, peer) send budget. Counted in
+// 1-hour windows. Independent of the global per-identity quota so a user
+// can fan out 30 sends/min across many peers but is still capped at
+// PeerSendCap to a single recipient over an hour — which is the spam path
+// we actually care about.
+const PeerSendCap = 20
+
+// PeerWindow is the bucket capacity refill horizon for AllowPeer.
+const PeerWindow = time.Hour
+
+// AllowPeer is a separate token bucket for per-(identity, peer) sends.
+// max is the burst capacity; the bucket refills at max/window-seconds.
+// peerHash should be the RedactPeer output (or any stable token derived
+// from the peer); we never key on the raw peer string so a redacted audit
+// log can still reconstruct which bucket was touched.
+//
+// Called from the destructive-action gate (prepare_send_message / send /
+// prepare_pin_message / pin) in addition to the per-request middleware
+// limiter. A user can issue many reads per minute but only N writes per
+// peer per hour.
+func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, window time.Duration) bool {
+	if max <= 0 || window <= 0 {
+		return true
+	}
+	key := identityKey(id) + ":peer:" + peerHash
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.buckets[key]
+	now := r.now()
+	if !ok {
+		b = &bucket{tokens: float64(max), lastFill: now}
+		r.buckets[key] = b
+	}
+	elapsed := now.Sub(b.lastFill).Seconds()
+	b.tokens += elapsed * float64(max) / window.Seconds()
+	if b.tokens > float64(max) {
+		b.tokens = float64(max)
+	}
+	b.lastFill = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 func (r *RateLimiter) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
