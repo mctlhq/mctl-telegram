@@ -43,7 +43,7 @@ func (s *Server) WithLimiter(l *audit.RateLimiter) *Server {
 func (s *Server) HTTPHandler() http.Handler {
 	srv := mcpserver.NewMCPServer(
 		"mctl-telegram",
-		"0.8.0",
+		"0.7.0",
 		mcpserver.WithToolCapabilities(true),
 	)
 	srv.AddTool(s.toolListDialogs())
