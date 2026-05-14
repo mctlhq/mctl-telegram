@@ -74,15 +74,26 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	); err != nil {
 		return fmt.Errorf("revoke prior: %w", err)
 	}
+	now := time.Now().UTC()
+	expires := now.Add(absoluteSessionTTL)
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted)
-		 VALUES($1,$2,$3,$4,$5)`,
-		userID, telegramUserID, nullable(displayName), nullable(username), blob,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7)`,
+		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires,
 	); err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
 	return tx.Commit()
 }
+
+// Session TTL policy. Borrow refuses a session whose last_used_at is older
+// than idleSessionTTL OR whose expires_at is in the past. Sessions are
+// stamped expires_at = connected_at + absoluteSessionTTL on insert and the
+// Migrate backfill applies the same delta to legacy rows.
+const (
+	idleSessionTTL     = 30 * 24 * time.Hour
+	absoluteSessionTTL = 90 * 24 * time.Hour
+)
 
 // LoadSession returns the decrypted session blob for the active telegram
 // account of the user. Returns (nil, nil) when no active session.
@@ -247,6 +258,101 @@ func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 		return false, fmt.Errorf("query send_enabled: %w", err)
 	}
 	return enabled, nil
+}
+
+// MarkLastUsed updates last_used_at on the active session for the user. Best
+// effort — a failure does not surface to the caller; the next call will
+// retry. Called from Pool.Borrow on every successful tool dispatch so the
+// idle-TTL clock resets while the user is active.
+func (s *Store) MarkLastUsed(ctx context.Context, userID int64) {
+	_, _ = s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET last_used_at = $1
+		 WHERE user_id = $2 AND revoked_at IS NULL`,
+		time.Now().UTC(), userID,
+	)
+}
+
+// ErrSessionExpired is returned by CheckSessionValid when the user's active
+// session has tripped either the idle or the absolute TTL. Callers translate
+// this into a user-visible message and force a fresh login.
+var ErrSessionExpired = errors.New("session expired")
+
+// ErrNoActiveSession means there is no row at all — used to distinguish
+// "expired" from "never connected" so the surface error matches reality.
+var ErrNoActiveSession = errors.New("no active session")
+
+// SessionExpiryReason captures why CheckSessionValid rejected a session, so
+// the caller can include the reason in the audit row / user response. It is
+// safe to log unredacted.
+type SessionExpiryReason string
+
+const (
+	ReasonIdle     SessionExpiryReason = "idle-expiry"     // last_used_at older than idleSessionTTL
+	ReasonAbsolute SessionExpiryReason = "absolute-expiry" // expires_at in the past
+)
+
+// CheckSessionValid returns nil when the user's active session is fresh
+// enough to use. When expired it BOTH marks the row revoked (so a
+// subsequent Borrow won't keep loading it) AND returns ErrSessionExpired
+// wrapped with the human-readable reason. Returns ErrNoActiveSession when
+// there is no row at all.
+//
+// Called by Pool.Borrow before allocating or reusing a client. Holding the
+// pool mutex around this check is the caller's responsibility — see
+// telegram.ClientPool.Borrow.
+func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExpiryReason, error) {
+	var (
+		lastUsed sql.NullTime
+		expires  sql.NullTime
+	)
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT last_used_at, expires_at FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 ORDER BY connected_at DESC LIMIT 1`,
+		userID,
+	).Scan(&lastUsed, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNoActiveSession
+	}
+	if err != nil {
+		return "", fmt.Errorf("check session: %w", err)
+	}
+	now := time.Now().UTC()
+	if expires.Valid && expires.Time.Before(now) {
+		_, _ = s.RevokeActiveSession(ctx, userID)
+		return ReasonAbsolute, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonAbsolute)
+	}
+	if lastUsed.Valid && now.Sub(lastUsed.Time) > idleSessionTTL {
+		_, _ = s.RevokeActiveSession(ctx, userID)
+		return ReasonIdle, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonIdle)
+	}
+	return "", nil
+}
+
+// SweepExpiredSessions revokes every active row whose TTL has elapsed.
+// Returns the number of rows flipped. Intended to run on an interval from
+// the sweeper goroutine; safe to call concurrently with Borrow because
+// CheckSessionValid would have caught the same rows on the next Borrow
+// anyway — the sweep just bounds how long an idle row sits in storage
+// before being marked revoked.
+func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
+	now := time.Now().UTC()
+	idleCutoff := now.Add(-idleSessionTTL)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts
+		 SET revoked_at = $1
+		 WHERE revoked_at IS NULL
+		   AND (
+		     (expires_at IS NOT NULL AND expires_at < $1)
+		     OR (last_used_at IS NOT NULL AND last_used_at < $2)
+		   )`,
+		now, idleCutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("sweep sessions: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
 }
 
 // AuditEntry is the user-visible projection of an audit_logs row. It mirrors
