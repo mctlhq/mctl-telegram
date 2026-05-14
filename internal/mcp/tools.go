@@ -295,19 +295,15 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		if !realSend {
 			// Dry-run never touches Telegram so we don't require TG_API_* configured.
 			result, err = telegram.SendMessage(ctx, nil, peer, text, false, dryReason)
-		} else if s.Hub != nil {
-			accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
-			if modeErr == nil && accountMode == "local" {
-				res, err2 := s.bridgeCall(ctx, id, "send_message", args)
-				s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
-				return res, err2
-			}
-			err = s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-				var inner error
-				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason)
-				return inner
-			})
 		} else {
+			if s.Hub != nil {
+				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+				if modeErr == nil && accountMode == "local" {
+					res, err2 := s.bridgeCall(ctx, id, "send_message", args)
+					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+					return res, err2
+				}
+			}
 			err = s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 				var inner error
 				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason)

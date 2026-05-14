@@ -66,7 +66,7 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store) http.Ha
 
 		// Parent context for both goroutines. Cancelling it stops the
 		// reader and the writer cleanly without leaking goroutines.
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
 		done := make(chan struct{}, 2)

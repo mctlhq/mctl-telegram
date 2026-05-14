@@ -143,10 +143,13 @@ func TestBridgeRoundTrip(t *testing.T) {
 	}
 	defer daemonConn.CloseNow()
 
-	// Give the server goroutines time to run Register.
-	time.Sleep(50 * time.Millisecond)
-	if !hub.HasDaemon(42) {
-		t.Fatal("daemon should be registered after dial")
+	// Poll until the server goroutines have called Register.
+	deadline := time.Now().Add(2 * time.Second)
+	for !hub.HasDaemon(42) {
+		if time.Now().After(deadline) {
+			t.Fatal("daemon should be registered after dial")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// Simulate a daemon that echoes a successful response.
