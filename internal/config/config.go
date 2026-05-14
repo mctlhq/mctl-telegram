@@ -8,42 +8,44 @@ import (
 )
 
 type Config struct {
-	Addr              string
-	PublicBaseURL     string
-	MCPPath           string
-	AuthMode          string
-	AuthRequired      bool
-	OperatorLogin     string
-	DatabaseURL       string
-	OAUTHJWTSecret    string
-	OAUTHJWTAudience  string // expected `aud` claim; empty disables the check
-	OAUTHJWTAudReq    bool   // when true, tokens without aud are rejected
-	TGAPIID           int
-	TGAPIHash         string
-	EncryptionKey     []byte
-	AllowSend         bool
-	IdleClientTimeout time.Duration
-	RateLimitPerUser  int
-	LogLevel          string
+	Addr               string
+	PublicBaseURL      string
+	MCPPath            string
+	AuthMode           string
+	AuthRequired       bool
+	OperatorLogin      string
+	DatabaseURL        string
+	OAUTHJWTSecret     string
+	OAUTHJWTAudience   string // expected `aud` claim; empty disables the check
+	OAUTHJWTAudReq     bool   // when true, tokens without aud are rejected
+	TGAPIID            int
+	TGAPIHash          string
+	EncryptionKey      []byte
+	AllowSend          bool
+	IdleClientTimeout  time.Duration
+	RateLimitPerUser   int
+	AuditRetentionDays int
+	LogLevel           string
 }
 
 func Load() (*Config, error) {
 	c := &Config{
-		Addr:              envOr("ADDR", ":8080"),
-		PublicBaseURL:     envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
-		MCPPath:           envOr("MCP_PATH", "/mcp"),
-		AuthMode:          envOr("AUTH_MODE", "local-dev"),
-		AuthRequired:      envBool("AUTH_REQUIRED", false),
-		OperatorLogin:     envOr("OPERATOR_GITHUB_LOGIN", "operator"),
-		DatabaseURL:       envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
-		OAUTHJWTSecret:    os.Getenv("OAUTH_JWT_SECRET"),
-		OAUTHJWTAudience:  os.Getenv("OAUTH_JWT_AUDIENCE"),
-		OAUTHJWTAudReq:    envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
-		TGAPIHash:         os.Getenv("TG_API_HASH"),
-		AllowSend:         envBool("ALLOW_SEND", false),
-		IdleClientTimeout: envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
-		RateLimitPerUser:  envInt("RATE_LIMIT_PER_USER", 30),
-		LogLevel:          envOr("LOG_LEVEL", "info"),
+		Addr:               envOr("ADDR", ":8080"),
+		PublicBaseURL:      envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
+		MCPPath:            envOr("MCP_PATH", "/mcp"),
+		AuthMode:           envOr("AUTH_MODE", "local-dev"),
+		AuthRequired:       envBool("AUTH_REQUIRED", false),
+		OperatorLogin:      envOr("OPERATOR_GITHUB_LOGIN", "operator"),
+		DatabaseURL:        envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
+		OAUTHJWTSecret:     os.Getenv("OAUTH_JWT_SECRET"),
+		OAUTHJWTAudience:   os.Getenv("OAUTH_JWT_AUDIENCE"),
+		OAUTHJWTAudReq:     envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
+		TGAPIHash:          os.Getenv("TG_API_HASH"),
+		AllowSend:          envBool("ALLOW_SEND", false),
+		IdleClientTimeout:  envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
+		RateLimitPerUser:   envInt("RATE_LIMIT_PER_USER", 30),
+		AuditRetentionDays: envInt("AUDIT_RETENTION_DAYS", 90),
+		LogLevel:           envOr("LOG_LEVEL", "info"),
 	}
 
 	if v := os.Getenv("TG_API_ID"); v != "" {

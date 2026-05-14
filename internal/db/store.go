@@ -429,6 +429,27 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	return out, nil
 }
 
+// SweepAuditLog removes audit rows older than `retention`. Returns the
+// number of rows removed. Called from the audit-retention sweeper.
+// retention <= 0 is treated as a no-op so an operator who sets
+// AUDIT_RETENTION_DAYS=0 to "keep forever" doesn't have to disable the
+// goroutine entirely.
+func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().UTC().Add(-retention)
+	res, err := s.DB.ExecContext(ctx,
+		`DELETE FROM audit_logs WHERE created_at < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("sweep audit: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
+}
+
 // LogToolCall writes one audit row. Errors are non-fatal to the caller.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg string) {
 	_, _ = s.DB.ExecContext(ctx,

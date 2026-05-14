@@ -81,6 +81,57 @@ func TestListAuditFor_LimitClamp(t *testing.T) {
 	}
 }
 
+func TestSweepAuditLog_DeletesOlderThanRetention(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "u", "", "test")
+	old := time.Now().UTC().Add(-100 * 24 * time.Hour)
+	fresh := time.Now().UTC().Add(-1 * time.Hour)
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO audit_logs(user_id, tool_name, status, created_at) VALUES($1,$2,$3,$4)`,
+		uid, "ancient", "ok", old,
+	); err != nil {
+		t.Fatalf("seed old: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO audit_logs(user_id, tool_name, status, created_at) VALUES($1,$2,$3,$4)`,
+		uid, "recent", "ok", fresh,
+	); err != nil {
+		t.Fatalf("seed fresh: %v", err)
+	}
+	rows, err := s.SweepAuditLog(ctx, 90*24*time.Hour)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 row deleted, got %d", rows)
+	}
+	// And the recent row survives.
+	var tool string
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT tool_name FROM audit_logs WHERE user_id=$1`, uid,
+	).Scan(&tool); err != nil {
+		t.Fatalf("query survivor: %v", err)
+	}
+	if tool != "recent" {
+		t.Fatalf("expected 'recent' to survive, got %q", tool)
+	}
+}
+
+func TestSweepAuditLog_ZeroRetentionIsNoop(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "u", "", "test")
+	s.LogToolCall(ctx, uid, "x", "", "ok", "")
+	rows, err := s.SweepAuditLog(ctx, 0)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("retention=0 must be no-op, got rows=%d", rows)
+	}
+}
+
 func TestListAuditFor_BeforeFiltersOlderEntries(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

@@ -1,6 +1,7 @@
-// Package sweeper runs periodic maintenance jobs against the store. Today
-// the only sweeper is for session TTL (idle + absolute); audit-log retention
-// will land alongside M2.5.
+// Package sweeper runs periodic maintenance jobs against the store: session
+// TTL enforcement and audit-log retention. Both are best-effort — the
+// per-request gates remain authoritative — and both log their row counts so
+// an operator can observe turnover in Loki without poking the DB.
 package sweeper
 
 import (
@@ -48,5 +49,40 @@ func sweepOnce(ctx context.Context, store *db.Store) {
 	}
 	if rows > 0 {
 		slog.Info("session sweep", "revoked_rows", rows)
+	}
+}
+
+// AuditSweeperInterval is how often AuditLog() wakes up. Daily is plenty —
+// the retention window is measured in days, so a missed sweep just leaves a
+// handful of rows around for ~24h longer than promised.
+const AuditSweeperInterval = 24 * time.Hour
+
+// AuditLog runs Store.SweepAuditLog on an interval until ctx is cancelled.
+// retention is the maximum age of a row before it's deleted; values <= 0
+// (e.g. AUDIT_RETENTION_DAYS=0) are treated as "keep forever" and the
+// sweep becomes a no-op without disabling the goroutine — keeps the
+// operator-facing config simple.
+func AuditLog(ctx context.Context, store *db.Store, retention time.Duration) {
+	ticker := time.NewTicker(AuditSweeperInterval)
+	defer ticker.Stop()
+	auditSweepOnce(ctx, store, retention)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			auditSweepOnce(ctx, store, retention)
+		}
+	}
+}
+
+func auditSweepOnce(ctx context.Context, store *db.Store, retention time.Duration) {
+	rows, err := store.SweepAuditLog(ctx, retention)
+	if err != nil {
+		slog.Warn("audit sweep failed", "err", err)
+		return
+	}
+	if rows > 0 {
+		slog.Info("audit sweep", "deleted_rows", rows, "retention", retention)
 	}
 }
