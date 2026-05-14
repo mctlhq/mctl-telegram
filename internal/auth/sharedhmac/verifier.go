@@ -79,16 +79,24 @@ func New(store *db.Store, cfg Config) (*Provider, error) {
 
 // DefaultGroupScopes maps GitHub team / mctl-tenant names to scope sets.
 // platform-admins inherits everything plus admin:users.
+//
+// Breaking change (M2.6): the "admins" group is now read-only by default.
+// Users that need send/pin access must be added to "telegram-mcp-senders".
+// This prevents new connector users from sending messages before an operator
+// has explicitly opted them in.
 func DefaultGroupScopes() map[string][]string {
 	return map[string][]string{
 		"telegram-mcp-readers": {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 		},
+		// telegram-mcp-senders is the only group that grants write access by
+		// default. Operators must explicitly add users to this group.
 		"telegram-mcp-senders": {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
+			"telegram:messages:pin",
 		},
 		"platform-admins": {
 			"telegram:dialogs:read",
@@ -98,12 +106,11 @@ func DefaultGroupScopes() map[string][]string {
 			"admin:users",
 		},
 		// mctl-api issues "admins" for org admins (IsAdmin check in ResolveGroups).
+		// Read-only by design: prevents implicit send access for new connector
+		// users who happen to be org admins but have not been opted in to writes.
 		"admins": {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
-			"telegram:messages:send",
-			"telegram:messages:pin",
-			"admin:users",
 		},
 	}
 }
