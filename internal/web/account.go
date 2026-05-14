@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -26,11 +28,12 @@ type AccountCloser interface {
 //	GET    /api/account              -> {"connected":bool, …}
 //	POST   /api/account/disconnect   -> {"disconnected":true, "had_active_session":bool}
 //	DELETE /api/account              -> {"deleted":true, "rows_removed":int}
+//	GET    /api/account/audit        -> {"entries":[…], "count":N}
 //
 // All handlers require an *auth.Identity in context — wire them behind the
 // same auth middleware as the MCP endpoint. Anonymous requests get 401.
 // Audit rows are written through the same Store.LogToolCall path used by MCP
-// tools so /api/account calls show up in get_my_audit_log too.
+// tools so /api/account calls show up in get_my_auditLog too.
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
@@ -51,6 +54,7 @@ func (h *AccountHandlers) Register(mux interface {
 	mux.Get("/", h.get)
 	mux.Post("/disconnect", h.disconnect)
 	mux.Delete("/", h.delete)
+	mux.Get("/audit", h.auditLog)
 }
 
 func (h *AccountHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +131,53 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	writeAccountJSON(w, http.StatusOK, map[string]any{
 		"deleted":      true,
 		"rows_removed": rows,
+	})
+}
+
+// auditLog handles GET /api/account/audit. Query params:
+//
+//	limit  — int, default 50, max 500
+//	before — RFC3339; only entries strictly older than this are returned
+//
+// Returns {"entries":[…], "count":N}. Like the matching get_my_auditLog
+// MCP tool, this handler never reads cross-user rows — the SQL filter is
+// pinned to id.UserID resolved from the authenticated identity. We
+// intentionally do NOT audit this call itself to avoid recursive
+// audit-of-audit rows on every page fetch.
+func (h *AccountHandlers) auditLog(w http.ResponseWriter, r *http.Request) {
+	id := auth.From(r.Context())
+	if id == nil {
+		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	q := r.URL.Query()
+	limit := 50
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			writeAccountErr(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		limit = n
+	}
+	var before time.Time
+	if raw := q.Get("before"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeAccountErr(w, http.StatusBadRequest, "before must be RFC3339")
+			return
+		}
+		before = parsed
+	}
+	entries, err := h.Store.ListAuditFor(r.Context(), id.UserID, limit, before)
+	if err != nil {
+		slog.Warn("account.auditLog", "err", err)
+		writeAccountErr(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	writeAccountJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"count":   len(entries),
 	})
 }
 
