@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mctl-telegram — security model</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 760px; margin: 2.5rem auto; padding: 0 1.25rem;
+    color: #1f2328; background: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre { background: #161b22; color: #e6edf3; }
+    a { color: #58a6ff; }
+    .card, .warn { background: #161b22; border-color: #30363d; }
+    .muted { color: #8b949e; }
+    .warn { background: #2d1b1b; border-color: #6b3030; }
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
+  .lead { color: #57606a; margin: .25rem 0 1.5rem; }
+  .muted { color: #57606a; font-size: .9rem; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .88em;
+  }
+  code { background: #eaeef2; padding: 1px 5px; border-radius: 4px; }
+  pre { background: #eaeef2; padding: .75rem 1rem; border-radius: 6px; overflow-x: auto; }
+  .card, .warn {
+    background: #fff; border: 1px solid #d0d7de; border-radius: 8px;
+    padding: 1rem 1.25rem; margin: 1rem 0;
+  }
+  .warn { border-color: #d1242f; background: #fff5f5; }
+  @media (prefers-color-scheme: dark) {
+    .warn { background: #2d1b1b; border-color: #6b3030; }
+  }
+  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
+  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  @media (prefers-color-scheme: dark) { td, th { border-color: #30363d; } }
+</style>
+</head>
+<body>
+  <p class="muted"><a href="/">← back to setup</a></p>
+  <h1>Security model</h1>
+  <p class="lead">Threat model, cryptographic invariants, and known coupling for this deployment.</p>
+
+  <div class="warn">
+    <strong>Not zero-knowledge.</strong> mctl-telegram makes outbound MTProto calls
+    to Telegram on your behalf, so the server process necessarily handles plaintext
+    Telegram data while serving your request. You are trusting both the operator
+    of this deployment and the integrity of this code. For a stronger trust model,
+    track the planned <strong>Local Bridge</strong> mode where the session lives
+    on your machine and tg.mctl.ai is reduced to a connectivity relay.
+  </div>
+
+  <h2>Reporting vulnerabilities</h2>
+  <p>Email <strong>dmitri+security@mctl.ai</strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgement target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
+
+  <h2>Trust boundaries</h2>
+  <p>Per user, the service brokers two trust relationships:</p>
+  <table>
+    <thead><tr><th>Boundary</th><th>Trusted credential</th><th>Lives</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Inbound HTTP (Claude.ai → <code>/mcp</code>)</td>
+        <td>OAuth JWT issued by <code>api.mctl.ai</code>, verified via shared HMAC</td>
+        <td>Bearer header, per-request</td>
+      </tr>
+      <tr>
+        <td>Outbound MTProto (<code>gotd/td</code> → Telegram)</td>
+        <td>Encrypted session blob</td>
+        <td>Postgres <code>telegram_accounts.session_encrypted</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Compromise of either boundary compromises only the affected operator's account — not other users — provided the per-user session key derivation is intact (see <em>Cryptographic invariants</em> below).</p>
+
+  <h2>What the server sees</h2>
+  <ul>
+    <li><strong>Plaintext MTProto traffic for the duration of one tool call.</strong> The server must decrypt the session blob and exchange MTProto messages with Telegram in memory.</li>
+    <li><strong>Tool-call metadata, persisted.</strong> Tool name, redacted peer reference, status, and (if any) error string. Persisted to <code>audit_logs</code> with the redaction policy below.</li>
+  </ul>
+
+  <h2>What the server NEVER persists</h2>
+  <p>The slog redaction handler scrubs every log line, and the audit-log schema does not contain columns for any of the following:</p>
+  <ul>
+    <li>The full text of a sent or received message</li>
+    <li>The user's phone number or 2FA password (only seen during interactive login, never stored)</li>
+    <li>The raw MTProto session bytes (only the AES-GCM ciphertext lives in Postgres)</li>
+    <li>The OAuth JWT secret, the encryption master key, or any derived per-user subkey</li>
+    <li>The contents of <code>Authorization: Bearer</code> headers</li>
+  </ul>
+
+  <h2>Known coupling: shared <code>OAUTH_JWT_SECRET</code> with mctl-api</h2>
+  <p>The current <code>shared-hmac</code> auth mode validates JWTs by re-implementing mctl-api's HMAC-SHA256 verifier and reading the <strong>same</strong> <code>OAUTH_JWT_SECRET</code> from Vault (<code>secret/platform/oauth-jwt-secret</code>). This is an MVP-stage coupling.</p>
+  <ul>
+    <li><strong>Impact:</strong> compromise of the mctl-telegram pod's secret material is equivalent to compromise of mctl-api's — an attacker can mint valid platform tokens.</li>
+    <li><strong>Mitigation today:</strong> rotate <code>OAUTH_JWT_SECRET</code> for both services in the same change. Failing to do so will lock out users on whichever side is stale.</li>
+    <li><strong>Audience binding:</strong> tokens carry an <code>aud</code> claim that is checked against the resource server's expected audience, so a JWT minted for a sibling service cannot be replayed against tg-mcp once both sides have rolled out aud emission and enforcement.</li>
+    <li><strong>Long-term fix (planned):</strong> add RS256 + <code>/oauth/jwks</code> to mctl-api; switch mctl-telegram to JWKS verification.</li>
+  </ul>
+
+  <h2>Cryptographic invariants</h2>
+  <ul>
+    <li><code>ENCRYPTION_KEY</code> MUST be 32 random bytes, hex-encoded (64 chars). The service refuses to start otherwise.</li>
+    <li>MTProto session blobs are AES-256-GCM sealed with a per-user subkey derived via HKDF-SHA256: <code>subkey = HKDF(master, salt=user_id_be64, info="mctl-telegram-session-v2", L=32)</code>. Each row has cryptographically independent keys.</li>
+    <li>Legacy v1 blobs (single global key) are migrated to v2 in-place on first read. Cleanup of the legacy decrypt path is tracked for ~90 days after rollout.</li>
+    <li>Audit log NEVER contains: message <code>text</code>, decoded phone digits, 2FA password, MTProto session bytes, JWT secret, or encryption keys. The slog redaction handler strips these keys before any line reaches stdout.</li>
+  </ul>
+
+  <h2>Send-gate (defense in depth)</h2>
+  <p>Real Telegram sends require <strong>all</strong> of:</p>
+  <ol>
+    <li>Server flag <code>ALLOW_SEND=true</code> (Helm values).</li>
+    <li>Identity has <code>telegram:messages:send</code> scope (group → scope map).</li>
+    <li><code>telegram_accounts.send_enabled = true</code> for that operator.</li>
+    <li>Tool call argument <code>mode=send</code> (default is <code>draft</code>).</li>
+  </ol>
+  <p>Any condition false → response is a dry-run preview containing the proposed text and the failing-condition reason in <code>dry_reason</code>. <code>mode=draft</code> never reaches the Telegram API.</p>
+
+  <h2>Authentication-required mode</h2>
+  <ul>
+    <li><code>AUTH_REQUIRED=false</code> is for local development only. The deployed pod MUST set <code>AUTH_REQUIRED=true</code> and <code>AUTH_MODE=shared-hmac</code>.</li>
+    <li><code>local-dev</code> provider returns a fixed identity with platform-admin scopes and is gated by <code>AUTH_MODE=local-dev</code>. It MUST NOT be reachable from any non-localhost interface in production.</li>
+  </ul>
+
+  <h2>Rate limiting</h2>
+  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
+
+  <p class="muted"><a href="/">← back to setup</a> · <a href="/privacy">privacy policy</a> · <a href="https://github.com/mctlhq/mctl-telegram/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md in repo</a></p>
+</body>
+</html>

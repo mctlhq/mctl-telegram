@@ -20,11 +20,13 @@
     body { color: #e6edf3; background: #0d1117; }
     code, pre { background: #161b22; color: #e6edf3; }
     a { color: #58a6ff; }
-    .card { background: #161b22; border-color: #30363d; }
+    .card, .callout, .warn { background: #161b22; border-color: #30363d; }
     .muted { color: #8b949e; }
+    .warn { background: #2d1b1b; border-color: #6b3030; }
   }
   h1 { font-size: 1.75rem; margin: 0 0 .25rem; }
   h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
+  h3 { font-size: 1rem; margin: 1.25rem 0 .25rem; }
   .lead { color: #57606a; margin: .25rem 0 2rem; }
   .muted { color: #57606a; font-size: .9rem; }
   code, pre {
@@ -39,30 +41,54 @@
     overflow-x: auto;
     line-height: 1.4;
   }
-  .card {
+  .card, .callout, .warn {
     background: #fff;
     border: 1px solid #d0d7de;
     border-radius: 8px;
     padding: 1rem 1.25rem;
     margin: 1rem 0;
   }
+  .warn { border-color: #d1242f; background: #fff5f5; }
+  @media (prefers-color-scheme: dark) {
+    .warn { background: #2d1b1b; border-color: #6b3030; }
+  }
   .url { word-break: break-all; }
   ol { padding-left: 1.25rem; }
   ol li { margin: .35rem 0; }
-  table { width: 100%; border-collapse: collapse; margin: .75rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
   td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  th { font-weight: 600; }
   @media (prefers-color-scheme: dark) { td, th { border-color: #30363d; } }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: #ddf4ff; color: #0969da; font-size: .75rem; font-weight: 600; vertical-align: middle; }
+  .pill-read { background: #ddf4ff; color: #0969da; }
+  .pill-write { background: #fff1cc; color: #9a6700; }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
 </style>
 </head>
 <body>
   <h1>mctl-telegram <span class="badge">MCP</span></h1>
-  <p class="lead">Remote MCP server exposing your Telegram user-account (read dialogs, read unread, send draft) to Claude.ai and other MCP clients.</p>
+  <p class="lead">Remote MCP server that exposes your Telegram user-account to Claude.ai and other MCP clients. Five tools: list dialogs, read unread, read by peer, send draft/live, pin/unpin.</p>
 
   <div class="card">
     <strong>MCP endpoint</strong><br>
     <code class="url">{{.MCPURL}}</code><br>
-    <span class="muted">Streamable HTTP — works via <code>POST</code> with <code>Accept: application/json, text/event-stream</code>. Opening it in a browser is expected to be blank.</span>
+    <span class="muted">Streamable HTTP — works via <code>POST</code> with <code>Accept: application/json, text/event-stream</code>. Opening it in a browser shows this page; that is expected.</span>
+  </div>
+
+  <div class="warn">
+    <strong>What this is — and what it isn't.</strong>
+    <p style="margin:.5rem 0 0">
+      mctl-telegram holds a server-side Telegram MTProto session on your behalf.
+      <strong>This is not a zero-knowledge service.</strong> The server can technically read
+      your Telegram data while processing your requests, because it is the one
+      making MTProto calls to Telegram. We minimize what is stored (encrypted session
+      blob only) and what is logged (no message text, no phone numbers), but you are
+      trusting both the operator of this deployment and the integrity of this code.
+    </p>
+    <p style="margin:.5rem 0 0">
+      See <a href="/security">/security</a> for the full threat model and
+      <a href="/privacy">/privacy</a> for the data inventory and retention policy.
+    </p>
   </div>
 
   <h2>1. Add as a custom connector in Claude.ai</h2>
@@ -75,15 +101,95 @@
 
   <h2>2. Available tools</h2>
   <table>
-    <thead><tr><th>Tool</th><th>Annotation</th><th>Notes</th></tr></thead>
+    <thead><tr><th>Tool</th><th>Annotation</th><th>Scope required</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td><code>list_dialogs</code></td><td>readOnly</td><td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td></tr>
-      <tr><td><code>get_unread_messages</code></td><td>readOnly</td><td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td></tr>
-      <tr><td><code>send_message</code></td><td>destructive</td><td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires server <code>ALLOW_SEND=true</code> + scope <code>telegram:messages:send</code> + per-account <code>send_enabled=true</code> + <code>mode=send</code>.</td></tr>
+      <tr>
+        <td><code>list_dialogs</code></td>
+        <td><span class="pill pill-read">read</span></td>
+        <td><code>telegram:dialogs:read</code></td>
+        <td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td>
+      </tr>
+      <tr>
+        <td><code>get_unread_messages</code></td>
+        <td><span class="pill pill-read">read</span></td>
+        <td><code>telegram:messages:read</code></td>
+        <td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td>
+      </tr>
+      <tr>
+        <td><code>get_messages</code></td>
+        <td><span class="pill pill-read">read</span></td>
+        <td><code>telegram:messages:read</code></td>
+        <td>Full history of a specific peer, not just unread.</td>
+      </tr>
+      <tr>
+        <td><code>send_message</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td><code>telegram:messages:send</code></td>
+        <td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires <strong>all</strong> of: server <code>ALLOW_SEND=true</code>, identity scope, per-account <code>send_enabled=true</code>, and <code>mode=send</code>.</td>
+      </tr>
+      <tr>
+        <td><code>pin_message</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td><code>telegram:messages:pin</code></td>
+        <td>Inputs: <code>peer</code>, <code>message_id</code>, <code>unpin</code> (bool).</td>
+      </tr>
+      <tr>
+        <td><code>disconnect_telegram_account</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td>any authenticated identity</td>
+        <td>Soft-revokes your session — see <em>Your controls</em>.</td>
+      </tr>
+      <tr>
+        <td><code>delete_telegram_account</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td>any authenticated identity</td>
+        <td>Hard-deletes the encrypted session blob.</td>
+      </tr>
     </tbody>
   </table>
 
-  <h2>3. Smoke-test from your terminal</h2>
+  <h2>3. Scopes and permissions</h2>
+  <p class="muted">Scopes are derived from your GitHub-team / mctl-tenant groups via the shared-HMAC verifier.</p>
+  <table>
+    <thead><tr><th>Group</th><th>Scopes granted</th></tr></thead>
+    <tbody>
+      <tr><td><code>telegram-mcp-readers</code></td><td>dialogs:read, messages:read</td></tr>
+      <tr><td><code>telegram-mcp-senders</code></td><td>dialogs:read, messages:read, messages:send</td></tr>
+      <tr><td><code>platform-admins</code> / <code>admins</code></td><td>all telegram:* scopes plus <code>admin:users</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. What we store</h2>
+  <table>
+    <thead><tr><th>Row</th><th>Contents</th><th>Retention</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>users</code></td>
+        <td>github_login, optional email</td>
+        <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
+      </tr>
+      <tr>
+        <td><code>telegram_accounts.session_encrypted</code></td>
+        <td>AES-256-GCM-sealed MTProto session blob, per-user HKDF-derived key</td>
+        <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed).</td>
+      </tr>
+      <tr>
+        <td><code>audit_logs</code></td>
+        <td>tool name, redacted peer reference, status, error. <strong>Never the message body, phone number, or session bytes.</strong></td>
+        <td>90 days (sweeper, configurable via <code>AUDIT_RETENTION_DAYS</code>).</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. Your controls</h2>
+  <ul>
+    <li><strong>Disconnect (soft):</strong> call MCP tool <code>disconnect_telegram_account</code>, or <code>POST /api/account/disconnect</code>. Marks the session revoked and immediately tears down the in-memory MTProto client.</li>
+    <li><strong>Delete (hard):</strong> call MCP tool <code>delete_telegram_account</code>, or <code>DELETE /api/account</code>. Removes the encrypted session blob and all per-account metadata.</li>
+    <li><strong>Status:</strong> <code>GET /api/account</code> returns connection state, display name, and the per-account <code>send_enabled</code> flag.</li>
+    <li><strong>Revoke from Telegram's side:</strong> Telegram app → Settings → Devices → close the session named after this app. This will not delete data here but will sever the MTProto link Telegram-side.</li>
+  </ul>
+
+  <h2>6. Smoke-test from your terminal</h2>
   <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
   <pre>curl -s {{.WellKnownURL}}
 
@@ -92,9 +198,9 @@ curl -s -X POST {{.MCPURL}} \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'</pre>
 
-  <h2>4. First-time Telegram login</h2>
-  <p>Until the in-browser <code>/telegram/connect</code> flow ships, the operator runs the CLI binary <code>mctl-telegram-login</code> bundled in the same image. It performs phone → SMS code → optional 2FA password and persists an AES-256-GCM-encrypted MTProto session keyed to your GitHub login. The full recipe lives in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.</p>
+  <h2>7. First-time Telegram login</h2>
+  <p>Until an in-browser <code>/telegram/connect</code> flow ships, the operator runs the CLI binary <code>mctl-telegram-login</code> bundled in the same image. It performs phone → SMS code → optional 2FA password and persists an AES-256-GCM-encrypted MTProto session keyed to your GitHub login. The full recipe lives in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>. Self-service flows are tracked in the roadmap.</p>
 
-  <p class="muted">Source: <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> · Auth server: <code>{{.AuthServer}}</code> · Resource: <code>{{.PublicBaseURL}}</code></p>
+  <p class="muted">Source: <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · Auth server: <code>{{.AuthServer}}</code> · Resource: <code>{{.PublicBaseURL}}</code></p>
 </body>
 </html>

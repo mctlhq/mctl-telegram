@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mctl-telegram — privacy</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 760px; margin: 2.5rem auto; padding: 0 1.25rem;
+    color: #1f2328; background: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre { background: #161b22; color: #e6edf3; }
+    a { color: #58a6ff; }
+    .card { background: #161b22; border-color: #30363d; }
+    .muted { color: #8b949e; }
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
+  .lead { color: #57606a; margin: .25rem 0 1.5rem; }
+  .muted { color: #57606a; font-size: .9rem; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .88em;
+  }
+  code { background: #eaeef2; padding: 1px 5px; border-radius: 4px; }
+  pre { background: #eaeef2; padding: .75rem 1rem; border-radius: 6px; overflow-x: auto; }
+  .card {
+    background: #fff; border: 1px solid #d0d7de; border-radius: 8px;
+    padding: 1rem 1.25rem; margin: 1rem 0;
+  }
+  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
+  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  @media (prefers-color-scheme: dark) { td, th { border-color: #30363d; } }
+</style>
+</head>
+<body>
+  <p class="muted"><a href="/">← back to setup</a></p>
+  <h1>Privacy and data handling</h1>
+  <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
+
+  <h2>Data inventory</h2>
+  <table>
+    <thead><tr><th>Where</th><th>Contents</th><th>Why</th><th>Retention</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>users</code> table</td>
+        <td>GitHub login (subject claim from your JWT), optional email if provided by the OAuth provider</td>
+        <td>Resolves your identity for per-user storage isolation</td>
+        <td>Until you call <code>delete_telegram_account</code> — cascades to remove your row</td>
+      </tr>
+      <tr>
+        <td><code>telegram_accounts</code> table</td>
+        <td>AES-256-GCM ciphertext of your MTProto session blob (per-user HKDF-derived key), plus non-sensitive display name / Telegram username if Telegram returned them</td>
+        <td>Required to make Telegram API calls on your behalf</td>
+        <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed)</td>
+      </tr>
+      <tr>
+        <td><code>audit_logs</code> table</td>
+        <td>Tool name, redacted peer reference (truncated/hashed), status, and a redacted error string. <strong>No message text, no phone numbers, no session bytes.</strong></td>
+        <td>Operational visibility, abuse detection, and to power your future <code>get_my_audit_log</code> tool</td>
+        <td>Default 90 days, configurable via <code>AUDIT_RETENTION_DAYS</code></td>
+      </tr>
+      <tr>
+        <td>Process memory</td>
+        <td>Plaintext MTProto messages for the duration of one tool call (the server must decrypt them to talk to Telegram)</td>
+        <td>Required to fulfil the request</td>
+        <td>Freed when the goroutine returns; never written to disk</td>
+      </tr>
+      <tr>
+        <td>Process stdout (Loki)</td>
+        <td>Structured JSON log lines from <code>slog</code>, with sensitive keys redacted by the audit handler</td>
+        <td>Operator debugging</td>
+        <td>Per the platform's Loki retention (typically 14–30 days)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>What is NOT stored</h2>
+  <ul>
+    <li>The plaintext of any message you send or receive</li>
+    <li>Your phone number (only seen during interactive login, never persisted)</li>
+    <li>Your Telegram cloud password / 2FA digits</li>
+    <li>Raw MTProto session bytes (only the AES-GCM ciphertext lives in Postgres)</li>
+    <li>The contents of <code>Authorization: Bearer</code> headers</li>
+    <li>Your IP address beyond what the platform ingress logs at L4/L7 (not persisted by this service)</li>
+  </ul>
+
+  <h2>Self-service deletion</h2>
+  <p>You can remove your data at any time without operator involvement:</p>
+  <pre>POST /api/account/disconnect    # mark session revoked (keeps row, no Telegram access)
+DELETE /api/account              # remove the encrypted session blob and row entirely</pre>
+  <p>Or call the equivalent MCP tools: <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>. Both flows immediately tear down the in-memory MTProto client so a concurrent request cannot piggyback on the doomed session.</p>
+
+  <h2>Who can access your data</h2>
+  <ul>
+    <li><strong>You</strong>, via the MCP tools and HTTP endpoints listed above.</li>
+    <li><strong>The deployment operator</strong>, who has Kubernetes/database access to the running service. There is no in-service admin tool that exposes another user's session in plaintext, but operator with sql access could read the encrypted blob; without the <code>ENCRYPTION_KEY</code> they cannot decrypt it.</li>
+    <li><strong>Anyone who compromises the running pod</strong> could read every session in memory while requests are in flight (this is true of any server-side MTProto host; mitigations are the <em>Local Bridge</em> roadmap).</li>
+  </ul>
+
+  <h2>Third parties</h2>
+  <ul>
+    <li><strong>Telegram</strong> — your MTProto session is, by definition, used to talk to Telegram. They see the same traffic any Telegram client would generate.</li>
+    <li><strong>GitHub</strong> — your identity originates from a GitHub OAuth login proxied through <code>api.mctl.ai</code>.</li>
+    <li>No analytics, advertising, or third-party tracking is injected by this service. The landing/<code>/security</code>/<code>/privacy</code> pages serve inline CSS only and contact no external hosts.</li>
+  </ul>
+
+  <h2>Contact</h2>
+  <p>Privacy and security inquiries: <strong>dmitri+security@mctl.ai</strong>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
+
+  <p class="muted"><a href="/">← back to setup</a> · <a href="/security">security model</a></p>
+</body>
+</html>
