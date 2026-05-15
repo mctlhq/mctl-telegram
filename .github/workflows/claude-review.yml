@@ -2,19 +2,12 @@ name: Claude PR review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
-  issue_comment:
-    types: [created]
+    types: [opened, reopened, synchronize, ready_for_review]
 
 jobs:
   review:
-    # pull_request: review every non-draft PR on open/reopen/ready.
-    # issue_comment: only when a comment on a PR contains "@claude review"
-    # (re-review after a fix-up).
-    if: >-
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude review'))
+    # Skip drafts; synchronize re-reviews after each fix-up push.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,15 +16,21 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Claude review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--model claude-sonnet-4-6 --max-turns 20'
+          # track_progress surfaces the review: it posts a tracking comment and
+          # publishes the buffered inline comments. Without it the review runs
+          # but its findings are never posted to the PR.
+          track_progress: true
           prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
             You are the automated code reviewer for this pull request. Review
             the PR diff thoroughly.
 
@@ -48,17 +47,19 @@ jobs:
 
             If the diff is trivial — only config/values YAML (hostname, env
             var, image tag, resource limits, replica count), a dependency bump
-            with no logic change, docs/comments, or a one-line typo — reply
-            with a single short approval line and nothing else.
+            with no logic change, docs/comments, or a one-line typo — post a
+            single short top-level approval comment and nothing else.
 
-            Otherwise post findings as inline review comments. Prefix each
-            finding with a severity tag:
+            Otherwise, post each finding as an inline comment using the
+            mcp__github_inline_comment__create_inline_comment tool, prefixed
+            with a severity tag:
             - P1 — must fix before merge (bug, security hole, data loss).
             - P2 — should fix before merge (likely bug, missing test, unsafe
               pattern).
             - P3 — nice to have (style, minor nit); does not block merge.
 
-            End with a summary comment: the count of P1/P2/P3 findings and an
-            explicit verdict — "No P1/P2 findings, good to merge" or "Has
-            P1/P2 findings, changes requested". Be concise; do not restate the
-            diff.
+            Finish with a top-level summary comment: the count of P1/P2/P3
+            findings and an explicit verdict — "No P1/P2 findings, good to
+            merge" or "Has P1/P2 findings, changes requested". Be concise; do
+            not restate the diff.
+          claude_args: '--model claude-sonnet-4-6 --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
