@@ -230,8 +230,11 @@ func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
 func (s *Server) Register(mux Router) {
 	mux.Get("/.well-known/oauth-authorization-server", s.handleAuthorizationServerMetadata)
 	mux.Get("/oauth/authorize", s.handleAuthorize)
+	// /oauth/telegram/callback is POST-only on purpose: the embedded widget
+	// (data-onauth) JS submits a form. Accepting GET would let a third-party
+	// site mount a CSRF-by-link attack — the widget hash + server-state
+	// nonce mitigate exchange, but POST-only narrows the abuse window.
 	mux.Post("/oauth/telegram/callback", s.handleWidgetCallback)
-	mux.Get("/oauth/telegram/callback", s.handleWidgetCallback) // widget can issue either; accept both
 	mux.Post("/oauth/token", s.handleToken)
 	mux.Post("/oauth/register", s.handleClientRegistration)
 }
@@ -360,6 +363,14 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, "unknown or expired state", http.StatusBadRequest)
+		return
+	}
+	// Defensive TTL check: the background sweeper drops stale entries on a
+	// timer, but a callback arriving in the gap between expiry and the next
+	// sweep tick would still be served if we only relied on map presence.
+	// CodeTTL bounds how long we trust serverState; reject if exceeded.
+	if s.clock().Sub(pending.CreatedAt) > s.cfg.CodeTTL {
+		http.Error(w, "state expired", http.StatusBadRequest)
 		return
 	}
 

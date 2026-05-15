@@ -414,6 +414,49 @@ func TestLookupClientName_UnregisteredNotBranded(t *testing.T) {
 	}
 }
 
+func TestWidgetCallback_RejectsStaleState(t *testing.T) {
+	// Override clock to fast-forward past CodeTTL between authorize and callback.
+	srv := newTestServer(t, func(c *Config) { c.CodeTTL = 1 * time.Second })
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	// Drive only the authorize step.
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"claude.ai"},
+		"redirect_uri":          {"https://claude.ai/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	state := extractServerStateFromHTML(t, rec.Body.String())
+
+	// Fast-forward time on the server's clock so the pending entry is stale.
+	now := time.Now().Add(10 * time.Second)
+	srv.clock = func() time.Time { return now }
+
+	// Build a valid widget payload — verification should pass — then assert
+	// the handler still rejects the request because the pending state is stale.
+	widgetFields := map[string]string{
+		"id":        "210408407",
+		"auth_date": strconv.FormatInt(now.Unix(), 10),
+	}
+	widgetFields["hash"] = signWidget(t, widgetFields)
+	form := url.Values{"st": {state}}
+	for k, v := range widgetFields {
+		form.Set(k, v)
+	}
+	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	mux.serve("POST", "/oauth/telegram/callback", rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for stale state, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestLookupClientName_Registered(t *testing.T) {
 	srv := newTestServer(t)
 	srv.clients["c1"] = &clientReg{
