@@ -47,15 +47,10 @@ type Server struct {
 	store    *db.Store
 	clock    func() time.Time
 
-	mu         sync.Mutex
-	pending    map[string]*pendingAuth // keyed by "state" issued at /oauth/authorize
-	codes      map[string]*authCode    // keyed by the authorization_code value
-	clients    map[string]*clientReg   // keyed by client_id
-	widgetTmps map[string]*widgetTemp  // keyed by short-lived nonce so widget POST can carry the OAuth context across requests
-
-	// session cookies for the multi-step flow. We deliberately do not use a
-	// shared secret-store; everything we need to carry across requests is
-	// either in the URL (state) or in a single short-lived cookie (mctl_oauth_state).
+	mu      sync.Mutex
+	pending map[string]*pendingAuth // keyed by "state" issued at /oauth/authorize
+	codes   map[string]*authCode    // keyed by the authorization_code value
+	clients map[string]*clientReg   // keyed by client_id
 }
 
 // Config captures everything the OAuth server needs at construction time.
@@ -126,14 +121,6 @@ type clientReg struct {
 	CreatedAt    time.Time
 }
 
-// widgetTemp lets the multi-step flow carry the OAuth context (state) from
-// the authorize step through the widget POST. Keyed by a server-issued
-// random nonce held in a short-lived signed cookie.
-type widgetTemp struct {
-	State     string
-	CreatedAt time.Time
-}
-
 // New constructs a Server. The caller is responsible for wiring the handlers
 // onto a chi router via Register.
 func New(cfg Config, store *db.Store) (*Server, error) {
@@ -175,15 +162,14 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		cfg:        cfg,
-		issuer:     issuer,
-		verifier:   v,
-		store:      store,
-		clock:      time.Now,
-		pending:    map[string]*pendingAuth{},
-		codes:      map[string]*authCode{},
-		clients:    map[string]*clientReg{},
-		widgetTmps: map[string]*widgetTemp{},
+		cfg:      cfg,
+		issuer:   issuer,
+		verifier: v,
+		store:    store,
+		clock:    time.Now,
+		pending:  map[string]*pendingAuth{},
+		codes:    map[string]*authCode{},
+		clients:  map[string]*clientReg{},
 	}, nil
 }
 
@@ -218,11 +204,6 @@ func (s *Server) sweep(now time.Time) {
 	for k, c := range s.codes {
 		if now.Sub(c.CreatedAt) > s.cfg.CodeTTL {
 			delete(s.codes, k)
-		}
-	}
-	for k, w := range s.widgetTmps {
-		if now.Sub(w.CreatedAt) > s.cfg.CodeTTL {
-			delete(s.widgetTmps, k)
 		}
 	}
 }

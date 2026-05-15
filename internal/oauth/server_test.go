@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -558,12 +557,3 @@ func (m *mockRouter) serve(method, p string, w http.ResponseWriter, r *http.Requ
 	}
 	h(w, r)
 }
-
-// drainBody discards a response body so tests that ignore it close the
-// connection cleanly.
-func drainBody(r *http.Response) {
-	_, _ = io.Copy(io.Discard, r.Body)
-	r.Body.Close()
-}
-
-var _ = drainBody // keep helper around for future tests
