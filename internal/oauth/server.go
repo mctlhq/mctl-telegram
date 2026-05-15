@@ -107,6 +107,12 @@ type Config struct {
 	// until OOM. When exceeded, the oldest entry is evicted on the next
 	// /oauth/authorize call. Defaults to 5000.
 	MaxPendingAuth int
+	// MaxAuthCodes caps the size of the issued-authorization-code map.
+	// Each successful widget callback inserts an entry; without a bound
+	// an attacker who replays valid widget payloads can mint codes
+	// without ever redeeming them and grow process memory. Defaults to
+	// 10000.
+	MaxAuthCodes int
 	// MaxRegisterBodyBytes caps how many bytes /oauth/register will read
 	// from r.Body before bailing out. Default 64 KiB — generous for the
 	// RFC 7591 metadata fields we accept, tiny next to anything an
@@ -199,6 +205,9 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.MaxPendingAuth == 0 {
 		cfg.MaxPendingAuth = 5000
+	}
+	if cfg.MaxAuthCodes == 0 {
+		cfg.MaxAuthCodes = 10000
 	}
 	if cfg.MaxRegisterBodyBytes == 0 {
 		cfg.MaxRegisterBodyBytes = 64 * 1024
@@ -498,7 +507,26 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := randomToken(32)
+	now := s.clock()
 	s.mu.Lock()
+	// Cap the authorization-code map. Each successful widget callback
+	// inserts a new entry; an attacker who can replay valid widget
+	// payloads within the auth_date window could otherwise keep adding
+	// codes without ever redeeming them. Oldest-evict on insert mirrors
+	// the pending/clients pattern and keeps the sweeper as a backstop.
+	if s.cfg.MaxAuthCodes > 0 && len(s.codes) >= s.cfg.MaxAuthCodes {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, c := range s.codes {
+			if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = c.CreatedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.codes, oldestKey)
+		}
+	}
 	s.codes[code] = &authCode{
 		ClientID:            pending.ClientID,
 		RedirectURI:         pending.RedirectURI,
@@ -507,7 +535,7 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		TelegramID:          payload.ID,
 		TelegramUsername:    payload.Username,
 		Scope:               pending.Scope,
-		CreatedAt:           s.clock(),
+		CreatedAt:           now,
 	}
 	s.mu.Unlock()
 
@@ -724,14 +752,19 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 // validateImplicitRedirectURI applies the same policy as the implicit-client
 // branch of validateClient. Factored out so /oauth/register can enforce it
 // at registration time instead of waiting until /oauth/authorize.
+//
+// Loopback exception per RFC 8252 §7.3: native clients must be able to use
+// any free port on a loopback interface. We accept the three loopback host
+// forms — "localhost", IPv4 "127.0.0.1", and IPv6 "::1" — under http (no
+// TLS required) so a native client on an IPv6-only host is not locked out.
 func (s *Server) validateImplicitRedirectURI(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("redirect_uri %q is not a valid URL: %w", raw, err)
 	}
 	if u.Scheme != "https" {
-		if u.Scheme != "http" || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1") {
-			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http://localhost)", u.Scheme)
+		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
 		}
 	}
 	host := u.Hostname()
@@ -740,7 +773,24 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 			return nil
 		}
 	}
+	// Loopback addresses are accepted even when not explicitly listed in
+	// AllowedImplicitHosts — the implicit deny on a non-loopback host
+	// remains, but loopback is universally safe for native clients.
+	if isLoopbackHost(host) {
+		return nil
+	}
 	return fmt.Errorf("redirect_uri host %q is not in the allowlist", host)
+}
+
+// isLoopbackHost is true for the three RFC 8252 §7.3 loopback host forms.
+// url.Hostname() strips the brackets around IPv6 literals so we compare
+// against the bare "::1" string, not "[::1]".
+func isLoopbackHost(h string) bool {
+	switch h {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // ----- helpers -----
@@ -775,10 +825,11 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 	if err != nil {
 		return fmt.Errorf("redirect_uri is not a valid URL: %w", err)
 	}
-	// http:// is acceptable only for loopback addresses (RFC 8252 §7.3).
+	// http:// is acceptable only for loopback addresses (RFC 8252 §7.3 —
+	// including IPv6 ::1 for native clients on IPv6-only hosts).
 	if u.Scheme != "https" {
-		if u.Scheme != "http" || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1") {
-			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http://localhost)", u.Scheme)
+		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
 		}
 	}
 	host := u.Hostname()
@@ -786,6 +837,9 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 		if host == allowed {
 			return nil
 		}
+	}
+	if isLoopbackHost(host) {
+		return nil
 	}
 	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
 }

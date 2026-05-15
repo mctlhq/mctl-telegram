@@ -320,13 +320,20 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 // AUTH_MODE=local-jwt would silently downgrade /bridge to localdev (any
 // connection accepted, daemon registers as fixed operator). Each non-local-
 // dev mode therefore has an explicit branch here.
+//
+// Fail-closed posture: when AUTH_MODE expects a JWT but OAUTH_JWT_SECRET is
+// missing, we DO NOT fall back to localdev — that would let an unauthenticated
+// remote client register a bridge daemon as the fixed operator account in
+// `local` mode. Instead we return rejectAllProvider so every /bridge request
+// gets 401 and the operator sees the misconfiguration loudly. localdev
+// fallback is reserved for AUTH_MODE=local-dev (developer-only).
 func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 	mode := strings.ToLower(cfg.AuthMode)
 	switch mode {
 	case "local-jwt":
 		if cfg.OAUTHJWTSecret == "" {
-			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
-			return localdev.New(store, cfg.OperatorLogin)
+			slog.Error("bridge: OAUTH_JWT_SECRET not set in local-jwt mode; /bridge will fail closed")
+			return rejectAllProvider("bridge auth: OAUTH_JWT_SECRET not configured")
 		}
 		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
@@ -341,8 +348,8 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		return p
 	case "shared-hmac", "shared-hmac-legacy":
 		if cfg.OAUTHJWTSecret == "" {
-			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
-			return localdev.New(store, cfg.OperatorLogin)
+			slog.Error("bridge: OAUTH_JWT_SECRET not set in shared-hmac mode; /bridge will fail closed")
+			return rejectAllProvider("bridge auth: OAUTH_JWT_SECRET not configured")
 		}
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
@@ -356,8 +363,27 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		}
 		return p
 	default:
+		// AUTH_MODE=local-dev (or unknown → falls through to localdev in
+		// selectProvider). The whole server is already in developer-bypass
+		// mode in this branch — using localdev on /bridge as well keeps the
+		// local CLI workflow functional without re-introducing a
+		// production fail-open.
 		return localdev.New(store, cfg.OperatorLogin)
 	}
+}
+
+// rejectAllProvider returns an auth.Provider that fails every request with a
+// fixed error. Used as the fail-closed fallback when a deployment requests
+// JWT-based auth but never supplied a signing secret — better to lock the
+// endpoint than to silently downgrade to a developer-bypass identity.
+func rejectAllProvider(reason string) auth.Provider {
+	return rejectProvider{reason: reason}
+}
+
+type rejectProvider struct{ reason string }
+
+func (p rejectProvider) Authenticate(_ *http.Request) (*auth.Identity, error) {
+	return nil, errors.New(p.reason)
 }
 
 // protectedResource serves the RFC 9728 OAuth Protected Resource Metadata so

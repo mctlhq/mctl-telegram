@@ -433,6 +433,73 @@ func TestAuthorize_AllowsLoopbackHTTP(t *testing.T) {
 	}
 }
 
+func TestAuthorize_AllowsIPv6Loopback(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"unknown-impl"},
+		"redirect_uri":          {"http://[::1]:9000/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for IPv6 loopback http, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIsLoopbackHost(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"127.0.0.2", false},
+		{"example.com", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isLoopbackHost(c.host); got != c.want {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+func TestWidgetCallback_CodesCapEvictsOldest(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.MaxAuthCodes = 2 })
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+
+	// Drive obtainAuthorizationCode 3 times with monotonic clock so we can
+	// identify which auth_code was minted first and confirm it got evicted.
+	t0 := time.Now()
+	codes := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		srv.clock = func() time.Time { return t0.Add(time.Duration(i) * time.Second) }
+		got := obtainAuthorizationCode(t, srv, mux, challenge)
+		codes = append(codes, got.code)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if got := len(srv.codes); got != 2 {
+		t.Fatalf("codes len = %d, want 2 (cap)", got)
+	}
+	if _, ok := srv.codes[codes[0]]; ok {
+		t.Errorf("oldest code %s should have been evicted", codes[0])
+	}
+	if _, ok := srv.codes[codes[2]]; !ok {
+		t.Errorf("newest code %s missing after eviction", codes[2])
+	}
+}
+
 func TestAuthorize_RejectsUnknownClient_WhenImplicitDisabled(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.AllowImplicitClient = false })
 	mux := newMockRouter()
