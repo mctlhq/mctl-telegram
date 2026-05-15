@@ -127,7 +127,7 @@ func renderAuthorizeHTML(w http.ResponseWriter, page authorizePage) {
 	// Tight CSP — the only external script we load is the Telegram widget.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; "+
-			"script-src 'self' https://telegram.org 'unsafe-inline'; "+
+			"script-src 'self' https://telegram.org 'unsafe-inline' 'unsafe-eval'; "+
 			"frame-src https://telegram.org https://oauth.telegram.org; "+
 			"connect-src 'self' https://telegram.org https://oauth.telegram.org; "+
 			"img-src 'self' https://telegram.org https://*.telegram.org https://*.t.me data:; "+
