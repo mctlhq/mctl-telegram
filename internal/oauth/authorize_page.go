@@ -39,25 +39,29 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
   <style>
     :root { color-scheme: light dark; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-           background: #f7f8fa; color: #1a1a1a; margin: 0; padding: 40px 20px; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #11151a; color: #e6e6e6; }
-      .card { background: #1a1f26; box-shadow: 0 1px 4px rgba(0,0,0,0.6); }
-      .meta { color: #9aa5b1; }
-      .url { color: #8bb6e8; }
-    }
-    .card { max-width: 460px; margin: 0 auto; background: #ffffff;
-            border-radius: 12px; padding: 32px 28px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+           background: #f6f8fa; color: #1f2328; margin: 0; padding: 40px 20px; }
+    .card { max-width: 460px; margin: 0 auto; background: #ffffff; border: 1px solid #d0d7de;
+            border-radius: 12px; padding: 32px 28px; box-shadow: 0 1px 3px rgba(27,31,36,0.04); }
     h1 { font-size: 22px; margin: 0 0 12px; font-weight: 600; }
     p { line-height: 1.5; margin: 8px 0; }
-    .meta { font-size: 13px; color: #5a6573; }
+    .meta { font-size: 13px; color: #57606a; }
     .url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
     .widget { margin: 28px 0 8px; min-height: 50px; display: flex; justify-content: center; }
-    .error { color: #c33; font-size: 13px; margin-top: 12px; min-height: 18px; }
-    .footer { font-size: 12px; color: #8a95a5; margin-top: 24px; }
-    .footer a { color: inherit; }
-    .verify { background: #fffbe6; border: 1px solid #f0d86b; border-radius: 6px; padding: 10px 12px; font-size: 13px; }
-    @media (prefers-color-scheme: dark) { .verify { background: #2b2510; border-color: #5a4818; } }
+    .error { color: #cf222e; font-size: 13px; margin-top: 12px; min-height: 18px; }
+    .footer { font-size: 12px; color: #57606a; margin-top: 24px; }
+    .footer a { color: #57606a; }
+    .verify { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; padding: 10px 12px; font-size: 13px; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #0d1117; color: #e6edf3; }
+      .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+      h1 { color: #e6edf3; }
+      .meta { color: #8b949e; }
+      .url { color: #58a6ff; }
+      .footer { color: #8b949e; }
+      .footer a { color: #8b949e; }
+      .error { color: #f85149; }
+      .verify { background: #2d2a0e; border-color: #735c0f; }
+    }
   </style>
 </head>
 <body>
@@ -124,8 +128,9 @@ func renderAuthorizeHTML(w http.ResponseWriter, page authorizePage) {
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; "+
 			"script-src 'self' https://telegram.org 'unsafe-inline'; "+
-			"frame-src https://oauth.telegram.org; "+
-			"img-src 'self' https://*.telegram.org https://*.t.me data:; "+
+			"frame-src https://telegram.org https://oauth.telegram.org; "+
+			"connect-src 'self' https://telegram.org https://oauth.telegram.org; "+
+			"img-src 'self' https://telegram.org https://*.telegram.org https://*.t.me data:; "+
 			"style-src 'self' 'unsafe-inline'")
 	if err := authorizeTemplate.Execute(w, page); err != nil {
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
