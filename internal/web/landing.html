@@ -18,7 +18,8 @@
   }
   @media (prefers-color-scheme: dark) {
     body { color: #e6edf3; background: #0d1117; }
-    code, pre { background: #161b22; color: #e6edf3; }
+    code { background: #2d333b; color: #adbac7; }
+    pre { background: #161b22; color: #e6edf3; }
     a { color: #58a6ff; }
     .card, .callout, .warn { background: #161b22; border-color: #30363d; }
     .muted { color: #8b949e; }
@@ -29,6 +30,9 @@
   h3 { font-size: 1rem; margin: 1.25rem 0 .25rem; }
   .lead { color: #57606a; margin: .25rem 0 2rem; }
   .muted { color: #57606a; font-size: .9rem; }
+  @media (prefers-color-scheme: dark) {
+    .lead { color: #8b949e; }
+  }
   code, pre {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: .88em;
@@ -72,7 +76,7 @@
 </head>
 <body>
   <h1>mctl-telegram <span class="badge">MCP</span></h1>
-  <p class="lead">Remote MCP server that exposes your Telegram user-account to Claude.ai and other MCP clients. Five tools: list dialogs, read unread, read by peer, send draft/live, pin/unpin.</p>
+  <p class="lead">Remote MCP server that exposes your Telegram user-account to Claude.ai and other MCP clients. Tools: list dialogs, read unread, read by peer, send draft/live, pin/unpin, audit log, disconnect/delete.</p>
 
   <div class="card">
     <strong>MCP endpoint</strong><br>
