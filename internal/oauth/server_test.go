@@ -249,6 +249,121 @@ func TestToken_RejectsCodeReuse(t *testing.T) {
 	}
 }
 
+func TestValidPKCEString(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"valid 43-char", strings.Repeat("a", 43), false},
+		{"valid 128-char", strings.Repeat("a", 128), false},
+		{"valid mixed", "ABCdef-._~0123456789ABCdef-._~0123456789ABC", false},
+		{"too short 42", strings.Repeat("a", 42), true},
+		{"too long 129", strings.Repeat("a", 129), true},
+		{"contains plus", strings.Repeat("a", 42) + "+", true},
+		{"contains slash", strings.Repeat("a", 42) + "/", true},
+		{"contains space", strings.Repeat("a", 42) + " ", true},
+		{"contains equals", strings.Repeat("a", 42) + "=", true},
+		{"empty", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validPKCEString(c.input)
+			if (err != nil) != c.wantErr {
+				t.Errorf("validPKCEString(%q) err=%v, wantErr=%v", c.input, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthorize_RejectsWeakPKCE(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"claude.ai"},
+		"redirect_uri":          {"https://claude.ai/cb"},
+		"code_challenge":        {"short"}, // <43 chars
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for weak challenge, got %d", rec.Code)
+	}
+}
+
+func TestToken_RejectsWeakVerifier(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	// Drive flow to obtain a code with a proper-length challenge.
+	_, challenge := pkceVerifierAndChallenge()
+	state := obtainAuthorizationCode(t, srv, mux, challenge)
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", state.code)
+	form.Set("client_id", "claude.ai")
+	form.Set("redirect_uri", "https://claude.ai/cb")
+	form.Set("code_verifier", "short") // <43 chars
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.serve("POST", "/oauth/token", rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for weak verifier, got %d", rec.Code)
+	}
+}
+
+func TestRegister_BodySizeCap(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.MaxRegisterBodyBytes = 256 })
+	mux := newMockRouter()
+	srv.Register(mux)
+	// 1 KB body — well over the 256-byte cap.
+	body := `{"client_name":"big","redirect_uris":["https://claude.ai/cb"]` +
+		strings.Repeat(`,"extra":"x"`, 100) + `}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.serve("POST", "/oauth/register", rec, req)
+	if rec.Code == http.StatusCreated {
+		t.Fatal("/oauth/register accepted a body larger than MaxRegisterBodyBytes")
+	}
+}
+
+func TestAuthorize_PendingCapEvictsOldest(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.MaxPendingAuth = 2 })
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	open := func() {
+		q := url.Values{
+			"response_type":         {"code"},
+			"client_id":             {"claude.ai"},
+			"redirect_uri":          {"https://claude.ai/cb"},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+		}
+		req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+		rec := httptest.NewRecorder()
+		mux.serve("GET", "/oauth/authorize", rec, req)
+	}
+	t0 := time.Now()
+	srv.clock = func() time.Time { return t0 }
+	open()
+	srv.clock = func() time.Time { return t0.Add(1 * time.Second) }
+	open()
+	srv.clock = func() time.Time { return t0.Add(2 * time.Second) }
+	open()
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if got := len(srv.pending); got != 2 {
+		t.Errorf("pending len = %d, want 2 (cap)", got)
+	}
+}
+
 func TestAuthorize_MissingPKCE(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()

@@ -101,6 +101,23 @@ type Config struct {
 	// kept simultaneously. When exceeded, the oldest entry is evicted on
 	// the next /oauth/register call. Defaults to 1000.
 	MaxRegisteredClients int
+	// MaxPendingAuth caps the size of the in-memory pending-authorize state
+	// map. /oauth/authorize is unauthenticated, so without this bound an
+	// attacker could push valid-looking requests and grow process memory
+	// until OOM. When exceeded, the oldest entry is evicted on the next
+	// /oauth/authorize call. Defaults to 5000.
+	MaxPendingAuth int
+	// MaxRegisterBodyBytes caps how many bytes /oauth/register will read
+	// from r.Body before bailing out. Default 64 KiB — generous for the
+	// RFC 7591 metadata fields we accept, tiny next to anything an
+	// attacker could send to OOM the JSON decoder.
+	MaxRegisterBodyBytes int64
+	// MaxRedirectURIs caps how many entries the registration endpoint
+	// accepts under redirect_uris. Default 16.
+	MaxRedirectURIs int
+	// MaxRedirectURILength caps each individual redirect URI string.
+	// Default 2048.
+	MaxRedirectURILength int
 	// JWTAudience overrides the aud claim emitted into newly minted access
 	// tokens. When empty (default), the access token has no aud — keeping
 	// token-side audience policy aligned with the localjwt verifier's
@@ -179,6 +196,18 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.MaxRegisteredClients == 0 {
 		cfg.MaxRegisteredClients = 1000
+	}
+	if cfg.MaxPendingAuth == 0 {
+		cfg.MaxPendingAuth = 5000
+	}
+	if cfg.MaxRegisterBodyBytes == 0 {
+		cfg.MaxRegisterBodyBytes = 64 * 1024
+	}
+	if cfg.MaxRedirectURIs == 0 {
+		cfg.MaxRedirectURIs = 16
+	}
+	if cfg.MaxRedirectURILength == 0 {
+		cfg.MaxRedirectURILength = 2048
 	}
 	issuer, err := localjwt.NewIssuer(cfg.JWTSecret, cfg.Issuer)
 	if err != nil {
@@ -337,6 +366,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthorizeError(w, "invalid_request", "PKCE S256 is required (code_challenge + code_challenge_method=S256)")
 		return
 	}
+	if err := validPKCEString(codeChallenge); err != nil {
+		s.writeAuthorizeError(w, "invalid_request", "code_challenge "+err.Error())
+		return
+	}
 	if err := s.validateClient(clientID, redirectURI); err != nil {
 		s.writeAuthorizeError(w, "invalid_client", err.Error())
 		return
@@ -346,7 +379,26 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// We DO NOT trust the client-supplied state — that survives only as a
 	// pass-through value the widget callback echoes back on redirect.
 	serverState := randomToken(32)
+	now := s.clock()
 	s.mu.Lock()
+	// Bound the pending map. /oauth/authorize is unauthenticated; without a
+	// cap an attacker could push enough authorize requests to OOM the
+	// process before any individual entry hits its TTL. The eviction is a
+	// linear scan but only fires when we are at the limit, and we are
+	// already under the mutex.
+	if s.cfg.MaxPendingAuth > 0 && len(s.pending) >= s.cfg.MaxPendingAuth {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, p := range s.pending {
+			if oldestKey == "" || p.CreatedAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = p.CreatedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.pending, oldestKey)
+		}
+	}
 	s.pending[serverState] = &pendingAuth{
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
@@ -354,7 +406,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Scope:               scope,
-		CreatedAt:           s.clock(),
+		CreatedAt:           now,
 	}
 	s.mu.Unlock()
 
@@ -496,6 +548,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "code, client_id, code_verifier are required", http.StatusBadRequest)
 		return
 	}
+	if err := validPKCEString(codeVerifier); err != nil {
+		writeTokenError(w, "invalid_request", "code_verifier "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	s.mu.Lock()
 	entry, ok := s.codes[code]
@@ -584,6 +640,13 @@ func writeTokenError(w http.ResponseWriter, code, desc string, status int) {
 // ----- /oauth/register (RFC 7591) -----
 
 func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request) {
+	// /oauth/register is unauthenticated. Wrap the body with MaxBytesReader
+	// before json.Decode so a 1-MB attack payload cannot force the JSON
+	// decoder to allocate proportional memory. The cap is generous for
+	// RFC 7591 metadata fields but a non-starter for OOM probes.
+	if s.cfg.MaxRegisterBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRegisterBodyBytes)
+	}
 	var req struct {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
@@ -595,6 +658,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	if len(req.RedirectURIs) == 0 {
 		writeTokenError(w, "invalid_client_metadata", "redirect_uris is required", http.StatusBadRequest)
 		return
+	}
+	if s.cfg.MaxRedirectURIs > 0 && len(req.RedirectURIs) > s.cfg.MaxRedirectURIs {
+		writeTokenError(w, "invalid_client_metadata", fmt.Sprintf("too many redirect_uris (max %d)", s.cfg.MaxRedirectURIs), http.StatusBadRequest)
+		return
+	}
+	for _, raw := range req.RedirectURIs {
+		if s.cfg.MaxRedirectURILength > 0 && len(raw) > s.cfg.MaxRedirectURILength {
+			writeTokenError(w, "invalid_redirect_uri", fmt.Sprintf("redirect_uri exceeds %d bytes", s.cfg.MaxRedirectURILength), http.StatusBadRequest)
+			return
+		}
 	}
 	// Apply the SAME scheme + host policy as implicit clients. Without
 	// this, a malicious /oauth/register call could supply an http://
@@ -738,6 +811,39 @@ func pkceVerify(verifier, challenge string) bool {
 	sum := sha256.Sum256([]byte(verifier))
 	computed := base64.RawURLEncoding.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
+}
+
+// PKCE length bounds per RFC 7636 §4.1 (code_verifier) and §4.2 (code_challenge):
+// both values are derived from a 43–128 character alphabet of unreserved
+// ASCII. Accepting shorter values would weaken the brute-force-resistance
+// PKCE is meant to provide on the redirect_uri interception path.
+const (
+	pkceMinLen = 43
+	pkceMaxLen = 128
+)
+
+// validPKCEString returns nil when s satisfies RFC 7636's syntax for both the
+// code_challenge and the code_verifier: 43–128 characters drawn from
+// [A-Z][a-z][0-9]-._~. Any character outside that set or any length outside
+// the range is rejected.
+func validPKCEString(s string) error {
+	n := len(s)
+	if n < pkceMinLen || n > pkceMaxLen {
+		return fmt.Errorf("must be %d–%d characters (got %d)", pkceMinLen, pkceMaxLen, n)
+	}
+	for i := 0; i < n; i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z',
+			c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '-' || c == '.' || c == '_' || c == '~':
+			// allowed unreserved
+		default:
+			return fmt.Errorf("contains disallowed character %q at index %d (only [A-Za-z0-9-._~] permitted)", c, i)
+		}
+	}
+	return nil
 }
 
 // randomToken returns a base64url-encoded random string of approximately the
