@@ -81,8 +81,10 @@ type loginFlow struct {
 // startLoginFlow launches telegram.Login in a background goroutine driven by
 // channels. The goroutine owns a context with a CodeTTL deadline so it always
 // terminates even if the user abandons the browser; cancel releases it sooner
-// when a /start re-submission supersedes it.
-func (s *Server) startLoginFlow(uid int64, phone string, sendOptIn bool) *loginFlow {
+// when a /start re-submission supersedes it. wantTgID is the widget-proven
+// Telegram id — the goroutine rejects the flow if the phone login resolves to
+// a different account.
+func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn bool) *loginFlow {
 	lf := &loginFlow{
 		codeCh:   make(chan string),
 		pwCh:     make(chan string),
@@ -124,6 +126,17 @@ func (s *Server) startLoginFlow(uid int64, phone string, sendOptIn bool) *loginF
 		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword)
 		if err != nil {
 			lf.err = err
+			return
+		}
+		// Identity binding. The Telegram account that just completed
+		// phone/SMS/2FA MUST be the same one the widget proved. Otherwise an
+		// admin authenticated as account A could enter account B's phone and
+		// end up operating B's messages through A's token. telegram.Login has
+		// already persisted B's session bytes via the gotd SessionStore, so
+		// revoke that row before bailing out.
+		if tgID != wantTgID {
+			_, _ = s.store.RevokeActiveSession(bgCtx, uid)
+			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
 		}
 		// Replicate cmd/login/main.go: telegram.Login persists the raw
@@ -214,7 +227,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 	es.phone = phone
 	es.sendOptIn = sendOptIn
-	es.flow = s.startLoginFlow(es.uid, phone, sendOptIn)
+	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
 	es.step = stepCode
 	lf := es.flow
 

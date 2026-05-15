@@ -320,14 +320,28 @@ func (s *Server) sweep(now time.Time) {
 			}
 		}
 	}
-	// Abandoned enable_access flows. We only drop the map entry here; the
-	// background login goroutine self-terminates because its context carries
-	// a CodeTTL deadline (see startLoginFlow). Reaching into entry.flow to
-	// cancel early would race a concurrent /start handler reassigning it.
+	// Abandoned enable_access flows: drop the map entry and best-effort
+	// cancel the background login goroutine.
 	for k, e := range s.enables {
 		if now.Sub(e.createdAt) > s.cfg.CodeTTL {
+			cancelEnableFlow(e)
 			delete(s.enables, k)
 		}
+	}
+}
+
+// cancelEnableFlow best-effort cancels the background login goroutine of an
+// enable_access session that is being dropped (swept or evicted). It runs
+// under s.mu; the TryLock keeps it free of a lock-ordering hazard against the
+// handler path (a handler holds e.lock, then may take s.mu) — if a handler is
+// mid-step we simply skip, and the goroutine's own CodeTTL-bounded context
+// still terminates it.
+func cancelEnableFlow(e *enableSession) {
+	if e.lock.TryLock() {
+		if e.flow != nil && e.flow.cancel != nil {
+			e.flow.cancel()
+		}
+		e.lock.Unlock()
 	}
 }
 
@@ -605,8 +619,20 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	// in-browser enable_access flow to provision one. Non-admins get the
 	// code regardless: their token carries no scopes, so an MTProto session
 	// would be unusable — no point collecting their phone number.
-	if _, sessErr := s.store.CheckSessionValid(r.Context(), uid); sessErr == nil {
+	_, sessErr := s.store.CheckSessionValid(r.Context(), uid)
+	switch {
+	case sessErr == nil:
+		// A valid session exists — issue the code directly.
 		s.issueAuthCode(w, r, oc)
+		return
+	case errors.Is(sessErr, db.ErrNoActiveSession), errors.Is(sessErr, db.ErrSessionExpired):
+		// Expected: no usable session. Fall through to the enable_access
+		// decision below.
+	default:
+		// An unexpected storage error must not be silently treated as
+		// "no session" — that would divert the user into re-login (and a
+		// possible session overwrite) on a transient DB blip.
+		http.Error(w, fmt.Sprintf("session check failed: %v", sessErr), http.StatusInternalServerError)
 		return
 	}
 	if !s.cfg.AdminTelegramIDs[payload.ID] {
@@ -633,6 +659,9 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if oldestKey != "" {
+			if old := s.enables[oldestKey]; old != nil {
+				cancelEnableFlow(old)
+			}
 			delete(s.enables, oldestKey)
 		}
 	}

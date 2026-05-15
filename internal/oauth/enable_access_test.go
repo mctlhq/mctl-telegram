@@ -115,6 +115,26 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 	}
 }
 
+// stubLoginWrongAccount fakes a login that succeeds but resolves to a
+// different Telegram account than the widget-proven one (id 210408407). It
+// persists session bytes first, mimicking gotd, so the test can assert the
+// identity-mismatch path revokes them.
+func stubLoginWrongAccount() LoginFunc {
+	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
+		uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+	) (int64, string, string, error) {
+		if _, err := askCode(ctx); err != nil {
+			return 0, "", "", err
+		}
+		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
+			return 0, "", "", err
+		}
+		return 999000111, "Someone Else", "someoneelse", nil
+	}
+}
+
 func postForm(t *testing.T, mux *chi.Mux, path string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
@@ -356,5 +376,33 @@ func TestEnableAccess_NonAdminSkipsFlow(t *testing.T) {
 	rec = postForm(t, mux, "/oauth/telegram/callback", form)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("non-admin callback = %d (want 302 straight to code); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEnableAccess_TelegramIDMismatch_Rejected confirms that a phone login
+// resolving to a different Telegram account than the widget identity is
+// rejected, and that the wrong-account session bytes are revoked.
+func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK {
+		t.Fatalf("start: %d", rec.Code)
+	}
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mismatch code step = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "different Telegram account") {
+		t.Errorf("expected an identity-mismatch error, got: %s", rec.Body.String())
+	}
+
+	// The wrong-account session bytes must have been revoked, not left valid.
+	ctx := context.Background()
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if _, err := srv.store.CheckSessionValid(ctx, uid); err == nil {
+		t.Error("wrong-account session was left valid after the mismatch")
 	}
 }
