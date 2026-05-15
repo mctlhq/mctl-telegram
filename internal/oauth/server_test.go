@@ -339,6 +339,94 @@ func TestAuthorize_RejectsUnknownClient_WhenImplicitDisabled(t *testing.T) {
 	}
 }
 
+func TestToken_EchoesGrantedScope(t *testing.T) {
+	// Non-admin telegram id → empty scope set. Token response must reflect
+	// that, not echo back whatever the client claimed it wanted.
+	srv := newTestServer(t, func(c *Config) {
+		c.AdminTelegramIDs = map[int64]bool{} // empty allowlist
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	verifier, challenge := pkceVerifierAndChallenge()
+
+	// authorize with a fake "requested" scope that the user is NOT entitled to.
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"claude.ai"},
+		"redirect_uri":          {"https://claude.ai/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"telegram:messages:send admin:users"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	state := extractServerStateFromHTML(t, rec.Body.String())
+
+	// widget callback with non-admin id.
+	now := time.Now()
+	fields := map[string]string{
+		"id":        "999", // not in AdminTelegramIDs
+		"auth_date": strconv.FormatInt(now.Unix(), 10),
+	}
+	fields["hash"] = signWidget(t, fields)
+	form := url.Values{"st": {state}}
+	for k, v := range fields {
+		form.Set(k, v)
+	}
+	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	mux.serve("POST", "/oauth/telegram/callback", rec, req)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	code := loc.Query().Get("code")
+
+	// token exchange.
+	form = url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("client_id", "claude.ai")
+	form.Set("redirect_uri", "https://claude.ai/cb")
+	form.Set("code_verifier", verifier)
+	req = httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	mux.serve("POST", "/oauth/token", rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token status = %d", rec.Code)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if scope, ok := resp["scope"].(string); !ok {
+		t.Fatal("scope field missing from token response")
+	} else if scope != "" {
+		t.Errorf("non-admin granted scope = %q, want empty (not the requested telegram:messages:send)", scope)
+	}
+}
+
+func TestLookupClientName_UnregisteredNotBranded(t *testing.T) {
+	srv := newTestServer(t)
+	got := srv.lookupClientName("attacker-chosen-client-id")
+	if strings.Contains(strings.ToLower(got), "claude") {
+		t.Errorf("lookupClientName branded unregistered client as Claude: %q", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "unknown") {
+		t.Errorf("expected neutral 'unknown' label, got %q", got)
+	}
+}
+
+func TestLookupClientName_Registered(t *testing.T) {
+	srv := newTestServer(t)
+	srv.clients["c1"] = &clientReg{
+		ClientID:     "c1",
+		ClientName:   "Acme Web",
+		RedirectURIs: []string{"https://acme.example/cb"},
+	}
+	if got := srv.lookupClientName("c1"); got != "Acme Web" {
+		t.Errorf("lookupClientName(registered) = %q, want %q", got, "Acme Web")
+	}
+}
+
 func TestRegister_ReturnsClientID(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()

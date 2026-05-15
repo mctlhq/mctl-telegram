@@ -22,6 +22,7 @@ package oauth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -502,8 +503,16 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"token_type":   "Bearer",
 		"expires_in":   int(s.cfg.AccessTokenTTL.Seconds()),
 	}
-	if entry.Scope != "" {
-		resp["scope"] = entry.Scope
+	// Echo the *granted* scope set, not what the client asked for. A
+	// non-admin who asks for "telegram:messages:send" still gets an empty
+	// JWT scope set, and the token response must mirror that so the client
+	// does not believe it has privileges it cannot exercise. Per RFC 6749
+	// §5.1 we MUST include scope when it differs from the request, and we
+	// always include it here for clarity.
+	if len(scopes) > 0 {
+		resp["scope"] = strings.Join(scopes, " ")
+	} else {
+		resp["scope"] = ""
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -610,23 +619,36 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
 }
 
+// lookupClientName returns a label safe to render on the consent screen.
+// Registered clients get their declared name; unregistered (implicit)
+// clients get a neutral "Unknown application" plus a truncated client_id so
+// the user can still distinguish two simultaneous attempts. We deliberately
+// do NOT default to a recognised brand like "Claude" — an attacker with an
+// allowlisted redirect_uri host could otherwise craft a phishing consent
+// screen by picking a client_id no one has registered.
 func (s *Server) lookupClientName(clientID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c, ok := s.clients[clientID]; ok && c.ClientName != "" {
 		return c.ClientName
 	}
-	return "Claude"
+	id := clientID
+	if len(id) > 16 {
+		id = id[:13] + "…"
+	}
+	return "Unknown application (" + id + ")"
 }
 
 // pkceVerify checks that SHA256(verifier) base64url-encoded equals challenge.
-// Per RFC 7636 §4.6.
+// Per RFC 7636 §4.6. Uses subtle.ConstantTimeCompare so a timing oracle does
+// not leak how many leading bytes of the challenge match.
 func pkceVerify(verifier, challenge string) bool {
 	if verifier == "" || challenge == "" {
 		return false
 	}
 	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:]) == challenge
+	computed := base64.RawURLEncoding.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
 // randomToken returns a base64url-encoded random string of approximately the

@@ -200,9 +200,16 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "local-jwt":
+		// Use the canonicalised issuer (trailing slash stripped) so the
+		// minting path in registerOAuth and the verify path here always
+		// agree, regardless of whether the operator wrote PUBLIC_BASE_URL
+		// with or without a trailing slash. Without this normalization a
+		// values.yaml change from "https://tg.mctl.ai" to "https://tg.mctl.ai/"
+		// would silently break every bearer token because iss claim and
+		// expected issuer would differ by one byte.
 		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
-			ExpectedIssuer:   cfg.PublicBaseURL,
+			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: cfg.OAUTHJWTAudience,
 			AudienceRequired: cfg.OAUTHJWTAudReq,
 		})
@@ -289,11 +296,31 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 // are accepted. Regular MCP tokens (no aud or aud != "bridge") are rejected,
 // preventing cross-channel token reuse.
 //
-// In local-dev mode, the bridge endpoint falls back to the same localdev
-// bypass — useful when running without a real JWT secret.
+// Mode parity with selectProvider: the bridge endpoint must use the same
+// signing key + issuer convention as the MCP path, otherwise a switch to
+// AUTH_MODE=local-jwt would silently downgrade /bridge to localdev (any
+// connection accepted, daemon registers as fixed operator). Each non-local-
+// dev mode therefore has an explicit branch here.
 func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
-	switch strings.ToLower(cfg.AuthMode) {
-	case "shared-hmac":
+	mode := strings.ToLower(cfg.AuthMode)
+	switch mode {
+	case "local-jwt":
+		if cfg.OAUTHJWTSecret == "" {
+			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
+			return localdev.New(store, cfg.OperatorLogin)
+		}
+		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
+			ExpectedAudience: "bridge",
+			AudienceRequired: true,
+		})
+		if err != nil {
+			slog.Error("bridge: local-jwt init failed; bridge endpoint disabled", "err", err)
+			os.Exit(1)
+		}
+		return p
+	case "shared-hmac", "shared-hmac-legacy":
 		if cfg.OAUTHJWTSecret == "" {
 			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
 			return localdev.New(store, cfg.OperatorLogin)
