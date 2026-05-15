@@ -54,6 +54,74 @@ func (s *Store) EnsureUser(ctx context.Context, login, email, provider string) (
 	return id, nil
 }
 
+// EnsureUserByTelegramID is the Telegram-native counterpart of EnsureUser.
+// It is the canonical identity-binding call for the localjwt provider and
+// the OAuth Login Widget callback: given a Telegram user id (and optional
+// username/displayName), it returns the internal users.id row, creating one
+// if absent.
+//
+// SQLite still requires github_login NOT NULL — we satisfy the constraint by
+// stamping a synthetic "tg:<id>" string so legacy code that joins on
+// github_login keeps working. New code should always prefer telegram_login_id.
+// On Postgres the column has been dropped to nullable, but we still stamp
+// the synthetic value for cross-dialect consistency.
+//
+// The optional username/displayName are refreshed on every call so the row
+// stays current when Telegram returns newer values during widget reauth.
+//
+// Race safety: this function is called concurrently from /oauth/* and the
+// localjwt middleware on bearer auth. A naive read-then-insert pattern would
+// allow two callers to both observe sql.ErrNoRows and then race on the
+// UNIQUE index — one would succeed, the other would surface a 500. We use
+// INSERT ... ON CONFLICT DO NOTHING followed by a SELECT, which is safe
+// under SERIALIZABLE/RC isolation on both Postgres and SQLite (the loser of
+// the race simply observes the winner's row on the SELECT).
+func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username, displayName string) (int64, error) {
+	if tgID <= 0 {
+		return 0, errors.New("telegram id must be positive")
+	}
+	syntheticLogin := fmt.Sprintf("tg:%d", tgID)
+	// Insert-or-no-op. ON CONFLICT covers both the telegram_login_id unique
+	// partial index and the legacy github_login UNIQUE constraint — we use
+	// the unqualified DO NOTHING form which fires on any conflict.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO users(github_login, provider, telegram_login_id, telegram_username, telegram_display_name)
+		 VALUES($1,$2,$3,$4,$5)
+		 ON CONFLICT DO NOTHING`,
+		syntheticLogin, "tg-mcp", tgID, nullable(username), nullable(displayName),
+	); err != nil {
+		return 0, fmt.Errorf("insert user by tg_id: %w", err)
+	}
+	var id int64
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE telegram_login_id=$1`, tgID,
+	).Scan(&id); err != nil {
+		// Fall back to the synthetic github_login lookup in the unlikely
+		// case that an older row already carries the synthetic login but
+		// has not been backfilled with telegram_login_id yet.
+		if errors.Is(err, sql.ErrNoRows) {
+			if err2 := s.DB.QueryRowContext(ctx,
+				`SELECT id FROM users WHERE github_login=$1`, syntheticLogin,
+			).Scan(&id); err2 != nil {
+				return 0, fmt.Errorf("select user by tg_id (fallback): %w", err2)
+			}
+		} else {
+			return 0, fmt.Errorf("select user by tg_id: %w", err)
+		}
+	}
+	// Best-effort refresh of metadata. Idempotent and safe to skip on error
+	// because the next call will retry; surfacing it would block auth.
+	if username != "" || displayName != "" {
+		_, _ = s.DB.ExecContext(ctx,
+			`UPDATE users SET telegram_username = COALESCE(NULLIF($1,''), telegram_username),
+			                  telegram_display_name = COALESCE(NULLIF($2,''), telegram_display_name)
+			 WHERE id = $3`,
+			username, displayName, id,
+		)
+	}
+	return id, nil
+}
+
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
 // Any prior active row for the user is marked revoked. Writes always use
 // SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read

@@ -17,12 +17,14 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
@@ -88,14 +90,32 @@ func main() {
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
 
+	// Authorization server URL — for the Telegram-native local-jwt path
+	// (default), this is the same as PublicBaseURL: mctl-telegram is its own
+	// issuer. The legacy shared-hmac-legacy path keeps pointing at
+	// api.mctl.ai.
+	authServer := selectAuthServer(cfg)
+
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
-	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg))
+	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg, authServer))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
-	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath))
+	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer))
 	mux.Get("/security", web.Security())
 	mux.Get("/privacy", web.Privacy())
+
+	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
+	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,
+	// /oauth/register, and /.well-known/oauth-authorization-server. The
+	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
+	// to api.mctl.ai as before.
+	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
+		if err := registerOAuth(cfg, store, mux); err != nil {
+			slog.Error("oauth init failed; refusing to start", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	provider := selectProvider(cfg, store)
 
@@ -112,9 +132,14 @@ func main() {
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
 	// uses to register its websocket connection at GET /bridge.
+	//
+	// Issuer parity matters here: bridge token iss MUST match what
+	// selectBridgeProvider configures as ExpectedIssuer, or every minted
+	// token would be rejected at /bridge. selectBridgeIssuer maps the same
+	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true)).Post("/api/bridge/token",
-			bridge.NewBridgeTokenHandler(provider, []byte(secret)))
+			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
@@ -169,12 +194,36 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // selectProvider picks the auth.Provider implementation based on AUTH_MODE.
-// "local-dev" is the operator-fixed bypass (safe only behind 127.0.0.1).
-// "shared-hmac" reuses mctl-api's OAUTH_JWT_SECRET to verify JWTs in-band —
-// see SECURITY.md for the documented coupling caveat.
+//
+//   - "local-dev" — fixed-identity bypass (safe only behind 127.0.0.1).
+//   - "local-jwt" — mctl-telegram is its own OAuth issuer (Telegram Login
+//     Widget → JWT with iss=PublicBaseURL, verified by localjwt.Provider).
+//   - "shared-hmac-legacy" — backwards compat for deployments that still
+//     trust JWTs signed by api.mctl.ai via the shared OAUTH_JWT_SECRET.
+//     "shared-hmac" is accepted as an alias for the legacy mode for the
+//     duration of one minor release.
 func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 	switch strings.ToLower(cfg.AuthMode) {
-	case "shared-hmac":
+	case "local-jwt":
+		// Use the canonicalised issuer (trailing slash stripped) so the
+		// minting path in registerOAuth and the verify path here always
+		// agree, regardless of whether the operator wrote PUBLIC_BASE_URL
+		// with or without a trailing slash. Without this normalization a
+		// values.yaml change from "https://tg.mctl.ai" to "https://tg.mctl.ai/"
+		// would silently break every bearer token because iss claim and
+		// expected issuer would differ by one byte.
+		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
+			ExpectedAudience: cfg.OAUTHJWTAudience,
+			AudienceRequired: cfg.OAUTHJWTAudReq,
+		})
+		if err != nil {
+			slog.Error("local-jwt init failed; refusing to start", "err", err)
+			os.Exit(1)
+		}
+		return p
+	case "shared-hmac", "shared-hmac-legacy":
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
 			ExpectedIssuer:   "https://api.mctl.ai",
@@ -194,20 +243,117 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 	}
 }
 
+// selectAuthServer returns the canonical authorization server URL for this
+// deployment. Returns empty string for modes where the OAuth routes are not
+// mounted — advertising an authorization_server that has no endpoints confuses
+// OAuth clients that discover the metadata before trying to authenticate.
+func selectAuthServer(cfg *config.Config) string {
+	switch strings.ToLower(cfg.AuthMode) {
+	case "local-jwt":
+		return strings.TrimRight(cfg.PublicBaseURL, "/")
+	case "shared-hmac", "shared-hmac-legacy":
+		return "https://api.mctl.ai"
+	default: // local-dev: OAuth routes are not mounted
+		return ""
+	}
+}
+
+// selectBridgeIssuer returns the iss value to stamp into bridge tokens minted
+// at POST /api/bridge/token. Must match the ExpectedIssuer configured on the
+// bridge auth.Provider via selectBridgeProvider — keep these two in lockstep
+// or every bridge token will be rejected as "unexpected JWT issuer".
+func selectBridgeIssuer(cfg *config.Config) string {
+	switch strings.ToLower(cfg.AuthMode) {
+	case "shared-hmac", "shared-hmac-legacy":
+		return "https://api.mctl.ai"
+	default:
+		return strings.TrimRight(cfg.PublicBaseURL, "/")
+	}
+}
+
+// registerOAuth wires the Telegram-native OAuth issuer onto the router.
+// Called only when AUTH_MODE=local-jwt.
+func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
+	if cfg.OAUTHJWTSecret == "" {
+		return fmt.Errorf("OAUTH_JWT_SECRET is required when AUTH_MODE=local-jwt")
+	}
+	if cfg.TelegramLoginBotToken == "" {
+		return fmt.Errorf("TELEGRAM_LOGIN_BOT_TOKEN is required when AUTH_MODE=local-jwt")
+	}
+	if cfg.TelegramLoginBotUsername == "" {
+		return fmt.Errorf("TELEGRAM_LOGIN_BOT_USERNAME is required when AUTH_MODE=local-jwt")
+	}
+	admins := map[int64]bool{}
+	for _, id := range cfg.TGLoginAdmins {
+		admins[id] = true
+	}
+	srv, err := oauth.New(oauth.Config{
+		Issuer:              strings.TrimRight(cfg.PublicBaseURL, "/"),
+		JWTSecret:           []byte(cfg.OAUTHJWTSecret),
+		JWTAudience:         cfg.OAUTHJWTAudience,
+		BotToken:            cfg.TelegramLoginBotToken,
+		BotUsername:         cfg.TelegramLoginBotUsername,
+		AdminTelegramIDs:    admins,
+		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
+		CodeTTL:             cfg.OAUTHCodeTTL,
+		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
+	}, store)
+	if err != nil {
+		return err
+	}
+	srv.Register(mux)
+	stopSweep := make(chan struct{})
+	srv.StartSweeper(stopSweep, 1*time.Minute)
+	slog.Info("oauth issuer enabled",
+		"issuer", cfg.PublicBaseURL,
+		"bot_username", cfg.TelegramLoginBotUsername,
+		"admin_count", len(admins),
+		"implicit_clients", cfg.OAUTHAllowImplicitClient,
+	)
+	return nil
+}
+
 // selectBridgeProvider builds an auth.Provider for the /bridge websocket
 // endpoint. It behaves like selectProvider but enforces AudienceRequired=true
 // and ExpectedAudience="bridge" so only tokens issued by NewBridgeTokenHandler
 // are accepted. Regular MCP tokens (no aud or aud != "bridge") are rejected,
 // preventing cross-channel token reuse.
 //
-// In local-dev mode, the bridge endpoint falls back to the same localdev
-// bypass — useful when running without a real JWT secret.
+// Mode parity with selectProvider: the bridge endpoint must use the same
+// signing key + issuer convention as the MCP path, otherwise a switch to
+// AUTH_MODE=local-jwt would silently downgrade /bridge to localdev (any
+// connection accepted, daemon registers as fixed operator). Each non-local-
+// dev mode therefore has an explicit branch here.
+//
+// Fail-closed posture: when AUTH_MODE expects a JWT but OAUTH_JWT_SECRET is
+// missing, we DO NOT fall back to localdev — that would let an unauthenticated
+// remote client register a bridge daemon as the fixed operator account in
+// `local` mode. Instead we return rejectAllProvider so every /bridge request
+// gets 401 and the operator sees the misconfiguration loudly. localdev
+// fallback is reserved for AUTH_MODE=local-dev (developer-only).
 func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
-	switch strings.ToLower(cfg.AuthMode) {
-	case "shared-hmac":
+	mode := strings.ToLower(cfg.AuthMode)
+	switch mode {
+	case "local-jwt":
 		if cfg.OAUTHJWTSecret == "" {
-			slog.Warn("bridge: OAUTH_JWT_SECRET not set, bridge endpoint will reject all connections")
-			return localdev.New(store, cfg.OperatorLogin)
+			slog.Error("bridge: OAUTH_JWT_SECRET not set in local-jwt mode; /bridge will fail closed")
+			return rejectAllProvider("bridge auth: OAUTH_JWT_SECRET not configured")
+		}
+		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
+			ExpectedAudience: "bridge",
+			AudienceRequired: true,
+		})
+		if err != nil {
+			slog.Error("bridge: local-jwt init failed; bridge endpoint disabled", "err", err)
+			os.Exit(1)
+		}
+		return p
+	case "shared-hmac", "shared-hmac-legacy":
+		if cfg.OAUTHJWTSecret == "" {
+			slog.Error("bridge: OAUTH_JWT_SECRET not set in shared-hmac mode; /bridge will fail closed")
+			return rejectAllProvider("bridge auth: OAUTH_JWT_SECRET not configured")
 		}
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
@@ -221,17 +367,46 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		}
 		return p
 	default:
+		// AUTH_MODE=local-dev (or unknown → falls through to localdev in
+		// selectProvider). The whole server is already in developer-bypass
+		// mode in this branch — using localdev on /bridge as well keeps the
+		// local CLI workflow functional without re-introducing a
+		// production fail-open.
 		return localdev.New(store, cfg.OperatorLogin)
 	}
 }
 
+// rejectAllProvider returns an auth.Provider that fails every request with a
+// fixed error. Used as the fail-closed fallback when a deployment requests
+// JWT-based auth but never supplied a signing secret — better to lock the
+// endpoint than to silently downgrade to a developer-bypass identity.
+func rejectAllProvider(reason string) auth.Provider {
+	return rejectProvider{reason: reason}
+}
+
+type rejectProvider struct{ reason string }
+
+func (p rejectProvider) Authenticate(_ *http.Request) (*auth.Identity, error) {
+	return nil, errors.New(p.reason)
+}
+
 // protectedResource serves the RFC 9728 OAuth Protected Resource Metadata so
-// claude.ai's connector knows api.mctl.ai is the authorization server even
-// though tg-mcp lives on a different host.
-func protectedResource(cfg *config.Config) http.HandlerFunc {
+// claude.ai's connector knows which authorization server to talk to. In the
+// Telegram-native local-jwt mode this is the same service (PublicBaseURL);
+// in shared-hmac-legacy mode it stays pointed at api.mctl.ai; in local-dev
+// mode authServer is empty and the authorization_servers array is omitted so
+// OAuth clients do not discover endpoints that are not mounted.
+func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
+	var authServersJSON string
+	if authServer != "" {
+		authServersJSON = fmt.Sprintf("[%q]", authServer)
+	} else {
+		authServersJSON = "[]"
+	}
 	body := []byte(fmt.Sprintf(
-		`{"resource":%q,"authorization_servers":["https://api.mctl.ai"],"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin"]}`,
+		`{"resource":%q,"authorization_servers":%s,"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin","admin:users"]}`,
 		cfg.PublicBaseURL,
+		authServersJSON,
 	))
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

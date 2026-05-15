@@ -11,12 +11,12 @@ import (
 )
 
 type SendResult struct {
-	Mode       string `json:"mode"` // "send" or "draft"
-	PeerInput  string `json:"peer"`
-	Text       string `json:"text"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	MessageID  int    `json:"message_id,omitempty"`
-	DryReason  string `json:"dry_reason,omitempty"`
+	Mode      string `json:"mode"` // "send" or "draft"
+	PeerInput string `json:"peer"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated,omitempty"`
+	MessageID int    `json:"message_id,omitempty"`
+	DryReason string `json:"dry_reason,omitempty"`
 }
 
 // SendMessage either sends a real message (mode="send" and gate allows) or

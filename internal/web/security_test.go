@@ -52,7 +52,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 
 func TestLanding_HasTransparencySections(t *testing.T) {
 	w := httptest.NewRecorder()
-	Landing("https://tg.mctl.ai", "/mcp").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
