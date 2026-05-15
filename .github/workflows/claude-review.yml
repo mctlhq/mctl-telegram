@@ -1,0 +1,63 @@
+name: Claude PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    # pull_request: review every non-draft PR on open/reopen/ready.
+    # issue_comment: only when a comment on a PR contains "@claude review"
+    # (re-review after a fix-up).
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@claude review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--model claude-sonnet-4-6 --max-turns 20'
+          prompt: |
+            You are the automated code reviewer for this pull request. Review
+            the PR diff thoroughly.
+
+            Focus on:
+            - Correctness and logic errors; edge cases the change misses.
+            - Security: injection, authentication/authorization, secret
+              handling, unsafe input.
+            - Concurrency: data races, deadlocks, goroutine leaks.
+            - Error handling: ignored errors, missing context, panics.
+            - Test coverage: behaviour changed without a corresponding test.
+
+            Follow the conventions in this repository's CLAUDE.md (Go style,
+            conventional commits, English only, no emoji).
+
+            If the diff is trivial — only config/values YAML (hostname, env
+            var, image tag, resource limits, replica count), a dependency bump
+            with no logic change, docs/comments, or a one-line typo — reply
+            with a single short approval line and nothing else.
+
+            Otherwise post findings as inline review comments. Prefix each
+            finding with a severity tag:
+            - P1 — must fix before merge (bug, security hole, data loss).
+            - P2 — should fix before merge (likely bug, missing test, unsafe
+              pattern).
+            - P3 — nice to have (style, minor nit); does not block merge.
+
+            End with a summary comment: the count of P1/P2/P3 findings and an
+            explicit verdict — "No P1/P2 findings, good to merge" or "Has
+            P1/P2 findings, changes requested". Be concise; do not restate the
+            diff.
