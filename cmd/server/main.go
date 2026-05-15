@@ -244,13 +244,17 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 }
 
 // selectAuthServer returns the canonical authorization server URL for this
-// deployment. local-jwt → self (PublicBaseURL); shared-hmac → api.mctl.ai.
+// deployment. Returns empty string for modes where the OAuth routes are not
+// mounted — advertising an authorization_server that has no endpoints confuses
+// OAuth clients that discover the metadata before trying to authenticate.
 func selectAuthServer(cfg *config.Config) string {
 	switch strings.ToLower(cfg.AuthMode) {
+	case "local-jwt":
+		return strings.TrimRight(cfg.PublicBaseURL, "/")
 	case "shared-hmac", "shared-hmac-legacy":
 		return "https://api.mctl.ai"
-	default:
-		return strings.TrimRight(cfg.PublicBaseURL, "/")
+	default: // local-dev: OAuth routes are not mounted
+		return ""
 	}
 }
 
@@ -389,12 +393,20 @@ func (p rejectProvider) Authenticate(_ *http.Request) (*auth.Identity, error) {
 // protectedResource serves the RFC 9728 OAuth Protected Resource Metadata so
 // claude.ai's connector knows which authorization server to talk to. In the
 // Telegram-native local-jwt mode this is the same service (PublicBaseURL);
-// in shared-hmac-legacy mode it stays pointed at api.mctl.ai.
+// in shared-hmac-legacy mode it stays pointed at api.mctl.ai; in local-dev
+// mode authServer is empty and the authorization_servers array is omitted so
+// OAuth clients do not discover endpoints that are not mounted.
 func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
+	var authServersJSON string
+	if authServer != "" {
+		authServersJSON = fmt.Sprintf("[%q]", authServer)
+	} else {
+		authServersJSON = "[]"
+	}
 	body := []byte(fmt.Sprintf(
-		`{"resource":%q,"authorization_servers":[%q],"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin","admin:users"]}`,
+		`{"resource":%q,"authorization_servers":%s,"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin","admin:users"]}`,
 		cfg.PublicBaseURL,
-		authServer,
+		authServersJSON,
 	))
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

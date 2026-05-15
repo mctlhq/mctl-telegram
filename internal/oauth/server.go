@@ -379,6 +379,22 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthorizeError(w, "invalid_request", "code_challenge "+err.Error())
 		return
 	}
+	// Bound client-controlled strings. /oauth/authorize is unauthenticated and
+	// stores each request in the in-memory pending map; without length limits an
+	// attacker can fill entries with near-header-limit strings and drive the
+	// process to OOM before TTL eviction fires.
+	if len(redirectURI) > 2048 {
+		s.writeAuthorizeError(w, "invalid_request", "redirect_uri exceeds 2048 bytes")
+		return
+	}
+	if len(state) > 512 {
+		s.writeAuthorizeError(w, "invalid_request", "state exceeds 512 bytes")
+		return
+	}
+	if len(scope) > 1024 {
+		s.writeAuthorizeError(w, "invalid_request", "scope exceeds 1024 bytes")
+		return
+	}
 	if err := s.validateClient(clientID, redirectURI); err != nil {
 		s.writeAuthorizeError(w, "invalid_client", err.Error())
 		return
@@ -768,9 +784,19 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 		}
 	}
 	host := u.Hostname()
+	hostWithPort := u.Host
 	for _, allowed := range s.cfg.AllowedImplicitHosts {
-		if host == allowed {
-			return nil
+		// If the allowlist entry specifies a port, require an exact host:port
+		// match so that port-level separation is respected. Without a port in the
+		// entry, any port on the named host is permitted.
+		if strings.Contains(allowed, ":") {
+			if hostWithPort == allowed {
+				return nil
+			}
+		} else {
+			if host == allowed {
+				return nil
+			}
 		}
 	}
 	// Loopback addresses are accepted even when not explicitly listed in
@@ -833,9 +859,16 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 		}
 	}
 	host := u.Hostname()
+	hostWithPort := u.Host
 	for _, allowed := range s.cfg.AllowedImplicitHosts {
-		if host == allowed {
-			return nil
+		if strings.Contains(allowed, ":") {
+			if hostWithPort == allowed {
+				return nil
+			}
+		} else {
+			if host == allowed {
+				return nil
+			}
 		}
 	}
 	if isLoopbackHost(host) {
