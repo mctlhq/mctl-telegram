@@ -14,6 +14,21 @@ import (
 
 const pingInterval = 25 * time.Second
 
+// identityLabel returns a stable, log-safe label for an Identity across
+// auth providers. localjwt issues Identity.Subject (e.g. "tg:<id>"), the
+// shared-hmac and localdev providers populate GitHubLogin. We prefer the
+// Subject string when both are set so the log stays consistent regardless
+// of which provider authenticated the caller.
+func identityLabel(id *auth.Identity) string {
+	if id == nil {
+		return ""
+	}
+	if id.Subject != "" {
+		return id.Subject
+	}
+	return id.GitHubLogin
+}
+
 // NewBridgeHandler returns an http.HandlerFunc that upgrades HTTP connections
 // to websockets and wires them into the Hub as Local Bridge daemon connections.
 //
@@ -65,7 +80,7 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			return
 		}
 
-		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", id.GitHubLogin)
+		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id))
 		send := hub.Register(id.UserID)
 
 		// Parent context for both goroutines. Cancelling it stops the
@@ -131,6 +146,6 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		cancel()
 		hub.UnregisterSend(id.UserID, send)
 		_ = conn.Close(websocket.StatusNormalClosure, "done")
-		slog.Info("bridge: daemon disconnected", "user_id", id.UserID, "login", id.GitHubLogin)
+		slog.Info("bridge: daemon disconnected", "user_id", id.UserID, "login", identityLabel(id))
 	}
 }

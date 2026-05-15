@@ -132,9 +132,14 @@ func main() {
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
 	// uses to register its websocket connection at GET /bridge.
+	//
+	// Issuer parity matters here: bridge token iss MUST match what
+	// selectBridgeProvider configures as ExpectedIssuer, or every minted
+	// token would be rejected at /bridge. selectBridgeIssuer maps the same
+	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true)).Post("/api/bridge/token",
-			bridge.NewBridgeTokenHandler(provider, []byte(secret)))
+			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
@@ -241,6 +246,19 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 // selectAuthServer returns the canonical authorization server URL for this
 // deployment. local-jwt → self (PublicBaseURL); shared-hmac → api.mctl.ai.
 func selectAuthServer(cfg *config.Config) string {
+	switch strings.ToLower(cfg.AuthMode) {
+	case "shared-hmac", "shared-hmac-legacy":
+		return "https://api.mctl.ai"
+	default:
+		return strings.TrimRight(cfg.PublicBaseURL, "/")
+	}
+}
+
+// selectBridgeIssuer returns the iss value to stamp into bridge tokens minted
+// at POST /api/bridge/token. Must match the ExpectedIssuer configured on the
+// bridge auth.Provider via selectBridgeProvider — keep these two in lockstep
+// or every bridge token will be rejected as "unexpected JWT issuer".
+func selectBridgeIssuer(cfg *config.Config) string {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "shared-hmac", "shared-hmac-legacy":
 		return "https://api.mctl.ai"

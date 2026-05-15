@@ -125,7 +125,16 @@ func (r *RateLimiter) Middleware() func(http.Handler) http.Handler {
 }
 
 func identityKey(id *auth.Identity) string {
-	// Prefer GitHubLogin (stable string), fall back to user_id digits.
+	// Prefer Subject (e.g. "tg:<id>" from localjwt) since it is the
+	// canonical identifier across providers; fall back to GitHubLogin
+	// (set by sharedhmac-legacy and localdev) for older tokens, then to
+	// the numeric user_id as a last resort. Without the Subject branch a
+	// localjwt-authed caller would lose its per-identity bucket because
+	// GitHubLogin is empty and every caller would collapse onto the same
+	// "uid:<int>" key only when user_id happens to be the only difference.
+	if id.Subject != "" {
+		return "u:" + id.Subject
+	}
 	if id.GitHubLogin != "" {
 		return "u:" + id.GitHubLogin
 	}

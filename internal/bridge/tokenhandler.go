@@ -25,10 +25,18 @@ type bridgeTokenResponse struct {
 // with aud="bridge" that the Local Bridge daemon uses to authenticate its
 // websocket connection to GET /bridge.
 //
-// Signing uses IssueTestTokenWithAudience from the sharedhmac package — despite
-// the "Test" in the name the HMAC-SHA256 logic is identical to what mctl-api
-// issues for normal MCP JWTs, just with a different audience and shorter TTL.
-func NewBridgeTokenHandler(provider auth.Provider, secret []byte) http.HandlerFunc {
+// issuer is the value embedded in the JWT iss claim. It MUST match the
+// ExpectedIssuer configured on the bridge auth.Provider in main.go,
+// otherwise the bridge will reject every token this handler hands out. For
+// AUTH_MODE=shared-hmac-legacy that is "https://api.mctl.ai"; for
+// AUTH_MODE=local-jwt it is the deployment's PublicBaseURL (with trailing
+// slash stripped). main.go calls selectBridgeIssuer to derive it.
+//
+// Signing reuses the HMAC routine from internal/auth/sharedhmac — it is the
+// same canonical-JSON + HMAC-SHA256 algorithm regardless of which provider
+// later verifies the token, so we can hand the same primitive out to both
+// modes without depending on each provider's package.
+func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := auth.From(r.Context())
 		if id == nil {
@@ -38,15 +46,21 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte) http.HandlerFu
 			return
 		}
 
-		// Derive the issuer from the provider if possible. We use the same
-		// value that sharedhmac.New defaults to so tokens are accepted by a
-		// bridge Provider configured with the same issuer.
-		issuer := "https://api.mctl.ai"
+		// Subject preference matches Identity's canonical-identifier order:
+		// localjwt-issued tokens set Subject (e.g. "tg:<id>"); legacy
+		// shared-hmac tokens populate GitHubLogin. Without this fallback a
+		// local-jwt-authed caller would get an empty `sub` in the bridge
+		// token and the bridge would later reject it because EnsureUser
+		// rejects an empty login.
+		subject := id.Subject
+		if subject == "" {
+			subject = id.GitHubLogin
+		}
 
 		tok, err := sharedhmac.IssueTestTokenWithAudience(
 			secret,
 			issuer,
-			id.GitHubLogin,
+			subject,
 			id.Groups,
 			[]string{"bridge"},
 			bridgeTokenTTL,
