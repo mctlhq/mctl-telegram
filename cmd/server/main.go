@@ -297,6 +297,8 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
 		CodeTTL:             cfg.OAUTHCodeTTL,
 		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
+		TGAPIID:             cfg.TGAPIID,
+		TGAPIHash:           cfg.TGAPIHash,
 	}, store)
 	if err != nil {
 		return err

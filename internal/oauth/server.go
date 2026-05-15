@@ -20,6 +20,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -36,6 +37,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramwidget"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // Server wires the OAuth endpoints. Construct with New, mount handlers with
@@ -48,10 +50,30 @@ type Server struct {
 	clock    func() time.Time
 
 	mu      sync.Mutex
-	pending map[string]*pendingAuth // keyed by "state" issued at /oauth/authorize
-	codes   map[string]*authCode    // keyed by the authorization_code value
-	clients map[string]*clientReg   // keyed by client_id
+	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
+	codes   map[string]*authCode      // keyed by the authorization_code value
+	clients map[string]*clientReg     // keyed by client_id
+	enables map[string]*enableSession // keyed by the "es" token of an enable_access flow
+
+	// loginFn performs the Telegram MTProto phone -> code -> 2FA login. It is
+	// a field (not a direct telegram.Login call) so tests can substitute a
+	// stub without dialing real Telegram. New sets it to telegram.Login.
+	loginFn LoginFunc
 }
+
+// LoginFunc matches the signature of telegram.Login. The enable_access flow
+// drives it from a background goroutine with channel-backed askCode/askPassword
+// callbacks.
+type LoginFunc func(
+	ctx context.Context,
+	apiID int,
+	apiHash string,
+	store *db.Store,
+	userID int64,
+	phone string,
+	askCode func(context.Context) (string, error),
+	askPassword func(context.Context) (string, error),
+) (telegramUserID int64, displayName, username string, err error)
 
 // Config captures everything the OAuth server needs at construction time.
 type Config struct {
@@ -131,6 +153,18 @@ type Config struct {
 	// aud value, which lets operators run OAUTH_JWT_AUDIENCE_REQUIRED=true
 	// without breaking the in-band token flow.
 	JWTAudience string
+	// TGAPIID / TGAPIHash are the Telegram MTProto application credentials
+	// (my.telegram.org). The in-browser enable_access flow needs them to run
+	// the phone -> code -> 2FA login. When unset, enable_access reports a
+	// configuration error instead of dialing Telegram; the rest of the OAuth
+	// flow still works for users who already have a session.
+	TGAPIID   int
+	TGAPIHash string
+	// MaxPendingEnable caps the in-memory enable_access session map. Each
+	// admin who lands on the enable_access flow without a session inserts an
+	// entry; oldest-evict on insert keeps the public surface bounded.
+	// Defaults to 256.
+	MaxPendingEnable int
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the widget
@@ -218,6 +252,9 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	if cfg.MaxRedirectURILength == 0 {
 		cfg.MaxRedirectURILength = 2048
 	}
+	if cfg.MaxPendingEnable == 0 {
+		cfg.MaxPendingEnable = 256
+	}
 	issuer, err := localjwt.NewIssuer(cfg.JWTSecret, cfg.Issuer)
 	if err != nil {
 		return nil, err
@@ -235,6 +272,8 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 		pending:  map[string]*pendingAuth{},
 		codes:    map[string]*authCode{},
 		clients:  map[string]*clientReg{},
+		enables:  map[string]*enableSession{},
+		loginFn:  telegram.Login,
 	}, nil
 }
 
@@ -281,6 +320,15 @@ func (s *Server) sweep(now time.Time) {
 			}
 		}
 	}
+	// Abandoned enable_access flows. We only drop the map entry here; the
+	// background login goroutine self-terminates because its context carries
+	// a CodeTTL deadline (see startLoginFlow). Reaching into entry.flow to
+	// cancel early would race a concurrent /start handler reassigning it.
+	for k, e := range s.enables {
+		if now.Sub(e.createdAt) > s.cfg.CodeTTL {
+			delete(s.enables, k)
+		}
+	}
 }
 
 // ResolveScopes maps a Telegram identity to a scope set. For the MVP the
@@ -312,6 +360,12 @@ func (s *Server) Register(mux Router) {
 	mux.Post("/oauth/telegram/callback", s.handleWidgetCallback)
 	mux.Post("/oauth/token", s.handleToken)
 	mux.Post("/oauth/register", s.handleClientRegistration)
+	// In-browser "enable message access" flow. Public (no auth gate): the
+	// caller's identity is carried by the unguessable "es" token minted at
+	// the widget callback, which also serves as the CSRF token.
+	mux.Post("/oauth/telegram/enable_access/start", s.handleEnableStart)
+	mux.Post("/oauth/telegram/enable_access/code", s.handleEnableCode)
+	mux.Post("/oauth/telegram/enable_access/password", s.handleEnablePassword)
 }
 
 // Router is the minimum chi.Router surface we depend on. Lets us write
@@ -525,23 +579,92 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bind the Telegram identity to an internal users row. We do this even
-	// when the user is not in the admin allowlist — the row is needed so
-	// the localjwt provider can resolve UserID on subsequent /mcp calls,
-	// and so audit-log entries have something to reference.
-	if _, err := s.store.EnsureUserByTelegramID(r.Context(), payload.ID, payload.Username, strings.TrimSpace(payload.FirstName+" "+payload.LastName)); err != nil {
+	// Bind the Telegram identity to an internal users row. EnsureUserByTelegramID
+	// is keyed by telegram_login_id, so the MTProto session the enable_access
+	// flow provisions below lands on the SAME users.id this token resolves to
+	// on later /mcp calls — closing the duplicate-identity gap the old CLI
+	// (github_login-keyed) login left open.
+	uid, err := s.store.EnsureUserByTelegramID(r.Context(), payload.ID, payload.Username, strings.TrimSpace(payload.FirstName+" "+payload.LastName))
+	if err != nil {
 		http.Error(w, fmt.Sprintf("ensure user: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	oc := oauthCtx{
+		ClientID:      pending.ClientID,
+		RedirectURI:   pending.RedirectURI,
+		CodeChallenge: pending.CodeChallenge,
+		ClientState:   pending.State,
+		Scope:         pending.Scope,
+		TelegramID:    payload.ID,
+		Username:      payload.Username,
+	}
+
+	// If the user already has a usable MTProto session, hand back the
+	// authorization code immediately. Otherwise walk admins through the
+	// in-browser enable_access flow to provision one. Non-admins get the
+	// code regardless: their token carries no scopes, so an MTProto session
+	// would be unusable — no point collecting their phone number.
+	if _, sessErr := s.store.CheckSessionValid(r.Context(), uid); sessErr == nil {
+		s.issueAuthCode(w, r, oc)
+		return
+	}
+	if !s.cfg.AdminTelegramIDs[payload.ID] {
+		s.issueAuthCode(w, r, oc)
+		return
+	}
+
+	es := &enableSession{
+		oc:        oc,
+		uid:       uid,
+		tgID:      payload.ID,
+		createdAt: s.clock(),
+		step:      stepPhone,
+	}
+	esTok := randomToken(32)
+	s.mu.Lock()
+	if s.cfg.MaxPendingEnable > 0 && len(s.enables) >= s.cfg.MaxPendingEnable {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, e := range s.enables {
+			if oldestKey == "" || e.createdAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = e.createdAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.enables, oldestKey)
+		}
+	}
+	s.enables[esTok] = es
+	s.mu.Unlock()
+	renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+}
+
+// oauthCtx bundles the per-flow OAuth parameters needed to mint and deliver an
+// authorization code, independent of how the user's identity was established
+// (direct widget callback when a session exists, or after the enable_access
+// detour when one had to be provisioned).
+type oauthCtx struct {
+	ClientID      string
+	RedirectURI   string
+	CodeChallenge string
+	ClientState   string
+	Scope         string
+	TelegramID    int64
+	Username      string
+}
+
+// issueAuthCode mints an authorization_code for oc and 302-redirects the
+// browser to the client's redirect_uri with ?code=&state=. Shared by the
+// has-session widget-callback path and the enable_access success path. State
+// is echoed verbatim per RFC 6749 §4.1.2.
+func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthCtx) {
 	code := randomToken(32)
 	now := s.clock()
 	s.mu.Lock()
-	// Cap the authorization-code map. Each successful widget callback
-	// inserts a new entry; an attacker who can replay valid widget
-	// payloads within the auth_date window could otherwise keep adding
-	// codes without ever redeeming them. Oldest-evict on insert mirrors
-	// the pending/clients pattern and keeps the sweeper as a backstop.
+	// Cap the authorization-code map. Oldest-evict on insert mirrors the
+	// pending/clients pattern and keeps the sweeper as a backstop.
 	if s.cfg.MaxAuthCodes > 0 && len(s.codes) >= s.cfg.MaxAuthCodes {
 		var oldestKey string
 		var oldestAt time.Time
@@ -556,28 +679,26 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.codes[code] = &authCode{
-		ClientID:            pending.ClientID,
-		RedirectURI:         pending.RedirectURI,
-		CodeChallenge:       pending.CodeChallenge,
-		CodeChallengeMethod: pending.CodeChallengeMethod,
-		TelegramID:          payload.ID,
-		TelegramUsername:    payload.Username,
-		Scope:               pending.Scope,
+		ClientID:            oc.ClientID,
+		RedirectURI:         oc.RedirectURI,
+		CodeChallenge:       oc.CodeChallenge,
+		CodeChallengeMethod: "S256",
+		TelegramID:          oc.TelegramID,
+		TelegramUsername:    oc.Username,
+		Scope:               oc.Scope,
 		CreatedAt:           now,
 	}
 	s.mu.Unlock()
 
-	// Build the redirect URL. State is the original client-supplied state,
-	// echoed verbatim per RFC 6749 §4.1.2.
-	u, err := url.Parse(pending.RedirectURI)
+	u, err := url.Parse(oc.RedirectURI)
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
 		return
 	}
 	q := u.Query()
 	q.Set("code", code)
-	if pending.State != "" {
-		q.Set("state", pending.State)
+	if oc.ClientState != "" {
+		q.Set("state", oc.ClientState)
 	}
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, u.String(), http.StatusFound)
