@@ -383,6 +383,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// stores each request in the in-memory pending map; without length limits an
 	// attacker can fill entries with near-header-limit strings and drive the
 	// process to OOM before TTL eviction fires.
+	if len(clientID) > 256 {
+		s.writeAuthorizeError(w, "invalid_request", "client_id exceeds 256 bytes")
+		return
+	}
 	if len(redirectURI) > 2048 {
 		s.writeAuthorizeError(w, "invalid_request", "redirect_uri exceeds 2048 bytes")
 		return
@@ -499,13 +503,21 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect the widget fields. Spec says GET query OR POST form depending
-	// on data-auth-url config; we accept either.
+	// Build widgetFields from ALL received form fields except "st" (our
+	// server-side state token). The Telegram check-string is defined over
+	// every non-hash field, so a fixed key whitelist would silently drop any
+	// new signed attribute Telegram adds in the future, causing hash mismatch
+	// on otherwise valid logins. Empty values are skipped per Telegram docs.
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "cannot parse form", http.StatusBadRequest)
+		return
+	}
 	widgetFields := map[string]string{}
-	for _, k := range []string{"id", "first_name", "last_name", "username", "photo_url", "auth_date", "hash"} {
-		if v := r.FormValue(k); v != "" {
-			widgetFields[k] = v
+	for k, vs := range r.Form {
+		if k == "st" || len(vs) == 0 || vs[0] == "" {
+			continue
 		}
+		widgetFields[k] = vs[0]
 	}
 	payload, err := s.verifier.Verify(widgetFields)
 	if err != nil {
