@@ -403,14 +403,36 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 	}
 }
 
-func TestLookupClientName_UnregisteredNotBranded(t *testing.T) {
+func TestAuthorizePage_NeverEchoesClientName(t *testing.T) {
+	// Even a CLIENT that registered itself with a brand-y name does not get
+	// that name echoed on the consent screen. The consent screen instead
+	// shows the redirect_uri host, which is the only piece of metadata the
+	// user can verify against where their code is about to be delivered.
 	srv := newTestServer(t)
-	got := srv.lookupClientName("attacker-chosen-client-id")
-	if strings.Contains(strings.ToLower(got), "claude") {
-		t.Errorf("lookupClientName branded unregistered client as Claude: %q", got)
+	mux := newMockRouter()
+	srv.Register(mux)
+	srv.clients["spoof"] = &clientReg{
+		ClientID:     "spoof",
+		ClientName:   "Claude (Anthropic)",
+		RedirectURIs: []string{"https://attacker.example/cb"},
 	}
-	if !strings.Contains(strings.ToLower(got), "unknown") {
-		t.Errorf("expected neutral 'unknown' label, got %q", got)
+	_, challenge := pkceVerifierAndChallenge()
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"spoof"},
+		"redirect_uri":          {"https://attacker.example/cb"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "Claude (Anthropic)") {
+		t.Error("consent page rendered self-declared client_name")
+	}
+	if !strings.Contains(body, "attacker.example") {
+		t.Error("consent page should surface redirect_uri host so user can verify")
 	}
 }
 
@@ -457,15 +479,73 @@ func TestWidgetCallback_RejectsStaleState(t *testing.T) {
 	}
 }
 
-func TestLookupClientName_Registered(t *testing.T) {
+func TestLookupClientName_AlwaysEmpty(t *testing.T) {
+	// Document the policy: lookupClientName is a deliberate no-op so that
+	// self-registered client_name cannot reach the consent screen.
 	srv := newTestServer(t)
 	srv.clients["c1"] = &clientReg{
 		ClientID:     "c1",
 		ClientName:   "Acme Web",
 		RedirectURIs: []string{"https://acme.example/cb"},
 	}
-	if got := srv.lookupClientName("c1"); got != "Acme Web" {
-		t.Errorf("lookupClientName(registered) = %q, want %q", got, "Acme Web")
+	if got := srv.lookupClientName("c1"); got != "" {
+		t.Errorf("lookupClientName should always be empty, got %q", got)
+	}
+}
+
+func TestRegister_RejectsUntrustedRedirect(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	body := `{"client_name":"evil","redirect_uris":["http://attacker.example/cb"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.serve("POST", "/oauth/register", rec, req)
+	if rec.Code == http.StatusCreated {
+		t.Fatal("registration accepted an attacker-hosted redirect_uri")
+	}
+}
+
+func TestRegister_CapEvictsOldest(t *testing.T) {
+	// Hard-cap N=2; insert 3 → confirm the oldest is evicted.
+	srv := newTestServer(t, func(c *Config) { c.MaxRegisteredClients = 2 })
+	mux := newMockRouter()
+	srv.Register(mux)
+	register := func(name string) string {
+		body := `{"client_name":"` + name + `","redirect_uris":["https://claude.ai/cb"]}`
+		req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.serve("POST", "/oauth/register", rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("%s: status %d body %s", name, rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+		return resp["client_id"].(string)
+	}
+	// Inject monotonic clocks so eviction can pick the oldest deterministically.
+	t0 := time.Now()
+	srv.clock = func() time.Time { return t0 }
+	id1 := register("first")
+	srv.clock = func() time.Time { return t0.Add(1 * time.Second) }
+	id2 := register("second")
+	srv.clock = func() time.Time { return t0.Add(2 * time.Second) }
+	id3 := register("third")
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.clients) != 2 {
+		t.Fatalf("clients len = %d, want 2 (cap)", len(srv.clients))
+	}
+	if _, ok := srv.clients[id1]; ok {
+		t.Errorf("oldest entry %s should have been evicted", id1)
+	}
+	if _, ok := srv.clients[id2]; !ok {
+		t.Errorf("entry %s missing after eviction", id2)
+	}
+	if _, ok := srv.clients[id3]; !ok {
+		t.Errorf("entry %s missing after eviction", id3)
 	}
 }
 

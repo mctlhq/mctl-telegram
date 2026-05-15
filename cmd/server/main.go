@@ -286,6 +286,7 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 	srv, err := oauth.New(oauth.Config{
 		Issuer:              strings.TrimRight(cfg.PublicBaseURL, "/"),
 		JWTSecret:           []byte(cfg.OAUTHJWTSecret),
+		JWTAudience:         cfg.OAUTHJWTAudience,
 		BotToken:            cfg.TelegramLoginBotToken,
 		BotUsername:         cfg.TelegramLoginBotUsername,
 		AdminTelegramIDs:    admins,

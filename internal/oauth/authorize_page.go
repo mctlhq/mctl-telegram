@@ -7,11 +7,20 @@ import (
 
 // authorizePage is the data model for the /oauth/authorize HTML response.
 // Kept tiny: every field is plainly addressable from the template.
+//
+// IMPORTANT: there is intentionally no ClientName field here. /oauth/register
+// is unauthenticated and accepts arbitrary client_name strings, so rendering
+// that name on the consent screen would let an attacker spoof a familiar
+// brand (e.g. register client_name="Claude" and a malicious redirect_uri).
+// Instead we surface the redirect_uri's HOST as the identifier the user can
+// verify — that field is bound to the OAuth flow and validated by
+// validateClient against either the registered list or the implicit-host
+// allowlist.
 type authorizePage struct {
-	Issuer      string // canonical service URL, displayed in the breadcrumb
-	BotUsername string // @username for data-telegram-login
-	ServerState string // the server-issued state token (hidden form field)
-	ClientName  string // human label for the requesting client; defaults to "Claude"
+	Issuer       string // canonical service URL, displayed in the breadcrumb
+	BotUsername  string // @username for data-telegram-login
+	ServerState  string // the server-issued state token (hidden form field)
+	RedirectHost string // host portion of redirect_uri — the only trustworthy "who is asking" label
 }
 
 // authorizeTemplate is the single-page Login Widget host. The Telegram-widget
@@ -25,7 +34,7 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Connect Telegram to {{.ClientName}}</title>
+  <title>Connect Telegram</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root { color-scheme: light dark; }
@@ -47,13 +56,19 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     .error { color: #c33; font-size: 13px; margin-top: 12px; min-height: 18px; }
     .footer { font-size: 12px; color: #8a95a5; margin-top: 24px; }
     .footer a { color: inherit; }
+    .verify { background: #fffbe6; border: 1px solid #f0d86b; border-radius: 6px; padding: 10px 12px; font-size: 13px; }
+    @media (prefers-color-scheme: dark) { .verify { background: #2b2510; border-color: #5a4818; } }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>Connect Telegram to {{.ClientName}}</h1>
-    <p>To finish setup, log in with your Telegram account. {{.ClientName}} will be able
-       to call the MCP tools on this server on your behalf.</p>
+    <h1>Connect Telegram</h1>
+    <p>An application is requesting access to the MCP tools on this server using your Telegram identity.</p>
+    <div class="verify">
+      Before continuing, verify the destination:
+      <strong class="url">{{.RedirectHost}}</strong>
+      <br>If this hostname does not look like the application you intended to authorise, close this page.
+    </div>
     <p class="meta">You are signing in to <span class="url">{{.Issuer}}</span>. Message access is granted by the
        Telegram session stored on this server. If your account hasn't been provisioned yet, you'll see
        a follow-up screen explaining the next step.</p>

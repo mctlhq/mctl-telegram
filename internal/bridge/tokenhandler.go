@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
-	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 )
 
 const bridgeTokenTTL = time.Hour
@@ -25,19 +25,32 @@ type bridgeTokenResponse struct {
 // with aud="bridge" that the Local Bridge daemon uses to authenticate its
 // websocket connection to GET /bridge.
 //
-// issuer is the value embedded in the JWT iss claim. It MUST match the
-// ExpectedIssuer configured on the bridge auth.Provider in main.go,
-// otherwise the bridge will reject every token this handler hands out. For
-// AUTH_MODE=shared-hmac-legacy that is "https://api.mctl.ai"; for
-// AUTH_MODE=local-jwt it is the deployment's PublicBaseURL (with trailing
-// slash stripped). main.go calls selectBridgeIssuer to derive it.
+// The minting always uses localjwt.Issuer, which produces an HS256 JWT
+// carrying:
+//   - iss = issuer (must match the bridge verifier's ExpectedIssuer)
+//   - aud = "bridge"
+//   - sub = Identity.Subject (falls back to GitHubLogin for legacy
+//     identities)
+//   - tg_id, tg_username = Identity.TelegramID / .TelegramUsername
 //
-// Signing reuses the HMAC routine from internal/auth/sharedhmac — it is the
-// same canonical-JSON + HMAC-SHA256 algorithm regardless of which provider
-// later verifies the token, so we can hand the same primitive out to both
-// modes without depending on each provider's package.
+// The tg_id field is REQUIRED in local-jwt mode: the bridge verifier
+// (localjwt.Provider) looks up the user via EnsureUserByTelegramID(tg_id),
+// and an unset value would resolve to 0 → "telegram id must be positive"
+// → daemon registration rejected. Bridge tokens shared the sharedhmac
+// signer previously, which never carried tg_id, breaking /bridge under
+// local-jwt mode.
+//
+// Signing is HS256, identical algorithm to the legacy sharedhmac path —
+// shared-hmac-legacy bridge verifiers accept these tokens as long as the
+// issuer + audience + secret match.
 func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string) http.HandlerFunc {
+	signer, signerErr := localjwt.NewIssuer(secret, issuer)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if signerErr != nil {
+			slog.Error("bridge token: signer init failed", "err", signerErr)
+			writeJSONError(w, http.StatusInternalServerError, "bridge token signer not configured")
+			return
+		}
 		id := auth.From(r.Context())
 		if id == nil {
 			// Should never reach here when Middleware(required=true) is in the
@@ -57,14 +70,13 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string)
 			subject = id.GitHubLogin
 		}
 
-		tok, err := sharedhmac.IssueTestTokenWithAudience(
-			secret,
-			issuer,
-			subject,
-			id.Groups,
-			[]string{"bridge"},
-			bridgeTokenTTL,
-		)
+		tok, err := signer.Mint(localjwt.Claims{
+			Subject:          subject,
+			TelegramID:       id.TelegramID,
+			TelegramUsername: id.TelegramUsername,
+			Groups:           id.Groups,
+			Audience:         []string{"bridge"},
+		}, bridgeTokenTTL)
 		if err != nil {
 			slog.Error("bridge token: sign failed", "user_id", id.UserID, "err", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to issue bridge token")

@@ -86,7 +86,28 @@ type Config struct {
 	// registered. Empty list ⇒ a built-in default (claude.ai, claude.com,
 	// localhost, 127.0.0.1) is used. The check is exact-match on the
 	// URL's Host (including any port); never substring-match.
+	//
+	// AllowedImplicitHosts is also applied to redirect_uris supplied at
+	// RFC 7591 dynamic registration, so a malicious /oauth/register call
+	// cannot smuggle in a phishing destination by bypassing the implicit
+	// check via prior registration.
 	AllowedImplicitHosts []string
+	// ClientRegistrationTTL bounds how long a dynamically-registered client
+	// is kept in memory before the sweeper evicts it. Defaults to 24h.
+	// Set to a negative duration to disable eviction (not recommended in
+	// production — /oauth/register is unauthenticated).
+	ClientRegistrationTTL time.Duration
+	// MaxRegisteredClients caps how many dynamic client registrations are
+	// kept simultaneously. When exceeded, the oldest entry is evicted on
+	// the next /oauth/register call. Defaults to 1000.
+	MaxRegisteredClients int
+	// JWTAudience overrides the aud claim emitted into newly minted access
+	// tokens. When empty (default), the access token has no aud — keeping
+	// token-side audience policy aligned with the localjwt verifier's
+	// transitional defaults. When set, every minted token carries this
+	// aud value, which lets operators run OAUTH_JWT_AUDIENCE_REQUIRED=true
+	// without breaking the in-band token flow.
+	JWTAudience string
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the widget
@@ -153,6 +174,12 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 			"127.0.0.1",
 		}
 	}
+	if cfg.ClientRegistrationTTL == 0 {
+		cfg.ClientRegistrationTTL = 24 * time.Hour
+	}
+	if cfg.MaxRegisteredClients == 0 {
+		cfg.MaxRegisteredClients = 1000
+	}
 	issuer, err := localjwt.NewIssuer(cfg.JWTSecret, cfg.Issuer)
 	if err != nil {
 		return nil, err
@@ -204,6 +231,16 @@ func (s *Server) sweep(now time.Time) {
 	for k, c := range s.codes {
 		if now.Sub(c.CreatedAt) > s.cfg.CodeTTL {
 			delete(s.codes, k)
+		}
+	}
+	// Dynamic client registrations are kept for ClientRegistrationTTL.
+	// Without this sweep the map grows unbounded because /oauth/register is
+	// unauthenticated — a trivial public-API DoS vector.
+	if s.cfg.ClientRegistrationTTL > 0 {
+		for k, c := range s.clients {
+			if now.Sub(c.CreatedAt) > s.cfg.ClientRegistrationTTL {
+				delete(s.clients, k)
+			}
 		}
 	}
 }
@@ -324,11 +361,22 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Render the widget HTML. The widget's `data-onauth` JS posts the signed
 	// payload to /oauth/telegram/callback?st=<serverState>; we read st from
 	// the form on the callback side.
+	//
+	// We render the redirect_uri host rather than any client-supplied name
+	// because the host is the only piece bound to the OAuth flow that the
+	// user can verify against where they expect their authorization code
+	// to be delivered. Trusting client_name from dynamic registration
+	// (currently unauthenticated) would let an attacker mint a consent
+	// screen labeled with any brand.
+	redirectHost := ""
+	if u, err := url.Parse(redirectURI); err == nil {
+		redirectHost = u.Host
+	}
 	renderAuthorizeHTML(w, authorizePage{
-		Issuer:      s.cfg.Issuer,
-		BotUsername: s.cfg.BotUsername,
-		ServerState: serverState,
-		ClientName:  s.lookupClientName(clientID),
+		Issuer:       s.cfg.Issuer,
+		BotUsername:  s.cfg.BotUsername,
+		ServerState:  serverState,
+		RedirectHost: redirectHost,
 	})
 }
 
@@ -477,13 +525,25 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	groups, scopes := s.ResolveScopes(entry.TelegramID)
+	// aud policy: when the deployment configures OAUTH_JWT_AUDIENCE,
+	// every minted token MUST carry exactly that value so the localjwt
+	// verifier on /mcp accepts it. When unconfigured, no aud is emitted
+	// (the verifier policy in turn tolerates absent aud per RFC 7519).
+	// Binding aud to client_id like the old default would have failed
+	// /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE to
+	// something else, which codex flagged as a real misconfiguration
+	// trap.
+	var audience []string
+	if s.cfg.JWTAudience != "" {
+		audience = []string{s.cfg.JWTAudience}
+	}
 	tok, err := s.issuer.Mint(localjwt.Claims{
 		Subject:          fmt.Sprintf("tg:%d", entry.TelegramID),
 		TelegramID:       entry.TelegramID,
 		TelegramUsername: entry.TelegramUsername,
 		Groups:           groups,
 		Scopes:           scopes,
-		Audience:         []string{clientID},
+		Audience:         audience,
 	}, s.cfg.AccessTokenTTL)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -536,19 +596,43 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		writeTokenError(w, "invalid_client_metadata", "redirect_uris is required", http.StatusBadRequest)
 		return
 	}
-	for _, u := range req.RedirectURIs {
-		if _, err := url.Parse(u); err != nil {
-			writeTokenError(w, "invalid_redirect_uri", fmt.Sprintf("redirect_uri %q is not a valid URL", u), http.StatusBadRequest)
+	// Apply the SAME scheme + host policy as implicit clients. Without
+	// this, a malicious /oauth/register call could supply an http://
+	// attacker-controlled redirect_uri, and a later /oauth/authorize
+	// call against that client_id would skip the implicit-host check
+	// because validateClient trusts registered redirect_uris on
+	// exact-match. Result: authorization codes redirected to an
+	// attacker URL.
+	for _, raw := range req.RedirectURIs {
+		if err := s.validateImplicitRedirectURI(raw); err != nil {
+			writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 	clientID := "tgmcp_" + randomToken(16)
+	now := s.clock()
 	s.mu.Lock()
+	// Enforce the global cap. If we are at the limit, evict the oldest
+	// entry (linear scan — fine at N≈1000). This keeps the public
+	// endpoint bounded even before the periodic sweeper runs.
+	if s.cfg.MaxRegisteredClients > 0 && len(s.clients) >= s.cfg.MaxRegisteredClients {
+		var oldestKey string
+		var oldestAt time.Time
+		for k, c := range s.clients {
+			if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
+				oldestKey = k
+				oldestAt = c.CreatedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.clients, oldestKey)
+		}
+	}
 	s.clients[clientID] = &clientReg{
 		ClientID:     clientID,
 		ClientName:   req.ClientName,
 		RedirectURIs: req.RedirectURIs,
-		CreatedAt:    s.clock(),
+		CreatedAt:    now,
 	}
 	s.mu.Unlock()
 	resp := map[string]any{
@@ -562,6 +646,28 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// validateImplicitRedirectURI applies the same policy as the implicit-client
+// branch of validateClient. Factored out so /oauth/register can enforce it
+// at registration time instead of waiting until /oauth/authorize.
+func (s *Server) validateImplicitRedirectURI(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("redirect_uri %q is not a valid URL: %w", raw, err)
+	}
+	if u.Scheme != "https" {
+		if u.Scheme != "http" || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1") {
+			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http://localhost)", u.Scheme)
+		}
+	}
+	host := u.Hostname()
+	for _, allowed := range s.cfg.AllowedImplicitHosts {
+		if host == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("redirect_uri host %q is not in the allowlist", host)
 }
 
 // ----- helpers -----
@@ -611,24 +717,15 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
 }
 
-// lookupClientName returns a label safe to render on the consent screen.
-// Registered clients get their declared name; unregistered (implicit)
-// clients get a neutral "Unknown application" plus a truncated client_id so
-// the user can still distinguish two simultaneous attempts. We deliberately
-// do NOT default to a recognised brand like "Claude" — an attacker with an
-// allowlisted redirect_uri host could otherwise craft a phishing consent
-// screen by picking a client_id no one has registered.
+// lookupClientName is retained as a documented no-op: we never display a
+// self-supplied client_name on the consent screen because /oauth/register is
+// unauthenticated and would allow brand spoofing. Kept as a function so
+// tests can still pin the policy.
+//
+// Deprecated: do not use. Render redirect_uri host instead.
 func (s *Server) lookupClientName(clientID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c, ok := s.clients[clientID]; ok && c.ClientName != "" {
-		return c.ClientName
-	}
-	id := clientID
-	if len(id) > 16 {
-		id = id[:13] + "…"
-	}
-	return "Unknown application (" + id + ")"
+	_ = clientID
+	return ""
 }
 
 // pkceVerify checks that SHA256(verifier) base64url-encoded equals challenge.
