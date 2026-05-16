@@ -6,60 +6,30 @@ import (
 	"testing"
 )
 
-func TestBotIDFromToken(t *testing.T) {
-	cases := []struct {
-		name, token, want string
-	}{
-		{"valid", "8568443430:AAHxyz-123_abc", "8568443430"},
-		{"empty", "", ""},
-		{"no colon", "8568443430", ""},
-		{"empty id", ":AAHxyz", ""},
-		{"non-numeric id", "bot123:AAHxyz", ""},
-		{"id with letters", "12ab34:AAHxyz", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := botIDFromToken(c.token); got != c.want {
-				t.Fatalf("botIDFromToken(%q) = %q, want %q", c.token, got, c.want)
-			}
-		})
-	}
-}
-
-func TestRenderAuthorizeSwitchControl(t *testing.T) {
-	const logoutPrefix = "https://oauth.telegram.org/auth/logOut?bot_id="
-
-	t.Run("present when BotID set", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		renderAuthorizeHTML(rec, authorizePage{
-			Issuer:       "https://tg.mctl.ai",
-			BotUsername:  "MCTL_AI_bot",
-			ServerState:  "st",
-			RedirectHost: "claude.ai",
-			BotID:        "8568443430",
-		})
-		body := rec.Body.String()
-		if !strings.Contains(body, logoutPrefix+"8568443430") {
-			t.Fatalf("rendered page missing switch-account logout link:\n%s", body)
-		}
-		// Telegram's logOut endpoint rejects the request with "origin required"
-		// unless the embedding page's origin is passed; it must carry the issuer.
-		if !strings.Contains(strings.ToLower(body), "origin=https%3a%2f%2ftg.mctl.ai") {
-			t.Fatalf("logout link missing origin parameter:\n%s", body)
-		}
+// The consent screen offers an account-switch help block instead of an
+// automated logout: the legacy Telegram Login Widget exposes no logout API,
+// and oauth.telegram.org/auth/logOut does not clear the session. The block
+// must be present, explain the manual steps, and never link the defunct
+// logOut endpoint.
+func TestRenderAuthorizeAccountSwitchHelp(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderAuthorizeHTML(rec, authorizePage{
+		Issuer:       "https://tg.mctl.ai",
+		BotUsername:  "MCTL_AI_bot",
+		ServerState:  "st",
+		RedirectHost: "claude.ai",
 	})
+	body := rec.Body.String()
 
-	t.Run("absent when BotID empty", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		renderAuthorizeHTML(rec, authorizePage{
-			Issuer:      "https://tg.mctl.ai",
-			BotUsername: "MCTL_AI_bot",
-			ServerState: "st",
-		})
-		if strings.Contains(rec.Body.String(), logoutPrefix) {
-			t.Fatal("switch-account link rendered despite empty BotID")
-		}
-	})
+	if !strings.Contains(body, "Want to use a different Telegram account?") {
+		t.Fatalf("rendered page missing account-switch help block:\n%s", body)
+	}
+	if !strings.Contains(body, "incognito") {
+		t.Fatalf("account-switch help missing manual steps:\n%s", body)
+	}
+	if strings.Contains(body, "auth/logOut") {
+		t.Fatalf("page still renders the broken logOut link:\n%s", body)
+	}
 }
 
 // The Login Widget must not request bot-DM write access: the grant makes
