@@ -62,9 +62,9 @@ func seedSession(t *testing.T, srv *Server, tgID int64) {
 	}
 }
 
-func newEnableTestServer(t *testing.T, login LoginFunc) (*Server, *chi.Mux) {
+func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (*Server, *chi.Mux) {
 	t.Helper()
-	srv, err := New(Config{
+	cfg := Config{
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
 		BotToken:            testBotToken,
@@ -75,7 +75,11 @@ func newEnableTestServer(t *testing.T, login LoginFunc) (*Server, *chi.Mux) {
 		AllowImplicitClient: true,
 		TGAPIID:             99999,
 		TGAPIHash:           "test-api-hash",
-	}, newEnableTestStore(t))
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	srv, err := New(cfg, newEnableTestStore(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -343,10 +347,10 @@ func TestEnableAccess_ExpiredToken(t *testing.T) {
 	}
 }
 
-// TestEnableAccess_NonAdminSkipsFlow confirms a non-admin widget login gets the
-// authorization code directly, never the enable_access phone screen.
-func TestEnableAccess_NonAdminSkipsFlow(t *testing.T) {
-	_, mux := newEnableTestServer(t, stubLogin(false, nil))
+// widgetCallbackFor drives /oauth/authorize then the widget callback for tgID
+// and returns the callback response recorder.
+func widgetCallbackFor(t *testing.T, mux *chi.Mux, tgID int64) *httptest.ResponseRecorder {
+	t.Helper()
 	_, challenge := pkceVerifierAndChallenge()
 	q := url.Values{
 		"response_type":         {"code"},
@@ -361,21 +365,43 @@ func TestEnableAccess_NonAdminSkipsFlow(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	serverState := extractInputValue(t, rec.Body.String(), "st")
 
-	now := time.Now()
 	fields := map[string]string{
-		"id":         "999000111", // not in AdminTelegramIDs
-		"username":   "rando",
-		"first_name": "Rando",
-		"auth_date":  strconv.FormatInt(now.Unix(), 10),
+		"id":         strconv.FormatInt(tgID, 10),
+		"username":   "user",
+		"first_name": "User",
+		"auth_date":  strconv.FormatInt(time.Now().Unix(), 10),
 	}
 	fields["hash"] = signWidget(t, fields)
 	form := url.Values{"st": {serverState}}
 	for k, v := range fields {
 		form.Set(k, v)
 	}
-	rec = postForm(t, mux, "/oauth/telegram/callback", form)
+	return postForm(t, mux, "/oauth/telegram/callback", form)
+}
+
+// TestEnableAccess_UnknownUserSkipsFlow confirms a user in neither allowlist
+// gets the authorization code directly, never the enable_access phone screen.
+func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
+	_, mux := newEnableTestServer(t, stubLogin(false, nil))
+	rec := widgetCallbackFor(t, mux, 999000111) // in no allowlist
 	if rec.Code != http.StatusFound {
-		t.Fatalf("non-admin callback = %d (want 302 straight to code); body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("unknown-user callback = %d (want 302 straight to code); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEnableAccess_ClientRoutedToPhoneScreen confirms a client-tier user with
+// no session is routed into the enable_access phone screen, not 302'd.
+func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
+	clientID := int64(888000111)
+	_, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+		c.ClientTelegramIDs = map[int64]bool{clientID: true}
+	})
+	rec := widgetCallbackFor(t, mux, clientID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client callback = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("client was not routed to the enable_access phone screen; body=%s", rec.Body.String())
 	}
 }
 
@@ -408,8 +434,8 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 }
 
 // TestResolveScopes_Tiers checks the three identity tiers: admins get
-// admin:users, clients get the telegram:* set without it, and anyone else
-// gets nothing.
+// admin:users, clients (via env OR the DB access_tier column) get the
+// telegram:* set without it, and anyone else gets nothing.
 func TestResolveScopes_Tiers(t *testing.T) {
 	has := func(ss []string, v string) bool {
 		for _, s := range ss {
@@ -419,20 +445,27 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		}
 		return false
 	}
+	ctx := context.Background()
 	srv := newTestServer(t, func(c *Config) {
 		c.ClientTelegramIDs = map[int64]bool{555000111: true}
 	})
 
 	// Admin tier (210408407 is in newTestServer's AdminTelegramIDs).
-	ag, as := srv.ResolveScopes(210408407)
+	ag, as, err := srv.ResolveScopes(ctx, 210408407)
+	if err != nil {
+		t.Fatalf("admin ResolveScopes: %v", err)
+	}
 	if !has(ag, "platform-admins") || !has(as, "admin:users") {
 		t.Errorf("admin tier wrong: groups=%v scopes=%v", ag, as)
 	}
 
-	// Client tier — telegram:* scopes but NOT admin:users.
-	cg, cs := srv.ResolveScopes(555000111)
+	// Client tier via the TG_LOGIN_CLIENTS env allowlist.
+	cg, cs, err := srv.ResolveScopes(ctx, 555000111)
+	if err != nil {
+		t.Fatalf("env-client ResolveScopes: %v", err)
+	}
 	if !has(cg, "clients") {
-		t.Errorf("client groups = %v, want [clients]", cg)
+		t.Errorf("env-client groups = %v, want [clients]", cg)
 	}
 	if has(cs, "admin:users") {
 		t.Error("client must not receive admin:users")
@@ -446,8 +479,27 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		}
 	}
 
+	// Client tier via the DB access_tier='client' column.
+	dbID := int64(777000222)
+	if _, err := srv.store.EnsureUserByTelegramID(ctx, dbID, "dbclient", "DB Client"); err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, dbID, db.TierClient); err != nil {
+		t.Fatalf("set access tier: %v", err)
+	}
+	dg, ds, err := srv.ResolveScopes(ctx, dbID)
+	if err != nil {
+		t.Fatalf("db-client ResolveScopes: %v", err)
+	}
+	if !has(dg, "clients") || has(ds, "admin:users") {
+		t.Errorf("db-client tier wrong: groups=%v scopes=%v", dg, ds)
+	}
+
 	// Neither tier — no scopes at all.
-	ng, ns := srv.ResolveScopes(999999999)
+	ng, ns, err := srv.ResolveScopes(ctx, 999999999)
+	if err != nil {
+		t.Fatalf("unknown ResolveScopes: %v", err)
+	}
 	if len(ng) != 0 || len(ns) != 0 {
 		t.Errorf("unknown id got groups=%v scopes=%v, want empty", ng, ns)
 	}

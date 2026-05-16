@@ -64,7 +64,7 @@ type Server struct {
 	// int64 -> *sync.Mutex). Two flows for the same uid must not interleave,
 	// or a cancelled-but-still-running predecessor could revoke the session a
 	// newer flow just provisioned. Entries are created on demand and never
-	// removed — one mutex per onboarded admin is negligible.
+	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
 }
 
@@ -368,35 +368,45 @@ func cancelEnableFlow(e *enableSession) bool {
 }
 
 // ResolveScopes maps a Telegram identity to a scope set. Three tiers:
-//   - AdminTelegramIDs  → platform-admins: the full telegram:* set plus
+//   - admins (TG_LOGIN_ADMINS env) → platform-admins: full telegram:* plus
 //     admin:users.
-//   - ClientTelegramIDs → clients: the telegram:* set for the user's own
-//     account (read/send/pin), without admin:users.
-//   - anyone else       → no scopes; authenticates but fails the per-tool gate.
+//   - clients → clients: telegram:* for the user's own account (read/send/
+//     pin), without admin:users. The client allowlist is the union of the
+//     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
+//     users.access_tier='client' column (set via the admin MCP tools).
+//   - anyone else → no scopes; authenticates but fails the per-tool gate.
 //
 // telegram:messages:send is granted to clients too, but a real send stays
 // gated by the per-account send_enabled flag — the scope alone does not let a
-// client send.
-func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
-	switch {
-	case s.cfg.AdminTelegramIDs[tgID]:
+// client send. A DB error resolving the client tier is returned so the caller
+// fails the token issuance rather than silently under-granting.
+func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes []string, err error) {
+	if s.cfg.AdminTelegramIDs[tgID] {
 		return []string{"platform-admins", "admins"}, []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
 			"admin:users",
+		}, nil
+	}
+	isClient := s.cfg.ClientTelegramIDs[tgID]
+	if !isClient {
+		dbClient, dbErr := s.store.IsClientTier(ctx, tgID)
+		if dbErr != nil {
+			return nil, nil, fmt.Errorf("resolve client tier: %w", dbErr)
 		}
-	case s.cfg.ClientTelegramIDs[tgID]:
+		isClient = dbClient
+	}
+	if isClient {
 		return []string{"clients"}, []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
-		}
-	default:
-		return nil, nil
+		}, nil
 	}
+	return nil, nil, nil
 }
 
 // Register mounts the OAuth handlers onto the supplied router. Each route is
@@ -830,7 +840,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	groups, scopes := s.ResolveScopes(entry.TelegramID)
+	groups, scopes, err := s.ResolveScopes(r.Context(), entry.TelegramID)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
+		return
+	}
 	// aud policy: when the deployment configures OAUTH_JWT_AUDIENCE,
 	// every minted token MUST carry exactly that value so the localjwt
 	// verifier on /mcp accepts it. When unconfigured, no aud is emitted

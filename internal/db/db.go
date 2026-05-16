@@ -117,6 +117,14 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// access_tier: DB-backed client allowlist. NULL/'none' = unprivileged,
+	// 'client' = telegram:* scopes for the user's own account. Admins stay on
+	// the TG_LOGIN_ADMINS env allowlist; this column only governs the client
+	// tier so it can be managed at runtime via the admin MCP tools.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "access_tier",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// Unique index on telegram_login_id (partial — NULLs ignored) so multiple
 	// pre-migration rows without telegram_login_id remain valid.
 	idxStmts := []string{

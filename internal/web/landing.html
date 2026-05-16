@@ -155,6 +155,18 @@
         <td>any authenticated identity</td>
         <td>Hard-deletes the encrypted session blob.</td>
       </tr>
+      <tr>
+        <td><code>list_telegram_identities</code></td>
+        <td><span class="pill pill-read">read</span></td>
+        <td><code>admin:users</code></td>
+        <td>Admin only. Roster of signed-in users with access tier and session state.</td>
+      </tr>
+      <tr>
+        <td><code>set_telegram_access</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td><code>admin:users</code></td>
+        <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
+      </tr>
     </tbody>
   </table>
 

@@ -68,6 +68,8 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolDisconnectAccount())
 	srv.AddTool(s.toolDeleteAccount())
 	srv.AddTool(s.toolGetMyAuditLog())
+	srv.AddTool(s.toolListIdentities())
+	srv.AddTool(s.toolSetAccess())
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,
