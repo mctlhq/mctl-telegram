@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/digest"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
@@ -299,6 +300,7 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		BotUsername:         cfg.TelegramLoginBotUsername,
 		AdminTelegramIDs:    admins,
 		ClientTelegramIDs:   clients,
+		AutoApproveClients:  cfg.AutoApproveClients,
 		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
 		CodeTTL:             cfg.OAUTHCodeTTL,
 		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
@@ -311,11 +313,16 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 	srv.Register(mux)
 	stopSweep := make(chan struct{})
 	srv.StartSweeper(stopSweep, 1*time.Minute)
+	// Once-a-day Telegram digest of new clients — keeps the operator informed
+	// while onboarding stays hands-off. Recipients are the admin allowlist.
+	stopDigest := make(chan struct{})
+	digest.StartDailyDigest(stopDigest, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC)
 	slog.Info("oauth issuer enabled",
 		"issuer", cfg.PublicBaseURL,
 		"bot_username", cfg.TelegramLoginBotUsername,
 		"admin_count", len(admins),
 		"client_count", len(clients),
+		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 	)
 	return nil

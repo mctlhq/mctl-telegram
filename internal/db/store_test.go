@@ -3,9 +3,48 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// TestListIdentities_SinceFilter checks the since-window: zero returns all
+// users, a future cutoff returns none, a recent cutoff returns the just-created
+// rows.
+func TestListIdentities_SinceFilter(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.EnsureUserByTelegramID(ctx, 111, "old", "Old"); err != nil {
+		t.Fatalf("ensure 111: %v", err)
+	}
+	if _, err := st.EnsureUserByTelegramID(ctx, 222, "new", "New"); err != nil {
+		t.Fatalf("ensure 222: %v", err)
+	}
+
+	all, err := st.ListIdentities(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("list all = %d, want 2", len(all))
+	}
+
+	future, err := st.ListIdentities(ctx, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("list since-future: %v", err)
+	}
+	if len(future) != 0 {
+		t.Errorf("since=now+1h = %d, want 0", len(future))
+	}
+
+	recent, err := st.ListIdentities(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("list since-recent: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Errorf("since=now-1h = %d, want 2", len(recent))
+	}
+}
 
 // newTestStore opens an in-memory SQLite DB, applies the migration, and
 // returns a Store wired with a nil crypto (Seal/Open passthrough). Session

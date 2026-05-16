@@ -430,6 +430,48 @@ func TestResolveScopes_DBRevokeOverridesEnv(t *testing.T) {
 	}
 }
 
+// TestResolveScopes_AutoApprove confirms open registration: with
+// AutoApproveClients on, an un-tiered user gets the client tier, an explicit
+// DB "none" still bans, and admins are unaffected.
+func TestResolveScopes_AutoApprove(t *testing.T) {
+	has := func(ss []string, v string) bool {
+		for _, s := range ss {
+			if s == v {
+				return true
+			}
+		}
+		return false
+	}
+	ctx := context.Background()
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+
+	// Unknown user, no DB tier, not in env → client by auto-approve.
+	g, sc, err := srv.ResolveScopes(ctx, 444000111)
+	if err != nil {
+		t.Fatalf("auto-approve ResolveScopes: %v", err)
+	}
+	if !has(g, "clients") || has(sc, "admin:users") || !has(sc, "telegram:messages:read") {
+		t.Errorf("auto-approved user wrong tier: groups=%v scopes=%v", g, sc)
+	}
+
+	// Explicit DB "none" must override auto-approve (ban survives).
+	banned := int64(444000222)
+	if _, err := srv.store.EnsureUserByTelegramID(ctx, banned, "x", "X"); err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, banned, db.TierNone); err != nil {
+		t.Fatalf("set tier none: %v", err)
+	}
+	if _, sc, err := srv.ResolveScopes(ctx, banned); err != nil || len(sc) != 0 {
+		t.Errorf("explicit DB 'none' must override auto-approve: scopes=%v err=%v", sc, err)
+	}
+
+	// Admin is still an admin under auto-approve.
+	if _, as, err := srv.ResolveScopes(ctx, 210408407); err != nil || !has(as, "admin:users") {
+		t.Errorf("admin tier broken under auto-approve: scopes=%v err=%v", as, err)
+	}
+}
+
 // TestEnableAccess_DBClientRoutedToPhoneScreen confirms a client granted via
 // the DB access_tier column (not the env allowlist) is likewise routed into
 // the enable_access phone screen, not 302'd past it.

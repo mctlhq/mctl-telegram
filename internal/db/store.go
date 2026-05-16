@@ -132,11 +132,12 @@ const (
 // IdentityRow is the admin-facing projection of a users row: who has
 // authenticated, their access tier, and whether they hold an active session.
 type IdentityRow struct {
-	TelegramID  int64  `json:"telegram_id"`
-	Username    string `json:"username,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
-	AccessTier  string `json:"access_tier"`
-	HasSession  bool   `json:"has_session"`
+	TelegramID  int64     `json:"telegram_id"`
+	Username    string    `json:"username,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	AccessTier  string    `json:"access_tier"`
+	HasSession  bool      `json:"has_session"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // SetAccessTier sets users.access_tier for the user with the given Telegram
@@ -178,26 +179,34 @@ func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
 	return tier.String, nil
 }
 
-// ListIdentities returns every widget-authenticated user with their access
-// tier and whether they currently hold a *usable* MTProto session — a session
-// that is non-revoked AND within both the absolute and idle TTLs, matching
-// what CheckSessionValid would accept. Newest first. Used by the admin
-// list_telegram_identities tool.
-func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
+// ListIdentities returns widget-authenticated users with their access tier,
+// join time, and whether they currently hold a *usable* MTProto session — a
+// session that is non-revoked AND within both the absolute and idle TTLs,
+// matching what CheckSessionValid would accept. Newest first.
+//
+// When since is zero every user is returned; otherwise only users whose
+// users.created_at is strictly after since — used by the daily digest to list
+// just the new clients.
+func (s *Store) ListIdentities(ctx context.Context, since time.Time) ([]IdentityRow, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
-	rows, err := s.DB.QueryContext(ctx,
-		`SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
-		        COALESCE(u.access_tier, 'none'),
-		        EXISTS(SELECT 1 FROM telegram_accounts ta
-		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
-		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
-		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
-		   FROM users u
-		  WHERE u.telegram_login_id IS NOT NULL
-		  ORDER BY u.id DESC`,
-		now, idleCutoff,
+	const base = `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
+	        COALESCE(u.access_tier, 'none'), u.created_at,
+	        EXISTS(SELECT 1 FROM telegram_accounts ta
+	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+	                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
+	                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
+	   FROM users u
+	  WHERE u.telegram_login_id IS NOT NULL`
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if since.IsZero() {
+		rows, err = s.DB.QueryContext(ctx, base+` ORDER BY u.id DESC`, now, idleCutoff)
+	} else {
+		rows, err = s.DB.QueryContext(ctx, base+` AND u.created_at > $3 ORDER BY u.id DESC`, now, idleCutoff, since.UTC())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list identities: %w", err)
 	}
@@ -209,7 +218,7 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 			username sql.NullString
 			display  sql.NullString
 		)
-		if err := rows.Scan(&r.TelegramID, &username, &display, &r.AccessTier, &r.HasSession); err != nil {
+		if err := rows.Scan(&r.TelegramID, &username, &display, &r.AccessTier, &r.CreatedAt, &r.HasSession); err != nil {
 			return nil, fmt.Errorf("scan identity: %w", err)
 		}
 		r.Username = username.String
