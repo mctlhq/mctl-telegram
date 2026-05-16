@@ -89,7 +89,21 @@
     --grid:          color-mix(in srgb, var(--surface-line) 80%, transparent);
     color-scheme: dark;
   }
-  :root[data-theme="light"] { color-scheme: light; }
+  /*
+   * The mctl accents are tuned for the dark surface and keep the same bright
+   * value in mctl.css's light theme — on the warm paper background that drops
+   * accent-coloured text (links, tool names, step counters) well below the
+   * WCAG AA contrast floor. Darken each accent for light mode here so the page
+   * is legible whether the tokens come from the CDN or the inline fallback.
+   */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --accent:  color-mix(in srgb, var(--mctl-accent-cyan-primary) 46%, #000);
+    --code-fg: var(--accent);
+  }
+  :root[data-theme="light"][data-accent="lime"]      { --accent: color-mix(in srgb, var(--mctl-accent-lime-primary) 42%, #000); }
+  :root[data-theme="light"][data-accent="vermilion"] { --accent: color-mix(in srgb, var(--mctl-accent-vermilion-primary) 70%, #000); }
+  :root[data-theme="light"][data-accent="lilac"]     { --accent: color-mix(in srgb, var(--mctl-accent-lilac-primary) 64%, #000); }
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -358,7 +372,7 @@
     color: var(--text-dim);
     margin: 16px 0;
   }
-  pre::before {
+  #smoke pre::before {
     content: "$ smoke-test";
     display: block;
     padding: 8px 14px;
@@ -637,12 +651,12 @@
       <a href="/privacy">privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
       <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
-        <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"      onclick="setAccent('cyan')"></button>
-        <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"      onclick="setAccent('lime')"></button>
-        <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion" onclick="setAccent('vermilion')"></button>
-        <button class="accent-swatch" type="button" data-pick="lilac"     aria-label="Lilac accent"     title="Lilac"     onclick="setAccent('lilac')"></button>
+        <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
+        <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
+        <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
+        <button class="accent-swatch" type="button" data-pick="lilac"     aria-label="Lilac accent"     title="Lilac"></button>
       </span>
-      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme" onclick="toggleTheme()">
+      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
         <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
       </button>
@@ -930,6 +944,13 @@ curl -s -X POST {{.MCPURL}} \
     }
     try { localStorage.setItem('mctl-accent', name); } catch (e) {}
   }
+
+  // Wire up handlers without inline onclick attributes, so the markup stays
+  // compatible with a strict Content-Security-Policy (script-src 'self').
+  document.querySelector('.theme-toggle').addEventListener('click', toggleTheme);
+  document.querySelectorAll('.accent-swatch').forEach(function (btn) {
+    btn.addEventListener('click', function () { setAccent(btn.dataset.pick); });
+  });
 </script>
 </body>
 </html>
