@@ -3,6 +3,7 @@ package oauth
 import (
 	"html/template"
 	"net/http"
+	"strings"
 )
 
 // authorizePage is the data model for the /oauth/authorize HTML response.
@@ -21,6 +22,25 @@ type authorizePage struct {
 	BotUsername  string // @username for data-telegram-login
 	ServerState  string // the server-issued state token (hidden form field)
 	RedirectHost string // host portion of redirect_uri — the only trustworthy "who is asking" label
+	BotID        string // numeric bot id, used to build the Telegram logout link; empty hides the switch-account control
+}
+
+// botIDFromToken extracts the numeric bot id from a Telegram bot token, whose
+// format is "<bot_id>:<hash>". The id is needed for the oauth.telegram.org
+// logout link that powers the "switch account" control. Returns "" for any
+// token that does not have a purely-numeric id prefix, so the template hides
+// the control rather than rendering a broken link.
+func botIDFromToken(token string) string {
+	id, _, ok := strings.Cut(token, ":")
+	if !ok || id == "" {
+		return ""
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return id
 }
 
 // authorizeTemplate is the single-page Login Widget host. The Telegram-widget
@@ -48,6 +68,8 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     .url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
     .widget { margin: 28px 0 8px; min-height: 50px; display: flex; justify-content: center; }
     .error { color: #cf222e; font-size: 13px; margin-top: 12px; min-height: 18px; }
+    .switch { text-align: center; margin: 4px 0 0; font-size: 13px; }
+    .switch a { color: #57606a; }
     .footer { font-size: 12px; color: #57606a; margin-top: 24px; }
     .footer a { color: #57606a; }
     .verify { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; padding: 10px 12px; font-size: 13px; }
@@ -60,6 +82,7 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
       .footer { color: #8b949e; }
       .footer a { color: #8b949e; }
       .error { color: #f85149; }
+      .switch a { color: #8b949e; }
       .verify { background: #2d2a0e; border-color: #735c0f; }
     }
   </style>
@@ -86,6 +109,12 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
               data-request-access="write"></script>
     </div>
     <div id="err" class="error"></div>
+    {{if .BotID}}
+    <p class="switch">
+      <a id="switch" target="_blank" rel="noopener noreferrer"
+         href="https://oauth.telegram.org/auth/logOut?bot_id={{.BotID}}">Use a different Telegram account</a>
+    </p>
+    {{end}}
 
     <form id="cb" method="POST" action="/oauth/telegram/callback" style="display:none">
       <input type="hidden" name="st" value="{{.ServerState}}">
@@ -115,6 +144,29 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
         document.getElementById('err').textContent = "Telegram callback failed: " + e.message;
       }
     }
+
+    // The Telegram widget remembers the last account via cookies on the
+    // oauth.telegram.org domain, which this origin cannot clear. The switch
+    // control opens Telegram's own logout endpoint in a popup, then reloads
+    // this page so the widget re-renders and prompts for a fresh login.
+    (function () {
+      var sw = document.getElementById('switch');
+      if (!sw) return;
+      sw.addEventListener('click', function (e) {
+        e.preventDefault();
+        var p = window.open(sw.href, 'tg_logout', 'width=420,height=520');
+        if (!p) {
+          document.getElementById('err').textContent =
+            'Popup was blocked - please allow popups for this site and try again.';
+          return;
+        }
+        sw.textContent = 'Logging out, one moment...';
+        setTimeout(function () {
+          try { p.close(); } catch (_) {}
+          location.reload();
+        }, 2500);
+      });
+    })();
   </script>
 </body>
 </html>`))
