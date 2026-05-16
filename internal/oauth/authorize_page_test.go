@@ -55,3 +55,18 @@ func TestRenderAuthorizeSwitchControl(t *testing.T) {
 		}
 	})
 }
+
+// The Login Widget must not request bot-DM write access: the grant makes
+// Telegram open the shared @MCTL_AI_bot chat for the user, which triggers the
+// OpenClaw admins-tenant pairing prompt. The widget only needs identity auth.
+func TestRenderAuthorizeNoWriteAccess(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderAuthorizeHTML(rec, authorizePage{
+		Issuer:      "https://tg.mctl.ai",
+		BotUsername: "MCTL_AI_bot",
+		ServerState: "st",
+	})
+	if strings.Contains(rec.Body.String(), "data-request-access") {
+		t.Fatal("widget requests data-request-access; identity auth must not request write access")
+	}
+}
