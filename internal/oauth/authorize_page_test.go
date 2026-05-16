@@ -38,8 +38,14 @@ func TestRenderAuthorizeSwitchControl(t *testing.T) {
 			RedirectHost: "claude.ai",
 			BotID:        "8568443430",
 		})
-		if body := rec.Body.String(); !strings.Contains(body, logoutPrefix+"8568443430") {
+		body := rec.Body.String()
+		if !strings.Contains(body, logoutPrefix+"8568443430") {
 			t.Fatalf("rendered page missing switch-account logout link:\n%s", body)
+		}
+		// Telegram's logOut endpoint rejects the request with "origin required"
+		// unless the embedding page's origin is passed; it must carry the issuer.
+		if !strings.Contains(strings.ToLower(body), "origin=https%3a%2f%2ftg.mctl.ai") {
+			t.Fatalf("logout link missing origin parameter:\n%s", body)
 		}
 	})
 

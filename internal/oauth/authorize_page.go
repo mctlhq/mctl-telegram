@@ -116,7 +116,7 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     {{if .BotID}}
     <p class="switch">
       <a id="switch" target="_blank" rel="noopener noreferrer"
-         href="https://oauth.telegram.org/auth/logOut?bot_id={{.BotID}}">Use a different Telegram account</a>
+         href="https://oauth.telegram.org/auth/logOut?bot_id={{.BotID}}&origin={{.Issuer}}">Use a different Telegram account</a>
     </p>
     {{end}}
 
@@ -153,6 +153,9 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     // oauth.telegram.org domain, which this origin cannot clear. The switch
     // control opens Telegram's own logout endpoint in a popup, then reloads
     // this page so the widget re-renders and prompts for a fresh login.
+    // The logOut endpoint requires the embedding page's origin as a query
+    // parameter (it rejects the request with "origin required" otherwise) and
+    // validates it against the bot's registered domain.
     (function () {
       var sw = document.getElementById('switch');
       if (!sw) return;
