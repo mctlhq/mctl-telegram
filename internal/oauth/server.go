@@ -98,9 +98,13 @@ type Config struct {
 	// reads this from data-telegram-login.
 	BotUsername string
 	// AdminTelegramIDs is the allowlist of Telegram user ids that get
-	// admin/platform-admins scopes. Anyone else still authenticates but
-	// receives an empty scope set (and therefore 403s on every MCP tool).
+	// admin/platform-admins scopes — the full telegram:* set plus admin:users.
 	AdminTelegramIDs map[int64]bool
+	// ClientTelegramIDs is the allowlist of Telegram user ids that get the
+	// telegram:* scopes for their OWN account (read/send/pin) but NOT the
+	// admin:users platform-admin capability. An id in neither allowlist still
+	// authenticates but receives an empty scope set (403 on every MCP tool).
+	ClientTelegramIDs map[int64]bool
 	// AccessTokenTTL is how long the issued access tokens live. Default 1h.
 	AccessTokenTTL time.Duration
 	// CodeTTL bounds how long an authorization code is valid after issuance.
@@ -229,6 +233,9 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.AdminTelegramIDs == nil {
 		cfg.AdminTelegramIDs = map[int64]bool{}
+	}
+	if cfg.ClientTelegramIDs == nil {
+		cfg.ClientTelegramIDs = map[int64]bool{}
 	}
 	if len(cfg.AllowedImplicitHosts) == 0 {
 		cfg.AllowedImplicitHosts = []string{
@@ -360,12 +367,19 @@ func cancelEnableFlow(e *enableSession) bool {
 	return false
 }
 
-// ResolveScopes maps a Telegram identity to a scope set. For the MVP the
-// only meaningful distinction is "is this id in AdminTelegramIDs": admins
-// get the full read+write+pin set; everyone else gets nothing and will fail
-// the per-tool scope gate.
+// ResolveScopes maps a Telegram identity to a scope set. Three tiers:
+//   - AdminTelegramIDs  → platform-admins: the full telegram:* set plus
+//     admin:users.
+//   - ClientTelegramIDs → clients: the telegram:* set for the user's own
+//     account (read/send/pin), without admin:users.
+//   - anyone else       → no scopes; authenticates but fails the per-tool gate.
+//
+// telegram:messages:send is granted to clients too, but a real send stays
+// gated by the per-account send_enabled flag — the scope alone does not let a
+// client send.
 func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
-	if s.cfg.AdminTelegramIDs[tgID] {
+	switch {
+	case s.cfg.AdminTelegramIDs[tgID]:
 		return []string{"platform-admins", "admins"}, []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
@@ -373,8 +387,16 @@ func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
 			"telegram:messages:pin",
 			"admin:users",
 		}
+	case s.cfg.ClientTelegramIDs[tgID]:
+		return []string{"clients"}, []string{
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+			"telegram:messages:send",
+			"telegram:messages:pin",
+		}
+	default:
+		return nil, nil
 	}
-	return nil, nil
 }
 
 // Register mounts the OAuth handlers onto the supplied router. Each route is
@@ -650,7 +672,10 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("session check failed: %v", sessErr), http.StatusInternalServerError)
 		return
 	}
-	if !s.cfg.AdminTelegramIDs[payload.ID] {
+	// enable_access provisions an MTProto session, which is only useful to a
+	// user who will actually get scopes. Offer it to admins and clients;
+	// everyone else just gets the (scopeless) code.
+	if !s.cfg.AdminTelegramIDs[payload.ID] && !s.cfg.ClientTelegramIDs[payload.ID] {
 		s.issueAuthCode(w, r, oc)
 		return
 	}

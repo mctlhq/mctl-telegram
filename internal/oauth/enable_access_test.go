@@ -406,3 +406,49 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 		t.Error("wrong-account session was left valid after the mismatch")
 	}
 }
+
+// TestResolveScopes_Tiers checks the three identity tiers: admins get
+// admin:users, clients get the telegram:* set without it, and anyone else
+// gets nothing.
+func TestResolveScopes_Tiers(t *testing.T) {
+	has := func(ss []string, v string) bool {
+		for _, s := range ss {
+			if s == v {
+				return true
+			}
+		}
+		return false
+	}
+	srv := newTestServer(t, func(c *Config) {
+		c.ClientTelegramIDs = map[int64]bool{555000111: true}
+	})
+
+	// Admin tier (210408407 is in newTestServer's AdminTelegramIDs).
+	ag, as := srv.ResolveScopes(210408407)
+	if !has(ag, "platform-admins") || !has(as, "admin:users") {
+		t.Errorf("admin tier wrong: groups=%v scopes=%v", ag, as)
+	}
+
+	// Client tier — telegram:* scopes but NOT admin:users.
+	cg, cs := srv.ResolveScopes(555000111)
+	if !has(cg, "clients") {
+		t.Errorf("client groups = %v, want [clients]", cg)
+	}
+	if has(cs, "admin:users") {
+		t.Error("client must not receive admin:users")
+	}
+	for _, want := range []string{
+		"telegram:dialogs:read", "telegram:messages:read",
+		"telegram:messages:send", "telegram:messages:pin",
+	} {
+		if !has(cs, want) {
+			t.Errorf("client missing scope %s (got %v)", want, cs)
+		}
+	}
+
+	// Neither tier — no scopes at all.
+	ng, ns := srv.ResolveScopes(999999999)
+	if len(ng) != 0 || len(ns) != 0 {
+		t.Errorf("unknown id got groups=%v scopes=%v, want empty", ng, ns)
+	}
+}
