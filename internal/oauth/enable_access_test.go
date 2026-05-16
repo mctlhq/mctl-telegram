@@ -405,6 +405,28 @@ func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_DBClientRoutedToPhoneScreen confirms a client granted via
+// the DB access_tier column (not the env allowlist) is likewise routed into
+// the enable_access phone screen, not 302'd past it.
+func TestEnableAccess_DBClientRoutedToPhoneScreen(t *testing.T) {
+	clientID := int64(888000222)
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	ctx := context.Background()
+	if _, err := srv.store.EnsureUserByTelegramID(ctx, clientID, "dbclient", "DB Client"); err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, clientID, db.TierClient); err != nil {
+		t.Fatalf("set access tier: %v", err)
+	}
+	rec := widgetCallbackFor(t, mux, clientID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("db-client callback = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("db-client was not routed to the enable_access phone screen; body=%s", rec.Body.String())
+	}
+}
+
 // TestEnableAccess_TelegramIDMismatch_Rejected confirms that a phone login
 // resolving to a different Telegram account than the widget identity is
 // rejected, and that the wrong-account session bytes are revoked.

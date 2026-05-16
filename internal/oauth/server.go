@@ -390,13 +390,9 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			"admin:users",
 		}, nil
 	}
-	isClient := s.cfg.ClientTelegramIDs[tgID]
-	if !isClient {
-		dbClient, dbErr := s.store.IsClientTier(ctx, tgID)
-		if dbErr != nil {
-			return nil, nil, fmt.Errorf("resolve client tier: %w", dbErr)
-		}
-		isClient = dbClient
+	isClient, err := s.isClientTier(ctx, tgID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve client tier: %w", err)
 	}
 	if isClient {
 		return []string{"clients"}, []string{
@@ -407,6 +403,17 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 		}, nil
 	}
 	return nil, nil, nil
+}
+
+// isClientTier reports whether tgID is in the client tier — the union of the
+// TG_LOGIN_CLIENTS env allowlist (bootstrap) and the runtime-managed
+// users.access_tier='client' column. Both ResolveScopes and the
+// handleWidgetCallback enable_access gate use it so the two stay consistent.
+func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
+	if s.cfg.ClientTelegramIDs[tgID] {
+		return true, nil
+	}
+	return s.store.IsClientTier(ctx, tgID)
 }
 
 // Register mounts the OAuth handlers onto the supplied router. Each route is
@@ -662,10 +669,10 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If the user already has a usable MTProto session, hand back the
-	// authorization code immediately. Otherwise walk admins through the
-	// in-browser enable_access flow to provision one. Non-admins get the
-	// code regardless: their token carries no scopes, so an MTProto session
-	// would be unusable — no point collecting their phone number.
+	// authorization code immediately. Otherwise walk admins and clients
+	// through the in-browser enable_access flow to provision one. A user who
+	// will receive no scopes gets the code regardless: an MTProto session
+	// would be unusable for them — no point collecting their phone number.
 	_, sessErr := s.store.CheckSessionValid(r.Context(), uid)
 	switch {
 	case sessErr == nil:
@@ -683,9 +690,17 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// enable_access provisions an MTProto session, which is only useful to a
-	// user who will actually get scopes. Offer it to admins and clients;
-	// everyone else just gets the (scopeless) code.
-	if !s.cfg.AdminTelegramIDs[payload.ID] && !s.cfg.ClientTelegramIDs[payload.ID] {
+	// user who will actually receive scopes. Offer it to admins and clients;
+	// anyone who will get no scopes just receives the (scopeless) code. The
+	// client check must mirror ResolveScopes (env ∪ DB) — otherwise a
+	// DB-granted client would be 302'd past enable_access, get a scoped token,
+	// and then fail every tool call for lack of a session.
+	isClient, err := s.isClientTier(r.Context(), payload.ID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("resolve client tier: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !s.cfg.AdminTelegramIDs[payload.ID] && !isClient {
 		s.issueAuthCode(w, r, oc)
 		return
 	}
