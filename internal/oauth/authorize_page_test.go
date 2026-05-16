@@ -24,8 +24,11 @@ func TestRenderAuthorizeAccountSwitchHelp(t *testing.T) {
 	if !strings.Contains(body, "Want to use a different Telegram account?") {
 		t.Fatalf("rendered page missing account-switch help block:\n%s", body)
 	}
-	if !strings.Contains(body, "incognito") {
-		t.Fatalf("account-switch help missing manual steps:\n%s", body)
+	// Lock down all three manual steps so a reworded option is caught.
+	for _, step := range []string{"incognito", "oauth.telegram.org", "Logged in with Telegram"} {
+		if !strings.Contains(body, step) {
+			t.Fatalf("account-switch help missing manual step %q:\n%s", step, body)
+		}
 	}
 	if strings.Contains(body, "auth/logOut") {
 		t.Fatalf("page still renders the broken logOut link:\n%s", body)
