@@ -600,6 +600,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		BotUsername:  s.cfg.BotUsername,
 		ServerState:  serverState,
 		RedirectHost: redirectHost,
+		BotID:        botIDFromToken(s.cfg.BotToken),
 	})
 }
 
