@@ -659,6 +659,72 @@ This tool is part of the self-service transparency surface — operators cannot 
 	return tool, handler
 }
 
+// toolListIdentities is the admin-only roster of widget-authenticated users.
+func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("list_telegram_identities",
+		mcplib.WithTitleAnnotation("List Telegram identities"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
+
+Output: JSON array of {telegram_id, username, display_name, access_tier, has_session}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account).
+
+Use this to find a newly signed-in user, then grant them access with set_telegram_access.`),
+	)
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		rows, err := s.Store.ListIdentities(ctx)
+		s.audit(ctx, id, "list_telegram_identities", "", err)
+		if err != nil {
+			return toolErr("list_telegram_identities: %v", err), nil
+		}
+		return jsonResult(map[string]any{"identities": rows, "count": len(rows)})
+	}
+	return tool, handler
+}
+
+// toolSetAccess grants or revokes the client tier for a Telegram user.
+func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("set_telegram_access",
+		mcplib.WithTitleAnnotation("Set a Telegram user's access tier"),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Grant or revoke the "client" access tier for a Telegram user.
+
+Inputs:
+  telegram_id — int, required. The Telegram user id (see list_telegram_identities).
+  tier        — string, required. "client" grants telegram:* scopes for that user's own account; "none" revokes them.
+
+The user must have signed in via the Login Widget at least once (so a users row exists) before a tier can be set. The change takes effect on the user's next token issuance — they reconnect the connector to pick it up.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Description("Telegram user id to grant/revoke (required).")),
+		mcplib.WithString("tier",
+			mcplib.Description(`"client" or "none" (required).`)),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		tier := stringArg(args, "tier", "")
+		if tgID <= 0 {
+			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		if tier != db.TierClient && tier != db.TierNone {
+			return mcplib.NewToolResultError(`tier must be "client" or "none"`), nil
+		}
+		err := s.Store.SetAccessTier(ctx, tgID, tier)
+		s.audit(ctx, id, "set_telegram_access", "", err)
+		if err != nil {
+			return toolErr("set_telegram_access: %v", err), nil
+		}
+		return jsonResult(map[string]any{"telegram_id": tgID, "access_tier": tier, "ok": true})
+	}
+	return tool, handler
+}
+
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
 		return false, "mode=draft (default) — call with mode:'send' to send for real"

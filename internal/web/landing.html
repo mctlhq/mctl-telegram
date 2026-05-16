@@ -155,15 +155,28 @@
         <td>any authenticated identity</td>
         <td>Hard-deletes the encrypted session blob.</td>
       </tr>
+      <tr>
+        <td><code>list_telegram_identities</code></td>
+        <td><span class="pill pill-read">read</span></td>
+        <td><code>admin:users</code></td>
+        <td>Admin only. Roster of signed-in users with access tier and session state.</td>
+      </tr>
+      <tr>
+        <td><code>set_telegram_access</code></td>
+        <td><span class="pill pill-write">write</span></td>
+        <td><code>admin:users</code></td>
+        <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
+      </tr>
     </tbody>
   </table>
 
   <h2>3. Scopes and permissions</h2>
-  <p class="muted">Scopes are derived from your Telegram identity. Operators on the admin allowlist (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set; everyone else authenticates but receives no scopes and will be rejected at the per-tool gate.</p>
+  <p class="muted">Scopes are derived from your Telegram identity. Operators on the admin allowlist (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set; clients on <code>TG_LOGIN_CLIENTS</code> get the <code>telegram:*</code> tool scopes for their own account without platform-admin capability; everyone else authenticates but receives no scopes and is rejected at the per-tool gate.</p>
   <table>
     <thead><tr><th>Telegram identity</th><th>Scopes granted</th></tr></thead>
     <tbody>
-      <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all telegram:* scopes plus <code>admin:users</code></td></tr>
+      <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all <code>telegram:*</code> scopes plus <code>admin:users</code></td></tr>
+      <tr><td>Telegram id ∈ <code>TG_LOGIN_CLIENTS</code></td><td><code>telegram:*</code> scopes (dialogs/messages read, send, pin) — no <code>admin:users</code></td></tr>
       <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
     </tbody>
   </table>

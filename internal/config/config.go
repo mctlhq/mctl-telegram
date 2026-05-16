@@ -30,6 +30,7 @@ type Config struct {
 	TelegramLoginBotToken    string  // signs Telegram Login Widget callbacks (SHA256→HMAC)
 	TelegramLoginBotUsername string  // the @username (no leading @) displayed by the widget
 	TGLoginAdmins            []int64 // allowlist of Telegram ids granted platform-admins scopes
+	TGLoginClients           []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
 	OAUTHCodeTTL             time.Duration
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHAllowImplicitClient bool // accept unregistered client_ids (eases Claude.ai onboarding)
@@ -60,6 +61,7 @@ func Load() (*Config, error) {
 		OAUTHAllowImplicitClient: envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
+	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 
 	if v := os.Getenv("TG_API_ID"); v != "" {
 		n, err := strconv.Atoi(v)

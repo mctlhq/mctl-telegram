@@ -122,6 +122,103 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 	return id, nil
 }
 
+// Access tiers stored in users.access_tier. NULL is treated as TierNone.
+// Admins are governed by the TG_LOGIN_ADMINS env allowlist, not this column.
+const (
+	TierNone   = "none"
+	TierClient = "client"
+)
+
+// IdentityRow is the admin-facing projection of a users row: who has
+// authenticated, their access tier, and whether they hold an active session.
+type IdentityRow struct {
+	TelegramID  int64  `json:"telegram_id"`
+	Username    string `json:"username,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	AccessTier  string `json:"access_tier"`
+	HasSession  bool   `json:"has_session"`
+}
+
+// SetAccessTier sets users.access_tier for the user with the given Telegram
+// id. Returns an error when no such row exists — the user must have signed in
+// through the widget at least once before a tier can be granted.
+func (s *Store) SetAccessTier(ctx context.Context, tgID int64, tier string) error {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET access_tier = $2 WHERE telegram_login_id = $1`,
+		tgID, tier,
+	)
+	if err != nil {
+		return fmt.Errorf("set access_tier: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("no user with telegram id %d — they must sign in once first", tgID)
+	}
+	return nil
+}
+
+// GetAccessTier returns the explicit users.access_tier value for a Telegram
+// id: "" when the user has no row or a NULL tier (unset — the caller should
+// fall back to the env bootstrap allowlist), or "client"/"none" when the tool
+// has set it explicitly. An explicit value is authoritative over the env.
+func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
+	var tier sql.NullString
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT access_tier FROM users WHERE telegram_login_id = $1`, tgID,
+	).Scan(&tier)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query access_tier: %w", err)
+	}
+	if !tier.Valid {
+		return "", nil
+	}
+	return tier.String, nil
+}
+
+// ListIdentities returns every widget-authenticated user with their access
+// tier and whether they currently hold a *usable* MTProto session — a session
+// that is non-revoked AND within both the absolute and idle TTLs, matching
+// what CheckSessionValid would accept. Newest first. Used by the admin
+// list_telegram_identities tool.
+func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
+	now := time.Now().UTC()
+	idleCutoff := now.Add(-idleSessionTTL)
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
+		        COALESCE(u.access_tier, 'none'),
+		        EXISTS(SELECT 1 FROM telegram_accounts ta
+		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
+		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
+		   FROM users u
+		  WHERE u.telegram_login_id IS NOT NULL
+		  ORDER BY u.id DESC`,
+		now, idleCutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list identities: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []IdentityRow
+	for rows.Next() {
+		var (
+			r        IdentityRow
+			username sql.NullString
+			display  sql.NullString
+		)
+		if err := rows.Scan(&r.TelegramID, &username, &display, &r.AccessTier, &r.HasSession); err != nil {
+			return nil, fmt.Errorf("scan identity: %w", err)
+		}
+		r.Username = username.String
+		r.DisplayName = display.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
 // Any prior active row for the user is marked revoked. Writes always use
 // SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read

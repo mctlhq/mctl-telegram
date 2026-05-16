@@ -64,7 +64,7 @@ type Server struct {
 	// int64 -> *sync.Mutex). Two flows for the same uid must not interleave,
 	// or a cancelled-but-still-running predecessor could revoke the session a
 	// newer flow just provisioned. Entries are created on demand and never
-	// removed — one mutex per onboarded admin is negligible.
+	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
 }
 
@@ -98,9 +98,13 @@ type Config struct {
 	// reads this from data-telegram-login.
 	BotUsername string
 	// AdminTelegramIDs is the allowlist of Telegram user ids that get
-	// admin/platform-admins scopes. Anyone else still authenticates but
-	// receives an empty scope set (and therefore 403s on every MCP tool).
+	// admin/platform-admins scopes — the full telegram:* set plus admin:users.
 	AdminTelegramIDs map[int64]bool
+	// ClientTelegramIDs is the allowlist of Telegram user ids that get the
+	// telegram:* scopes for their OWN account (read/send/pin) but NOT the
+	// admin:users platform-admin capability. An id in neither allowlist still
+	// authenticates but receives an empty scope set (403 on every MCP tool).
+	ClientTelegramIDs map[int64]bool
 	// AccessTokenTTL is how long the issued access tokens live. Default 1h.
 	AccessTokenTTL time.Duration
 	// CodeTTL bounds how long an authorization code is valid after issuance.
@@ -229,6 +233,9 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.AdminTelegramIDs == nil {
 		cfg.AdminTelegramIDs = map[int64]bool{}
+	}
+	if cfg.ClientTelegramIDs == nil {
+		cfg.ClientTelegramIDs = map[int64]bool{}
 	}
 	if len(cfg.AllowedImplicitHosts) == 0 {
 		cfg.AllowedImplicitHosts = []string{
@@ -360,11 +367,20 @@ func cancelEnableFlow(e *enableSession) bool {
 	return false
 }
 
-// ResolveScopes maps a Telegram identity to a scope set. For the MVP the
-// only meaningful distinction is "is this id in AdminTelegramIDs": admins
-// get the full read+write+pin set; everyone else gets nothing and will fail
-// the per-tool scope gate.
-func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
+// ResolveScopes maps a Telegram identity to a scope set. Three tiers:
+//   - admins (TG_LOGIN_ADMINS env) → platform-admins: full telegram:* plus
+//     admin:users.
+//   - clients → clients: telegram:* for the user's own account (read/send/
+//     pin), without admin:users. The client allowlist is the union of the
+//     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
+//     users.access_tier='client' column (set via the admin MCP tools).
+//   - anyone else → no scopes; authenticates but fails the per-tool gate.
+//
+// telegram:messages:send is granted to clients too, but a real send stays
+// gated by the per-account send_enabled flag — the scope alone does not let a
+// client send. A DB error resolving the client tier is returned so the caller
+// fails the token issuance rather than silently under-granting.
+func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes []string, err error) {
 	if s.cfg.AdminTelegramIDs[tgID] {
 		return []string{"platform-admins", "admins"}, []string{
 			"telegram:dialogs:read",
@@ -372,9 +388,42 @@ func (s *Server) ResolveScopes(tgID int64) (groups, scopes []string) {
 			"telegram:messages:send",
 			"telegram:messages:pin",
 			"admin:users",
-		}
+		}, nil
 	}
-	return nil, nil
+	isClient, err := s.isClientTier(ctx, tgID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve client tier: %w", err)
+	}
+	if isClient {
+		return []string{"clients"}, []string{
+			"telegram:dialogs:read",
+			"telegram:messages:read",
+			"telegram:messages:send",
+			"telegram:messages:pin",
+		}, nil
+	}
+	return nil, nil, nil
+}
+
+// isClientTier reports whether tgID is in the client tier. The DB
+// users.access_tier column is authoritative when set explicitly; when it is
+// unset (NULL / no row) the TG_LOGIN_CLIENTS env allowlist is the bootstrap
+// fallback. This ordering lets set_telegram_access(tier="none") revoke even an
+// env-listed client. Both ResolveScopes and the handleWidgetCallback
+// enable_access gate use it, so the two stay consistent.
+func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
+	tier, err := s.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		return false, err
+	}
+	switch tier {
+	case db.TierClient:
+		return true, nil
+	case db.TierNone:
+		return false, nil
+	default: // unset — fall back to the env bootstrap allowlist
+		return s.cfg.ClientTelegramIDs[tgID], nil
+	}
 }
 
 // Register mounts the OAuth handlers onto the supplied router. Each route is
@@ -630,10 +679,10 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If the user already has a usable MTProto session, hand back the
-	// authorization code immediately. Otherwise walk admins through the
-	// in-browser enable_access flow to provision one. Non-admins get the
-	// code regardless: their token carries no scopes, so an MTProto session
-	// would be unusable — no point collecting their phone number.
+	// authorization code immediately. Otherwise walk admins and clients
+	// through the in-browser enable_access flow to provision one. A user who
+	// will receive no scopes gets the code regardless: an MTProto session
+	// would be unusable for them — no point collecting their phone number.
 	_, sessErr := s.store.CheckSessionValid(r.Context(), uid)
 	switch {
 	case sessErr == nil:
@@ -650,7 +699,18 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("session check failed: %v", sessErr), http.StatusInternalServerError)
 		return
 	}
-	if !s.cfg.AdminTelegramIDs[payload.ID] {
+	// enable_access provisions an MTProto session, which is only useful to a
+	// user who will actually receive scopes. Offer it to admins and clients;
+	// anyone who will get no scopes just receives the (scopeless) code. The
+	// client check must mirror ResolveScopes (env ∪ DB) — otherwise a
+	// DB-granted client would be 302'd past enable_access, get a scoped token,
+	// and then fail every tool call for lack of a session.
+	isClient, err := s.isClientTier(r.Context(), payload.ID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("resolve client tier: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !s.cfg.AdminTelegramIDs[payload.ID] && !isClient {
 		s.issueAuthCode(w, r, oc)
 		return
 	}
@@ -805,7 +865,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	groups, scopes := s.ResolveScopes(entry.TelegramID)
+	groups, scopes, err := s.ResolveScopes(r.Context(), entry.TelegramID)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
+		return
+	}
 	// aud policy: when the deployment configures OAUTH_JWT_AUDIENCE,
 	// every minted token MUST carry exactly that value so the localjwt
 	// verifier on /mcp accepts it. When unconfigured, no aud is emitted
