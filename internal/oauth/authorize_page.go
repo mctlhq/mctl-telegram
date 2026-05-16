@@ -101,12 +101,15 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
        a follow-up screen explaining the next step.</p>
 
     <div class="widget">
+      <!-- data-request-access="write" is intentionally omitted: this server
+           only needs identity verification, and the write grant made Telegram
+           open the shared @MCTL_AI_bot chat for the user, triggering the
+           OpenClaw admins-tenant pairing prompt as confusing onboarding noise. -->
       <script async src="https://telegram.org/js/telegram-widget.js?22"
               data-telegram-login="{{.BotUsername}}"
               data-size="large"
               data-radius="8"
-              data-onauth="onTelegramAuth(user)"
-              data-request-access="write"></script>
+              data-onauth="onTelegramAuth(user)"></script>
     </div>
     <div id="err" class="error"></div>
     {{if .BotID}}
