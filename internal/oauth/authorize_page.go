@@ -182,7 +182,7 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
         frame.addEventListener('load', finish);
         frame.src = sw.href;
         document.body.appendChild(frame);
-        // Fallback in case the iframe load event never fires.
+        // Safety net in case the logOut request stalls and load never fires.
         setTimeout(finish, 5000);
       });
     })();
