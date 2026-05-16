@@ -111,7 +111,7 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     <div id="err" class="error"></div>
     {{if .BotID}}
     <p class="switch">
-      <a id="switch" target="_blank" rel="noopener"
+      <a id="switch" target="_blank" rel="noopener noreferrer"
          href="https://oauth.telegram.org/auth/logOut?bot_id={{.BotID}}">Use a different Telegram account</a>
     </p>
     {{end}}
@@ -155,9 +155,14 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
       sw.addEventListener('click', function (e) {
         e.preventDefault();
         var p = window.open(sw.href, 'tg_logout', 'width=420,height=520');
+        if (!p) {
+          document.getElementById('err').textContent =
+            'Popup was blocked - please allow popups for this site and try again.';
+          return;
+        }
         sw.textContent = 'Logging out, one moment...';
         setTimeout(function () {
-          try { if (p) p.close(); } catch (_) {}
+          try { p.close(); } catch (_) {}
           location.reload();
         }, 2500);
       });
