@@ -104,6 +104,11 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	mux := newMockRouter()
 	srv.Register(mux)
 
+	// A returning admin already has an MTProto session, so the widget
+	// callback issues a code directly. A first-time admin without one is
+	// routed through enable_access instead (see enable_access_test.go).
+	seedSession(t, srv, 210408407)
+
 	// 1. /oauth/authorize — receive HTML with serverState embedded.
 	verifier, challenge := pkceVerifierAndChallenge()
 	q := url.Values{
@@ -782,6 +787,10 @@ type codeState struct {
 
 func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challenge string) codeState {
 	t.Helper()
+	// A widget callback only issues a code directly when the user already has
+	// an MTProto session; a first-time admin is otherwise diverted into the
+	// enable_access flow. Seed one so these /oauth/token tests get a code.
+	seedSession(t, srv, 210408407)
 	q := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {"claude.ai"},
