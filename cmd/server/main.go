@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/digest"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
@@ -111,7 +112,7 @@ func main() {
 	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
 	// to api.mctl.ai as before.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		if err := registerOAuth(cfg, store, mux); err != nil {
+		if err := registerOAuth(ctx, cfg, store, mux); err != nil {
 			slog.Error("oauth init failed; refusing to start", "err", err)
 			os.Exit(1)
 		}
@@ -273,7 +274,7 @@ func selectBridgeIssuer(cfg *config.Config) string {
 
 // registerOAuth wires the Telegram-native OAuth issuer onto the router.
 // Called only when AUTH_MODE=local-jwt.
-func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
+func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 	if cfg.OAUTHJWTSecret == "" {
 		return fmt.Errorf("OAUTH_JWT_SECRET is required when AUTH_MODE=local-jwt")
 	}
@@ -299,6 +300,7 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		BotUsername:         cfg.TelegramLoginBotUsername,
 		AdminTelegramIDs:    admins,
 		ClientTelegramIDs:   clients,
+		AutoApproveClients:  cfg.AutoApproveClients,
 		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
 		CodeTTL:             cfg.OAUTHCodeTTL,
 		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
@@ -309,13 +311,18 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		return err
 	}
 	srv.Register(mux)
-	stopSweep := make(chan struct{})
-	srv.StartSweeper(stopSweep, 1*time.Minute)
+	// ctx.Done() is a <-chan struct{} — the sweeper exits on shutdown.
+	srv.StartSweeper(ctx.Done(), 1*time.Minute)
+	// Once-a-day Telegram digest of new clients — keeps the operator informed
+	// while onboarding stays hands-off. Recipients are the admin allowlist;
+	// the goroutine exits with ctx.
+	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
 	slog.Info("oauth issuer enabled",
 		"issuer", cfg.PublicBaseURL,
 		"bot_username", cfg.TelegramLoginBotUsername,
 		"admin_count", len(admins),
 		"client_count", len(clients),
+		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 	)
 	return nil

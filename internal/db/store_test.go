@@ -7,6 +7,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// TestListIdentities checks the roster: fresh widget-authenticated users appear
+// with a populated CreatedAt and an empty (unset) raw access_tier.
+func TestListIdentities(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if _, err := st.EnsureUserByTelegramID(ctx, 111, "alice", "Alice"); err != nil {
+		t.Fatalf("ensure 111: %v", err)
+	}
+	if _, err := st.EnsureUserByTelegramID(ctx, 222, "bob", "Bob"); err != nil {
+		t.Fatalf("ensure 222: %v", err)
+	}
+	rows, err := st.ListIdentities(ctx)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ListIdentities len = %d, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.CreatedAt.IsZero() {
+			t.Errorf("identity %d has zero CreatedAt", r.TelegramID)
+		}
+		if r.AccessTier != "" {
+			t.Errorf("fresh identity %d should have empty access_tier, got %q", r.TelegramID, r.AccessTier)
+		}
+	}
+}
+
 // newTestStore opens an in-memory SQLite DB, applies the migration, and
 // returns a Store wired with a nil crypto (Seal/Open passthrough). Session
 // blobs in these tests are arbitrary bytes — we never decrypt them.

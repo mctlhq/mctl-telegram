@@ -34,6 +34,8 @@ type Config struct {
 	OAUTHCodeTTL             time.Duration
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHAllowImplicitClient bool // accept unregistered client_ids (eases Claude.ai onboarding)
+	AutoApproveClients       bool // open registration: every widget login auto-gets the client tier
+	DigestHourUTC            int  // UTC hour (0-23) for the daily new-client digest; default 9
 }
 
 func Load() (*Config, error) {
@@ -59,6 +61,8 @@ func Load() (*Config, error) {
 		OAUTHCodeTTL:             envDuration("OAUTH_CODE_TTL", 10*time.Minute),
 		OAUTHAccessTokenTTL:      envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
 		OAUTHAllowImplicitClient: envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
+		AutoApproveClients:       envBool("AUTO_APPROVE_CLIENTS", false),
+		DigestHourUTC:            envInt("DIGEST_HOUR_UTC", 9),
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))

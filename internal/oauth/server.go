@@ -105,6 +105,10 @@ type Config struct {
 	// admin:users platform-admin capability. An id in neither allowlist still
 	// authenticates but receives an empty scope set (403 on every MCP tool).
 	ClientTelegramIDs map[int64]bool
+	// AutoApproveClients opens registration: when true, any widget-authenticated
+	// user whose users.access_tier is unset resolves to the client tier without
+	// an operator action. An explicit DB tier of "none" still bans them.
+	AutoApproveClients bool
 	// AccessTokenTTL is how long the issued access tokens live. Default 1h.
 	AccessTokenTTL time.Duration
 	// CodeTTL bounds how long an authorization code is valid after issuance.
@@ -421,7 +425,13 @@ func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
 		return true, nil
 	case db.TierNone:
 		return false, nil
-	default: // unset — fall back to the env bootstrap allowlist
+	default: // unset
+		// Open registration: an un-tiered user is a client by default.
+		// An explicit DB "none" (above) still bans them.
+		if s.cfg.AutoApproveClients {
+			return true, nil
+		}
+		// Otherwise fall back to the env bootstrap allowlist.
 		return s.cfg.ClientTelegramIDs[tgID], nil
 	}
 }
