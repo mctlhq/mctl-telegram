@@ -59,6 +59,13 @@ type Server struct {
 	// a field (not a direct telegram.Login call) so tests can substitute a
 	// stub without dialing real Telegram. New sets it to telegram.Login.
 	loginFn LoginFunc
+
+	// loginMu serialises enable_access login goroutines per users.id (key
+	// int64 -> *sync.Mutex). Two flows for the same uid must not interleave,
+	// or a cancelled-but-still-running predecessor could revoke the session a
+	// newer flow just provisioned. Entries are created on demand and never
+	// removed — one mutex per onboarded admin is negligible.
+	loginMu sync.Map
 }
 
 // LoginFunc matches the signature of telegram.Login. The enable_access flow
@@ -320,12 +327,15 @@ func (s *Server) sweep(now time.Time) {
 			}
 		}
 	}
-	// Abandoned enable_access flows: drop the map entry and best-effort
-	// cancel the background login goroutine.
+	// Abandoned enable_access flows. Drop the entry only once the goroutine
+	// could be cancelled; if a handler is mid-step (holds e.lock) keep the
+	// entry so the user's in-flight flow is not silently invalidated — the
+	// next sweep tick retries after the handler releases the lock.
 	for k, e := range s.enables {
 		if now.Sub(e.createdAt) > s.cfg.CodeTTL {
-			cancelEnableFlow(e)
-			delete(s.enables, k)
+			if cancelEnableFlow(e) {
+				delete(s.enables, k)
+			}
 		}
 	}
 }
@@ -333,16 +343,21 @@ func (s *Server) sweep(now time.Time) {
 // cancelEnableFlow best-effort cancels the background login goroutine of an
 // enable_access session that is being dropped (swept or evicted). It runs
 // under s.mu; the TryLock keeps it free of a lock-ordering hazard against the
-// handler path (a handler holds e.lock, then may take s.mu) — if a handler is
-// mid-step we simply skip, and the goroutine's own CodeTTL-bounded context
-// still terminates it.
-func cancelEnableFlow(e *enableSession) {
+// handler path (a handler holds e.lock, then may take s.mu).
+//
+// Returns true when it acquired e.lock (cancel applied, nothing left to do)
+// and false when a handler currently holds e.lock. A false result means the
+// caller must NOT drop the entry yet — a handler is mid-step and dropping it
+// would silently invalidate the user's in-flight flow.
+func cancelEnableFlow(e *enableSession) bool {
 	if e.lock.TryLock() {
 		if e.flow != nil && e.flow.cancel != nil {
 			e.flow.cancel()
 		}
 		e.lock.Unlock()
+		return true
 	}
+	return false
 }
 
 // ResolveScopes maps a Telegram identity to a scope set. For the MVP the
@@ -659,8 +674,12 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if oldestKey != "" {
+			// Eviction must enforce the map cap, so the entry is dropped
+			// regardless of whether the goroutine could be cancelled now; a
+			// best-effort cancel still fires and, failing that, the
+			// goroutine's CodeTTL-bounded context terminates it.
 			if old := s.enables[oldestKey]; old != nil {
-				cancelEnableFlow(old)
+				_ = cancelEnableFlow(old)
 			}
 			delete(s.enables, oldestKey)
 		}

@@ -123,6 +123,13 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	go func() {
 		defer cancel()
 		defer close(lf.done)
+		// Serialise login work for this uid. A /start re-submission cancels
+		// the prior flow and starts a new one; without this lock the cancelled
+		// predecessor — if its login RPC had already returned — could still
+		// run its revoke/SaveSession and clobber the newer flow's session.
+		ul := s.uidLoginMutex(uid)
+		ul.Lock()
+		defer ul.Unlock()
 		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword)
 		if err != nil {
 			lf.err = err
@@ -135,7 +142,16 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// already persisted B's session bytes via the gotd SessionStore, so
 		// revoke that row before bailing out.
 		if tgID != wantTgID {
-			_, _ = s.store.RevokeActiveSession(bgCtx, uid)
+			// telegram.Login already persisted the wrong account's session
+			// bytes under uid; revoke them. The uid mutex guarantees no
+			// concurrent flow for uid, so this only targets this flow's own
+			// row. A failed revoke must surface — otherwise the wrong session
+			// stays active and a later callback would issue a token backed by
+			// it.
+			if _, rErr := s.store.RevokeActiveSession(bgCtx, uid); rErr != nil {
+				lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
+				return
+			}
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
 		}
@@ -165,6 +181,22 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		lf.tgUserID = tgID
 	}()
 	return lf
+}
+
+// uidLoginMutex returns the per-user mutex that serialises enable_access login
+// goroutines for one users.id. See Server.loginMu.
+func (s *Server) uidLoginMutex(uid int64) *sync.Mutex {
+	m, _ := s.loginMu.LoadOrStore(uid, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// renderEnablePhoneStep resets the flow to stepPhone and renders the phone
+// screen. Every handler path that bounces the user back to the start uses it,
+// so es.step never lags behind the screen actually shown (a stale stepCode /
+// stepPassword would otherwise let a direct POST skip the UI order).
+func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePhonePage) {
+	es.step = stepPhone
+	renderEnablePhone(w, p)
 }
 
 // lookupEnable parses the form, resolves the "es" token to a live (un-expired)
@@ -211,7 +243,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	sendOptIn := r.FormValue("send_optin") != ""
 	phone := normalizePhone(rawPhone)
 	if !validPhone(phone) {
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       rawPhone,
@@ -236,7 +268,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		renderEnableCode(w, enableCodePage{Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: phone})
 	case <-lf.done:
 		if lf.err != nil {
-			renderEnablePhone(w, enablePhonePage{
+			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 				Error: "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again.",
 			})
@@ -246,7 +278,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// auth on the session storage). Nothing more to collect.
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 			Error: "Timed out contacting Telegram. Please try again.",
 		})
@@ -268,7 +300,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	defer es.lock.Unlock()
 
 	if es.step != stepCode || es.flow == nil {
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
 		})
@@ -289,7 +321,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		// Goroutine already exited — fall through to result handling below.
 	case <-time.After(enableChanSendWait):
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "The login flow stopped responding. Please start again.",
 		})
@@ -302,7 +334,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		renderEnablePassword(w, enablePasswordPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
 	case <-lf.done:
 		if lf.err != nil {
-			renderEnablePhone(w, enablePhonePage{
+			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
 			})
@@ -310,7 +342,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		}
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the code. Please start again.",
 		})
@@ -332,7 +364,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	defer es.lock.Unlock()
 
 	if es.step != stepPassword || es.flow == nil {
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
 		})
@@ -353,7 +385,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		// Goroutine already exited — fall through to result handling below.
 	case <-time.After(enableChanSendWait):
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "The login flow stopped responding. Please start again.",
 		})
@@ -363,7 +395,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.done:
 		if lf.err != nil {
-			renderEnablePhone(w, enablePhonePage{
+			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
 			})
@@ -371,7 +403,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		renderEnablePhone(w, enablePhonePage{
+		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the password. Please start again.",
 		})
