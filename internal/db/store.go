@@ -179,34 +179,29 @@ func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
 	return tier.String, nil
 }
 
-// ListIdentities returns widget-authenticated users with their access tier,
-// join time, and whether they currently hold a *usable* MTProto session — a
-// session that is non-revoked AND within both the absolute and idle TTLs,
-// matching what CheckSessionValid would accept. Newest first.
+// ListIdentities returns every widget-authenticated user with their raw
+// access tier, join time, and whether they currently hold a *usable* MTProto
+// session — non-revoked AND within both the absolute and idle TTLs, matching
+// what CheckSessionValid would accept. Newest first.
 //
-// When since is zero every user is returned; otherwise only users whose
-// users.created_at is strictly after since — used by the daily digest to list
-// just the new clients.
-func (s *Store) ListIdentities(ctx context.Context, since time.Time) ([]IdentityRow, error) {
+// AccessTier is the raw users.access_tier value: "" (unset), "client", or
+// "none". Callers that care about the effective tier must apply the
+// auto-approve rule themselves — see ResolveScopes / the digest.
+func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
-	const base = `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
-	        COALESCE(u.access_tier, 'none'), u.created_at,
-	        EXISTS(SELECT 1 FROM telegram_accounts ta
-	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
-	                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
-	                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
-	   FROM users u
-	  WHERE u.telegram_login_id IS NOT NULL`
-	var (
-		rows *sql.Rows
-		err  error
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
+		        u.access_tier, u.created_at,
+		        EXISTS(SELECT 1 FROM telegram_accounts ta
+		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
+		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
+		   FROM users u
+		  WHERE u.telegram_login_id IS NOT NULL
+		  ORDER BY u.id DESC`,
+		now, idleCutoff,
 	)
-	if since.IsZero() {
-		rows, err = s.DB.QueryContext(ctx, base+` ORDER BY u.id DESC`, now, idleCutoff)
-	} else {
-		rows, err = s.DB.QueryContext(ctx, base+` AND u.created_at > $3 ORDER BY u.id DESC`, now, idleCutoff, since.UTC())
-	}
 	if err != nil {
 		return nil, fmt.Errorf("list identities: %w", err)
 	}
@@ -217,12 +212,14 @@ func (s *Store) ListIdentities(ctx context.Context, since time.Time) ([]Identity
 			r        IdentityRow
 			username sql.NullString
 			display  sql.NullString
+			tier     sql.NullString
 		)
-		if err := rows.Scan(&r.TelegramID, &username, &display, &r.AccessTier, &r.CreatedAt, &r.HasSession); err != nil {
+		if err := rows.Scan(&r.TelegramID, &username, &display, &tier, &r.CreatedAt, &r.HasSession); err != nil {
 			return nil, fmt.Errorf("scan identity: %w", err)
 		}
 		r.Username = username.String
 		r.DisplayName = display.String
+		r.AccessTier = tier.String // "" when the column is NULL (unset)
 		out = append(out, r)
 	}
 	return out, rows.Err()

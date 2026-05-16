@@ -675,7 +675,7 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 		if err := requireScope(id, "admin:users"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
-		rows, err := s.Store.ListIdentities(ctx, time.Time{})
+		rows, err := s.Store.ListIdentities(ctx)
 		s.audit(ctx, id, "list_telegram_identities", "", err)
 		if err != nil {
 			return toolErr("list_telegram_identities: %v", err), nil

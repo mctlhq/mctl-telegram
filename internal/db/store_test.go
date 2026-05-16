@@ -3,46 +3,35 @@ package db
 import (
 	"context"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// TestListIdentities_SinceFilter checks the since-window: zero returns all
-// users, a future cutoff returns none, a recent cutoff returns the just-created
-// rows.
-func TestListIdentities_SinceFilter(t *testing.T) {
+// TestListIdentities checks the roster: fresh widget-authenticated users appear
+// with a populated CreatedAt and an empty (unset) raw access_tier.
+func TestListIdentities(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
-	if _, err := st.EnsureUserByTelegramID(ctx, 111, "old", "Old"); err != nil {
+	if _, err := st.EnsureUserByTelegramID(ctx, 111, "alice", "Alice"); err != nil {
 		t.Fatalf("ensure 111: %v", err)
 	}
-	if _, err := st.EnsureUserByTelegramID(ctx, 222, "new", "New"); err != nil {
+	if _, err := st.EnsureUserByTelegramID(ctx, 222, "bob", "Bob"); err != nil {
 		t.Fatalf("ensure 222: %v", err)
 	}
-
-	all, err := st.ListIdentities(ctx, time.Time{})
+	rows, err := st.ListIdentities(ctx)
 	if err != nil {
-		t.Fatalf("list all: %v", err)
+		t.Fatalf("ListIdentities: %v", err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("list all = %d, want 2", len(all))
+	if len(rows) != 2 {
+		t.Fatalf("ListIdentities len = %d, want 2", len(rows))
 	}
-
-	future, err := st.ListIdentities(ctx, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatalf("list since-future: %v", err)
-	}
-	if len(future) != 0 {
-		t.Errorf("since=now+1h = %d, want 0", len(future))
-	}
-
-	recent, err := st.ListIdentities(ctx, time.Now().Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("list since-recent: %v", err)
-	}
-	if len(recent) != 2 {
-		t.Errorf("since=now-1h = %d, want 2", len(recent))
+	for _, r := range rows {
+		if r.CreatedAt.IsZero() {
+			t.Errorf("identity %d has zero CreatedAt", r.TelegramID)
+		}
+		if r.AccessTier != "" {
+			t.Errorf("fresh identity %d should have empty access_tier, got %q", r.TelegramID, r.AccessTier)
+		}
 	}
 }
 
