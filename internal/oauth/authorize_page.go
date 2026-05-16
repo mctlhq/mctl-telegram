@@ -150,28 +150,40 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
     }
 
     // The Telegram widget remembers the last account via cookies on the
-    // oauth.telegram.org domain, which this origin cannot clear. The switch
-    // control opens Telegram's own logout endpoint in a popup, then reloads
-    // this page so the widget re-renders and prompts for a fresh login.
-    // The logOut endpoint requires the embedding page's origin as a query
-    // parameter (it rejects the request with "origin required" otherwise) and
-    // validates it against the bot's registered domain.
+    // oauth.telegram.org domain. Those cookies are read by the widget's own
+    // embedded iframe, so the logout must run in the SAME browsing context -
+    // an iframe under this page. A popup loads oauth.telegram.org as a
+    // first-party top-level page, which browsers keep in a different cookie
+    // partition than the third-party iframe, so a popup logout never clears
+    // the cookie the widget actually reads (and on mobile window.open opens
+    // a tab, breaking the close/reload flow entirely).
+    //
+    // The switch control loads the logOut endpoint in a hidden same-page
+    // iframe, then reloads so the widget re-renders and prompts for a fresh
+    // login. The logOut endpoint requires the embedding page's origin as a
+    // query parameter (it rejects the request with "origin required"
+    // otherwise) and validates it against the bot's registered domain.
     (function () {
       var sw = document.getElementById('switch');
       if (!sw) return;
       sw.addEventListener('click', function (e) {
         e.preventDefault();
-        var p = window.open(sw.href, 'tg_logout', 'width=420,height=520');
-        if (!p) {
-          document.getElementById('err').textContent =
-            'Popup was blocked - please allow popups for this site and try again.';
-          return;
-        }
+        if (sw.dataset.busy) return;
+        sw.dataset.busy = '1';
         sw.textContent = 'Logging out, one moment...';
-        setTimeout(function () {
-          try { p.close(); } catch (_) {}
+        var done = false;
+        var finish = function () {
+          if (done) return;
+          done = true;
           location.reload();
-        }, 2500);
+        };
+        var frame = document.createElement('iframe');
+        frame.style.display = 'none';
+        frame.addEventListener('load', finish);
+        frame.src = sw.href;
+        document.body.appendChild(frame);
+        // Fallback in case the iframe load event never fires.
+        setTimeout(finish, 5000);
       });
     })();
   </script>
