@@ -287,6 +287,10 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 	for _, id := range cfg.TGLoginAdmins {
 		admins[id] = true
 	}
+	clients := map[int64]bool{}
+	for _, id := range cfg.TGLoginClients {
+		clients[id] = true
+	}
 	srv, err := oauth.New(oauth.Config{
 		Issuer:              strings.TrimRight(cfg.PublicBaseURL, "/"),
 		JWTSecret:           []byte(cfg.OAUTHJWTSecret),
@@ -294,6 +298,7 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		BotToken:            cfg.TelegramLoginBotToken,
 		BotUsername:         cfg.TelegramLoginBotUsername,
 		AdminTelegramIDs:    admins,
+		ClientTelegramIDs:   clients,
 		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
 		CodeTTL:             cfg.OAUTHCodeTTL,
 		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
@@ -310,6 +315,7 @@ func registerOAuth(cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 		"issuer", cfg.PublicBaseURL,
 		"bot_username", cfg.TelegramLoginBotUsername,
 		"admin_count", len(admins),
+		"client_count", len(clients),
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 	)
 	return nil
