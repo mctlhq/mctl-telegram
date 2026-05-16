@@ -405,15 +405,25 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 	return nil, nil, nil
 }
 
-// isClientTier reports whether tgID is in the client tier — the union of the
-// TG_LOGIN_CLIENTS env allowlist (bootstrap) and the runtime-managed
-// users.access_tier='client' column. Both ResolveScopes and the
-// handleWidgetCallback enable_access gate use it so the two stay consistent.
+// isClientTier reports whether tgID is in the client tier. The DB
+// users.access_tier column is authoritative when set explicitly; when it is
+// unset (NULL / no row) the TG_LOGIN_CLIENTS env allowlist is the bootstrap
+// fallback. This ordering lets set_telegram_access(tier="none") revoke even an
+// env-listed client. Both ResolveScopes and the handleWidgetCallback
+// enable_access gate use it, so the two stay consistent.
 func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
-	if s.cfg.ClientTelegramIDs[tgID] {
-		return true, nil
+	tier, err := s.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		return false, err
 	}
-	return s.store.IsClientTier(ctx, tgID)
+	switch tier {
+	case db.TierClient:
+		return true, nil
+	case db.TierNone:
+		return false, nil
+	default: // unset — fall back to the env bootstrap allowlist
+		return s.cfg.ClientTelegramIDs[tgID], nil
+	}
 }
 
 // Register mounts the OAuth handlers onto the supplied router. Each route is

@@ -157,34 +157,46 @@ func (s *Store) SetAccessTier(ctx context.Context, tgID int64, tier string) erro
 	return nil
 }
 
-// IsClientTier reports whether the Telegram id is marked access_tier='client'.
-// A missing row or NULL tier yields (false, nil).
-func (s *Store) IsClientTier(ctx context.Context, tgID int64) (bool, error) {
+// GetAccessTier returns the explicit users.access_tier value for a Telegram
+// id: "" when the user has no row or a NULL tier (unset — the caller should
+// fall back to the env bootstrap allowlist), or "client"/"none" when the tool
+// has set it explicitly. An explicit value is authoritative over the env.
+func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
 	var tier sql.NullString
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT access_tier FROM users WHERE telegram_login_id = $1`, tgID,
 	).Scan(&tier)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return "", nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("query access_tier: %w", err)
+		return "", fmt.Errorf("query access_tier: %w", err)
 	}
-	return tier.Valid && tier.String == TierClient, nil
+	if !tier.Valid {
+		return "", nil
+	}
+	return tier.String, nil
 }
 
 // ListIdentities returns every widget-authenticated user with their access
-// tier and whether they currently hold an active MTProto session. Newest
-// first. Used by the admin list_telegram_identities tool.
+// tier and whether they currently hold a *usable* MTProto session — a session
+// that is non-revoked AND within both the absolute and idle TTLs, matching
+// what CheckSessionValid would accept. Newest first. Used by the admin
+// list_telegram_identities tool.
 func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
+	now := time.Now().UTC()
+	idleCutoff := now.Add(-idleSessionTTL)
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
 		        COALESCE(u.access_tier, 'none'),
 		        EXISTS(SELECT 1 FROM telegram_accounts ta
-		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL)
+		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
+		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
 		   FROM users u
 		  WHERE u.telegram_login_id IS NOT NULL
 		  ORDER BY u.id DESC`,
+		now, idleCutoff,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list identities: %w", err)

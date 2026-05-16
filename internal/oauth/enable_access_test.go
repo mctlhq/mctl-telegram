@@ -405,6 +405,31 @@ func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
 	}
 }
 
+// TestResolveScopes_DBRevokeOverridesEnv confirms that an explicit DB tier of
+// "none" revokes a client even when they are in the TG_LOGIN_CLIENTS env
+// bootstrap allowlist.
+func TestResolveScopes_DBRevokeOverridesEnv(t *testing.T) {
+	ctx := context.Background()
+	envID := int64(666000333)
+	srv := newTestServer(t, func(c *Config) {
+		c.ClientTelegramIDs = map[int64]bool{envID: true}
+	})
+	// Starts as a client via the env bootstrap allowlist.
+	if _, sc, err := srv.ResolveScopes(ctx, envID); err != nil || len(sc) == 0 {
+		t.Fatalf("env-listed id should start as a client: scopes=%v err=%v", sc, err)
+	}
+	// Explicit DB revocation must override the env.
+	if _, err := srv.store.EnsureUserByTelegramID(ctx, envID, "u", "U"); err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, envID, db.TierNone); err != nil {
+		t.Fatalf("set tier none: %v", err)
+	}
+	if _, sc, err := srv.ResolveScopes(ctx, envID); err != nil || len(sc) != 0 {
+		t.Errorf("DB tier='none' must override the env allowlist: scopes=%v err=%v", sc, err)
+	}
+}
+
 // TestEnableAccess_DBClientRoutedToPhoneScreen confirms a client granted via
 // the DB access_tier column (not the env allowlist) is likewise routed into
 // the enable_access phone screen, not 302'd past it.
