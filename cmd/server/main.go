@@ -311,8 +311,8 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		return err
 	}
 	srv.Register(mux)
-	stopSweep := make(chan struct{})
-	srv.StartSweeper(stopSweep, 1*time.Minute)
+	// ctx.Done() is a <-chan struct{} — the sweeper exits on shutdown.
+	srv.StartSweeper(ctx.Done(), 1*time.Minute)
 	// Once-a-day Telegram digest of new clients — keeps the operator informed
 	// while onboarding stays hands-off. Recipients are the admin allowlist;
 	// the goroutine exits with ctx.
