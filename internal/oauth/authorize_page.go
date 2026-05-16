@@ -50,6 +50,11 @@ func botIDFromToken(token string) string {
 //
 // We intentionally avoid any external CSS/JS dependency beyond Telegram's own
 // widget script so the page works without a CDN and CSP can stay narrow.
+//
+// The widget script intentionally omits data-request-access="write": this
+// server only needs identity verification, and the write grant made Telegram
+// open the shared bot chat for the user, triggering the OpenClaw admins-tenant
+// pairing prompt as confusing onboarding noise.
 var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -101,10 +106,6 @@ var authorizeTemplate = template.Must(template.New("authorize").Parse(`<!doctype
        a follow-up screen explaining the next step.</p>
 
     <div class="widget">
-      <!-- data-request-access="write" is intentionally omitted: this server
-           only needs identity verification, and the write grant made Telegram
-           open the shared @MCTL_AI_bot chat for the user, triggering the
-           OpenClaw admins-tenant pairing prompt as confusing onboarding noise. -->
       <script async src="https://telegram.org/js/telegram-widget.js?22"
               data-telegram-login="{{.BotUsername}}"
               data-size="large"
