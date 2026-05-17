@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 )
@@ -166,6 +167,62 @@ func TestToken_RefreshRejectsClientMismatch(t *testing.T) {
 	form.Set("client_id", "someone-else")
 	if rec := doTokenRequest(t, mux, form); rec.Code == http.StatusOK {
 		t.Fatal("refresh token redeemed under a mismatched client_id")
+	}
+}
+
+// TestToken_RefreshRejectsExpiredToken confirms the handler rejects a refresh
+// token whose absolute expiry has elapsed.
+func TestToken_RefreshRejectsExpiredToken(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	// Issue a refresh token under the real clock (default TTL 720h).
+	resp := authCodeTokens(t, srv, mux)
+	refreshTok, _ := resp["refresh_token"].(string)
+	// Advance the server clock past the refresh-token TTL.
+	srv.clock = func() time.Time { return time.Now().Add(721 * time.Hour) }
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshTok)
+	form.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, form); rec.Code == http.StatusOK {
+		t.Fatal("expired refresh token was accepted")
+	}
+}
+
+// TestToken_RefreshIsAbsoluteNotSliding confirms a rotated token carries the
+// original expiry forward — refreshing does not extend the absolute lifetime.
+func TestToken_RefreshIsAbsoluteNotSliding(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	refreshTok, _ := resp["refresh_token"].(string)
+
+	// Rotate once, still under the real clock.
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshTok)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotation failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	// Past the original TTL the rotated token must also be dead — rotation
+	// did not reset the clock.
+	srv.clock = func() time.Time { return time.Now().Add(721 * time.Hour) }
+	form2 := url.Values{}
+	form2.Set("grant_type", "refresh_token")
+	form2.Set("refresh_token", rotatedTok)
+	form2.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, form2); rec.Code == http.StatusOK {
+		t.Fatal("rotated token outlived the original absolute TTL — expiry is sliding")
 	}
 }
 

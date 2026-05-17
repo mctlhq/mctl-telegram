@@ -910,7 +910,9 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bind the refresh token to the internal users.id so a later refresh —
 	// and operator-facing tooling — resolves the same identity the access
-	// token authenticates as. EnsureUserByTelegramID is idempotent.
+	// token authenticates as. EnsureUserByTelegramID is idempotent; the empty
+	// displayName is safe because its metadata refresh is NULLIF-guarded and
+	// will not clobber a name the widget callback already stored.
 	uid, err := s.store.EnsureUserByTelegramID(r.Context(), entry.TelegramID, entry.TelegramUsername, "")
 	if err != nil {
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
@@ -955,10 +957,16 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reuse detection: an already-rotated (revoked) token is presented again.
 	// Either an honest client double-submitted or a stolen token is in play —
-	// kill the family and force a fresh login.
+	// kill the family and force a fresh login. If the revoke itself fails we
+	// must NOT fall through to a plain invalid_grant: that would leave the
+	// family's still-live token usable after a detected theft. Fail closed
+	// with a 500 so the incident surfaces and the caller retries.
 	if rt.Revoked() {
 		if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
-			slog.Warn("refresh token family revoke failed", "err", revErr)
+			slog.Error("refresh token family revoke failed — reuse detection not enforced",
+				"err", revErr, "family_id", rt.FamilyID)
+			writeTokenError(w, "server_error", "could not complete reuse detection", http.StatusInternalServerError)
+			return
 		}
 		writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
 		return
@@ -992,7 +1000,11 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		TelegramID:       rt.TelegramID,
 		TelegramUsername: rt.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
-		ExpiresAt:        s.clock().Add(s.cfg.RefreshTokenTTL),
+		// Carry the original expiry forward — RefreshTokenTTL is an *absolute*
+		// lifetime, not a sliding window. Re-stamping now+TTL on every
+		// rotation would let a client that refreshes hourly hold a token that
+		// never expires; instead the whole family dies TTL after first issue.
+		ExpiresAt: rt.ExpiresAt,
 	}); err != nil {
 		if errors.Is(err, db.ErrRefreshTokenNotFound) {
 			// Lost a race with a concurrent rotation of the same token.

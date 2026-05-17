@@ -279,7 +279,7 @@ func selectBridgeIssuer(cfg *config.Config) string {
 // Called only when AUTH_MODE=local-jwt.
 func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux) error {
 	if cfg.OAUTHJWTSecret == "" {
-		return fmt.Errorf("OAUTH_JWT_SECRET is required when AUTH_MODE=local-jwt")
+		return fmt.Errorf("OAUTH_JWT_SIGNING_KEY is required when AUTH_MODE=local-jwt")
 	}
 	if cfg.TelegramLoginBotToken == "" {
 		return fmt.Errorf("TELEGRAM_LOGIN_BOT_TOKEN is required when AUTH_MODE=local-jwt")
