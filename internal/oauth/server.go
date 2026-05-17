@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -114,6 +115,12 @@ type Config struct {
 	// CodeTTL bounds how long an authorization code is valid after issuance.
 	// Default 10 minutes (RFC 6749 §4.1.2 recommends "as short as possible").
 	CodeTTL time.Duration
+	// RefreshTokenTTL is the absolute lifetime of an issued refresh token.
+	// Default 720h (30 days). Refresh tokens are long-lived on purpose — they
+	// are opaque, stored hashed, and rotated on every use, so a client can
+	// renew a short-lived access token across pod restarts without re-running
+	// the Telegram Login Widget flow.
+	RefreshTokenTTL time.Duration
 	// AllowImplicitClient allows /oauth/authorize without prior /oauth/register.
 	// Set to true to make Claude.ai onboarding trivial; the redirect_uri is
 	// still validated against AllowedImplicitHosts before being accepted.
@@ -234,6 +241,9 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.CodeTTL <= 0 {
 		cfg.CodeTTL = 10 * time.Minute
+	}
+	if cfg.RefreshTokenTTL <= 0 {
+		cfg.RefreshTokenTTL = 720 * time.Hour
 	}
 	if cfg.AdminTelegramIDs == nil {
 		cfg.AdminTelegramIDs = map[int64]bool{}
@@ -472,7 +482,7 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		"token_endpoint":                        s.cfg.Issuer + "/oauth/token",
 		"registration_endpoint":                 s.cfg.Issuer + "/oauth/register",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported": []string{
@@ -824,16 +834,29 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 
 // ----- /oauth/token -----
 
+// handleToken dispatches the RFC 6749 token endpoint by grant_type. Two grants
+// are supported: authorization_code (the PKCE exchange after the Telegram
+// widget flow) and refresh_token (silent renewal of a short-lived access
+// token, with no widget interaction).
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeTokenError(w, "invalid_request", "could not parse form", http.StatusBadRequest)
 		return
 	}
-	grant := r.FormValue("grant_type")
-	if grant != "authorization_code" {
-		writeTokenError(w, "unsupported_grant_type", "only authorization_code is supported", http.StatusBadRequest)
-		return
+	switch r.FormValue("grant_type") {
+	case "authorization_code":
+		s.handleTokenAuthCode(w, r)
+	case "refresh_token":
+		s.handleTokenRefresh(w, r)
+	default:
+		writeTokenError(w, "unsupported_grant_type",
+			"only authorization_code and refresh_token are supported", http.StatusBadRequest)
 	}
+}
+
+// handleTokenAuthCode implements grant_type=authorization_code: it redeems a
+// one-time PKCE-bound code for an access token plus a fresh refresh token.
+func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
@@ -880,46 +903,189 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
-	// aud policy: when the deployment configures OAUTH_JWT_AUDIENCE,
-	// every minted token MUST carry exactly that value so the localjwt
-	// verifier on /mcp accepts it. When unconfigured, no aud is emitted
-	// (the verifier policy in turn tolerates absent aud per RFC 7519).
-	// Binding aud to client_id like the old default would have failed
-	// /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE to
-	// something else, which codex flagged as a real misconfiguration
-	// trap.
-	var audience []string
-	if s.cfg.JWTAudience != "" {
-		audience = []string{s.cfg.JWTAudience}
-	}
-	tok, err := s.issuer.Mint(localjwt.Claims{
-		Subject:          fmt.Sprintf("tg:%d", entry.TelegramID),
-		TelegramID:       entry.TelegramID,
-		TelegramUsername: entry.TelegramUsername,
-		Groups:           groups,
-		Scopes:           scopes,
-		Audience:         audience,
-	}, s.cfg.AccessTokenTTL)
+	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
 	}
-
-	resp := map[string]any{
-		"access_token": tok,
-		"token_type":   "Bearer",
-		"expires_in":   int(s.cfg.AccessTokenTTL.Seconds()),
+	// Bind the refresh token to the internal users.id so a later refresh —
+	// and operator-facing tooling — resolves the same identity the access
+	// token authenticates as. EnsureUserByTelegramID is idempotent; the empty
+	// displayName is safe because its metadata refresh is NULLIF-guarded and
+	// will not clobber a name the widget callback already stored.
+	uid, err := s.store.EnsureUserByTelegramID(r.Context(), entry.TelegramID, entry.TelegramUsername, "")
+	if err != nil {
+		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
+		return
 	}
-	// Echo the *granted* scope set, not what the client asked for. A
-	// non-admin who asks for "telegram:messages:send" still gets an empty
-	// JWT scope set, and the token response must mirror that so the client
-	// does not believe it has privileges it cannot exercise. Per RFC 6749
-	// §5.1 we MUST include scope when it differs from the request, and we
-	// always include it here for clarity.
-	if len(scopes) > 0 {
-		resp["scope"] = strings.Join(scopes, " ")
-	} else {
-		resp["scope"] = ""
+	refreshTok, err := s.issueRefreshToken(r.Context(), db.RefreshToken{
+		FamilyID:         randomToken(16),
+		UserID:           uid,
+		ClientID:         clientID,
+		TelegramID:       entry.TelegramID,
+		TelegramUsername: entry.TelegramUsername,
+		Scope:            strings.Join(scopes, " "),
+	})
+	if err != nil {
+		writeTokenError(w, "server_error", "could not issue refresh token", http.StatusInternalServerError)
+		return
+	}
+	writeTokenJSON(w, tok, refreshTok, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
+}
+
+// handleTokenRefresh implements grant_type=refresh_token: it renews a
+// (typically expired) access token from a stored, rotating refresh token with
+// no Telegram widget interaction. This is what stops MCP clients losing access
+// once an access token's short TTL elapses. The presented refresh token is
+// rotated — the old one revoked, a new one returned. Presenting an
+// already-rotated token is treated as reuse and revokes the whole family.
+func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshTok := r.FormValue("refresh_token")
+	clientID := r.FormValue("client_id")
+	if refreshTok == "" || clientID == "" {
+		writeTokenError(w, "invalid_request", "refresh_token and client_id are required", http.StatusBadRequest)
+		return
+	}
+	rt, err := s.store.LookupRefreshToken(r.Context(), refreshTok)
+	if errors.Is(err, db.ErrRefreshTokenNotFound) {
+		writeTokenError(w, "invalid_grant", "refresh token not found, expired, or already used", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		writeTokenError(w, "server_error", "could not look up refresh token", http.StatusInternalServerError)
+		return
+	}
+	// Reuse detection: an already-rotated (revoked) token is presented again.
+	// Either an honest client double-submitted or a stolen token is in play —
+	// kill the family and force a fresh login. If the revoke itself fails we
+	// must NOT fall through to a plain invalid_grant: that would leave the
+	// family's still-live token usable after a detected theft. Fail closed
+	// with a 500 so the incident surfaces and the caller retries.
+	if rt.Revoked() {
+		if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
+			slog.Error("refresh token family revoke failed — reuse detection not enforced",
+				"err", revErr, "family_id", rt.FamilyID)
+			writeTokenError(w, "server_error", "could not complete reuse detection", http.StatusInternalServerError)
+			return
+		}
+		writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
+		return
+	}
+	if rt.Expired(s.clock()) {
+		writeTokenError(w, "invalid_grant", "refresh token expired", http.StatusBadRequest)
+		return
+	}
+	if rt.ClientID != clientID {
+		writeTokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
+		return
+	}
+	// Re-resolve scopes from the current identity state: a user demoted since
+	// the token was issued must lose scopes on refresh, not keep them for the
+	// refresh token's full lifetime.
+	groups, scopes, err := s.ResolveScopes(r.Context(), rt.TelegramID)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
+		return
+	}
+	tok, err := s.mintAccessToken(rt.TelegramID, rt.TelegramUsername, groups, scopes)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
+		return
+	}
+	newRefresh := randomToken(32)
+	if err := s.store.RotateRefreshToken(r.Context(), refreshTok, newRefresh, db.RefreshToken{
+		FamilyID:         rt.FamilyID,
+		UserID:           rt.UserID,
+		ClientID:         rt.ClientID,
+		TelegramID:       rt.TelegramID,
+		TelegramUsername: rt.TelegramUsername,
+		Scope:            strings.Join(scopes, " "),
+		// Carry the original expiry forward — RefreshTokenTTL is an *absolute*
+		// lifetime, not a sliding window. Re-stamping now+TTL on every
+		// rotation would let a client that refreshes hourly hold a token that
+		// never expires; instead the whole family dies TTL after first issue.
+		ExpiresAt: rt.ExpiresAt,
+	}); err != nil {
+		if errors.Is(err, db.ErrRefreshTokenNotFound) {
+			// The token was revoked between LookupRefreshToken and the
+			// rotation — a concurrent request rotated the same token first.
+			// That is a same-token double-use, indistinguishable from a theft
+			// race, so treat it like any other reuse and kill the family.
+			// Without this, the request that won the race would keep a live
+			// rotated token while the family stays intact. The cost is that a
+			// (rare) honest concurrent double-submit forces one re-login —
+			// well-behaved OAuth clients serialise refresh, so this path is
+			// effectively attacker-only in practice.
+			//
+			// Unlike the explicit-reuse path above, a revoke failure here is
+			// logged but not turned into a 500: the loser's token is already
+			// definitively gone (the winner revoked it), so invalid_grant is
+			// the correct client-facing answer regardless, and the family will
+			// still be caught if the now-revoked token is replayed.
+			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
+				slog.Error("refresh token family revoke failed after rotation race",
+					"err", revErr, "family_id", rt.FamilyID)
+			}
+			writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
+			return
+		}
+		writeTokenError(w, "server_error", "could not rotate refresh token", http.StatusInternalServerError)
+		return
+	}
+	writeTokenJSON(w, tok, newRefresh, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
+}
+
+// mintAccessToken signs a localjwt access token for the given Telegram
+// identity and resolved scope set.
+//
+// aud policy: when the deployment configures OAUTH_JWT_AUDIENCE, every minted
+// token MUST carry exactly that value so the localjwt verifier on /mcp accepts
+// it. When unconfigured, no aud is emitted (the verifier tolerates absent aud
+// per RFC 7519). Binding aud to client_id like an earlier default would have
+// failed /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE — a
+// misconfiguration trap codex flagged.
+func (s *Server) mintAccessToken(tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+	var audience []string
+	if s.cfg.JWTAudience != "" {
+		audience = []string{s.cfg.JWTAudience}
+	}
+	return s.issuer.Mint(localjwt.Claims{
+		Subject:          fmt.Sprintf("tg:%d", tgID),
+		TelegramID:       tgID,
+		TelegramUsername: tgUsername,
+		Groups:           groups,
+		Scopes:           scopes,
+		Audience:         audience,
+	}, s.cfg.AccessTokenTTL)
+}
+
+// issueRefreshToken generates an opaque refresh token, persists it (hashed),
+// and returns the plaintext for the token response. ExpiresAt is stamped here
+// from RefreshTokenTTL so callers supply only identity fields.
+func (s *Server) issueRefreshToken(ctx context.Context, rt db.RefreshToken) (string, error) {
+	plaintext := randomToken(32)
+	rt.ExpiresAt = s.clock().Add(s.cfg.RefreshTokenTTL)
+	if err := s.store.SaveRefreshToken(ctx, plaintext, rt); err != nil {
+		return "", err
+	}
+	return plaintext, nil
+}
+
+// writeTokenJSON writes a successful RFC 6749 §5.1 token response.
+//
+// scope is always echoed (the *granted* set, which may be empty) so a client
+// never believes it holds privileges it cannot exercise — a non-admin who
+// asked for "telegram:messages:send" still sees the empty granted set.
+// refresh_token is omitted only when empty.
+func writeTokenJSON(w http.ResponseWriter, accessToken, refreshToken string, expiresIn int, scopes []string) {
+	resp := map[string]any{
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   expiresIn,
+		"scope":        strings.Join(scopes, " "),
+	}
+	if refreshToken != "" {
+		resp["refresh_token"] = refreshToken
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1012,7 +1178,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		"client_name":                req.ClientName,
 		"redirect_uris":              req.RedirectURIs,
 		"token_endpoint_auth_method": "none",
-		"grant_types":                []string{"authorization_code"},
+		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
 	w.Header().Set("Content-Type", "application/json")

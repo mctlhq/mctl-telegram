@@ -1,7 +1,7 @@
 // Package sweeper runs periodic maintenance jobs against the store: session
-// TTL enforcement and audit-log retention. Both are best-effort — the
-// per-request gates remain authoritative — and both log their row counts so
-// an operator can observe turnover in Loki without poking the DB.
+// TTL enforcement, audit-log retention, and refresh-token expiry. All are
+// best-effort — the per-request gates remain authoritative — and all log their
+// row counts so an operator can observe turnover in Loki without poking the DB.
 package sweeper
 
 import (
@@ -84,5 +84,39 @@ func auditSweepOnce(ctx context.Context, store *db.Store, retention time.Duratio
 	}
 	if rows > 0 {
 		slog.Info("audit sweep", "deleted_rows", rows, "retention", retention)
+	}
+}
+
+// RefreshTokenSweeperInterval is how often RefreshTokens() wakes up. Daily is
+// plenty — refresh tokens live for weeks, so a missed sweep just leaves expired
+// rows in the table ~24h longer; LookupRefreshToken still rejects them.
+const RefreshTokenSweeperInterval = 24 * time.Hour
+
+// RefreshTokens runs Store.SweepExpiredRefreshTokens on an interval until ctx
+// is cancelled, deleting refresh-token rows past their absolute expiry. Like
+// the other sweepers it is best-effort: the per-request LookupRefreshToken
+// check is authoritative, so a failed sweep only delays table cleanup.
+func RefreshTokens(ctx context.Context, store *db.Store) {
+	ticker := time.NewTicker(RefreshTokenSweeperInterval)
+	defer ticker.Stop()
+	refreshTokenSweepOnce(ctx, store)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshTokenSweepOnce(ctx, store)
+		}
+	}
+}
+
+func refreshTokenSweepOnce(ctx context.Context, store *db.Store) {
+	rows, err := store.SweepExpiredRefreshTokens(ctx)
+	if err != nil {
+		slog.Warn("refresh token sweep failed", "err", err)
+		return
+	}
+	if rows > 0 {
+		slog.Info("refresh token sweep", "deleted_rows", rows)
 	}
 }
