@@ -1016,6 +1016,12 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 			// (rare) honest concurrent double-submit forces one re-login —
 			// well-behaved OAuth clients serialise refresh, so this path is
 			// effectively attacker-only in practice.
+			//
+			// Unlike the explicit-reuse path above, a revoke failure here is
+			// logged but not turned into a 500: the loser's token is already
+			// definitively gone (the winner revoked it), so invalid_grant is
+			// the correct client-facing answer regardless, and the family will
+			// still be caught if the now-revoked token is replayed.
 			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
 				slog.Error("refresh token family revoke failed after rotation race",
 					"err", revErr, "family_id", rt.FamilyID)
