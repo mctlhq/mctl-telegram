@@ -169,6 +169,8 @@ func (c *Client) Exchange(ctx context.Context, code, codeVerifier, expectedNonce
 	if idToken.Nonce != expectedNonce {
 		return nil, errors.New("telegramoidc: id_token nonce does not match the authorization request")
 	}
+	// A zero Expiry means the id_token carried no exp claim — the same
+	// leniency go-oidc applies without SkipExpiryCheck.
 	if !idToken.Expiry.IsZero() && time.Now().Add(-clockSkew).After(idToken.Expiry) {
 		return nil, fmt.Errorf("telegramoidc: id_token expired at %s", idToken.Expiry.UTC())
 	}

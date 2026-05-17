@@ -68,6 +68,11 @@ func TestParseIdentity(t *testing.T) {
 			claims:  idTokenClaims{ID: json.RawMessage(`"-5"`), Sub: "s"},
 			wantErr: true,
 		},
+		{
+			name:    "float id — rejected",
+			claims:  idTokenClaims{ID: json.RawMessage(`210408407.5`), Sub: "s"},
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
