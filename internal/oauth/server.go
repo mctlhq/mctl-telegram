@@ -1007,7 +1007,19 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: rt.ExpiresAt,
 	}); err != nil {
 		if errors.Is(err, db.ErrRefreshTokenNotFound) {
-			// Lost a race with a concurrent rotation of the same token.
+			// The token was revoked between LookupRefreshToken and the
+			// rotation — a concurrent request rotated the same token first.
+			// That is a same-token double-use, indistinguishable from a theft
+			// race, so treat it like any other reuse and kill the family.
+			// Without this, the request that won the race would keep a live
+			// rotated token while the family stays intact. The cost is that a
+			// (rare) honest concurrent double-submit forces one re-login —
+			// well-behaved OAuth clients serialise refresh, so this path is
+			// effectively attacker-only in practice.
+			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
+				slog.Error("refresh token family revoke failed after rotation race",
+					"err", revErr, "family_id", rt.FamilyID)
+			}
 			writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
 			return
 		}

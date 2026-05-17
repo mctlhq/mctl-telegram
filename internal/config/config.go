@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -41,15 +42,16 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	authMode := envOr("AUTH_MODE", "local-dev")
 	c := &Config{
 		Addr:                     envOr("ADDR", ":8080"),
 		PublicBaseURL:            envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
 		MCPPath:                  envOr("MCP_PATH", "/mcp"),
-		AuthMode:                 envOr("AUTH_MODE", "local-dev"),
+		AuthMode:                 authMode,
 		AuthRequired:             envBool("AUTH_REQUIRED", false),
 		OperatorLogin:            envOr("OPERATOR_GITHUB_LOGIN", "operator"),
 		DatabaseURL:              envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
-		OAUTHJWTSecret:           jwtSigningKey(),
+		OAUTHJWTSecret:           jwtSigningKey(authMode),
 		OAUTHJWTAudience:         os.Getenv("OAUTH_JWT_AUDIENCE"),
 		OAUTHJWTAudReq:           envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		TGAPIHash:                os.Getenv("TG_API_HASH"),
@@ -92,24 +94,40 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// jwtSigningKey resolves the HS256 signing key for OAuth/MCP JWTs.
+// jwtSigningKey resolves the HS256 key for OAuth/MCP JWTs, honouring AUTH_MODE.
 //
-// The dedicated env var is OAUTH_JWT_SIGNING_KEY — a signing key owned by
-// mctl-telegram and sourced from its own Vault path. The legacy
-// OAUTH_JWT_SECRET is still honoured as a fallback for one transition window:
-// historically it was wired to api.mctl.ai's shared OAuth secret, so a
+// In local-jwt mode mctl-telegram signs its own tokens: the dedicated
+// OAUTH_JWT_SIGNING_KEY is preferred, sourced from mctl-telegram's own Vault
+// path. The legacy OAUTH_JWT_SECRET stays as a fallback for one transition
+// window — historically it was wired to api.mctl.ai's shared secret, so a
 // rotation in mctl-api would silently invalidate every mctl-telegram token.
-// Deployments should migrate to OAUTH_JWT_SIGNING_KEY to break that coupling.
-func jwtSigningKey() string {
-	if v := os.Getenv("OAUTH_JWT_SIGNING_KEY"); v != "" {
-		return v
-	}
-	if legacy := os.Getenv("OAUTH_JWT_SECRET"); legacy != "" {
-		slog.Warn("OAUTH_JWT_SECRET is deprecated; set OAUTH_JWT_SIGNING_KEY instead " +
-			"(a dedicated mctl-telegram signing key, not the shared mctl-api secret)")
+//
+// In shared-hmac(-legacy) mode the service VERIFIES tokens signed by
+// api.mctl.ai, so the correct key is that service's shared OAUTH_JWT_SECRET —
+// never the dedicated key. Preferring OAUTH_JWT_SIGNING_KEY there would break
+// all authentication with "invalid JWT signature"; we use OAUTH_JWT_SECRET and
+// warn loudly if a dedicated key was set by mistake (e.g. a partial rollout).
+func jwtSigningKey(authMode string) string {
+	dedicated := os.Getenv("OAUTH_JWT_SIGNING_KEY")
+	legacy := os.Getenv("OAUTH_JWT_SECRET")
+	switch strings.ToLower(authMode) {
+	case "shared-hmac", "shared-hmac-legacy":
+		if dedicated != "" {
+			slog.Warn("OAUTH_JWT_SIGNING_KEY is set but AUTH_MODE is shared-hmac; " +
+				"that mode verifies tokens signed by api.mctl.ai — using OAUTH_JWT_SECRET instead")
+		}
 		return legacy
+	default:
+		if dedicated != "" {
+			return dedicated
+		}
+		if legacy != "" {
+			slog.Warn("OAUTH_JWT_SECRET is deprecated; set OAUTH_JWT_SIGNING_KEY instead " +
+				"(a dedicated mctl-telegram signing key, not the shared mctl-api secret)")
+			return legacy
+		}
+		return ""
 	}
-	return ""
 }
 
 func envOr(key, def string) string {
