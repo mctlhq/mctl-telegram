@@ -1,256 +1,956 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mctl-telegram — MCP connector</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="shortcut icon" href="/favicon.ico">
 <style>
+  /*
+   * Inline fallback for the mctl design tokens — keeps the page readable and
+   * theme/accent switching functional if ui.mctl.ai/mctl.css fails to load.
+   * When the CDN stylesheet loads it is sourced AFTER this block and overrides
+   * every token (equal specificity, later wins). Mirrors mctl.css.
+   */
   :root {
+    --mctl-accent-cyan-primary: #00e5ff;
+    --mctl-accent-lime-primary: #bdf24a;
+    --mctl-accent-vermilion-primary: #ff5a36;
+    --mctl-accent-lilac-primary: #b07aff;
+    --mctl-radius-sm: 2px;
+    --mctl-radius-md: 4px;
+    --mctl-radius-lg: 8px;
     --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
-    --surface-line: #1e2227; --surface-line-strong: #2a3040;
-    --surface-fg: #e6e7e9; --surface-fg-muted: #9ba1ab; --surface-fg-subtle: #5c636e;
-    --accent: #00e5ff; --accent-highlight: #00bfdf;
-    --status-ok: #00e676; --status-warn: #ffb300; --status-bad: #ff5252;
-    --syntax-key: #82aaff; --syntax-string: #c3e88d;
+    --surface-line: #1f242b; --surface-line-strong: #2a313a;
+    --surface-fg: #e6e7e9; --surface-fg-muted: #a4a8ae; --surface-fg-subtle: #6b7079;
+    --accent: #00e5ff; --accent-highlight: #7df2ff;
+    --status-ok: #7cf2a4; --status-warn: #f5a524; --status-bad: #ff6b6b;
+    --font-display: 'Geist', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   }
+  [data-theme='light'] {
+    --surface-bg: #f1ede4; --surface-elevated: #f1ede4; --surface-card: #f1ede4;
+    --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
+    --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
+  }
+  [data-accent='lime']      { --accent: #bdf24a; --accent-highlight: #dcff8c; }
+  [data-accent='vermilion'] { --accent: #ff5a36; --accent-highlight: #ff8a6a; }
+  [data-accent='lilac']     { --accent: #b07aff; --accent-highlight: #d6b3ff; }
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://ui.mctl.ai/mctl.css">
+<script>
+  // Resolve theme and set data-theme BEFORE paint to avoid flash.
+  // mctl.css has no prefers-color-scheme fallback, so the attribute
+  // must always be present.
+  (function () {
+    var root = document.documentElement;
+    var t, a;
+    try {
+      t = localStorage.getItem('mctl-theme');
+      a = localStorage.getItem('mctl-accent');
+    } catch (e) {}
+    if (t !== 'light' && t !== 'dark') {
+      t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    root.setAttribute('data-theme', t);
+    if (a === 'lime' || a === 'vermilion' || a === 'lilac') {
+      root.setAttribute('data-accent', a);
+    }
+  })();
+</script>
 <style>
-  html { background: #0a0b0d; color: #e6e7e9; }
+  /*
+   * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css).
+   * The landing keeps its own internal variable names but aliases them onto the
+   * mctl semantic tokens, so dark/light flips and accent swaps are handled by
+   * mctl.css's [data-theme] / [data-accent] layers automatically.
+   */
+  :root {
+    --bg:            var(--surface-bg);
+    --bg-elev:       var(--surface-elevated);
+    --surface:       var(--surface-card);
+    --surface-2:     color-mix(in srgb, var(--surface-card) 78%, var(--surface-line));
+    --border:        var(--surface-line);
+    --border-strong: var(--surface-line-strong);
+    --text:          var(--surface-fg);
+    --text-dim:      var(--surface-fg-muted);
+    --muted:         var(--surface-fg-subtle);
+    --accent-2:      var(--status-ok);     /* terminal green */
+    --warn:          var(--status-warn);
+    --danger:        var(--status-bad);
+    --code-fg:       var(--accent-highlight);
+    --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
+    --accent-2-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
+    --warn-soft:     color-mix(in srgb, var(--warn) 14%, transparent);
+    --grid:          color-mix(in srgb, var(--surface-line) 80%, transparent);
+    color-scheme: dark;
+  }
+  /*
+   * The mctl accents are tuned for the dark surface and keep the same bright
+   * value in mctl.css's light theme — on the warm paper background that drops
+   * accent-coloured text (links, tool names, step counters) well below the
+   * WCAG AA contrast floor. Darken each accent for light mode here so the page
+   * is legible whether the tokens come from the CDN or the inline fallback.
+   */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --accent:  color-mix(in srgb, var(--mctl-accent-cyan-primary) 46%, #000);
+    --code-fg: var(--accent);
+  }
+  :root[data-theme="light"][data-accent="lime"]      { --accent: color-mix(in srgb, var(--mctl-accent-lime-primary) 42%, #000); }
+  :root[data-theme="light"][data-accent="vermilion"] { --accent: color-mix(in srgb, var(--mctl-accent-vermilion-primary) 70%, #000); }
+  :root[data-theme="light"][data-accent="lilac"]     { --accent: color-mix(in srgb, var(--mctl-accent-lilac-primary) 64%, #000); }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
 
   body {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    font-family: var(--font-display), system-ui, -apple-system, sans-serif;
     font-size: 15px;
-    line-height: 1.55;
-    max-width: 760px;
-    margin: 2.5rem auto;
-    padding: 0 1.25rem;
-    background: var(--surface-bg);
-    color: var(--surface-fg);
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(circle at 1px 1px, var(--grid) 1px, transparent 0);
+    background-size: 28px 28px;
+    background-position: 0 0;
+    background-attachment: fixed;
+    transition: background-color .2s, color .2s;
   }
-  a { color: var(--accent); }
-  h1 { font-size: 1.75rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
-  h3 { font-size: 1rem; margin: 1.25rem 0 .25rem; }
-  .lead { color: var(--surface-fg-muted); margin: .25rem 0 2rem; }
-  .muted { color: var(--surface-fg-muted); font-size: .9rem; }
-  code {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card);
-    padding: 1px 5px;
-    border-radius: 4px;
-    color: var(--syntax-key);
+
+  /* Decorative top scanline */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent) 30%, var(--accent-2) 70%, transparent);
+    opacity: .6;
+    z-index: 5;
+    pointer-events: none;
   }
-  pre {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card);
-    border: 1px solid var(--surface-line);
-    padding: .75rem 1rem;
-    border-radius: 6px;
-    overflow-x: auto;
-    line-height: 1.4;
+
+  .wrap {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 0 24px;
   }
-  .card, .callout {
-    background: var(--surface-card);
-    border: 1px solid var(--surface-line);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin: 1rem 0;
+
+  /* ===== Top bar ===== */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 56px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .02em;
+    color: var(--text-dim);
   }
-  .warn {
-    background: color-mix(in srgb, var(--status-bad) 6%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-bad) 50%, transparent);
-    border-left: 3px solid var(--status-bad);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    margin: 1rem 0;
-  }
-  .url { word-break: break-all; }
-  ol { padding-left: 1.25rem; }
-  ol li { margin: .35rem 0; }
-  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
-  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--surface-line); vertical-align: top; }
-  th { font-weight: 600; color: var(--surface-fg-muted); }
-  .badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-    font-size: .75rem;
+  .topbar .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
     font-weight: 600;
+  }
+  .topbar .brand .mark {
+    width: 22px; height: 22px;
+    border: 1px solid var(--accent);
+    display: inline-grid;
+    place-items: center;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: var(--mctl-radius-md);
+    background: var(--accent-soft);
+  }
+  .topbar .meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .topbar a {
+    color: var(--text-dim);
+    text-decoration: none;
+    transition: color .15s;
+  }
+  .topbar a:hover { color: var(--text); }
+
+  /* ===== Hero ===== */
+  .hero {
+    margin-bottom: 56px;
+    position: relative;
+  }
+  .hero .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--text-dim);
+    margin-bottom: 22px;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent-2);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent); }
+    70%  { box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent-2) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 0%, transparent); }
+  }
+  h1 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: clamp(28px, 4vw, 44px);
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -.02em;
+    margin: 0 0 16px;
+    color: var(--text);
+  }
+  h1 .accent { color: var(--accent); }
+  h1 .slash { color: var(--muted); margin: 0 .15em; }
+  .lead {
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    margin: 0 0 32px;
+    max-width: 62ch;
+    text-wrap: pretty;
+  }
+
+  /* ===== Endpoint card ===== */
+  .endpoint {
+    background: linear-gradient(180deg, var(--surface), var(--bg-elev));
+    border: 1px solid var(--border-strong);
+    border-radius: var(--mctl-radius-lg);
+    padding: 0;
+    overflow: hidden;
+    position: relative;
+  }
+  .endpoint .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .endpoint .head .lights {
+    display: inline-flex; gap: 6px;
+  }
+  .endpoint .head .lights span {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: color-mix(in srgb, var(--border-strong) 60%, transparent);
+  }
+  .endpoint .head .lights span:nth-child(1) { background: var(--danger); opacity: .5; }
+  .endpoint .head .lights span:nth-child(2) { background: var(--warn);   opacity: .5; }
+  .endpoint .head .lights span:nth-child(3) { background: var(--accent-2); opacity: .7; }
+  .endpoint .body { padding: 18px 20px 16px; }
+  .endpoint .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .endpoint .url {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    color: var(--text);
+    word-break: break-all;
+    display: block;
+    margin-bottom: 8px;
+  }
+  .endpoint .url::before {
+    content: "▸ ";
+    color: var(--accent);
+  }
+  .endpoint .hint {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin: 0;
+  }
+  .endpoint .hint code { font-size: 12px; }
+
+  /* ===== Warning callout ===== */
+  .callout {
+    margin: 32px 0;
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--warn);
+    border-radius: var(--mctl-radius-lg);
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--warn) 6%, transparent), transparent),
+      var(--surface);
+    padding: 18px 20px;
+    position: relative;
+  }
+  .callout .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--warn);
+    margin-bottom: 8px;
+  }
+  .callout .tag::before {
+    content: "▲";
+    font-size: 10px;
+  }
+  .callout strong { color: var(--text); font-weight: 600; }
+  .callout p { margin: .5rem 0 0; color: var(--text-dim); font-size: 14px; line-height: 1.6; }
+  .callout p:first-of-type { margin-top: 0; }
+
+  /* ===== Section headers ===== */
+  section { margin-top: 64px; }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 22px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-head h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+    letter-spacing: -.01em;
+  }
+
+  /* ===== Body content ===== */
+  p { color: var(--text-dim); margin: 0 0 14px; text-wrap: pretty; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); transition: border-color .15s, color .15s; }
+  a:hover { border-bottom-color: var(--accent); }
+
+  code, pre, .mono {
+    font-family: var(--font-mono);
+  }
+  code {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: var(--mctl-radius-md);
+    font-size: .85em;
+    color: var(--code-fg);
+  }
+  a code { color: inherit; }
+
+  pre {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    padding: 0;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    margin: 16px 0;
+  }
+  #smoke pre::before {
+    content: "$ smoke-test";
+    display: block;
+    padding: 8px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  pre code {
+    display: block;
+    background: transparent;
+    border: 0;
+    padding: 14px 16px;
+    color: var(--text-dim);
+    border-radius: 0;
+  }
+
+  /* Ordered list — numbered chips */
+  ol.steps {
+    list-style: none;
+    counter-reset: step;
+    padding: 0;
+    margin: 0;
+  }
+  ol.steps > li {
+    counter-increment: step;
+    position: relative;
+    padding: 14px 16px 14px 56px;
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    background: var(--surface);
+    margin-bottom: 10px;
+    color: var(--text-dim);
+    transition: border-color .15s, transform .15s;
+  }
+  ol.steps > li:hover { border-color: var(--border-strong); }
+  ol.steps > li::before {
+    content: counter(step, decimal-leading-zero);
+    position: absolute;
+    left: 16px; top: 14px;
+    width: 28px; height: 28px;
+    display: inline-grid;
+    place-items: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: var(--mctl-radius-md);
+  }
+  ol.steps strong { color: var(--text); font-weight: 600; }
+  ol.steps em { font-style: normal; color: var(--text); }
+
+  /* Bullet list */
+  ul.ctrl {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  ul.ctrl > li {
+    padding: 14px 18px;
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 14px;
+    transition: background .12s;
+  }
+  ul.ctrl > li:hover { background: var(--surface-2); }
+  ul.ctrl > li strong { color: var(--text); font-weight: 600; display: inline-block; margin-right: 6px; }
+
+  /* ===== Tables ===== */
+  .tbl {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 16px 0 4px;
+    font-size: 13.5px;
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  .tbl thead th {
+    text-align: left;
+    background: var(--surface-2);
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--muted);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+  .tbl tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    color: var(--text-dim);
+  }
+  .tbl tbody tr:last-child td { border-bottom: 0; }
+  .tbl tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .tbl td code, .tbl th code {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .tbl td:first-child code { color: var(--accent); font-weight: 500; }
+
+  /* ===== Pills / badges ===== */
+  .badge, .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    padding: 2px 8px;
+    border-radius: var(--mctl-radius-md);
+    border: 1px solid transparent;
+    line-height: 1.5;
     vertical-align: middle;
   }
-  .pill { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: .75rem; font-weight: 600; }
-  .pill-read {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  .badge.mcp {
+    background: var(--accent-soft);
     color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .badge.mcp::before {
+    content: "";
+    width: 6px; height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .pill-read {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .pill-write {
-    background: color-mix(in srgb, var(--status-warn) 15%, transparent);
-    color: var(--status-warn);
+    background: var(--warn-soft);
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  }
+
+  .muted { color: var(--muted); font-size: 13px; }
+
+  /* ===== Theme toggle ===== */
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px; height: 28px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    border-radius: var(--mctl-radius-md);
+    cursor: pointer;
+    padding: 0;
+    transition: color .15s, border-color .15s, background .15s;
+    font: inherit;
+  }
+  .theme-toggle:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+    background: var(--surface-2);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; }
+  /* data-theme is always set by the pre-paint script. */
+  .theme-toggle .icon-sun  { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+
+  /* ===== Accent picker ===== */
+  .accent-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-md);
+    background: var(--surface);
+  }
+  .accent-swatch {
+    width: 16px; height: 16px;
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--swatch) 50%, transparent);
+    border-radius: var(--mctl-radius-sm);
+    background: var(--swatch);
+    cursor: pointer;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .accent-swatch:hover { transform: scale(1.12); }
+  .accent-swatch[data-pick="cyan"]      { --swatch: var(--mctl-accent-cyan-primary); }
+  .accent-swatch[data-pick="lime"]      { --swatch: var(--mctl-accent-lime-primary); }
+  .accent-swatch[data-pick="vermilion"] { --swatch: var(--mctl-accent-vermilion-primary); }
+  .accent-swatch[data-pick="lilac"]     { --swatch: var(--mctl-accent-lilac-primary); }
+  :root:not([data-accent]) .accent-swatch[data-pick="cyan"],
+  :root[data-accent="cyan"]      .accent-swatch[data-pick="cyan"],
+  :root[data-accent="lime"]      .accent-swatch[data-pick="lime"],
+  :root[data-accent="vermilion"] .accent-swatch[data-pick="vermilion"],
+  :root[data-accent="lilac"]     .accent-swatch[data-pick="lilac"] {
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--swatch);
+  }
+
+  /* ===== Footer ===== */
+  footer {
+    margin: 80px 0 40px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    align-items: center;
+    justify-content: space-between;
+  }
+  footer .links {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+  }
+  footer a { color: var(--text-dim); border-bottom-color: transparent; }
+  footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  footer .sep { color: var(--border-strong); }
+  footer code { font-size: 11px; background: transparent; border: 0; padding: 0; color: var(--text-dim); }
+
+  /* Inline helpers */
+  .url { word-break: break-all; }
+
+  /* Section anchor offset */
+  section { scroll-margin-top: 24px; }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .wrap { padding: 0 18px; }
+    .topbar .meta { gap: 12px; font-size: 11px; }
+    .topbar .meta .hide-sm { display: none; }
+    h1 { font-size: 28px; }
+    .lead { font-size: 15px; }
+    .tbl { font-size: 12.5px; }
+    .tbl thead th, .tbl tbody td { padding: 8px 10px; }
+    ol.steps > li { padding: 12px 14px 12px 50px; }
   }
 </style>
 </head>
 <body>
-  <h1>mctl-telegram <span class="badge">MCP</span></h1>
-  <p class="lead">Remote MCP server that exposes your Telegram user-account to Claude.ai and other MCP clients. Tools: list dialogs, read unread, read by peer, send draft/live, pin/unpin, audit log, disconnect/delete.</p>
 
-  <div class="card">
-    <strong>MCP endpoint</strong><br>
-    <code class="url">{{.MCPURL}}</code><br>
-    <span class="muted">Streamable HTTP — works via <code>POST</code> with <code>Accept: application/json, text/event-stream</code>. Opening it in a browser shows this page; that is expected.</span>
-  </div>
+<div class="wrap">
 
-  <div class="warn">
-    <strong>What this is — and what it isn't.</strong>
-    <p style="margin:.5rem 0 0">
+  <!-- ============ Top bar ============ -->
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="mark">M</span>
+      <span>mctl-telegram</span>
+    </a>
+    <nav class="meta">
+      <a href="#tools">tools</a>
+      <a href="#scopes" class="hide-sm">scopes</a>
+      <a href="/security">security</a>
+      <a href="/privacy">privacy</a>
+      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
+      <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
+        <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
+        <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
+        <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
+        <button class="accent-swatch" type="button" data-pick="lilac"     aria-label="Lilac accent"     title="Lilac"></button>
+      </span>
+      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+      </button>
+    </nav>
+  </header>
+
+  <!-- ============ Hero ============ -->
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Operational · Remote MCP Server · v1</span>
+    </div>
+    <h1>
+      Telegram <span class="slash">/</span> <span class="accent">MCP</span> connector<br>
+      for Claude.ai
+    </h1>
+    <p class="lead">
+      A remote MCP server that exposes your Telegram user-account to Claude.ai and other MCP clients.
+      Read dialogs and unread messages, send drafts or live messages, pin, audit — all through a
+      single OAuth-authenticated endpoint.
+    </p>
+
+    <!-- Endpoint card -->
+    <div class="endpoint">
+      <div class="head">
+        <span class="lights"><span></span><span></span><span></span></span>
+        <span>POST · application/json · text/event-stream</span>
+      </div>
+      <div class="body">
+        <div class="label">MCP endpoint</div>
+        <code class="url">{{.MCPURL}}</code>
+        <p class="hint">
+          Streamable HTTP. Opening it in a browser shows this page — that is expected.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Trust callout ============ -->
+  <div class="callout">
+    <div class="tag">Trust model</div>
+    <p><strong>What this is — and what it isn't.</strong></p>
+    <p>
       mctl-telegram holds a server-side Telegram MTProto session on your behalf.
       <strong>This is not a zero-knowledge service.</strong> The server can technically read
-      your Telegram data while processing your requests, because it is the one
-      making MTProto calls to Telegram. We minimize what is stored (encrypted session
-      blob only) and what is logged (no message text, no phone numbers), but you are
-      trusting both the operator of this deployment and the integrity of this code.
+      your Telegram data while processing your requests, because it is the one making
+      MTProto calls to Telegram. We minimise what is stored (encrypted session blob only)
+      and what is logged (no message text, no phone numbers), but you are trusting both the
+      operator of this deployment and the integrity of this code.
     </p>
-    <p style="margin:.5rem 0 0">
+    <p>
       See <a href="/security">/security</a> for the full threat model and
       <a href="/privacy">/privacy</a> for the data inventory and retention policy.
     </p>
   </div>
 
-  <h2>1. Add as a custom connector in Claude.ai</h2>
-  <ol>
-    <li>Open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai → Customize → Connectors</a> and click <em>Add custom connector</em>.</li>
-    <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
-    <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers this server as its own authorization server via the well-known documents at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
-    <li>You will see a <em>“Connect Telegram to Claude”</em> page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
-    <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
-  </ol>
+  <!-- ============ 01 Connector setup ============ -->
+  <section id="setup">
+    <div class="section-head">
+      <h2>Add as a custom connector in Claude.ai</h2>
+    </div>
+    <ol class="steps">
+      <li>Open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai → Customize → Connectors</a> and click <em>Add custom connector</em>.</li>
+      <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
+      <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers this server as its own authorization server via the well-known documents at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+      <li>You will see a <em>"Connect Telegram to Claude"</em> page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
+      <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
+    </ol>
+  </section>
 
-  <h2>2. Available tools</h2>
-  <table>
-    <thead><tr><th>Tool</th><th>Annotation</th><th>Scope required</th><th>Notes</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>list_dialogs</code></td>
-        <td><span class="pill pill-read">read</span></td>
-        <td><code>telegram:dialogs:read</code></td>
-        <td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td>
-      </tr>
-      <tr>
-        <td><code>get_unread_messages</code></td>
-        <td><span class="pill pill-read">read</span></td>
-        <td><code>telegram:messages:read</code></td>
-        <td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td>
-      </tr>
-      <tr>
-        <td><code>get_messages</code></td>
-        <td><span class="pill pill-read">read</span></td>
-        <td><code>telegram:messages:read</code></td>
-        <td>Full history of a specific peer, not just unread.</td>
-      </tr>
-      <tr>
-        <td><code>send_message</code></td>
-        <td><span class="pill pill-write">write</span></td>
-        <td><code>telegram:messages:send</code></td>
-        <td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires <strong>all</strong> of: server <code>ALLOW_SEND=true</code>, identity scope, per-account <code>send_enabled=true</code>, and <code>mode=send</code>.</td>
-      </tr>
-      <tr>
-        <td><code>pin_message</code></td>
-        <td><span class="pill pill-write">write</span></td>
-        <td><code>telegram:messages:pin</code></td>
-        <td>Inputs: <code>peer</code>, <code>message_id</code>, <code>unpin</code> (bool).</td>
-      </tr>
-      <tr>
-        <td><code>disconnect_telegram_account</code></td>
-        <td><span class="pill pill-write">write</span></td>
-        <td>any authenticated identity</td>
-        <td>Soft-revokes your session — see <em>Your controls</em>.</td>
-      </tr>
-      <tr>
-        <td><code>delete_telegram_account</code></td>
-        <td><span class="pill pill-write">write</span></td>
-        <td>any authenticated identity</td>
-        <td>Hard-deletes the encrypted session blob.</td>
-      </tr>
-      <tr>
-        <td><code>list_telegram_identities</code></td>
-        <td><span class="pill pill-read">read</span></td>
-        <td><code>admin:users</code></td>
-        <td>Admin only. Roster of signed-in users with access tier and session state.</td>
-      </tr>
-      <tr>
-        <td><code>set_telegram_access</code></td>
-        <td><span class="pill pill-write">write</span></td>
-        <td><code>admin:users</code></td>
-        <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
-      </tr>
-    </tbody>
-  </table>
+  <!-- ============ 02 Tools ============ -->
+  <section id="tools">
+    <div class="section-head">
+      <h2>Available tools</h2>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr><th>Tool</th><th>Mode</th><th>Scope required</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>list_dialogs</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:dialogs:read</code></td>
+          <td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td>
+        </tr>
+        <tr>
+          <td><code>get_unread_messages</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:messages:read</code></td>
+          <td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td>
+        </tr>
+        <tr>
+          <td><code>get_messages</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:messages:read</code></td>
+          <td>Full history of a specific peer, not just unread.</td>
+        </tr>
+        <tr>
+          <td><code>send_message</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>telegram:messages:send</code></td>
+          <td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires <strong>all</strong> of: server <code>ALLOW_SEND=true</code>, identity scope, per-account <code>send_enabled=true</code>, and <code>mode=send</code>.</td>
+        </tr>
+        <tr>
+          <td><code>pin_message</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>telegram:messages:pin</code></td>
+          <td>Inputs: <code>peer</code>, <code>message_id</code>, <code>unpin</code> (bool).</td>
+        </tr>
+        <tr>
+          <td><code>disconnect_telegram_account</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td>any authenticated identity</td>
+          <td>Soft-revokes your session — see <em>Your controls</em>.</td>
+        </tr>
+        <tr>
+          <td><code>delete_telegram_account</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td>any authenticated identity</td>
+          <td>Hard-deletes the encrypted session blob.</td>
+        </tr>
+        <tr>
+          <td><code>list_telegram_identities</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>admin:users</code></td>
+          <td>Admin only. Roster of signed-in users with access tier and session state.</td>
+        </tr>
+        <tr>
+          <td><code>set_telegram_access</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>admin:users</code></td>
+          <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
 
-  <h2>3. Scopes and permissions</h2>
-  <p class="muted">Scopes are derived from your Telegram identity. Operators on the admin allowlist (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set. Everyone else gets the <code>client</code> tier — the <code>telegram:*</code> tool scopes for their <em>own</em> account, without platform-admin capability. When <code>AUTO_APPROVE_CLIENTS</code> is enabled (open registration) every signed-in user is a client automatically; otherwise the client tier comes from the <code>TG_LOGIN_CLIENTS</code> allowlist or an operator grant. An operator can revoke any user with <code>set_telegram_access</code>.</p>
-  <table>
-    <thead><tr><th>Telegram identity</th><th>Scopes granted</th></tr></thead>
-    <tbody>
-      <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all <code>telegram:*</code> scopes plus <code>admin:users</code></td></tr>
-      <tr><td>Telegram id ∈ <code>TG_LOGIN_CLIENTS</code></td><td><code>telegram:*</code> scopes (dialogs/messages read, send, pin) — no <code>admin:users</code></td></tr>
-      <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
-    </tbody>
-  </table>
-  <p class="muted">For backward compatibility the server can still be run under <code>AUTH_MODE=shared-hmac-legacy</code>, in which case the original GitHub-group→scope mapping applies. The default mode is <code>local-jwt</code>.</p>
+  <!-- ============ 03 Scopes ============ -->
+  <section id="scopes">
+    <div class="section-head">
+      <h2>Scopes and permissions</h2>
+    </div>
+    <p>
+      Scopes are derived from your Telegram identity. Operators on the admin allowlist
+      (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set.
+      Everyone else gets the <code>client</code> tier — the <code>telegram:*</code> tool
+      scopes for their <em style="color: var(--text)">own</em> account, without
+      platform-admin capability. When <code>AUTO_APPROVE_CLIENTS</code> is enabled
+      (open registration) every signed-in user is a client automatically; otherwise
+      the client tier comes from the <code>TG_LOGIN_CLIENTS</code> allowlist or an
+      operator grant. An operator can revoke any user with
+      <code>set_telegram_access</code>.
+    </p>
+    <table class="tbl">
+      <thead>
+        <tr><th>Telegram identity</th><th>Scopes granted</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all <code>telegram:*</code> scopes plus <code>admin:users</code></td></tr>
+        <tr><td>Telegram id ∈ <code>TG_LOGIN_CLIENTS</code></td><td><code>telegram:*</code> scopes (dialogs/messages read, send, pin) — no <code>admin:users</code></td></tr>
+        <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="margin-top: 16px;">
+      For backward compatibility the server can still be run under
+      <code>AUTH_MODE=shared-hmac-legacy</code>, in which case the original
+      GitHub-group→scope mapping applies. The default mode is <code>local-jwt</code>.
+    </p>
+  </section>
 
-  <h2>4. What we store</h2>
-  <table>
-    <thead><tr><th>Row</th><th>Contents</th><th>Retention</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>users</code></td>
-        <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
-        <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
-      </tr>
-      <tr>
-        <td><code>telegram_accounts.session_encrypted</code></td>
-        <td>AES-256-GCM-sealed MTProto session blob, per-user HKDF-derived key</td>
-        <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed).</td>
-      </tr>
-      <tr>
-        <td><code>audit_logs</code></td>
-        <td>tool name, redacted peer reference, status, error. <strong>Never the message body, phone number, or session bytes.</strong></td>
-        <td>Retained indefinitely today; 90-day sweeper is planned (M2). Ask the operator if you need an earlier purge.</td>
-      </tr>
-    </tbody>
-  </table>
+  <!-- ============ 04 Storage ============ -->
+  <section id="storage">
+    <div class="section-head">
+      <h2>What we store</h2>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr><th>Row</th><th>Contents</th><th>Retention</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>users</code></td>
+          <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
+          <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
+        </tr>
+        <tr>
+          <td><code>telegram_accounts<wbr>.session_encrypted</code></td>
+          <td>AES-256-GCM-sealed MTProto session blob, per-user HKDF-derived key.</td>
+          <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed).</td>
+        </tr>
+        <tr>
+          <td><code>audit_logs</code></td>
+          <td>Tool name, redacted peer reference, status, error. <strong style="color: var(--text)">Never the message body, phone number, or session bytes.</strong></td>
+          <td>Retained indefinitely today; 90-day sweeper is planned (M2). Ask the operator if you need an earlier purge.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
 
-  <h2>5. Your controls</h2>
-  <ul>
-    <li><strong>Disconnect (soft):</strong> call MCP tool <code>disconnect_telegram_account</code>, or <code>POST /api/account/disconnect</code>. Marks the session revoked and immediately tears down the in-memory MTProto client.</li>
-    <li><strong>Delete (hard):</strong> call MCP tool <code>delete_telegram_account</code>, or <code>DELETE /api/account</code>. Removes the encrypted session blob and all per-account metadata.</li>
-    <li><strong>Status:</strong> <code>GET /api/account</code> returns connection state, display name, and the per-account <code>send_enabled</code> flag.</li>
-    <li><strong>Audit log:</strong> <code>get_my_audit_log</code> MCP tool or <code>GET /api/account/audit</code> — newest-first, RFC3339 <code>before</code> cursor for keyset pagination.</li>
-    <li><strong>Verify your audit chain:</strong> <code>GET /api/account/audit/verify</code> recomputes the SHA-256 hash chain over your rows and reports <code>{ok, verified}</code> or <code>{ok:false, first_bad_id, reason}</code>.</li>
-    <li><strong>Revoke from Telegram's side:</strong> Telegram app → Settings → Devices → close the session named after this app. This will not delete data here but will sever the MTProto link Telegram-side.</li>
-  </ul>
+  <!-- ============ 05 Controls ============ -->
+  <section id="controls">
+    <div class="section-head">
+      <h2>Your controls</h2>
+    </div>
+    <ul class="ctrl">
+      <li><strong>Disconnect (soft):</strong> call MCP tool <code>disconnect_telegram_account</code>, or <code>POST /api/account/disconnect</code>. Marks the session revoked and immediately tears down the in-memory MTProto client.</li>
+      <li><strong>Delete (hard):</strong> call MCP tool <code>delete_telegram_account</code>, or <code>DELETE /api/account</code>. Removes the encrypted session blob and all per-account metadata.</li>
+      <li><strong>Status:</strong> <code>GET /api/account</code> returns connection state, display name, and the per-account <code>send_enabled</code> flag.</li>
+      <li><strong>Audit log:</strong> <code>get_my_audit_log</code> MCP tool or <code>GET /api/account/audit</code> — newest-first, RFC3339 <code>before</code> cursor for keyset pagination.</li>
+      <li><strong>Verify your audit chain:</strong> <code>GET /api/account/audit/verify</code> recomputes the SHA-256 hash chain over your rows and reports <code>{ok, verified}</code> or <code>{ok:false, first_bad_id, reason}</code>.</li>
+      <li><strong>Revoke from Telegram's side:</strong> Telegram app → Settings → Devices → close the session named after this app. This will not delete data here but will sever the MTProto link Telegram-side.</li>
+    </ul>
+  </section>
 
-  <h2>6. Smoke-test from your terminal</h2>
-  <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
-  <pre>curl -s {{.WellKnownURL}}
+  <!-- ============ 06 Smoke test ============ -->
+  <section id="smoke">
+    <div class="section-head">
+      <h2>Smoke-test from your terminal</h2>
+    </div>
+    <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
+<pre><code>curl -s {{.WellKnownURL}}
 
 curl -s -X POST {{.MCPURL}} \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'</pre>
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"smoke","version":"0"}}}'</code></pre>
+  </section>
 
-  <h2>7. First-time Telegram login</h2>
-  <p>Sign-in via the Claude.ai connector authenticates you with the Telegram Login Widget. If the server has no MTProto session for your account yet, the connect flow continues straight into an in-browser <em>&ldquo;Enable message access&rdquo;</em> step: enter your phone number, type the login code Telegram sends you, and &mdash; if your account uses it &mdash; your two-step verification password. The server then persists an AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the connector is ready &mdash; no operator CLI step required. The bundled <code>mctl-telegram-login</code> CLI remains available for operators as a fallback. Full details in the repo <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.</p>
+  <!-- ============ 07 First login ============ -->
+  <section id="first-login">
+    <div class="section-head">
+      <h2>First-time Telegram login</h2>
+    </div>
+    <p>
+      Sign-in via the Claude.ai connector authenticates you with the Telegram Login Widget.
+      If the server has no MTProto session for your account yet, the connect flow continues
+      straight into an in-browser <em style="color: var(--text)">"Enable message access"</em>
+      step: enter your phone number, type the login code Telegram sends you, and — if your
+      account uses it — your two-step verification password. The server then persists an
+      AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the
+      connector is ready — no operator CLI step required. The bundled
+      <code>mctl-telegram-login</code> CLI remains available for operators as a fallback.
+      Full details in the repo
+      <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.
+    </p>
+  </section>
 
-  <p class="muted">Source: <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> · <a href="/security">Security</a> · <a href="/privacy">Privacy</a> · Auth server: <code>{{.AuthServer}}</code> · Resource: <code>{{.PublicBaseURL}}</code></p>
+  <!-- ============ Footer ============ -->
+  <footer>
+    <div class="links">
+      <span class="brand-mark">mctl-telegram</span>
+      <span class="sep">·</span>
+      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">source</a>
+      <span class="sep">·</span>
+      <a href="/security">security</a>
+      <span class="sep">·</span>
+      <a href="/privacy">privacy</a>
+    </div>
+    <span>resource: <code>{{.PublicBaseURL}}</code></span>
+  </footer>
+
+</div>
+
+<script>
+  // Theme toggle: cycles light ↔ dark, persists in localStorage.
+  function toggleTheme() {
+    var root = document.documentElement;
+    var cur = root.getAttribute('data-theme') || 'dark';
+    var next = cur === 'light' ? 'dark' : 'light';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('mctl-theme', next); } catch (e) {}
+  }
+
+  // Accent picker: sets data-accent (cyan is the mctl default — no attribute),
+  // persists in localStorage.
+  function setAccent(name) {
+    var root = document.documentElement;
+    if (name === 'cyan') {
+      root.removeAttribute('data-accent');
+    } else {
+      root.setAttribute('data-accent', name);
+    }
+    try { localStorage.setItem('mctl-accent', name); } catch (e) {}
+  }
+
+  // Wire up handlers without inline onclick attributes, so the markup stays
+  // compatible with a strict Content-Security-Policy (script-src 'self').
+  document.querySelector('.theme-toggle').addEventListener('click', toggleTheme);
+  document.querySelectorAll('.accent-swatch').forEach(function (btn) {
+    btn.addEventListener('click', function () { setAccent(btn.dataset.pick); });
+  });
+</script>
 </body>
 </html>
