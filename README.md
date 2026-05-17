@@ -59,15 +59,51 @@ curl -s -X POST localhost:8080/mcp \
 
 Required `env` (set via Helm `values.yaml` + ExternalSecret pulling from Vault):
 
-| Key                       | Source                                          |
-|---------------------------|-------------------------------------------------|
-| `AUTH_MODE`               | `shared-hmac` (recommended) or `own-oauth` (M6) |
-| `AUTH_REQUIRED`           | `true`                                          |
-| `OAUTH_JWT_SECRET`        | Vault `secret/platform/oauth-jwt-secret`        |
-| `TG_API_ID`, `TG_API_HASH`| Vault `secret/platform/mctl-telegram/api`       |
-| `ENCRYPTION_KEY`          | Vault `secret/platform/mctl-telegram/encryption` (32-byte hex) |
-| `DATABASE_URL`            | `postgres://...` (provisioned via `mctl_provision_database`) |
-| `ALLOW_SEND`              | `false` until bake-in completes                 |
+| Key                        | Source / value                                                  |
+|----------------------------|-----------------------------------------------------------------|
+| `AUTH_MODE`                | `local-jwt` (mctl-telegram is its own OAuth issuer)             |
+| `AUTH_REQUIRED`            | `true`                                                          |
+| `OAUTH_JWT_SIGNING_KEY`    | Vault `secret/platform/mctl-telegram/oauth` → `jwt-signing-key` |
+| `TELEGRAM_LOGIN_BOT_TOKEN` | Vault `secret/platform/mctl-telegram/login`                     |
+| `TG_API_ID`, `TG_API_HASH` | Vault `secret/platform/mctl-telegram/api`                       |
+| `ENCRYPTION_KEY`           | Vault `secret/platform/mctl-telegram/encryption` (32-byte hex)  |
+| `DATABASE_URL`             | `postgres://...` (provisioned via `mctl_provision_database`)    |
+| `ALLOW_SEND`               | `false` until bake-in completes                                 |
+| `OAUTH_ACCESS_TOKEN_TTL`   | optional, default `1h` — access tokens are short-lived          |
+| `OAUTH_REFRESH_TOKEN_TTL`  | optional, default `720h` (30d) — refresh-token absolute lifetime|
+
+> `OAUTH_JWT_SECRET` is the deprecated predecessor of `OAUTH_JWT_SIGNING_KEY`.
+> It is still accepted as a fallback but logs a warning at startup. It was
+> historically wired to api.mctl.ai's shared OAuth secret, so a rotation there
+> would silently invalidate every mctl-telegram token — use the dedicated
+> `OAUTH_JWT_SIGNING_KEY` instead.
+
+### JWT signing key
+
+In `local-jwt` mode mctl-telegram signs its own access tokens (HS256). The
+signing key **must persist across restarts** and **must be dedicated to this
+service** — if it changes, every previously issued token fails verification.
+
+Generate a key and store it in Vault:
+
+```bash
+# 64 random bytes, base64-encoded — used verbatim as the HMAC secret
+openssl rand -base64 64
+vault kv put secret/platform/mctl-telegram/oauth jwt-signing-key="<paste>"
+```
+
+The chart's ExternalSecret syncs it to the `OAUTH_JWT_SIGNING_KEY` env var. In
+local development the key can be any non-empty string passed directly via the
+env var.
+
+### Token lifetimes and refresh
+
+Access tokens are intentionally short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default
+1h). Clients renew them silently with the OAuth 2.1 `refresh_token` grant: the
+`/oauth/token` endpoint accepts `grant_type=refresh_token` and returns a new
+access token plus a rotated refresh token, with no Telegram Login Widget
+interaction. Refresh tokens are opaque, stored SHA-256-hashed, and rotated on
+every use; replaying an already-rotated token revokes the whole token family.
 
 ## Claude.ai connector registration
 

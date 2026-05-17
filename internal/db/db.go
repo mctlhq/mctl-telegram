@@ -248,6 +248,24 @@ func sqliteSchema() []string {
 			prev_hash BLOB,
 			entry_hash BLOB
 		)`,
+		// OAuth refresh tokens (M5). The opaque token string is never stored —
+		// only token_hash (SHA-256). family_id ties a token to its rotation
+		// lineage so a replayed (already-rotated) token can revoke the family.
+		`CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			family_id TEXT NOT NULL,
+			token_hash BLOB NOT NULL,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			client_id TEXT NOT NULL,
+			telegram_id INTEGER NOT NULL,
+			telegram_username TEXT,
+			scope TEXT,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at DATETIME NOT NULL,
+			revoked_at DATETIME
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
 	}
 }
 
@@ -287,5 +305,23 @@ func pgSchema() []string {
 			prev_hash BYTEA,
 			entry_hash BYTEA
 		)`,
+		// OAuth refresh tokens (M5). The opaque token string is never stored —
+		// only token_hash (SHA-256). family_id ties a token to its rotation
+		// lineage so a replayed (already-rotated) token can revoke the family.
+		`CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+			id BIGSERIAL PRIMARY KEY,
+			family_id TEXT NOT NULL,
+			token_hash BYTEA NOT NULL,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			client_id TEXT NOT NULL,
+			telegram_id BIGINT NOT NULL,
+			telegram_username TEXT,
+			scope TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
 	}
 }

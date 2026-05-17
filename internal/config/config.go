@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -15,7 +16,7 @@ type Config struct {
 	AuthRequired       bool
 	OperatorLogin      string
 	DatabaseURL        string
-	OAUTHJWTSecret     string
+	OAUTHJWTSecret     string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
 	OAUTHJWTAudience   string // expected `aud` claim; empty disables the check
 	OAUTHJWTAudReq     bool   // when true, tokens without aud are rejected
 	TGAPIID            int
@@ -33,9 +34,10 @@ type Config struct {
 	TGLoginClients           []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
 	OAUTHCodeTTL             time.Duration
 	OAUTHAccessTokenTTL      time.Duration
-	OAUTHAllowImplicitClient bool // accept unregistered client_ids (eases Claude.ai onboarding)
-	AutoApproveClients       bool // open registration: every widget login auto-gets the client tier
-	DigestHourUTC            int  // UTC hour (0-23) for the daily new-client digest; default 9
+	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
+	OAUTHAllowImplicitClient bool          // accept unregistered client_ids (eases Claude.ai onboarding)
+	AutoApproveClients       bool          // open registration: every widget login auto-gets the client tier
+	DigestHourUTC            int           // UTC hour (0-23) for the daily new-client digest; default 9
 }
 
 func Load() (*Config, error) {
@@ -47,7 +49,7 @@ func Load() (*Config, error) {
 		AuthRequired:             envBool("AUTH_REQUIRED", false),
 		OperatorLogin:            envOr("OPERATOR_GITHUB_LOGIN", "operator"),
 		DatabaseURL:              envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
-		OAUTHJWTSecret:           os.Getenv("OAUTH_JWT_SECRET"),
+		OAUTHJWTSecret:           jwtSigningKey(),
 		OAUTHJWTAudience:         os.Getenv("OAUTH_JWT_AUDIENCE"),
 		OAUTHJWTAudReq:           envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		TGAPIHash:                os.Getenv("TG_API_HASH"),
@@ -60,6 +62,7 @@ func Load() (*Config, error) {
 		TelegramLoginBotUsername: envOr("TELEGRAM_LOGIN_BOT_USERNAME", ""),
 		OAUTHCodeTTL:             envDuration("OAUTH_CODE_TTL", 10*time.Minute),
 		OAUTHAccessTokenTTL:      envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
+		OAUTHRefreshTokenTTL:     envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
 		OAUTHAllowImplicitClient: envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
 		AutoApproveClients:       envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:            envInt("DIGEST_HOUR_UTC", 9),
@@ -87,6 +90,26 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+// jwtSigningKey resolves the HS256 signing key for OAuth/MCP JWTs.
+//
+// The dedicated env var is OAUTH_JWT_SIGNING_KEY — a signing key owned by
+// mctl-telegram and sourced from its own Vault path. The legacy
+// OAUTH_JWT_SECRET is still honoured as a fallback for one transition window:
+// historically it was wired to api.mctl.ai's shared OAuth secret, so a
+// rotation in mctl-api would silently invalidate every mctl-telegram token.
+// Deployments should migrate to OAUTH_JWT_SIGNING_KEY to break that coupling.
+func jwtSigningKey() string {
+	if v := os.Getenv("OAUTH_JWT_SIGNING_KEY"); v != "" {
+		return v
+	}
+	if legacy := os.Getenv("OAUTH_JWT_SECRET"); legacy != "" {
+		slog.Warn("OAUTH_JWT_SECRET is deprecated; set OAUTH_JWT_SIGNING_KEY instead " +
+			"(a dedicated mctl-telegram signing key, not the shared mctl-api secret)")
+		return legacy
+	}
+	return ""
 }
 
 func envOr(key, def string) string {

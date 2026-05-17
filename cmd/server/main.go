@@ -84,6 +84,9 @@ func main() {
 	// Audit-log retention: trims rows older than AUDIT_RETENTION_DAYS
 	// (default 90). AUDIT_RETENTION_DAYS=0 keeps rows forever.
 	go sweeper.AuditLog(ctx, store, time.Duration(cfg.AuditRetentionDays)*24*time.Hour)
+	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
+	// the table stays bounded. LookupRefreshToken is the authoritative gate.
+	go sweeper.RefreshTokens(ctx, store)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
@@ -302,6 +305,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		ClientTelegramIDs:   clients,
 		AutoApproveClients:  cfg.AutoApproveClients,
 		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
+		RefreshTokenTTL:     cfg.OAUTHRefreshTokenTTL,
 		CodeTTL:             cfg.OAUTHCodeTTL,
 		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
 		TGAPIID:             cfg.TGAPIID,
