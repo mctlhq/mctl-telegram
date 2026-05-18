@@ -85,6 +85,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "telegram:dialogs:read"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
@@ -94,7 +95,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "list_dialogs", args)
-				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res))
+				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res), startedAt)
 				return res, err2
 			}
 		}
@@ -106,7 +107,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 			dialogs, err = telegram.ListDialogs(ctx, c, limit, query)
 			return err
 		})
-		s.audit(ctx, id, "list_dialogs", "", err)
+		s.audit(ctx, id, "list_dialogs", "", err, startedAt)
 		if err != nil {
 			return toolErr("list_dialogs: %v", err), nil
 		}
@@ -135,6 +136,7 @@ Empty result means no unread messages match (including: peer has unread but text
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "telegram:messages:read"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
@@ -144,7 +146,7 @@ Empty result means no unread messages match (including: peer has unread but text
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
-				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res))
+				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res), startedAt)
 				return res, err2
 			}
 		}
@@ -156,7 +158,7 @@ Empty result means no unread messages match (including: peer has unread but text
 			msgs, err = telegram.GetUnreadMessages(ctx, c, peer, limit)
 			return err
 		})
-		s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err)
+		s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
 			return toolErr("get_unread_messages: %v", err), nil
 		}
@@ -193,6 +195,7 @@ The two-step flow exists so an LLM cannot quietly drift the payload between agre
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
@@ -210,7 +213,7 @@ The two-step flow exists so an LLM cannot quietly drift the payload between agre
 		// can't sidestep the cap. Returning an error keeps the surface
 		// honest — there is no draft preview for prepare.
 		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil)
+			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil, startedAt)
 			return mcplib.NewToolResultError("per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
 		}
 		hash := HashSendPayload(peer, text)
@@ -218,7 +221,7 @@ The two-step flow exists so an LLM cannot quietly drift the payload between agre
 		if err != nil {
 			return toolErr("prepare_send_message: %v", err), nil
 		}
-		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil)
+		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil, startedAt)
 		return jsonResult(map[string]any{
 			"confirmation_id": c.ID,
 			"peer_redacted":   telegram.RedactPeer(peer),
@@ -261,6 +264,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
@@ -300,7 +304,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 				if modeErr == nil && accountMode == "local" {
 					res, err2 := s.bridgeCall(ctx, id, "send_message", args)
-					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
 					return res, err2
 				}
 			}
@@ -314,7 +318,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		if realSend && err == nil {
 			status = "sent"
 		}
-		s.audit(ctx, id, "send_message:"+status, telegram.RedactPeer(peer), err)
+		s.audit(ctx, id, "send_message:"+status, telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
 			return toolErr("send_message: %v", err), nil
 		}
@@ -350,6 +354,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "telegram:messages:read"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
@@ -363,7 +368,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_messages", args)
-				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res))
+				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
 				return res, err2
 			}
 		}
@@ -374,7 +379,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 			msgs, err = telegram.GetMessages(ctx, c, peer, limit)
 			return err
 		})
-		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err)
+		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
 			return toolErr("get_messages: %v", err), nil
 		}
@@ -409,6 +414,7 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
@@ -422,7 +428,7 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, nil)
+			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, nil, startedAt)
 			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
@@ -434,7 +440,7 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 		if err != nil {
 			return toolErr("prepare_pin_message: %v", err), nil
 		}
-		s.audit(ctx, id, "prepare_pin_message", telegram.RedactPeer(peer), nil)
+		s.audit(ctx, id, "prepare_pin_message", telegram.RedactPeer(peer), nil, startedAt)
 		return jsonResult(map[string]any{
 			"confirmation_id": c.ID,
 			"peer_redacted":   telegram.RedactPeer(peer),
@@ -477,6 +483,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "telegram:messages:pin"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
@@ -507,7 +514,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "pin_message", args)
-				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res))
+				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
 				return res, err2
 			}
 		}
@@ -519,7 +526,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		if unpin {
 			action = "unpinned"
 		}
-		s.audit(ctx, id, "pin_message:"+action, telegram.RedactPeer(peer), err)
+		s.audit(ctx, id, "pin_message:"+action, telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
 			return toolErr("pin_message: %v", err), nil
 		}
@@ -541,6 +548,7 @@ This tool is part of self-service controls — you do not need an operator to di
 No inputs. Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
@@ -555,10 +563,10 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		var had bool
 		err := s.Pool.RemoveAtomic(id.UserID, func() error {
 			var e error
-			had, e = s.Store.RevokeActiveSession(ctx, id.UserID)
+			had, e = s.Store.RevokeActiveSession(ctx, id.UserID, "disconnect")
 			return e
 		})
-		s.audit(ctx, id, "disconnect_telegram_account", "", err)
+		s.audit(ctx, id, "disconnect_telegram_account", "", err, startedAt)
 		if err != nil {
 			return toolErr("disconnect: %v", err), nil
 		}
@@ -583,6 +591,7 @@ For a softer alternative that keeps the row but disables it, use disconnect_tele
 No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
@@ -596,7 +605,7 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 			rows, e = s.Store.HardDeleteAccount(ctx, id.UserID)
 			return e
 		})
-		s.audit(ctx, id, "delete_telegram_account", "", err)
+		s.audit(ctx, id, "delete_telegram_account", "", err, startedAt)
 		if err != nil {
 			return toolErr("delete: %v", err), nil
 		}
@@ -671,12 +680,13 @@ Output: JSON array of {telegram_id, username, display_name, access_tier, has_ses
 Use this to find a newly signed-in user, then grant them access with set_telegram_access.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "admin:users"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		rows, err := s.Store.ListIdentities(ctx)
-		s.audit(ctx, id, "list_telegram_identities", "", err)
+		s.audit(ctx, id, "list_telegram_identities", "", err, startedAt)
 		if err != nil {
 			return toolErr("list_telegram_identities: %v", err), nil
 		}
@@ -702,6 +712,7 @@ The user must have signed in via the Login Widget at least once (so a users row 
 			mcplib.Description(`"client" or "none" (required).`)),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "admin:users"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
@@ -716,7 +727,7 @@ The user must have signed in via the Login Widget at least once (so a users row 
 			return mcplib.NewToolResultError(`tier must be "client" or "none"`), nil
 		}
 		err := s.Store.SetAccessTier(ctx, tgID, tier)
-		s.audit(ctx, id, "set_telegram_access", "", err)
+		s.audit(ctx, id, "set_telegram_access", "", err, startedAt)
 		if err != nil {
 			return toolErr("set_telegram_access: %v", err), nil
 		}
@@ -769,7 +780,7 @@ func jsonResult(v any) (*mcplib.CallToolResult, error) {
 	return mcplib.NewToolResultText(string(b)), nil
 }
 
-func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error) {
+func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time) {
 	uid := int64(0)
 	if id != nil {
 		uid = id.UserID
@@ -781,6 +792,11 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		msg = err.Error()
 	}
 	s.Store.LogToolCall(ctx, uid, tool, peer, status, msg)
+	if s.Metrics != nil && !startedAt.IsZero() {
+		elapsed := time.Since(startedAt).Seconds()
+		s.Metrics.ToolInvocationDuration.WithLabelValues(tool).Observe(elapsed)
+		s.Metrics.ToolInvocationsTotal.WithLabelValues(tool, status).Inc()
+	}
 }
 
 func stringArg(args map[string]any, key, def string) string {

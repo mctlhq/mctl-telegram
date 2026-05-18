@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -24,6 +26,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
@@ -72,8 +75,12 @@ func main() {
 	if !cryp.Enabled() {
 		slog.Warn("ENCRYPTION_KEY not set — session bytes stored UNENCRYPTED (acceptable only for local-dev)")
 	}
-	store := db.NewStore(rawDB, cryp)
-	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store)
+	// Construct the metrics registry early so all subsystems can be wired
+	// before any goroutine or handler is started.
+	m := metrics.New()
+
+	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).WithMetrics(m)
 	defer pool.Shutdown()
 
 	// Periodic background job that revokes sessions whose idle (30d) or
@@ -87,12 +94,29 @@ func main() {
 	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
 	// the table stays bounded. LookupRefreshToken is the authoritative gate.
 	go sweeper.RefreshTokens(ctx, store)
+	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := store.CountActiveSessions(ctx)
+				if err == nil {
+					m.SessionsActiveGauge.Set(float64(n))
+				}
+			}
+		}
+	}()
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
 	mux.Use(middleware.RealIP)
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
+	mux.Use(m.HTTPMiddleware())
 
 	// Authorization server URL — for the Telegram-native local-jwt path
 	// (default), this is the same as PublicBaseURL: mctl-telegram is its own
@@ -102,6 +126,7 @@ func main() {
 
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
+	mux.Get("/metrics", metricsHandler(m, cfg.MetricsAllowCIDR))
 	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg, authServer))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
@@ -128,10 +153,10 @@ func main() {
 	accountMux := chi.NewRouter()
 	accountHandlers := web.NewAccountHandlers(store, pool)
 	accountHandlers.Register(accountMux)
-	mux.Mount("/api/account", auth.Middleware(provider, true)(accountMux))
+	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
 
-	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter)
+	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m)
 
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
@@ -142,7 +167,7 @@ func main() {
 	// token would be rejected at /bridge. selectBridgeIssuer maps the same
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
-		mux.With(auth.Middleware(provider, true)).Post("/api/bridge/token",
+		mux.With(auth.Middleware(provider, true, m)).Post("/api/bridge/token",
 			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
 	}
 
@@ -161,7 +186,7 @@ func main() {
 	// runs, so unauthenticated humans still see instructions instead of
 	// a 401. MCP clients (Accept: application/json, text/event-stream)
 	// fall through and hit the full auth+ratelimit+MCP chain.
-	mcpHandler := auth.Middleware(provider, cfg.AuthRequired)(
+	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	mux.Mount(cfg.MCPPath, web.BrowserRedirect(mcpHandler, "/"))
@@ -189,6 +214,34 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// metricsHandler wraps the Prometheus exposition handler with an optional CIDR
+// allowlist guard. When allowCIDR is empty the endpoint is open (suitable for
+// Kubernetes PodMonitor scrape patterns where NetworkPolicy provides isolation).
+// When set, requests from outside the CIDR receive HTTP 403.
+func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
+	h := promhttp.HandlerFor(m.Prometheus, promhttp.HandlerOpts{})
+	if allowCIDR == "" {
+		return h.ServeHTTP
+	}
+	_, ipNet, err := net.ParseCIDR(allowCIDR)
+	if err != nil {
+		slog.Warn("METRICS_ALLOW_CIDR is invalid — /metrics endpoint is open", "cidr", allowCIDR, "err", err)
+		return h.ServeHTTP
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+		if splitErr != nil {
+			host = r.RemoteAddr
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ipNet.Contains(ip) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

@@ -44,6 +44,12 @@ type Config struct {
 	OAUTHAllowImplicitClient bool          // accept unregistered client_ids (eases Claude.ai onboarding)
 	AutoApproveClients       bool          // open registration: every widget login auto-gets the client tier
 	DigestHourUTC            int           // UTC hour (0-23) for the daily new-client digest; default 9
+	// Observability:
+	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
+	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
+	// open without authentication — suitable for Kubernetes PodMonitor scrape
+	// patterns where network policy provides the access control.
+	MetricsAllowCIDR string // METRICS_ALLOW_CIDR, optional
 }
 
 func Load() (*Config, error) {
@@ -77,6 +83,7 @@ func Load() (*Config, error) {
 		AutoApproveClients:       envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:            envInt("DIGEST_HOUR_UTC", 9),
 	}
+	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))

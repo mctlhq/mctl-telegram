@@ -9,13 +9,15 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // Store wraps the DB with high-level accessors used by the MCP tool layer and
 // the Telegram session store.
 type Store struct {
-	DB    *sql.DB
-	Crypt *crypto.AESGCM
+	DB      *sql.DB
+	Crypt   *crypto.AESGCM
+	metrics *metrics.Registry
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,
@@ -31,6 +33,13 @@ type AccountInfo struct {
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
 	return &Store{DB: db, Crypt: c}
+}
+
+// WithMetrics wires a *metrics.Registry so session lifecycle events are
+// counted. Returns the receiver for chaining.
+func (s *Store) WithMetrics(m *metrics.Registry) *Store {
+	s.metrics = m
+	return s
 }
 
 // EnsureUser creates a user row by github_login if absent and returns the user id.
@@ -255,7 +264,13 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	); err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if s.metrics != nil {
+		s.metrics.SessionsConnectedTotal.Inc()
+	}
+	return nil
 }
 
 // Session TTL policy. Borrow refuses a session whose last_used_at is older
@@ -351,9 +366,13 @@ func (s *Store) UpdateSessionBlob(ctx context.Context, userID int64, plaintext [
 
 // RevokeActiveSession marks the active telegram_accounts row for a user as
 // revoked. Returns true if a row was actually flipped. Idempotent: calling
-// it twice in a row only flips the first time. Used by the self-service
-// disconnect MCP tool / HTTP endpoint.
-func (s *Store) RevokeActiveSession(ctx context.Context, userID int64) (bool, error) {
+// it twice in a row only flips the first time.
+//
+// reason is recorded in mctl_sessions_revoked_total{reason} when a metrics
+// registry is wired. Callers should pass one of: "disconnect" (self-service
+// disconnect MCP tool / HTTP endpoint), "idle_expiry" (CheckSessionValid idle
+// TTL gate), "absolute_expiry" (CheckSessionValid absolute TTL gate).
+func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
@@ -363,6 +382,9 @@ func (s *Store) RevokeActiveSession(ctx context.Context, userID int64) (bool, er
 		return false, fmt.Errorf("revoke session: %w", err)
 	}
 	rows, _ := res.RowsAffected()
+	if rows > 0 && s.metrics != nil && reason != "" {
+		s.metrics.SessionsRevokedTotal.WithLabelValues(reason).Inc()
+	}
 	return rows > 0, nil
 }
 
@@ -379,6 +401,9 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, fmt.Errorf("delete account: %w", err)
 	}
 	rows, _ := res.RowsAffected()
+	if rows > 0 && s.metrics != nil {
+		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(rows))
+	}
 	return rows, nil
 }
 
@@ -507,11 +532,11 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	}
 	now := time.Now().UTC()
 	if expires.Valid && expires.Time.Before(now) {
-		_, _ = s.RevokeActiveSession(ctx, userID)
+		_, _ = s.RevokeActiveSession(ctx, userID, "absolute_expiry")
 		return ReasonAbsolute, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonAbsolute)
 	}
 	if lastUsed.Valid && now.Sub(lastUsed.Time) > idleSessionTTL {
-		_, _ = s.RevokeActiveSession(ctx, userID)
+		_, _ = s.RevokeActiveSession(ctx, userID, "idle_expiry")
 		return ReasonIdle, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonIdle)
 	}
 	return "", nil
@@ -523,6 +548,9 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 // CheckSessionValid would have caught the same rows on the next Borrow
 // anyway — the sweep just bounds how long an idle row sits in storage
 // before being marked revoked.
+//
+// Deprecated: prefer calling SweepIdleSessions and SweepAbsoluteSessions
+// separately so the sweeper can label revoked rows by reason.
 func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
@@ -541,6 +569,74 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 	}
 	rows, _ := res.RowsAffected()
 	return rows, nil
+}
+
+// SweepIdleSessions revokes active rows whose last_used_at is older than the
+// idle TTL (30 days). Returns the number of rows flipped. Increments
+// mctl_sessions_revoked_total{reason="idle_expiry"} if a metrics registry is
+// wired.
+func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
+	now := time.Now().UTC()
+	idleCutoff := now.Add(-idleSessionTTL)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts
+		 SET revoked_at = $1
+		 WHERE revoked_at IS NULL
+		   AND last_used_at IS NOT NULL
+		   AND last_used_at < $2`,
+		now, idleCutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("sweep idle sessions: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows > 0 && s.metrics != nil {
+		s.metrics.SessionsRevokedTotal.WithLabelValues("idle_expiry").Add(float64(rows))
+	}
+	return rows, nil
+}
+
+// SweepAbsoluteSessions revokes active rows whose expires_at is in the past
+// (absolute TTL 90 days). Returns the number of rows flipped. Increments
+// mctl_sessions_revoked_total{reason="absolute_expiry"} if a metrics registry
+// is wired.
+func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
+	now := time.Now().UTC()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts
+		 SET revoked_at = $1
+		 WHERE revoked_at IS NULL
+		   AND expires_at IS NOT NULL
+		   AND expires_at < $1`,
+		now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("sweep absolute sessions: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows > 0 && s.metrics != nil {
+		s.metrics.SessionsRevokedTotal.WithLabelValues("absolute_expiry").Add(float64(rows))
+	}
+	return rows, nil
+}
+
+// CountActiveSessions returns the number of non-revoked telegram_accounts rows
+// whose last_used_at is within the last hour. Used by the active-session gauge
+// sampler in main(). A nil or query error returns (0, err) so the caller can
+// log and skip the gauge update.
+func (s *Store) CountActiveSessions(ctx context.Context) (int64, error) {
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	var n int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts
+		 WHERE revoked_at IS NULL
+		   AND (last_used_at IS NULL OR last_used_at > $1)`,
+		cutoff,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count active sessions: %w", err)
+	}
+	return n, nil
 }
 
 // AuditEntry is the user-visible projection of an audit_logs row. It mirrors

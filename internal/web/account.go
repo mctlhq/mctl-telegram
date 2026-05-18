@@ -88,11 +88,11 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 	if h.Pool != nil {
 		err = h.Pool.RemoveAtomic(id.UserID, func() error {
 			var e error
-			had, e = h.Store.RevokeActiveSession(r.Context(), id.UserID)
+			had, e = h.Store.RevokeActiveSession(r.Context(), id.UserID, "disconnect")
 			return e
 		})
 	} else {
-		had, err = h.Store.RevokeActiveSession(r.Context(), id.UserID)
+		had, err = h.Store.RevokeActiveSession(r.Context(), id.UserID, "disconnect")
 	}
 	h.audit(r, id, "POST /api/account/disconnect", err)
 	if err != nil {

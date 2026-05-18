@@ -66,7 +66,7 @@ func TestRevokeActiveSession_FlipsOnceAndIsIdempotent(t *testing.T) {
 		t.Fatalf("seed account: %v", err)
 	}
 
-	had, err := s.RevokeActiveSession(ctx, uid)
+	had, err := s.RevokeActiveSession(ctx, uid, "disconnect")
 	if err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRevokeActiveSession_FlipsOnceAndIsIdempotent(t *testing.T) {
 		t.Fatal("first revoke should report had=true")
 	}
 
-	had2, err := s.RevokeActiveSession(ctx, uid)
+	had2, err := s.RevokeActiveSession(ctx, uid, "disconnect")
 	if err != nil {
 		t.Fatalf("revoke 2: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRevokeActiveSession_NoSession(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 
-	had, err := s.RevokeActiveSession(ctx, uid)
+	had, err := s.RevokeActiveSession(ctx, uid, "disconnect")
 	if err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
