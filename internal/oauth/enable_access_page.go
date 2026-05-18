@@ -1,9 +1,8 @@
 package oauth
 
 // enable_access_page.go holds the HTML for the in-browser enable_access flow:
-// the phone, SMS-code, 2FA-password, and error screens. They mirror the visual
-// style of authorize_page.go but need no JavaScript and no external resources,
-// so the CSP is tighter than the widget page's.
+// the phone, SMS-code, 2FA-password, and error screens. They need no
+// JavaScript and no external resources, so the CSP forbids scripts entirely.
 
 import (
 	"bytes"

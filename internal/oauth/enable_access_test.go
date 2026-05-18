@@ -7,12 +7,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	_ "modernc.org/sqlite"
@@ -67,8 +67,7 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 	cfg := Config{
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
-		BotToken:            testBotToken,
-		BotUsername:         testBotUsername,
+		TelegramOIDC:        newFakeAuthenticator(),
 		AdminTelegramIDs:    map[int64]bool{210408407: true},
 		AccessTokenTTL:      time.Hour,
 		CodeTTL:             time.Minute,
@@ -79,7 +78,7 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 	for _, o := range opts {
 		o(&cfg)
 	}
-	srv, err := New(cfg, newEnableTestStore(t))
+	srv, err := New(context.Background(), cfg, newEnableTestStore(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -169,11 +168,10 @@ func extractInputValue(t *testing.T, html, name string) string {
 	return rest[:end]
 }
 
-// driveToPhone runs /oauth/authorize then the widget callback for an admin with
-// no session, and returns the "es" token from the rendered phone screen.
-func driveToPhone(t *testing.T, mux *chi.Mux) string {
+// authorizeViaChi runs GET /oauth/authorize on a chi mux and returns the
+// server-side state token embedded in the 302-to-Telegram redirect.
+func authorizeViaChi(t *testing.T, mux *chi.Mux, challenge string) string {
 	t.Helper()
-	_, challenge := pkceVerifierAndChallenge()
 	q := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {"claude.ai"},
@@ -185,24 +183,38 @@ func driveToPhone(t *testing.T, mux *chi.Mux) string {
 	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("authorize = %d", rec.Code)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize = %d body=%s", rec.Code, rec.Body.String())
 	}
-	serverState := extractInputValue(t, rec.Body.String(), "st")
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("authorize redirect parse: %v", err)
+	}
+	st := loc.Query().Get("state")
+	if st == "" {
+		t.Fatalf("authorize redirect carried no state: %s", loc)
+	}
+	return st
+}
 
-	now := time.Now()
-	fields := map[string]string{
-		"id":         "210408407",
-		"username":   "MashkovD",
-		"first_name": "Dmitry",
-		"auth_date":  strconv.FormatInt(now.Unix(), 10),
-	}
-	fields["hash"] = signWidget(t, fields)
-	form := url.Values{"st": {serverState}}
-	for k, v := range fields {
-		form.Set(k, v)
-	}
-	rec = postForm(t, mux, "/oauth/telegram/callback", form)
+// callbackViaChi runs the Telegram OIDC callback GET (?code=&state=) on a chi mux.
+func callbackViaChi(t *testing.T, mux *chi.Mux, state string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{"state": {state}, "code": {"tg-auth-code"}}
+	req := httptest.NewRequest("GET", "/oauth/telegram/callback?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// driveToPhone runs /oauth/authorize then the Telegram OIDC callback for an
+// admin with no session, and returns the "es" token from the rendered phone
+// screen. The fake authenticator resolves the admin (210408407) by default.
+func driveToPhone(t *testing.T, mux *chi.Mux) string {
+	t.Helper()
+	_, challenge := pkceVerifierAndChallenge()
+	state := authorizeViaChi(t, mux, challenge)
+	rec := callbackViaChi(t, mux, state)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("callback = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
 	}
@@ -347,43 +359,22 @@ func TestEnableAccess_ExpiredToken(t *testing.T) {
 	}
 }
 
-// widgetCallbackFor drives /oauth/authorize then the widget callback for tgID
-// and returns the callback response recorder.
-func widgetCallbackFor(t *testing.T, mux *chi.Mux, tgID int64) *httptest.ResponseRecorder {
+// telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
+// for tgID and returns the callback response recorder. It points the fake
+// authenticator at tgID so Exchange resolves that identity.
+func telegramCallbackFor(t *testing.T, srv *Server, mux *chi.Mux, tgID int64) *httptest.ResponseRecorder {
 	t.Helper()
+	authFake(srv).identity = &telegramoidc.Identity{TelegramID: tgID, Username: "user", FirstName: "User"}
 	_, challenge := pkceVerifierAndChallenge()
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
-		"state":                 {"s"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	serverState := extractInputValue(t, rec.Body.String(), "st")
-
-	fields := map[string]string{
-		"id":         strconv.FormatInt(tgID, 10),
-		"username":   "user",
-		"first_name": "User",
-		"auth_date":  strconv.FormatInt(time.Now().Unix(), 10),
-	}
-	fields["hash"] = signWidget(t, fields)
-	form := url.Values{"st": {serverState}}
-	for k, v := range fields {
-		form.Set(k, v)
-	}
-	return postForm(t, mux, "/oauth/telegram/callback", form)
+	state := authorizeViaChi(t, mux, challenge)
+	return callbackViaChi(t, mux, state)
 }
 
 // TestEnableAccess_UnknownUserSkipsFlow confirms a user in neither allowlist
 // gets the authorization code directly, never the enable_access phone screen.
 func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
-	_, mux := newEnableTestServer(t, stubLogin(false, nil))
-	rec := widgetCallbackFor(t, mux, 999000111) // in no allowlist
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	rec := telegramCallbackFor(t, srv, mux, 999000111) // in no allowlist
 	if rec.Code != http.StatusFound {
 		t.Fatalf("unknown-user callback = %d (want 302 straight to code); body=%s", rec.Code, rec.Body.String())
 	}
@@ -393,10 +384,10 @@ func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
 // no session is routed into the enable_access phone screen, not 302'd.
 func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
 	clientID := int64(888000111)
-	_, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
 		c.ClientTelegramIDs = map[int64]bool{clientID: true}
 	})
-	rec := widgetCallbackFor(t, mux, clientID)
+	rec := telegramCallbackFor(t, srv, mux, clientID)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("client callback = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
 	}
@@ -485,7 +476,7 @@ func TestEnableAccess_DBClientRoutedToPhoneScreen(t *testing.T) {
 	if err := srv.store.SetAccessTier(ctx, clientID, db.TierClient); err != nil {
 		t.Fatalf("set access tier: %v", err)
 	}
-	rec := widgetCallbackFor(t, mux, clientID)
+	rec := telegramCallbackFor(t, srv, mux, clientID)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("db-client callback = %d (want 200 phone screen); body=%s", rec.Code, rec.Body.String())
 	}

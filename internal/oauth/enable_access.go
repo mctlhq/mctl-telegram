@@ -2,8 +2,8 @@ package oauth
 
 // enable_access.go implements the in-browser "enable message access" flow.
 //
-// After the Telegram Login Widget proves identity, an admin who has no MTProto
-// session is walked through phone -> SMS code -> optional 2FA, all over HTTP.
+// After Telegram OIDC proves identity, an admin who has no MTProto session is
+// walked through phone -> SMS code -> optional 2FA, all over HTTP.
 // The gotd auth flow cannot be split across requests (the MTProto connection
 // lives only inside one client.Run callback), so telegram.Login runs in a
 // background goroutine and the per-step HTTP handlers feed it the code and
@@ -39,7 +39,7 @@ const (
 )
 
 // enableSession is the server-side state of one in-browser enable_access flow,
-// keyed by an unguessable "es" token minted at the widget callback. It carries
+// keyed by an unguessable "es" token minted at the Telegram callback. It carries
 // the OAuth context so the flow can resume the authorization-code dance once
 // the MTProto session exists.
 type enableSession struct {
@@ -81,7 +81,7 @@ type loginFlow struct {
 // startLoginFlow launches telegram.Login in a background goroutine driven by
 // channels. The goroutine owns a context with a CodeTTL deadline so it always
 // terminates even if the user abandons the browser; cancel releases it sooner
-// when a /start re-submission supersedes it. wantTgID is the widget-proven
+// when a /start re-submission supersedes it. wantTgID is the OIDC-proven
 // Telegram id — the goroutine rejects the flow if the phone login resolves to
 // a different account.
 func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn bool) *loginFlow {
@@ -136,7 +136,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		// Identity binding. The Telegram account that just completed
-		// phone/SMS/2FA MUST be the same one the widget proved. Otherwise an
+		// phone/SMS/2FA MUST be the same one Telegram OIDC proved. Otherwise an
 		// admin authenticated as account A could enter account B's phone and
 		// end up operating B's messages through A's token. telegram.Login has
 		// already persisted B's session bytes via the gotd SessionStore, so

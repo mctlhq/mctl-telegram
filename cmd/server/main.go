@@ -281,11 +281,11 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	if cfg.OAUTHJWTSecret == "" {
 		return fmt.Errorf("OAUTH_JWT_SIGNING_KEY is required when AUTH_MODE=local-jwt")
 	}
-	if cfg.TelegramLoginBotToken == "" {
-		return fmt.Errorf("TELEGRAM_LOGIN_BOT_TOKEN is required when AUTH_MODE=local-jwt")
+	if cfg.TelegramOIDCClientID == "" {
+		return fmt.Errorf("TELEGRAM_OIDC_CLIENT_ID is required when AUTH_MODE=local-jwt")
 	}
-	if cfg.TelegramLoginBotUsername == "" {
-		return fmt.Errorf("TELEGRAM_LOGIN_BOT_USERNAME is required when AUTH_MODE=local-jwt")
+	if cfg.TelegramOIDCClientSecret == "" {
+		return fmt.Errorf("TELEGRAM_OIDC_CLIENT_SECRET is required when AUTH_MODE=local-jwt")
 	}
 	admins := map[int64]bool{}
 	for _, id := range cfg.TGLoginAdmins {
@@ -295,21 +295,27 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	for _, id := range cfg.TGLoginClients {
 		clients[id] = true
 	}
-	srv, err := oauth.New(oauth.Config{
-		Issuer:              strings.TrimRight(cfg.PublicBaseURL, "/"),
-		JWTSecret:           []byte(cfg.OAUTHJWTSecret),
-		JWTAudience:         cfg.OAUTHJWTAudience,
-		BotToken:            cfg.TelegramLoginBotToken,
-		BotUsername:         cfg.TelegramLoginBotUsername,
-		AdminTelegramIDs:    admins,
-		ClientTelegramIDs:   clients,
-		AutoApproveClients:  cfg.AutoApproveClients,
-		AccessTokenTTL:      cfg.OAUTHAccessTokenTTL,
-		RefreshTokenTTL:     cfg.OAUTHRefreshTokenTTL,
-		CodeTTL:             cfg.OAUTHCodeTTL,
-		AllowImplicitClient: cfg.OAUTHAllowImplicitClient,
-		TGAPIID:             cfg.TGAPIID,
-		TGAPIHash:           cfg.TGAPIHash,
+	// oauth.New performs OIDC discovery against Telegram — a network call at
+	// boot. It is fail-closed: a discovery failure aborts startup rather than
+	// running a server that cannot authenticate anyone.
+	srv, err := oauth.New(ctx, oauth.Config{
+		Issuer:                   strings.TrimRight(cfg.PublicBaseURL, "/"),
+		JWTSecret:                []byte(cfg.OAUTHJWTSecret),
+		JWTAudience:              cfg.OAUTHJWTAudience,
+		TelegramOIDCClientID:     cfg.TelegramOIDCClientID,
+		TelegramOIDCClientSecret: cfg.TelegramOIDCClientSecret,
+		TelegramOIDCIssuerURL:    cfg.TelegramOIDCIssuerURL,
+		TelegramOIDCRedirectURL:  cfg.TelegramOIDCRedirectURL,
+		TelegramOIDCSigningAlgs:  cfg.TelegramOIDCSigningAlgs,
+		AdminTelegramIDs:         admins,
+		ClientTelegramIDs:        clients,
+		AutoApproveClients:       cfg.AutoApproveClients,
+		AccessTokenTTL:           cfg.OAUTHAccessTokenTTL,
+		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,
+		CodeTTL:                  cfg.OAUTHCodeTTL,
+		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
+		TGAPIID:                  cfg.TGAPIID,
+		TGAPIHash:                cfg.TGAPIHash,
 	}, store)
 	if err != nil {
 		return err
@@ -319,11 +325,17 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	srv.StartSweeper(ctx.Done(), 1*time.Minute)
 	// Once-a-day Telegram digest of new clients — keeps the operator informed
 	// while onboarding stays hands-off. Recipients are the admin allowlist;
-	// the goroutine exits with ctx.
+	// the goroutine exits with ctx. The bot token is no longer load-bearing
+	// for authentication (OIDC replaced the widget), so an unset token only
+	// disables the digest rather than failing startup.
+	if cfg.TelegramLoginBotToken == "" {
+		slog.Warn("TELEGRAM_LOGIN_BOT_TOKEN unset — the daily new-client digest will not be delivered")
+	}
 	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
 	slog.Info("oauth issuer enabled",
 		"issuer", cfg.PublicBaseURL,
-		"bot_username", cfg.TelegramLoginBotUsername,
+		"oidc_issuer", cfg.TelegramOIDCIssuerURL,
+		"oidc_client_id", cfg.TelegramOIDCClientID,
 		"admin_count", len(admins),
 		"client_count", len(clients),
 		"auto_approve_clients", cfg.AutoApproveClients,
