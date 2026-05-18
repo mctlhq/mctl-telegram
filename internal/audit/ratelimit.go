@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // RateLimiter is a per-identity in-memory token bucket. Capacity is `RatePerMin`
@@ -18,6 +19,8 @@ type RateLimiter struct {
 	now        func() time.Time
 	mu         sync.Mutex
 	buckets    map[string]*bucket
+	// metrics is optional; when non-nil, 429 responses are counted.
+	metrics *metrics.Registry
 }
 
 type bucket struct {
@@ -31,6 +34,14 @@ func NewRateLimiter(perMin int) *RateLimiter {
 		now:        time.Now,
 		buckets:    make(map[string]*bucket),
 	}
+}
+
+// WithMetrics wires a *metrics.Registry so 429 responses are counted in
+// mctl_rate_limit_events_total. Returns the receiver for chaining.
+// Passing nil is a no-op (safe to call on an existing limiter to detach).
+func (r *RateLimiter) WithMetrics(m *metrics.Registry) *RateLimiter {
+	r.metrics = m
+	return r
 }
 
 func (r *RateLimiter) allow(key string) bool {
@@ -108,11 +119,17 @@ func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, win
 func (r *RateLimiter) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			id := auth.From(req.Context())
 			key := "anon"
-			if id := auth.From(req.Context()); id != nil && id.UserID > 0 {
+			identityKind := "anon"
+			if id != nil && id.UserID > 0 {
 				key = identityKey(id)
+				identityKind = "user"
 			}
 			if !r.allow(key) {
+				if r.metrics != nil {
+					r.metrics.RateLimitEventsTotal.WithLabelValues(identityKind).Inc()
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "60")
 				w.WriteHeader(http.StatusTooManyRequests)

@@ -11,6 +11,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -25,6 +26,9 @@ type Server struct {
 	// Hub routes MCP tool calls to Local Bridge daemons. When nil, all
 	// tools fall back to Pool.Borrow (hosted mode only).
 	Hub *bridge.Hub
+	// Metrics is optional; when non-nil, tool invocation counters and
+	// duration histograms are recorded.
+	Metrics *metrics.Registry
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -49,6 +53,13 @@ func (s *Server) WithLimiter(l *audit.RateLimiter) *Server {
 // Returns the receiver for chaining.
 func (s *Server) WithHub(h *bridge.Hub) *Server {
 	s.Hub = h
+	return s
+}
+
+// WithMetrics wires a *metrics.Registry so tool invocations are counted and
+// their durations are histogrammed. Returns the receiver for chaining.
+func (s *Server) WithMetrics(m *metrics.Registry) *Server {
+	s.Metrics = m
 	return s
 }
 

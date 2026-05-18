@@ -10,6 +10,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // unfinishedSessionCodes are MTProto errors meaning the stored session never
@@ -56,6 +57,9 @@ type ClientPool struct {
 	APIHash     string
 	IdleTimeout time.Duration
 	Store       *db.Store
+	// metrics is optional; when non-nil, pool size and error counters are
+	// maintained.
+	metrics *metrics.Registry
 
 	mu      sync.Mutex
 	entries map[int64]*entry
@@ -78,6 +82,13 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 		Store:       store,
 		entries:     make(map[int64]*entry),
 	}
+}
+
+// WithMetrics wires a *metrics.Registry so pool size and MTProto client errors
+// are recorded. Returns the receiver for chaining.
+func (p *ClientPool) WithMetrics(m *metrics.Registry) *ClientPool {
+	p.metrics = m
+	return p
 }
 
 // Borrow returns a connected *telegram.Client for the user. The caller MUST
@@ -157,7 +168,7 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 func (p *ClientPool) revokeRejected(ctx context.Context, userID int64) error {
 	revokeCtx := context.WithoutCancel(ctx)
 	return p.RemoveAtomic(userID, func() error {
-		_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID)
+		_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID, "unauthorized")
 		return rErr
 	})
 }
@@ -182,6 +193,9 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 		ready:    make(chan struct{}),
 	}
 	p.entries[userID] = e
+	if p.metrics != nil {
+		p.metrics.TelegramClientPoolSize.Inc()
+	}
 
 	go p.run(ctx, userID, e)
 	go p.gc(userID, e)
@@ -206,8 +220,14 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 			close(e.ready)
 		}
 		slog.Warn("telegram client exited", "user_id", userID, "err", err)
+		if p.metrics != nil {
+			p.metrics.TelegramClientErrorsTotal.Inc()
+		}
 	}
 	delete(p.entries, userID)
+	if p.metrics != nil {
+		p.metrics.TelegramClientPoolSize.Dec()
+	}
 }
 
 func (p *ClientPool) gc(userID int64, e *entry) {

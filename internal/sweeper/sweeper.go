@@ -42,13 +42,18 @@ func Sessions(ctx context.Context, store *db.Store) {
 }
 
 func sweepOnce(ctx context.Context, store *db.Store) {
-	rows, err := store.SweepExpiredSessions(ctx)
-	if err != nil {
-		slog.Warn("session sweep failed", "err", err)
-		return
+	idleRows, idleErr := store.SweepIdleSessions(ctx)
+	if idleErr != nil {
+		slog.Warn("idle session sweep failed", "err", idleErr)
+	} else if idleRows > 0 {
+		slog.Info("session sweep", "reason", "idle_expiry", "revoked_rows", idleRows)
 	}
-	if rows > 0 {
-		slog.Info("session sweep", "revoked_rows", rows)
+
+	absRows, absErr := store.SweepAbsoluteSessions(ctx)
+	if absErr != nil {
+		slog.Warn("absolute session sweep failed", "err", absErr)
+	} else if absRows > 0 {
+		slog.Info("session sweep", "reason", "absolute_expiry", "revoked_rows", absRows)
 	}
 }
 

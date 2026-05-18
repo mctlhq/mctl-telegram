@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,10 +26,12 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -72,8 +75,12 @@ func main() {
 	if !cryp.Enabled() {
 		slog.Warn("ENCRYPTION_KEY not set — session bytes stored UNENCRYPTED (acceptable only for local-dev)")
 	}
-	store := db.NewStore(rawDB, cryp)
-	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store)
+	// Construct the metrics registry early so all subsystems can be wired
+	// before any goroutine or handler is started.
+	m := metrics.New()
+
+	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).WithMetrics(m)
 	defer pool.Shutdown()
 
 	// Periodic background job that revokes sessions whose idle (30d) or
@@ -87,10 +94,35 @@ func main() {
 	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
 	// the table stays bounded. LookupRefreshToken is the authoritative gate.
 	go sweeper.RefreshTokens(ctx, store)
+	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				n, err := store.CountActiveSessions(ctx)
+				if err != nil {
+					// Log so a persistent DB failure leaves a trail —
+					// otherwise the gauge silently goes stale.
+					slog.Warn("active-session gauge sample failed", "err", err)
+					continue
+				}
+				m.SessionsActiveGauge.Set(float64(n))
+			}
+		}
+	}()
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
 	mux.Use(middleware.RealIP)
+	// HTTPMiddleware is placed before Recoverer so that panics recovered as
+	// HTTP 500 by Recoverer are still captured in mctl_http_requests_total.
+	// Recoverer writes the 500 status, which the metrics responseWriter wrapper
+	// sees because it sits on the outside of the Recoverer layer.
+	mux.Use(m.HTTPMiddleware())
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
 
@@ -102,6 +134,7 @@ func main() {
 
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
+	mux.Get("/metrics", metricsHandler(m, cfg.MetricsAllowCIDR))
 	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg, authServer))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
@@ -128,10 +161,10 @@ func main() {
 	accountMux := chi.NewRouter()
 	accountHandlers := web.NewAccountHandlers(store, pool)
 	accountHandlers.Register(accountMux)
-	mux.Mount("/api/account", auth.Middleware(provider, true)(accountMux))
+	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
 
-	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser)
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter)
+	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m)
 
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
@@ -142,7 +175,7 @@ func main() {
 	// token would be rejected at /bridge. selectBridgeIssuer maps the same
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
-		mux.With(auth.Middleware(provider, true)).Post("/api/bridge/token",
+		mux.With(auth.Middleware(provider, true, m)).Post("/api/bridge/token",
 			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
 	}
 
@@ -161,7 +194,7 @@ func main() {
 	// runs, so unauthenticated humans still see instructions instead of
 	// a 401. MCP clients (Accept: application/json, text/event-stream)
 	// fall through and hit the full auth+ratelimit+MCP chain.
-	mcpHandler := auth.Middleware(provider, cfg.AuthRequired)(
+	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	mux.Mount(cfg.MCPPath, web.BrowserRedirect(mcpHandler, "/"))
@@ -170,6 +203,13 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ConnContext stores the TCP peer address in the request context before
+		// any middleware runs. metricsHandler reads socketPeerKey to enforce the
+		// CIDR allowlist against the real socket address — not the r.RemoteAddr
+		// value that middleware.RealIP rewrites from X-Forwarded-For headers.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return context.WithValue(ctx, socketPeerKey{}, c.RemoteAddr().String())
+		},
 	}
 
 	errCh := make(chan error, 1)
@@ -190,6 +230,59 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
 }
+
+// metricsHandler wraps the Prometheus exposition handler with an optional CIDR
+// allowlist guard. When allowCIDR is empty the endpoint is open (suitable for
+// Kubernetes PodMonitor scrape patterns where NetworkPolicy provides isolation).
+// When set, requests from outside the CIDR receive HTTP 403.
+//
+// The CIDR check uses the real TCP socket peer address stored in context by the
+// http.Server ConnContext hook — not r.RemoteAddr, which middleware.RealIP
+// rewrites from X-Forwarded-For / X-Real-IP headers. A client cannot bypass
+// the CIDR guard by forging those headers. The authoritative control MUST
+// still be a NetworkPolicy that restricts ingress to /metrics to the monitoring
+// namespace; the CIDR check is a secondary belt.
+//
+// A misconfigured allowCIDR fails CLOSED — the endpoint rejects every request
+// rather than silently exposing platform metrics.
+func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
+	h := promhttp.HandlerFor(m.Prometheus, promhttp.HandlerOpts{})
+	if allowCIDR == "" {
+		return h.ServeHTTP
+	}
+	_, ipNet, err := net.ParseCIDR(allowCIDR)
+	if err != nil {
+		slog.Error("METRICS_ALLOW_CIDR is invalid — /metrics endpoint will reject ALL requests until fixed", "cidr", allowCIDR, "err", err)
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Use the real socket peer stored by ConnContext — not r.RemoteAddr,
+		// which middleware.RealIP may have overwritten with a header value.
+		// A client that forges X-Forwarded-For cannot bypass the CIDR check
+		// because the TCP-level address is set before any request handling.
+		rawAddr, _ := r.Context().Value(socketPeerKey{}).(string)
+		if rawAddr == "" {
+			rawAddr = r.RemoteAddr // fallback for tests that bypass ConnContext
+		}
+		host, _, splitErr := net.SplitHostPort(rawAddr)
+		if splitErr != nil {
+			host = rawAddr
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ipNet.Contains(ip) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}
+}
+
+// socketPeerKey is the context key used by the http.Server ConnContext hook to
+// store the real TCP peer address before middleware.RealIP can overwrite
+// r.RemoteAddr with X-Forwarded-For values.
+type socketPeerKey struct{}
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

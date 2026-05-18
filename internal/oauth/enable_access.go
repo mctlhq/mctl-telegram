@@ -148,7 +148,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// row. A failed revoke must surface — otherwise the wrong session
 			// stays active and a later callback would issue a token backed by
 			// it.
-			if _, rErr := s.store.RevokeActiveSession(bgCtx, uid); rErr != nil {
+			if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
 				lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
 				return
 			}
