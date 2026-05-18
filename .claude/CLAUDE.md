@@ -39,4 +39,4 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`
 - Tag format: `MAJOR.MINOR.PATCH` (no `v` prefix)
 - Tag creation triggers release-please workflow → dispatches centralized `mctl-gitops/.github/workflows/release-deploy.yaml`
-- **Merge strategy: squash merge only** (no merge commits, no rebase) — keeps main history linear; individual PR commits are preserved on the PR page
+- **Merge strategy: merge commits only** (`gh pr merge <N> --merge --delete-branch`, no squash, no rebase) — every feature branch stays visible as a bubble in the git graph (`Merge pull request #NNN from mctlhq/...`)
