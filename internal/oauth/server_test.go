@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -283,6 +284,31 @@ func TestTelegramCallback_ErrorRedirect(t *testing.T) {
 	// The pending entry must already be consumed — a replay is rejected.
 	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
 		t.Errorf("state not consumed by the error redirect: replay got %d", rec2.Code)
+	}
+}
+
+// TestTelegramCallback_ExchangeError_ConsumesState confirms that when the
+// Telegram token exchange fails, the callback returns 401 and the pending
+// state is still consumed — so a failed flow cannot be replayed.
+func TestTelegramCallback_ExchangeError_ConsumesState(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	authFake(srv).exchangeErr = errors.New("token endpoint refused the code")
+	rec := callbackWithState(t, mux, state)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on exchange error, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// No raw error detail leaks to the browser.
+	if strings.Contains(rec.Body.String(), "token endpoint refused the code") {
+		t.Errorf("raw exchange error leaked to the browser: %s", rec.Body.String())
+	}
+	// State must be consumed — a replay is rejected.
+	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
+		t.Errorf("state not consumed on exchange error: replay got %d", rec2.Code)
 	}
 }
 
@@ -566,7 +592,8 @@ func TestTelegramCallback_CodesCapEvictsOldest(t *testing.T) {
 	t0 := time.Now()
 	codes := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
-		srv.clock = func() time.Time { return t0.Add(time.Duration(i) * time.Second) }
+		offset := time.Duration(i) * time.Second
+		srv.clock = func() time.Time { return t0.Add(offset) }
 		got := obtainAuthorizationCode(t, srv, mux, challenge)
 		codes = append(codes, got.code)
 	}
@@ -657,20 +684,6 @@ func TestTelegramCallback_RejectsStaleState(t *testing.T) {
 	rec := callbackWithState(t, mux, state)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for stale state, got %d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestLookupClientName_AlwaysEmpty(t *testing.T) {
-	// Document the policy: lookupClientName is a deliberate no-op so that
-	// self-registered client_name cannot reach any consent surface.
-	srv := newTestServer(t)
-	srv.clients["c1"] = &clientReg{
-		ClientID:     "c1",
-		ClientName:   "Acme Web",
-		RedirectURIs: []string{"https://acme.example/cb"},
-	}
-	if got := srv.lookupClientName("c1"); got != "" {
-		t.Errorf("lookupClientName should always be empty, got %q", got)
 	}
 }
 

@@ -712,7 +712,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// was ever exposed to the browser.
 	identity, err := s.tgoidc.Exchange(r.Context(), code, pending.TGCodeVerifier, pending.Nonce)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("telegram authentication failed: %v", err), http.StatusUnauthorized)
+		// The raw error may embed Telegram's token-endpoint response body
+		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
+		// server-side, return an opaque message to the browser.
+		slog.Error("telegram OIDC token exchange failed", "err", err)
+		http.Error(w, "telegram authentication failed", http.StatusUnauthorized)
 		return
 	}
 	if identity.TelegramID <= 0 {
@@ -731,7 +735,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// (github_login-keyed) login left open.
 	uid, err := s.store.EnsureUserByTelegramID(r.Context(), identity.TelegramID, identity.Username, strings.TrimSpace(identity.FirstName+" "+identity.LastName))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("ensure user: %v", err), http.StatusInternalServerError)
+		slog.Error("ensure user failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -763,7 +768,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// An unexpected storage error must not be silently treated as
 		// "no session" — that would divert the user into re-login (and a
 		// possible session overwrite) on a transient DB blip.
-		http.Error(w, fmt.Sprintf("session check failed: %v", sessErr), http.StatusInternalServerError)
+		slog.Error("session check failed", "err", sessErr)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	// enable_access provisions an MTProto session, which is only useful to a
@@ -774,7 +780,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// and then fail every tool call for lack of a session.
 	isClient, err := s.isClientTier(r.Context(), identity.TelegramID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("resolve client tier: %v", err), http.StatusInternalServerError)
+		slog.Error("resolve client tier failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if !s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient {
@@ -1343,17 +1350,6 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 		return nil
 	}
 	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
-}
-
-// lookupClientName is retained as a documented no-op: we never display a
-// self-supplied client_name on the consent screen because /oauth/register is
-// unauthenticated and would allow brand spoofing. Kept as a function so
-// tests can still pin the policy.
-//
-// Deprecated: do not use. Render redirect_uri host instead.
-func (s *Server) lookupClientName(clientID string) string {
-	_ = clientID
-	return ""
 }
 
 // pkceVerify checks that SHA256(verifier) base64url-encoded equals challenge.
