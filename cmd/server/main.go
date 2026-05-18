@@ -220,6 +220,16 @@ func main() {
 // allowlist guard. When allowCIDR is empty the endpoint is open (suitable for
 // Kubernetes PodMonitor scrape patterns where NetworkPolicy provides isolation).
 // When set, requests from outside the CIDR receive HTTP 403.
+//
+// The CIDR guard is defense-in-depth only: it matches r.RemoteAddr, which the
+// chi RealIP middleware rewrites from X-Forwarded-For / X-Real-IP headers. A
+// client that can reach this endpoint through a proxy could forge those
+// headers. The authoritative control MUST be a NetworkPolicy that restricts
+// ingress to /metrics to the monitoring namespace; the CIDR check is a
+// secondary belt.
+//
+// A misconfigured allowCIDR fails CLOSED — the endpoint rejects every request
+// rather than silently exposing platform metrics.
 func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 	h := promhttp.HandlerFor(m.Prometheus, promhttp.HandlerOpts{})
 	if allowCIDR == "" {
@@ -227,8 +237,10 @@ func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 	}
 	_, ipNet, err := net.ParseCIDR(allowCIDR)
 	if err != nil {
-		slog.Warn("METRICS_ALLOW_CIDR is invalid — /metrics endpoint is open", "cidr", allowCIDR, "err", err)
-		return h.ServeHTTP
+		slog.Error("METRICS_ALLOW_CIDR is invalid — /metrics endpoint will reject ALL requests until fixed", "cidr", allowCIDR, "err", err)
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)

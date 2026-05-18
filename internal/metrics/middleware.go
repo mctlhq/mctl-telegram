@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -60,4 +62,26 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 		// status remains the 200 default set in initialisation.
 	}
 	return rw.ResponseWriter.Write(b)
+}
+
+// Flush forwards to the underlying ResponseWriter when it supports
+// http.Flusher. This middleware is mounted globally, so it also wraps the
+// MCP endpoint, which streams responses (Streamable HTTP / SSE) and depends
+// on Flush. Without this pass-through the wrapper would mask the Flusher and
+// streamed responses would buffer until the handler returns.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack forwards to the underlying ResponseWriter when it supports
+// http.Hijacker. The /bridge websocket endpoint shares this router, and the
+// websocket upgrade hijacks the connection. Without this pass-through the
+// wrapper would mask the Hijacker and the upgrade would fail.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("metrics: underlying ResponseWriter does not implement http.Hijacker")
 }

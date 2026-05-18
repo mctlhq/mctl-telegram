@@ -621,9 +621,14 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 }
 
 // CountActiveSessions returns the number of non-revoked telegram_accounts rows
-// whose last_used_at is within the last hour. Used by the active-session gauge
-// sampler in main(). A nil or query error returns (0, err) so the caller can
-// log and skip the gauge update.
+// that were last used within the last hour. Freshly created sessions whose
+// last_used_at is still NULL are also counted as active. Used by the
+// active-session gauge sampler in main(). A nil or query error returns
+// (0, err) so the caller can log and skip the gauge update.
+//
+// This runs once a minute; on a large telegram_accounts table a partial
+// index on (revoked_at, last_used_at) WHERE revoked_at IS NULL keeps it
+// cheap. Negligible at current scale.
 func (s *Store) CountActiveSessions(ctx context.Context) (int64, error) {
 	cutoff := time.Now().UTC().Add(-time.Hour)
 	var n int64

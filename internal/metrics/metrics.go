@@ -98,7 +98,7 @@ func New() *Registry {
 
 	r.SessionsActiveGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_sessions_active",
-		Help: "Count of non-revoked sessions whose last_used_at is within the last hour. Refreshed every minute.",
+		Help: "Count of non-revoked sessions that were last used within the last hour, including freshly created sessions not yet used. Refreshed every minute.",
 	})
 
 	// Register all collectors. MustRegister panics on duplicate names, which
