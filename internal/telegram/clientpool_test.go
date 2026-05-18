@@ -2,9 +2,44 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+// TestSessionErrorFor checks that MTProto auth-failure codes map to the right
+// session sentinel — unfinished setup vs server-side revocation — and that
+// ordinary errors map to nil.
+func TestSessionErrorFor(t *testing.T) {
+	for _, code := range unfinishedSessionCodes {
+		if got := sessionErrorFor(tgerr.New(401, code)); !errors.Is(got, db.ErrSessionUnauthorized) {
+			t.Errorf("sessionErrorFor(%s) = %v, want ErrSessionUnauthorized", code, got)
+		}
+		// Still recognised when wrapped.
+		if got := sessionErrorFor(fmt.Errorf("borrow: %w", tgerr.New(401, code))); !errors.Is(got, db.ErrSessionUnauthorized) {
+			t.Errorf("sessionErrorFor(wrapped %s) = %v, want ErrSessionUnauthorized", code, got)
+		}
+	}
+	for _, code := range revokedSessionCodes {
+		if got := sessionErrorFor(tgerr.New(401, code)); !errors.Is(got, db.ErrSessionRevoked) {
+			t.Errorf("sessionErrorFor(%s) = %v, want ErrSessionRevoked", code, got)
+		}
+	}
+	for _, err := range []error{
+		nil,
+		errors.New("connection refused"),
+		tgerr.New(400, "PEER_ID_INVALID"),
+		tgerr.New(420, "FLOOD_WAIT_30"),
+	} {
+		if got := sessionErrorFor(err); got != nil {
+			t.Errorf("sessionErrorFor(%v) = %v, want nil", err, got)
+		}
+	}
+}
 
 // TestClose_RemovesEntryUnderLock verifies the fix for the race condition
 // flagged by codex on PR #2: Close() must remove the entry from p.entries

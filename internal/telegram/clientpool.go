@@ -8,9 +8,45 @@ import (
 	"time"
 
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
+
+// unfinishedSessionCodes are MTProto errors meaning the stored session never
+// completed authorization — typically an enable_access flow abandoned at the
+// 2FA step. The fix is for the user to finish the in-browser setup.
+var unfinishedSessionCodes = []string{
+	"SESSION_PASSWORD_NEEDED",
+}
+
+// revokedSessionCodes are MTProto errors meaning a once-good session was
+// killed server-side: signed out from another device, or the account was
+// expired/deactivated/banned. These are NOT half-finished setups — the
+// user-facing message must not mention 2FA.
+var revokedSessionCodes = []string{
+	"AUTH_KEY_UNREGISTERED",
+	"AUTH_KEY_INVALID",
+	"SESSION_REVOKED",
+	"SESSION_EXPIRED",
+	"USER_DEACTIVATED",
+	"USER_DEACTIVATED_BAN",
+}
+
+// sessionErrorFor classifies an MTProto error into the matching session
+// sentinel — db.ErrSessionUnauthorized for an unfinished login,
+// db.ErrSessionRevoked for a server-side kill — or nil when err is not a
+// session-auth failure at all.
+func sessionErrorFor(err error) error {
+	switch {
+	case tgerr.Is(err, unfinishedSessionCodes...):
+		return db.ErrSessionUnauthorized
+	case tgerr.Is(err, revokedSessionCodes...):
+		return db.ErrSessionRevoked
+	default:
+		return nil
+	}
+}
 
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
@@ -83,6 +119,17 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	select {
 	case <-e.ready:
 		if e.runErr != nil {
+			// client.Run can fail before the ready callback ever fires —
+			// a startup-time AUTH_KEY_UNREGISTERED / SESSION_REVOKED never
+			// reaches the post-fn classifier below, so classify it here too.
+			if sentinel := sessionErrorFor(e.runErr); sentinel != nil && p.Store != nil {
+				if rErr := p.revokeRejected(ctx, userID); rErr != nil {
+					slog.Error("telegram session rejected at startup, revoke failed", "user_id", userID, "err", rErr)
+					return fmt.Errorf("revoke rejected session: %w", rErr)
+				}
+				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
+				return fmt.Errorf("%w: %v", sentinel, e.runErr)
+			}
 			return fmt.Errorf("telegram client failed: %w", e.runErr)
 		}
 	case <-ctx.Done():
@@ -93,7 +140,37 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	if p.Store != nil {
 		p.Store.MarkLastUsed(ctx, userID)
 	}
-	return fn(ctx, e.client)
+	callErr := fn(ctx, e.client)
+	if sentinel := sessionErrorFor(callErr); sentinel != nil && p.Store != nil {
+		// Telegram rejected the stored session — it was an unfinished
+		// enable_access session, or the session was revoked / the account
+		// deactivated server-side. Revoke the DB row so a reconnect re-runs
+		// enable_access instead of reloading a dead session. If the revoke
+		// fails the row is still loadable, so do NOT report recovery — the
+		// caller must not loop the user through reauth against a dead row.
+		if rErr := p.revokeRejected(ctx, userID); rErr != nil {
+			slog.Error("telegram session rejected, revoke failed", "user_id", userID, "err", rErr)
+			return fmt.Errorf("revoke rejected session: %w", rErr)
+		}
+		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
+		return fmt.Errorf("%w: %v", sentinel, callErr)
+	}
+	return callErr
+}
+
+// revokeRejected evicts the pool entry and revokes the DB session for a user
+// whose stored session Telegram rejected. The eviction and the DB revoke run
+// under the same mutex acquire() takes, so a concurrent reconnect cannot
+// reload the dead session. context.WithoutCancel keeps the revoke alive even
+// if the request context is already done. Returns nil when the row was
+// revoked; a non-nil error means the revoke failed and the row may still be
+// loadable.
+func (p *ClientPool) revokeRejected(ctx context.Context, userID int64) error {
+	revokeCtx := context.WithoutCancel(ctx)
+	return p.RemoveAtomic(userID, func() error {
+		_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID, "unauthorized")
+		return rErr
+	})
 }
 
 func (p *ClientPool) acquire(userID int64) (*entry, error) {

@@ -15,7 +15,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -26,12 +25,13 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
-	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -104,9 +104,13 @@ func main() {
 				return
 			case <-ticker.C:
 				n, err := store.CountActiveSessions(ctx)
-				if err == nil {
-					m.SessionsActiveGauge.Set(float64(n))
+				if err != nil {
+					// Log so a persistent DB failure leaves a trail —
+					// otherwise the gauge silently goes stale.
+					slog.Warn("active-session gauge sample failed", "err", err)
+					continue
 				}
+				m.SessionsActiveGauge.Set(float64(n))
 			}
 		}
 	}()

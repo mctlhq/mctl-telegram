@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -109,7 +110,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		})
 		s.audit(ctx, id, "list_dialogs", "", err, startedAt)
 		if err != nil {
-			return toolErr("list_dialogs: %v", err), nil
+			return borrowErrResult("list_dialogs", err), nil
 		}
 		return jsonResult(map[string]any{"dialogs": dialogs})
 	}
@@ -146,7 +147,7 @@ Empty result means no unread messages match (including: peer has unread but text
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
-				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res), startedAt)
+				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(stringArg(args, "peer", "")), bridgeResultErr(res), startedAt)
 				return res, err2
 			}
 		}
@@ -160,7 +161,7 @@ Empty result means no unread messages match (including: peer has unread but text
 		})
 		s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return toolErr("get_unread_messages: %v", err), nil
+			return borrowErrResult("get_unread_messages", err), nil
 		}
 		return jsonResult(map[string]any{
 			"messages": wrapMessages(msgs),
@@ -322,7 +323,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		}
 		s.audit(ctx, id, "send_message:"+status, telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return toolErr("send_message: %v", err), nil
+			return borrowErrResult("send_message", err), nil
 		}
 		return jsonResult(result)
 	}
@@ -383,7 +384,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		})
 		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return toolErr("get_messages: %v", err), nil
+			return borrowErrResult("get_messages", err), nil
 		}
 		return jsonResult(map[string]any{
 			"messages": wrapMessages(msgs),
@@ -530,7 +531,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		}
 		s.audit(ctx, id, "pin_message:"+action, telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return toolErr("pin_message: %v", err), nil
+			return borrowErrResult("pin_message", err), nil
 		}
 		return jsonResult(map[string]any{"status": action, "peer": peer, "message_id": messageID})
 	}
@@ -738,6 +739,120 @@ The user must have signed in via the Login Widget at least once (so a users row 
 	return tool, handler
 }
 
+// toolGetUserAuditLog is the admin counterpart of get_my_audit_log: it reads
+// the audit rows of any user, resolved by Telegram id.
+func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_user_audit_log",
+		mcplib.WithTitleAnnotation("Read any user's audit log"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Return the audit-log rows for any Telegram user — the operator-facing counterpart of get_my_audit_log. Use list_telegram_identities to find the telegram_id.
+
+Inputs:
+  telegram_id — int, required. The Telegram user id whose audit log to read.
+  limit       — int, optional, default 50, max 500. Newest entries first.
+  before      — RFC3339 timestamp, optional. Only entries strictly older than this; use the "ts" of the last entry of a page as the next "before" for keyset pagination.
+
+Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error}], count}. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Description("Telegram user id whose audit log to read (required).")),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Max rows to return (default 50, max 500).")),
+		mcplib.WithString("before",
+			mcplib.Description("RFC3339 timestamp; only entries strictly older than this are returned.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		if tgID <= 0 {
+			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		limit := intArg(args, "limit", 50)
+		var before time.Time
+		if raw := stringArg(args, "before", ""); raw != "" {
+			parsed, perr := time.Parse(time.RFC3339, raw)
+			if perr != nil {
+				return mcplib.NewToolResultError("before must be RFC3339 (e.g. 2026-05-14T00:00:00Z)"), nil
+			}
+			before = parsed
+		}
+		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
+		if err != nil {
+			s.audit(ctx, id, "get_user_audit_log", "", err, startedAt)
+			if errors.Is(err, db.ErrUserNotFound) {
+				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
+			}
+			return toolErr("get_user_audit_log: %v", err), nil
+		}
+		entries, err := s.Store.ListAuditFor(ctx, targetUID, limit, before)
+		s.audit(ctx, id, "get_user_audit_log", "", err, startedAt)
+		if err != nil {
+			return toolErr("get_user_audit_log: %v", err), nil
+		}
+		return jsonResult(map[string]any{
+			"entries": entries,
+			"count":   len(entries),
+		})
+	}
+	return tool, handler
+}
+
+// toolRevokeSession revokes the active MTProto session of any user, resolved
+// by Telegram id. Companion to set_telegram_access for clearing a stuck or
+// unfinished (un-authorized) session.
+func (s *Server) toolRevokeSession() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("revoke_telegram_session",
+		mcplib.WithTitleAnnotation("Revoke a Telegram user's session"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Revoke the active MTProto session of a Telegram user and close their in-memory client. The user keeps their access tier; on their next reconnect the in-browser setup (phone → SMS → 2FA) runs again. Use this to clear a stuck or unfinished session.
+
+Inputs:
+  telegram_id — int, required. The Telegram user id (see list_telegram_identities).
+
+Output: JSON {telegram_id, revoked}. revoked is false when the user had no active session.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Description("Telegram user id whose session to revoke (required).")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		if tgID <= 0 {
+			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
+		if err != nil {
+			s.audit(ctx, id, "revoke_telegram_session", "", err, startedAt)
+			if errors.Is(err, db.ErrUserNotFound) {
+				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
+			}
+			return toolErr("revoke_telegram_session: %v", err), nil
+		}
+		// Pool eviction and DB revoke under the same mutex acquire() takes —
+		// see the comment on toolDisconnectAccount.
+		var revoked bool
+		err = s.Pool.RemoveAtomic(targetUID, func() error {
+			var e error
+			revoked, e = s.Store.RevokeActiveSession(ctx, targetUID, "disconnect")
+			return e
+		})
+		s.audit(ctx, id, "revoke_telegram_session", "", err, startedAt)
+		if err != nil {
+			return toolErr("revoke_telegram_session: %v", err), nil
+		}
+		return jsonResult(map[string]any{"telegram_id": tgID, "revoked": revoked})
+	}
+	return tool, handler
+}
+
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
 		return false, "mode=draft (default) — call with mode:'send' to send for real"
@@ -774,6 +889,34 @@ func requireScope(id *auth.Identity, scope string) error {
 	return nil
 }
 
+// sessionErrText maps the well-known session sentinel errors to a clear,
+// actionable user-facing message. Returns "" when err is not one of them, so
+// callers fall through to their generic toolErr.
+func sessionErrText(err error) string {
+	switch {
+	case errors.Is(err, db.ErrSessionUnauthorized):
+		return "Telegram setup is incomplete — the two-step-verification (2FA) step was not finished. Reconnect the connector and complete phone number → SMS code → 2FA password without closing the page."
+	case errors.Is(err, db.ErrSessionRevoked):
+		return "Your Telegram session is no longer valid — it was signed out from another device, or the account is unavailable. Reconnect the connector to sign in again."
+	case errors.Is(err, db.ErrSessionExpired):
+		return "Your Telegram session has expired. Reconnect the connector to sign in again."
+	case errors.Is(err, db.ErrNoActiveSession):
+		return "No Telegram account is connected. Reconnect the connector and complete the in-browser setup (phone → SMS → 2FA)."
+	default:
+		return ""
+	}
+}
+
+// borrowErrResult turns a Pool.Borrow / session error into an MCP error
+// result: a friendly, actionable message for the known session sentinels,
+// otherwise the generic "<tool>: <err>" form.
+func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
+	if friendly := sessionErrText(err); friendly != "" {
+		return mcplib.NewToolResultError(friendly)
+	}
+	return toolErr("%s: %v", tool, err)
+}
+
 func jsonResult(v any) (*mcplib.CallToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -798,6 +941,23 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		elapsed := time.Since(startedAt).Seconds()
 		s.Metrics.ToolInvocationDuration.WithLabelValues(tool).Observe(elapsed)
 		s.Metrics.ToolInvocationsTotal.WithLabelValues(tool, status).Inc()
+	}
+
+	// Mirror the outcome to slog so tool-call activity and failures are
+	// visible in Loki, not only in the audit_logs table. Only fields already
+	// vetted as non-sensitive for audit_logs are emitted — never raw args or
+	// message bodies; peer is the pre-redacted value passed by the caller.
+	attrs := []any{"tool", tool, "user_id", uid, "status", status}
+	if peer != "" {
+		attrs = append(attrs, "peer", peer)
+	}
+	if err != nil {
+		// Resolution failures format the user-supplied peer verbatim
+		// (`peer %q not found`); scrub @handles / phone numbers so a raw
+		// dialog identifier never reaches centralized logs.
+		slog.Warn("mcp tool call", append(attrs, "err", audit.ScrubText(msg))...)
+	} else {
+		slog.Info("mcp tool call", attrs...)
 	}
 }
 
