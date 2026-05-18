@@ -6,6 +6,8 @@ package oauth
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"html/template"
 	"net/http"
 )
@@ -29,6 +31,10 @@ type enablePasswordPage struct {
 	Issuer      string
 	EnableToken string
 	Error       string
+	// Nonce authorizes the single inline <script> on the password screen
+	// (the show/hide-password toggle). It is generated per request by
+	// renderEnablePassword and echoed in the CSP script-src.
+	Nonce string
 }
 
 type enableErrorPage struct {
@@ -66,6 +72,13 @@ const enableHead = `<!doctype html>
     button:hover { background: #1a7f37; }
     .error { background: #ffebe9; border: 1px solid #ff818266; border-radius: 6px;
              padding: 10px 12px; font-size: 13px; color: #cf222e; margin: 12px 0; }
+    .pwwrap { position: relative; }
+    .pwwrap input { padding-right: 46px; }
+    .pwtoggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 42px;
+                margin: 0; padding: 0; border: none; border-radius: 0 6px 6px 0;
+                background: none; color: #57606a; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; }
+    .pwtoggle:hover { background: none; color: #1f2328; }
     @media (prefers-color-scheme: dark) {
       body { background: #0d1117; color: #e6edf3; }
       .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
@@ -76,6 +89,8 @@ const enableHead = `<!doctype html>
       .field input { background: #0d1117; border-color: #30363d; color: #e6edf3; }
       .check { color: #8b949e; }
       .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
+      .pwtoggle { color: #8b949e; }
+      .pwtoggle:hover { color: #e6edf3; }
     }
   </style>
 </head>
@@ -128,16 +143,45 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
 
 var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    <h1>Two-step verification</h1>
     <p>Your Telegram account is protected by a two-step verification password. Enter it to
-       finish connecting. This is your Telegram <em>cloud password</em> — not the login code.</p>
+       finish connecting. This is your <strong>Telegram cloud password</strong> — <strong>not</strong>
+       the 5-digit login code you entered on the previous screen.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/password" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
       <label class="field">
         <span>Two-step verification password</span>
-        <input name="password" type="password" required autofocus>
+        <div class="pwwrap">
+          <input id="pw" name="password" type="password" required autofocus>
+          <button type="button" id="pwtoggle" class="pwtoggle" aria-label="Show password">
+            <svg class="eye-show" viewBox="0 0 24 24" width="20" height="20" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+            <svg class="eye-hide" viewBox="0 0 24 24" width="20" height="20" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden>
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          </button>
+        </div>
       </label>
       <button type="submit">Finish</button>
     </form>
+    <script nonce="{{.Nonce}}">
+(function () {
+  var input = document.getElementById('pw'),
+      toggle = document.getElementById('pwtoggle'),
+      show = toggle.querySelector('.eye-show'),
+      hide = toggle.querySelector('.eye-hide');
+  toggle.addEventListener('click', function () {
+    var reveal = input.type === 'password';
+    input.type = reveal ? 'text' : 'password';
+    show.hidden = reveal;
+    hide.hidden = !reveal;
+    toggle.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
+  });
+})();
+</script>
 ` + enableFoot))
 
 var enableErrorTemplate = template.Must(template.New("enableError").Parse(enableHead + `    <h1>Sign-in interrupted</h1>
@@ -146,33 +190,61 @@ var enableErrorTemplate = template.Must(template.New("enableError").Parse(enable
 ` + enableFoot))
 
 func renderEnablePhone(w http.ResponseWriter, p enablePhonePage) {
-	renderEnable(w, http.StatusOK, enablePhoneTemplate, p)
+	renderEnable(w, http.StatusOK, enablePhoneTemplate, p, "")
 }
 
 func renderEnableCode(w http.ResponseWriter, p enableCodePage) {
-	renderEnable(w, http.StatusOK, enableCodeTemplate, p)
+	renderEnable(w, http.StatusOK, enableCodeTemplate, p, "")
 }
 
+// renderEnablePassword is the only screen with an inline <script> (the
+// show/hide-password toggle). It mints a fresh per-request CSP nonce, hands
+// it to the template, and echoes it in the script-src so that — and only
+// that — script may run.
 func renderEnablePassword(w http.ResponseWriter, p enablePasswordPage) {
-	renderEnable(w, http.StatusOK, enablePasswordTemplate, p)
+	nonce, err := newCSPNonce()
+	if err != nil {
+		http.Error(w, "csp nonce: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	p.Nonce = nonce
+	renderEnable(w, http.StatusOK, enablePasswordTemplate, p, nonce)
 }
 
 func renderEnableError(w http.ResponseWriter, msg string) {
-	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{Message: msg})
+	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{Message: msg}, "")
+}
+
+// newCSPNonce returns a fresh nonce for a CSP script-src. 16 random bytes is
+// well above the 128-bit unguessability the CSP spec calls for. URL-safe
+// base64 (no '+' '/' '=') is used so the value survives HTML-attribute
+// escaping byte-for-byte and still matches the nonce in the CSP header.
+func newCSPNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // renderEnable executes t into a buffer first so a template failure cannot
-// leave a half-written body under an already-sent 200, then writes the page
-// with a no-JavaScript CSP.
-func renderEnable(w http.ResponseWriter, status int, t *template.Template, data any) {
+// leave a half-written body under an already-sent 200, then writes the page.
+// The CSP forbids scripts entirely unless nonce is non-empty, in which case
+// exactly that one inline script is allowed — still no external or injected
+// scripts.
+func renderEnable(w http.ResponseWriter, status int, t *template.Template, data any, nonce string) {
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+	if nonce != "" {
+		csp = "default-src 'none'; script-src 'nonce-" + nonce +
+			"'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
