@@ -11,10 +11,13 @@
 package telegramoidc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -115,6 +118,14 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if len(algs) == 0 {
 		algs = []string{oidc.RS256}
 	}
+
+	// Telegram's JWKS includes a key on the secp256k1 curve (kid=oidc-es256k-1),
+	// which go-jose cannot decode. go-jose fails the *whole* key set atomically
+	// on an unknown curve, so without filtering even the RS256 key we rely on
+	// (kid=oidc-1) becomes unusable and every id_token verification fails. The
+	// filtering client strips unsupported keys from the JWKS response; the
+	// provider propagates this client to its RemoteKeySet.
+	ctx = oidc.ClientContext(ctx, &http.Client{Transport: newJWKSFilterTransport(nil)})
 
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
@@ -240,4 +251,78 @@ func parseTelegramID(raw json.RawMessage) (int64, error) {
 		return asNumber, nil
 	}
 	return 0, fmt.Errorf("telegramoidc: id claim %s is neither a numeric string nor a number", trimmed)
+}
+
+// unsupportedJWKCurves lists EC curves that go-jose (and therefore go-oidc)
+// cannot decode. Telegram publishes a secp256k1 key in its JWKS; go-jose
+// rejects an entire key set when it meets one of these, so such keys are
+// stripped before the JWKS reaches the decoder. Dropping them is safe: the
+// verifier only accepts RS256 (SupportedSigningAlgs), so an ES256K key would be
+// rejected anyway — filtering merely keeps the rest of the key set decodable.
+var unsupportedJWKCurves = map[string]bool{"secp256k1": true}
+
+// jwksFilterTransport wraps an http.RoundTripper and removes JWKS keys that use
+// curves go-jose cannot decode. Non-JWKS responses (e.g. the discovery
+// document) pass through untouched.
+type jwksFilterTransport struct{ base http.RoundTripper }
+
+func newJWKSFilterTransport(base http.RoundTripper) *jwksFilterTransport {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &jwksFilterTransport{base: base}
+}
+
+func (t *jwksFilterTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return resp, err
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "json") {
+		return resp, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if filtered, changed := filterJWKS(body); changed {
+		body = filtered
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		resp.ContentLength = int64(len(body))
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return resp, nil
+}
+
+// filterJWKS drops keys on unsupported curves. It returns the (possibly
+// rewritten) body and whether anything changed. A body that is not a JWKS — no
+// top-level "keys" array — is returned untouched.
+func filterJWKS(body []byte) ([]byte, bool) {
+	var doc struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil || doc.Keys == nil {
+		return body, false
+	}
+	kept := make([]json.RawMessage, 0, len(doc.Keys))
+	for _, k := range doc.Keys {
+		var meta struct {
+			Crv string `json:"crv"`
+		}
+		if err := json.Unmarshal(k, &meta); err == nil && unsupportedJWKCurves[meta.Crv] {
+			continue
+		}
+		kept = append(kept, k)
+	}
+	if len(kept) == len(doc.Keys) {
+		return body, false
+	}
+	out, err := json.Marshal(struct {
+		Keys []json.RawMessage `json:"keys"`
+	}{Keys: kept})
+	if err != nil {
+		return body, false
+	}
+	return out, true
 }
