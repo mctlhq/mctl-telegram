@@ -2,9 +2,37 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
+
+// TestIsAuthError checks that the MTProto auth-failure codes that mean the
+// stored session is dead are recognised, and ordinary errors are not.
+func TestIsAuthError(t *testing.T) {
+	for _, code := range authErrorCodes {
+		if !isAuthError(tgerr.New(401, code)) {
+			t.Errorf("isAuthError(%s) = false, want true", code)
+		}
+		// Still recognised when wrapped.
+		if !isAuthError(fmt.Errorf("borrow: %w", tgerr.New(401, code))) {
+			t.Errorf("isAuthError(wrapped %s) = false, want true", code)
+		}
+	}
+	for _, err := range []error{
+		nil,
+		errors.New("connection refused"),
+		tgerr.New(400, "PEER_ID_INVALID"),
+		tgerr.New(420, "FLOOD_WAIT_30"),
+	} {
+		if isAuthError(err) {
+			t.Errorf("isAuthError(%v) = true, want false", err)
+		}
+	}
+}
 
 // TestClose_RemovesEntryUnderLock verifies the fix for the race condition
 // flagged by codex on PR #2: Close() must remove the entry from p.entries

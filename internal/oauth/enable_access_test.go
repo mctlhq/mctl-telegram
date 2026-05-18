@@ -53,10 +53,13 @@ func seedSession(t *testing.T, srv *Server, tgID int64) {
 		t.Fatalf("ensure user: %v", err)
 	}
 	now := time.Now().UTC()
+	// telegram_user_id must be set: it is the marker that distinguishes a
+	// finalised (SaveSession) session from a mid-login partial one, and
+	// CheckSessionValid rejects rows where it is NULL.
 	if _, err := srv.store.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at)
-		 VALUES($1, $2, $3, $4)`,
-		uid, []byte("seed-session"), now, now.Add(24*time.Hour),
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1, $2, $3, $4, $5)`,
+		uid, tgID, []byte("seed-session"), now, now.Add(24*time.Hour),
 	); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}

@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -231,5 +233,68 @@ func TestIsSendEnabled_DefaultFalseAndRespectsFlag(t *testing.T) {
 	}
 	if !enabled {
 		t.Fatal("expected true after flip")
+	}
+}
+
+// TestListIdentities_PartialSessionNotCounted checks that a mid-login session
+// row (telegram_user_id NULL, as inserted by UpdateSessionBlob) is NOT
+// reported as has_session — only a finalised SaveSession row counts.
+func TestListIdentities_PartialSessionNotCounted(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	now := time.Now().UTC()
+
+	partialUID, _ := s.EnsureUserByTelegramID(ctx, 111, "partial", "Partial")
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at) VALUES($1,$2,$3,$4)`,
+		partialUID, []byte("blob"), now, now.Add(90*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed partial: %v", err)
+	}
+	finalUID, _ := s.EnsureUserByTelegramID(ctx, 222, "final", "Final")
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1,$2,$3,$4,$5)`,
+		finalUID, 222, []byte("blob"), now, now.Add(90*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed final: %v", err)
+	}
+
+	rows, err := s.ListIdentities(ctx)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, r := range rows {
+		got[r.TelegramID] = r.HasSession
+	}
+	if got[111] {
+		t.Error("partial session (telegram_user_id NULL) must not count as has_session")
+	}
+	if !got[222] {
+		t.Error("finalised session must count as has_session")
+	}
+}
+
+// TestUserIDByTelegramID covers the read-only lookup: a hit returns the row
+// id, a miss returns ErrUserNotFound without creating a row.
+func TestUserIDByTelegramID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	want, _ := s.EnsureUserByTelegramID(ctx, 777, "g", "G")
+
+	got, err := s.UserIDByTelegramID(ctx, 777)
+	if err != nil {
+		t.Fatalf("lookup hit: %v", err)
+	}
+	if got != want {
+		t.Fatalf("UserIDByTelegramID = %d, want %d", got, want)
+	}
+
+	if _, err := s.UserIDByTelegramID(ctx, 999); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("miss: expected ErrUserNotFound, got %v", err)
+	}
+	// The miss must NOT have created a row.
+	if _, err := s.UserIDByTelegramID(ctx, 999); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("miss is not idempotent — a row was created: %v", err)
 	}
 }

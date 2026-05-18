@@ -122,6 +122,27 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 	return id, nil
 }
 
+// UserIDByTelegramID resolves a Telegram user id to the internal users.id
+// WITHOUT creating a row — the read-only counterpart of
+// EnsureUserByTelegramID. Returns ErrUserNotFound when no user has signed in
+// with that Telegram id. Used by the admin tools that act on another user.
+func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, error) {
+	if tgID <= 0 {
+		return 0, errors.New("telegram id must be positive")
+	}
+	var id int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM users WHERE telegram_login_id = $1`, tgID,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrUserNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("select user by tg_id: %w", err)
+	}
+	return id, nil
+}
+
 // Access tiers stored in users.access_tier. NULL is treated as TierNone.
 // Admins are governed by the TG_LOGIN_ADMINS env allowlist, not this column.
 const (
@@ -181,8 +202,9 @@ func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
 
 // ListIdentities returns every widget-authenticated user with their raw
 // access tier, join time, and whether they currently hold a *usable* MTProto
-// session — non-revoked AND within both the absolute and idle TTLs, matching
-// what CheckSessionValid would accept. Newest first.
+// session — non-revoked, finalised (telegram_user_id set), AND within both the
+// absolute and idle TTLs, matching what CheckSessionValid would accept.
+// Newest first.
 //
 // AccessTier is the raw users.access_tier value: "" (unset), "client", or
 // "none". Callers that care about the effective tier must apply the
@@ -195,6 +217,7 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 		        u.access_tier, u.created_at,
 		        EXISTS(SELECT 1 FROM telegram_accounts ta
 		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+		                 AND ta.telegram_user_id IS NOT NULL
 		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
 		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
 		   FROM users u
@@ -469,6 +492,19 @@ var ErrSessionExpired = errors.New("session expired")
 // "expired" from "never connected" so the surface error matches reality.
 var ErrNoActiveSession = errors.New("no active session")
 
+// ErrSessionUnauthorized is returned when the user's most-recent session row
+// holds MTProto session bytes but is not a finalised, authorized session:
+// the gotd SessionStore persisted bytes mid-login (UpdateSessionBlob) but the
+// enable_access flow never completed SaveSession, so telegram_user_id stays
+// NULL. Such a session has an auth key but no completed user authorization —
+// every RPC fails with SESSION_PASSWORD_NEEDED. CheckSessionValid and
+// ClientPool.Borrow revoke the row before returning this so the next
+// reconnect re-runs enable_access instead of reloading a dead session.
+var ErrSessionUnauthorized = errors.New("session not authorized")
+
+// ErrUserNotFound means no users row carries the requested telegram_login_id.
+var ErrUserNotFound = errors.New("user not found")
+
 // SessionExpiryReason captures why CheckSessionValid rejected a session, so
 // the caller can include the reason in the audit row / user response. It is
 // safe to log unredacted.
@@ -492,13 +528,14 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	var (
 		lastUsed sql.NullTime
 		expires  sql.NullTime
+		tgUserID sql.NullInt64
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT last_used_at, expires_at FROM telegram_accounts
+		`SELECT last_used_at, expires_at, telegram_user_id FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 ORDER BY connected_at DESC LIMIT 1`,
 		userID,
-	).Scan(&lastUsed, &expires)
+	).Scan(&lastUsed, &expires, &tgUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoActiveSession
 	}
@@ -506,6 +543,15 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 		return "", fmt.Errorf("check session: %w", err)
 	}
 	now := time.Now().UTC()
+	// telegram_user_id is NULL only on rows the gotd SessionStore inserted
+	// mid-login that enable_access never finalised with SaveSession. Such a
+	// session carries MTProto bytes but no completed user authorization, so
+	// every RPC fails with SESSION_PASSWORD_NEEDED. Revoke it so the next
+	// reconnect re-runs enable_access instead of reloading a dead session.
+	if !tgUserID.Valid {
+		_, _ = s.RevokeActiveSession(ctx, userID)
+		return "", ErrSessionUnauthorized
+	}
 	if expires.Valid && expires.Time.Before(now) {
 		_, _ = s.RevokeActiveSession(ctx, userID)
 		return ReasonAbsolute, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonAbsolute)

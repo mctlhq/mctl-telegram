@@ -26,13 +26,43 @@ func TestCheckSessionValid_FreshSessionPasses(t *testing.T) {
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
 	now := time.Now().UTC()
 	if _, err := s.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4)`,
-		uid, []byte("blob"), now, now.Add(90*24*time.Hour),
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), now, now.Add(90*24*time.Hour),
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := s.CheckSessionValid(ctx, uid); err != nil {
 		t.Fatalf("expected fresh session to pass, got %v", err)
+	}
+}
+
+// TestCheckSessionValid_UnauthorizedSession covers a row the gotd
+// SessionStore inserted mid-login (telegram_user_id NULL) that enable_access
+// never finalised. CheckSessionValid must reject it with ErrSessionUnauthorized
+// and revoke the row so a reconnect re-runs enable_access.
+func TestCheckSessionValid_UnauthorizedSession(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "mallory", "", "test")
+	now := time.Now().UTC()
+	// No telegram_user_id — mirrors UpdateSessionBlob's mid-login insert.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4)`,
+		uid, []byte("blob"), now, now.Add(90*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := s.CheckSessionValid(ctx, uid); !errors.Is(err, ErrSessionUnauthorized) {
+		t.Fatalf("expected ErrSessionUnauthorized, got %v", err)
+	}
+	var revoked bool
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at IS NOT NULL FROM telegram_accounts WHERE user_id=$1`, uid,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("check revoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("unauthorized session should be revoked in-place")
 	}
 }
 
@@ -43,8 +73,8 @@ func TestCheckSessionValid_IdleExpiryRevokes(t *testing.T) {
 	now := time.Now().UTC()
 	stale := now.Add(-31 * 24 * time.Hour) // older than 30-day idle TTL
 	if _, err := s.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4)`,
-		uid, []byte("blob"), stale, now.Add(60*24*time.Hour),
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), stale, now.Add(60*24*time.Hour),
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -74,8 +104,8 @@ func TestCheckSessionValid_AbsoluteExpiryRevokes(t *testing.T) {
 	uid, _ := s.EnsureUser(ctx, "carol", "", "test")
 	now := time.Now().UTC()
 	if _, err := s.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4)`,
-		uid, []byte("blob"), now, now.Add(-time.Hour), // expired an hour ago
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), now, now.Add(-time.Hour), // expired an hour ago
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

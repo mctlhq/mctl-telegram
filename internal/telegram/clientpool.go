@@ -8,8 +8,29 @@ import (
 	"time"
 
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+// authErrorCodes are the MTProto RPC error codes that mean the stored session
+// is no longer usable and the user must re-authenticate: an unfinished
+// enable_access session (SESSION_PASSWORD_NEEDED), or a session the user
+// revoked / that Telegram expired or deactivated server-side.
+var authErrorCodes = []string{
+	"SESSION_PASSWORD_NEEDED",
+	"AUTH_KEY_UNREGISTERED",
+	"AUTH_KEY_INVALID",
+	"SESSION_REVOKED",
+	"SESSION_EXPIRED",
+	"USER_DEACTIVATED",
+	"USER_DEACTIVATED_BAN",
+}
+
+// isAuthError reports whether err is one of the MTProto auth-failure codes
+// in authErrorCodes.
+func isAuthError(err error) bool {
+	return tgerr.Is(err, authErrorCodes...)
+}
 
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
@@ -82,7 +103,23 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	if p.Store != nil {
 		p.Store.MarkLastUsed(ctx, userID)
 	}
-	return fn(ctx, e.client)
+	callErr := fn(ctx, e.client)
+	if callErr != nil && p.Store != nil && isAuthError(callErr) {
+		// Telegram rejected the stored session — it was an unfinished
+		// enable_access session, or the user revoked it from their Telegram
+		// app. Evict the pool entry and revoke the DB row under the same
+		// mutex acquire() takes, so a reconnect re-runs enable_access
+		// instead of reloading a dead session. context.WithoutCancel keeps
+		// the revoke alive even if the request context is already done.
+		revokeCtx := context.WithoutCancel(ctx)
+		_ = p.RemoveAtomic(userID, func() error {
+			_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID)
+			return rErr
+		})
+		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
+		return fmt.Errorf("%w: %v", db.ErrSessionUnauthorized, callErr)
+	}
+	return callErr
 }
 
 func (p *ClientPool) acquire(userID int64) (*entry, error) {
