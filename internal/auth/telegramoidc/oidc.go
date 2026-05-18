@@ -123,8 +123,11 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	// which go-jose cannot decode. go-jose fails the *whole* key set atomically
 	// on an unknown curve, so without filtering even the RS256 key we rely on
 	// (kid=oidc-1) becomes unusable and every id_token verification fails. The
-	// filtering client strips unsupported keys from the JWKS response; the
-	// provider propagates this client to its RemoteKeySet.
+	// filtering client strips unsupported keys from the JWKS response.
+	//
+	// This client must reach the verifier's RemoteKeySet. It is threaded via
+	// the context into both NewProvider and VerifierContext, so the JWKS fetch
+	// and every later key-set refresh go through the filtering transport.
 	ctx = oidc.ClientContext(ctx, &http.Client{Transport: newJWKSFilterTransport(nil)})
 
 	provider, err := oidc.NewProvider(ctx, issuer)
@@ -144,7 +147,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       scopes,
 		},
-		verifier: provider.Verifier(&oidc.Config{
+		verifier: provider.VerifierContext(ctx, &oidc.Config{
 			ClientID:             cfg.ClientID,
 			SupportedSigningAlgs: algs,
 			// Expiry is checked below with clockSkew tolerance — Telegram's
