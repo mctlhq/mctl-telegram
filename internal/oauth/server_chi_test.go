@@ -67,4 +67,14 @@ func TestServer_RegistersOnChi(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("token without body = %d", rec.Code)
 	}
+
+	// /oauth/telegram/callback: registered as GET (Telegram's OIDC redirect is
+	// a GET); 400 without a state param. A 405 here would mean the route was
+	// mistakenly mounted as POST.
+	req = httptest.NewRequest("GET", "/oauth/telegram/callback", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("callback without state = %d (want 400)", rec.Code)
+	}
 }

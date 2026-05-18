@@ -3,16 +3,19 @@
 // the cross-service shared-hmac coupling with api.mctl.ai — mctl-telegram is
 // now its own issuer.
 //
-// Identity provider is the Telegram Login Widget: /oauth/authorize renders a
-// page with the widget, and Telegram POSTs back a signed payload that
-// /oauth/telegram/callback verifies via internal/auth/telegramwidget.
+// Identity provider is Telegram's OpenID Connect provider: /oauth/authorize
+// redirects the browser to oauth.telegram.org with an Authorization Code +
+// PKCE request, and /oauth/telegram/callback exchanges the returned code for a
+// JWKS-validated id_token via internal/auth/telegramoidc. The service is thus
+// an OIDC federation broker — an OAuth 2.1 Authorization Server to its own
+// MCP clients, and an OIDC Relying Party to Telegram.
 //
 // Tokens are minted by internal/auth/localjwt. PKCE-S256 is mandatory — the
 // only supported response_type is "code". Clients are public (no
 // client_secret); dynamic registration per RFC 7591 returns an ephemeral
 // client_id keyed to a redirect_uri.
 //
-// Storage is in-memory (codes, registrations, pending widget flows). Each
+// Storage is in-memory (codes, registrations, pending OIDC flows). Each
 // store has a TTL; a background goroutine sweeps expired entries. For a
 // single-replica deployment (current mctl-telegram in `labs`) this is fine;
 // horizontal scale-out would need to externalise the code store to Redis or
@@ -36,7 +39,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
-	"github.com/mctlhq/mctl-telegram/internal/auth/telegramwidget"
+	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -44,11 +47,11 @@ import (
 // Server wires the OAuth endpoints. Construct with New, mount handlers with
 // Register.
 type Server struct {
-	cfg      Config
-	issuer   *localjwt.Issuer
-	verifier *telegramwidget.Verifier
-	store    *db.Store
-	clock    func() time.Time
+	cfg    Config
+	issuer *localjwt.Issuer
+	tgoidc telegramoidc.Authenticator
+	store  *db.Store
+	clock  func() time.Time
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
@@ -91,13 +94,28 @@ type Config struct {
 	// JWTSecret signs+verifies access tokens. Same value as the localjwt
 	// Provider on the /mcp path.
 	JWTSecret []byte
-	// BotToken is the Telegram bot token whose /setdomain points at Issuer.
-	// Used to verify widget callbacks.
-	BotToken string
-	// BotUsername is the @username of the bot (without leading @). Required
-	// for the Login Widget HTML to know which bot to embed. The widget JS
-	// reads this from data-telegram-login.
-	BotUsername string
+	// Telegram OpenID Connect (Relying Party) configuration. New uses these to
+	// build the Authenticator unless TelegramOIDC is injected directly.
+	//
+	// TelegramOIDCClientID is the OIDC client id — the login bot's numeric id
+	// (the part of the bot token before the colon). Not secret.
+	TelegramOIDCClientID string
+	// TelegramOIDCClientSecret is the OIDC client secret from BotFather; a
+	// credential distinct from the bot API token. Sourced from Vault.
+	TelegramOIDCClientSecret string
+	// TelegramOIDCIssuerURL overrides the OIDC issuer. Empty ⇒ the
+	// telegramoidc default (https://oauth.telegram.org).
+	TelegramOIDCIssuerURL string
+	// TelegramOIDCRedirectURL is the absolute URL of this server's Telegram
+	// callback. Empty ⇒ derived as Issuer + "/oauth/telegram/callback". It
+	// must match a Redirect URI registered for the bot in BotFather exactly.
+	TelegramOIDCRedirectURL string
+	// TelegramOIDCSigningAlgs restricts accepted id_token signing algorithms.
+	// Empty ⇒ telegramoidc default (RS256).
+	TelegramOIDCSigningAlgs []string
+	// TelegramOIDC is an injected Authenticator. When non-nil New uses it and
+	// skips OIDC discovery — the seam tests use to avoid a network call.
+	TelegramOIDC telegramoidc.Authenticator
 	// AdminTelegramIDs is the allowlist of Telegram user ids that get
 	// admin/platform-admins scopes — the full telegram:* set plus admin:users.
 	AdminTelegramIDs map[int64]bool
@@ -106,7 +124,7 @@ type Config struct {
 	// admin:users platform-admin capability. An id in neither allowlist still
 	// authenticates but receives an empty scope set (403 on every MCP tool).
 	ClientTelegramIDs map[int64]bool
-	// AutoApproveClients opens registration: when true, any widget-authenticated
+	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
 	// an operator action. An explicit DB tier of "none" still bans them.
 	AutoApproveClients bool
@@ -119,7 +137,7 @@ type Config struct {
 	// Default 720h (30 days). Refresh tokens are long-lived on purpose — they
 	// are opaque, stored hashed, and rotated on every use, so a client can
 	// renew a short-lived access token across pod restarts without re-running
-	// the Telegram Login Widget flow.
+	// the Telegram OIDC sign-in flow.
 	RefreshTokenTTL time.Duration
 	// AllowImplicitClient allows /oauth/authorize without prior /oauth/register.
 	// Set to true to make Claude.ai onboarding trivial; the redirect_uri is
@@ -152,10 +170,9 @@ type Config struct {
 	// /oauth/authorize call. Defaults to 5000.
 	MaxPendingAuth int
 	// MaxAuthCodes caps the size of the issued-authorization-code map.
-	// Each successful widget callback inserts an entry; without a bound
-	// an attacker who replays valid widget payloads can mint codes
-	// without ever redeeming them and grow process memory. Defaults to
-	// 10000.
+	// Each successful Telegram callback inserts an entry; without a bound
+	// an attacker who replays valid callbacks can mint codes without ever
+	// redeeming them and grow process memory. Defaults to 10000.
 	MaxAuthCodes int
 	// MaxRegisterBodyBytes caps how many bytes /oauth/register will read
 	// from r.Body before bailing out. Default 64 KiB — generous for the
@@ -189,8 +206,15 @@ type Config struct {
 	MaxPendingEnable int
 }
 
-// pendingAuth is the state captured between /oauth/authorize and the widget
-// callback. Survives 10 minutes by default.
+// pendingAuth is the state captured between /oauth/authorize and the Telegram
+// OIDC callback. Survives 10 minutes by default.
+//
+// Two PKCE pairs are in play and must never be confused:
+//   - CodeChallenge is the MCP *client's* PKCE challenge, verified later in
+//     handleToken against the client-supplied code_verifier.
+//   - TGCodeVerifier is the *Telegram-leg* PKCE verifier this server generated
+//     for its own RP request to oauth.telegram.org; it is replayed to
+//     telegramoidc.Exchange and never leaves the server.
 type pendingAuth struct {
 	ClientID            string
 	RedirectURI         string
@@ -198,6 +222,8 @@ type pendingAuth struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Scope               string
+	Nonce               string
+	TGCodeVerifier      string
 	CreatedAt           time.Time
 }
 
@@ -223,18 +249,17 @@ type clientReg struct {
 
 // New constructs a Server. The caller is responsible for wiring the handlers
 // onto a chi router via Register.
-func New(cfg Config, store *db.Store) (*Server, error) {
+//
+// Unless cfg.TelegramOIDC is injected, New performs OIDC discovery against
+// Telegram — a network call. It must therefore be invoked at startup and is
+// fail-closed: a discovery failure returns an error rather than booting a
+// server that cannot authenticate anyone.
+func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	if cfg.Issuer == "" {
 		return nil, errors.New("oauth: issuer required")
 	}
 	if len(cfg.JWTSecret) == 0 {
 		return nil, errors.New("oauth: JWTSecret required")
-	}
-	if cfg.BotToken == "" {
-		return nil, errors.New("oauth: BotToken required (Telegram Login Widget cannot verify without it)")
-	}
-	if cfg.BotUsername == "" {
-		return nil, errors.New("oauth: BotUsername required (widget HTML needs data-telegram-login)")
 	}
 	if cfg.AccessTokenTTL <= 0 {
 		cfg.AccessTokenTTL = 1 * time.Hour
@@ -287,21 +312,42 @@ func New(cfg Config, store *db.Store) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	v, err := telegramwidget.New(cfg.BotToken)
-	if err != nil {
-		return nil, err
+	// Identity provider: Telegram's OIDC. A test injects cfg.TelegramOIDC to
+	// skip the network discovery New would otherwise perform at boot.
+	auth := cfg.TelegramOIDC
+	if auth == nil {
+		if cfg.TelegramOIDCClientID == "" {
+			return nil, errors.New("oauth: TelegramOIDCClientID required")
+		}
+		if cfg.TelegramOIDCClientSecret == "" {
+			return nil, errors.New("oauth: TelegramOIDCClientSecret required")
+		}
+		redirectURL := cfg.TelegramOIDCRedirectURL
+		if redirectURL == "" {
+			redirectURL = cfg.Issuer + "/oauth/telegram/callback"
+		}
+		auth, err = telegramoidc.New(ctx, telegramoidc.Config{
+			IssuerURL:    cfg.TelegramOIDCIssuerURL,
+			ClientID:     cfg.TelegramOIDCClientID,
+			ClientSecret: cfg.TelegramOIDCClientSecret,
+			RedirectURL:  redirectURL,
+			SigningAlgs:  cfg.TelegramOIDCSigningAlgs,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Server{
-		cfg:      cfg,
-		issuer:   issuer,
-		verifier: v,
-		store:    store,
-		clock:    time.Now,
-		pending:  map[string]*pendingAuth{},
-		codes:    map[string]*authCode{},
-		clients:  map[string]*clientReg{},
-		enables:  map[string]*enableSession{},
-		loginFn:  telegram.Login,
+		cfg:     cfg,
+		issuer:  issuer,
+		tgoidc:  auth,
+		store:   store,
+		clock:   time.Now,
+		pending: map[string]*pendingAuth{},
+		codes:   map[string]*authCode{},
+		clients: map[string]*clientReg{},
+		enables: map[string]*enableSession{},
+		loginFn: telegram.Login,
 	}, nil
 }
 
@@ -423,7 +469,7 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 // users.access_tier column is authoritative when set explicitly; when it is
 // unset (NULL / no row) the TG_LOGIN_CLIENTS env allowlist is the bootstrap
 // fallback. This ordering lets set_telegram_access(tier="none") revoke even an
-// env-listed client. Both ResolveScopes and the handleWidgetCallback
+// env-listed client. Both ResolveScopes and the handleTelegramCallback
 // enable_access gate use it, so the two stay consistent.
 func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
 	tier, err := s.store.GetAccessTier(ctx, tgID)
@@ -451,16 +497,16 @@ func (s *Server) isClientTier(ctx context.Context, tgID int64) (bool, error) {
 func (s *Server) Register(mux Router) {
 	mux.Get("/.well-known/oauth-authorization-server", s.handleAuthorizationServerMetadata)
 	mux.Get("/oauth/authorize", s.handleAuthorize)
-	// /oauth/telegram/callback is POST-only on purpose: the embedded widget
-	// (data-onauth) JS submits a form. Accepting GET would let a third-party
-	// site mount a CSRF-by-link attack — the widget hash + server-state
-	// nonce mitigate exchange, but POST-only narrows the abuse window.
-	mux.Post("/oauth/telegram/callback", s.handleWidgetCallback)
+	// /oauth/telegram/callback is GET: Telegram's OIDC provider 302-redirects
+	// the browser here with ?code=&state=. The unguessable server-side `state`
+	// bound to a pending entry, plus the Telegram-leg PKCE verifier replayed at
+	// the token exchange, are what tie the callback to a real authorize request.
+	mux.Get("/oauth/telegram/callback", s.handleTelegramCallback)
 	mux.Post("/oauth/token", s.handleToken)
 	mux.Post("/oauth/register", s.handleClientRegistration)
 	// In-browser "enable message access" flow. Public (no auth gate): the
 	// caller's identity is carried by the unguessable "es" token minted at
-	// the widget callback, which also serves as the CSRF token.
+	// the Telegram callback, which also serves as the CSRF token.
 	mux.Post("/oauth/telegram/enable_access/start", s.handleEnableStart)
 	mux.Post("/oauth/telegram/enable_access/code", s.handleEnableCode)
 	mux.Post("/oauth/telegram/enable_access/password", s.handleEnablePassword)
@@ -501,10 +547,9 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 // ----- /oauth/authorize -----
 
 // handleAuthorize validates the client params, persists pending state, and
-// renders the Telegram Login Widget page. We never redirect through the
-// /oauth/authorize step itself; the user clicks the widget which POSTs to
-// /oauth/telegram/callback, and only that handler issues the redirect-with-
-// code back to the client's redirect_uri.
+// 302-redirects the browser to Telegram's OIDC authorization endpoint. The
+// authorization code is delivered back to the MCP client only later, by
+// handleTelegramCallback, once Telegram has authenticated the user.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
@@ -558,8 +603,14 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Persist pending state, indexed by a fresh random server-side state token.
 	// We DO NOT trust the client-supplied state — that survives only as a
-	// pass-through value the widget callback echoes back on redirect.
+	// pass-through value the OIDC callback echoes back on redirect.
+	//
+	// nonce binds the id_token Telegram returns to this request; tgVerifier is
+	// the Telegram-leg PKCE verifier (its challenge goes to Telegram, the
+	// verifier is replayed at the token exchange). Both are kept server-side.
 	serverState := randomToken(32)
+	nonce := randomToken(16)
+	tgVerifier, tgChallenge := pkceChallenge()
 	now := s.clock()
 	s.mu.Lock()
 	// Bound the pending map. /oauth/authorize is unauthenticated; without a
@@ -587,30 +638,18 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Scope:               scope,
+		Nonce:               nonce,
+		TGCodeVerifier:      tgVerifier,
 		CreatedAt:           now,
 	}
 	s.mu.Unlock()
 
-	// Render the widget HTML. The widget's `data-onauth` JS posts the signed
-	// payload to /oauth/telegram/callback?st=<serverState>; we read st from
-	// the form on the callback side.
-	//
-	// We render the redirect_uri host rather than any client-supplied name
-	// because the host is the only piece bound to the OAuth flow that the
-	// user can verify against where they expect their authorization code
-	// to be delivered. Trusting client_name from dynamic registration
-	// (currently unauthenticated) would let an attacker mint a consent
-	// screen labeled with any brand.
-	redirectHost := ""
-	if u, err := url.Parse(redirectURI); err == nil {
-		redirectHost = u.Host
-	}
-	renderAuthorizeHTML(w, authorizePage{
-		Issuer:       s.cfg.Issuer,
-		BotUsername:  s.cfg.BotUsername,
-		ServerState:  serverState,
-		RedirectHost: redirectHost,
-	})
+	// Hand the browser to Telegram's OIDC authorization endpoint. Telegram
+	// renders its own account-selection and consent screen, then 302s back to
+	// /oauth/telegram/callback with ?code=&state=serverState. tgChallenge is
+	// the Telegram-leg PKCE challenge — independent of the MCP client's
+	// codeChallenge held in pending and verified later at /oauth/token.
+	http.Redirect(w, r, s.tgoidc.AuthCodeURL(serverState, nonce, tgChallenge), http.StatusFound)
 }
 
 func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
@@ -624,20 +663,20 @@ func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
 
 // ----- /oauth/telegram/callback -----
 
-// handleWidgetCallback receives the signed Telegram payload (from the widget
-// data-onauth JS) along with the server-issued state token. We verify the
-// signature, intersect the user against the admin allowlist, issue an
-// authorization_code, and redirect the browser to the client's redirect_uri.
-func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	serverState := r.FormValue("st")
+// handleTelegramCallback receives Telegram's OIDC redirect: ?code=&state= on
+// success, or ?error=&state= when the user cancelled or Telegram refused. It
+// consumes the pending entry, exchanges the code for a JWKS-verified id_token,
+// resolves the Telegram identity, issues an authorization_code, and redirects
+// the browser to the MCP client's redirect_uri.
+func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	serverState := q.Get("state")
 	if serverState == "" {
-		http.Error(w, "missing st", http.StatusBadRequest)
+		http.Error(w, "missing state", http.StatusBadRequest)
 		return
 	}
+	// Consume the pending entry up front — state is single-use whatever the
+	// outcome, so an error redirect cannot be replayed against a fresh code.
 	s.mu.Lock()
 	pending, ok := s.pending[serverState]
 	delete(s.pending, serverState)
@@ -655,25 +694,37 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build widgetFields from ALL received form fields except "st" (our
-	// server-side state token). The Telegram check-string is defined over
-	// every non-hash field, so a fixed key whitelist would silently drop any
-	// new signed attribute Telegram adds in the future, causing hash mismatch
-	// on otherwise valid logins. Empty values are skipped per Telegram docs.
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "cannot parse form", http.StatusBadRequest)
+	// The user cancelled at oauth.telegram.org, or Telegram refused the
+	// request. The pending entry is already consumed above; show a friendly
+	// page rather than a 500 or a blank screen.
+	if oidcErr := q.Get("error"); oidcErr != "" {
+		renderEnableError(w, "Telegram sign-in was not completed ("+sanitizeOIDCError(oidcErr)+"). Close this page and try connecting again from your MCP client.")
 		return
 	}
-	widgetFields := map[string]string{}
-	for k, vs := range r.Form {
-		if k == "st" || len(vs) == 0 || vs[0] == "" {
-			continue
-		}
-		widgetFields[k] = vs[0]
+	code := q.Get("code")
+	if code == "" {
+		renderEnableError(w, "Telegram sign-in did not return an authorization code. Close this page and try again.")
+		return
 	}
-	payload, err := s.verifier.Verify(widgetFields)
+
+	// Server-to-server token exchange + id_token verification. The Telegram-leg
+	// PKCE verifier and the nonce are replayed from the pending entry; neither
+	// was ever exposed to the browser.
+	identity, err := s.tgoidc.Exchange(r.Context(), code, pending.TGCodeVerifier, pending.Nonce)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("widget verification failed: %v", err), http.StatusUnauthorized)
+		// The raw error may embed Telegram's token-endpoint response body
+		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
+		// server-side, return an opaque message to the browser.
+		slog.Error("telegram OIDC token exchange failed", "err", err)
+		http.Error(w, "telegram authentication failed", http.StatusUnauthorized)
+		return
+	}
+	if identity.TelegramID <= 0 {
+		// The primary migration path keys on the numeric `id` claim (#48). An
+		// id_token carrying only an opaque `sub` is the documented contingency
+		// and is not handled here — fail loudly rather than mint a token for an
+		// unresolved identity.
+		http.Error(w, "telegram id_token carried no usable Telegram user id", http.StatusUnauthorized)
 		return
 	}
 
@@ -682,9 +733,10 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	// flow provisions below lands on the SAME users.id this token resolves to
 	// on later /mcp calls — closing the duplicate-identity gap the old CLI
 	// (github_login-keyed) login left open.
-	uid, err := s.store.EnsureUserByTelegramID(r.Context(), payload.ID, payload.Username, strings.TrimSpace(payload.FirstName+" "+payload.LastName))
+	uid, err := s.store.EnsureUserByTelegramID(r.Context(), identity.TelegramID, identity.Username, strings.TrimSpace(identity.FirstName+" "+identity.LastName))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("ensure user: %v", err), http.StatusInternalServerError)
+		slog.Error("ensure user failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -694,8 +746,8 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge: pending.CodeChallenge,
 		ClientState:   pending.State,
 		Scope:         pending.Scope,
-		TelegramID:    payload.ID,
-		Username:      payload.Username,
+		TelegramID:    identity.TelegramID,
+		Username:      identity.Username,
 	}
 
 	// If the user already has a usable MTProto session, hand back the
@@ -716,7 +768,8 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 		// An unexpected storage error must not be silently treated as
 		// "no session" — that would divert the user into re-login (and a
 		// possible session overwrite) on a transient DB blip.
-		http.Error(w, fmt.Sprintf("session check failed: %v", sessErr), http.StatusInternalServerError)
+		slog.Error("session check failed", "err", sessErr)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	// enable_access provisions an MTProto session, which is only useful to a
@@ -725,12 +778,13 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	// client check must mirror ResolveScopes (env ∪ DB) — otherwise a
 	// DB-granted client would be 302'd past enable_access, get a scoped token,
 	// and then fail every tool call for lack of a session.
-	isClient, err := s.isClientTier(r.Context(), payload.ID)
+	isClient, err := s.isClientTier(r.Context(), identity.TelegramID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("resolve client tier: %v", err), http.StatusInternalServerError)
+		slog.Error("resolve client tier failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !s.cfg.AdminTelegramIDs[payload.ID] && !isClient {
+	if !s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient {
 		s.issueAuthCode(w, r, oc)
 		return
 	}
@@ -738,7 +792,7 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 	es := &enableSession{
 		oc:        oc,
 		uid:       uid,
-		tgID:      payload.ID,
+		tgID:      identity.TelegramID,
 		createdAt: s.clock(),
 		step:      stepPhone,
 	}
@@ -771,7 +825,7 @@ func (s *Server) handleWidgetCallback(w http.ResponseWriter, r *http.Request) {
 
 // oauthCtx bundles the per-flow OAuth parameters needed to mint and deliver an
 // authorization code, independent of how the user's identity was established
-// (direct widget callback when a session exists, or after the enable_access
+// (direct Telegram callback when a session exists, or after the enable_access
 // detour when one had to be provisioned).
 type oauthCtx struct {
 	ClientID      string
@@ -785,7 +839,7 @@ type oauthCtx struct {
 
 // issueAuthCode mints an authorization_code for oc and 302-redirects the
 // browser to the client's redirect_uri with ?code=&state=. Shared by the
-// has-session widget-callback path and the enable_access success path. State
+// has-session Telegram-callback path and the enable_access success path. State
 // is echoed verbatim per RFC 6749 §4.1.2.
 func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthCtx) {
 	code := randomToken(32)
@@ -836,8 +890,8 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 
 // handleToken dispatches the RFC 6749 token endpoint by grant_type. Two grants
 // are supported: authorization_code (the PKCE exchange after the Telegram
-// widget flow) and refresh_token (silent renewal of a short-lived access
-// token, with no widget interaction).
+// OIDC sign-in flow) and refresh_token (silent renewal of a short-lived access
+// token, with no Telegram interaction).
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeTokenError(w, "invalid_request", "could not parse form", http.StatusBadRequest)
@@ -912,7 +966,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// and operator-facing tooling — resolves the same identity the access
 	// token authenticates as. EnsureUserByTelegramID is idempotent; the empty
 	// displayName is safe because its metadata refresh is NULLIF-guarded and
-	// will not clobber a name the widget callback already stored.
+	// will not clobber a name the Telegram callback already stored.
 	uid, err := s.store.EnsureUserByTelegramID(r.Context(), entry.TelegramID, entry.TelegramUsername, "")
 	if err != nil {
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
@@ -935,7 +989,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 
 // handleTokenRefresh implements grant_type=refresh_token: it renews a
 // (typically expired) access token from a stored, rotating refresh token with
-// no Telegram widget interaction. This is what stops MCP clients losing access
+// no Telegram interaction. This is what stops MCP clients losing access
 // once an access token's short TTL elapses. The presented refresh token is
 // rotated — the old one revoked, a new one returned. Presenting an
 // already-rotated token is treated as reuse and revokes the whole family.
@@ -1298,17 +1352,6 @@ func (s *Server) validateClient(clientID, redirectURI string) error {
 	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
 }
 
-// lookupClientName is retained as a documented no-op: we never display a
-// self-supplied client_name on the consent screen because /oauth/register is
-// unauthenticated and would allow brand spoofing. Kept as a function so
-// tests can still pin the policy.
-//
-// Deprecated: do not use. Render redirect_uri host instead.
-func (s *Server) lookupClientName(clientID string) string {
-	_ = clientID
-	return ""
-}
-
 // pkceVerify checks that SHA256(verifier) base64url-encoded equals challenge.
 // Per RFC 7636 §4.6. Uses subtle.ConstantTimeCompare so a timing oracle does
 // not leak how many leading bytes of the challenge match.
@@ -1362,4 +1405,32 @@ func randomToken(n int) string {
 		panic("oauth: rand.Read failed: " + err.Error())
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+// pkceChallenge generates the Telegram-leg PKCE pair: a random code_verifier —
+// 32 random bytes base64url-encoded is 43 characters, satisfying RFC 7636's
+// 43–128 unreserved-character syntax — and its S256 code_challenge. The
+// verifier is stored in pendingAuth.TGCodeVerifier and replayed at the
+// Telegram token exchange; the challenge is sent to Telegram up front.
+func pkceChallenge() (verifier, challenge string) {
+	verifier = randomToken(32)
+	sum := sha256.Sum256([]byte(verifier))
+	return verifier, base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// sanitizeOIDCError reduces a Telegram-supplied `error` query parameter to a
+// short, safe token before it is shown on an error page. Standard OIDC error
+// codes are lowercase snake_case; anything else — or an over-long value —
+// collapses to "unknown" so a crafted callback URL cannot inject markup.
+func sanitizeOIDCError(code string) string {
+	if code == "" || len(code) > 64 {
+		return "unknown"
+	}
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		if !((c >= 'a' && c <= 'z') || c == '_') {
+			return "unknown"
+		}
+	}
+	return code
 }

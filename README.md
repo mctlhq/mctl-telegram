@@ -64,7 +64,9 @@ Required `env` (set via Helm `values.yaml` + ExternalSecret pulling from Vault):
 | `AUTH_MODE`                | `local-jwt` (mctl-telegram is its own OAuth issuer)             |
 | `AUTH_REQUIRED`            | `true`                                                          |
 | `OAUTH_JWT_SIGNING_KEY`    | Vault `secret/platform/mctl-telegram/oauth` → `jwt-signing-key` |
-| `TELEGRAM_LOGIN_BOT_TOKEN` | Vault `secret/platform/mctl-telegram/login`                     |
+| `TELEGRAM_OIDC_CLIENT_ID`  | Login bot's numeric id (BotFather → OIDC client id); not secret |
+| `TELEGRAM_OIDC_CLIENT_SECRET` | Vault `secret/platform/mctl-telegram/oauth` → `oidc-client-secret` |
+| `TELEGRAM_LOGIN_BOT_TOKEN` | Vault `secret/platform/mctl-telegram/login` — used only for the daily new-client digest |
 | `TG_API_ID`, `TG_API_HASH` | Vault `secret/platform/mctl-telegram/api`                       |
 | `ENCRYPTION_KEY`           | Vault `secret/platform/mctl-telegram/encryption` (32-byte hex)  |
 | `DATABASE_URL`             | `postgres://...` (provisioned via `mctl_provision_database`)    |
@@ -101,7 +103,7 @@ env var.
 Access tokens are intentionally short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default
 1h). Clients renew them silently with the OAuth 2.1 `refresh_token` grant: the
 `/oauth/token` endpoint accepts `grant_type=refresh_token` and returns a new
-access token plus a rotated refresh token, with no Telegram Login Widget
+access token plus a rotated refresh token, with no Telegram sign-in
 interaction. Refresh tokens are opaque, stored SHA-256-hashed, and rotated on
 every use; replaying an already-rotated token revokes the whole token family.
 

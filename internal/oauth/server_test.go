@@ -2,32 +2,71 @@ package oauth
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	_ "modernc.org/sqlite"
 )
 
-const (
-	testBotToken    = "123456:test-bot-token"
-	testBotUsername = "mctl_test_bot"
-	testIssuer      = "https://tg.test"
-)
+const testIssuer = "https://tg.test"
 
 var testJWTSecret = []byte("oauth-test-secret-32-bytes!!!!!!")
+
+// fakeAuthenticator is the in-package test double for telegramoidc.Authenticator.
+// It performs no network call: AuthCodeURL echoes the server-issued state into
+// a parseable URL, and Exchange returns a canned Identity while recording the
+// code_verifier and nonce it received — so tests can assert the double-PKCE and
+// nonce wiring without a live Telegram OP.
+type fakeAuthenticator struct {
+	identity    *telegramoidc.Identity
+	exchangeErr error
+
+	lastNonce         string
+	lastChallenge     string
+	lastCodeVerifier  string
+	lastExpectedNonce string
+}
+
+func newFakeAuthenticator() *fakeAuthenticator {
+	return &fakeAuthenticator{
+		identity: &telegramoidc.Identity{TelegramID: 210408407, Username: "MashkovD", FirstName: "Dmitry"},
+	}
+}
+
+func (f *fakeAuthenticator) AuthCodeURL(state, nonce, codeChallenge string) string {
+	f.lastNonce = nonce
+	f.lastChallenge = codeChallenge
+	return "https://oauth.telegram.org/auth?" + url.Values{
+		"state":          {state},
+		"nonce":          {nonce},
+		"code_challenge": {codeChallenge},
+	}.Encode()
+}
+
+func (f *fakeAuthenticator) Exchange(_ context.Context, _, codeVerifier, expectedNonce string) (*telegramoidc.Identity, error) {
+	f.lastCodeVerifier = codeVerifier
+	f.lastExpectedNonce = expectedNonce
+	if f.exchangeErr != nil {
+		return nil, f.exchangeErr
+	}
+	return f.identity, nil
+}
+
+// authFake returns the fakeAuthenticator a test server was constructed with.
+func authFake(srv *Server) *fakeAuthenticator {
+	return srv.tgoidc.(*fakeAuthenticator)
+}
 
 func newTestStore(t *testing.T) *db.Store {
 	t.Helper()
@@ -48,8 +87,7 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 	cfg := Config{
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
-		BotToken:            testBotToken,
-		BotUsername:         testBotUsername,
+		TelegramOIDC:        newFakeAuthenticator(),
 		AdminTelegramIDs:    map[int64]bool{210408407: true},
 		AccessTokenTTL:      1 * time.Hour,
 		CodeTTL:             1 * time.Minute,
@@ -58,59 +96,27 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	srv, err := New(cfg, newTestStore(t))
+	srv, err := New(context.Background(), cfg, newTestStore(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return srv
 }
 
-// signWidget produces a valid Telegram widget hash for the given fields,
-// using the same SHA256(token) + HMAC-SHA256 routine as Telegram.
-func signWidget(t *testing.T, fields map[string]string) string {
-	t.Helper()
-	secret := sha256.Sum256([]byte(testBotToken))
-	keys := make([]string, 0, len(fields))
-	for k, v := range fields {
-		if k == "hash" || v == "" {
-			continue
-		}
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(fields[k])
-	}
-	mac := hmac.New(sha256.New, secret[:])
-	mac.Write([]byte(b.String()))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// pkceVerifierAndChallenge returns a random verifier + its S256 challenge.
+// pkceVerifierAndChallenge returns a random verifier + its S256 challenge —
+// the MCP *client's* PKCE leg, distinct from the Telegram-leg PKCE the server
+// generates internally.
 func pkceVerifierAndChallenge() (string, string) {
 	v := "v_" + base64.RawURLEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz0123456789"))
 	sum := sha256.Sum256([]byte(v))
 	return v, base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func TestFullFlow_PKCEHappyPath(t *testing.T) {
-	srv := newTestServer(t)
-	mux := newMockRouter()
-	srv.Register(mux)
-
-	// A returning admin already has an MTProto session, so the widget
-	// callback issues a code directly. A first-time admin without one is
-	// routed through enable_access instead (see enable_access_test.go).
-	seedSession(t, srv, 210408407)
-
-	// 1. /oauth/authorize — receive HTML with serverState embedded.
-	verifier, challenge := pkceVerifierAndChallenge()
+// stateFromAuthorize runs GET /oauth/authorize with the given MCP-client PKCE
+// challenge, asserts the 302 to Telegram, and returns the server-side state
+// token embedded in the redirect URL.
+func stateFromAuthorize(t *testing.T, mux *mockRouter, challenge string) string {
+	t.Helper()
 	q := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {"claude.ai"},
@@ -118,34 +124,51 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 		"state":                 {"client-state-abc"},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
-		"scope":                 {"telegram:dialogs:read"},
 	}
 	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	mux.serve("GET", "/oauth/authorize", rec, req)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusFound {
 		t.Fatalf("authorize status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	serverState := extractServerStateFromHTML(t, rec.Body.String())
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("authorize redirect parse: %v", err)
+	}
+	st := loc.Query().Get("state")
+	if st == "" {
+		t.Fatalf("authorize redirect carried no state: %s", loc)
+	}
+	return st
+}
 
-	// 2. /oauth/telegram/callback — submit a valid widget payload.
-	now := time.Now()
-	widgetFields := map[string]string{
-		"id":         "210408407",
-		"username":   "MashkovD",
-		"first_name": "Dmitry",
-		"auth_date":  strconv.FormatInt(now.Unix(), 10),
-	}
-	widgetFields["hash"] = signWidget(t, widgetFields)
-	form := url.Values{}
-	form.Set("st", serverState)
-	for k, v := range widgetFields {
-		form.Set(k, v)
-	}
-	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
-	mux.serve("POST", "/oauth/telegram/callback", rec, req)
+// callbackWithState runs the Telegram OIDC callback GET (?code=&state=) and
+// returns the recorder.
+func callbackWithState(t *testing.T, mux *mockRouter, state string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{"state": {state}, "code": {"tg-auth-code"}}
+	req := httptest.NewRequest("GET", "/oauth/telegram/callback?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	return rec
+}
+
+func TestFullFlow_PKCEHappyPath(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	// A returning admin already has an MTProto session, so the OIDC callback
+	// issues a code directly. A first-time admin without one is routed through
+	// enable_access instead (see enable_access_test.go).
+	seedSession(t, srv, 210408407)
+
+	// 1. /oauth/authorize — 302 to Telegram, carrying the server state.
+	verifier, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	// 2. /oauth/telegram/callback — Telegram redirects back with code+state.
+	rec := callbackWithState(t, mux, state)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -165,13 +188,13 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	}
 
 	// 3. /oauth/token — exchange the code with the matching verifier.
-	form = url.Values{}
+	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("client_id", "claude.ai")
 	form.Set("redirect_uri", "https://claude.ai/cb")
 	form.Set("code_verifier", verifier)
-	req = httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec = httptest.NewRecorder()
 	mux.serve("POST", "/oauth/token", rec, req)
@@ -204,11 +227,95 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	}
 }
 
+// TestDoublePKCE_LegsIndependent confirms the MCP-client PKCE and the
+// Telegram-leg PKCE never cross: the verifier handed to Telegram's Exchange is
+// the server-generated Telegram-leg one, and the nonce round-trips intact.
+func TestDoublePKCE_LegsIndependent(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, 210408407)
+
+	clientVerifier, clientChallenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, clientChallenge)
+	if rec := callbackWithState(t, mux, state); rec.Code != http.StatusFound {
+		t.Fatalf("callback = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	f := authFake(srv)
+	if f.lastCodeVerifier == "" {
+		t.Fatal("Exchange received an empty code_verifier")
+	}
+	if f.lastCodeVerifier == clientVerifier || f.lastCodeVerifier == clientChallenge {
+		t.Error("Telegram-leg PKCE verifier collided with the MCP client's PKCE")
+	}
+	// The challenge sent to Telegram is S256(Telegram-leg verifier).
+	sum := sha256.Sum256([]byte(f.lastCodeVerifier))
+	if want := base64.RawURLEncoding.EncodeToString(sum[:]); f.lastChallenge != want {
+		t.Errorf("Telegram-leg challenge %q is not S256(verifier)", f.lastChallenge)
+	}
+	// nonce emitted at AuthCodeURL is the nonce checked at Exchange.
+	if f.lastNonce == "" || f.lastNonce != f.lastExpectedNonce {
+		t.Errorf("nonce mismatch: emitted %q, expected-at-exchange %q", f.lastNonce, f.lastExpectedNonce)
+	}
+}
+
+// TestTelegramCallback_ErrorRedirect confirms a user who cancels at
+// oauth.telegram.org gets a friendly page (not a 500) and that the pending
+// state is consumed so the cancelled flow cannot be replayed.
+func TestTelegramCallback_ErrorRedirect(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	q := url.Values{"state": {state}, "error": {"access_denied"}}
+	req := httptest.NewRequest("GET", "/oauth/telegram/callback?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("error redirect produced a 500: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("error redirect status = %d, want a friendly 400 page", rec.Code)
+	}
+
+	// The pending entry must already be consumed — a replay is rejected.
+	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
+		t.Errorf("state not consumed by the error redirect: replay got %d", rec2.Code)
+	}
+}
+
+// TestTelegramCallback_ExchangeError_ConsumesState confirms that when the
+// Telegram token exchange fails, the callback returns 401 and the pending
+// state is still consumed — so a failed flow cannot be replayed.
+func TestTelegramCallback_ExchangeError_ConsumesState(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	authFake(srv).exchangeErr = errors.New("token endpoint refused the code")
+	rec := callbackWithState(t, mux, state)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on exchange error, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	// No raw error detail leaks to the browser.
+	if strings.Contains(rec.Body.String(), "token endpoint refused the code") {
+		t.Errorf("raw exchange error leaked to the browser: %s", rec.Body.String())
+	}
+	// State must be consumed — a replay is rejected.
+	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
+		t.Errorf("state not consumed on exchange error: replay got %d", rec2.Code)
+	}
+}
+
 func TestToken_RejectsWrongVerifier(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	// Drive flow to obtain a code.
 	_, challenge := pkceVerifierAndChallenge()
 	state := obtainAuthorizationCode(t, srv, mux, challenge)
 	form := url.Values{}
@@ -232,7 +339,6 @@ func TestToken_RejectsCodeReuse(t *testing.T) {
 	srv.Register(mux)
 	verifier, challenge := pkceVerifierAndChallenge()
 	state := obtainAuthorizationCode(t, srv, mux, challenge)
-	// First exchange — must succeed.
 	tokenReq := func() *httptest.ResponseRecorder {
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
@@ -304,7 +410,6 @@ func TestToken_RejectsWeakVerifier(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	// Drive flow to obtain a code with a proper-length challenge.
 	_, challenge := pkceVerifierAndChallenge()
 	state := obtainAuthorizationCode(t, srv, mux, challenge)
 	form := url.Values{}
@@ -326,7 +431,6 @@ func TestRegister_BodySizeCap(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.MaxRegisterBodyBytes = 256 })
 	mux := newMockRouter()
 	srv.Register(mux)
-	// 1 KB body — well over the 256-byte cap.
 	body := `{"client_name":"big","redirect_uris":["https://claude.ai/cb"]` +
 		strings.Repeat(`,"extra":"x"`, 100) + `}`
 	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
@@ -433,8 +537,8 @@ func TestAuthorize_AllowsLoopbackHTTP(t *testing.T) {
 	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	mux.serve("GET", "/oauth/authorize", rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for loopback http, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 for loopback http, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -453,8 +557,8 @@ func TestAuthorize_AllowsIPv6Loopback(t *testing.T) {
 	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
 	rec := httptest.NewRecorder()
 	mux.serve("GET", "/oauth/authorize", rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for IPv6 loopback http, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 for IPv6 loopback http, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -477,18 +581,19 @@ func TestIsLoopbackHost(t *testing.T) {
 	}
 }
 
-func TestWidgetCallback_CodesCapEvictsOldest(t *testing.T) {
+func TestTelegramCallback_CodesCapEvictsOldest(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.MaxAuthCodes = 2 })
 	mux := newMockRouter()
 	srv.Register(mux)
 	_, challenge := pkceVerifierAndChallenge()
 
-	// Drive obtainAuthorizationCode 3 times with monotonic clock so we can
+	// Drive obtainAuthorizationCode 3 times with a monotonic clock so we can
 	// identify which auth_code was minted first and confirm it got evicted.
 	t0 := time.Now()
 	codes := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
-		srv.clock = func() time.Time { return t0.Add(time.Duration(i) * time.Second) }
+		offset := time.Duration(i) * time.Second
+		srv.clock = func() time.Time { return t0.Add(offset) }
 		got := obtainAuthorizationCode(t, srv, mux, challenge)
 		codes = append(codes, got.code)
 	}
@@ -533,48 +638,24 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 	})
 	mux := newMockRouter()
 	srv.Register(mux)
+	authFake(srv).identity = &telegramoidc.Identity{TelegramID: 999} // not an admin
+
 	verifier, challenge := pkceVerifierAndChallenge()
-
-	// authorize with a fake "requested" scope that the user is NOT entitled to.
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"scope":                 {"telegram:messages:send admin:users"},
+	state := stateFromAuthorize(t, mux, challenge)
+	rec := callbackWithState(t, mux, state)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	rec := httptest.NewRecorder()
-	mux.serve("GET", "/oauth/authorize", rec, req)
-	state := extractServerStateFromHTML(t, rec.Body.String())
-
-	// widget callback with non-admin id.
-	now := time.Now()
-	fields := map[string]string{
-		"id":        "999", // not in AdminTelegramIDs
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-	}
-	fields["hash"] = signWidget(t, fields)
-	form := url.Values{"st": {state}}
-	for k, v := range fields {
-		form.Set(k, v)
-	}
-	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
-	mux.serve("POST", "/oauth/telegram/callback", rec, req)
 	loc, _ := url.Parse(rec.Header().Get("Location"))
 	code := loc.Query().Get("code")
 
-	// token exchange.
-	form = url.Values{}
+	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("client_id", "claude.ai")
 	form.Set("redirect_uri", "https://claude.ai/cb")
 	form.Set("code_verifier", verifier)
-	req = httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec = httptest.NewRecorder()
 	mux.serve("POST", "/oauth/token", rec, req)
@@ -586,97 +667,23 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 	if scope, ok := resp["scope"].(string); !ok {
 		t.Fatal("scope field missing from token response")
 	} else if scope != "" {
-		t.Errorf("non-admin granted scope = %q, want empty (not the requested telegram:messages:send)", scope)
+		t.Errorf("non-admin granted scope = %q, want empty", scope)
 	}
 }
 
-func TestAuthorizePage_NeverEchoesClientName(t *testing.T) {
-	// Even a CLIENT that registered itself with a brand-y name does not get
-	// that name echoed on the consent screen. The consent screen instead
-	// shows the redirect_uri host, which is the only piece of metadata the
-	// user can verify against where their code is about to be delivered.
-	srv := newTestServer(t)
-	mux := newMockRouter()
-	srv.Register(mux)
-	srv.clients["spoof"] = &clientReg{
-		ClientID:     "spoof",
-		ClientName:   "Claude (Anthropic)",
-		RedirectURIs: []string{"https://attacker.example/cb"},
-	}
-	_, challenge := pkceVerifierAndChallenge()
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"spoof"},
-		"redirect_uri":          {"https://attacker.example/cb"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	rec := httptest.NewRecorder()
-	mux.serve("GET", "/oauth/authorize", rec, req)
-	body := rec.Body.String()
-	if strings.Contains(body, "Claude (Anthropic)") {
-		t.Error("consent page rendered self-declared client_name")
-	}
-	if !strings.Contains(body, "attacker.example") {
-		t.Error("consent page should surface redirect_uri host so user can verify")
-	}
-}
-
-func TestWidgetCallback_RejectsStaleState(t *testing.T) {
-	// Override clock to fast-forward past CodeTTL between authorize and callback.
+func TestTelegramCallback_RejectsStaleState(t *testing.T) {
+	// Fast-forward past CodeTTL between authorize and callback.
 	srv := newTestServer(t, func(c *Config) { c.CodeTTL = 1 * time.Second })
 	mux := newMockRouter()
 	srv.Register(mux)
 	_, challenge := pkceVerifierAndChallenge()
-	// Drive only the authorize step.
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	rec := httptest.NewRecorder()
-	mux.serve("GET", "/oauth/authorize", rec, req)
-	state := extractServerStateFromHTML(t, rec.Body.String())
+	state := stateFromAuthorize(t, mux, challenge)
 
-	// Fast-forward time on the server's clock so the pending entry is stale.
-	now := time.Now().Add(10 * time.Second)
-	srv.clock = func() time.Time { return now }
+	srv.clock = func() time.Time { return time.Now().Add(10 * time.Second) }
 
-	// Build a valid widget payload — verification should pass — then assert
-	// the handler still rejects the request because the pending state is stale.
-	widgetFields := map[string]string{
-		"id":        "210408407",
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-	}
-	widgetFields["hash"] = signWidget(t, widgetFields)
-	form := url.Values{"st": {state}}
-	for k, v := range widgetFields {
-		form.Set(k, v)
-	}
-	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
-	mux.serve("POST", "/oauth/telegram/callback", rec, req)
+	rec := callbackWithState(t, mux, state)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for stale state, got %d body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestLookupClientName_AlwaysEmpty(t *testing.T) {
-	// Document the policy: lookupClientName is a deliberate no-op so that
-	// self-registered client_name cannot reach the consent screen.
-	srv := newTestServer(t)
-	srv.clients["c1"] = &clientReg{
-		ClientID:     "c1",
-		ClientName:   "Acme Web",
-		RedirectURIs: []string{"https://acme.example/cb"},
-	}
-	if got := srv.lookupClientName("c1"); got != "" {
-		t.Errorf("lookupClientName should always be empty, got %q", got)
 	}
 }
 
@@ -695,7 +702,6 @@ func TestRegister_RejectsUntrustedRedirect(t *testing.T) {
 }
 
 func TestRegister_CapEvictsOldest(t *testing.T) {
-	// Hard-cap N=2; insert 3 → confirm the oldest is evicted.
 	srv := newTestServer(t, func(c *Config) { c.MaxRegisteredClients = 2 })
 	mux := newMockRouter()
 	srv.Register(mux)
@@ -712,7 +718,6 @@ func TestRegister_CapEvictsOldest(t *testing.T) {
 		_ = json.NewDecoder(rec.Body).Decode(&resp)
 		return resp["client_id"].(string)
 	}
-	// Inject monotonic clocks so eviction can pick the oldest deterministically.
 	t0 := time.Now()
 	srv.clock = func() time.Time { return t0 }
 	id1 := register("first")
@@ -779,45 +784,21 @@ func TestAuthorizationServerMetadata(t *testing.T) {
 
 // --- helpers ---
 
-// obtainAuthorizationCode runs authorize + widget callback and returns the
-// short-lived authorization_code, for tests that exercise /oauth/token.
+// codeState carries the short-lived authorization_code obtained by driving the
+// authorize + Telegram-callback steps, for tests that exercise /oauth/token.
 type codeState struct {
 	code string
 }
 
+// obtainAuthorizationCode runs authorize + the Telegram OIDC callback and
+// returns the issued authorization_code. The fake authenticator resolves the
+// returning admin (210408407); seedSession gives that admin a session so the
+// callback issues a code directly instead of diverting into enable_access.
 func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challenge string) codeState {
 	t.Helper()
-	// A widget callback only issues a code directly when the user already has
-	// an MTProto session; a first-time admin is otherwise diverted into the
-	// enable_access flow. Seed one so these /oauth/token tests get a code.
 	seedSession(t, srv, 210408407)
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	rec := httptest.NewRecorder()
-	mux.serve("GET", "/oauth/authorize", rec, req)
-	state := extractServerStateFromHTML(t, rec.Body.String())
-
-	now := time.Now()
-	fields := map[string]string{
-		"id":        "210408407",
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-	}
-	fields["hash"] = signWidget(t, fields)
-	form := url.Values{}
-	form.Set("st", state)
-	for k, v := range fields {
-		form.Set(k, v)
-	}
-	req = httptest.NewRequest("POST", "/oauth/telegram/callback", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
-	mux.serve("POST", "/oauth/telegram/callback", rec, req)
+	state := stateFromAuthorize(t, mux, challenge)
+	rec := callbackWithState(t, mux, state)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -825,23 +806,8 @@ func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challen
 	return codeState{code: loc.Query().Get("code")}
 }
 
-func extractServerStateFromHTML(t *testing.T, body string) string {
-	t.Helper()
-	marker := `name="st" value="`
-	idx := strings.Index(body, marker)
-	if idx < 0 {
-		t.Fatalf("HTML did not contain st input: %s", body)
-	}
-	rest := body[idx+len(marker):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		t.Fatal("HTML st input unterminated")
-	}
-	return rest[:end]
-}
-
 // mockRouter is the tiniest possible chi-like router we can hand the Server
-// for tests. Keeps oauth_test.go from depending on chi.
+// for tests. Keeps server_test.go from depending on chi.
 type mockRouter struct {
 	getH  map[string]http.HandlerFunc
 	postH map[string]http.HandlerFunc
