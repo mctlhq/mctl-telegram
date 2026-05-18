@@ -7,7 +7,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 )
+
+// peerLike matches Telegram identifiers that can appear verbatim inside error
+// strings: @handles and phone-like digit runs. Numeric chat IDs are left alone
+// — they are less identifying and indistinguishable from ordinary numbers
+// without false positives.
+var peerLike = regexp.MustCompile(`@[A-Za-z0-9_]{4,}|\+?\d{7,}`)
+
+// ScrubText masks Telegram peer identifiers (@handles, phone numbers) inside
+// arbitrary free text. It is used before mirroring tool-call error strings to
+// slog, where errors such as `peer "@username" not found` would otherwise leak
+// a raw dialog identifier into centralized logs. MTProto error codes and other
+// non-identifying text pass through unchanged.
+func ScrubText(s string) string {
+	return peerLike.ReplaceAllString(s, "[redacted]")
+}
 
 // sensitiveKeys is checked case-insensitively against attribute keys.
 // Values for matching keys are replaced with `[redacted len=N]`.
