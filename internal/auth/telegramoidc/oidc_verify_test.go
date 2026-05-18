@@ -17,8 +17,8 @@ import (
 // for PR #57. A fake OpenID Provider serves a JWKS that — like Telegram's —
 // mixes an RS256 key with a secp256k1 key go-jose cannot decode. Without the
 // filtering transport reaching the verifier's RemoteKeySet, go-jose rejects the
-// whole key set and Exchange fails; this test fails if the filter is ever
-// unwired (e.g. reverting VerifierContext back to Verifier).
+// whole key set and Exchange fails. The test fails if the filtering transport
+// is removed from the OIDC client context entirely.
 func TestExchange_VerifiesAgainstSecp256k1JWKS(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
