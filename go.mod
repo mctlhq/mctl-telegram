@@ -1,6 +1,6 @@
 module github.com/mctlhq/mctl-telegram
 
-go 1.25.0
+go 1.25.5
 
 require (
 	github.com/coder/websocket v1.8.14
@@ -10,7 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gotd/td v0.144.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/mark3labs/mcp-go v0.46.0
+	github.com/mark3labs/mcp-go v0.54.0
 	github.com/prometheus/client_golang v1.20.0
 	github.com/prometheus/client_model v0.6.1
 	golang.org/x/crypto v0.49.0
@@ -47,6 +47,7 @@ require (
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
