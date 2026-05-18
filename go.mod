@@ -3,11 +3,15 @@ module github.com/mctlhq/mctl-telegram
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.14
+	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/google/uuid v1.6.0
 	github.com/gotd/td v0.144.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/mark3labs/mcp-go v0.46.0
 	golang.org/x/crypto v0.49.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.43.0
 	modernc.org/sqlite v1.50.1
 )
@@ -15,7 +19,6 @@ require (
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
@@ -24,8 +27,8 @@ require (
 	github.com/go-faster/jx v1.2.0 // indirect
 	github.com/go-faster/xor v1.0.0 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gotd/ige v0.2.2 // indirect
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

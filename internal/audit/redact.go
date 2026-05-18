@@ -12,18 +12,20 @@ import (
 // sensitiveKeys is checked case-insensitively against attribute keys.
 // Values for matching keys are replaced with `[redacted len=N]`.
 var sensitiveKeys = map[string]struct{}{
-	"text":              {},
-	"password":          {},
-	"phone":             {},
-	"code":              {},
-	"session_encrypted": {},
-	"session":           {},
-	"tg_api_hash":       {},
-	"oauth_jwt_secret":  {},
-	"jwt_secret":        {},
-	"encryption_key":    {},
-	"authorization":     {},
-	"bearer":            {},
+	"text":                        {},
+	"password":                    {},
+	"phone":                       {},
+	"code":                        {},
+	"session_encrypted":           {},
+	"session":                     {},
+	"tg_api_hash":                 {},
+	"oauth_jwt_secret":            {},
+	"jwt_secret":                  {},
+	"client_secret":               {},
+	"telegram_oidc_client_secret": {},
+	"encryption_key":              {},
+	"authorization":               {},
+	"bearer":                      {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

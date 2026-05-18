@@ -33,6 +33,11 @@ type Config struct {
 	TelegramLoginBotUsername string  // the @username (no leading @) displayed by the widget
 	TGLoginAdmins            []int64 // allowlist of Telegram ids granted platform-admins scopes
 	TGLoginClients           []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
+	// Telegram OpenID Connect (Relying Party — replaces the legacy widget):
+	TelegramOIDCClientID     string   // OIDC client id = the login bot's numeric id; not secret
+	TelegramOIDCClientSecret string   // OIDC client secret from BotFather; sourced from Vault
+	TelegramOIDCIssuerURL    string   // OIDC issuer; default https://oauth.telegram.org
+	TelegramOIDCSigningAlgs  []string // accepted id_token signing algs; empty → RS256
 	OAUTHCodeTTL             time.Duration
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
@@ -62,6 +67,9 @@ func Load() (*Config, error) {
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramLoginBotUsername: envOr("TELEGRAM_LOGIN_BOT_USERNAME", ""),
+		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
+		TelegramOIDCClientSecret: os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
+		TelegramOIDCIssuerURL:    envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
 		OAUTHCodeTTL:             envDuration("OAUTH_CODE_TTL", 10*time.Minute),
 		OAUTHAccessTokenTTL:      envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
 		OAUTHRefreshTokenTTL:     envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
@@ -71,6 +79,7 @@ func Load() (*Config, error) {
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
+	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
 	if v := os.Getenv("TG_API_ID"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -211,6 +220,21 @@ func parseInt64CSV(s string) []int64 {
 		parts = append(parts, n)
 	}
 	return parts
+}
+
+// parseStringCSV splits a comma-separated list, trimming whitespace and
+// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS.
+func parseStringCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	out := []string{}
+	for _, raw := range splitTrim(s) {
+		if raw != "" {
+			out = append(out, raw)
+		}
+	}
+	return out
 }
 
 // splitTrim is strings.Split + TrimSpace per element. Kept private — the
