@@ -493,14 +493,21 @@ var ErrSessionExpired = errors.New("session expired")
 var ErrNoActiveSession = errors.New("no active session")
 
 // ErrSessionUnauthorized is returned when the user's most-recent session row
-// holds MTProto session bytes but is not a finalised, authorized session:
-// the gotd SessionStore persisted bytes mid-login (UpdateSessionBlob) but the
-// enable_access flow never completed SaveSession, so telegram_user_id stays
-// NULL. Such a session has an auth key but no completed user authorization —
-// every RPC fails with SESSION_PASSWORD_NEEDED. CheckSessionValid and
+// holds MTProto session bytes but never completed authorization: the gotd
+// SessionStore persisted bytes mid-login (UpdateSessionBlob) but the
+// enable_access flow never completed SaveSession (telegram_user_id stays
+// NULL), or a runtime RPC failed with SESSION_PASSWORD_NEEDED. The fix is for
+// the user to finish the in-browser setup. CheckSessionValid and
 // ClientPool.Borrow revoke the row before returning this so the next
 // reconnect re-runs enable_access instead of reloading a dead session.
 var ErrSessionUnauthorized = errors.New("session not authorized")
+
+// ErrSessionRevoked is returned when a previously-good MTProto session was
+// killed server-side — the user signed it out from another device, or
+// Telegram expired/deactivated/banned the account. Unlike ErrSessionUnauthorized
+// this is not a half-finished setup, so the user-facing message must not tell
+// the user to "finish 2FA". The row is revoked before this is returned.
+var ErrSessionRevoked = errors.New("session revoked")
 
 // ErrUserNotFound means no users row carries the requested telegram_login_id.
 var ErrUserNotFound = errors.New("user not found")
@@ -549,7 +556,9 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	// every RPC fails with SESSION_PASSWORD_NEEDED. Revoke it so the next
 	// reconnect re-runs enable_access instead of reloading a dead session.
 	if !tgUserID.Valid {
-		_, _ = s.RevokeActiveSession(ctx, userID)
+		// Use a cancel-free context so the revoke still commits if the
+		// request context is already done — mirrors ClientPool.Borrow.
+		_, _ = s.RevokeActiveSession(context.WithoutCancel(ctx), userID)
 		return "", ErrSessionUnauthorized
 	}
 	if expires.Valid && expires.Time.Before(now) {

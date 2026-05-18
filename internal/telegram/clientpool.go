@@ -12,12 +12,18 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
-// authErrorCodes are the MTProto RPC error codes that mean the stored session
-// is no longer usable and the user must re-authenticate: an unfinished
-// enable_access session (SESSION_PASSWORD_NEEDED), or a session the user
-// revoked / that Telegram expired or deactivated server-side.
-var authErrorCodes = []string{
+// unfinishedSessionCodes are MTProto errors meaning the stored session never
+// completed authorization — typically an enable_access flow abandoned at the
+// 2FA step. The fix is for the user to finish the in-browser setup.
+var unfinishedSessionCodes = []string{
 	"SESSION_PASSWORD_NEEDED",
+}
+
+// revokedSessionCodes are MTProto errors meaning a once-good session was
+// killed server-side: signed out from another device, or the account was
+// expired/deactivated/banned. These are NOT half-finished setups — the
+// user-facing message must not mention 2FA.
+var revokedSessionCodes = []string{
 	"AUTH_KEY_UNREGISTERED",
 	"AUTH_KEY_INVALID",
 	"SESSION_REVOKED",
@@ -26,10 +32,19 @@ var authErrorCodes = []string{
 	"USER_DEACTIVATED_BAN",
 }
 
-// isAuthError reports whether err is one of the MTProto auth-failure codes
-// in authErrorCodes.
-func isAuthError(err error) bool {
-	return tgerr.Is(err, authErrorCodes...)
+// sessionErrorFor classifies an MTProto error into the matching session
+// sentinel — db.ErrSessionUnauthorized for an unfinished login,
+// db.ErrSessionRevoked for a server-side kill — or nil when err is not a
+// session-auth failure at all.
+func sessionErrorFor(err error) error {
+	switch {
+	case tgerr.Is(err, unfinishedSessionCodes...):
+		return db.ErrSessionUnauthorized
+	case tgerr.Is(err, revokedSessionCodes...):
+		return db.ErrSessionRevoked
+	default:
+		return nil
+	}
 }
 
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
@@ -104,20 +119,21 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		p.Store.MarkLastUsed(ctx, userID)
 	}
 	callErr := fn(ctx, e.client)
-	if callErr != nil && p.Store != nil && isAuthError(callErr) {
+	if sentinel := sessionErrorFor(callErr); sentinel != nil && p.Store != nil {
 		// Telegram rejected the stored session — it was an unfinished
-		// enable_access session, or the user revoked it from their Telegram
-		// app. Evict the pool entry and revoke the DB row under the same
-		// mutex acquire() takes, so a reconnect re-runs enable_access
-		// instead of reloading a dead session. context.WithoutCancel keeps
-		// the revoke alive even if the request context is already done.
+		// enable_access session, or the session was revoked / the account
+		// deactivated server-side. Evict the pool entry and revoke the DB
+		// row under the same mutex acquire() takes, so a reconnect re-runs
+		// enable_access instead of reloading a dead session.
+		// context.WithoutCancel keeps the revoke alive even if the request
+		// context is already done.
 		revokeCtx := context.WithoutCancel(ctx)
 		_ = p.RemoveAtomic(userID, func() error {
 			_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID)
 			return rErr
 		})
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
-		return fmt.Errorf("%w: %v", db.ErrSessionUnauthorized, callErr)
+		return fmt.Errorf("%w: %v", sentinel, callErr)
 	}
 	return callErr
 }

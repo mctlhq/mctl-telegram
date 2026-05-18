@@ -881,6 +881,8 @@ func sessionErrText(err error) string {
 	switch {
 	case errors.Is(err, db.ErrSessionUnauthorized):
 		return "Telegram setup is incomplete — the two-step-verification (2FA) step was not finished. Reconnect the connector and complete phone number → SMS code → 2FA password without closing the page."
+	case errors.Is(err, db.ErrSessionRevoked):
+		return "Your Telegram session is no longer valid — it was signed out from another device, or the account is unavailable. Reconnect the connector to sign in again."
 	case errors.Is(err, db.ErrSessionExpired):
 		return "Your Telegram session has expired. Reconnect the connector to sign in again."
 	case errors.Is(err, db.ErrNoActiveSession):
@@ -929,7 +931,7 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		attrs = append(attrs, "peer", peer)
 	}
 	if err != nil {
-		slog.Warn("mcp tool call", append(attrs, "err", msg)...)
+		slog.Warn("mcp tool call", append(attrs, "err", err)...)
 	} else {
 		slog.Info("mcp tool call", attrs...)
 	}

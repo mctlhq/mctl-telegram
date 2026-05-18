@@ -8,18 +8,25 @@ import (
 	"time"
 
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
-// TestIsAuthError checks that the MTProto auth-failure codes that mean the
-// stored session is dead are recognised, and ordinary errors are not.
-func TestIsAuthError(t *testing.T) {
-	for _, code := range authErrorCodes {
-		if !isAuthError(tgerr.New(401, code)) {
-			t.Errorf("isAuthError(%s) = false, want true", code)
+// TestSessionErrorFor checks that MTProto auth-failure codes map to the right
+// session sentinel — unfinished setup vs server-side revocation — and that
+// ordinary errors map to nil.
+func TestSessionErrorFor(t *testing.T) {
+	for _, code := range unfinishedSessionCodes {
+		if got := sessionErrorFor(tgerr.New(401, code)); !errors.Is(got, db.ErrSessionUnauthorized) {
+			t.Errorf("sessionErrorFor(%s) = %v, want ErrSessionUnauthorized", code, got)
 		}
 		// Still recognised when wrapped.
-		if !isAuthError(fmt.Errorf("borrow: %w", tgerr.New(401, code))) {
-			t.Errorf("isAuthError(wrapped %s) = false, want true", code)
+		if got := sessionErrorFor(fmt.Errorf("borrow: %w", tgerr.New(401, code))); !errors.Is(got, db.ErrSessionUnauthorized) {
+			t.Errorf("sessionErrorFor(wrapped %s) = %v, want ErrSessionUnauthorized", code, got)
+		}
+	}
+	for _, code := range revokedSessionCodes {
+		if got := sessionErrorFor(tgerr.New(401, code)); !errors.Is(got, db.ErrSessionRevoked) {
+			t.Errorf("sessionErrorFor(%s) = %v, want ErrSessionRevoked", code, got)
 		}
 	}
 	for _, err := range []error{
@@ -28,8 +35,8 @@ func TestIsAuthError(t *testing.T) {
 		tgerr.New(400, "PEER_ID_INVALID"),
 		tgerr.New(420, "FLOOD_WAIT_30"),
 	} {
-		if isAuthError(err) {
-			t.Errorf("isAuthError(%v) = true, want false", err)
+		if got := sessionErrorFor(err); got != nil {
+			t.Errorf("sessionErrorFor(%v) = %v, want nil", err, got)
 		}
 	}
 }

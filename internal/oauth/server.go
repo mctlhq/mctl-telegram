@@ -762,11 +762,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		s.issueAuthCode(w, r, oc)
 		return
 	case errors.Is(sessErr, db.ErrNoActiveSession), errors.Is(sessErr, db.ErrSessionExpired),
-		errors.Is(sessErr, db.ErrSessionUnauthorized):
-		// Expected: no usable session. ErrSessionUnauthorized means a prior
-		// enable_access attempt persisted session bytes but never finished
-		// the 2FA step; CheckSessionValid has already revoked that row, so
-		// the user self-recovers by falling through to enable_access here.
+		errors.Is(sessErr, db.ErrSessionUnauthorized), errors.Is(sessErr, db.ErrSessionRevoked):
+		// Expected: no usable session. ErrSessionUnauthorized/ErrSessionRevoked
+		// mean a prior session was unfinished or killed server-side;
+		// CheckSessionValid has already revoked that row, so the user
+		// self-recovers by falling through to enable_access here.
 	default:
 		// An unexpected storage error must not be silently treated as
 		// "no session" — that would divert the user into re-login (and a
