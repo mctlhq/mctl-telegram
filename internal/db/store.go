@@ -558,7 +558,13 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	if !tgUserID.Valid {
 		// Use a cancel-free context so the revoke still commits if the
 		// request context is already done — mirrors ClientPool.Borrow.
-		_, _ = s.RevokeActiveSession(context.WithoutCancel(ctx), userID)
+		// If the revoke fails, surface that error instead of
+		// ErrSessionUnauthorized: the caller must not route the user
+		// into enable_access while the dead partial row is still the
+		// newest loadable session, or reauth just reloads it.
+		if _, rErr := s.RevokeActiveSession(context.WithoutCancel(ctx), userID); rErr != nil {
+			return "", fmt.Errorf("revoke unauthorized session: %w", rErr)
+		}
 		return "", ErrSessionUnauthorized
 	}
 	if expires.Valid && expires.Time.Before(now) {

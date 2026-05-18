@@ -108,6 +108,17 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	select {
 	case <-e.ready:
 		if e.runErr != nil {
+			// client.Run can fail before the ready callback ever fires —
+			// a startup-time AUTH_KEY_UNREGISTERED / SESSION_REVOKED never
+			// reaches the post-fn classifier below, so classify it here too.
+			if sentinel := sessionErrorFor(e.runErr); sentinel != nil && p.Store != nil {
+				if rErr := p.revokeRejected(ctx, userID); rErr != nil {
+					slog.Error("telegram session rejected at startup, revoke failed", "user_id", userID, "err", rErr)
+					return fmt.Errorf("revoke rejected session: %w", rErr)
+				}
+				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
+				return fmt.Errorf("%w: %v", sentinel, e.runErr)
+			}
 			return fmt.Errorf("telegram client failed: %w", e.runErr)
 		}
 	case <-ctx.Done():
@@ -122,20 +133,33 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	if sentinel := sessionErrorFor(callErr); sentinel != nil && p.Store != nil {
 		// Telegram rejected the stored session — it was an unfinished
 		// enable_access session, or the session was revoked / the account
-		// deactivated server-side. Evict the pool entry and revoke the DB
-		// row under the same mutex acquire() takes, so a reconnect re-runs
-		// enable_access instead of reloading a dead session.
-		// context.WithoutCancel keeps the revoke alive even if the request
-		// context is already done.
-		revokeCtx := context.WithoutCancel(ctx)
-		_ = p.RemoveAtomic(userID, func() error {
-			_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID)
-			return rErr
-		})
+		// deactivated server-side. Revoke the DB row so a reconnect re-runs
+		// enable_access instead of reloading a dead session. If the revoke
+		// fails the row is still loadable, so do NOT report recovery — the
+		// caller must not loop the user through reauth against a dead row.
+		if rErr := p.revokeRejected(ctx, userID); rErr != nil {
+			slog.Error("telegram session rejected, revoke failed", "user_id", userID, "err", rErr)
+			return fmt.Errorf("revoke rejected session: %w", rErr)
+		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
 		return fmt.Errorf("%w: %v", sentinel, callErr)
 	}
 	return callErr
+}
+
+// revokeRejected evicts the pool entry and revokes the DB session for a user
+// whose stored session Telegram rejected. The eviction and the DB revoke run
+// under the same mutex acquire() takes, so a concurrent reconnect cannot
+// reload the dead session. context.WithoutCancel keeps the revoke alive even
+// if the request context is already done. Returns nil when the row was
+// revoked; a non-nil error means the revoke failed and the row may still be
+// loadable.
+func (p *ClientPool) revokeRejected(ctx context.Context, userID int64) error {
+	revokeCtx := context.WithoutCancel(ctx)
+	return p.RemoveAtomic(userID, func() error {
+		_, rErr := p.Store.RevokeActiveSession(revokeCtx, userID)
+		return rErr
+	})
 }
 
 func (p *ClientPool) acquire(userID int64) (*entry, error) {

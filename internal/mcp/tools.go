@@ -145,7 +145,7 @@ Empty result means no unread messages match (including: peer has unread but text
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
-				s.audit(ctx, id, "get_unread_messages", stringArg(args, "peer", ""), bridgeResultErr(res))
+				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(stringArg(args, "peer", "")), bridgeResultErr(res))
 				return res, err2
 			}
 		}
@@ -931,7 +931,10 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		attrs = append(attrs, "peer", peer)
 	}
 	if err != nil {
-		slog.Warn("mcp tool call", append(attrs, "err", err)...)
+		// Resolution failures format the user-supplied peer verbatim
+		// (`peer %q not found`); scrub @handles / phone numbers so a raw
+		// dialog identifier never reaches centralized logs.
+		slog.Warn("mcp tool call", append(attrs, "err", audit.ScrubText(msg))...)
 	} else {
 		slog.Info("mcp tool call", attrs...)
 	}
