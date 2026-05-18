@@ -393,7 +393,26 @@ func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason st
 // nullable) survive — they reference the user, not the account. Returns the
 // number of rows removed.
 func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, error) {
-	res, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Count rows that are still active BEFORE the delete. Only those count as
+	// "revoked by delete" for the metric — rows already carrying a revoked_at
+	// were revoked earlier for another reason and must not inflate
+	// mctl_sessions_revoked_total{reason="delete"}. Doing the count and the
+	// delete in one transaction keeps them race-free.
+	var activeRows int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	).Scan(&activeRows); err != nil {
+		return 0, fmt.Errorf("delete account: count active: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM telegram_accounts WHERE user_id = $1`,
 		userID,
 	)
@@ -401,8 +420,12 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, fmt.Errorf("delete account: %w", err)
 	}
 	rows, _ := res.RowsAffected()
-	if rows > 0 && s.metrics != nil {
-		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(rows))
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("delete account: commit: %w", err)
+	}
+	if activeRows > 0 && s.metrics != nil {
+		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(activeRows))
 	}
 	return rows, nil
 }

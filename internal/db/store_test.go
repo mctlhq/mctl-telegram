@@ -3,8 +3,12 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // TestListIdentities checks the roster: fresh widget-authenticated users appear
@@ -32,6 +36,135 @@ func TestListIdentities(t *testing.T) {
 		if r.AccessTier != "" {
 			t.Errorf("fresh identity %d should have empty access_tier, got %q", r.TelegramID, r.AccessTier)
 		}
+	}
+}
+
+// seedAccount inserts a telegram_accounts row with explicit lifecycle
+// timestamps. A nil pointer leaves that column NULL.
+func seedAccount(t *testing.T, s *Store, userID int64, lastUsed, expiresAt, revokedAt *time.Time) {
+	t.Helper()
+	if _, err := s.DB.ExecContext(context.Background(),
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at, expires_at, revoked_at)
+		 VALUES($1,$2,$3,$4,$5)`,
+		userID, []byte("blob"), lastUsed, expiresAt, revokedAt,
+	); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+}
+
+func TestSweepIdleSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "idle-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	now := time.Now().UTC()
+	old := now.Add(-40 * 24 * time.Hour)   // older than the 30d idle TTL
+	fresh := now.Add(-24 * time.Hour)      // well within the idle TTL
+	revoked := now.Add(-time.Hour)
+
+	seedAccount(t, s, uid, &old, nil, nil)        // active + idle  -> swept
+	seedAccount(t, s, uid, &fresh, nil, nil)      // active + fresh -> kept
+	seedAccount(t, s, uid, &old, nil, &revoked)   // already revoked -> ignored
+
+	n, err := s.SweepIdleSessions(ctx)
+	if err != nil {
+		t.Fatalf("SweepIdleSessions: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("SweepIdleSessions revoked %d rows, want 1", n)
+	}
+	// The fresh row must still be active.
+	var active int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id=$1 AND revoked_at IS NULL`, uid,
+	).Scan(&active); err != nil {
+		t.Fatalf("count active: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("after idle sweep %d rows still active, want 1", active)
+	}
+}
+
+func TestSweepAbsoluteSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "abs-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	now := time.Now().UTC()
+	past := now.Add(-time.Hour)            // expires_at in the past
+	future := now.Add(30 * 24 * time.Hour) // expires_at well in the future
+	revoked := now.Add(-time.Hour)
+
+	seedAccount(t, s, uid, &now, &past, nil)        // active + expired -> swept
+	seedAccount(t, s, uid, &now, &future, nil)      // active + valid   -> kept
+	seedAccount(t, s, uid, &now, nil, nil)          // active + no expiry -> kept
+	seedAccount(t, s, uid, &now, &past, &revoked)   // already revoked  -> ignored
+
+	n, err := s.SweepAbsoluteSessions(ctx)
+	if err != nil {
+		t.Fatalf("SweepAbsoluteSessions: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("SweepAbsoluteSessions revoked %d rows, want 1", n)
+	}
+}
+
+func TestCountActiveSessions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "count-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	now := time.Now().UTC()
+	recent := now.Add(-10 * time.Minute) // used within the last hour
+	stale := now.Add(-2 * time.Hour)     // used more than an hour ago
+	revoked := now.Add(-time.Minute)
+
+	seedAccount(t, s, uid, &recent, nil, nil)      // active + recent     -> counted
+	seedAccount(t, s, uid, nil, nil, nil)          // active + never used -> counted
+	seedAccount(t, s, uid, &stale, nil, nil)       // active + stale      -> not counted
+	seedAccount(t, s, uid, &recent, nil, &revoked) // revoked             -> not counted
+
+	n, err := s.CountActiveSessions(ctx)
+	if err != nil {
+		t.Fatalf("CountActiveSessions: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("CountActiveSessions = %d, want 2 (recent + never-used)", n)
+	}
+}
+
+// TestHardDeleteAccount_DeleteMetricCountsOnlyActiveRows pins the fix for the
+// review finding: mctl_sessions_revoked_total{reason="delete"} must count only
+// the rows that were still active at delete time, not already-revoked rows.
+func TestHardDeleteAccount_DeleteMetricCountsOnlyActiveRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithMetrics(metrics.New())
+	uid, err := s.EnsureUser(ctx, "del-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	now := time.Now().UTC()
+	revoked := now.Add(-time.Hour)
+	seedAccount(t, s, uid, &now, nil, nil)        // active
+	seedAccount(t, s, uid, &now, nil, nil)        // active
+	seedAccount(t, s, uid, &now, nil, &revoked)   // already revoked
+
+	removed, err := s.HardDeleteAccount(ctx, uid)
+	if err != nil {
+		t.Fatalf("HardDeleteAccount: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("HardDeleteAccount removed %d rows, want 3", removed)
+	}
+	got := testutil.ToFloat64(s.metrics.SessionsRevokedTotal.WithLabelValues("delete"))
+	if got != 2 {
+		t.Fatalf("delete revocation metric = %v, want 2 (only the active rows)", got)
 	}
 }
 
