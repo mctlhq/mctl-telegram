@@ -297,16 +297,23 @@ func (t *jwksFilterTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 // filterJWKS drops keys on unsupported curves. It returns the (possibly
 // rewritten) body and whether anything changed. A body that is not a JWKS — no
-// top-level "keys" array — is returned untouched.
+// top-level "keys" array — is returned untouched. Any other top-level fields
+// are preserved.
 func filterJWKS(body []byte) ([]byte, bool) {
-	var doc struct {
-		Keys []json.RawMessage `json:"keys"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil || doc.Keys == nil {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return body, false
 	}
-	kept := make([]json.RawMessage, 0, len(doc.Keys))
-	for _, k := range doc.Keys {
+	rawKeys, ok := doc["keys"]
+	if !ok {
+		return body, false
+	}
+	var keys []json.RawMessage
+	if err := json.Unmarshal(rawKeys, &keys); err != nil {
+		return body, false
+	}
+	kept := make([]json.RawMessage, 0, len(keys))
+	for _, k := range keys {
 		var meta struct {
 			Crv string `json:"crv"`
 		}
@@ -315,12 +322,15 @@ func filterJWKS(body []byte) ([]byte, bool) {
 		}
 		kept = append(kept, k)
 	}
-	if len(kept) == len(doc.Keys) {
+	if len(kept) == len(keys) {
 		return body, false
 	}
-	out, err := json.Marshal(struct {
-		Keys []json.RawMessage `json:"keys"`
-	}{Keys: kept})
+	newKeys, err := json.Marshal(kept)
+	if err != nil {
+		return body, false
+	}
+	doc["keys"] = newKeys
+	out, err := json.Marshal(doc)
 	if err != nil {
 		return body, false
 	}
