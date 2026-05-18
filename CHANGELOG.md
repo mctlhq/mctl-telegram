@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.16.2](https://github.com/mctlhq/mctl-telegram/compare/0.16.1...0.16.2) (2026-05-18)
+## [0.17.0](https://github.com/mctlhq/mctl-telegram/compare/0.16.1...0.17.0) (2026-05-18)
 
 
 ### Bug Fixes
