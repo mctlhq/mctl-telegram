@@ -198,12 +198,14 @@ The two-step flow exists so an LLM cannot quietly drift the payload between agre
 		startedAt := time.Now()
 		id := auth.From(ctx)
 		if id == nil {
+			s.audit(ctx, id, "prepare_send_message", "", errors.New("authentication required"), startedAt)
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
 		text := stringArg(args, "text", "")
 		if peer == "" || text == "" {
+			s.audit(ctx, id, "prepare_send_message", "", errors.New("peer and text are required"), startedAt)
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)

@@ -30,6 +30,9 @@ func Middleware(p Provider, required bool, m *metrics.Registry) func(http.Handle
 				return
 			}
 			if id == nil && required {
+				if m != nil {
+					m.AuthFailuresTotal.WithLabelValues("no_token", providerLabel).Inc()
+				}
 				w.Header().Set("WWW-Authenticate", `Bearer realm="mctl-telegram"`)
 				writeJSONError(w, http.StatusUnauthorized, "authentication required")
 				return

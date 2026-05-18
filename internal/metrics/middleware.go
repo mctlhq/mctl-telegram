@@ -85,3 +85,12 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	return nil, nil, fmt.Errorf("metrics: underlying ResponseWriter does not implement http.Hijacker")
 }
+
+// Unwrap returns the underlying ResponseWriter. http.ResponseController (Go
+// 1.20+) uses this to discover optional interfaces — such as SetReadDeadline
+// and SetWriteDeadline — that are implemented by the server's native writer
+// but not re-declared on this wrapper. Without Unwrap, ResponseController
+// would be unable to reach those methods through the wrapper layer.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}

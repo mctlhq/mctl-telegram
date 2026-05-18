@@ -114,9 +114,13 @@ func main() {
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
 	mux.Use(middleware.RealIP)
+	// HTTPMiddleware is placed before Recoverer so that panics recovered as
+	// HTTP 500 by Recoverer are still captured in mctl_http_requests_total.
+	// Recoverer writes the 500 status, which the metrics responseWriter wrapper
+	// sees because it sits on the outside of the Recoverer layer.
+	mux.Use(m.HTTPMiddleware())
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
-	mux.Use(m.HTTPMiddleware())
 
 	// Authorization server URL — for the Telegram-native local-jwt path
 	// (default), this is the same as PublicBaseURL: mctl-telegram is its own
@@ -195,6 +199,13 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ConnContext stores the TCP peer address in the request context before
+		// any middleware runs. metricsHandler reads socketPeerKey to enforce the
+		// CIDR allowlist against the real socket address — not the r.RemoteAddr
+		// value that middleware.RealIP rewrites from X-Forwarded-For headers.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			return context.WithValue(ctx, socketPeerKey{}, c.RemoteAddr().String())
+		},
 	}
 
 	errCh := make(chan error, 1)
@@ -221,12 +232,12 @@ func main() {
 // Kubernetes PodMonitor scrape patterns where NetworkPolicy provides isolation).
 // When set, requests from outside the CIDR receive HTTP 403.
 //
-// The CIDR guard is defense-in-depth only: it matches r.RemoteAddr, which the
-// chi RealIP middleware rewrites from X-Forwarded-For / X-Real-IP headers. A
-// client that can reach this endpoint through a proxy could forge those
-// headers. The authoritative control MUST be a NetworkPolicy that restricts
-// ingress to /metrics to the monitoring namespace; the CIDR check is a
-// secondary belt.
+// The CIDR check uses the real TCP socket peer address stored in context by the
+// http.Server ConnContext hook — not r.RemoteAddr, which middleware.RealIP
+// rewrites from X-Forwarded-For / X-Real-IP headers. A client cannot bypass
+// the CIDR guard by forging those headers. The authoritative control MUST
+// still be a NetworkPolicy that restricts ingress to /metrics to the monitoring
+// namespace; the CIDR check is a secondary belt.
 //
 // A misconfigured allowCIDR fails CLOSED — the endpoint rejects every request
 // rather than silently exposing platform metrics.
@@ -243,9 +254,17 @@ func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+		// Use the real socket peer stored by ConnContext — not r.RemoteAddr,
+		// which middleware.RealIP may have overwritten with a header value.
+		// A client that forges X-Forwarded-For cannot bypass the CIDR check
+		// because the TCP-level address is set before any request handling.
+		rawAddr, _ := r.Context().Value(socketPeerKey{}).(string)
+		if rawAddr == "" {
+			rawAddr = r.RemoteAddr // fallback for tests that bypass ConnContext
+		}
+		host, _, splitErr := net.SplitHostPort(rawAddr)
 		if splitErr != nil {
-			host = r.RemoteAddr
+			host = rawAddr
 		}
 		ip := net.ParseIP(host)
 		if ip == nil || !ipNet.Contains(ip) {
@@ -255,6 +274,11 @@ func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 		h.ServeHTTP(w, r)
 	}
 }
+
+// socketPeerKey is the context key used by the http.Server ConnContext hook to
+// store the real TCP peer address before middleware.RealIP can overwrite
+// r.RemoteAddr with X-Forwarded-For values.
+type socketPeerKey struct{}
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
