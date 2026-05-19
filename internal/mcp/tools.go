@@ -914,6 +914,9 @@ func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
 	if friendly := sessionErrText(err); friendly != "" {
 		return mcplib.NewToolResultError(friendly)
 	}
+	if res := mtprotoErrResult(tool, err); res != nil {
+		return res
+	}
 	return toolErr("%s: %v", tool, err)
 }
 
