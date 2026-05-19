@@ -1044,6 +1044,19 @@ func TestExchangeConnect_UnknownCode(t *testing.T) {
 	}
 }
 
+// TestExchangeConnect_WrongClientID confirms that ExchangeConnect rejects any
+// client_id that is not ConnectClientID.
+func TestExchangeConnect_WrongClientID(t *testing.T) {
+	srv := newTestServer(t)
+	_, err := srv.ExchangeConnect(context.Background(), "some-code", strings.Repeat("a", 43), "other-client", testIssuer+"/telegram/connect/done")
+	if err == nil {
+		t.Error("ExchangeConnect should reject a client_id that is not ConnectClientID")
+	}
+	if !strings.Contains(err.Error(), "client_id") {
+		t.Errorf("error should mention client_id, got: %v", err)
+	}
+}
+
 // --- helpers ---
 
 // codeState carries the short-lived authorization_code obtained by driving the

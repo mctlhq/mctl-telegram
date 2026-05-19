@@ -408,21 +408,48 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	if code == "" || verifier == "" || clientID == "" || redirectURI == "" {
 		return "", errors.New("invalid_request: code, verifier, client_id, redirect_uri are required")
 	}
+	if clientID != ConnectClientID {
+		return "", fmt.Errorf("invalid_request: client_id must be %s", ConnectClientID)
+	}
 	if err := validPKCEString(verifier); err != nil {
 		return "", fmt.Errorf("invalid_request: code_verifier %w", err)
 	}
 
-	s.mu.Lock()
-	entry, ok := s.codes[code]
-	if ok {
-		delete(s.codes, code)
-	}
-	s.mu.Unlock()
-	if !ok {
-		return "", errors.New("invalid_grant: code not found, expired, or already used")
-	}
-	if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
-		return "", errors.New("invalid_grant: code expired")
+	var entry *authCode
+	if s.useDB {
+		dbCode, err := s.store.ConsumeOAuthCode(ctx, code, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
+		if err != nil {
+			return "", fmt.Errorf("server_error: could not redeem code: %w", err)
+		}
+		entry = &authCode{
+			ClientID:            dbCode.ClientID,
+			RedirectURI:         dbCode.RedirectURI,
+			CodeChallenge:       dbCode.CodeChallenge,
+			CodeChallengeMethod: dbCode.ChallengeMethod,
+			TelegramID:          dbCode.TelegramID,
+			TelegramUsername:    dbCode.TelegramUsername,
+			Scope:               dbCode.Scope,
+			CreatedAt:           dbCode.CreatedAt,
+		}
+	} else {
+		s.mu.Lock()
+		var ok bool
+		entry, ok = s.codes[code]
+		if ok {
+			if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
+				delete(s.codes, code)
+				ok = false
+			} else {
+				delete(s.codes, code)
+			}
+		}
+		s.mu.Unlock()
+		if !ok {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
 	}
 	if entry.ClientID != clientID {
 		return "", errors.New("invalid_grant: client_id mismatch")
@@ -1604,19 +1631,22 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 			// Unexpected DB error — fail closed.
 			return fmt.Errorf("client validation error: %w", err)
 		}
-		// Not found in DB — fall through to implicit-client check below.
-	} else {
-		s.mu.Lock()
-		reg, ok := s.clients[clientID]
-		s.mu.Unlock()
-		if ok {
-			for _, u := range reg.RedirectURIs {
-				if u == redirectURI {
-					return nil
-				}
+		// Not found in DB — fall through to in-memory check below so that
+		// pre-registered built-in clients (e.g. ConnectClientID) are
+		// recognised even when useDB is true.
+	}
+	// In-memory map: covers non-DB deployments and pre-registered built-in
+	// clients that are not persisted to the DB.
+	s.mu.Lock()
+	reg, ok := s.clients[clientID]
+	s.mu.Unlock()
+	if ok {
+		for _, u := range reg.RedirectURIs {
+			if u == redirectURI {
+				return nil
 			}
-			return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
 		}
+		return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
 	}
 	if !s.cfg.AllowImplicitClient {
 		return fmt.Errorf("unknown client_id %q (call /oauth/register first)", clientID)
