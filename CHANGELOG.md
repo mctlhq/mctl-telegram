@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.1](https://github.com/mctlhq/mctl-telegram/compare/0.20.0...0.20.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **oauth:** drop admin:users from public scopes_supported ([1a2680d](https://github.com/mctlhq/mctl-telegram/commit/1a2680d139521a1d7937cf2b6e9065ccacaa06c7))
+* **oauth:** drop admin:users from public scopes_supported ([153beb3](https://github.com/mctlhq/mctl-telegram/commit/153beb312651e1abebba532ca275dca3762f880a))
+
 ## [0.20.0](https://github.com/mctlhq/mctl-telegram/compare/0.19.0...0.20.0) (2026-05-19)
 
 
