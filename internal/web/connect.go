@@ -43,11 +43,20 @@ type ConnectConfig struct {
 	// ClaudeAIConnectorURL is the link rendered on the success page.
 	// Defaults to "https://claude.ai/settings/integrations".
 	ClaudeAIConnectorURL string
+	// ClientID is the OAuth client_id for the self-connect flow. Pass
+	// oauth.ConnectClientID from the call site; no default is applied so a
+	// missing value surfaces immediately at link generation.
+	ClientID string
+	// MCPPath is the path component of the MCP URL shown on the success page.
+	// Defaults to "/mcp" when empty.
+	MCPPath string
+	// MaxSessions caps the number of pending connect sessions held in memory.
+	// When > 0 and the cap is reached, the oldest session is evicted to make
+	// room. 0 means no cap.
+	MaxSessions int
 	// clock is injectable for tests; nil means time.Now.
 	clock func() time.Time
 }
-
-const connectClientID = "mctl_self_connect"
 
 // connectSession holds the PKCE verifier for one pending /telegram/connect flow.
 type connectSession struct {
@@ -62,6 +71,9 @@ type ConnectServer struct {
 	oauthSrv    OAuthExchanger
 	codeTTL     time.Duration
 	claudeURL   string
+	clientID    string
+	mcpPath     string
+	maxSessions int
 	clock       func() time.Time
 
 	mu       sync.Mutex
@@ -76,6 +88,9 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 	if cfg.ClaudeAIConnectorURL == "" {
 		cfg.ClaudeAIConnectorURL = "https://claude.ai/settings/integrations"
 	}
+	if cfg.MCPPath == "" {
+		cfg.MCPPath = "/mcp"
+	}
 	clk := cfg.clock
 	if clk == nil {
 		clk = time.Now
@@ -86,6 +101,9 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 		oauthSrv:    cfg.OAuthServer,
 		codeTTL:     cfg.CodeTTL,
 		claudeURL:   cfg.ClaudeAIConnectorURL,
+		clientID:    cfg.ClientID,
+		mcpPath:     cfg.MCPPath,
+		maxSessions: cfg.MaxSessions,
 		clock:       clk,
 		sessions:    map[string]*connectSession{},
 	}
@@ -101,6 +119,18 @@ func (s *ConnectServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	state := connectRandomToken(16)
 
 	s.mu.Lock()
+	if s.maxSessions > 0 && len(s.sessions) >= s.maxSessions {
+		// Evict the oldest pending session to stay within the cap.
+		var oldestKey string
+		var oldestTime time.Time
+		for k, sess := range s.sessions {
+			if oldestKey == "" || sess.createdAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = sess.createdAt
+			}
+		}
+		delete(s.sessions, oldestKey)
+	}
 	s.sessions[state] = &connectSession{
 		verifier:  verifier,
 		createdAt: s.clock(),
@@ -108,7 +138,7 @@ func (s *ConnectServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	authorizeURL := s.issuer + "/oauth/authorize?" + url.Values{
-		"client_id":             {connectClientID},
+		"client_id":             {s.clientID},
 		"redirect_uri":          {s.redirectURI},
 		"response_type":         {"code"},
 		"code_challenge":        {challenge},
@@ -152,7 +182,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, connectClientID, s.redirectURI)
+	_, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
 	if err != nil {
 		slog.Error("connect: ExchangeConnect failed", "err", err)
 		renderConnectError(w, "Could not confirm your Telegram session. Please try again.", s.issuer+"/telegram/connect")
@@ -161,7 +191,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 
 	renderConnectSuccess(w, connectSuccessData{
 		ClaudeURL: s.claudeURL,
-		MCPURL:    s.issuer + "/mcp",
+		MCPURL:    s.issuer + s.mcpPath,
 	})
 }
 

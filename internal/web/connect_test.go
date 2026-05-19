@@ -31,11 +31,38 @@ func newTestConnectServer(t *testing.T, opts ...func(*ConnectConfig)) *ConnectSe
 		OAuthServer:          &stubExchanger{},
 		CodeTTL:              10 * time.Minute,
 		ClaudeAIConnectorURL: "https://claude.ai/settings/integrations",
+		ClientID:             "test-connect-client",
+		MCPPath:              "/mcp",
 	}
 	for _, o := range opts {
 		o(&cfg)
 	}
 	return NewConnectServer(cfg)
+}
+
+// TestHandleConnect_MaxSessionsCap confirms that when MaxSessions is set,
+// the oldest pending session is evicted when the cap is reached.
+func TestHandleConnect_MaxSessionsCap(t *testing.T) {
+	srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+		cfg.MaxSessions = 2
+	})
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("GET", "/telegram/connect", nil)
+		rec := httptest.NewRecorder()
+		srv.HandleConnect(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HandleConnect call %d status = %d", i+1, rec.Code)
+		}
+	}
+
+	srv.mu.Lock()
+	n := len(srv.sessions)
+	srv.mu.Unlock()
+
+	if n != 2 {
+		t.Errorf("expected %d sessions after cap eviction, got %d", 2, n)
+	}
 }
 
 // TestHandleConnect_GeneratesDistinctPKCEPairs confirms that successive calls

@@ -171,6 +171,8 @@ func main() {
 			OAuthServer:          oauthSrv,
 			CodeTTL:              cfg.OAUTHCodeTTL,
 			ClaudeAIConnectorURL: "https://claude.ai/settings/integrations",
+			ClientID:             oauth.ConnectClientID,
+			MCPPath:              cfg.MCPPath,
 		})
 		mux.Get("/telegram/connect", connectSrv.HandleConnect)
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
