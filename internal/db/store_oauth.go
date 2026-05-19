@@ -77,9 +77,10 @@ func (s *Store) InsertOAuthPending(ctx context.Context, p OAuthPendingAuth) erro
 	return nil
 }
 
-// EvictOldestOAuthPendingIfOver deletes the oldest non-expired pending-auth row
-// when the live count (created within ttl) is at or above max. No-op when max
-// is zero. Used by handleAuthorize to enforce MaxPendingAuth on the DB path.
+// EvictOldestOAuthPendingIfOver deletes the oldest live (non-expired)
+// pending-auth row when the live count is at or above max. No-op when max is
+// zero. Both the candidate selection and the live-count check use the same
+// cutoff so an expired row is never mistakenly evicted in place of a live one.
 func (s *Store) EvictOldestOAuthPendingIfOver(ctx context.Context, max int, ttl time.Duration) error {
 	if max <= 0 {
 		return nil
@@ -88,7 +89,9 @@ func (s *Store) EvictOldestOAuthPendingIfOver(ctx context.Context, max int, ttl 
 	_, err := s.DB.ExecContext(ctx,
 		`DELETE FROM oauth_pending_auth
 		  WHERE state = (
-		    SELECT state FROM oauth_pending_auth ORDER BY created_at ASC LIMIT 1
+		    SELECT state FROM oauth_pending_auth
+		     WHERE created_at >= $1
+		     ORDER BY created_at ASC LIMIT 1
 		  )
 		  AND (SELECT COUNT(*) FROM oauth_pending_auth WHERE created_at >= $1) >= $2`,
 		cutoff, int64(max),
@@ -99,9 +102,9 @@ func (s *Store) EvictOldestOAuthPendingIfOver(ctx context.Context, max int, ttl 
 	return nil
 }
 
-// EvictOldestOAuthCodeIfOver deletes the oldest non-expired auth-code row when
-// the live count is at or above max. No-op when max is zero. Used by
-// issueAuthCode to enforce MaxAuthCodes on the DB path.
+// EvictOldestOAuthCodeIfOver deletes the oldest live (non-expired) auth-code
+// row when the live count is at or above max. No-op when max is zero. Both the
+// candidate selection and the live-count check use the same cutoff.
 func (s *Store) EvictOldestOAuthCodeIfOver(ctx context.Context, max int, ttl time.Duration) error {
 	if max <= 0 {
 		return nil
@@ -110,7 +113,9 @@ func (s *Store) EvictOldestOAuthCodeIfOver(ctx context.Context, max int, ttl tim
 	_, err := s.DB.ExecContext(ctx,
 		`DELETE FROM oauth_auth_codes
 		  WHERE code = (
-		    SELECT code FROM oauth_auth_codes ORDER BY created_at ASC LIMIT 1
+		    SELECT code FROM oauth_auth_codes
+		     WHERE created_at >= $1
+		     ORDER BY created_at ASC LIMIT 1
 		  )
 		  AND (SELECT COUNT(*) FROM oauth_auth_codes WHERE created_at >= $1) >= $2`,
 		cutoff, int64(max),
@@ -142,25 +147,21 @@ func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 	return nil
 }
 
-// ConsumeOAuthPending deletes and returns the pending entry for the given
-// state. Returns ErrOAuthNotFound when the row is absent or expired (older
-// than ttl). Expiry is checked on read so callers are not subject to sweeper
-// timing.
+// ConsumeOAuthPending atomically deletes and returns the pending entry for the
+// given state. Returns ErrOAuthNotFound when the row is absent or expired
+// (older than ttl). DELETE ... RETURNING is atomic at the DB level regardless
+// of isolation, eliminating the TOCTOU race that a SELECT + DELETE transaction
+// at READ COMMITTED would have.
 func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.Duration) (*OAuthPendingAuth, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("consume oauth_pending_auth: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+	cutoff := time.Now().UTC().Add(-ttl)
 	var p OAuthPendingAuth
 	var clientState, scope sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT state, client_id, redirect_uri, client_state, code_challenge,
-		        challenge_method, scope, nonce, tg_code_verifier, created_at
-		   FROM oauth_pending_auth
-		  WHERE state = $1`,
-		state,
+	err := s.DB.QueryRowContext(ctx,
+		`DELETE FROM oauth_pending_auth
+		  WHERE state = $1 AND created_at >= $2
+		RETURNING state, client_id, redirect_uri, client_state, code_challenge,
+		          challenge_method, scope, nonce, tg_code_verifier, created_at`,
+		state, cutoff,
 	).Scan(
 		&p.State, &p.ClientID, &p.RedirectURI, &clientState, &p.CodeChallenge,
 		&p.ChallengeMethod, &scope, &p.Nonce, &p.TGCodeVerifier, &p.CreatedAt,
@@ -169,31 +170,21 @@ func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.
 		return nil, ErrOAuthNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("consume oauth_pending_auth: query: %w", err)
+		return nil, fmt.Errorf("consume oauth_pending_auth: %w", err)
 	}
 	p.ClientState = clientState.String
 	p.Scope = scope.String
-
-	// Defensive TTL check on read — the sweeper may not have run yet.
-	if time.Since(p.CreatedAt) > ttl {
-		// Delete the expired row and report not-found.
-		_, _ = tx.ExecContext(ctx, `DELETE FROM oauth_pending_auth WHERE state = $1`, state)
-		_ = tx.Commit()
-		return nil, ErrOAuthNotFound
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_pending_auth WHERE state = $1`, state); err != nil {
-		return nil, fmt.Errorf("consume oauth_pending_auth: delete: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("consume oauth_pending_auth: commit: %w", err)
-	}
 	return &p, nil
 }
 
+// ErrOAuthCodeConflict is returned by InsertOAuthCode when the code token
+// already exists. A collision with randomToken(32) is astronomically unlikely
+// but the caller should treat it as an internal error and abort.
+var ErrOAuthCodeConflict = errors.New("oauth: auth code already exists")
+
 // InsertOAuthCode persists an issued authorization code to oauth_auth_codes.
 func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode) error {
-	_, err := s.DB.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO oauth_auth_codes
 			(code, client_id, redirect_uri, code_challenge, challenge_method,
 			 telegram_id, telegram_username, scope, created_at)
@@ -205,28 +196,27 @@ func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode) error {
 	if err != nil {
 		return fmt.Errorf("insert oauth_auth_codes: %w", err)
 	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrOAuthCodeConflict
+	}
 	return nil
 }
 
-// ConsumeOAuthCode deletes and returns the authorization code entry. Returns
-// ErrOAuthNotFound when the row is absent, expired, or already consumed.
-// Expiry is checked on read against ttl so callers are not subject to sweeper
-// timing.
+// ConsumeOAuthCode atomically deletes and returns the authorization code
+// entry. Returns ErrOAuthNotFound when the row is absent, expired, or already
+// consumed. DELETE ... RETURNING is atomic regardless of isolation, eliminating
+// the TOCTOU race where two concurrent /oauth/token requests for the same code
+// could both succeed and receive separate access tokens.
 func (s *Store) ConsumeOAuthCode(ctx context.Context, code string, ttl time.Duration) (*OAuthCode, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("consume oauth_auth_codes: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+	cutoff := time.Now().UTC().Add(-ttl)
 	var c OAuthCode
 	var tgUsername, scope sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT code, client_id, redirect_uri, code_challenge, challenge_method,
-		        telegram_id, telegram_username, scope, created_at
-		   FROM oauth_auth_codes
-		  WHERE code = $1`,
-		code,
+	err := s.DB.QueryRowContext(ctx,
+		`DELETE FROM oauth_auth_codes
+		  WHERE code = $1 AND created_at >= $2
+		RETURNING code, client_id, redirect_uri, code_challenge, challenge_method,
+		          telegram_id, telegram_username, scope, created_at`,
+		code, cutoff,
 	).Scan(
 		&c.Code, &c.ClientID, &c.RedirectURI, &c.CodeChallenge, &c.ChallengeMethod,
 		&c.TelegramID, &tgUsername, &scope, &c.CreatedAt,
@@ -235,24 +225,10 @@ func (s *Store) ConsumeOAuthCode(ctx context.Context, code string, ttl time.Dura
 		return nil, ErrOAuthNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("consume oauth_auth_codes: query: %w", err)
+		return nil, fmt.Errorf("consume oauth_auth_codes: %w", err)
 	}
 	c.TelegramUsername = tgUsername.String
 	c.Scope = scope.String
-
-	// Defensive TTL check on read.
-	if time.Since(c.CreatedAt) > ttl {
-		_, _ = tx.ExecContext(ctx, `DELETE FROM oauth_auth_codes WHERE code = $1`, code)
-		_ = tx.Commit()
-		return nil, ErrOAuthNotFound
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_auth_codes WHERE code = $1`, code); err != nil {
-		return nil, fmt.Errorf("consume oauth_auth_codes: delete: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("consume oauth_auth_codes: commit: %w", err)
-	}
 	return &c, nil
 }
 

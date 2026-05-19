@@ -672,7 +672,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthorizeError(w, "invalid_request", "scope exceeds 1024 bytes")
 		return
 	}
-	if err := s.validateClient(clientID, redirectURI); err != nil {
+	if err := s.validateClient(r.Context(), clientID, redirectURI); err != nil {
 		s.writeAuthorizeError(w, "invalid_client", err.Error())
 		return
 	}
@@ -1498,10 +1498,10 @@ func isLoopbackHost(h string) bool {
 // exchange a hijacked code), shipping a URL fragment to an attacker-controlled
 // host would still leak the authorization_code briefly. Constraining the host
 // closes that window.
-func (s *Server) validateClient(clientID, redirectURI string) error {
+func (s *Server) validateClient(ctx context.Context, clientID, redirectURI string) error {
 	if s.useDB {
 		// Look up registration in the Postgres table.
-		dbReg, err := s.store.GetClientReg(context.Background(), clientID)
+		dbReg, err := s.store.GetClientReg(ctx, clientID)
 		if err == nil {
 			for _, u := range dbReg.RedirectURIs {
 				if u == redirectURI {
