@@ -798,6 +798,34 @@ func TestAuthorizationServerMetadata(t *testing.T) {
 	if body["authorization_endpoint"] != testIssuer+"/oauth/authorize" {
 		t.Errorf("auth endpoint = %v", body["authorization_endpoint"])
 	}
+	// scopes_supported is the contract DCR clients (ChatGPT, claude.ai)
+	// read to decide which scopes to request. admin:users must NOT
+	// appear here: it's implicit-privileged (ResolveScopes grants it
+	// based on TG_LOGIN_ADMINS), and advertising it caused client-tier
+	// users to see "not all requested permissions were granted" warnings
+	// because they cannot ever obtain that scope through DCR.
+	scopes, _ := body["scopes_supported"].([]any)
+	got := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		str, _ := s.(string)
+		got[str] = true
+	}
+	for _, want := range []string{
+		"telegram:dialogs:read",
+		"telegram:messages:read",
+		"telegram:messages:send",
+		"telegram:messages:pin",
+	} {
+		if !got[want] {
+			t.Errorf("scopes_supported missing %q", want)
+		}
+	}
+	if got["admin:users"] {
+		t.Errorf("scopes_supported must not include admin:users (privileged, not DCR-negotiable)")
+	}
+	if len(scopes) != 4 {
+		t.Errorf("scopes_supported len = %d, want 4", len(scopes))
+	}
 }
 
 // --- helpers ---

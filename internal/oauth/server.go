@@ -607,12 +607,20 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
+		// scopes_supported intentionally omits admin:users — that scope is
+		// implicit-privileged (granted by ResolveScopes based on
+		// TG_LOGIN_ADMINS membership, not negotiable via DCR). Advertising
+		// it would cause DCR clients (ChatGPT, claude.ai) to request it
+		// for every user; client-tier users would then see "not all
+		// requested permissions were granted" warnings even though the
+		// token works correctly. Admins still receive admin:users in the
+		// JWT scopes claim; MCP per-tool gates check the claim, not this
+		// metadata field.
 		"scopes_supported": []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
-			"admin:users",
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
