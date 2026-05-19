@@ -366,7 +366,7 @@
     border: 1px solid var(--border);
     border-radius: var(--mctl-radius-lg);
     padding: 0;
-    overflow: hidden;
+    overflow-x: auto;
     font-size: 13px;
     line-height: 1.55;
     color: var(--text-dim);
@@ -460,7 +460,7 @@
     font-size: 13.5px;
     border: 1px solid var(--border);
     border-radius: var(--mctl-radius-lg);
-    overflow: hidden;
+    overflow-x: auto;
   }
   .tbl thead th {
     text-align: left;
@@ -632,6 +632,24 @@
     .tbl thead th, .tbl tbody td { padding: 8px 10px; }
     ol.steps > li { padding: 12px 14px 12px 50px; }
   }
+  @media (max-width: 768px) {
+    .wrap { padding: 0 20px; }
+    .topbar .meta .hide-md { display: none; }
+    .theme-toggle { width: 44px; height: 44px; }
+    .accent-swatch { min-width: 44px; min-height: 44px; padding: 0; }
+  }
+  @media (max-width: 480px) {
+    .wrap { padding: 0 14px; }
+    h1 { font-size: 24px; letter-spacing: -.015em; }
+    .lead { font-size: 14px; }
+    .endpoint .url { font-size: 14px; }
+    ol.steps > li { padding: 10px 12px 10px 44px; }
+    ol.steps > li::before { left: 10px; top: 10px; width: 26px; height: 26px; font-size: 11px; }
+    pre code { font-size: 12px; }
+    .tbl { font-size: 12px; }
+    section { margin-top: 40px; }
+    .topbar { margin-bottom: 36px; }
+  }
 </style>
 </head>
 <body>
@@ -646,11 +664,11 @@
     </a>
     <nav class="meta">
       <a href="#tools">tools</a>
-      <a href="#scopes" class="hide-sm">scopes</a>
+      <a href="#scopes" class="hide-sm hide-md">scopes</a>
       <a href="/security">security</a>
       <a href="/privacy">privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
+      <span class="accent-picker hide-sm hide-md" role="group" aria-label="Accent color">
         <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
         <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
         <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
