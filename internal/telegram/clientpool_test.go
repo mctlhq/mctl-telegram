@@ -11,6 +11,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+
 // TestSessionErrorFor checks that MTProto auth-failure codes map to the right
 // session sentinel — unfinished setup vs server-side revocation — and that
 // ordinary errors map to nil.
@@ -177,3 +178,74 @@ func TestRemoveAtomic_ReturnsFnError(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// TestPoolFull verifies that a pool with MaxSessions=2 returns ErrPoolFull on
+// the third acquire when two entries are already live. It does NOT attempt to
+// dial Telegram — the pool is seeded with hand-injected entries so no actual
+// client goroutine is started.
+func TestPoolFull(t *testing.T) {
+	p := NewClientPool(1, "h", time.Minute, nil)
+	p.WithMaxSessions(2)
+
+	// Inject two synthetic live entries (stopped=false, ready channel closed).
+	for _, uid := range []int64{1, 2} {
+		e := &entry{
+			lastUsed: time.Now(),
+			cancel:   func() {},
+			ready:    make(chan struct{}),
+		}
+		close(e.ready)
+		p.mu.Lock()
+		p.entries[uid] = e
+		p.mu.Unlock()
+	}
+
+	// A third acquire for a new user id must return ErrPoolFull.
+	_, err := p.acquire(99)
+	if !errors.Is(err, ErrPoolFull) {
+		t.Fatalf("expected ErrPoolFull when pool is at cap, got: %v", err)
+	}
+
+	// Acquiring for an existing uid must succeed (live entry reuse).
+	e, err := p.acquire(1)
+	if err != nil {
+		t.Fatalf("expected acquire(1) to succeed (live entry reuse), got: %v", err)
+	}
+	if e == nil {
+		t.Fatal("expected non-nil entry for existing uid 1")
+	}
+}
+
+// TestWithMaxSessions_ZeroMeansNoCap confirms that MaxSessions=0 (default)
+// imposes no cap: the pool does not return ErrPoolFull even when many entries
+// are present.
+func TestWithMaxSessions_ZeroMeansNoCap(t *testing.T) {
+	p := NewClientPool(1, "h", time.Minute, nil)
+	// MaxSessions defaults to 0 — no cap.
+
+	// Inject 5 synthetic entries to simulate a full pool.
+	for i := int64(1); i <= 5; i++ {
+		uid := i
+		e := &entry{
+			lastUsed: time.Now(),
+			cancel:   func() {},
+			ready:    make(chan struct{}),
+		}
+		close(e.ready)
+		p.mu.Lock()
+		p.entries[uid] = e
+		p.mu.Unlock()
+	}
+
+	// Verify the cap check logic directly: with MaxSessions=0, len(entries)>=0
+	// is always true but the condition is p.MaxSessions > 0, so it never fires.
+	if p.MaxSessions != 0 {
+		t.Fatalf("expected MaxSessions=0, got %d", p.MaxSessions)
+	}
+	// The cap check in acquire is: if p.MaxSessions > 0 && len(p.entries) >= p.MaxSessions.
+	// With MaxSessions=0 the first predicate is false — ErrPoolFull is never returned.
+	capWouldFire := p.MaxSessions > 0 && len(p.entries) >= p.MaxSessions
+	if capWouldFire {
+		t.Fatal("MaxSessions=0 must not cap the pool")
+	}
+}

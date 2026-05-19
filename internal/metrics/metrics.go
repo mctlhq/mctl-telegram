@@ -29,6 +29,14 @@ type Registry struct {
 	// Telegram client pool.
 	TelegramClientPoolSize    prometheus.Gauge
 	TelegramClientErrorsTotal prometheus.Counter
+	// TelegramPoolCapacity is the configured TELEGRAM_MAX_SESSIONS value.
+	// -1 means uncapped (TELEGRAM_MAX_SESSIONS=0 or unset). Set once at
+	// startup by cmd/server/main.go after pool construction.
+	TelegramPoolCapacity prometheus.Gauge
+	// TelegramFloodWaitEventsTotal counts FLOOD_WAIT_X events, labeled by
+	// tool name. Incremented each time borrowWithRetry observes a FloodWait
+	// error (whether or not the subsequent retry succeeds).
+	TelegramFloodWaitEventsTotal *prometheus.CounterVec
 
 	// Session lifecycle.
 	SessionsConnectedTotal prometheus.Counter
@@ -37,11 +45,23 @@ type Registry struct {
 	SessionsRevokedTotal *prometheus.CounterVec
 	// SessionsActiveGauge is refreshed by a background sampler in main().
 	SessionsActiveGauge prometheus.Gauge
+
+	// OAuth server.
+	// OAuthPendingAuthSize reflects the current count of pending OAuth
+	// authorization flows. Refreshed every minute by oauth.Server.
+	OAuthPendingAuthSize prometheus.Gauge
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
 // round-trips.
 var toolDurationBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 10}
+
+// SetOAuthPendingAuthSize sets the mctl_oauth_pending_auth_size gauge to n.
+// This method satisfies the oauth.metricsIface interface so a *Registry can be
+// passed to oauth.Server.WithMetrics without importing this package from oauth.
+func (r *Registry) SetOAuthPendingAuthSize(n float64) {
+	r.OAuthPendingAuthSize.Set(n)
+}
 
 // New constructs a Registry with all collectors registered on a fresh
 // prometheus.Registry. Panics only if duplicate names are registered within
@@ -86,6 +106,21 @@ func New() *Registry {
 		Help: "Total Telegram MTProto client goroutine exits with a non-context-canceled error.",
 	})
 
+	r.TelegramPoolCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_telegram_pool_capacity",
+		Help: "Configured TELEGRAM_MAX_SESSIONS value. -1 when uncapped (TELEGRAM_MAX_SESSIONS=0 or unset). Allows HPA to track pool_size / pool_capacity.",
+	})
+
+	r.TelegramFloodWaitEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_telegram_flood_wait_events_total",
+		Help: "Total Telegram FLOOD_WAIT_X errors observed, labeled by MCP tool name. Incremented on each FloodWait event whether or not the retry succeeds.",
+	}, []string{"tool"})
+
+	r.OAuthPendingAuthSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_oauth_pending_auth_size",
+		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
+	})
+
 	r.SessionsConnectedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_sessions_connected_total",
 		Help: "Total new Telegram sessions persisted via SaveSession.",
@@ -111,9 +146,12 @@ func New() *Registry {
 		r.ToolInvocationDuration,
 		r.TelegramClientPoolSize,
 		r.TelegramClientErrorsTotal,
+		r.TelegramPoolCapacity,
+		r.TelegramFloodWaitEventsTotal,
 		r.SessionsConnectedTotal,
 		r.SessionsRevokedTotal,
 		r.SessionsActiveGauge,
+		r.OAuthPendingAuthSize,
 	)
 	return r
 }

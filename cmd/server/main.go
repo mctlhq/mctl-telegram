@@ -80,8 +80,19 @@ func main() {
 	m := metrics.New()
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m)
-	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).WithMetrics(m)
+	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).
+		WithMaxSessions(cfg.TelegramMaxSessions).
+		WithMetrics(m)
 	defer pool.Shutdown()
+
+	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
+	// pool_size / pool_capacity correctly indicates "no cap" (-1) vs a real value.
+	if cfg.TelegramMaxSessions > 0 {
+		m.TelegramPoolCapacity.Set(float64(cfg.TelegramMaxSessions))
+		slog.Info("session pool cap configured", "max_sessions", cfg.TelegramMaxSessions)
+	} else {
+		m.TelegramPoolCapacity.Set(-1)
+	}
 
 	// Periodic background job that revokes sessions whose idle (30d) or
 	// absolute (90d) TTL has elapsed. CheckSessionValid on every Borrow
@@ -148,7 +159,7 @@ func main() {
 	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
 	// to api.mctl.ai as before.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		if err := registerOAuth(ctx, cfg, store, mux); err != nil {
+		if err := registerOAuth(ctx, cfg, store, mux, m); err != nil {
 			slog.Error("oauth init failed; refusing to start", "err", err)
 			os.Exit(1)
 		}
@@ -370,7 +381,7 @@ func selectBridgeIssuer(cfg *config.Config) string {
 
 // registerOAuth wires the Telegram-native OAuth issuer onto the router.
 // Called only when AUTH_MODE=local-jwt.
-func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux) error {
+func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux, m *metrics.Registry) error {
 	if cfg.OAUTHJWTSecret == "" {
 		return fmt.Errorf("OAUTH_JWT_SIGNING_KEY is required when AUTH_MODE=local-jwt")
 	}
@@ -391,6 +402,8 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	// oauth.New performs OIDC discovery against Telegram — a network call at
 	// boot. It is fail-closed: a discovery failure aborts startup rather than
 	// running a server that cannot authenticate anyone.
+	useDBForOAuth := strings.HasPrefix(cfg.DatabaseURL, "postgres://") ||
+		strings.HasPrefix(cfg.DatabaseURL, "postgresql://")
 	srv, err := oauth.New(ctx, oauth.Config{
 		Issuer:                   strings.TrimRight(cfg.PublicBaseURL, "/"),
 		JWTSecret:                []byte(cfg.OAUTHJWTSecret),
@@ -409,10 +422,12 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,
+		UseDBForOAuth:            useDBForOAuth,
 	}, store)
 	if err != nil {
 		return err
 	}
+	srv.WithMetrics(m)
 	srv.Register(mux)
 	// ctx.Done() is a <-chan struct{} — the sweeper exits on shutdown.
 	srv.StartSweeper(ctx.Done(), 1*time.Minute)

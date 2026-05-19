@@ -323,5 +323,39 @@ func pgSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// OAuth transient state tables (issue-66). Only created on Postgres; SQLite
+		// deployments keep in-memory maps (single-writer contention makes DB-backed
+		// OAuth worse there). Tables are idempotent (IF NOT EXISTS) and contain
+		// only transient state (TTL <= 10 min for pending/codes; registration TTL
+		// default 24h for clients) — safe to drop without user-visible data loss.
+		`CREATE TABLE IF NOT EXISTS oauth_pending_auth (
+			state              TEXT PRIMARY KEY,
+			client_id          TEXT NOT NULL,
+			redirect_uri       TEXT NOT NULL,
+			client_state       TEXT NOT NULL DEFAULT '',
+			code_challenge     TEXT NOT NULL,
+			challenge_method   TEXT NOT NULL DEFAULT 'S256',
+			scope              TEXT NOT NULL DEFAULT '',
+			nonce              TEXT NOT NULL,
+			tg_code_verifier   TEXT NOT NULL,
+			created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+			code                TEXT PRIMARY KEY,
+			client_id           TEXT NOT NULL,
+			redirect_uri        TEXT NOT NULL,
+			code_challenge      TEXT NOT NULL,
+			challenge_method    TEXT NOT NULL DEFAULT 'S256',
+			telegram_id         BIGINT NOT NULL,
+			telegram_username   TEXT NOT NULL DEFAULT '',
+			scope               TEXT NOT NULL DEFAULT '',
+			created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS oauth_client_registrations (
+			client_id      TEXT PRIMARY KEY,
+			client_name    TEXT NOT NULL DEFAULT '',
+			redirect_uris  TEXT NOT NULL,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 	}
 }
