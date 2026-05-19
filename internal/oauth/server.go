@@ -146,8 +146,8 @@ type Config struct {
 	// AllowedImplicitHosts is the hostname allowlist applied to redirect_uri
 	// when AllowImplicitClient is true and the client_id has not been
 	// registered. Empty list ⇒ a built-in default (claude.ai, claude.com,
-	// localhost, 127.0.0.1) is used. The check is exact-match on the
-	// URL's Host (including any port); never substring-match.
+	// chatgpt.com, localhost, 127.0.0.1) is used. The check is exact-match
+	// on the URL's Host (including any port); never substring-match.
 	//
 	// AllowedImplicitHosts is also applied to redirect_uris supplied at
 	// RFC 7591 dynamic registration, so a malicious /oauth/register call
@@ -280,6 +280,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		cfg.AllowedImplicitHosts = []string{
 			"claude.ai",
 			"claude.com",
+			"chatgpt.com",
 			"localhost",
 			"127.0.0.1",
 		}
