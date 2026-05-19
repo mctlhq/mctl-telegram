@@ -9,10 +9,10 @@ import (
 )
 
 // FloodWaitSeconds extracts the wait duration (in seconds) encoded in a
-// Telegram FLOOD_WAIT_X MTProto error. Returns 0 when err is nil, is not a
-// tgerr.Error, or is not a FloodWait error. The returned value is suitable
-// for use as a sleep duration: callers should cap it (e.g. at 60s) before
-// using it as a time.Duration multiplier.
+// Telegram FLOOD_WAIT_X or FLOOD_PREMIUM_WAIT_X MTProto error (both code 420).
+// Returns 0 when err is nil, is not a tgerr.Error, or is not a flood-wait
+// error. The returned value is suitable for use as a sleep duration: callers
+// should cap it (e.g. at 60s) before using it as a time.Duration multiplier.
 func FloodWaitSeconds(err error) int {
 	if err == nil {
 		return 0
@@ -24,14 +24,14 @@ func FloodWaitSeconds(err error) int {
 	if te.Code != 420 {
 		return 0
 	}
-	const prefix = "FLOOD_WAIT_"
 	msg := te.Message
-	if !strings.HasPrefix(msg, prefix) {
-		return 0
+	for _, prefix := range []string{"FLOOD_WAIT_", "FLOOD_PREMIUM_WAIT_"} {
+		if strings.HasPrefix(msg, prefix) {
+			n, parseErr := strconv.Atoi(msg[len(prefix):])
+			if parseErr == nil && n >= 0 {
+				return n
+			}
+		}
 	}
-	n, parseErr := strconv.Atoi(msg[len(prefix):])
-	if parseErr != nil || n < 0 {
-		return 0
-	}
-	return n
+	return 0
 }

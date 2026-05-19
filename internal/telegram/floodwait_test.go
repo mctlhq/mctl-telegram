@@ -59,6 +59,21 @@ func TestFloodWaitSeconds(t *testing.T) {
 			err:  tgerr.New(401, "AUTH_KEY_INVALID"),
 			want: 0,
 		},
+		{
+			name: "FLOOD_PREMIUM_WAIT_60",
+			err:  tgerr.New(420, "FLOOD_PREMIUM_WAIT_60"),
+			want: 60,
+		},
+		{
+			name: "FLOOD_PREMIUM_WAIT_0",
+			err:  tgerr.New(420, "FLOOD_PREMIUM_WAIT_0"),
+			want: 0,
+		},
+		{
+			name: "wrapped FLOOD_PREMIUM_WAIT_120",
+			err:  fmt.Errorf("borrow: %w", tgerr.New(420, "FLOOD_PREMIUM_WAIT_120")),
+			want: 120,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

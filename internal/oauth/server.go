@@ -691,6 +691,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if s.useDB {
 		// Persist to Postgres; skip the in-memory map so reads on other replicas
 		// resolve the same entry.
+		// Cap enforcement is best-effort under concurrent load: evict and insert
+		// are separate round-trips with no transaction between them, so N
+		// concurrent requests near the cap boundary can each skip eviction and
+		// all insert, temporarily exceeding MaxPendingAuth by at most N. The
+		// sweeper converges the count back below the cap within its next tick.
 		if err := s.store.EvictOldestOAuthPendingIfOver(r.Context(), s.cfg.MaxPendingAuth, s.cfg.CodeTTL); err != nil {
 			slog.Warn("oauth: pending_auth eviction failed", "err", err)
 		}
@@ -974,6 +979,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 	code := randomToken(32)
 	now := s.clock()
 	if s.useDB {
+		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestOAuthCodeIfOver(r.Context(), s.cfg.MaxAuthCodes, s.cfg.CodeTTL); err != nil {
 			slog.Warn("oauth: auth_code eviction failed", "err", err)
 		}
@@ -1379,6 +1385,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	clientID := "tgmcp_" + randomToken(16)
 	now := s.clock()
 	if s.useDB {
+		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
 			slog.Warn("oauth: client_reg eviction failed", "err", err)
 		}
