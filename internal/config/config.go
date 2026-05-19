@@ -50,6 +50,9 @@ type Config struct {
 	// open without authentication — suitable for Kubernetes PodMonitor scrape
 	// patterns where network policy provides the access control.
 	MetricsAllowCIDR string // METRICS_ALLOW_CIDR, optional
+	// TelegramMaxSessions caps the number of concurrently live MTProto client
+	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
+	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
 }
 
 func Load() (*Config, error) {
@@ -84,6 +87,7 @@ func Load() (*Config, error) {
 		DigestHourUTC:            envInt("DIGEST_HOUR_UTC", 9),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
+	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
