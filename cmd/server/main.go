@@ -152,6 +152,7 @@ func main() {
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer))
 	mux.Get("/security", web.Security())
 	mux.Get("/privacy", web.Privacy())
+	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer))
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,
