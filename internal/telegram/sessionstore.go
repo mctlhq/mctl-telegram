@@ -16,6 +16,9 @@ type SessionStore struct {
 }
 
 func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
+	if s.Store == nil {
+		return nil, session.ErrNotFound
+	}
 	pt, err := s.Store.LoadSession(ctx, s.UserID)
 	if err != nil {
 		return nil, err
@@ -27,5 +30,8 @@ func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
 }
 
 func (s *SessionStore) StoreSession(ctx context.Context, data []byte) error {
+	if s.Store == nil {
+		return nil
+	}
 	return s.Store.UpdateSessionBlob(ctx, s.UserID, data)
 }
