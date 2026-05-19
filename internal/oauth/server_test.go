@@ -701,6 +701,24 @@ func TestRegister_RejectsUntrustedRedirect(t *testing.T) {
 	}
 }
 
+// TestRegister_AcceptsChatGPTRedirect locks in chatgpt.com as a default
+// implicit-host. ChatGPT's connector onboarding posts to /oauth/register
+// with a redirect_uri on this host; removing it from the default list
+// would break that flow without any other test catching it.
+func TestRegister_AcceptsChatGPTRedirect(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	body := `{"client_name":"chatgpt","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"]}`
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.serve("POST", "/oauth/register", rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRegister_CapEvictsOldest(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.MaxRegisteredClients = 2 })
 	mux := newMockRouter()
