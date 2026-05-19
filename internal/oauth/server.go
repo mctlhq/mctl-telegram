@@ -410,7 +410,8 @@ func (s *Server) sweepDB(_ time.Time) {
 	if !s.useDB || s.store == nil {
 		return
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if _, _, err := s.store.DeleteExpiredOAuthRows(ctx, s.cfg.CodeTTL); err != nil {
 		slog.Warn("oauth db sweep failed", "err", err)
 	}
@@ -429,7 +430,8 @@ func (s *Server) samplePendingAuthGauge() {
 		return
 	}
 	if s.useDB && s.store != nil {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		n, err := s.store.CountOAuthPending(ctx, s.cfg.CodeTTL)
 		if err != nil {
 			slog.Warn("oauth pending_auth gauge sample failed", "err", err)
@@ -689,6 +691,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if s.useDB {
 		// Persist to Postgres; skip the in-memory map so reads on other replicas
 		// resolve the same entry.
+		if err := s.store.EvictOldestOAuthPendingIfOver(r.Context(), s.cfg.MaxPendingAuth, s.cfg.CodeTTL); err != nil {
+			slog.Warn("oauth: pending_auth eviction failed", "err", err)
+		}
 		if err := s.store.InsertOAuthPending(r.Context(), db.OAuthPendingAuth{
 			State:           serverState,
 			ClientID:        clientID,
@@ -969,6 +974,9 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 	code := randomToken(32)
 	now := s.clock()
 	if s.useDB {
+		if err := s.store.EvictOldestOAuthCodeIfOver(r.Context(), s.cfg.MaxAuthCodes, s.cfg.CodeTTL); err != nil {
+			slog.Warn("oauth: auth_code eviction failed", "err", err)
+		}
 		if err := s.store.InsertOAuthCode(r.Context(), db.OAuthCode{
 			Code:             code,
 			ClientID:         oc.ClientID,
@@ -1371,6 +1379,9 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	clientID := "tgmcp_" + randomToken(16)
 	now := s.clock()
 	if s.useDB {
+		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
+			slog.Warn("oauth: client_reg eviction failed", "err", err)
+		}
 		if err := s.store.InsertClientReg(r.Context(), db.OAuthClientReg{
 			ClientID:     clientID,
 			ClientName:   req.ClientName,

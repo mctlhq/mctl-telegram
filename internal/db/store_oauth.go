@@ -13,6 +13,11 @@ import (
 // does not exist, has been consumed, or has exceeded its TTL.
 var ErrOAuthNotFound = errors.New("oauth: not found or expired")
 
+// ErrOAuthStateConflict is returned by InsertOAuthPending when the state token
+// already exists in the table (duplicate PKCE state). The caller should abort
+// the authorization flow — a collision is either a bug or an attack attempt.
+var ErrOAuthStateConflict = errors.New("oauth: state already exists")
+
 // OAuthPendingAuth is the persistent representation of a pending OAuth
 // authorization flow, mirroring the in-memory pendingAuth struct in
 // internal/oauth/server.go.
@@ -54,7 +59,7 @@ type OAuthClientReg struct {
 // InsertOAuthPending persists a pending OAuth authorization-flow entry to
 // oauth_pending_auth. Used by oauth.Server.handleAuthorize when useDB is true.
 func (s *Store) InsertOAuthPending(ctx context.Context, p OAuthPendingAuth) error {
-	_, err := s.DB.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO oauth_pending_auth
 			(state, client_id, redirect_uri, client_state, code_challenge,
 			 challenge_method, scope, nonce, tg_code_verifier, created_at)
@@ -65,6 +70,74 @@ func (s *Store) InsertOAuthPending(ctx context.Context, p OAuthPendingAuth) erro
 	)
 	if err != nil {
 		return fmt.Errorf("insert oauth_pending_auth: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrOAuthStateConflict
+	}
+	return nil
+}
+
+// EvictOldestOAuthPendingIfOver deletes the oldest non-expired pending-auth row
+// when the live count (created within ttl) is at or above max. No-op when max
+// is zero. Used by handleAuthorize to enforce MaxPendingAuth on the DB path.
+func (s *Store) EvictOldestOAuthPendingIfOver(ctx context.Context, max int, ttl time.Duration) error {
+	if max <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	_, err := s.DB.ExecContext(ctx,
+		`DELETE FROM oauth_pending_auth
+		  WHERE state = (
+		    SELECT state FROM oauth_pending_auth ORDER BY created_at ASC LIMIT 1
+		  )
+		  AND (SELECT COUNT(*) FROM oauth_pending_auth WHERE created_at >= $1) >= $2`,
+		cutoff, int64(max),
+	)
+	if err != nil {
+		return fmt.Errorf("evict oldest oauth_pending_auth: %w", err)
+	}
+	return nil
+}
+
+// EvictOldestOAuthCodeIfOver deletes the oldest non-expired auth-code row when
+// the live count is at or above max. No-op when max is zero. Used by
+// issueAuthCode to enforce MaxAuthCodes on the DB path.
+func (s *Store) EvictOldestOAuthCodeIfOver(ctx context.Context, max int, ttl time.Duration) error {
+	if max <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	_, err := s.DB.ExecContext(ctx,
+		`DELETE FROM oauth_auth_codes
+		  WHERE code = (
+		    SELECT code FROM oauth_auth_codes ORDER BY created_at ASC LIMIT 1
+		  )
+		  AND (SELECT COUNT(*) FROM oauth_auth_codes WHERE created_at >= $1) >= $2`,
+		cutoff, int64(max),
+	)
+	if err != nil {
+		return fmt.Errorf("evict oldest oauth_auth_codes: %w", err)
+	}
+	return nil
+}
+
+// EvictOldestClientRegIfOver deletes the oldest client registration when the
+// total count is at or above max. No-op when max is zero. Used by
+// handleClientRegistration to enforce MaxRegisteredClients on the DB path.
+func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
+	if max <= 0 {
+		return nil
+	}
+	_, err := s.DB.ExecContext(ctx,
+		`DELETE FROM oauth_client_registrations
+		  WHERE client_id = (
+		    SELECT client_id FROM oauth_client_registrations ORDER BY created_at ASC LIMIT 1
+		  )
+		  AND (SELECT COUNT(*) FROM oauth_client_registrations) >= $1`,
+		int64(max),
+	)
+	if err != nil {
+		return fmt.Errorf("evict oldest oauth_client_registrations: %w", err)
 	}
 	return nil
 }

@@ -357,5 +357,11 @@ func pgSchema() []string {
 			redirect_uris  TEXT NOT NULL,
 			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// Indexes on created_at for the three OAuth transient tables — used by
+		// sweep (range DELETE WHERE created_at < cutoff) and eviction (ORDER BY
+		// created_at ASC LIMIT 1). Without these, both operations do full scans.
+		`CREATE INDEX IF NOT EXISTS idx_oauth_pending_auth_created_at ON oauth_pending_auth(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_created_at ON oauth_auth_codes(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_client_regs_created_at ON oauth_client_registrations(created_at)`,
 	}
 }

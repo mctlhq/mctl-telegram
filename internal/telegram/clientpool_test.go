@@ -11,7 +11,6 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
-
 // TestSessionErrorFor checks that MTProto auth-failure codes map to the right
 // session sentinel — unfinished setup vs server-side revocation — and that
 // ordinary errors map to nil.
@@ -237,15 +236,15 @@ func TestWithMaxSessions_ZeroMeansNoCap(t *testing.T) {
 		p.mu.Unlock()
 	}
 
-	// Verify the cap check logic directly: with MaxSessions=0, len(entries)>=0
-	// is always true but the condition is p.MaxSessions > 0, so it never fires.
-	if p.MaxSessions != 0 {
-		t.Fatalf("expected MaxSessions=0, got %d", p.MaxSessions)
+	// Call acquire for a new uid (not in the 5 synthetic entries) and confirm
+	// that ErrPoolFull is not returned. This exercises the runtime path directly
+	// rather than asserting a boolean derived from the implementation details.
+	e, err := p.acquire(99)
+	if err != nil {
+		t.Fatalf("MaxSessions=0 must not cap the pool: acquire returned %v", err)
 	}
-	// The cap check in acquire is: if p.MaxSessions > 0 && len(p.entries) >= p.MaxSessions.
-	// With MaxSessions=0 the first predicate is false — ErrPoolFull is never returned.
-	capWouldFire := p.MaxSessions > 0 && len(p.entries) >= p.MaxSessions
-	if capWouldFire {
-		t.Fatal("MaxSessions=0 must not cap the pool")
+	// Stop the goroutines spawned by acquire so they do not outlive the test.
+	if e != nil {
+		e.cancel()
 	}
 }
