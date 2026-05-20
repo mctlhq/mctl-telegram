@@ -160,10 +160,24 @@ func main() {
 	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
 	// to api.mctl.ai as before.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		if err := registerOAuth(ctx, cfg, store, mux, m); err != nil {
+		oauthSrv, err := registerOAuth(ctx, cfg, store, mux, m)
+		if err != nil {
 			slog.Error("oauth init failed; refusing to start", "err", err)
 			os.Exit(1)
 		}
+		// Browser-based Telegram account onboarding. Only meaningful when the
+		// OAuth issuer is active (local-jwt mode); returns 404 otherwise.
+		connectSrv := web.NewConnectServer(web.ConnectConfig{
+			Issuer:               strings.TrimRight(cfg.PublicBaseURL, "/"),
+			OAuthServer:          oauthSrv,
+			CodeTTL:              cfg.OAUTHCodeTTL,
+			ClaudeAIConnectorURL: "https://claude.ai/settings/integrations",
+			ClientID:             oauth.ConnectClientID,
+			MCPPath:              cfg.MCPPath,
+			MaxSessions:          500,
+		})
+		mux.Get("/telegram/connect", connectSrv.HandleConnect)
+		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
 	}
 
 	provider := selectProvider(cfg, store)
@@ -381,16 +395,17 @@ func selectBridgeIssuer(cfg *config.Config) string {
 }
 
 // registerOAuth wires the Telegram-native OAuth issuer onto the router.
-// Called only when AUTH_MODE=local-jwt.
-func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux, m *metrics.Registry) error {
+// Called only when AUTH_MODE=local-jwt. Returns the constructed *oauth.Server
+// so the caller can pass it to web.NewConnectServer.
+func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux *chi.Mux, m *metrics.Registry) (*oauth.Server, error) {
 	if cfg.OAUTHJWTSecret == "" {
-		return fmt.Errorf("OAUTH_JWT_SIGNING_KEY is required when AUTH_MODE=local-jwt")
+		return nil, fmt.Errorf("OAUTH_JWT_SIGNING_KEY is required when AUTH_MODE=local-jwt")
 	}
 	if cfg.TelegramOIDCClientID == "" {
-		return fmt.Errorf("TELEGRAM_OIDC_CLIENT_ID is required when AUTH_MODE=local-jwt")
+		return nil, fmt.Errorf("TELEGRAM_OIDC_CLIENT_ID is required when AUTH_MODE=local-jwt")
 	}
 	if cfg.TelegramOIDCClientSecret == "" {
-		return fmt.Errorf("TELEGRAM_OIDC_CLIENT_SECRET is required when AUTH_MODE=local-jwt")
+		return nil, fmt.Errorf("TELEGRAM_OIDC_CLIENT_SECRET is required when AUTH_MODE=local-jwt")
 	}
 	admins := map[int64]bool{}
 	for _, id := range cfg.TGLoginAdmins {
@@ -426,7 +441,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		UseDBForOAuth:            useDBForOAuth,
 	}, store)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	srv.WithMetrics(m)
 	srv.Register(mux)
@@ -450,7 +465,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 	)
-	return nil
+	return srv, nil
 }
 
 // selectBridgeProvider builds an auth.Provider for the /bridge websocket

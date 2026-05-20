@@ -745,8 +745,10 @@ func TestRegister_CapEvictsOldest(t *testing.T) {
 	id3 := register("third")
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if len(srv.clients) != 2 {
-		t.Fatalf("clients len = %d, want 2 (cap)", len(srv.clients))
+	// The map holds MaxRegisteredClients (2) dynamic entries plus the one
+	// built-in connect client, so the total is 3.
+	if got := len(srv.clients); got != 3 {
+		t.Fatalf("clients len = %d, want 3 (2 dynamic cap + 1 built-in)", got)
 	}
 	if _, ok := srv.clients[id1]; ok {
 		t.Errorf("oldest entry %s should have been evicted", id1)
@@ -756,6 +758,9 @@ func TestRegister_CapEvictsOldest(t *testing.T) {
 	}
 	if _, ok := srv.clients[id3]; !ok {
 		t.Errorf("entry %s missing after eviction", id3)
+	}
+	if _, ok := srv.clients[ConnectClientID]; !ok {
+		t.Errorf("built-in connect client %s should not have been evicted", ConnectClientID)
 	}
 }
 
@@ -825,6 +830,230 @@ func TestAuthorizationServerMetadata(t *testing.T) {
 	}
 	if len(scopes) != 4 {
 		t.Errorf("scopes_supported len = %d, want 4", len(scopes))
+	}
+}
+
+// TestConnectClient_ValidateClientAcceptsConnectRedirect confirms that the
+// pre-registered mctl_self_connect client is accepted by validateClient with
+// its exact redirect_uri, and rejected with any other redirect_uri.
+func TestConnectClient_ValidateClientAcceptsConnectRedirect(t *testing.T) {
+	srv := newTestServer(t)
+
+	connectRedirect := testIssuer + "/telegram/connect/done"
+	if err := srv.validateClient(context.Background(), ConnectClientID, connectRedirect); err != nil {
+		t.Errorf("validateClient(%q, %q) returned unexpected error: %v", ConnectClientID, connectRedirect, err)
+	}
+
+	wrongRedirect := testIssuer + "/telegram/connect/evil"
+	if err := srv.validateClient(context.Background(), ConnectClientID, wrongRedirect); err == nil {
+		t.Errorf("validateClient(%q, %q) should have rejected a wrong redirect_uri", ConnectClientID, wrongRedirect)
+	}
+}
+
+// TestConnectClient_NeverSwept confirms that the built-in connect client
+// survives a sweep even when ClientRegistrationTTL has elapsed.
+func TestConnectClient_NeverSwept(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.ClientRegistrationTTL = 1 * time.Second
+	})
+
+	// Advance clock far past TTL and run a sweep.
+	future := time.Now().Add(1 * time.Hour)
+	srv.sweep(future)
+
+	srv.mu.Lock()
+	_, ok := srv.clients[ConnectClientID]
+	srv.mu.Unlock()
+	if !ok {
+		t.Errorf("built-in connect client was swept, want it to persist indefinitely")
+	}
+}
+
+// TestConnectClient_NeverEvictedByRegistrationCap confirms that registering
+// enough clients to exceed MaxRegisteredClients never evicts the built-in
+// connect client (zero CreatedAt is excluded from the dynamic cap and eviction).
+func TestConnectClient_NeverEvictedByRegistrationCap(t *testing.T) {
+	// Cap at 1 dynamic client. Registering a second dynamic client must evict
+	// the first dynamic one, not the built-in connect client.
+	srv := newTestServer(t, func(c *Config) {
+		c.MaxRegisteredClients = 1
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	registerClient := func(name string) {
+		body := `{"client_name":"` + name + `","redirect_uris":["https://claude.ai/cb"]}`
+		req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.serve("POST", "/oauth/register", rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register %s: %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	// Register two dynamic clients: the second evicts the first.
+	registerClient("first")
+	registerClient("second")
+
+	srv.mu.Lock()
+	_, ok := srv.clients[ConnectClientID]
+	srv.mu.Unlock()
+	if !ok {
+		t.Errorf("built-in connect client was evicted by registration cap, want it to persist")
+	}
+}
+
+// TestExchangeConnect_ValidFlow confirms ExchangeConnect redeems a code that
+// was issued for the connect client and returns a non-empty access token.
+func TestExchangeConnect_ValidFlow(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, 210408407)
+
+	// Drive authorize using the connect client.
+	verifier, challenge := pkceVerifierAndChallenge()
+	connectRedirect := testIssuer + "/telegram/connect/done"
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {ConnectClientID},
+		"redirect_uri":          {connectRedirect},
+		"state":                 {"connect-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize = %d body=%s", rec.Code, rec.Body.String())
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	// Telegram callback — issues the authorization code.
+	cq := url.Values{"state": {state}, "code": {"tg-code"}}
+	req = httptest.NewRequest("GET", "/oauth/telegram/callback?"+cq.Encode(), nil)
+	rec = httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback = %d body=%s", rec.Code, rec.Body.String())
+	}
+	cbLoc, _ := url.Parse(rec.Header().Get("Location"))
+	code := cbLoc.Query().Get("code")
+	if code == "" {
+		t.Fatal("callback did not return an authorization code")
+	}
+
+	// ExchangeConnect should succeed.
+	tok, err := srv.ExchangeConnect(context.Background(), code, verifier, ConnectClientID, connectRedirect)
+	if err != nil {
+		t.Fatalf("ExchangeConnect returned unexpected error: %v", err)
+	}
+	if tok == "" {
+		t.Error("ExchangeConnect returned empty token on success")
+	}
+}
+
+// TestExchangeConnect_WrongVerifier confirms that ExchangeConnect returns an
+// error when the code_verifier does not match the code_challenge.
+func TestExchangeConnect_WrongVerifier(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, 210408407)
+
+	_, challenge := pkceVerifierAndChallenge()
+	connectRedirect := testIssuer + "/telegram/connect/done"
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {ConnectClientID},
+		"redirect_uri":          {connectRedirect},
+		"state":                 {"connect-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	cq := url.Values{"state": {state}, "code": {"tg-code"}}
+	req = httptest.NewRequest("GET", "/oauth/telegram/callback?"+cq.Encode(), nil)
+	rec = httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	cbLoc, _ := url.Parse(rec.Header().Get("Location"))
+	code := cbLoc.Query().Get("code")
+
+	// Use wrong verifier — 43+ chars to pass the format check but wrong value.
+	wrongVerifier := strings.Repeat("z", 43)
+	_, err := srv.ExchangeConnect(context.Background(), code, wrongVerifier, ConnectClientID, connectRedirect)
+	if err == nil {
+		t.Error("ExchangeConnect should have rejected a wrong code_verifier")
+	}
+}
+
+// TestExchangeConnect_ExpiredCode confirms that ExchangeConnect returns an
+// error when the authorization code's TTL has elapsed.
+func TestExchangeConnect_ExpiredCode(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.CodeTTL = 1 * time.Second })
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, 210408407)
+
+	verifier, challenge := pkceVerifierAndChallenge()
+	connectRedirect := testIssuer + "/telegram/connect/done"
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {ConnectClientID},
+		"redirect_uri":          {connectRedirect},
+		"state":                 {"connect-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/authorize", rec, req)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	cq := url.Values{"state": {state}, "code": {"tg-code"}}
+	req = httptest.NewRequest("GET", "/oauth/telegram/callback?"+cq.Encode(), nil)
+	rec = httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	cbLoc, _ := url.Parse(rec.Header().Get("Location"))
+	code := cbLoc.Query().Get("code")
+
+	// Advance the clock past CodeTTL.
+	srv.clock = func() time.Time { return time.Now().Add(10 * time.Second) }
+
+	_, err := srv.ExchangeConnect(context.Background(), code, verifier, ConnectClientID, connectRedirect)
+	if err == nil {
+		t.Error("ExchangeConnect should have rejected an expired code")
+	}
+}
+
+// TestExchangeConnect_UnknownCode confirms that ExchangeConnect returns an
+// error when the code has never been issued.
+func TestExchangeConnect_UnknownCode(t *testing.T) {
+	srv := newTestServer(t)
+	_, err := srv.ExchangeConnect(context.Background(), "bogus-code-value", strings.Repeat("a", 43), ConnectClientID, testIssuer+"/telegram/connect/done")
+	if err == nil {
+		t.Error("ExchangeConnect should have rejected an unknown code")
+	}
+}
+
+// TestExchangeConnect_WrongClientID confirms that ExchangeConnect rejects any
+// client_id that is not ConnectClientID.
+func TestExchangeConnect_WrongClientID(t *testing.T) {
+	srv := newTestServer(t)
+	_, err := srv.ExchangeConnect(context.Background(), "some-code", strings.Repeat("a", 43), "other-client", testIssuer+"/telegram/connect/done")
+	if err == nil {
+		t.Error("ExchangeConnect should reject a client_id that is not ConnectClientID")
+	}
+	if !strings.Contains(err.Error(), "client_id") {
+		t.Errorf("error should mention client_id, got: %v", err)
 	}
 }
 

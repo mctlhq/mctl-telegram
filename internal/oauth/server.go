@@ -366,7 +366,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		issuer:  issuer,
 		tgoidc:  auth,
@@ -378,7 +378,99 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		clients: map[string]*clientReg{},
 		enables: map[string]*enableSession{},
 		loginFn: telegram.Login,
-	}, nil
+	}
+	// Pre-register the built-in self-connect client. Zero CreatedAt ensures the
+	// background sweeper never evicts it (the sweep condition
+	// now.Sub(c.CreatedAt) > ClientRegistrationTTL is never true for zero time
+	// with a positive TTL). No /oauth/register call is needed for this client.
+	s.clients[ConnectClientID] = &clientReg{
+		ClientID:     ConnectClientID,
+		ClientName:   "mctl-telegram connect",
+		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
+		CreatedAt:    time.Time{}, // zero — never swept
+	}
+	return s, nil
+}
+
+// ConnectClientID is the client_id for the built-in self-connect OAuth client.
+// It is pre-registered in oauth.New and used by internal/web/connect.go.
+const ConnectClientID = "mctl_self_connect"
+
+// ExchangeConnect redeems a one-time PKCE-bound authorization code on behalf
+// of the built-in mctl_self_connect client. It mirrors the PKCE verification
+// and scope resolution in handleTokenAuthCode but is callable in-process from
+// the /telegram/connect/done handler, avoiding a loopback HTTP round-trip.
+//
+// The returned access token is discarded by the caller; ExchangeConnect is
+// called only to confirm that the code is valid and that the MTProto session
+// was provisioned successfully. An error signals that the code was invalid,
+// expired, or the PKCE verifier did not match.
+func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, redirectURI string) (string, error) {
+	if code == "" || verifier == "" || clientID == "" || redirectURI == "" {
+		return "", errors.New("invalid_request: code, verifier, client_id, redirect_uri are required")
+	}
+	if clientID != ConnectClientID {
+		return "", fmt.Errorf("invalid_request: client_id must be %s", ConnectClientID)
+	}
+	if err := validPKCEString(verifier); err != nil {
+		return "", fmt.Errorf("invalid_request: code_verifier %w", err)
+	}
+
+	var entry *authCode
+	if s.useDB {
+		dbCode, err := s.store.ConsumeOAuthCode(ctx, code, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
+		if err != nil {
+			return "", fmt.Errorf("server_error: could not redeem code: %w", err)
+		}
+		entry = &authCode{
+			ClientID:            dbCode.ClientID,
+			RedirectURI:         dbCode.RedirectURI,
+			CodeChallenge:       dbCode.CodeChallenge,
+			CodeChallengeMethod: dbCode.ChallengeMethod,
+			TelegramID:          dbCode.TelegramID,
+			TelegramUsername:    dbCode.TelegramUsername,
+			Scope:               dbCode.Scope,
+			CreatedAt:           dbCode.CreatedAt,
+		}
+	} else {
+		s.mu.Lock()
+		var ok bool
+		entry, ok = s.codes[code]
+		if ok {
+			if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
+				delete(s.codes, code)
+				ok = false
+			} else {
+				delete(s.codes, code)
+			}
+		}
+		s.mu.Unlock()
+		if !ok {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
+	}
+	if entry.ClientID != clientID {
+		return "", errors.New("invalid_grant: client_id mismatch")
+	}
+	if entry.RedirectURI != redirectURI {
+		return "", errors.New("invalid_grant: redirect_uri mismatch")
+	}
+	if !pkceVerify(verifier, entry.CodeChallenge) {
+		return "", errors.New("invalid_grant: code_verifier does not match code_challenge")
+	}
+
+	groups, scopes, err := s.ResolveScopes(ctx, entry.TelegramID)
+	if err != nil {
+		return "", fmt.Errorf("server_error: could not resolve scopes: %w", err)
+	}
+	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	if err != nil {
+		return "", fmt.Errorf("server_error: could not mint token: %w", err)
+	}
+	return tok, nil
 }
 
 // StartSweeper runs a background loop that drops expired in-memory state.
@@ -464,8 +556,13 @@ func (s *Server) sweep(now time.Time) {
 	// Dynamic client registrations are kept for ClientRegistrationTTL.
 	// Without this sweep the map grows unbounded because /oauth/register is
 	// unauthenticated — a trivial public-API DoS vector.
+	// Entries with a zero CreatedAt are built-in (pre-registered) clients that
+	// must never be evicted.
 	if s.cfg.ClientRegistrationTTL > 0 {
 		for k, c := range s.clients {
+			if c.CreatedAt.IsZero() {
+				continue // built-in client — never sweep
+			}
 			if now.Sub(c.CreatedAt) > s.cfg.ClientRegistrationTTL {
 				delete(s.clients, k)
 			}
@@ -1486,18 +1583,23 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	} else {
 		s.mu.Lock()
 		// Enforce the global cap. If we are at the limit, evict the oldest
-		// entry (linear scan — fine at N≈1000). This keeps the public
-		// endpoint bounded even before the periodic sweeper runs.
-		if s.cfg.MaxRegisteredClients > 0 && len(s.clients) >= s.cfg.MaxRegisteredClients {
+		// dynamic entry (linear scan — fine at N≈1000). Built-in clients
+		// (zero CreatedAt) are not counted toward the cap and are never evicted.
+		if s.cfg.MaxRegisteredClients > 0 {
+			var dynamicCount int
 			var oldestKey string
 			var oldestAt time.Time
 			for k, c := range s.clients {
+				if c.CreatedAt.IsZero() {
+					continue // built-in client — skip
+				}
+				dynamicCount++
 				if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
 					oldestKey = k
 					oldestAt = c.CreatedAt
 				}
 			}
-			if oldestKey != "" {
+			if dynamicCount >= s.cfg.MaxRegisteredClients && oldestKey != "" {
 				delete(s.clients, oldestKey)
 			}
 		}
@@ -1605,19 +1707,22 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 			// Unexpected DB error — fail closed.
 			return fmt.Errorf("client validation error: %w", err)
 		}
-		// Not found in DB — fall through to implicit-client check below.
-	} else {
-		s.mu.Lock()
-		reg, ok := s.clients[clientID]
-		s.mu.Unlock()
-		if ok {
-			for _, u := range reg.RedirectURIs {
-				if u == redirectURI {
-					return nil
-				}
+		// Not found in DB — fall through to in-memory check below so that
+		// pre-registered built-in clients (e.g. ConnectClientID) are
+		// recognised even when useDB is true.
+	}
+	// In-memory map: covers non-DB deployments and pre-registered built-in
+	// clients that are not persisted to the DB.
+	s.mu.Lock()
+	reg, ok := s.clients[clientID]
+	s.mu.Unlock()
+	if ok {
+		for _, u := range reg.RedirectURIs {
+			if u == redirectURI {
+				return nil
 			}
-			return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
 		}
+		return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
 	}
 	if !s.cfg.AllowImplicitClient {
 		return fmt.Errorf("unknown client_id %q (call /oauth/register first)", clientID)
