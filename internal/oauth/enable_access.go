@@ -378,8 +378,12 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.FormValue("code"))
 	if code == "" {
 		renderEnableCode(w, enableCodePage{
-			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
-			Error: "Enter the code Telegram sent you.",
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       "Enter the code Telegram sent you.",
 		})
 		return
 	}
