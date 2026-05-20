@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.21.0](https://github.com/mctlhq/mctl-telegram/compare/0.20.1...0.21.0) (2026-05-19)
+
+
+### Features
+
+* **agents:** issue-68-redesign-tg-mctl-ai-landing-page-for-cli ([1eae213](https://github.com/mctlhq/mctl-telegram/commit/1eae2133f8f504c946b7f36ff3fc262903985cfa))
+* **web:** redesign landing page, add /docs route, fix stale auth copy ([9009776](https://github.com/mctlhq/mctl-telegram/commit/9009776e6aef6b087c569d2f9cef9fca3c4e89a8))
+
+
+### Bug Fixes
+
+* **telegram:** nil-safe SessionStore when Store is nil (test harness) ([61bf4ed](https://github.com/mctlhq/mctl-telegram/commit/61bf4edc5e88001c2c844bc734ca21486f984af1))
+* **web:** correct docs.go comment four-&gt;three ([1573fe4](https://github.com/mctlhq/mctl-telegram/commit/1573fe44f7ba8731f9b3c734a9874f1d4657d68a))
+* **web:** fix duplicate Telegram bullet in privacy, remove debug comment in landing ([ddf4c12](https://github.com/mctlhq/mctl-telegram/commit/ddf4c129e9cb1f20149f489dddfba9499d8e56cb))
+
+## [0.20.1](https://github.com/mctlhq/mctl-telegram/compare/0.20.0...0.20.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **oauth:** drop admin:users from public scopes_supported ([1a2680d](https://github.com/mctlhq/mctl-telegram/commit/1a2680d139521a1d7937cf2b6e9065ccacaa06c7))
+* **oauth:** drop admin:users from public scopes_supported ([153beb3](https://github.com/mctlhq/mctl-telegram/commit/153beb312651e1abebba532ca275dca3762f880a))
+
+## [0.20.0](https://github.com/mctlhq/mctl-telegram/compare/0.19.0...0.20.0) (2026-05-19)
+
+
+### Features
+
+* **agents:** issue-66-scalability-audit-and-hardening-for-100 ([c497eb4](https://github.com/mctlhq/mctl-telegram/commit/c497eb4aaf777cea8431e6a6251dde34b4c04b3c))
+* **scalability:** issue-66-scalability-audit-and-hardening-for-100 ([6ddfd1b](https://github.com/mctlhq/mctl-telegram/commit/6ddfd1b0657e0b6bee8194309fbf914bfc6698f1))
+
+
+### Bug Fixes
+
+* **oauth:** address P1/P2 review findings for DB-backed OAuth paths ([c70319c](https://github.com/mctlhq/mctl-telegram/commit/c70319cf282850638b811711163cc35262925355))
+* **oauth:** address P2 findings — FLOOD_PREMIUM_WAIT and evict-insert comment ([e46f0b0](https://github.com/mctlhq/mctl-telegram/commit/e46f0b0a2fc9a38d7d6870108d5e297eff655086))
+* **oauth:** fix TOCTOU in Consume* methods and evict live-row mismatch ([79386e7](https://github.com/mctlhq/mctl-telegram/commit/79386e78217a3301d772d974ab985c5fecfe4077))
+
+## [0.19.0](https://github.com/mctlhq/mctl-telegram/compare/0.18.0...0.19.0) (2026-05-19)
+
+
+### Features
+
+* **oauth:** allow chatgpt.com redirect_uri in implicit-host allowlist ([dea99a8](https://github.com/mctlhq/mctl-telegram/commit/dea99a8d6050f67ffb3dc0ba29d8493fe6362512))
+* **oauth:** allow chatgpt.com redirect_uri in implicit-host allowlist ([fbb925f](https://github.com/mctlhq/mctl-telegram/commit/fbb925f1f77391828c3ecf64ca44a097f7f978b0))
+
 ## [0.18.0](https://github.com/mctlhq/mctl-telegram/compare/0.17.0...0.18.0) (2026-05-18)
 
 
