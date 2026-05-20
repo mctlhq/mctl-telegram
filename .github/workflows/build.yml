@@ -24,7 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: lint-grafana-json
-        run: python3 -c "import json,sys,glob; [json.load(open(f)) for f in glob.glob('deploy/grafana/**/*.json', recursive=True)]; print('Grafana JSON valid')"
+        run: |
+          python3 -c "
+          import json, glob
+          files = glob.glob('deploy/grafana/**/*.json', recursive=True)
+          if not files:
+              raise SystemExit('no Grafana JSON files found')
+          for f in files:
+              with open(f) as fh:
+                  json.load(fh)
+          print('Grafana JSON valid:', files)
+          "
 
   docker:
     runs-on: ubuntu-latest
