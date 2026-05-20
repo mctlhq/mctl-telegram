@@ -260,3 +260,8 @@ func TestRunMetricsListDialogsFailure(t *testing.T) {
 		t.Errorf("expected step_failure_total{step=list_dialogs}=1, got %v", got)
 	}
 }
+
+// TODO: add a test for the main() push-then-exit code path (the cfg.pushgateway != ""
+// branch). Requires extracting the push-and-exit logic from main() into a testable
+// function and stubbing the Pushgateway HTTP client.
+// Tracking: https://github.com/mctlhq/mctl-telegram/issues/TBD

@@ -410,7 +410,10 @@ func main() {
 		return
 	}
 
-	// Daemon mode: serve metrics locally for scraping.
+	// Daemon mode: serve metrics locally for Prometheus scraping.
+	// Intended for local smoke runs only; production uses the CronJob
+	// with PUSHGATEWAY_URL set. Metrics are frozen to the single probe
+	// result and do not refresh while the server is running.
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(met.registry, promhttp.HandlerOpts{}))
 	slog.Info("serving metrics", "addr", cfg.metricsAddr)

@@ -19,7 +19,7 @@ spec:
             runAsUser: 1000
           containers:
             - name: canary
-              image: ghcr.io/mctlhq/mctl-telegram:latest
+              image: ghcr.io/mctlhq/mctl-telegram:0.22.0
               command: ["/usr/local/bin/mctl-telegram-canary"]
               securityContext:
                 allowPrivilegeEscalation: false
