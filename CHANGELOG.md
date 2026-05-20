@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.23.0](https://github.com/mctlhq/mctl-telegram/compare/0.22.0...0.23.0) (2026-05-20)
+
+
+### Features
+
+* **agents:** issue-87-grafana-dashboard-for-beta-operations ([dbbbd10](https://github.com/mctlhq/mctl-telegram/commit/dbbbd1014e92e72b802813a84c6d204125cf93ca))
+* **agents:** issue-93-unified-connect-wizard-oidc-enable-acces ([e3dc686](https://github.com/mctlhq/mctl-telegram/commit/e3dc686820005e099c30d9612519154c6102809c))
+* **ops:** add Grafana dashboard for beta operations ([f82f47f](https://github.com/mctlhq/mctl-telegram/commit/f82f47fc18cd2e9a01f0dbf580b0bfca154a094c))
+* **web:** unified connect wizard with OIDC permissions step and audit trail ([1afa5da](https://github.com/mctlhq/mctl-telegram/commit/1afa5daef999fbfd50a077dd3cc127ba920daa3e))
+
+
+### Bug Fixes
+
+* **connect-wizard:** address P1/P2 review findings ([630dc5f](https://github.com/mctlhq/mctl-telegram/commit/630dc5f97d0a3a90aee44ccb37143ab62397cdbf))
+* **connect-wizard:** complete wizard step indicator on code and password screens ([3feaa1b](https://github.com/mctlhq/mctl-telegram/commit/3feaa1bd49572653f048506e68372954e50e6bad))
+* **connect-wizard:** derive Secure cookie flag + clear cookie on disconnect ([6c1a022](https://github.com/mctlhq/mctl-telegram/commit/6c1a022b1d513f7564d48c378b7aafcfc30e407c))
+* **connect-wizard:** preserve wizard mode on empty-code re-render ([1c8ef15](https://github.com/mctlhq/mctl-telegram/commit/1c8ef15001bd62ec3cea891daa94ba69c2317907))
+* **connect-wizard:** unblock CI + address P2/P3 review findings ([d3eceb4](https://github.com/mctlhq/mctl-telegram/commit/d3eceb4ae4460a4edbcfc58d6f8d494dc53486c0))
+* **grafana:** rename __requires__ to __requires (P1 follow-up) ([ac23e7a](https://github.com/mctlhq/mctl-telegram/commit/ac23e7a3bf56ee2863223ba911b54f50ba77c7e7))
+* **grafana:** rename dashboard import key to __inputs (P1 follow-up to [#95](https://github.com/mctlhq/mctl-telegram/issues/95)) ([4717277](https://github.com/mctlhq/mctl-telegram/commit/471727778c57e853cbac59e20877fad7095fd299))
+* **grafana:** rename dashboard import key to __inputs (P1 follow-up to [#95](https://github.com/mctlhq/mctl-telegram/issues/95)) ([e096870](https://github.com/mctlhq/mctl-telegram/commit/e09687042c18e9ce0bd9283d242f6190e60e1b3f))
+
 ## [0.22.0](https://github.com/mctlhq/mctl-telegram/compare/0.21.0...0.22.0) (2026-05-20)
 
 
