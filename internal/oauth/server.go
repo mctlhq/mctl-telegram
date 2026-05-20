@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -782,6 +783,40 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Diagnostic: capture exactly what the MCP client requests, so we can
+	// reconcile scope mismatches surfaced by DCR clients' UI. Emitted only
+	// after the length-bounded + validateClient gates — an unauthenticated
+	// caller cannot drive log volume past 4 KB per accepted request. PII-
+	// safe: scope is opaque OAuth strings, state/code_challenge are random
+	// tokens (len-only), redirect_uri is observed at the host level.
+	{
+		ru, _ := url.Parse(redirectURI)
+		host := ""
+		if ru != nil {
+			host = ru.Host
+		}
+		extraParams := make([]string, 0, len(q))
+		for k := range q {
+			switch k {
+			case "client_id", "redirect_uri", "state", "code_challenge",
+				"code_challenge_method", "response_type", "scope":
+			default:
+				extraParams = append(extraParams, k)
+			}
+		}
+		sort.Strings(extraParams)
+		slog.Info("oauth: authorize request",
+			"user_agent", r.Header.Get("User-Agent"),
+			"client_id", clientID,
+			"redirect_uri_host", host,
+			"response_type", responseType,
+			"scope", scope,
+			"state_len", len(state),
+			"code_challenge_method", codeChallengeMethod,
+			"extra_query_params", strings.Join(extraParams, ","),
+		)
+	}
+
 	// Persist pending state, indexed by a fresh random server-side state token.
 	// We DO NOT trust the client-supplied state — that survives only as a
 	// pass-through value the OIDC callback echoes back on redirect.
@@ -1243,6 +1278,14 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
+	// Diagnostic: requested-vs-granted scope reconciliation.
+	slog.Info("oauth: token authorization_code grant",
+		"user_agent", r.Header.Get("User-Agent"),
+		"client_id", clientID,
+		"requested_scope", entry.Scope,
+		"granted_scope", strings.Join(scopes, " "),
+		"groups", strings.Join(groups, ","),
+	)
 	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -1452,11 +1495,44 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	if s.cfg.MaxRegisterBodyBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRegisterBodyBytes)
 	}
+	// Decode into a loose map first so we can observe RFC 7591 fields we
+	// otherwise drop (scope, token_endpoint_auth_method, etc.) — useful
+	// for diagnosing scope-mismatch warnings in DCR clients. Re-decode
+	// into the typed struct for actual processing.
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
+		return
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	rawScope, _ := raw["scope"].(string)
+	rawClientName, _ := raw["client_name"].(string)
+	redirectURICount := 0
+	if uris, ok := raw["redirect_uris"].([]any); ok {
+		redirectURICount = len(uris)
+	}
+	slog.Info("oauth: client_registration request",
+		"user_agent", r.Header.Get("User-Agent"),
+		"keys", strings.Join(keys, ","),
+		"client_name", rawClientName,
+		"redirect_uri_count", redirectURICount,
+		"scope_in_request", rawScope,
+	)
+	// Re-encode + decode to extract the typed shape we actually use.
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
+		return
+	}
 	var req struct {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(buf, &req); err != nil {
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
