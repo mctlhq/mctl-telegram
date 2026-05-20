@@ -963,9 +963,8 @@ func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
 	if errors.Is(err, telegram.ErrPoolFull) {
 		return mcplib.NewToolResultError("server at session capacity — try again later")
 	}
-	if secs := telegram.FloodWaitSeconds(err); secs > 0 {
-		return mcplib.NewToolResultError(
-			fmt.Sprintf("Telegram rate limit (FLOOD_WAIT_%d): retry_after_seconds=%d", secs, secs))
+	if res := mtprotoErrResult(tool, err); res != nil {
+		return res
 	}
 	return toolErr("%s: %v", tool, err)
 }

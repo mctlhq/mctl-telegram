@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -96,5 +99,40 @@ func TestEvaluateSendGate_AllChecksPass(t *testing.T) {
 	}
 	if reason != "" {
 		t.Fatalf("expected empty reason on success, got %q", reason)
+	}
+}
+
+// TestBorrowErrResultSessionSentinelsUnchanged is a regression guard: the
+// known session sentinel errors must still produce a non-nil error result
+// whose content mentions "session".
+func TestBorrowErrResultSessionSentinelsUnchanged(t *testing.T) {
+	result := borrowErrResult("t", db.ErrSessionRevoked)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true")
+	}
+	text := contentText(result)
+	if !strings.Contains(strings.ToLower(text), "session") {
+		t.Errorf("expected 'session' in content, got %q", text)
+	}
+}
+
+// TestBorrowErrResultFloodWait verifies that a FLOOD_WAIT error wrapped in a
+// plain fmt.Errorf is recognised and produces a JSON envelope with a
+// retry_after_seconds field.
+func TestBorrowErrResultFloodWait(t *testing.T) {
+	wrapped := fmt.Errorf("list_dialogs: %w", tgerr.New(420, "FLOOD_WAIT_30"))
+	result := borrowErrResult("list_dialogs", wrapped)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true")
+	}
+	text := contentText(result)
+	if !strings.Contains(text, "retry_after_seconds") {
+		t.Errorf("expected 'retry_after_seconds' in content, got %q", text)
 	}
 }
