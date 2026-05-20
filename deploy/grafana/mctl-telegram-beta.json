@@ -1,5 +1,5 @@
 {
-  "__inputs__": [
+  "__inputs": [
     {
       "name": "DS_PROMETHEUS",
       "label": "Prometheus",
