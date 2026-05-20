@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.22.0](https://github.com/mctlhq/mctl-telegram/compare/0.21.0...0.22.0) (2026-05-20)
+
+
+### Features
+
+* **agents:** issue-67-build-browser-based-telegram-account-onb ([d2826e4](https://github.com/mctlhq/mctl-telegram/commit/d2826e42db4652becadeb16c865d70883e53aa26))
+* **agents:** issue-69-improve-mobile-responsiveness-of-tg-mctl ([4c2ccaa](https://github.com/mctlhq/mctl-telegram/commit/4c2ccaa05f871f5b8bb35abe1b7749ffc68b883e))
+* **agents:** issue-70-add-user-friendly-error-message-catalog ([dd28a43](https://github.com/mctlhq/mctl-telegram/commit/dd28a43f23b7c746112ff55420f4951ae3828313))
+
+
+### Bug Fixes
+
+* address P1/P2/P3 review findings in ExchangeConnect and validateClient ([fd85b79](https://github.com/mctlhq/mctl-telegram/commit/fd85b7989ee4fe9cf4d051fbdff49f60bb0191ab))
+* **mcp:** swap slog field names: message=rpcErr.Message, code=rpcErr.Code ([6a9b3bb](https://github.com/mctlhq/mctl-telegram/commit/6a9b3bb4b2420c0a849a2f5669635b2cbf8096fa))
+* **web:** reorder media queries largest-to-smallest (768→640→480) ([91aa239](https://github.com/mctlhq/mctl-telegram/commit/91aa239896ca5630375b7cf3e8ae5d8517a540e0))
+
 ## [0.21.0](https://github.com/mctlhq/mctl-telegram/compare/0.20.1...0.21.0) (2026-05-19)
 
 
