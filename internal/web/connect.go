@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -192,13 +193,15 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	// Set an HttpOnly session cookie so the browser can authenticate against
 	// the /telegram/connect/manage routes without receiving the JWT in-page.
 	// Path=/telegram/connect restricts delivery to this subtree only.
+	// Secure is derived from the issuer scheme so local HTTP dev does not
+	// silently drop the cookie.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "mctl_connect_token",
 		Value:    tok,
 		Path:     "/telegram/connect",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   true,
+		Secure:   strings.HasPrefix(s.issuer, "https://"),
 	})
 
 	renderConnectSuccess(w, connectSuccessData{

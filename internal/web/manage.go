@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -76,7 +77,18 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 		renderManageError(w, "Disconnect failed. Please try again.")
 		return
 	}
-	http.Redirect(w, r, s.issuer+"/telegram/connect/manage", http.StatusFound)
+	// Clear the connect-session cookie so the now-revoked DB session does not
+	// remain reachable via a still-valid JWT cookie until its 1-hour expiry.
+	// Path / Secure must match the Set-Cookie shape in HandleConnectDone.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mctl_connect_token",
+		Path:     "/telegram/connect",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   strings.HasPrefix(s.issuer, "https://"),
+		MaxAge:   -1,
+	})
+	http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
 }
 
 // HandleToggleSend flips the send_enabled flag and redirects back.
