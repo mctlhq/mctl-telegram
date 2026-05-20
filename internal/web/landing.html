@@ -564,6 +564,12 @@
   }
 
   /* Responsive */
+  @media (max-width: 768px) {
+    .wrap { padding: 0 20px; }
+    .topbar .meta .hide-md { display: none; }
+    .theme-toggle { width: 44px; height: 44px; }
+    .accent-swatch { min-width: 44px; min-height: 44px; padding: 0; }
+  }
   @media (max-width: 640px) {
     .wrap { padding: 0 18px; }
     .topbar .meta { gap: 12px; font-size: 11px; }
@@ -574,6 +580,18 @@
     .flow-diagram { flex-direction: column; }
     .flow-arrow { transform: rotate(90deg); padding: 4px 0; }
     .cta-row { flex-direction: column; align-items: flex-start; }
+  }
+  @media (max-width: 480px) {
+    .wrap { padding: 0 14px; }
+    h1 { font-size: 24px; letter-spacing: -.015em; }
+    .lead { font-size: 14px; }
+    .endpoint .url { font-size: 14px; }
+    ol.steps > li { padding: 10px 12px 10px 44px; }
+    ol.steps > li::before { left: 10px; top: 10px; width: 26px; height: 26px; font-size: 11px; }
+    pre code { font-size: 12px; }
+    .tbl { font-size: 12px; }
+    section { margin-top: 40px; }
+    .topbar { margin-bottom: 36px; }
   }
 </style>
 </head>
@@ -593,7 +611,7 @@
       <a href="/security">security</a>
       <a href="/privacy">privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
+      <span class="accent-picker hide-sm hide-md" role="group" aria-label="Accent color">
         <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
         <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
         <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
