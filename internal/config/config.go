@@ -53,6 +53,9 @@ type Config struct {
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
+	// ReplicaID identifies this pod for observability. Sourced from
+	// REPLICA_ID env var; falls back to POD_NAME; falls back to "unknown".
+	ReplicaID string
 }
 
 func Load() (*Config, error) {
@@ -88,6 +91,7 @@ func Load() (*Config, error) {
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
+	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))

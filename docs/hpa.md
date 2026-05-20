@@ -134,3 +134,120 @@ Add the following PrometheusRule to alert on sustained pool-full conditions:
   authorization flows. A sustained non-zero value with no corresponding traffic
   suggests abandoned flows or an uptick in bot-scan traffic against
   `/oauth/authorize`.
+
+## Sticky routing for multi-replica deployments
+
+### Problem
+
+`internal/telegram/clientpool.go` (lines 60-91) maintains a per-process map
+from `user_id` to a live `*telegram.Client` goroutine. This state is not shared
+across pods: when the Kubernetes Deployment scales to two or more replicas, a
+user whose requests land on different replicas triggers a fresh MTProto session
+on each replica. Telegram treats each new session as a new device login and
+fires a "New login" security notification — damaging user trust and raising red
+flags for security-conscious users. In addition, pool memory grows in proportion
+to (active users * replicas) instead of active users alone, undermining the
+capacity planning described above.
+
+### Two-layer solution
+
+Sticky routing operates at two independent layers, both of which must be active
+for multi-replica deployment to be safe:
+
+**Layer 1 — Load-balancer consistent-hash routing** (see `deploy/ingress/`):
+An ingress-tier Lua snippet extracts the `sub` claim from the JWT payload
+(`tg:<telegram_id>`), sets it as the `X-Mctl-Route-Key` request header, and
+NGINX (or Envoy) performs ketama consistent-hash routing on that header value.
+All requests for the same `sub` reach the same upstream pod. When a pod is added
+or removed, only the minimum subset of users affected by the rehash moves;
+unaffected users keep hitting their existing pod with no new session.
+
+**Layer 2 — Replica identity observability** (this repository):
+`mctl_telegram_replica_id{replica_id="..."}` is an info-type Prometheus gauge
+(constant value 1) that appears on every pod's `/metrics` endpoint. Operators
+cross-reference it with `mctl_telegram_client_pool_size` to verify that sticky
+routing is in effect.
+
+### Security analysis for payload-only JWT extraction at the routing tier
+
+The JWT signature is **not** verified at the ingress tier. This is intentional:
+
+- NGINX community edition and Envoy without the Istio JWT AuthN filter do not
+  ship HS256 verification as a first-class feature. Adding it would require
+  distributing `OAUTH_JWT_SIGNING_KEY` outside the pod boundary, increasing the
+  attack surface for key exposure.
+- The routing key carries **no authorization weight**. The application's auth
+  middleware (`internal/auth/middleware.go`) re-verifies the full JWT signature
+  on every request and rejects any tampered token before it reaches any handler.
+- A client that edits its JWT payload to change the `sub` claim changes only
+  which pod handles the request; the forged token is then rejected by that pod's
+  own auth check. **No privilege escalation is possible.**
+
+The ingress configuration **must** strip the `X-Mctl-Route-Key` header from
+client requests before the Lua extraction step so that a client cannot inject a
+routing key without a valid JWT.
+
+### Downward API snippet for POD_NAME
+
+Wire the `POD_NAME` environment variable via the Kubernetes downward API in the
+Deployment spec so that the `mctl_telegram_replica_id` gauge and startup log
+line carry a meaningful value:
+
+```yaml
+env:
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+```
+
+`REPLICA_ID` takes precedence if set. If neither is set, the value falls back to
+`"unknown"` and startup continues normally. A monitoring alert on
+`mctl_telegram_replica_id{replica_id="unknown"}` can catch missing downward API
+configuration.
+
+### Verification
+
+After deploying with sticky routing enabled, verify on each pod:
+
+```bash
+kubectl exec -n mctl <pod-name> -- \
+  wget -qO- http://localhost:8080/metrics | grep mctl_telegram_replica_id
+```
+
+Expected output (one line per pod, each with a distinct `replica_id`):
+
+```
+mctl_telegram_replica_id{replica_id="mctl-telegram-7f9d-abc12"} 1
+```
+
+Cross-reference with the pool size gauge to confirm that each pod serves a
+distinct, non-overlapping set of users:
+
+```bash
+kubectl exec -n mctl <pod-name> -- \
+  wget -qO- http://localhost:8080/metrics | grep mctl_telegram_client_pool_size
+```
+
+### One-time "New login" events on pod restarts and rehashes
+
+When a pod is restarted or when the consistent-hash ring rebalances after a
+scale-out event, a subset of users is remapped to a different pod. Each remapped
+user will experience a one-time "New login" Telegram security notification as
+their MTProto session is re-established on the new pod. This is unavoidable
+with in-process session state. After the rebalance stabilizes, sticky routing
+prevents further spurious notifications.
+
+Monitor `mctl_telegram_client_errors_total` for spikes after scale events as an
+indirect indicator of session churn.
+
+### Ingress example files
+
+- `deploy/ingress/sticky-nginx.yaml` — NGINX Ingress Controller (community
+  edition, v1.2+) with ketama consistent-hash routing on the extracted JWT sub.
+- `deploy/ingress/sticky-envoy.yaml` — Istio EnvoyFilter + DestinationRule for
+  Envoy-based ingress, with a note on the experimental Gateway API
+  `BackendLBPolicy` alternative.
+
+These files are standalone examples. The platform team adapts them into the
+appropriate kustomize overlay in `mctl-gitops` before deploying.

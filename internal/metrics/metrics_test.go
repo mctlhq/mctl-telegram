@@ -1,9 +1,11 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // expectedMetricNames lists every metric family that New() must register.
@@ -18,10 +20,11 @@ var expectedMetricNames = []string{
 	"mctl_sessions_connected_total",
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
+	"mctl_telegram_replica_id",
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
-// for each of the 10 metric names defined in the design.
+// for each of the metric names defined in the design.
 func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg := New()
 	// Force each metric to be "used" so the registry includes them in Gather.
@@ -37,6 +40,7 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.SessionsConnectedTotal.Add(0)
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
+	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
 
 	mfs, err := reg.Prometheus.Gather()
 	if err != nil {
@@ -50,5 +54,25 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 		if _, ok := gathered[name]; !ok {
 			t.Errorf("metric family %q not found in gathered output", name)
 		}
+	}
+}
+
+// TestReplicaIDGauge verifies the mctl_telegram_replica_id info gauge:
+// setting the gauge for two distinct replica_id labels produces two distinct
+// time-series each with value 1.
+func TestReplicaIDGauge(t *testing.T) {
+	reg := New()
+
+	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
+	reg.TelegramReplicaID.WithLabelValues("pod-1").Set(1)
+
+	const expected = `
+# HELP mctl_telegram_replica_id Info gauge (always 1) identifying this replica. Label replica_id is sourced from REPLICA_ID / POD_NAME env vars.
+# TYPE mctl_telegram_replica_id gauge
+mctl_telegram_replica_id{replica_id="pod-0"} 1
+mctl_telegram_replica_id{replica_id="pod-1"} 1
+`
+	if err := testutil.CollectAndCompare(reg.TelegramReplicaID, strings.NewReader(expected)); err != nil {
+		t.Errorf("CollectAndCompare: %v", err)
 	}
 }
