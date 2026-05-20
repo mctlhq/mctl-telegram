@@ -21,6 +21,11 @@ spec:
             - name: canary
               image: ghcr.io/mctlhq/mctl-telegram:latest
               command: ["/usr/local/bin/mctl-telegram-canary"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
               env:
                 - name: CANARY_BASE_URL
                   value: "https://tg.mctl.ai"

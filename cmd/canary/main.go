@@ -17,7 +17,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -153,7 +152,7 @@ func probeOAuthMetadata(ctx context.Context, client *http.Client, baseURL string
 		return fmt.Errorf("GET %s returned HTTP %d", url, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Errorf("read body: %w", err)
 	}
@@ -253,15 +252,15 @@ func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, be
 		return nil, fmt.Errorf("POST %s returned HTTP %d", url, resp.StatusCode)
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
 	// Check for flood-wait before parsing, since the substring may appear
 	// anywhere in the response text including inside error messages.
-	floodWait := strings.Contains(string(respBytes), "FLOOD_WAIT_") ||
-		strings.Contains(string(respBytes), "FLOOD_PREMIUM_WAIT_")
+	floodWait := bytes.Contains(respBytes, []byte("FLOOD_WAIT_")) ||
+		bytes.Contains(respBytes, []byte("FLOOD_PREMIUM_WAIT_"))
 
 	var rpcResp jsonRPCResponse
 	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
