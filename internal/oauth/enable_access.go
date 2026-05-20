@@ -240,7 +240,14 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 // screen. Every handler path that bounces the user back to the start uses it,
 // so es.step never lags behind the screen actually shown (a stale stepCode /
 // stepPassword would otherwise let a direct POST skip the UI order).
+// It also propagates wizard context from the session so error fallbacks from
+// later steps keep showing the 4-step indicator (callers that already set
+// WizardMode are not overridden).
 func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePhonePage) {
+	if es.isWizardMode() && !p.WizardMode {
+		p.WizardMode = true
+		p.WizardStep = 3
+	}
 	es.step = stepPhone
 	renderEnablePhone(w, p)
 }
@@ -319,7 +326,13 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.needCode:
 		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "")
-		renderEnableCode(w, enableCodePage{Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: phone})
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+		})
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
@@ -561,7 +574,7 @@ func shortReason(err error) string {
 		case rpcErr.Message == "PHONE_NUMBER_INVALID":
 			return "phone_invalid"
 		case rpcErr.Message == "PHONE_CODE_INVALID":
-			return "code_expired"
+			return "code_invalid"
 		case rpcErr.Message == "PHONE_CODE_EXPIRED":
 			return "code_expired"
 		case strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_"):

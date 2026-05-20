@@ -69,7 +69,7 @@ func TestShortReason(t *testing.T) {
 		{
 			name: "PHONE_CODE_INVALID",
 			err:  tgerr.New(400, "PHONE_CODE_INVALID"),
-			want: "code_expired",
+			want: "code_invalid",
 		},
 		{
 			name: "PHONE_CODE_EXPIRED",

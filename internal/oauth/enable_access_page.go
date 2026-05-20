@@ -132,7 +132,7 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
       <li>Done</li>
     </ol>{{end}}
-    <h1>Enable message access</h1>
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Phone number</h1>{{else}}<h1>Enable message access</h1>{{end}}
     {{if .WizardMode}}<div class="notice">A new Telegram session will appear in your account&#8217;s Active Sessions. This is normal &#8212; it is this connector.</div>{{end}}
     <p>You are connecting <span class="url">{{.Issuer}}</span> to your Telegram account. To
        read your messages, this server needs a Telegram session. Enter your phone number and
@@ -161,7 +161,7 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
       <li>Phone number</li>
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
     </ol>{{end}}
-    <h1>Enter your login code</h1>
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
     <p>Telegram sent a login code to <span class="url">{{.Phone}}</span>. Open the Telegram app
        on another device to find it.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}

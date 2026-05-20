@@ -318,7 +318,7 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
       <li class="active">Done</li>
     </ol>
     <h1>Step 4 of 4 &#8212; Done</h1>
-    <p>Your Telegram account has been successfully linked to this MCP connector.</p>
+    <p>Your Telegram account is now connected to this MCP connector.</p>
     <p>To start using it with Claude, open the Claude.ai connector settings and add the MCP URL:</p>
     <p class="url">{{.MCPURL}}</p>
     <p class="meta">A new session called &#8220;mctl Telegram Assistant&#8221; will appear in
