@@ -182,6 +182,19 @@ func main() {
 
 	provider := selectProvider(cfg, store)
 
+	// Session management dashboard — only mounted in local-jwt mode alongside
+	// the self-connect wizard. Requires auth so only the session owner can
+	// manage their own session.
+	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"))
+		mux.With(auth.Middleware(provider, true, m)).
+			Get("/telegram/connect/manage", manageSrv.HandleManage)
+		mux.With(auth.Middleware(provider, true, m)).
+			Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
+		mux.With(auth.Middleware(provider, true, m)).
+			Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
+	}
+
 	// Account endpoints — self-service disconnect/delete + status.
 	// Mounted behind the same auth middleware as MCP so anon traffic gets 401.
 	accountMux := chi.NewRouter()

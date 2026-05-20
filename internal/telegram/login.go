@@ -36,6 +36,13 @@ func Login(
 	sessStore := &SessionStore{UserID: userID, Store: store}
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
 		SessionStorage: sessStore,
+		Device: telegram.DeviceConfig{
+			DeviceModel:    "mctl Telegram Assistant",
+			SystemVersion:  "Linux",
+			AppVersion:     "1.0",
+			SystemLangCode: "en",
+			LangCode:       "en",
+		},
 	})
 
 	authenticator := &interactiveAuthenticator{

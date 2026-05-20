@@ -18,6 +18,8 @@ type enablePhonePage struct {
 	Phone       string
 	SendOptIn   bool
 	Error       string
+	WizardMode  bool
+	WizardStep  int
 }
 
 type enableCodePage struct {
@@ -25,6 +27,8 @@ type enableCodePage struct {
 	EnableToken string
 	Phone       string
 	Error       string
+	WizardMode  bool
+	WizardStep  int
 }
 
 type enablePasswordPage struct {
@@ -34,7 +38,15 @@ type enablePasswordPage struct {
 	// Nonce authorizes the single inline <script> on the password screen
 	// (the show/hide-password toggle). It is generated per request by
 	// renderEnablePassword and echoed in the CSP script-src.
-	Nonce string
+	Nonce      string
+	WizardMode bool
+	WizardStep int
+}
+
+type enablePermissionsPage struct {
+	Issuer      string
+	EnableToken string
+	Error       string
 }
 
 type enableErrorPage struct {
@@ -79,6 +91,15 @@ const enableHead = `<!doctype html>
                 background: none; color: #57606a; cursor: pointer;
                 display: flex; align-items: center; justify-content: center; }
     .pwtoggle:hover { background: none; color: #1f2328; }
+    .steps { display: flex; list-style: none; padding: 0; margin: 0 0 20px; gap: 0; }
+    .steps li { flex: 1; text-align: center; font-size: 12px; padding: 6px 4px;
+                border-bottom: 2px solid #d0d7de; color: #57606a; }
+    .steps li.active { border-bottom-color: #1f883d; color: #1f883d; font-weight: 600; }
+    .notice { background: #ddf4ff; border: 1px solid #54aeff; border-radius: 6px;
+              padding: 10px 12px; font-size: 13px; color: #0969da; margin: 12px 0; }
+    .radio-group { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+    .radio-group label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+    .radio-group input { margin-top: 3px; }
     @media (prefers-color-scheme: dark) {
       body { background: #0d1117; color: #e6edf3; }
       .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
@@ -91,6 +112,9 @@ const enableHead = `<!doctype html>
       .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
       .pwtoggle { color: #8b949e; }
       .pwtoggle:hover { color: #e6edf3; }
+      .steps li { border-bottom-color: #30363d; color: #8b949e; }
+      .steps li.active { border-bottom-color: #3fb950; color: #3fb950; }
+      .notice { background: #051d4d; border-color: #1f6feb; color: #79c0ff; }
     }
   </style>
 </head>
@@ -102,7 +126,14 @@ const enableFoot = `  </div>
 </body>
 </html>`
 
-var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    <h1>Enable message access</h1>
+var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
+      <li>Done</li>
+    </ol>{{end}}
+    <h1>Enable message access</h1>
+    {{if .WizardMode}}<div class="notice">A new Telegram session will appear in your account&#8217;s Active Sessions. This is normal &#8212; it is this connector.</div>{{end}}
     <p>You are connecting <span class="url">{{.Issuer}}</span> to your Telegram account. To
        read your messages, this server needs a Telegram session. Enter your phone number and
        Telegram will send you a login code.</p>
@@ -114,17 +145,23 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
         <input name="phone" type="tel" inputmode="tel" placeholder="+14155551234"
                value="{{.Phone}}" required autofocus>
       </label>
-      <label class="check">
+      {{if .WizardMode}}{{else}}<label class="check">
         <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
-      </label>
+      </label>{{end}}
       <button type="submit">Send code</button>
     </form>
     <p class="meta">The login code is delivered inside your Telegram app. The server stores an
        encrypted session blob — never your password.</p>
 ` + enableFoot))
 
-var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    <h1>Enter your login code</h1>
+var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li>Phone number</li>
+      <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
+    </ol>{{end}}
+    <h1>Enter your login code</h1>
     <p>Telegram sent a login code to <span class="url">{{.Phone}}</span>. Open the Telegram app
        on another device to find it.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
@@ -189,6 +226,32 @@ var enableErrorTemplate = template.Must(template.New("enableError").Parse(enable
     <p class="meta">Return to your MCP client and start the connection again.</p>
 ` + enableFoot))
 
+var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="steps">
+      <li>Sign in with Telegram</li>
+      <li class="active">Permissions</li>
+      <li>Phone number</li>
+      <li>Done</li>
+    </ol>
+    <h1>Step 2 of 4 &#8212; Permissions</h1>
+    <p>Choose what this connector is allowed to do with your Telegram account.</p>
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    <form method="POST" action="/oauth/telegram/enable_access/permissions" autocomplete="off">
+      <input type="hidden" name="es" value="{{.EnableToken}}">
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="send_optin" value="readonly" checked>
+          Read only (recommended) &#8212; the connector can read messages but cannot send.
+        </label>
+        <label>
+          <input type="radio" name="send_optin" value="send">
+          Read + send &#8212; the connector can also send messages on your behalf.
+        </label>
+      </div>
+      <button type="submit">Continue</button>
+    </form>
+    <p class="meta">You can change this permission later from the session management page.</p>
+` + enableFoot))
+
 func renderEnablePhone(w http.ResponseWriter, p enablePhonePage) {
 	renderEnable(w, http.StatusOK, enablePhoneTemplate, p, "")
 }
@@ -213,6 +276,10 @@ func renderEnablePassword(w http.ResponseWriter, p enablePasswordPage) {
 
 func renderEnableError(w http.ResponseWriter, msg string) {
 	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{Message: msg}, "")
+}
+
+func renderEnablePermissions(w http.ResponseWriter, p enablePermissionsPage) {
+	renderEnable(w, http.StatusOK, enablePermissionsTemplate, p, "")
 }
 
 // newCSPNonce returns a fresh nonce for a CSP script-src. 16 random bytes is

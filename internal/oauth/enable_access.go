@@ -17,16 +17,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
 
 // enableStep tracks where an enable_access flow is. Guarded by enableSession.lock.
 type enableStep int
 
 const (
-	stepPhone    enableStep = iota // awaiting the phone number (initial screen)
-	stepCode                       // awaiting the SMS code
-	stepPassword                   // awaiting the 2FA cloud password
-	stepDone                       // session provisioned, authorization code issued
+	stepPermissions enableStep = iota // awaiting permissions choice (wizard mode only)
+	stepPhone                         // awaiting the phone number (initial screen)
+	stepCode                          // awaiting the SMS code
+	stepPassword                      // awaiting the 2FA cloud password
+	stepDone                          // session provisioned, authorization code issued
 )
 
 // Per-step waits. SendCode/SignIn are network round-trips against Telegram;
@@ -190,6 +193,49 @@ func (s *Server) uidLoginMutex(uid int64) *sync.Mutex {
 	return m.(*sync.Mutex)
 }
 
+// isWizardMode reports whether this enable_access flow was initiated via the
+// built-in self-connect client (i.e. the /telegram/connect landing page).
+func (es *enableSession) isWizardMode() bool {
+	return es.oc.ClientID == ConnectClientID
+}
+
+// handleEnablePermissions receives the permissions choice (read-only vs
+// read+send), records the opt-in, and advances to the phone screen.
+func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request) {
+	es, esTok, ok := s.lookupEnable(r)
+	if !ok {
+		renderEnableError(w, "This sign-in session has expired. Close this page and reconnect from your MCP client.")
+		return
+	}
+	if !es.lock.TryLock() {
+		renderEnableError(w, "Another step of this sign-in is still in progress. Wait a moment, then retry.")
+		return
+	}
+	defer es.lock.Unlock()
+
+	if es.step != stepPermissions {
+		renderEnablePhoneStep(w, es, enablePhonePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+		})
+		return
+	}
+
+	sendOptin := r.FormValue("send_optin")
+	es.sendOptIn = sendOptin == "send"
+	es.step = stepPhone
+	renderEnablePhone(w, enablePhonePage{
+		Issuer:      s.cfg.Issuer,
+		EnableToken: esTok,
+		SendOptIn:   es.sendOptIn,
+		WizardMode:  true,
+		WizardStep:  3,
+	})
+}
+
 // renderEnablePhoneStep resets the flow to stepPhone and renders the phone
 // screen. Every handler path that bounces the user back to the start uses it,
 // so es.step never lags behind the screen actually shown (a stale stepCode /
@@ -240,7 +286,12 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawPhone := r.FormValue("phone")
-	sendOptIn := r.FormValue("send_optin") != ""
+	// In wizard mode the send permission was already captured by
+	// handleEnablePermissions; in non-wizard mode read it from the form.
+	sendOptIn := es.sendOptIn
+	if !es.isWizardMode() {
+		sendOptIn = r.FormValue("send_optin") != ""
+	}
 	phone := normalizePhone(rawPhone)
 	if !validPhone(phone) {
 		renderEnablePhoneStep(w, es, enablePhonePage{
@@ -248,6 +299,8 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       rawPhone,
 			SendOptIn:   sendOptIn,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
 			Error:       "Enter a phone number in international format, e.g. +14155551234.",
 		})
 		return
@@ -265,9 +318,11 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-lf.needCode:
+		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "")
 		renderEnableCode(w, enableCodePage{Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: phone})
 	case <-lf.done:
 		if lf.err != nil {
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 				Error: "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again.",
@@ -278,6 +333,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// auth on the session storage). Nothing more to collect.
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "send code timeout")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 			Error: "Timed out contacting Telegram. Please try again.",
@@ -330,18 +386,22 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-lf.needPw:
+		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "")
 		es.step = stepPassword
 		renderEnablePassword(w, enablePasswordPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
 	case <-lf.done:
 		if lf.err != nil {
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
 			})
 			return
 		}
+		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "")
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify code timeout")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the code. Please start again.",
@@ -395,14 +455,17 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.done:
 		if lf.err != nil {
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
 			})
 			return
 		}
+		s.store.LogToolCall(r.Context(), es.uid, "connect:2fa_submitted", "", "ok", "")
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify password timeout")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the password. Please start again.",
@@ -417,6 +480,7 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	s.mu.Lock()
 	delete(s.enables, esTok)
 	s.mu.Unlock()
+	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "")
 	s.issueAuthCode(w, r, es.oc)
 }
 
@@ -458,6 +522,20 @@ func friendlyErr(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "the login attempt expired."
 	}
+	// Map well-known MTProto error codes to human-readable messages.
+	var rpcErr *tgerr.Error
+	if errors.As(err, &rpcErr) {
+		switch {
+		case rpcErr.Message == "PHONE_NUMBER_INVALID":
+			return "The phone number is not valid. Use international format, e.g. +14155551234."
+		case rpcErr.Message == "PHONE_CODE_INVALID":
+			return "The login code is incorrect."
+		case rpcErr.Message == "PHONE_CODE_EXPIRED":
+			return "The login code has expired. Start again to receive a fresh code."
+		case strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_"):
+			return "Telegram rate limit reached. Wait a moment before trying again."
+		}
+	}
 	m := err.Error()
 	if len(m) > 200 {
 		m = m[:200]
@@ -466,4 +544,32 @@ func friendlyErr(err error) string {
 		m += "."
 	}
 	return m
+}
+
+// shortReason maps a login error to a short token suitable for use in an audit
+// tool_name suffix (e.g. "connect:failed:phone_invalid").
+func shortReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	var rpcErr *tgerr.Error
+	if errors.As(err, &rpcErr) {
+		switch {
+		case rpcErr.Message == "PHONE_NUMBER_INVALID":
+			return "phone_invalid"
+		case rpcErr.Message == "PHONE_CODE_INVALID":
+			return "code_expired"
+		case rpcErr.Message == "PHONE_CODE_EXPIRED":
+			return "code_expired"
+		case strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_"):
+			return "flood_wait"
+		}
+	}
+	if strings.Contains(err.Error(), "different Telegram account") {
+		return "identity_mismatch"
+	}
+	return "unknown"
 }
