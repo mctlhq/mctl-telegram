@@ -134,3 +134,12 @@ Add the following PrometheusRule to alert on sustained pool-full conditions:
   authorization flows. A sustained non-zero value with no corresponding traffic
   suggests abandoned flows or an uptick in bot-scan traffic against
   `/oauth/authorize`.
+
+## Grafana dashboard
+
+A pre-built operator dashboard is committed at
+`deploy/grafana/mctl-telegram-beta.json`. Import it into Grafana via
+**Dashboards > Import** and map the `DS_PROMETHEUS` input to your Prometheus
+data source. The dashboard covers the same pool-utilization signal used by the
+HPA (Session pool row) plus traffic, Telegram pressure, session lifecycle, OAuth,
+and rate-limiting panels.
