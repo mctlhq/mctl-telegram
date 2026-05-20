@@ -134,6 +134,66 @@ mctl deploy -t labs -n mctl-telegram -r mctlhq/mctl-telegram -g X.Y.Z \
 * GitOps values: `mctl-gitops/platform-gitops/services/labs/mctl-telegram/values.yaml`
 * Public hostname: `https://tg.mctl.ai`
 
+## Operations: Canary account
+
+The synthetic canary probe (`cmd/canary`) runs every two minutes as a Kubernetes
+CronJob against the live service. It requires a dedicated Telegram test account —
+**not the operator's personal Telegram account** — created specifically for
+automated probing. Using a personal account risks false-positive FLOOD_WAIT
+events from normal account activity interfering with the canary signal.
+
+### Setting up the canary account
+
+1. Create a fresh Telegram account for the canary. Note its numeric Telegram user id.
+
+2. Complete the browser-based setup flow by visiting `GET /telegram/connect` in a
+   browser while signed in with the canary account's credentials. This step links
+   the Telegram session to an authenticated identity in the database. The canary
+   bearer token cannot be issued until this step is complete.
+
+3. Issue a read-only bearer token using the `set_telegram_access` admin MCP tool.
+   Set only the read scopes — no send scope:
+
+   ```
+   set_telegram_access(tg_user_id="<canary-account-id>", scopes="telegram:dialogs:read,telegram:messages:read")
+   ```
+
+   The token must carry exactly the scopes `telegram:dialogs:read,telegram:messages:read`
+   and must **not** include `telegram:messages:send` or any other write scope.
+   A compromised read-only token cannot write to any Telegram peer.
+
+4. Create the Kubernetes Secret in the `mctl-telegram` namespace:
+
+   ```bash
+   kubectl create secret generic mctl-telegram-canary \
+     --namespace mctl-telegram \
+     --from-literal=tg_user_id="<canary-account-id>" \
+     --from-literal=bearer_token="<token-from-step-3>"
+   ```
+
+   The Secret must have exactly these two keys:
+
+   | Key            | Value                                              |
+   |----------------|----------------------------------------------------|
+   | `tg_user_id`   | Telegram numeric user id of the canary account     |
+   | `bearer_token` | Pre-issued JWT with read-only scopes (step 3)      |
+
+5. Apply the CronJob manifest:
+
+   ```bash
+   kubectl apply -f deploy/canary/cronjob.yaml
+   ```
+
+The CronJob runs `mctl-telegram-canary` every two minutes. It pushes three
+Prometheus metric families to the cluster-internal Pushgateway:
+
+- `mctl_telegram_canary_success` — 1 if all probes passed, 0 if any failed.
+- `mctl_telegram_canary_duration_seconds` — wall-clock time of the run.
+- `mctl_telegram_canary_step_failure_total{step=}` — per-step failure counters.
+
+The `MctlTelegramCanaryFailing` PrometheusRule (`deploy/alerts/canary.rules.yaml`)
+fires at `severity=critical` after five consecutive minutes of `success=0`.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, and the PR process.

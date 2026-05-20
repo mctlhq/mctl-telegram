@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mctl-telegram-canary
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: mctl-telegram-canary
+      interval: 60s
+      rules:
+        - alert: MctlTelegramCanaryFailing
+          expr: min_over_time(mctl_telegram_canary_success[10m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram canary probe has been failing for 5 minutes"
+            description: >
+              The synthetic end-to-end canary for mctl-telegram has reported
+              mctl_telegram_canary_success=0 for every scrape in the last 10
+              minutes, and the condition has persisted for at least 5 minutes.
+              Check mctl_telegram_canary_step_failure_total{step=} to identify
+              which probe step is failing (oauth_metadata, list_dialogs, or
+              get_unread_messages).
+              Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md

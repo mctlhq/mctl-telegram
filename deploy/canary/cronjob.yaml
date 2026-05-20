@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mctl-telegram-canary
+  namespace: mctl-telegram
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 90
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: canary
+              image: ghcr.io/mctlhq/mctl-telegram:latest
+              command: ["/usr/local/bin/mctl-telegram-canary"]
+              env:
+                - name: CANARY_BASE_URL
+                  value: "https://tg.mctl.ai"
+                - name: CANARY_TG_USER_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: mctl-telegram-canary
+                      key: tg_user_id
+                - name: CANARY_BEARER_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: mctl-telegram-canary
+                      key: bearer_token
+                - name: CANARY_PROBE_UNREAD
+                  value: "true"
+                - name: PUSHGATEWAY_URL
+                  value: "http://prometheus-pushgateway.monitoring.svc.cluster.local:9091"
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "64Mi"
