@@ -158,7 +158,7 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
 var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
-      <li>Phone number</li>
+      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
     </ol>{{end}}
     {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
@@ -178,7 +178,13 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
        screen to receive a fresh one.</p>
 ` + enableFoot))
 
-var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    <h1>Two-step verification</h1>
+var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
+      <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
+    </ol>{{end}}
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Two-step verification</h1>{{else}}<h1>Two-step verification</h1>{{end}}
     <p>Your Telegram account is protected by a two-step verification password. Enter it to
        finish connecting. This is your <strong>Telegram cloud password</strong> — <strong>not</strong>
        the 5-digit login code you entered on the previous screen.</p>

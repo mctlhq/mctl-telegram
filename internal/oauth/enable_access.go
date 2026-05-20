@@ -401,7 +401,12 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	case <-lf.needPw:
 		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "")
 		es.step = stepPassword
-		renderEnablePassword(w, enablePasswordPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+		renderEnablePassword(w, enablePasswordPage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+		})
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
@@ -446,8 +451,11 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	if password == "" {
 		renderEnablePassword(w, enablePasswordPage{
-			Issuer: s.cfg.Issuer, EnableToken: esTok,
-			Error: "Enter your Telegram two-step verification password.",
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       "Enter your Telegram two-step verification password.",
 		})
 		return
 	}
