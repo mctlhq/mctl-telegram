@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,13 @@ type Server struct {
 	tgoidc telegramoidc.Authenticator
 	store  *db.Store
 	clock  func() time.Time
+	// useDB is true when a Postgres DATABASE_URL is active and the three new
+	// OAuth tables have been migrated. When true, pending/codes/clients are
+	// persisted to the DB instead of in-memory maps, enabling cross-replica
+	// continuity. When false (SQLite or missing DB), the in-memory maps are
+	// used unchanged.
+	useDB   bool
+	metrics metricsIface
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
@@ -70,6 +78,21 @@ type Server struct {
 	// newer flow just provisioned. Entries are created on demand and never
 	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
+}
+
+// metricsIface is the minimum surface of metrics.Registry used by oauth.Server.
+// Defined as an interface so the oauth package does not import the metrics
+// package directly (avoiding a circular import if metrics ever needs oauth).
+type metricsIface interface {
+	SetOAuthPendingAuthSize(float64)
+}
+
+// WithMetrics wires a metrics registry so oauth.Server can update the
+// mctl_oauth_pending_auth_size gauge from the sweeper goroutine.
+// Returns the receiver for chaining.
+func (s *Server) WithMetrics(m metricsIface) *Server {
+	s.metrics = m
+	return s
 }
 
 // LoginFunc matches the signature of telegram.Login. The enable_access flow
@@ -146,8 +169,8 @@ type Config struct {
 	// AllowedImplicitHosts is the hostname allowlist applied to redirect_uri
 	// when AllowImplicitClient is true and the client_id has not been
 	// registered. Empty list ⇒ a built-in default (claude.ai, claude.com,
-	// localhost, 127.0.0.1) is used. The check is exact-match on the
-	// URL's Host (including any port); never substring-match.
+	// chatgpt.com, localhost, 127.0.0.1) is used. The check is exact-match
+	// on the URL's Host (including any port); never substring-match.
 	//
 	// AllowedImplicitHosts is also applied to redirect_uris supplied at
 	// RFC 7591 dynamic registration, so a malicious /oauth/register call
@@ -204,6 +227,11 @@ type Config struct {
 	// entry; oldest-evict on insert keeps the public surface bounded.
 	// Defaults to 256.
 	MaxPendingEnable int
+	// UseDBForOAuth routes pending-auth, auth-codes, and client-registrations
+	// through the Postgres-backed store methods (InsertOAuthPending, etc.)
+	// instead of the in-memory maps. Set to true when DATABASE_URL starts with
+	// "postgres://" or "postgresql://". Has no effect when the store is nil.
+	UseDBForOAuth bool
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the Telegram
@@ -280,6 +308,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		cfg.AllowedImplicitHosts = []string{
 			"claude.ai",
 			"claude.com",
+			"chatgpt.com",
 			"localhost",
 			"127.0.0.1",
 		}
@@ -337,22 +366,116 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		issuer:  issuer,
 		tgoidc:  auth,
 		store:   store,
 		clock:   time.Now,
+		useDB:   cfg.UseDBForOAuth && store != nil,
 		pending: map[string]*pendingAuth{},
 		codes:   map[string]*authCode{},
 		clients: map[string]*clientReg{},
 		enables: map[string]*enableSession{},
 		loginFn: telegram.Login,
-	}, nil
+	}
+	// Pre-register the built-in self-connect client. Zero CreatedAt ensures the
+	// background sweeper never evicts it (the sweep condition
+	// now.Sub(c.CreatedAt) > ClientRegistrationTTL is never true for zero time
+	// with a positive TTL). No /oauth/register call is needed for this client.
+	s.clients[ConnectClientID] = &clientReg{
+		ClientID:     ConnectClientID,
+		ClientName:   "mctl-telegram connect",
+		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
+		CreatedAt:    time.Time{}, // zero — never swept
+	}
+	return s, nil
+}
+
+// ConnectClientID is the client_id for the built-in self-connect OAuth client.
+// It is pre-registered in oauth.New and used by internal/web/connect.go.
+const ConnectClientID = "mctl_self_connect"
+
+// ExchangeConnect redeems a one-time PKCE-bound authorization code on behalf
+// of the built-in mctl_self_connect client. It mirrors the PKCE verification
+// and scope resolution in handleTokenAuthCode but is callable in-process from
+// the /telegram/connect/done handler, avoiding a loopback HTTP round-trip.
+//
+// The returned access token is discarded by the caller; ExchangeConnect is
+// called only to confirm that the code is valid and that the MTProto session
+// was provisioned successfully. An error signals that the code was invalid,
+// expired, or the PKCE verifier did not match.
+func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, redirectURI string) (string, error) {
+	if code == "" || verifier == "" || clientID == "" || redirectURI == "" {
+		return "", errors.New("invalid_request: code, verifier, client_id, redirect_uri are required")
+	}
+	if clientID != ConnectClientID {
+		return "", fmt.Errorf("invalid_request: client_id must be %s", ConnectClientID)
+	}
+	if err := validPKCEString(verifier); err != nil {
+		return "", fmt.Errorf("invalid_request: code_verifier %w", err)
+	}
+
+	var entry *authCode
+	if s.useDB {
+		dbCode, err := s.store.ConsumeOAuthCode(ctx, code, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
+		if err != nil {
+			return "", fmt.Errorf("server_error: could not redeem code: %w", err)
+		}
+		entry = &authCode{
+			ClientID:            dbCode.ClientID,
+			RedirectURI:         dbCode.RedirectURI,
+			CodeChallenge:       dbCode.CodeChallenge,
+			CodeChallengeMethod: dbCode.ChallengeMethod,
+			TelegramID:          dbCode.TelegramID,
+			TelegramUsername:    dbCode.TelegramUsername,
+			Scope:               dbCode.Scope,
+			CreatedAt:           dbCode.CreatedAt,
+		}
+	} else {
+		s.mu.Lock()
+		var ok bool
+		entry, ok = s.codes[code]
+		if ok {
+			if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
+				delete(s.codes, code)
+				ok = false
+			} else {
+				delete(s.codes, code)
+			}
+		}
+		s.mu.Unlock()
+		if !ok {
+			return "", errors.New("invalid_grant: code not found, expired, or already used")
+		}
+	}
+	if entry.ClientID != clientID {
+		return "", errors.New("invalid_grant: client_id mismatch")
+	}
+	if entry.RedirectURI != redirectURI {
+		return "", errors.New("invalid_grant: redirect_uri mismatch")
+	}
+	if !pkceVerify(verifier, entry.CodeChallenge) {
+		return "", errors.New("invalid_grant: code_verifier does not match code_challenge")
+	}
+
+	groups, scopes, err := s.ResolveScopes(ctx, entry.TelegramID)
+	if err != nil {
+		return "", fmt.Errorf("server_error: could not resolve scopes: %w", err)
+	}
+	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	if err != nil {
+		return "", fmt.Errorf("server_error: could not mint token: %w", err)
+	}
+	return tok, nil
 }
 
 // StartSweeper runs a background loop that drops expired in-memory state.
-// Caller controls the lifetime via the context.
+// When useDB is true it also sweeps the DB OAuth tables and samples the
+// OAuthPendingAuthSize gauge. Caller controls the lifetime via the stop channel.
 func (s *Server) StartSweeper(stop <-chan struct{}, interval time.Duration) {
 	if interval <= 0 {
 		interval = 1 * time.Minute
@@ -366,9 +489,55 @@ func (s *Server) StartSweeper(stop <-chan struct{}, interval time.Duration) {
 				return
 			case now := <-t.C:
 				s.sweep(now)
+				s.sweepDB(now)
+				s.samplePendingAuthGauge()
 			}
 		}
 	}()
+}
+
+// sweepDB deletes expired rows from the Postgres OAuth tables. No-op when
+// useDB is false. Errors are logged and not propagated — the in-memory sweeper
+// is the authoritative gate; DB sweeping is a bounded-growth safety net.
+func (s *Server) sweepDB(_ time.Time) {
+	if !s.useDB || s.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := s.store.DeleteExpiredOAuthRows(ctx, s.cfg.CodeTTL); err != nil {
+		slog.Warn("oauth db sweep failed", "err", err)
+	}
+	if s.cfg.ClientRegistrationTTL > 0 {
+		if _, err := s.store.DeleteExpiredClientRegs(ctx, s.cfg.ClientRegistrationTTL); err != nil {
+			slog.Warn("oauth db client_reg sweep failed", "err", err)
+		}
+	}
+}
+
+// samplePendingAuthGauge refreshes the mctl_oauth_pending_auth_size gauge.
+// When useDB is true the count comes from the DB; otherwise from the in-memory
+// map. No-op when no metrics registry is wired.
+func (s *Server) samplePendingAuthGauge() {
+	if s.metrics == nil {
+		return
+	}
+	if s.useDB && s.store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		n, err := s.store.CountOAuthPending(ctx, s.cfg.CodeTTL)
+		if err != nil {
+			slog.Warn("oauth pending_auth gauge sample failed", "err", err)
+			return
+		}
+		s.metrics.SetOAuthPendingAuthSize(float64(n))
+		return
+	}
+	// In-memory path.
+	s.mu.Lock()
+	n := len(s.pending)
+	s.mu.Unlock()
+	s.metrics.SetOAuthPendingAuthSize(float64(n))
 }
 
 func (s *Server) sweep(now time.Time) {
@@ -387,8 +556,13 @@ func (s *Server) sweep(now time.Time) {
 	// Dynamic client registrations are kept for ClientRegistrationTTL.
 	// Without this sweep the map grows unbounded because /oauth/register is
 	// unauthenticated — a trivial public-API DoS vector.
+	// Entries with a zero CreatedAt are built-in (pre-registered) clients that
+	// must never be evicted.
 	if s.cfg.ClientRegistrationTTL > 0 {
 		for k, c := range s.clients {
+			if c.CreatedAt.IsZero() {
+				continue // built-in client — never sweep
+			}
 			if now.Sub(c.CreatedAt) > s.cfg.ClientRegistrationTTL {
 				delete(s.clients, k)
 			}
@@ -531,12 +705,20 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
+		// scopes_supported intentionally omits admin:users — that scope is
+		// implicit-privileged (granted by ResolveScopes based on
+		// TG_LOGIN_ADMINS membership, not negotiable via DCR). Advertising
+		// it would cause DCR clients (ChatGPT, claude.ai) to request it
+		// for every user; client-tier users would then see "not all
+		// requested permissions were granted" warnings even though the
+		// token works correctly. Admins still receive admin:users in the
+		// JWT scopes claim; MCP per-tool gates check the claim, not this
+		// metadata field.
 		"scopes_supported": []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
-			"admin:users",
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -596,9 +778,43 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthorizeError(w, "invalid_request", "scope exceeds 1024 bytes")
 		return
 	}
-	if err := s.validateClient(clientID, redirectURI); err != nil {
+	if err := s.validateClient(r.Context(), clientID, redirectURI); err != nil {
 		s.writeAuthorizeError(w, "invalid_client", err.Error())
 		return
+	}
+
+	// Diagnostic: capture exactly what the MCP client requests, so we can
+	// reconcile scope mismatches surfaced by DCR clients' UI. Emitted only
+	// after the length-bounded + validateClient gates — an unauthenticated
+	// caller cannot drive log volume past 4 KB per accepted request. PII-
+	// safe: scope is opaque OAuth strings, state/code_challenge are random
+	// tokens (len-only), redirect_uri is observed at the host level.
+	{
+		ru, _ := url.Parse(redirectURI)
+		host := ""
+		if ru != nil {
+			host = ru.Host
+		}
+		extraParams := make([]string, 0, len(q))
+		for k := range q {
+			switch k {
+			case "client_id", "redirect_uri", "state", "code_challenge",
+				"code_challenge_method", "response_type", "scope":
+			default:
+				extraParams = append(extraParams, k)
+			}
+		}
+		sort.Strings(extraParams)
+		slog.Info("oauth: authorize request",
+			"user_agent", r.Header.Get("User-Agent"),
+			"client_id", clientID,
+			"redirect_uri_host", host,
+			"response_type", responseType,
+			"scope", scope,
+			"state_len", len(state),
+			"code_challenge_method", codeChallengeMethod,
+			"extra_query_params", strings.Join(extraParams, ","),
+		)
 	}
 
 	// Persist pending state, indexed by a fresh random server-side state token.
@@ -612,37 +828,66 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	nonce := randomToken(16)
 	tgVerifier, tgChallenge := pkceChallenge()
 	now := s.clock()
-	s.mu.Lock()
-	// Bound the pending map. /oauth/authorize is unauthenticated; without a
-	// cap an attacker could push enough authorize requests to OOM the
-	// process before any individual entry hits its TTL. The eviction is a
-	// linear scan but only fires when we are at the limit, and we are
-	// already under the mutex.
-	if s.cfg.MaxPendingAuth > 0 && len(s.pending) >= s.cfg.MaxPendingAuth {
-		var oldestKey string
-		var oldestAt time.Time
-		for k, p := range s.pending {
-			if oldestKey == "" || p.CreatedAt.Before(oldestAt) {
-				oldestKey = k
-				oldestAt = p.CreatedAt
+	if s.useDB {
+		// Persist to Postgres; skip the in-memory map so reads on other replicas
+		// resolve the same entry.
+		// Cap enforcement is best-effort under concurrent load: evict and insert
+		// are separate round-trips with no transaction between them, so N
+		// concurrent requests near the cap boundary can each skip eviction and
+		// all insert, temporarily exceeding MaxPendingAuth by at most N. The
+		// sweeper converges the count back below the cap within its next tick.
+		if err := s.store.EvictOldestOAuthPendingIfOver(r.Context(), s.cfg.MaxPendingAuth, s.cfg.CodeTTL); err != nil {
+			slog.Warn("oauth: pending_auth eviction failed", "err", err)
+		}
+		if err := s.store.InsertOAuthPending(r.Context(), db.OAuthPendingAuth{
+			State:           serverState,
+			ClientID:        clientID,
+			RedirectURI:     redirectURI,
+			ClientState:     state,
+			CodeChallenge:   codeChallenge,
+			ChallengeMethod: codeChallengeMethod,
+			Scope:           scope,
+			Nonce:           nonce,
+			TGCodeVerifier:  tgVerifier,
+			CreatedAt:       now,
+		}); err != nil {
+			slog.Error("oauth: persist pending_auth failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		s.mu.Lock()
+		// Bound the pending map. /oauth/authorize is unauthenticated; without a
+		// cap an attacker could push enough authorize requests to OOM the
+		// process before any individual entry hits its TTL. The eviction is a
+		// linear scan but only fires when we are at the limit, and we are
+		// already under the mutex.
+		if s.cfg.MaxPendingAuth > 0 && len(s.pending) >= s.cfg.MaxPendingAuth {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, p := range s.pending {
+				if oldestKey == "" || p.CreatedAt.Before(oldestAt) {
+					oldestKey = k
+					oldestAt = p.CreatedAt
+				}
+			}
+			if oldestKey != "" {
+				delete(s.pending, oldestKey)
 			}
 		}
-		if oldestKey != "" {
-			delete(s.pending, oldestKey)
+		s.pending[serverState] = &pendingAuth{
+			ClientID:            clientID,
+			RedirectURI:         redirectURI,
+			State:               state,
+			CodeChallenge:       codeChallenge,
+			CodeChallengeMethod: codeChallengeMethod,
+			Scope:               scope,
+			Nonce:               nonce,
+			TGCodeVerifier:      tgVerifier,
+			CreatedAt:           now,
 		}
+		s.mu.Unlock()
 	}
-	s.pending[serverState] = &pendingAuth{
-		ClientID:            clientID,
-		RedirectURI:         redirectURI,
-		State:               state,
-		CodeChallenge:       codeChallenge,
-		CodeChallengeMethod: codeChallengeMethod,
-		Scope:               scope,
-		Nonce:               nonce,
-		TGCodeVerifier:      tgVerifier,
-		CreatedAt:           now,
-	}
-	s.mu.Unlock()
 
 	// Hand the browser to Telegram's OIDC authorization endpoint. Telegram
 	// renders its own account-selection and consent screen, then 302s back to
@@ -677,21 +922,47 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	// Consume the pending entry up front — state is single-use whatever the
 	// outcome, so an error redirect cannot be replayed against a fresh code.
-	s.mu.Lock()
-	pending, ok := s.pending[serverState]
-	delete(s.pending, serverState)
-	s.mu.Unlock()
-	if !ok {
-		http.Error(w, "unknown or expired state", http.StatusBadRequest)
-		return
-	}
-	// Defensive TTL check: the background sweeper drops stale entries on a
-	// timer, but a callback arriving in the gap between expiry and the next
-	// sweep tick would still be served if we only relied on map presence.
-	// CodeTTL bounds how long we trust serverState; reject if exceeded.
-	if s.clock().Sub(pending.CreatedAt) > s.cfg.CodeTTL {
-		http.Error(w, "state expired", http.StatusBadRequest)
-		return
+	var pending *pendingAuth
+	if s.useDB {
+		dbPA, err := s.store.ConsumeOAuthPending(r.Context(), serverState, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			http.Error(w, "unknown or expired state", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			slog.Error("oauth: consume pending_auth failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		pending = &pendingAuth{
+			ClientID:            dbPA.ClientID,
+			RedirectURI:         dbPA.RedirectURI,
+			State:               dbPA.ClientState,
+			CodeChallenge:       dbPA.CodeChallenge,
+			CodeChallengeMethod: dbPA.ChallengeMethod,
+			Scope:               dbPA.Scope,
+			Nonce:               dbPA.Nonce,
+			TGCodeVerifier:      dbPA.TGCodeVerifier,
+			CreatedAt:           dbPA.CreatedAt,
+		}
+	} else {
+		s.mu.Lock()
+		var ok bool
+		pending, ok = s.pending[serverState]
+		delete(s.pending, serverState)
+		s.mu.Unlock()
+		if !ok {
+			http.Error(w, "unknown or expired state", http.StatusBadRequest)
+			return
+		}
+		// Defensive TTL check: the background sweeper drops stale entries on a
+		// timer, but a callback arriving in the gap between expiry and the next
+		// sweep tick would still be served if we only relied on map presence.
+		// CodeTTL bounds how long we trust serverState; reject if exceeded.
+		if s.clock().Sub(pending.CreatedAt) > s.cfg.CodeTTL {
+			http.Error(w, "state expired", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// The user cancelled at oauth.telegram.org, or Telegram refused the
@@ -847,33 +1118,55 @@ type oauthCtx struct {
 func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthCtx) {
 	code := randomToken(32)
 	now := s.clock()
-	s.mu.Lock()
-	// Cap the authorization-code map. Oldest-evict on insert mirrors the
-	// pending/clients pattern and keeps the sweeper as a backstop.
-	if s.cfg.MaxAuthCodes > 0 && len(s.codes) >= s.cfg.MaxAuthCodes {
-		var oldestKey string
-		var oldestAt time.Time
-		for k, c := range s.codes {
-			if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
-				oldestKey = k
-				oldestAt = c.CreatedAt
+	if s.useDB {
+		// Best-effort cap enforcement — see same comment in handleAuthorize.
+		if err := s.store.EvictOldestOAuthCodeIfOver(r.Context(), s.cfg.MaxAuthCodes, s.cfg.CodeTTL); err != nil {
+			slog.Warn("oauth: auth_code eviction failed", "err", err)
+		}
+		if err := s.store.InsertOAuthCode(r.Context(), db.OAuthCode{
+			Code:             code,
+			ClientID:         oc.ClientID,
+			RedirectURI:      oc.RedirectURI,
+			CodeChallenge:    oc.CodeChallenge,
+			ChallengeMethod:  "S256",
+			TelegramID:       oc.TelegramID,
+			TelegramUsername: oc.Username,
+			Scope:            oc.Scope,
+			CreatedAt:        now,
+		}); err != nil {
+			slog.Error("oauth: persist auth_code failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		s.mu.Lock()
+		// Cap the authorization-code map. Oldest-evict on insert mirrors the
+		// pending/clients pattern and keeps the sweeper as a backstop.
+		if s.cfg.MaxAuthCodes > 0 && len(s.codes) >= s.cfg.MaxAuthCodes {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, c := range s.codes {
+				if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
+					oldestKey = k
+					oldestAt = c.CreatedAt
+				}
+			}
+			if oldestKey != "" {
+				delete(s.codes, oldestKey)
 			}
 		}
-		if oldestKey != "" {
-			delete(s.codes, oldestKey)
+		s.codes[code] = &authCode{
+			ClientID:            oc.ClientID,
+			RedirectURI:         oc.RedirectURI,
+			CodeChallenge:       oc.CodeChallenge,
+			CodeChallengeMethod: "S256",
+			TelegramID:          oc.TelegramID,
+			TelegramUsername:    oc.Username,
+			Scope:               oc.Scope,
+			CreatedAt:           now,
 		}
+		s.mu.Unlock()
 	}
-	s.codes[code] = &authCode{
-		ClientID:            oc.ClientID,
-		RedirectURI:         oc.RedirectURI,
-		CodeChallenge:       oc.CodeChallenge,
-		CodeChallengeMethod: "S256",
-		TelegramID:          oc.TelegramID,
-		TelegramUsername:    oc.Username,
-		Scope:               oc.Scope,
-		CreatedAt:           now,
-	}
-	s.mu.Unlock()
 
 	u, err := url.Parse(oc.RedirectURI)
 	if err != nil {
@@ -928,19 +1221,44 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	entry, ok := s.codes[code]
-	if ok {
-		delete(s.codes, code)
-	}
-	s.mu.Unlock()
-	if !ok {
-		writeTokenError(w, "invalid_grant", "code not found, expired, or already used", http.StatusBadRequest)
-		return
-	}
-	if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
-		writeTokenError(w, "invalid_grant", "code expired", http.StatusBadRequest)
-		return
+	var entry *authCode
+	if s.useDB {
+		dbCode, err := s.store.ConsumeOAuthCode(r.Context(), code, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			writeTokenError(w, "invalid_grant", "code not found, expired, or already used", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			slog.Error("oauth: consume auth_code failed", "err", err)
+			writeTokenError(w, "server_error", "could not redeem code", http.StatusInternalServerError)
+			return
+		}
+		entry = &authCode{
+			ClientID:            dbCode.ClientID,
+			RedirectURI:         dbCode.RedirectURI,
+			CodeChallenge:       dbCode.CodeChallenge,
+			CodeChallengeMethod: dbCode.ChallengeMethod,
+			TelegramID:          dbCode.TelegramID,
+			TelegramUsername:    dbCode.TelegramUsername,
+			Scope:               dbCode.Scope,
+			CreatedAt:           dbCode.CreatedAt,
+		}
+	} else {
+		s.mu.Lock()
+		var ok bool
+		entry, ok = s.codes[code]
+		if ok {
+			delete(s.codes, code)
+		}
+		s.mu.Unlock()
+		if !ok {
+			writeTokenError(w, "invalid_grant", "code not found, expired, or already used", http.StatusBadRequest)
+			return
+		}
+		if s.clock().Sub(entry.CreatedAt) > s.cfg.CodeTTL {
+			writeTokenError(w, "invalid_grant", "code expired", http.StatusBadRequest)
+			return
+		}
 	}
 	if entry.ClientID != clientID {
 		writeTokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
@@ -960,6 +1278,14 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
+	// Diagnostic: requested-vs-granted scope reconciliation.
+	slog.Info("oauth: token authorization_code grant",
+		"user_agent", r.Header.Get("User-Agent"),
+		"client_id", clientID,
+		"requested_scope", entry.Scope,
+		"granted_scope", strings.Join(scopes, " "),
+		"groups", strings.Join(groups, ","),
+	)
 	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -1169,11 +1495,44 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	if s.cfg.MaxRegisterBodyBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRegisterBodyBytes)
 	}
+	// Decode into a loose map first so we can observe RFC 7591 fields we
+	// otherwise drop (scope, token_endpoint_auth_method, etc.) — useful
+	// for diagnosing scope-mismatch warnings in DCR clients. Re-decode
+	// into the typed struct for actual processing.
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
+		return
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	rawScope, _ := raw["scope"].(string)
+	rawClientName, _ := raw["client_name"].(string)
+	redirectURICount := 0
+	if uris, ok := raw["redirect_uris"].([]any); ok {
+		redirectURICount = len(uris)
+	}
+	slog.Info("oauth: client_registration request",
+		"user_agent", r.Header.Get("User-Agent"),
+		"keys", strings.Join(keys, ","),
+		"client_name", rawClientName,
+		"redirect_uri_count", redirectURICount,
+		"scope_in_request", rawScope,
+	)
+	// Re-encode + decode to extract the typed shape we actually use.
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
+		return
+	}
 	var req struct {
 		ClientName   string   `json:"client_name"`
 		RedirectURIs []string `json:"redirect_uris"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(buf, &req); err != nil {
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -1206,30 +1565,52 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	}
 	clientID := "tgmcp_" + randomToken(16)
 	now := s.clock()
-	s.mu.Lock()
-	// Enforce the global cap. If we are at the limit, evict the oldest
-	// entry (linear scan — fine at N≈1000). This keeps the public
-	// endpoint bounded even before the periodic sweeper runs.
-	if s.cfg.MaxRegisteredClients > 0 && len(s.clients) >= s.cfg.MaxRegisteredClients {
-		var oldestKey string
-		var oldestAt time.Time
-		for k, c := range s.clients {
-			if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
-				oldestKey = k
-				oldestAt = c.CreatedAt
+	if s.useDB {
+		// Best-effort cap enforcement — see same comment in handleAuthorize.
+		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
+			slog.Warn("oauth: client_reg eviction failed", "err", err)
+		}
+		if err := s.store.InsertClientReg(r.Context(), db.OAuthClientReg{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+			CreatedAt:    now,
+		}); err != nil {
+			slog.Error("oauth: persist client_reg failed", "err", err)
+			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		s.mu.Lock()
+		// Enforce the global cap. If we are at the limit, evict the oldest
+		// dynamic entry (linear scan — fine at N≈1000). Built-in clients
+		// (zero CreatedAt) are not counted toward the cap and are never evicted.
+		if s.cfg.MaxRegisteredClients > 0 {
+			var dynamicCount int
+			var oldestKey string
+			var oldestAt time.Time
+			for k, c := range s.clients {
+				if c.CreatedAt.IsZero() {
+					continue // built-in client — skip
+				}
+				dynamicCount++
+				if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
+					oldestKey = k
+					oldestAt = c.CreatedAt
+				}
+			}
+			if dynamicCount >= s.cfg.MaxRegisteredClients && oldestKey != "" {
+				delete(s.clients, oldestKey)
 			}
 		}
-		if oldestKey != "" {
-			delete(s.clients, oldestKey)
+		s.clients[clientID] = &clientReg{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+			CreatedAt:    now,
 		}
+		s.mu.Unlock()
 	}
-	s.clients[clientID] = &clientReg{
-		ClientID:     clientID,
-		ClientName:   req.ClientName,
-		RedirectURIs: req.RedirectURIs,
-		CreatedAt:    now,
-	}
-	s.mu.Unlock()
 	resp := map[string]any{
 		"client_id":                  clientID,
 		"client_name":                req.ClientName,
@@ -1310,7 +1691,28 @@ func isLoopbackHost(h string) bool {
 // exchange a hijacked code), shipping a URL fragment to an attacker-controlled
 // host would still leak the authorization_code briefly. Constraining the host
 // closes that window.
-func (s *Server) validateClient(clientID, redirectURI string) error {
+func (s *Server) validateClient(ctx context.Context, clientID, redirectURI string) error {
+	if s.useDB {
+		// Look up registration in the Postgres table.
+		dbReg, err := s.store.GetClientReg(ctx, clientID)
+		if err == nil {
+			for _, u := range dbReg.RedirectURIs {
+				if u == redirectURI {
+					return nil
+				}
+			}
+			return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
+		}
+		if !errors.Is(err, db.ErrOAuthNotFound) {
+			// Unexpected DB error — fail closed.
+			return fmt.Errorf("client validation error: %w", err)
+		}
+		// Not found in DB — fall through to in-memory check below so that
+		// pre-registered built-in clients (e.g. ConnectClientID) are
+		// recognised even when useDB is true.
+	}
+	// In-memory map: covers non-DB deployments and pre-registered built-in
+	// clients that are not persisted to the DB.
 	s.mu.Lock()
 	reg, ok := s.clients[clientID]
 	s.mu.Unlock()

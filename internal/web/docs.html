@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mctl-telegram — Your Telegram, inside Claude</title>
+<title>mctl-telegram — Developer reference</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="shortcut icon" href="/favicon.ico">
 <style>
@@ -89,13 +89,6 @@
     --grid:          color-mix(in srgb, var(--surface-line) 80%, transparent);
     color-scheme: dark;
   }
-  /*
-   * The mctl accents are tuned for the dark surface and keep the same bright
-   * value in mctl.css's light theme — on the warm paper background that drops
-   * accent-coloured text (links, tool names, step counters) well below the
-   * WCAG AA contrast floor. Darken each accent for light mode here so the page
-   * is legible whether the tokens come from the CDN or the inline fallback.
-   */
   :root[data-theme="light"] {
     color-scheme: light;
     --accent:  color-mix(in srgb, var(--mctl-accent-cyan-primary) 46%, #000);
@@ -184,6 +177,7 @@
     transition: color .15s;
   }
   .topbar a:hover { color: var(--text); }
+  .topbar a.active { color: var(--accent); }
 
   /* ===== Hero ===== */
   .hero {
@@ -233,6 +227,37 @@
     text-wrap: pretty;
   }
 
+  /* ===== Warning callout ===== */
+  .callout {
+    margin: 32px 0;
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--warn);
+    border-radius: var(--mctl-radius-lg);
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--warn) 6%, transparent), transparent),
+      var(--surface);
+    padding: 18px 20px;
+    position: relative;
+  }
+  .callout .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--warn);
+    margin-bottom: 8px;
+  }
+  .callout .tag::before {
+    content: "▲";
+    font-size: 10px;
+  }
+  .callout strong { color: var(--text); font-weight: 600; }
+  .callout p { margin: .5rem 0 0; color: var(--text-dim); font-size: 14px; line-height: 1.6; }
+  .callout p:first-of-type { margin-top: 0; }
+
   /* ===== Section headers ===== */
   section { margin-top: 64px; }
   .section-head {
@@ -270,6 +295,37 @@
   }
   a code { color: inherit; }
 
+  pre {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    padding: 0;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    margin: 16px 0;
+  }
+  #smoke pre::before {
+    content: "$ smoke-test";
+    display: block;
+    padding: 8px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  pre code {
+    display: block;
+    background: transparent;
+    border: 0;
+    padding: 14px 16px;
+    color: var(--text-dim);
+    border-radius: 0;
+  }
+
   /* Ordered list — numbered chips */
   ol.steps {
     list-style: none;
@@ -305,6 +361,107 @@
   }
   ol.steps strong { color: var(--text); font-weight: 600; }
   ol.steps em { font-style: normal; color: var(--text); }
+
+  /* Bullet list */
+  ul.ctrl {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  ul.ctrl > li {
+    padding: 14px 18px;
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 14px;
+    transition: background .12s;
+  }
+  ul.ctrl > li:hover { background: var(--surface-2); }
+  ul.ctrl > li strong { color: var(--text); font-weight: 600; display: inline-block; margin-right: 6px; }
+
+  /* ===== Tables ===== */
+  .tbl {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: 16px 0 4px;
+    font-size: 13.5px;
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  .tbl thead th {
+    text-align: left;
+    background: var(--surface-2);
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--muted);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+  .tbl tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    color: var(--text-dim);
+  }
+  .tbl tbody tr:last-child td { border-bottom: 0; }
+  .tbl tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .tbl td code, .tbl th code {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .tbl td:first-child code { color: var(--accent); font-weight: 500; }
+
+  /* ===== Pills / badges ===== */
+  .badge, .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    padding: 2px 8px;
+    border-radius: var(--mctl-radius-md);
+    border: 1px solid transparent;
+    line-height: 1.5;
+    vertical-align: middle;
+  }
+  .badge.mcp {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .badge.mcp::before {
+    content: "";
+    width: 6px; height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .pill-read {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .pill-write {
+    background: var(--warn-soft);
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  }
 
   .muted { color: var(--muted); font-size: 13px; }
 
@@ -398,171 +555,6 @@
   /* Section anchor offset */
   section { scroll-margin-top: 24px; }
 
-  /* CTA buttons */
-  .cta-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--accent);
-    color: #0a0b0d;
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 15px;
-    font-weight: 600;
-    padding: 10px 22px;
-    border-radius: var(--mctl-radius-md);
-    text-decoration: none;
-    border-bottom: 0;
-    transition: filter .15s;
-  }
-  .cta-btn:hover { filter: brightness(0.9); border-bottom: 0; }
-
-  .cta-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 32px;
-  }
-
-  .btn-secondary {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--surface);
-    color: var(--text);
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 14px;
-    font-weight: 500;
-    padding: 9px 18px;
-    border-radius: var(--mctl-radius-md);
-    border: 1px solid var(--border-strong);
-    cursor: pointer;
-    transition: background .15s, border-color .15s;
-  }
-  .btn-secondary:hover { background: var(--surface-2); border-color: var(--accent); }
-
-  /* Use-case cards */
-  .card-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 20px;
-    margin: 0;
-  }
-  .use-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-top: 3px solid var(--accent);
-    border-radius: var(--mctl-radius-lg);
-    padding: 20px;
-    transition: border-color .15s;
-  }
-  .use-card:hover { border-color: var(--accent); }
-  .use-card .card-icon {
-    font-size: 24px;
-    margin-bottom: 10px;
-    display: block;
-  }
-  .use-card h3 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 8px;
-  }
-  .use-card p {
-    font-size: 13.5px;
-    color: var(--text-dim);
-    margin: 0;
-    line-height: 1.55;
-  }
-
-  /* How it works flow diagram */
-  .flow-diagram {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0;
-    margin: 24px 0;
-  }
-  .flow-node {
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--mctl-radius-lg);
-    padding: 16px 24px;
-    text-align: center;
-    min-width: 140px;
-  }
-  .flow-node .node-name {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    display: block;
-  }
-  .flow-node .node-label {
-    font-size: 11px;
-    color: var(--text-dim);
-    display: block;
-    margin-top: 4px;
-  }
-  .flow-arrow {
-    font-family: var(--font-mono);
-    color: var(--accent);
-    font-size: 20px;
-    padding: 0 8px;
-    flex-shrink: 0;
-  }
-
-  /* Trust section */
-  .trust-card {
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--mctl-radius-lg);
-    padding: 24px;
-  }
-  .trust-card ul {
-    margin: 12px 0;
-    padding-left: 20px;
-    color: var(--text-dim);
-  }
-  .trust-card li { margin-bottom: 8px; font-size: 14px; line-height: 1.6; }
-  .trust-card li strong { color: var(--text); }
-  .trust-card .trust-links {
-    margin-top: 16px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 20px;
-    font-size: 13.5px;
-  }
-
-  /* FAQ */
-  .faq-list {
-    margin: 0;
-    padding: 0;
-  }
-  .faq-item {
-    border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-lg);
-    background: var(--surface);
-    margin-bottom: 10px;
-    overflow: hidden;
-  }
-  .faq-item dt {
-    font-weight: 600;
-    color: var(--text);
-    padding: 14px 18px;
-    font-size: 14.5px;
-    cursor: default;
-  }
-  .faq-item dd {
-    margin: 0;
-    padding: 0 18px 14px;
-    color: var(--text-dim);
-    font-size: 14px;
-    line-height: 1.6;
-    border-top: 1px solid var(--border);
-  }
-
   /* Responsive */
   @media (max-width: 640px) {
     .wrap { padding: 0 18px; }
@@ -570,28 +562,9 @@
     .topbar .meta .hide-sm { display: none; }
     h1 { font-size: 28px; }
     .lead { font-size: 15px; }
-    .card-grid { grid-template-columns: 1fr; }
-    .flow-diagram { flex-direction: column; }
-    .flow-arrow { transform: rotate(90deg); padding: 4px 0; }
-    .cta-row { flex-direction: column; align-items: flex-start; }
-  }
-  @media (max-width: 768px) {
-    .wrap { padding: 0 20px; }
-    .topbar .meta .hide-md { display: none; }
-    .theme-toggle { width: 44px; height: 44px; }
-    .accent-swatch { min-width: 44px; min-height: 44px; padding: 0; }
-  }
-  @media (max-width: 480px) {
-    .wrap { padding: 0 14px; }
-    h1 { font-size: 24px; letter-spacing: -.015em; }
-    .lead { font-size: 14px; }
-    .endpoint .url { font-size: 14px; }
-    ol.steps > li { padding: 10px 12px 10px 44px; }
-    ol.steps > li::before { left: 10px; top: 10px; width: 26px; height: 26px; font-size: 11px; }
-    pre code { font-size: 12px; }
-    .tbl { font-size: 12px; }
-    section { margin-top: 40px; }
-    .topbar { margin-bottom: 36px; }
+    .tbl { font-size: 12.5px; }
+    .tbl thead th, .tbl tbody td { padding: 8px 10px; }
+    ol.steps > li { padding: 12px 14px 12px 50px; }
   }
 </style>
 </head>
@@ -606,12 +579,12 @@
       <span>mctl-telegram</span>
     </a>
     <nav class="meta">
-      <a href="#how-it-works">how it works</a>
-      <a href="/docs">docs</a>
+      <a href="/">home</a>
+      <a href="/docs" class="active">docs</a>
       <a href="/security">security</a>
       <a href="/privacy">privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <span class="accent-picker hide-sm hide-md" role="group" aria-label="Accent color">
+      <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
         <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
         <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
         <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
@@ -628,124 +601,206 @@
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
       <span class="status-dot" aria-hidden="true"></span>
-      <span>Operational · Remote MCP Server · v1</span>
+      <span>Developer reference</span>
     </div>
-    <h1>Your Telegram,<br><span class="accent">inside Claude</span></h1>
+    <h1>Developer <span class="accent">reference</span></h1>
     <p class="lead">
-      Give Claude read and write access to your Telegram chats — directly from claude.ai, with no extra apps.
+      Tool catalogue, scopes, storage schema, and smoke-test for the mctl-telegram MCP connector.
     </p>
-    <div class="cta-row">
-      <a class="cta-btn" href="https://claude.ai/customize/connectors">Add to Claude</a>
-      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
-      <a href="/docs">See the docs</a>
-    </div>
   </section>
 
-  <!-- ============ Use cases ============ -->
-  <section id="use-cases">
+  <!-- ============ 01 Connector setup ============ -->
+  <section id="setup">
     <div class="section-head">
-      <h2>What you can do</h2>
-    </div>
-    <div class="card-grid">
-      <div class="use-card">
-        <span class="card-icon">[~]</span>
-        <h3>Summarise unread chats</h3>
-        <p>Ask Claude what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon">[&gt;]</span>
-        <h3>Draft and review messages</h3>
-        <p>Let Claude write or check a reply before you send. Review tone, catch errors, or translate — then send when ready.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon">[?]</span>
-        <h3>Search across conversations</h3>
-        <p>Find anything you said or received, instantly. Claude can search by topic, person, or date across your full history.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ How it works ============ -->
-  <section id="how-it-works">
-    <div class="section-head">
-      <h2>How it works</h2>
-    </div>
-    <div class="flow-diagram">
-      <div class="flow-node">
-        <span class="node-name">Claude.ai</span>
-        <span class="node-label">your prompt</span>
-      </div>
-      <span class="flow-arrow">--&gt;</span>
-      <div class="flow-node">
-        <span class="node-name">mctl-telegram</span>
-        <span class="node-label">MCP server</span>
-      </div>
-      <span class="flow-arrow">--&gt;</span>
-      <div class="flow-node">
-        <span class="node-name">Telegram</span>
-        <span class="node-label">MTProto API</span>
-      </div>
+      <h2>Add as a custom connector in Claude.ai</h2>
     </div>
     <ol class="steps">
-      <li>You authorise with Telegram sign-in. mctl-telegram stores an encrypted MTProto session on your behalf.</li>
-      <li>When you prompt Claude, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
-      <li>mctl-telegram makes MTProto calls to Telegram, formats the result, and returns it to Claude.</li>
+      <li>Open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai → Customize → Connectors</a> and click <em>Add custom connector</em>.</li>
+      <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
+      <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers this server as its own authorization server via the well-known documents at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+      <li>You will see a <em>"Connect Telegram to Claude"</em> page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
+      <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
     </ol>
   </section>
 
-  <!-- ============ Trust ============ -->
-  <section id="trust">
+  <!-- ============ 02 Tools ============ -->
+  <section id="tools">
     <div class="section-head">
-      <h2>Our trust model</h2>
+      <h2>Available tools</h2>
     </div>
-    <div class="trust-card">
-      <p>mctl-telegram holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
-      <ul>
-        <li><strong>Sessions are AES-256-GCM encrypted at rest</strong> with per-user keys derived via HKDF-SHA256.</li>
-        <li><strong>No message text, phone numbers, or 2FA passwords are ever logged or persisted</strong> — enforced by the slog redaction handler.</li>
-        <li><strong>You can disconnect (soft revoke) or delete (hard delete) your session at any time</strong> using the MCP tools or the API.</li>
-      </ul>
-      <p>MCP endpoint: <code class="url">{{.MCPURL}}</code><br>
-      OAuth protected resource document: <code class="url">{{.WellKnownURL}}</code></p>
-      <div class="trust-links">
-        <a href="/security">Full security model</a>
-        <a href="/privacy">Data retention</a>
-        <a href="/docs#controls">Developer reference</a>
-      </div>
-      <p style="margin-top: 16px; font-size: 13.5px;">
-        A Local Bridge mode (planned) will keep the session on your own machine, reducing trust to connectivity only.
-        Track it on <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.
-      </p>
-    </div>
+    <table class="tbl">
+      <thead>
+        <tr><th>Tool</th><th>Mode</th><th>Scope required</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>list_dialogs</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:dialogs:read</code></td>
+          <td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td>
+        </tr>
+        <tr>
+          <td><code>get_unread_messages</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:messages:read</code></td>
+          <td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td>
+        </tr>
+        <tr>
+          <td><code>get_messages</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:messages:read</code></td>
+          <td>Full history of a specific peer, not just unread.</td>
+        </tr>
+        <tr>
+          <td><code>send_message</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>telegram:messages:send</code></td>
+          <td>Default <code>mode=draft</code> returns a dry-run preview. Real send requires <strong>all</strong> of: server <code>ALLOW_SEND=true</code>, identity scope, per-account <code>send_enabled=true</code>, and <code>mode=send</code>.</td>
+        </tr>
+        <tr>
+          <td><code>pin_message</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>telegram:messages:pin</code></td>
+          <td>Inputs: <code>peer</code>, <code>message_id</code>, <code>unpin</code> (bool).</td>
+        </tr>
+        <tr>
+          <td><code>disconnect_telegram_account</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td>any authenticated identity</td>
+          <td>Soft-revokes your session — see <em>Your controls</em>.</td>
+        </tr>
+        <tr>
+          <td><code>delete_telegram_account</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td>any authenticated identity</td>
+          <td>Hard-deletes the encrypted session blob.</td>
+        </tr>
+        <tr>
+          <td><code>list_telegram_identities</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>admin:users</code></td>
+          <td>Admin only. Roster of signed-in users with access tier and session state.</td>
+        </tr>
+        <tr>
+          <td><code>set_telegram_access</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>admin:users</code></td>
+          <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
+        </tr>
+      </tbody>
+    </table>
   </section>
 
-  <!-- ============ FAQ ============ -->
-  <section id="faq">
+  <!-- ============ 03 Scopes ============ -->
+  <section id="scopes">
     <div class="section-head">
-      <h2>Common questions</h2>
+      <h2>Scopes and permissions</h2>
     </div>
-    <dl class="faq-list">
-      <div class="faq-item">
-        <dt>Can Claude send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. The default mode is draft — Claude prepares a message for your review but never sends it. Real sends require the server ALLOW_SEND flag, your account opt-in, and the mode=send argument in the tool call.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>What data does mctl-telegram store?</dt>
-        <dd>Only an encrypted session blob per account. No message text is ever stored or logged. The audit log records tool names and redacted peer references only.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>How do I revoke access?</dt>
-        <dd>Call the disconnect_telegram_account MCP tool (soft revoke, keeps row) or delete_telegram_account (hard delete, removes all your data). You can also revoke from Telegram's side: Settings → Devices.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>Is this open source?</dt>
-        <dd>Yes. The full source is at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>. You can audit the code, run your own deployment, or contribute.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>What is the Local Bridge?</dt>
-        <dd>A planned mode where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. This removes the server-side session trust requirement entirely. Track M4 on <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.</dd>
-      </div>
-    </dl>
+    <p>
+      Scopes are derived from your Telegram identity. Operators on the admin allowlist
+      (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set.
+      Everyone else gets the <code>client</code> tier — the <code>telegram:*</code> tool
+      scopes for their <em style="color: var(--text)">own</em> account, without
+      platform-admin capability. When <code>AUTO_APPROVE_CLIENTS</code> is enabled
+      (open registration) every signed-in user is a client automatically; otherwise
+      the client tier comes from the <code>TG_LOGIN_CLIENTS</code> allowlist or an
+      operator grant. An operator can revoke any user with
+      <code>set_telegram_access</code>.
+    </p>
+    <table class="tbl">
+      <thead>
+        <tr><th>Telegram identity</th><th>Scopes granted</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all <code>telegram:*</code> scopes plus <code>admin:users</code></td></tr>
+        <tr><td>Telegram id ∈ <code>TG_LOGIN_CLIENTS</code></td><td><code>telegram:*</code> scopes (dialogs/messages read, send, pin) — no <code>admin:users</code></td></tr>
+        <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="margin-top: 16px;">
+      For backward compatibility the server can still be run under
+      <code>AUTH_MODE=shared-hmac-legacy</code>, in which case the original
+      GitHub-group→scope mapping applies. The default mode is <code>local-jwt</code>.
+    </p>
+  </section>
+
+  <!-- ============ 04 Storage ============ -->
+  <section id="storage">
+    <div class="section-head">
+      <h2>What we store</h2>
+    </div>
+    <table class="tbl">
+      <thead>
+        <tr><th>Row</th><th>Contents</th><th>Retention</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>users</code></td>
+          <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
+          <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
+        </tr>
+        <tr>
+          <td><code>telegram_accounts<wbr>.session_encrypted</code></td>
+          <td>AES-256-GCM-sealed MTProto session blob, per-user HKDF-derived key.</td>
+          <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed).</td>
+        </tr>
+        <tr>
+          <td><code>audit_logs</code></td>
+          <td>Tool name, redacted peer reference, status, error. <strong style="color: var(--text)">Never the message body, phone number, or session bytes.</strong></td>
+          <td>Retained indefinitely today; 90-day sweeper is planned (M2). Ask the operator if you need an earlier purge.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============ 05 Controls ============ -->
+  <section id="controls">
+    <div class="section-head">
+      <h2>Your controls</h2>
+    </div>
+    <ul class="ctrl">
+      <li><strong>Disconnect (soft):</strong> call MCP tool <code>disconnect_telegram_account</code>, or <code>POST /api/account/disconnect</code>. Marks the session revoked and immediately tears down the in-memory MTProto client.</li>
+      <li><strong>Delete (hard):</strong> call MCP tool <code>delete_telegram_account</code>, or <code>DELETE /api/account</code>. Removes the encrypted session blob and all per-account metadata.</li>
+      <li><strong>Status:</strong> <code>GET /api/account</code> returns connection state, display name, and the per-account <code>send_enabled</code> flag.</li>
+      <li><strong>Audit log:</strong> <code>get_my_audit_log</code> MCP tool or <code>GET /api/account/audit</code> — newest-first, RFC3339 <code>before</code> cursor for keyset pagination.</li>
+      <li><strong>Verify your audit chain:</strong> <code>GET /api/account/audit/verify</code> recomputes the SHA-256 hash chain over your rows and reports <code>{ok, verified}</code> or <code>{ok:false, first_bad_id, reason}</code>.</li>
+      <li><strong>Revoke from Telegram's side:</strong> Telegram app → Settings → Devices → close the session named after this app. This will not delete data here but will sever the MTProto link Telegram-side.</li>
+    </ul>
+  </section>
+
+  <!-- ============ 06 Smoke test ============ -->
+  <section id="smoke">
+    <div class="section-head">
+      <h2>Smoke-test from your terminal</h2>
+    </div>
+    <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
+<pre><code>curl -s {{.WellKnownURL}}
+
+curl -s -X POST {{.MCPURL}} \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"smoke","version":"0"}}}'</code></pre>
+  </section>
+
+  <!-- ============ 07 First login ============ -->
+  <section id="first-login">
+    <div class="section-head">
+      <h2>First-time Telegram login</h2>
+    </div>
+    <p>
+      Sign-in via the Claude.ai connector authenticates you with the Telegram Login Widget.
+      If the server has no MTProto session for your account yet, the connect flow continues
+      straight into an in-browser <em style="color: var(--text)">"Enable message access"</em>
+      step: enter your phone number, type the login code Telegram sends you, and — if your
+      account uses it — your two-step verification password. The server then persists an
+      AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the
+      connector is ready — no operator CLI step required. The bundled
+      <code>mctl-telegram-login</code> CLI remains available for operators as a fallback.
+      Full details in the repo
+      <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.
+    </p>
   </section>
 
   <!-- ============ Footer ============ -->
@@ -753,7 +808,7 @@
     <div class="links">
       <span class="brand-mark">mctl-telegram</span>
       <span class="sep">·</span>
-      <a href="/docs">docs</a>
+      <a href="/">home</a>
       <span class="sep">·</span>
       <a href="/security">security</a>
       <span class="sep">·</span>
@@ -786,23 +841,6 @@
       root.setAttribute('data-accent', name);
     }
     try { localStorage.setItem('mctl-accent', name); } catch (e) {}
-  }
-
-  // Copy MCP URL button.
-  var copyBtn = document.getElementById('copy-mcp-url');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', function () {
-      var url = copyBtn.dataset.url;
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(function () {
-          copyBtn.textContent = 'Copied!';
-          setTimeout(function () { copyBtn.textContent = 'Copy MCP URL'; }, 2000);
-        });
-      } else {
-        copyBtn.textContent = url;
-        setTimeout(function () { copyBtn.textContent = 'Copy MCP URL'; }, 4000);
-      }
-    });
   }
 
   // Wire up handlers without inline onclick attributes, so the markup stays

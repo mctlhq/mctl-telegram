@@ -19,6 +19,52 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
+// FloodWait retry policy constants. Matching the design: up to 3 retries with
+// a per-sleep cap of 60 s. Context cancellation exits each sleep early.
+const (
+	maxFloodWaitRetries = 3
+	maxFloodWaitSleep   = 60 * time.Second
+)
+
+// borrowWithRetry wraps Pool.Borrow with up to maxFloodWaitRetries transparent
+// retries when Telegram returns FLOOD_WAIT_X. Each wait is capped at
+// maxFloodWaitSleep. Context cancellation during a sleep causes an immediate
+// return with ctx.Err(). The flood-wait counter is incremented on every
+// observed FloodWait error (including the one on the final attempt).
+func (s *Server) borrowWithRetry(
+	ctx context.Context,
+	tool string,
+	userID int64,
+	fn func(context.Context, *gotdtelegram.Client) error,
+) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxFloodWaitRetries; attempt++ {
+		lastErr = s.Pool.Borrow(ctx, userID, fn)
+		wait := telegram.FloodWaitSeconds(lastErr)
+		if wait == 0 {
+			// Not a FloodWait error — return immediately (success or other error).
+			return lastErr
+		}
+		// Record every FloodWait event so operators can observe total pressure.
+		if s.Metrics != nil {
+			s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues(tool).Inc()
+		}
+		if attempt == maxFloodWaitRetries {
+			break
+		}
+		sleep := time.Duration(wait) * time.Second
+		if sleep > maxFloodWaitSleep {
+			sleep = maxFloodWaitSleep
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sleep):
+		}
+	}
+	return lastErr
+}
+
 // bridgeResultErr converts a CallToolResult to an error for audit logging.
 // bridgeCall never returns a non-nil Go error; errors are embedded in the
 // result's IsError flag. This helper surfaces them so audit rows reflect
@@ -103,7 +149,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		limit := intArg(args, "limit", 50)
 		query := stringArg(args, "query", "")
 		var dialogs []telegram.Dialog
-		err := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		err := s.borrowWithRetry(ctx, "list_dialogs", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
 			dialogs, err = telegram.ListDialogs(ctx, c, limit, query)
 			return err
@@ -154,7 +200,7 @@ Empty result means no unread messages match (including: peer has unread but text
 		peer := stringArg(args, "peer", "")
 		limit := intArg(args, "limit", 50)
 		var msgs []telegram.Message
-		err := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		err := s.borrowWithRetry(ctx, "get_unread_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
 			msgs, err = telegram.GetUnreadMessages(ctx, c, peer, limit)
 			return err
@@ -311,7 +357,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 					return res, err2
 				}
 			}
-			err = s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			err = s.borrowWithRetry(ctx, "send_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 				var inner error
 				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason)
 				return inner
@@ -377,7 +423,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		}
 		limit := intArg(args, "limit", 50)
 		var msgs []telegram.Message
-		err := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		err := s.borrowWithRetry(ctx, "get_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
 			msgs, err = telegram.GetMessages(ctx, c, peer, limit)
 			return err
@@ -521,7 +567,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 				return res, err2
 			}
 		}
-		poolErr := s.Pool.Borrow(ctx, id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		poolErr := s.borrowWithRetry(ctx, "pin_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			return telegram.PinMessage(ctx, c, peer, messageID, unpin)
 		})
 		err = poolErr
@@ -913,6 +959,13 @@ func sessionErrText(err error) string {
 func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
 	if friendly := sessionErrText(err); friendly != "" {
 		return mcplib.NewToolResultError(friendly)
+	}
+	if errors.Is(err, telegram.ErrPoolFull) {
+		return mcplib.NewToolResultError("server at session capacity — try again later")
+	}
+	if secs := telegram.FloodWaitSeconds(err); secs > 0 {
+		return mcplib.NewToolResultError(
+			fmt.Sprintf("Telegram rate limit (FLOOD_WAIT_%d): retry_after_seconds=%d", secs, secs))
 	}
 	return toolErr("%s: %v", tool, err)
 }

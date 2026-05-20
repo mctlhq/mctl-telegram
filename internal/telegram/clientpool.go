@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -48,6 +49,10 @@ func sessionErrorFor(err error) error {
 	}
 }
 
+// ErrPoolFull is returned by Borrow when the pool has reached its
+// TELEGRAM_MAX_SESSIONS limit and cannot allocate a new client entry.
+var ErrPoolFull = errors.New("telegram: session pool at capacity")
+
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
 // after IdleTimeout of inactivity. Tool handlers call Borrow() to either
@@ -56,6 +61,7 @@ type ClientPool struct {
 	APIID       int
 	APIHash     string
 	IdleTimeout time.Duration
+	MaxSessions int // 0 = no cap; set via WithMaxSessions
 	Store       *db.Store
 	// metrics is optional; when non-nil, pool size and error counters are
 	// maintained.
@@ -88,6 +94,15 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 // are recorded. Returns the receiver for chaining.
 func (p *ClientPool) WithMetrics(m *metrics.Registry) *ClientPool {
 	p.metrics = m
+	return p
+}
+
+// WithMaxSessions sets an upper bound on the number of concurrently live client
+// pool entries. When n > 0 and the pool already holds n entries, Borrow returns
+// ErrPoolFull instead of allocating a new entry. n = 0 disables the cap
+// (default, preserving previous behaviour). Returns the receiver for chaining.
+func (p *ClientPool) WithMaxSessions(n int) *ClientPool {
+	p.MaxSessions = n
 	return p
 }
 
@@ -179,6 +194,12 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 
 	if e, ok := p.entries[userID]; ok && !e.stopped {
 		return e, nil
+	}
+
+	// Enforce TELEGRAM_MAX_SESSIONS cap. Only applies when allocating a new
+	// entry (the early-return above lets existing live entries through).
+	if p.MaxSessions > 0 && len(p.entries) >= p.MaxSessions {
+		return nil, ErrPoolFull
 	}
 
 	store := &SessionStore{UserID: userID, Store: p.Store}

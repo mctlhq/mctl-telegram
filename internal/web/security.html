@@ -84,7 +84,7 @@
     <tbody>
       <tr>
         <td>Inbound HTTP (Claude.ai → <code>/mcp</code>)</td>
-        <td>OAuth JWT issued by <code>api.mctl.ai</code>, verified via shared HMAC</td>
+        <td>OAuth JWT issued and verified by this server (local-jwt mode); shared-hmac-legacy mode uses <code>api.mctl.ai</code></td>
         <td>Bearer header, per-request</td>
       </tr>
       <tr>
@@ -112,8 +112,8 @@
     <li>The contents of <code>Authorization: Bearer</code> headers</li>
   </ul>
 
-  <h2>Known coupling: shared <code>OAUTH_JWT_SECRET</code> with mctl-api</h2>
-  <p>The current <code>shared-hmac</code> auth mode validates JWTs by re-implementing mctl-api's HMAC-SHA256 verifier and reading the <strong>same</strong> <code>OAUTH_JWT_SECRET</code> from Vault (<code>secret/platform/oauth-jwt-secret</code>). This is an MVP-stage coupling.</p>
+  <h2>Known coupling: shared-hmac-legacy mode</h2>
+  <p>The <code>AUTH_MODE=shared-hmac-legacy</code> auth mode validates JWTs by re-implementing mctl-api's HMAC-SHA256 verifier and reading the <strong>same</strong> <code>OAUTH_JWT_SECRET</code> from Vault (<code>secret/platform/oauth-jwt-secret</code>). This applies only to the legacy mode, not to the default <code>local-jwt</code> mode.</p>
   <ul>
     <li><strong>Impact:</strong> compromise of the mctl-telegram pod's secret material is equivalent to compromise of mctl-api's — an attacker can mint valid platform tokens.</li>
     <li><strong>Mitigation today:</strong> rotate <code>OAUTH_JWT_SECRET</code> for both services in the same change. Failing to do so will lock out users on whichever side is stale.</li>
@@ -141,7 +141,7 @@
 
   <h2>Authentication-required mode</h2>
   <ul>
-    <li><code>AUTH_REQUIRED=false</code> is for local development only. The deployed pod MUST set <code>AUTH_REQUIRED=true</code> and <code>AUTH_MODE=shared-hmac</code>.</li>
+    <li><code>AUTH_REQUIRED=false</code> is for local development only. The deployed pod MUST set <code>AUTH_REQUIRED=true</code> and <code>AUTH_MODE=local-jwt</code>.</li>
     <li><code>local-dev</code> provider returns a fixed identity with platform-admin scopes and is gated by <code>AUTH_MODE=local-dev</code>. It MUST NOT be reachable from any non-localhost interface in production.</li>
   </ul>
 
