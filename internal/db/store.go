@@ -281,9 +281,9 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	now := time.Now().UTC()
 	expires := now.Add(absoluteSessionTTL)
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7)`,
-		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at, send_enabled)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires, false,
 	); err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
@@ -517,6 +517,27 @@ func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) 
 		return fmt.Errorf("set send_enabled: %w", err)
 	}
 	return nil
+}
+
+// ToggleSendEnabled atomically inverts send_enabled on the user's active
+// session row. Using a single UPDATE avoids the read-modify-write race that
+// exists when callers read IsSendEnabled and then call SetSendEnabled in two
+// separate round-trips. Returns the new value of send_enabled.
+func (s *Store) ToggleSendEnabled(ctx context.Context, userID int64) (bool, error) {
+	var newVal bool
+	err := s.DB.QueryRowContext(ctx,
+		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 RETURNING send_enabled`,
+		userID,
+	).Scan(&newVal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("toggle send_enabled: %w", err)
+	}
+	return newVal, nil
 }
 
 // MarkLastUsed updates last_used_at on the active session for the user. Best

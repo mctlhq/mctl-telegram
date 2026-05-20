@@ -430,3 +430,46 @@ func TestUserIDByTelegramID(t *testing.T) {
 		t.Fatalf("miss is not idempotent — a row was created: %v", err)
 	}
 }
+
+func TestToggleSendEnabled_AtomicFlip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "toggle-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	// No active session → returns false, no error.
+	val, err := s.ToggleSendEnabled(ctx, uid)
+	if err != nil {
+		t.Fatalf("no session: %v", err)
+	}
+	if val {
+		t.Fatal("expected false when no active session")
+	}
+
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, send_enabled) VALUES($1, $2, $3)`,
+		uid, []byte("blob"), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// false → true.
+	val, err = s.ToggleSendEnabled(ctx, uid)
+	if err != nil {
+		t.Fatalf("first toggle: %v", err)
+	}
+	if !val {
+		t.Fatal("expected true after first toggle")
+	}
+
+	// true → false.
+	val, err = s.ToggleSendEnabled(ctx, uid)
+	if err != nil {
+		t.Fatalf("second toggle: %v", err)
+	}
+	if val {
+		t.Fatal("expected false after second toggle")
+	}
+}

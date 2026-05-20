@@ -681,6 +681,7 @@ func (s *Server) Register(mux Router) {
 	// In-browser "enable message access" flow. Public (no auth gate): the
 	// caller's identity is carried by the unguessable "es" token minted at
 	// the Telegram callback, which also serves as the CSRF token.
+	mux.Post("/oauth/telegram/enable_access/permissions", s.handleEnablePermissions)
 	mux.Post("/oauth/telegram/enable_access/start", s.handleEnableStart)
 	mux.Post("/oauth/telegram/enable_access/code", s.handleEnableCode)
 	mux.Post("/oauth/telegram/enable_access/password", s.handleEnablePassword)
@@ -1094,7 +1095,14 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	s.enables[esTok] = es
 	s.mu.Unlock()
-	renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+	s.store.LogToolCall(r.Context(), uid, "connect:oidc_callback", "", "ok", "")
+	if es.isWizardMode() {
+		es.step = stepPermissions
+		renderEnablePermissions(w, enablePermissionsPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+	} else {
+		es.step = stepPhone
+		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+	}
 }
 
 // oauthCtx bundles the per-flow OAuth parameters needed to mint and deliver an

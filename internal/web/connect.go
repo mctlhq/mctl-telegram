@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -182,12 +183,26 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
+	tok, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
 	if err != nil {
 		slog.Error("connect: ExchangeConnect failed", "err", err)
 		renderConnectError(w, "Could not confirm your Telegram session. Please try again.", s.issuer+"/telegram/connect")
 		return
 	}
+
+	// Set an HttpOnly session cookie so the browser can authenticate against
+	// the /telegram/connect/manage routes without receiving the JWT in-page.
+	// Path=/telegram/connect restricts delivery to this subtree only.
+	// Secure is derived from the issuer scheme so local HTTP dev does not
+	// silently drop the cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mctl_connect_token",
+		Value:    tok,
+		Path:     "/telegram/connect",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   strings.HasPrefix(s.issuer, "https://"),
+	})
 
 	renderConnectSuccess(w, connectSuccessData{
 		ClaudeURL: s.claudeURL,
@@ -255,6 +270,10 @@ const connectHead = `<!doctype html>
     .btn:hover { background: #1a7f37; }
     .error { background: #ffebe9; border: 1px solid #ff818266; border-radius: 6px;
              padding: 10px 12px; font-size: 13px; color: #cf222e; margin: 12px 0; }
+    .steps { display: flex; list-style: none; padding: 0; margin: 0 0 20px; gap: 0; }
+    .steps li { flex: 1; text-align: center; font-size: 12px; padding: 6px 4px;
+                border-bottom: 2px solid #d0d7de; color: #57606a; }
+    .steps li.active { border-bottom-color: #1f883d; color: #1f883d; font-weight: 600; }
     @media (prefers-color-scheme: dark) {
       body { background: #0d1117; color: #e6edf3; }
       .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
@@ -262,6 +281,8 @@ const connectHead = `<!doctype html>
       .meta { color: #8b949e; }
       .url { color: #58a6ff; }
       .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
+      .steps li { border-bottom-color: #30363d; color: #8b949e; }
+      .steps li.active { border-bottom-color: #3fb950; color: #3fb950; }
     }
   </style>
 </head>
@@ -290,7 +311,13 @@ type connectErrorData struct {
 	RetryURL string
 }
 
-var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <h1>Connect your Telegram account</h1>
+var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <ol class="steps">
+      <li class="active">Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li>Phone number</li>
+      <li>Done</li>
+    </ol>
+    <h1>Step 1 of 4 &#8212; Connect your Telegram account</h1>
     <p>Click the button below to sign in with Telegram and link your account to this MCP connector.
        You will be asked to enter your phone number and a one-time code sent by Telegram.</p>
     <p>No password is stored. An encrypted Telegram session is saved on this server so the
@@ -299,11 +326,22 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))
 
-var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <h1>Telegram account connected</h1>
-    <p>Your Telegram account has been successfully linked to this MCP connector.</p>
+var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li>Phone number</li>
+      <li class="active">Done</li>
+    </ol>
+    <h1>Step 4 of 4 &#8212; Done</h1>
+    <p>Your Telegram account is now connected to this MCP connector.</p>
     <p>To start using it with Claude, open the Claude.ai connector settings and add the MCP URL:</p>
     <p class="url">{{.MCPURL}}</p>
-    <p class="meta"><a href="{{.ClaudeURL}}">Go to Claude.ai connector settings</a></p>
+    <p class="meta">A new session called &#8220;mctl Telegram Assistant&#8221; will appear in
+       your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
+       &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
+       read your messages.</p>
+    <p class="meta"><a href="{{.ClaudeURL}}">Go to Claude.ai connector settings</a> &#183;
+       <a href="/telegram/connect/manage">Manage your session</a></p>
 ` + connectFoot))
 
 var connectErrorTemplate = template.Must(template.New("connectError").Parse(connectHead + `    <h1>Connection failed</h1>
