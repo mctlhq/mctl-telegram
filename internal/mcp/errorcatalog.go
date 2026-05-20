@@ -100,7 +100,7 @@ func mtprotoErrResult(tool string, err error) *mcplib.CallToolResult {
 		return nil
 	}
 
-	slog.Warn("mcp mtproto error", "tool", tool, "code", rpcErr.Message, "rpc_code", rpcErr.Code)
+	slog.Warn("mcp mtproto error", "tool", tool, "message", rpcErr.Message, "code", rpcErr.Code)
 
 	if n, ok := floodWaitSeconds(rpcErr.Message); ok {
 		var errKey, msg string
