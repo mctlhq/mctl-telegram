@@ -182,12 +182,24 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
+	tok, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
 	if err != nil {
 		slog.Error("connect: ExchangeConnect failed", "err", err)
 		renderConnectError(w, "Could not confirm your Telegram session. Please try again.", s.issuer+"/telegram/connect")
 		return
 	}
+
+	// Set an HttpOnly session cookie so the browser can authenticate against
+	// the /telegram/connect/manage routes without receiving the JWT in-page.
+	// Path=/telegram/connect restricts delivery to this subtree only.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mctl_connect_token",
+		Value:    tok,
+		Path:     "/telegram/connect",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   true,
+	})
 
 	renderConnectSuccess(w, connectSuccessData{
 		ClaudeURL: s.claudeURL,

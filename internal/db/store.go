@@ -519,6 +519,27 @@ func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) 
 	return nil
 }
 
+// ToggleSendEnabled atomically inverts send_enabled on the user's active
+// session row. Using a single UPDATE avoids the read-modify-write race that
+// exists when callers read IsSendEnabled and then call SetSendEnabled in two
+// separate round-trips. Returns the new value of send_enabled.
+func (s *Store) ToggleSendEnabled(ctx context.Context, userID int64) (bool, error) {
+	var newVal bool
+	err := s.DB.QueryRowContext(ctx,
+		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 RETURNING send_enabled`,
+		userID,
+	).Scan(&newVal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("toggle send_enabled: %w", err)
+	}
+	return newVal, nil
+}
+
 // MarkLastUsed updates last_used_at on the active session for the user. Best
 // effort — a failure does not surface to the caller; the next call will
 // retry. Called from Pool.Borrow on every successful tool dispatch so the

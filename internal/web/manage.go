@@ -86,14 +86,8 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 		http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
 		return
 	}
-	current, err := s.store.IsSendEnabled(r.Context(), id.UserID)
-	if err != nil {
-		slog.Warn("manage: is_send_enabled", "err", err)
-		renderManageError(w, "Could not read session state. Please try again.")
-		return
-	}
-	if err := s.store.SetSendEnabled(r.Context(), id.UserID, !current); err != nil {
-		slog.Warn("manage: set_send_enabled", "err", err)
+	if _, err := s.store.ToggleSendEnabled(r.Context(), id.UserID); err != nil {
+		slog.Warn("manage: toggle_send_enabled", "err", err)
 		renderManageError(w, "Could not update permission. Please try again.")
 		return
 	}

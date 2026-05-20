@@ -1,10 +1,14 @@
 package localjwt
 
 import (
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 var testSecret = []byte("test-secret-bytes-32-bytes-long!!")
@@ -185,5 +189,65 @@ func TestMint_AudienceSingleAndMulti(t *testing.T) {
 	}
 	if len(c.Audience) != 2 {
 		t.Errorf("multi aud roundtrip: got %v", c.Audience)
+	}
+}
+
+func newTestLocaljwtStore(t *testing.T) *db.Store {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return &db.Store{DB: conn}
+}
+
+func TestProvider_CookieFallback(t *testing.T) {
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject:    "tg:42",
+		TelegramID: 42,
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	store := newTestLocaljwtStore(t)
+	p, _ := NewProvider(store, ProviderConfig{
+		Secret:         testSecret,
+		ExpectedIssuer: testIssuer,
+	})
+
+	r := httptest.NewRequest("GET", "/telegram/connect/manage", nil)
+	r.AddCookie(&http.Cookie{Name: "mctl_connect_token", Value: tok})
+
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("Authenticate with cookie: %v", err)
+	}
+	if id == nil {
+		t.Fatal("expected non-nil identity from cookie")
+	}
+	if id.TelegramID != 42 {
+		t.Errorf("TelegramID = %d, want 42", id.TelegramID)
+	}
+}
+
+func TestProvider_CookieFallback_AnonymousWithoutCookie(t *testing.T) {
+	p, _ := NewProvider(nil, ProviderConfig{
+		Secret:         testSecret,
+		ExpectedIssuer: testIssuer,
+	})
+	r := httptest.NewRequest("GET", "/telegram/connect/manage", nil)
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != nil {
+		t.Errorf("expected nil identity without cookie or header, got %+v", id)
 	}
 }

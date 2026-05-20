@@ -198,15 +198,26 @@ func NewProvider(store *db.Store, cfg ProviderConfig) (*Provider, error) {
 
 // Authenticate satisfies the auth.Provider interface. Returns (nil, nil) for
 // anonymous requests so the caller (middleware) decides whether to 401.
+// In addition to a Bearer token in the Authorization header, accepts the
+// "mctl_connect_token" HttpOnly cookie so that browser-driven flows under
+// /telegram/connect can reach the manage routes. The cookie is set with
+// Path=/telegram/connect, so it is never delivered to /mcp or other endpoints.
 func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
+	tok := ""
 	hdr := r.Header.Get("Authorization")
-	if hdr == "" {
+	switch {
+	case hdr != "" && strings.HasPrefix(hdr, "Bearer "):
+		tok = strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
+	case hdr != "":
+		return nil, errors.New("Authorization header must use Bearer scheme")
+	default:
+		if ck, err := r.Cookie("mctl_connect_token"); err == nil {
+			tok = ck.Value
+		}
+	}
+	if tok == "" {
 		return nil, nil
 	}
-	if !strings.HasPrefix(hdr, "Bearer ") {
-		return nil, errors.New("Authorization header must use Bearer scheme")
-	}
-	tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
 	c, err := Verify(tok, p.Secret, p.ExpectedIssuer)
 	if err != nil {
 		return nil, err
