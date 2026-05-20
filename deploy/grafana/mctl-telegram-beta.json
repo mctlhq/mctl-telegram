@@ -9,7 +9,7 @@
       "pluginName": "Prometheus"
     }
   ],
-  "__requires__": [
+  "__requires": [
     {
       "type": "grafana",
       "id": "grafana",
