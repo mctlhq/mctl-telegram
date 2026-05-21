@@ -137,6 +137,13 @@ OAuth availability SLO (0.1% budget):
 | 1 h | 14.4x | 1.440% error rate | page |
 | 6 h | 6x | 0.600% error rate | ticket |
 
+Session borrow success rate SLO (1% budget):
+
+| Window | Burn multiplier | Alert threshold | Severity |
+|--------|----------------|-----------------|----------|
+| 1 h | 14.4x | 14.4% error rate | page |
+| 6 h | 6x | 6.0% error rate | ticket |
+
 The `for: 0m` convention is used on burn-rate alerts. The burn window itself
 provides the statistical stabilization; adding a separate `for:` duration
 would delay the alert by double and mask fast incidents.

@@ -14,7 +14,10 @@ var expectedMetricNames = []string{
 	"mctl_tool_invocations_total",
 	"mctl_tool_invocation_duration_seconds",
 	"mctl_telegram_client_pool_size",
+	"mctl_telegram_pool_capacity",
 	"mctl_telegram_client_errors_total",
+	"mctl_telegram_flood_wait_events_total",
+	"mctl_oauth_pending_auth_size",
 	"mctl_sessions_connected_total",
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
@@ -22,7 +25,7 @@ var expectedMetricNames = []string{
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
-// for each of the 11 metric names defined in the design.
+// for each of the 14 metric names defined in the design.
 func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg := New()
 	// Force each metric to be "used" so the registry includes them in Gather.
@@ -34,7 +37,10 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.ToolInvocationsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
 	reg.ToolInvocationDuration.WithLabelValues("list_dialogs").Observe(0)
 	reg.TelegramClientPoolSize.Set(0)
+	reg.TelegramPoolCapacity.Set(0)
 	reg.TelegramClientErrorsTotal.Add(0)
+	reg.TelegramFloodWaitEventsTotal.WithLabelValues("list_dialogs").Add(0)
+	reg.OAuthPendingAuthSize.Set(0)
 	reg.SessionsConnectedTotal.Add(0)
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
