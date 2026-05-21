@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mctl-telegram — Your Telegram, inside Claude</title>
+<title>mctl-telegram — Your Telegram, inside your AI assistant</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="shortcut icon" href="/favicon.ico">
 <style>
@@ -366,10 +366,11 @@
     padding: 10px 22px;
     border-radius: var(--mctl-radius-md);
     text-decoration: none;
-    border-bottom: 0;
+    border: 0;
+    cursor: pointer;
     transition: filter .15s;
   }
-  .cta-btn:hover { filter: brightness(0.9); border-bottom: 0; }
+  .cta-btn:hover { filter: brightness(0.9); border: 0; }
 
   .cta-row {
     display: flex;
@@ -578,15 +579,20 @@
       <span class="status-dot" aria-hidden="true"></span>
       <span>Operational · Remote MCP Server · v1</span>
     </div>
-    <h1>Your Telegram,<br><span class="accent">inside Claude</span></h1>
+    <h1>Your Telegram,<br><span class="accent">inside your AI assistant</span></h1>
     <p class="lead">
-      Give Claude read and write access to your Telegram chats — directly from claude.ai, with no extra apps.
+      Give Claude, ChatGPT, or any MCP client read and write access to your Telegram chats — straight from the chat, with no extra apps.
     </p>
     <div class="cta-row">
-      <a class="cta-btn" href="https://claude.ai/customize/connectors">Add to Claude</a>
-      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
+      <button class="cta-btn" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
+      <a class="btn-secondary" href="https://claude.ai/customize/connectors">Add to Claude</a>
+      <a class="btn-secondary" href="#connect">Set up in ChatGPT</a>
       <a href="/docs">See the docs</a>
     </div>
+    <p class="muted">
+      Works with any MCP client — Claude, ChatGPT, Cursor, Windsurf, and more.
+      Claude opens directly; ChatGPT setup takes pasting the MCP URL into connector settings.
+    </p>
   </section>
 
   <!-- ============ Use cases ============ -->
@@ -598,17 +604,32 @@
       <div class="use-card">
         <span class="card-icon">[~]</span>
         <h3>Summarise unread chats</h3>
-        <p>Ask Claude what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
+        <p>Ask your assistant what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
       </div>
       <div class="use-card">
         <span class="card-icon">[&gt;]</span>
         <h3>Draft and review messages</h3>
-        <p>Let Claude write or check a reply before you send. Review tone, catch errors, or translate — then send when ready.</p>
+        <p>Let your assistant write or check a reply before you send. Review tone, catch errors, or translate — then send when ready.</p>
       </div>
       <div class="use-card">
         <span class="card-icon">[?]</span>
         <h3>Search across conversations</h3>
-        <p>Find anything you said or received, instantly. Claude can search by topic, person, or date across your full history.</p>
+        <p>Find anything you said or received, instantly. Search by topic, person, or date across your full history.</p>
+      </div>
+      <div class="use-card">
+        <span class="card-icon">[#]</span>
+        <h3>Triage your inbox</h3>
+        <p>List every chat and surface what still needs a reply, so you can clear a backlog of unread conversations in one pass.</p>
+      </div>
+      <div class="use-card">
+        <span class="card-icon">[Aa]</span>
+        <h3>Translate on the fly</h3>
+        <p>Read foreign-language chats in your own language, or draft a reply in theirs — without leaving the conversation.</p>
+      </div>
+      <div class="use-card">
+        <span class="card-icon">[*]</span>
+        <h3>Pin what matters</h3>
+        <p>Ask your assistant to pin a key message in a chat so the important thing stays at the top where everyone sees it.</p>
       </div>
     </div>
   </section>
@@ -620,8 +641,8 @@
     </div>
     <div class="flow-diagram">
       <div class="flow-node">
-        <span class="node-name">Claude.ai</span>
-        <span class="node-label">your prompt</span>
+        <span class="node-name">Your AI client</span>
+        <span class="node-label">Claude, ChatGPT…</span>
       </div>
       <span class="flow-arrow">--&gt;</span>
       <div class="flow-node">
@@ -636,8 +657,20 @@
     </div>
     <ol class="steps">
       <li>You authorise with Telegram sign-in. mctl-telegram stores an encrypted MTProto session on your behalf.</li>
-      <li>When you prompt Claude, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
-      <li>mctl-telegram makes MTProto calls to Telegram, formats the result, and returns it to Claude.</li>
+      <li>When you prompt your assistant, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
+      <li>mctl-telegram makes MTProto calls to Telegram, formats the result, and returns it to your assistant.</li>
+    </ol>
+  </section>
+
+  <!-- ============ Connecting ============ -->
+  <section id="connect">
+    <div class="section-head">
+      <h2>Connecting</h2>
+    </div>
+    <ol class="steps">
+      <li><strong>Any client:</strong> copy the MCP URL <code class="url">{{.MCPURL}}</code> and add it as a custom connector. Authentication is <em>OAuth</em> — you sign in with Telegram once during setup.</li>
+      <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors">Connectors settings</a>, choose <em>Add custom connector</em>, and paste the MCP URL.</li>
+      <li><strong>ChatGPT:</strong> open <em>Settings &#8594; Connectors</em>, add a custom connector, and paste the MCP URL. Requires a plan with custom connectors enabled.</li>
     </ol>
   </section>
 
@@ -674,8 +707,12 @@
     </div>
     <dl class="faq-list">
       <div class="faq-item">
-        <dt>Can Claude send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. The default mode is draft — Claude prepares a message for your review but never sends it. Real sends require the server ALLOW_SEND flag, your account opt-in, and the mode=send argument in the tool call.</dd>
+        <dt>Which AI assistants does this work with?</dt>
+        <dd>Any client that supports remote MCP connectors — Claude, ChatGPT, Cursor, Windsurf, and others. It is a standard OAuth-authenticated MCP server, so it is not tied to a single vendor.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Can it send messages on my behalf?</dt>
+        <dd>Only if you explicitly opt in. The default mode is draft — your assistant prepares a message for your review but never sends it. Real sends require the server ALLOW_SEND flag, your account opt-in, and the mode=send argument in the tool call.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does mctl-telegram store?</dt>
