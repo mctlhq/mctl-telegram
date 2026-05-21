@@ -14,8 +14,9 @@ The canary CronJob (`deploy/canary/cronjob.yaml`, schedule
 endpoint. Each run exercises:
 
 1. `oauth_metadata` — `GET /.well-known/oauth-authorization-server`
-2. `list_dialogs` — MCP JSON-RPC call requiring a valid bearer token
-3. `get_unread_messages` — optional MCP call (`CANARY_PROBE_UNREAD=true`)
+2. `mcp_init` — MCP session initialization (`method: initialize`, obtains `Mcp-Session-Id`)
+3. `list_dialogs` — MCP JSON-RPC call requiring a valid bearer token
+4. `get_unread_messages` — optional MCP call (`CANARY_PROBE_UNREAD=true`)
 
 A successful run pushes `mctl_telegram_canary_success=1`. Any step
 failure pushes `0` and increments
@@ -42,6 +43,9 @@ failure pushes `0` and increments
 - **`oauth_metadata`** — `tg.mctl.ai` is down, OIDC issuer config is
   broken, or TLS cert expired. Cross-check with
   `mctl_telegram_up`-style readiness metrics for the server.
+- **`mcp_init`** — MCP session initialization failed; the server returned
+  a non-200 status or did not include an `Mcp-Session-Id` header. Usually
+  indicates the MCP handler is unhealthy even though HTTP is up.
 - **`list_dialogs`** — bearer token rotated or expired; MCP layer is
   unhealthy; `FLOOD_WAIT_*` from Telegram (the canary logs
   `flood_wait=true` in its slog output and increments
@@ -71,5 +75,5 @@ failure pushes `0` and increments
 ## Escalation
 
 If the alert persists for more than 30 minutes and the failing step
-is `oauth_metadata` or `list_dialogs`, page the mctl-telegram on-call
-— this represents a real user-visible outage.
+is `oauth_metadata`, `mcp_init`, or `list_dialogs`, page the
+mctl-telegram on-call — this represents a real user-visible outage.
