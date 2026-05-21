@@ -12,7 +12,9 @@ RUN CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-s -w -X main.version=${APP_VERSION}" \
     -o /mctl-telegram ./cmd/server && \
     CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-s -w" -o /mctl-telegram-login ./cmd/login
+    go build -ldflags="-s -w" -o /mctl-telegram-login ./cmd/login && \
+    CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags="-s -w -X main.version=${APP_VERSION}" -o /mctl-telegram-canary ./cmd/canary
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
@@ -22,6 +24,7 @@ RUN apk add --no-cache ca-certificates && \
 
 COPY --from=builder /mctl-telegram /usr/local/bin/mctl-telegram
 COPY --from=builder /mctl-telegram-login /usr/local/bin/mctl-telegram-login
+COPY --from=builder /mctl-telegram-canary /usr/local/bin/mctl-telegram-canary
 
 USER app:app
 
