@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/client_golang/prometheus/push"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // validMCPResponse returns a well-formed JSON-RPC 2.0 success response for a
@@ -120,7 +121,63 @@ func TestProbeOAuthMetadataNon200(t *testing.T) {
 	}
 }
 
-// --- T2: list_dialogs / probeMCPTool probe ---
+// --- T2: initMCPSession probe ---
+
+func TestInitMCPSessionSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req jsonRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method != "initialize" {
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "test-session-123")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  map[string]any{"protocolVersion": "2024-11-05"},
+		})
+	}))
+	defer srv.Close()
+
+	sid, err := initMCPSession(t.Context(), srv.Client(), srv.URL, "/mcp", "token")
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if sid != "test-session-123" {
+		t.Errorf("expected session ID %q, got %q", "test-session-123", sid)
+	}
+}
+
+func TestInitMCPSessionMissingHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	_, err := initMCPSession(t.Context(), srv.Client(), srv.URL, "/mcp", "token")
+	if err == nil {
+		t.Fatal("expected error when Mcp-Session-Id header is absent")
+	}
+}
+
+func TestInitMCPSessionNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := initMCPSession(t.Context(), srv.Client(), srv.URL, "/mcp", "bad-token")
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+}
+
+// --- T3: probeMCPTool probe ---
 
 func TestProbeMCPToolSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +185,7 @@ func TestProbeMCPToolSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "sess-1", "list_dialogs", map[string]any{"limit": 5})
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -153,7 +210,7 @@ func TestProbeMCPToolJSONRPCError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	_, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "sess-1", "list_dialogs", map[string]any{"limit": 5})
 	if err == nil {
 		t.Fatal("expected non-nil error for JSON-RPC error response")
 	}
@@ -173,7 +230,7 @@ func TestProbeMCPToolFloodWait_SuccessIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "sess-1", "list_dialogs", map[string]any{"limit": 5})
 	if err == nil {
 		t.Fatal("expected non-nil error for isError=true FLOOD_WAIT response")
 	}
@@ -196,7 +253,7 @@ func TestProbeMCPToolFloodWait_NotErrorWhenIsErrorFalse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "sess-1", "list_dialogs", map[string]any{"limit": 5})
 	if err != nil {
 		t.Fatalf("expected nil error when isError=false, got: %v", err)
 	}
@@ -219,7 +276,7 @@ func TestProbeMCPToolFloodWait_JSONRPCError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "sess-1", "list_dialogs", map[string]any{"limit": 5})
 	if err == nil {
 		t.Fatal("expected non-nil error for FLOOD_WAIT JSON-RPC error")
 	}
@@ -228,15 +285,35 @@ func TestProbeMCPToolFloodWait_JSONRPCError(t *testing.T) {
 	}
 }
 
-// --- T3: Integration tests ---
+// --- T4: Integration tests ---
 
 // newFakeServer builds a single httptest.Server that handles both the OAuth
-// metadata path and the MCP path using the provided handlers.
-func newFakeServer(t *testing.T, oauthHandler, mcpHandler http.HandlerFunc) *httptest.Server {
+// metadata path and the MCP path. The mcpHandler receives only tools/call
+// requests; initialize requests are handled automatically (session ID returned).
+func newFakeServer(t *testing.T, oauthHandler http.HandlerFunc, mcpHandler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/oauth-authorization-server", oauthHandler)
-	mux.HandleFunc("/mcp", mcpHandler)
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		// Route initialize to built-in handler; forward everything else.
+		var req struct {
+			Method string `json:"method"`
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		_ = json.Unmarshal(body, &req)
+		if req.Method == "initialize" {
+			w.Header().Set("Mcp-Session-Id", "fake-session-id")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  map[string]any{"protocolVersion": "2024-11-05"},
+			})
+			return
+		}
+		// Re-inject the already-read body for the delegate handler.
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		mcpHandler(w, r)
+	})
 	return httptest.NewServer(mux)
 }
 
