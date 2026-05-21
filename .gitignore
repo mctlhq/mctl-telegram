@@ -12,6 +12,7 @@
 node_modules/
 .claude/worktrees/
 /local
+/canary
 *.db
 *.sqlite
 *.sqlite3
