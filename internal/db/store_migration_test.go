@@ -23,7 +23,7 @@ func makeKey() []byte {
 func newTestStoreCrypted(t *testing.T) *Store {
 	t.Helper()
 	ctx := context.Background()
-	conn, err := Open(ctx, "file::memory:?cache=shared")
+	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
