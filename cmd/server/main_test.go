@@ -49,9 +49,9 @@ func TestSelectProviderLocalDevSucceeds(t *testing.T) {
 
 func TestSelectProviderLocalJWTRequiresSecret(t *testing.T) {
 	cfg := &config.Config{
-		AuthMode:     "local-jwt",
+		AuthMode:       "local-jwt",
 		OAUTHJWTSecret: "",
-		PublicBaseURL: "https://example.com",
+		PublicBaseURL:  "https://example.com",
 	}
 	_, err := selectProvider(cfg, nil)
 	if err == nil {
