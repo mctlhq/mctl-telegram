@@ -60,7 +60,9 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"Your Telegram,",
 		"inside your AI assistant",
+		"Copy MCP URL",
 		"Add to Claude",
+		`id="connect"`,
 		"How it works",
 		`href="/security"`,
 		`href="/privacy"`,
