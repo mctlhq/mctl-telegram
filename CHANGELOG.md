@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.24.0](https://github.com/mctlhq/mctl-telegram/compare/0.23.1...0.24.0) (2026-05-21)
+
+
+### Features
+
+* add Beta SLOs, burn-rate alerts, and session borrow counter ([f3d6240](https://github.com/mctlhq/mctl-telegram/commit/f3d62400e79eaea2712bcb86af694de2ea953e32))
+* add Beta SLOs, burn-rate alerts, and session borrow counter ([#88](https://github.com/mctlhq/mctl-telegram/issues/88)) ([f9e29ce](https://github.com/mctlhq/mctl-telegram/commit/f9e29ce2fb6ecd202d1e225662c3c6b7a9621f63))
+* add PrometheusRule manifest for production alerts ([#86](https://github.com/mctlhq/mctl-telegram/issues/86)) ([ec3b116](https://github.com/mctlhq/mctl-telegram/commit/ec3b11687b09125a9f4ecf01e84fecdb8801cb9a))
+* **agents:** issue-86-ship-prometheusrule-manifests-for-produc ([e5b61fd](https://github.com/mctlhq/mctl-telegram/commit/e5b61fdd8c42fc6b3b1e57f27c45ec4ab1893eff))
+* **agents:** issue-90-beta-capacity-profile-load-test-tuned-co ([d6fd303](https://github.com/mctlhq/mctl-telegram/commit/d6fd303b8c530866aae371d0d8edf74d455a29e1))
+* **agents:** issue-92-operational-runbook-for-beta-top-n-incid ([62af604](https://github.com/mctlhq/mctl-telegram/commit/62af6044f738826da0fe09334421c9d0d3ca09d3))
+* **db,config:** add configurable DB pool knobs and load-test binary ([ef47b02](https://github.com/mctlhq/mctl-telegram/commit/ef47b02d981479fed1b15077baa95bce050526f5))
+* **web:** make landing page LLM-provider agnostic ([4ebc096](https://github.com/mctlhq/mctl-telegram/commit/4ebc0961d8c5cd4bb2aa8b1b1bee33e84750879e))
+* **web:** make landing page LLM-provider agnostic ([8058bf4](https://github.com/mctlhq/mctl-telegram/commit/8058bf4804d39edd158284908b091b0eceeeae93))
+
+
+### Bug Fixes
+
+* **alerts:** add upper-bound guards on warning variants + humanize ([87cd94e](https://github.com/mctlhq/mctl-telegram/commit/87cd94e6f0af01b5f37eab1d496107c0b58e5a96))
+* **auth:** unknown AUTH_MODE is now a fatal startup error ([5872cbc](https://github.com/mctlhq/mctl-telegram/commit/5872cbce8beb6d9c597b013f491acaa4cc6833fc))
+* **grafana:** coalesce absent error series to zero in SLO panels ([2e992c6](https://github.com/mctlhq/mctl-telegram/commit/2e992c69e2f4c8f5d9c18222c1e15a10c151ef6e))
+* **load-test:** count isError results, warn on metrics non-200, delta flood-wait ([060112d](https://github.com/mctlhq/mctl-telegram/commit/060112dbedf512c2049fe2626c5adb76fc174169))
+* **load-test:** guard send_message, fix SSE extraction + poller timing ([40f6850](https://github.com/mctlhq/mctl-telegram/commit/40f68504e5c8b6885349f57fa56eb671ae4f96a6))
+* **load-test:** MCP initialize handshake + token/draft correctness ([c587f98](https://github.com/mctlhq/mctl-telegram/commit/c587f980dc5b8444cb13a9f73e23c5da69c53b31))
+* **oss:** remove internal infra references from SECURITY.md, CLI, issue template ([9b0489d](https://github.com/mctlhq/mctl-telegram/commit/9b0489d3a30b46ef7faef0c8f3a0b71eb2332d2e))
+* **oss:** remove internal infra references from SECURITY.md, local CLI, issue template ([10f8034](https://github.com/mctlhq/mctl-telegram/commit/10f80343716f01bc68004a5f40bec5e97cda9dd8))
+* point alert runbook_url at existing docs/hpa.md#alerts ([a007129](https://github.com/mctlhq/mctl-telegram/commit/a00712948ed17312a50a68cd0dc01b4676106eeb))
+* **web:** address P3 review nits on landing page ([bb917fb](https://github.com/mctlhq/mctl-telegram/commit/bb917fb89fbe11a0bf2d7f192a7d86d482db9c7f))
+
 ## [0.23.1](https://github.com/mctlhq/mctl-telegram/compare/0.23.0...0.23.1) (2026-05-21)
 
 
