@@ -14,10 +14,6 @@
    * every token (equal specificity, later wins). Mirrors mctl.css.
    */
   :root {
-    --mctl-accent-cyan-primary: #00e5ff;
-    --mctl-accent-lime-primary: #bdf24a;
-    --mctl-accent-vermilion-primary: #ff5a36;
-    --mctl-accent-lilac-primary: #b07aff;
     --mctl-radius-sm: 2px;
     --mctl-radius-md: 4px;
     --mctl-radius-lg: 8px;
@@ -34,9 +30,7 @@
     --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
     --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
   }
-  [data-accent='lime']      { --accent: #bdf24a; --accent-highlight: #dcff8c; }
-  [data-accent='vermilion'] { --accent: #ff5a36; --accent-highlight: #ff8a6a; }
-  [data-accent='lilac']     { --accent: #b07aff; --accent-highlight: #d6b3ff; }
+
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -48,18 +42,14 @@
   // must always be present.
   (function () {
     var root = document.documentElement;
-    var t, a;
+    var t;
     try {
       t = localStorage.getItem('mctl-theme');
-      a = localStorage.getItem('mctl-accent');
     } catch (e) {}
     if (t !== 'light' && t !== 'dark') {
       t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     }
     root.setAttribute('data-theme', t);
-    if (a === 'lime' || a === 'vermilion' || a === 'lilac') {
-      root.setAttribute('data-accent', a);
-    }
   })();
 </script>
 <style>
@@ -98,12 +88,9 @@
    */
   :root[data-theme="light"] {
     color-scheme: light;
-    --accent:  color-mix(in srgb, var(--mctl-accent-cyan-primary) 46%, #000);
+    --accent:  color-mix(in srgb, #00e5ff 46%, #000);
     --code-fg: var(--accent);
   }
-  :root[data-theme="light"][data-accent="lime"]      { --accent: color-mix(in srgb, var(--mctl-accent-lime-primary) 42%, #000); }
-  :root[data-theme="light"][data-accent="vermilion"] { --accent: color-mix(in srgb, var(--mctl-accent-vermilion-primary) 70%, #000); }
-  :root[data-theme="light"][data-accent="lilac"]     { --accent: color-mix(in srgb, var(--mctl-accent-lilac-primary) 64%, #000); }
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -335,38 +322,6 @@
   :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
   :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
 
-  /* ===== Accent picker ===== */
-  .accent-picker {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-md);
-    background: var(--surface);
-  }
-  .accent-swatch {
-    width: 16px; height: 16px;
-    padding: 0;
-    border: 1px solid color-mix(in srgb, var(--swatch) 50%, transparent);
-    border-radius: var(--mctl-radius-sm);
-    background: var(--swatch);
-    cursor: pointer;
-    transition: transform .12s, box-shadow .12s;
-  }
-  .accent-swatch:hover { transform: scale(1.12); }
-  .accent-swatch[data-pick="cyan"]      { --swatch: var(--mctl-accent-cyan-primary); }
-  .accent-swatch[data-pick="lime"]      { --swatch: var(--mctl-accent-lime-primary); }
-  .accent-swatch[data-pick="vermilion"] { --swatch: var(--mctl-accent-vermilion-primary); }
-  .accent-swatch[data-pick="lilac"]     { --swatch: var(--mctl-accent-lilac-primary); }
-  :root:not([data-accent]) .accent-swatch[data-pick="cyan"],
-  :root[data-accent="cyan"]      .accent-swatch[data-pick="cyan"],
-  :root[data-accent="lime"]      .accent-swatch[data-pick="lime"],
-  :root[data-accent="vermilion"] .accent-swatch[data-pick="vermilion"],
-  :root[data-accent="lilac"]     .accent-swatch[data-pick="lilac"] {
-    box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--swatch);
-  }
-
   /* ===== Footer ===== */
   footer {
     margin: 80px 0 40px;
@@ -568,7 +523,6 @@
     .wrap { padding: 0 20px; }
     .topbar .meta .hide-md { display: none; }
     .theme-toggle { width: 44px; height: 44px; }
-    .accent-swatch { min-width: 44px; min-height: 44px; padding: 0; }
   }
   @media (max-width: 640px) {
     .wrap { padding: 0 18px; }
@@ -611,12 +565,6 @@
       <a href="/security">security</a>
       <a href="/privacy">privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <span class="accent-picker hide-sm hide-md" role="group" aria-label="Accent color">
-        <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
-        <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
-        <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
-        <button class="accent-swatch" type="button" data-pick="lilac"     aria-label="Lilac accent"     title="Lilac"></button>
-      </span>
       <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
         <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
@@ -776,18 +724,6 @@
     try { localStorage.setItem('mctl-theme', next); } catch (e) {}
   }
 
-  // Accent picker: sets data-accent (cyan is the mctl default — no attribute),
-  // persists in localStorage.
-  function setAccent(name) {
-    var root = document.documentElement;
-    if (name === 'cyan') {
-      root.removeAttribute('data-accent');
-    } else {
-      root.setAttribute('data-accent', name);
-    }
-    try { localStorage.setItem('mctl-accent', name); } catch (e) {}
-  }
-
   // Copy MCP URL button.
   var copyBtn = document.getElementById('copy-mcp-url');
   if (copyBtn) {
@@ -808,9 +744,6 @@
   // Wire up handlers without inline onclick attributes, so the markup stays
   // compatible with a strict Content-Security-Policy (script-src 'self').
   document.querySelector('.theme-toggle').addEventListener('click', toggleTheme);
-  document.querySelectorAll('.accent-swatch').forEach(function (btn) {
-    btn.addEventListener('click', function () { setAccent(btn.dataset.pick); });
-  });
 </script>
 </body>
 </html>
