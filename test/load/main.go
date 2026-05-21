@@ -37,7 +37,7 @@ var (
 	flagTokens    = flag.String("tokens", "", "path to newline-delimited bearer token file (required)")
 	flagPeer      = flag.String("peer", "", "Telegram peer for get_messages calls (required)")
 	flagOut       = flag.String("out", "results.json", "path for JSON results file")
-	flagAllowSend = flag.Bool("allow-send", false, "exercise send_message (delivers REAL messages when the server runs with ALLOW_SEND=true); default false measures prepare_send_message only")
+	flagAllowSend = flag.Bool("allow-send", false, "exercise the send_message call path in draft mode (no real message delivered); default false measures prepare_send_message only")
 )
 
 // callResult records a single tool-call outcome.
@@ -196,8 +196,64 @@ type mcpToolResult struct {
 	IsError bool `json:"isError"`
 }
 
+// mcpInitParams / mcpClientInfo model the MCP initialize handshake.
+type mcpInitParams struct {
+	ProtocolVersion string         `json:"protocolVersion"`
+	Capabilities    map[string]any `json:"capabilities"`
+	ClientInfo      mcpClientInfo  `json:"clientInfo"`
+}
+
+type mcpClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// initMCPSession performs the MCP initialize handshake and returns the
+// Mcp-Session-Id that must accompany every subsequent tools/call. The MCP
+// Streamable HTTP transport requires session init before any tool call
+// (see cmd/canary/main.go).
+func initMCPSession(ctx context.Context, client *http.Client, target, token string) (string, error) {
+	body, err := json.Marshal(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: mcpInitParams{
+			ProtocolVersion: "2024-11-05",
+			Capabilities:    map[string]any{},
+			ClientInfo:      mcpClientInfo{Name: "mctl-telegram-loadtest", Version: "1"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal initialize: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target+"/mcp", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("new initialize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("initialize http: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("initialize returned HTTP %d", resp.StatusCode)
+	}
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		return "", fmt.Errorf("server did not return Mcp-Session-Id")
+	}
+	return sessionID, nil
+}
+
 // callTool sends one MCP tools/call request and returns the raw result payload.
-func callTool(ctx context.Context, client *http.Client, target, token string, reqID int, toolName string, args map[string]any) (json.RawMessage, time.Duration, error) {
+// sessionID must be the value returned by initMCPSession; the Streamable HTTP
+// transport rejects tools/call without a valid Mcp-Session-Id.
+func callTool(ctx context.Context, client *http.Client, target, token, sessionID string, reqID int, toolName string, args map[string]any) (json.RawMessage, time.Duration, error) {
 	body, err := json.Marshal(jsonrpcRequest{
 		JSONRPC: "2.0",
 		ID:      reqID,
@@ -215,6 +271,7 @@ func callTool(ctx context.Context, client *http.Client, target, token string, re
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Mcp-Session-Id", sessionID)
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -279,6 +336,15 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 	// Use a per-goroutine RNG seeded from the shared counter to avoid
 	// correlated selections across goroutines.
 	rng := rand.New(rand.NewSource(counter.Add(1)))
+
+	// MCP Streamable HTTP requires an initialize handshake before any
+	// tools/call; without a valid Mcp-Session-Id the server rejects calls.
+	sessionID, err := initMCPSession(ctx, client, target, token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "virtual user init failed: %v\n", err)
+		return
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -291,15 +357,15 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 
 		switch {
 		case roll < 70: // list_dialogs (70%)
-			_, lat, err := callTool(ctx, client, target, token, id, toolListDialogs, map[string]any{})
+			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolListDialogs, map[string]any{})
 			s.stats[toolListDialogs].record(callResult{latency: lat, isErr: err != nil})
 
 		case roll < 95: // get_messages (25%)
-			_, lat, err := callTool(ctx, client, target, token, id, toolGetMessages, map[string]any{"peer": peer})
+			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolGetMessages, map[string]any{"peer": peer})
 			s.stats[toolGetMessages].record(callResult{latency: lat, isErr: err != nil})
 
-		default: // send sequence (5%): prepare then send (dry-run)
-			prepRaw, lat1, err := callTool(ctx, client, target, token, id, toolPrepareSend, map[string]any{
+		default: // send sequence (5%): prepare then send (draft mode)
+			prepRaw, lat1, err := callTool(ctx, client, target, token, sessionID, id, toolPrepareSend, map[string]any{
 				"peer": peer,
 				"text": "load test dry run",
 			})
@@ -311,18 +377,19 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 			if confirmID == "" {
 				break
 			}
-			// Guard: send_message can deliver a REAL Telegram message when the
-			// server runs with ALLOW_SEND=true. Only exercise it when the
-			// operator explicitly opts in via -allow-send; otherwise we measure
-			// prepare_send_message latency only.
+			// Only exercise send_message when explicitly opted in via
+			// -allow-send; otherwise measure prepare_send_message only. Even
+			// when enabled we pass mode=draft so no real Telegram message is
+			// delivered during a load test.
 			if !allowSend {
 				break
 			}
 			id2 := int(counter.Add(1))
-			_, lat2, err2 := callTool(ctx, client, target, token, id2, toolSendMessage, map[string]any{
+			_, lat2, err2 := callTool(ctx, client, target, token, sessionID, id2, toolSendMessage, map[string]any{
 				"peer":            peer,
 				"text":            "load test dry run",
 				"confirmation_id": confirmID,
+				"mode":            "draft",
 			})
 			s.stats[toolSendMessage].record(callResult{latency: lat2, isErr: err2 != nil})
 		}
@@ -593,6 +660,11 @@ func main() {
 	numUsers := *flagUsers
 	if numUsers < 1 {
 		numUsers = 1
+	}
+	if numUsers > len(tokens) {
+		// Reused tokens share the same per-user rate limit across goroutines,
+		// which produces artificial 429-style errors and skews the results.
+		fmt.Fprintf(os.Stderr, "warning: %d users but only %d token(s); tokens will be reused and per-user rate limits will be shared, skewing results. Provide >= %d tokens for accurate measurement.\n", numUsers, len(tokens), numUsers)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
