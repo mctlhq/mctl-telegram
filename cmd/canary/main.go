@@ -195,16 +195,77 @@ func isFloodWaitContent(content []map[string]any) bool {
 
 // jsonRPCRequest is the JSON-RPC 2.0 request body sent to the MCP endpoint.
 type jsonRPCRequest struct {
-	JSONRPC string         `json:"jsonrpc"`
-	ID      int            `json:"id"`
-	Method  string         `json:"method"`
-	Params  mcpCallParams  `json:"params"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params"`
+}
+
+// mcpInitParams holds the MCP initialize request parameters.
+type mcpInitParams struct {
+	ProtocolVersion string         `json:"protocolVersion"`
+	Capabilities    map[string]any `json:"capabilities"`
+	ClientInfo      mcpClientInfo  `json:"clientInfo"`
+}
+
+// mcpClientInfo identifies the canary client in the initialize handshake.
+type mcpClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 // mcpCallParams holds the MCP tools/call parameters.
 type mcpCallParams struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
+}
+
+// initMCPSession performs the MCP initialize handshake and returns the
+// Mcp-Session-Id value that must be sent with subsequent requests.
+// The MCP Streamable HTTP transport requires session initialization before
+// any tools/call request.
+func initMCPSession(ctx context.Context, client *http.Client, baseURL, mcpPath, bearerToken string) (string, error) {
+	url := baseURL + mcpPath
+
+	reqBody := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: mcpInitParams{
+			ProtocolVersion: "2024-11-05",
+			Capabilities:    map[string]any{},
+			ClientInfo:      mcpClientInfo{Name: "mctl-telegram-canary", Version: version},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal initialize request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("build initialize request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST %s (initialize): %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("initialize returned HTTP %d", resp.StatusCode)
+	}
+
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		return "", errors.New("server did not return Mcp-Session-Id header")
+	}
+
+	return sessionID, nil
 }
 
 // jsonRPCResponse is used to decode the MCP endpoint response.
@@ -233,9 +294,10 @@ type probeMCPToolResult struct {
 }
 
 // probeMCPTool calls the MCP endpoint with a tools/call JSON-RPC request for
-// the given tool name. It returns a non-nil error on any failure, and sets
-// floodWait=true when a Telegram FLOOD_WAIT condition is detected.
-func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, bearerToken, toolName string, args map[string]any) (*probeMCPToolResult, error) {
+// the given tool name. sessionID must be the value obtained from initMCPSession.
+// It returns a non-nil error on any failure, and sets floodWait=true when a
+// Telegram FLOOD_WAIT condition is detected.
+func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, bearerToken, sessionID, toolName string, args map[string]any) (*probeMCPToolResult, error) {
 	url := baseURL + mcpPath
 
 	reqBody := jsonRPCRequest{
@@ -259,6 +321,7 @@ func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, be
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	req.Header.Set("Mcp-Session-Id", sessionID)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -334,10 +397,26 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 	}
 	log.Info("probe ok", "step", "oauth_metadata")
 
-	// Step 2: list_dialogs
+	// Step 2: initialize MCP session (required by the Streamable HTTP transport).
+	log.Info("probe start", "step", "mcp_init", "tg_user_id", cfg.tgUserID)
+	stepCtx, cancel = context.WithTimeout(ctx, cfg.timeout)
+	sessionID, err := initMCPSession(stepCtx, client, cfg.baseURL, cfg.mcpPath, cfg.bearerToken)
+	cancel()
+
+	if err != nil {
+		log.Error("probe failed", "step", "mcp_init", "err", err)
+		met.stepFailures.WithLabelValues("mcp_init").Inc()
+		ok = false
+		met.success.Set(0)
+		met.duration.Observe(time.Since(start).Seconds())
+		return false
+	}
+	log.Info("probe ok", "step", "mcp_init")
+
+	// Step 3: list_dialogs
 	log.Info("probe start", "step", "list_dialogs", "tg_user_id", cfg.tgUserID)
 	stepCtx, cancel = context.WithTimeout(ctx, cfg.timeout)
-	result, err := probeMCPTool(stepCtx, client, cfg.baseURL, cfg.mcpPath, cfg.bearerToken, "list_dialogs", map[string]any{"limit": 5})
+	result, err := probeMCPTool(stepCtx, client, cfg.baseURL, cfg.mcpPath, cfg.bearerToken, sessionID, "list_dialogs", map[string]any{"limit": 5})
 	cancel()
 
 	if err != nil {
@@ -349,11 +428,11 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 		log.Info("probe ok", "step", "list_dialogs")
 	}
 
-	// Step 3: get_unread_messages (optional)
+	// Step 4: get_unread_messages (optional)
 	if cfg.probeUnread {
 		log.Info("probe start", "step", "get_unread_messages", "tg_user_id", cfg.tgUserID)
 		stepCtx, cancel = context.WithTimeout(ctx, cfg.timeout)
-		result, err = probeMCPTool(stepCtx, client, cfg.baseURL, cfg.mcpPath, cfg.bearerToken, "get_unread_messages", map[string]any{"limit": 1})
+		result, err = probeMCPTool(stepCtx, client, cfg.baseURL, cfg.mcpPath, cfg.bearerToken, sessionID, "get_unread_messages", map[string]any{"limit": 1})
 		cancel()
 
 		if err != nil {
