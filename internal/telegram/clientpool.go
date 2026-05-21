@@ -117,17 +117,43 @@ func (p *ClientPool) WithMaxSessions(n int) *ClientPool {
 // the user is active.
 func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx context.Context, c *telegram.Client) error) error {
 	if p.APIID == 0 || p.APIHash == "" {
+		if p.metrics != nil {
+			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+		}
 		return fmt.Errorf("telegram api credentials not configured (TG_API_ID / TG_API_HASH)")
 	}
 
 	if p.Store != nil {
-		if _, err := p.Store.CheckSessionValid(ctx, userID); err != nil {
+		if reason, err := p.Store.CheckSessionValid(ctx, userID); err != nil {
+			if errors.Is(err, db.ErrSessionExpired) {
+				switch reason {
+				case db.ReasonIdle:
+					if p.metrics != nil {
+						p.metrics.SessionsBorrowTotal.WithLabelValues("expired_idle").Inc()
+					}
+				case db.ReasonAbsolute:
+					if p.metrics != nil {
+						p.metrics.SessionsBorrowTotal.WithLabelValues("expired_absolute").Inc()
+					}
+				default:
+					if p.metrics != nil {
+						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+					}
+				}
+			} else {
+				if p.metrics != nil {
+					p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+				}
+			}
 			return err
 		}
 	}
 
 	e, err := p.acquire(userID)
 	if err != nil {
+		if p.metrics != nil {
+			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+		}
 		return err
 	}
 
@@ -140,14 +166,26 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			if sentinel := sessionErrorFor(e.runErr); sentinel != nil && p.Store != nil {
 				if rErr := p.revokeRejected(ctx, userID); rErr != nil {
 					slog.Error("telegram session rejected at startup, revoke failed", "user_id", userID, "err", rErr)
+					if p.metrics != nil {
+						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+					}
 					return fmt.Errorf("revoke rejected session: %w", rErr)
 				}
 				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
+				if p.metrics != nil {
+					p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+				}
 				return fmt.Errorf("%w: %v", sentinel, e.runErr)
+			}
+			if p.metrics != nil {
+				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
 			}
 			return fmt.Errorf("telegram client failed: %w", e.runErr)
 		}
 	case <-ctx.Done():
+		if p.metrics != nil {
+			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+		}
 		return ctx.Err()
 	}
 
@@ -165,12 +203,27 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		// caller must not loop the user through reauth against a dead row.
 		if rErr := p.revokeRejected(ctx, userID); rErr != nil {
 			slog.Error("telegram session rejected, revoke failed", "user_id", userID, "err", rErr)
+			if p.metrics != nil {
+				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+			}
 			return fmt.Errorf("revoke rejected session: %w", rErr)
 		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
+		if p.metrics != nil {
+			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+		}
 		return fmt.Errorf("%w: %v", sentinel, callErr)
 	}
-	return callErr
+	if callErr != nil {
+		if p.metrics != nil {
+			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+		}
+		return callErr
+	}
+	if p.metrics != nil {
+		p.metrics.SessionsBorrowTotal.WithLabelValues("ok").Inc()
+	}
+	return nil
 }
 
 // revokeRejected evicts the pool entry and revokes the DB session for a user

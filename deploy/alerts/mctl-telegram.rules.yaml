@@ -86,3 +86,142 @@ spec:
               high value with no corresponding traffic suggests abandoned flows or
               bot-scan traffic against /oauth/authorize.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+
+    - name: mctl-telegram-tool-availability
+      rules:
+        - alert: MctlToolAvailabilityFastBurn
+          # 14.4x burn over 1h: error rate > 7.2% consumes the 0.5% budget
+          # 14.4x faster than allowed. For: 0m — the 1h window is the
+          # stabilization period. See docs/slo.md for the error-budget policy.
+          expr: |
+            sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
+            /
+            sum(rate(mctl_tool_invocations_total[1h]))
+            > 0.072
+          for: 0m
+          labels:
+            severity: page
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram MCP tool availability fast burn (14.4x, 1h)"
+            description: >
+              The MCP tool error rate over the last 1h is {{ $value | humanizePercentage }},
+              which exceeds the 7.2% fast-burn threshold (14.4x the 99.5% SLO budget).
+              The 30-day error budget is burning rapidly. Page the on-call engineer.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+        - alert: MctlToolAvailabilitySlowBurn
+          # 6x burn over 6h: error rate > 3.0% sustained for 6h erodes 36% of
+          # the monthly budget. Ticket-severity: no immediate page required.
+          expr: |
+            sum(rate(mctl_tool_invocations_total{status="error"}[6h]))
+            /
+            sum(rate(mctl_tool_invocations_total[6h]))
+            > 0.030
+          for: 0m
+          labels:
+            severity: ticket
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram MCP tool availability slow burn (6x, 6h)"
+            description: >
+              The MCP tool error rate over the last 6h is {{ $value | humanizePercentage }},
+              which exceeds the 3.0% slow-burn threshold (6x the 99.5% SLO budget).
+              Budget erosion is sustained but not critical. File a reliability ticket.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+    - name: mctl-telegram-oauth-availability
+      rules:
+        - alert: MctlOAuthAvailabilityFastBurn
+          # 14.4x burn over 1h on a 99.9% SLO (0.1% budget):
+          # error rate > 1.440% exhausts the budget at 14.4x.
+          expr: |
+            sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback",status_code=~"5.."}[1h]))
+            /
+            sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[1h]))
+            > 0.01440
+          for: 0m
+          labels:
+            severity: page
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram OAuth endpoint availability fast burn (14.4x, 1h)"
+            description: >
+              The OAuth endpoint (/oauth/token, /oauth/telegram/callback) 5xx rate
+              over the last 1h is {{ $value | humanizePercentage }}, exceeding the
+              1.440% fast-burn threshold (14.4x the 99.9% SLO budget).
+              The 30-day error budget is burning rapidly. Page the on-call engineer.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+        - alert: MctlOAuthAvailabilitySlowBurn
+          # 6x burn over 6h on a 99.9% SLO: error rate > 0.600%.
+          expr: |
+            sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback",status_code=~"5.."}[6h]))
+            /
+            sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[6h]))
+            > 0.00600
+          for: 0m
+          labels:
+            severity: ticket
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram OAuth endpoint availability slow burn (6x, 6h)"
+            description: >
+              The OAuth endpoint (/oauth/token, /oauth/telegram/callback) 5xx rate
+              over the last 6h is {{ $value | humanizePercentage }}, exceeding the
+              0.600% slow-burn threshold (6x the 99.9% SLO budget).
+              Budget erosion is sustained but not critical. File a reliability ticket.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+    # status: pending instrumentation (tasks 1-2 in issue-88)
+    # These alerts reference mctl_sessions_borrow_total, which is introduced in
+    # this PR. Deploy only after the new binary has been running for at least one
+    # 6h slow-burn window so the counter has enough data for meaningful rates.
+    - name: mctl-telegram-session-borrow
+      rules:
+        - alert: MctlSessionBorrowFastBurn
+          # 14.4x burn over 1h on a 99% SLO (1% budget):
+          # error rate > 14.4% exhausts the budget at 14.4x.
+          expr: |
+            sum(rate(mctl_sessions_borrow_total{result="error"}[1h]))
+            /
+            sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[1h]))
+            > 0.144
+          for: 0m
+          labels:
+            severity: page
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram session borrow success rate fast burn (14.4x, 1h)"
+            description: >
+              The session borrow error rate (excluding TTL expirations) over the
+              last 1h is {{ $value | humanizePercentage }}, exceeding the 14.4%
+              fast-burn threshold (14.4x the 99% SLO budget).
+              The 30-day error budget is burning rapidly. Page the on-call engineer.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+        - alert: MctlSessionBorrowSlowBurn
+          # 6x burn over 6h on a 99% SLO: error rate > 6%.
+          expr: |
+            sum(rate(mctl_sessions_borrow_total{result="error"}[6h]))
+            /
+            sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[6h]))
+            > 0.060
+          for: 0m
+          labels:
+            severity: ticket
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram session borrow success rate slow burn (6x, 6h)"
+            description: >
+              The session borrow error rate (excluding TTL expirations) over the
+              last 6h is {{ $value | humanizePercentage }}, exceeding the 6.0%
+              slow-burn threshold (6x the 99% SLO budget).
+              Budget erosion is sustained but not critical. File a reliability ticket.
+              See docs/slo.md for the error-budget policy and recovery criteria.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"

@@ -7,8 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	_ "modernc.org/sqlite"
 )
 
 // TestSessionErrorFor checks that MTProto auth-failure codes map to the right
@@ -177,6 +181,131 @@ func TestRemoveAtomic_ReturnsFnError(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// newBorrowTestStore opens an in-memory SQLite DB, applies the schema
+// migration, and registers a t.Cleanup to close the connection.
+func newBorrowTestStore(t *testing.T) *db.Store {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Open(ctx, "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate test db: %v", err)
+	}
+	return &db.Store{DB: conn}
+}
+
+// TestBorrow_SessionsBorrowCounter verifies that Pool.Borrow increments
+// mctl_sessions_borrow_total with the correct result label on each early-exit
+// path that can be exercised without a live Telegram connection.
+func TestBorrow_SessionsBorrowCounter(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("error/no_credentials", func(t *testing.T) {
+		met := metrics.New()
+		p := NewClientPool(0, "", time.Minute, nil)
+		p.WithMetrics(met)
+		_ = p.Borrow(ctx, 1, nil)
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error")); got != 1 {
+			t.Errorf("expected error counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "expired_idle", "expired_absolute"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+
+	t.Run("expired_idle", func(t *testing.T) {
+		store := newBorrowTestStore(t)
+		uid, err := store.EnsureUser(ctx, "idle-user", "", "test")
+		if err != nil {
+			t.Fatalf("EnsureUser: %v", err)
+		}
+		now := time.Now().UTC()
+		stale := now.Add(-31 * 24 * time.Hour)
+		if _, err := store.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+			uid, 555, []byte("blob"), stale, now.Add(60*24*time.Hour),
+		); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, store)
+		p.WithMetrics(met)
+		borErr := p.Borrow(ctx, uid, nil)
+		if !errors.Is(borErr, db.ErrSessionExpired) {
+			t.Fatalf("expected ErrSessionExpired, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_idle")); got != 1 {
+			t.Errorf("expected expired_idle counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "expired_absolute", "error"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+
+	t.Run("expired_absolute", func(t *testing.T) {
+		store := newBorrowTestStore(t)
+		uid, err := store.EnsureUser(ctx, "abs-user", "", "test")
+		if err != nil {
+			t.Fatalf("EnsureUser: %v", err)
+		}
+		now := time.Now().UTC()
+		past := now.Add(-1 * time.Hour)
+		if _, err := store.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+			uid, 555, []byte("blob"), now, past,
+		); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, store)
+		p.WithMetrics(met)
+		borErr := p.Borrow(ctx, uid, nil)
+		if !errors.Is(borErr, db.ErrSessionExpired) {
+			t.Fatalf("expected ErrSessionExpired, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_absolute")); got != 1 {
+			t.Errorf("expected expired_absolute counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "expired_idle", "error"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+
+	t.Run("error/pool_full", func(t *testing.T) {
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, nil)
+		p.WithMetrics(met).WithMaxSessions(1)
+		// Inject one live entry so the pool is at capacity.
+		e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+		close(e.ready)
+		p.mu.Lock()
+		p.entries[10] = e
+		p.mu.Unlock()
+
+		borErr := p.Borrow(ctx, 99, func(_ context.Context, _ *telegram.Client) error { return nil })
+		if !errors.Is(borErr, ErrPoolFull) {
+			t.Fatalf("expected ErrPoolFull, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error")); got != 1 {
+			t.Errorf("expected error counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "expired_idle", "expired_absolute"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+}
 
 // TestPoolFull verifies that a pool with MaxSessions=2 returns ErrPoolFull on
 // the third acquire when two entries are already live. It does NOT attempt to

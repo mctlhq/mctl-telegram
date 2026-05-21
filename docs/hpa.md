@@ -125,6 +125,10 @@ Alternatively, mirror it to `mctl-gitops` under
 `mctl-telegram-alerts.yaml` already lives). The VictoriaMetrics operator
 auto-converts the `PrometheusRule` to a `VMRule` on apply.
 
+For SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
+availability, session borrow success rate), see the PrometheusRule stanzas
+documented in [docs/slo.md](slo.md).
+
 ## Notes
 
 - When `TELEGRAM_MAX_SESSIONS` is unset or 0, `mctl_telegram_pool_capacity` is

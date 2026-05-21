@@ -45,6 +45,11 @@ type Registry struct {
 	SessionsRevokedTotal *prometheus.CounterVec
 	// SessionsActiveGauge is refreshed by a background sampler in main().
 	SessionsActiveGauge prometheus.Gauge
+	// SessionsBorrowTotal counts every Pool.Borrow() call exit, labeled by
+	// result: ok, expired_idle, expired_absolute, error.
+	// expired_idle and expired_absolute are expected user-side TTL expirations
+	// and are excluded from the session-borrow availability SLI denominator.
+	SessionsBorrowTotal *prometheus.CounterVec
 
 	// OAuth server.
 	// OAuthPendingAuthSize reflects the current count of pending OAuth
@@ -136,6 +141,13 @@ func New() *Registry {
 		Help: "Count of non-revoked sessions that were last used within the last hour, including freshly created sessions not yet used. Refreshed every minute.",
 	})
 
+	r.SessionsBorrowTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_sessions_borrow_total",
+		Help: "Total Pool.Borrow() calls, labeled by outcome. " +
+			"expired_idle and expired_absolute are expected user-side TTL expirations; " +
+			"exclude them from the availability SLI denominator.",
+	}, []string{"result"})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
@@ -152,6 +164,7 @@ func New() *Registry {
 		r.SessionsRevokedTotal,
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
+		r.SessionsBorrowTotal,
 	)
 	return r
 }
