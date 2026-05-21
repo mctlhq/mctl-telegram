@@ -144,7 +144,7 @@ Open a postmortem if:
 Identify which MCP tool is generating the most flood-wait events:
 
 ```promql
-topk(5, rate(mctl_telegram_flood_wait_events_total[5m])) by (tool)
+topk(5, sum by (tool) (rate(mctl_telegram_flood_wait_events_total[5m])))
 ```
 
 Total flood-wait event rate across all tools:
@@ -164,8 +164,18 @@ To identify the offending user, search structured slog logs (JSON) for
 
 ```sh
 kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
-  | grep flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+  | grep -i flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
 ```
+
+> **Caveat — logs are incomplete for warning-level spikes.** The
+> `mctl_telegram_flood_wait_events_total` metric is incremented on *every*
+> `FLOOD_WAIT` inside `borrowWithRetry()`, but `borrowWithRetry()` itself emits
+> no log line — a `flood_wait`-bearing entry only appears when retries are
+> exhausted and the tool returns an error. Warning-level spikes that self-retry
+> successfully therefore produce little or no log output. Use the metric (with
+> its `tool` label) as the authoritative detection and per-tool signal; treat
+> the log grep above as best-effort per-user attribution for error-level
+> (exhausted-retry) events only.
 
 ### Mitigation
 
@@ -377,11 +387,13 @@ sum(rate(mctl_auth_failures_total{reason=~"jwt_invalid_signature|jwt_expired"}[5
    structured slog output) and fix the client's `Authorization` header
    construction.
 
-5. **Sustained high failure rates** that cause 401 responses at scale will
-   not directly count against the tool-availability SLI (unauthenticated
-   requests are rejected before a tool is invoked) but will affect the OAuth
-   endpoint availability SLO if the failures originate from the token
-   endpoint. Monitor [SloBurnRate](#sloburnrate) in parallel.
+5. **Sustained high failure rates** that cause 401 responses at scale do not
+   count against any availability SLO: the tool-availability SLI excludes
+   them (unauthenticated requests are rejected before a tool is invoked), and
+   the OAuth burn-rate rules count only `status_code=~"5.."`, so authn-driven
+   401s from the token endpoint never burn that budget either. Treat a 401
+   spike as a client-misconfiguration or attack signal, not an SLO event;
+   investigate the failure reason directly rather than waiting on burn alerts.
 
 ### Escalation
 
@@ -511,8 +523,10 @@ Open a postmortem if:
 - No dedicated alert rule is wired by default. Monitor this metric during
   traffic incidents or bot-scan investigations.
 - `mctl_rate_limit_events_total` counts HTTP 429 responses, labeled by
-  `identity_kind`: `user` (authenticated, rate-limited by `user_id`) or
-  `anon` (unauthenticated, rate-limited by IP).
+  `identity_kind`: `user` (authenticated — bucketed by `identityKey()`, which
+  prefers the JWT subject, then the GitHub login, then the numeric user ID) or
+  `anon` (unauthenticated — all such requests share a single global token
+  bucket, not per-IP buckets).
 - A spike in `anon` rate-limit events typically indicates a bot scan or DDoS
   attempt. A spike in `user` events indicates one or more authenticated
   callers exceeding per-user request budgets.
@@ -542,12 +556,17 @@ Overall HTTP request rate (for context):
 sum(rate(mctl_http_requests_total[5m])) by (route, status_code)
 ```
 
-To identify which `user_id` is being rate-limited, search pod logs:
+Break the 429s down by identity kind (`anon` vs `user`):
 
-```sh
-kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
-  | grep 'rate_limit' | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+```promql
+sum(rate(mctl_rate_limit_events_total[5m])) by (identity_kind)
 ```
+
+Note: 429 responses are not structured-logged with a `user_id`, and
+`mctl_rate_limit_events_total` carries only the `identity_kind` label — it
+cannot attribute a spike to a single user. To pin down a specific abusive
+caller, correlate the request-path audit logs (which do carry `user_id`)
+over the same window.
 
 ### Mitigation
 
@@ -556,13 +575,19 @@ kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
    balancer WAF rules). Rate-limiting at the application layer is a last
    resort.
 
-2. **`user` spike from a specific caller**: identify the `user_id` from
-   pod logs. Contact the user or, if the behavior is abusive, revoke the
-   session:
+2. **`user` spike from a specific caller**: identify the offending
+   `telegram_id` via `list_telegram_identities`. Contact the user or, if the
+   behavior is abusive, revoke their session with the admin-only
+   `revoke_telegram_session` MCP tool (requires the `admin:users` scope).
+   There is no REST admin endpoint; it is an MCP `tools/call` against the
+   `/mcp` endpoint (after the standard `initialize` handshake):
    ```sh
-   # call the revoke endpoint (requires admin token)
-   curl -X POST https://tg.mctl.ai/admin/sessions/<user_id>/revoke \
-     -H "Authorization: Bearer <admin-token>"
+   curl -X POST https://tg.mctl.ai/mcp \
+     -H "Authorization: Bearer <admin-token>" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -H "Mcp-Session-Id: <id from initialize>" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"revoke_telegram_session","arguments":{"telegram_id":<id>}}}'
    ```
 
 3. **The rate limiter is protecting the Telegram pool.** High `anon` or
@@ -578,9 +603,12 @@ kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
 
 - Escalate to the platform/security team for any `anon` spike that persists
   for more than 10 minutes and cannot be attributed to a known load test.
-- Escalate to the mctl-telegram on-call if the rate-limit spike is causing
-  tool-availability SLO burn (authenticated users being incorrectly
-  rate-limited).
+- Escalate to the mctl-telegram on-call if legitimate authenticated users are
+  being incorrectly rate-limited (confirmed via support reports or a `user`
+  spike with no matching abuse pattern). Note: HTTP 429s are emitted by the
+  pre-tool middleware and never increment `mctl_tool_invocations_total`, so a
+  rate-limit spike does not register as tool-availability SLO burn — judge
+  user impact from the 429 rate and reports, not the burn-rate alerts.
 
 ### Postmortem trigger
 
@@ -608,9 +636,11 @@ One or more of the following multi-window burn-rate alerts fire:
 | `MctlSessionBorrowFastBurn` | page | 1h | error rate >14.4% |
 | `MctlSessionBorrowSlowBurn` | ticket | 6h | error rate >6.0% |
 
-Fast-burn (page severity) means 14.4x the allowed burn rate — the monthly
-error budget is exhausted in under 2 hours at this rate. Slow-burn (ticket
-severity) means 6x — 30-day budget exhausted in under 5 days.
+Fast-burn (page severity) means 14.4x the allowed burn rate — at that rate
+the full 30-day error budget is exhausted in about 2 days (30d / 14.4 ≈ 50
+hours). The 1h alert window is what makes it page-worthy: it catches the
+burn early, long before the budget is gone. Slow-burn (ticket severity)
+means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
 
 ### Likely causes
 
