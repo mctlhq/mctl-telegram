@@ -609,7 +609,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "1 - (sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])))",
+          "expr": "1 - ((sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) or on() vector(0)) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])))",
           "legendFormat": "OAuth availability",
           "refId": "A"
         }
@@ -650,7 +650,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "(0.005 * 30 * 24 * 60) - (sum(rate(mctl_tool_invocations_total{status=\"error\"}[28d])) / sum(rate(mctl_tool_invocations_total[28d])) * 30 * 24 * 60)",
+          "expr": "(0.005 * 30 * 24 * 60) - ((sum(rate(mctl_tool_invocations_total{status=\"error\"}[28d])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[28d])) * 30 * 24 * 60)",
           "legendFormat": "tool budget remaining",
           "refId": "A"
         }
@@ -691,7 +691,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "(0.001 * 30 * 24 * 60) - (sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])) * 30 * 24 * 60)",
+          "expr": "(0.001 * 30 * 24 * 60) - ((sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) or on() vector(0)) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])) * 30 * 24 * 60)",
           "legendFormat": "OAuth budget remaining",
           "refId": "A"
         }
@@ -736,13 +736,13 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "(sum(rate(mctl_tool_invocations_total{status=\"error\"}[1h])) / sum(rate(mctl_tool_invocations_total[1h]))) / 0.005",
+          "expr": "((sum(rate(mctl_tool_invocations_total{status=\"error\"}[1h])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[1h]))) / 0.005",
           "legendFormat": "burn rate 1h",
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "(sum(rate(mctl_tool_invocations_total{status=\"error\"}[6h])) / sum(rate(mctl_tool_invocations_total[6h]))) / 0.005",
+          "expr": "((sum(rate(mctl_tool_invocations_total{status=\"error\"}[6h])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[6h]))) / 0.005",
           "legendFormat": "burn rate 6h",
           "refId": "B"
         },
