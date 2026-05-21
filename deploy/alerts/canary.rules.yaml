@@ -18,14 +18,29 @@ spec:
             severity: critical
             service: mctl-telegram
           annotations:
-            summary: "mctl-telegram canary probe has been failing for 5 minutes"
+            summary: "mctl-telegram canary probe has been failing for ~15 minutes"
             description: >
               The synthetic end-to-end canary for mctl-telegram has reported
-              mctl_telegram_canary_success=0 for every scrape in the last 10
-              minutes, and the condition has persisted for at least 5 minutes.
-              Check mctl_telegram_canary_step_failure_total{step=} to identify
+              mctl_telegram_canary_success=0 for every run in the last 10
+              minutes, and the condition has persisted for at least 5 more
+              minutes (~15 minutes of continuous failure total).
+              Check mctl_telegram_canary_step_failure_total to identify
               which probe step is failing (oauth_metadata, list_dialogs, or
               get_unread_messages).
+              Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md
+        - alert: MctlTelegramCanaryStale
+          expr: time() - push_time_seconds{job="mctl_telegram_canary"} > 600
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram canary has not pushed metrics in 10 minutes"
+            description: >
+              The canary CronJob has not successfully pushed metrics to
+              Pushgateway in the last 10 minutes (schedule is */2 * * * *).
+              The CronJob may be failing to start or complete. Check pod logs
+              and CronJob status in the mctl-telegram namespace.
               Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md
         - alert: MctlTelegramCanaryAbsent
           expr: absent_over_time(mctl_telegram_canary_success[15m])
@@ -37,7 +52,6 @@ spec:
             summary: "mctl-telegram canary metrics absent for 15 minutes"
             description: >
               No mctl_telegram_canary_success samples have arrived in the last
-              15 minutes. The CronJob may have stopped running or Pushgateway
-              pushes are failing silently. Check the CronJob status and recent
-              job pod logs.
+              15 minutes. Pushgateway may be down or the metric group was
+              deleted. Check Pushgateway health and CronJob pod logs.
               Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md

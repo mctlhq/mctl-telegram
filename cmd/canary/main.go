@@ -113,7 +113,7 @@ func newCanaryMetrics() *canaryMetrics {
 
 	stepFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_telegram_canary_step_failure_total",
-		Help: "Number of canary probe step failures by step name.",
+		Help: "1 if the named step failed in the last canary run, 0 if it succeeded. Pushgateway replace semantics mean this reflects the most recent run only; use the instant value (> 0) rather than rate() for triage queries.",
 	}, []string{"step"})
 
 	reg.MustRegister(success, duration, stepFailures)
@@ -163,8 +163,8 @@ func probeOAuthMetadata(ctx context.Context, client *http.Client, baseURL string
 		return fmt.Errorf("parse JSON: %w", err)
 	}
 
-	if !strings.HasPrefix(meta.Issuer, "https://") && !strings.HasPrefix(meta.Issuer, "http://") {
-		return fmt.Errorf("oauth metadata issuer is not a URL: %q", meta.Issuer)
+	if !strings.HasPrefix(meta.Issuer, "https://") {
+		return fmt.Errorf("oauth metadata issuer must use https: %q", meta.Issuer)
 	}
 	if !strings.HasPrefix(meta.AuthorizationEndpoint, "https://") && !strings.HasPrefix(meta.AuthorizationEndpoint, "http://") {
 		return fmt.Errorf("oauth metadata authorization_endpoint is not a URL: %q", meta.AuthorizationEndpoint)

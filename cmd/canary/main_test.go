@@ -91,6 +91,23 @@ func TestProbeOAuthMetadataInvalidURL(t *testing.T) {
 	}
 }
 
+func TestProbeOAuthMetadataHTTPIssuerRejected(t *testing.T) {
+	// RFC 8414: issuer must use https. http:// must be rejected.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"issuer":                 "http://example.com",
+			"authorization_endpoint": "https://example.com/auth",
+			"token_endpoint":         "https://example.com/token",
+		})
+	}))
+	defer srv.Close()
+
+	err := probeOAuthMetadata(t.Context(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected non-nil error for http:// issuer (RFC 8414 requires https)")
+	}
+}
+
 func TestProbeOAuthMetadataNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

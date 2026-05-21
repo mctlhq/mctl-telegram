@@ -25,8 +25,10 @@ failure pushes `0` and increments
 
 1. Identify the failing step:
    ```promql
-   sum by (step) (rate(mctl_telegram_canary_step_failure_total[15m]))
+   mctl_telegram_canary_step_failure_total > 0
    ```
+   (Pushgateway replace semantics mean `rate()` is not useful here; use the
+   instant value — 1 means the step failed in the last run.)
 2. Inspect the most recent CronJob pod logs:
    ```sh
    kubectl -n mctl-telegram get pods -l job-name --sort-by=.metadata.creationTimestamp | tail
