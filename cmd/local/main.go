@@ -128,7 +128,7 @@ func runInit() {
 	cfg := &localConfig{
 		APIID:    apiID,
 		APIHash:  apiHash,
-		Server:   "https://tg.mctl.ai",
+		Server:   "",
 		KeySalt:  saltB64,
 		KeyCheck: deriveKeyCheck(initKey),
 	}
@@ -211,14 +211,14 @@ func runLogin(args []string) {
 
 func runConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	mcpToken := fs.String("token", "", "MCP JWT from tg.mctl.ai connector settings")
+	mcpToken := fs.String("token", "", "MCP JWT from your mctl-telegram connector settings")
 	server := fs.String("server", "", "Override the server URL (default: from config.json)")
 	if err := fs.Parse(args); err != nil {
 		die(err)
 	}
 
 	if *mcpToken == "" {
-		fmt.Fprintln(os.Stderr, "Get your MCP token from tg.mctl.ai connector settings, then run:")
+		fmt.Fprintln(os.Stderr, "Get your MCP token from your mctl-telegram connector settings, then run:")
 		fmt.Fprintln(os.Stderr, "  mctl-telegram-local connect --token <token>")
 		os.Exit(2)
 	}

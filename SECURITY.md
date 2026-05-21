@@ -28,13 +28,13 @@ The Claude.ai connector authenticates via a self-hosted OAuth 2.1 authorization 
 
 Notes:
 
-* `OAUTH_JWT_SIGNING_KEY` is a dedicated mctl-telegram signing key (Vault `secret/platform/mctl-telegram/oauth`) — there is no cross-service coupling. The deprecated `OAUTH_JWT_SECRET`, historically wired to mctl-api's shared secret, is still accepted as a fallback but logs a startup warning. The key must persist across pod restarts: if it changes, every previously issued token fails signature verification.
+* `OAUTH_JWT_SIGNING_KEY` is a dedicated per-deployment signing key — there is no cross-service coupling. The deprecated `OAUTH_JWT_SECRET` is still accepted as a fallback but logs a startup warning. The key must persist across restarts: if it changes, every previously issued token fails signature verification.
 * PKCE-S256 is mandatory on the MCP-client leg. Plain or missing `code_challenge` is rejected at `/oauth/authorize`. The broker runs a *second*, independent PKCE pair plus a `nonce` on the Telegram (Relying-Party) leg; the two legs share no secrets and are bound to distinct fields of the pending-authorization record.
 * Authorization codes are single-use, 10-minute TTL, and bound to (`client_id`, `redirect_uri`, `code_challenge`). The `/oauth/token` endpoint deletes the code on first redemption.
 * Access tokens are short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default 1h). Clients renew them with the `refresh_token` grant — see "Refresh tokens" below.
 * Implicit (unregistered) client_ids are accepted only when the `redirect_uri` host appears in `AllowedImplicitHosts` (default: `claude.ai`, `claude.com`, `localhost`, `127.0.0.1`) and the scheme is `https://` (or `http://` for loopback per RFC 8252 §7.3). This prevents the OAuth flow from being abused as an open redirector.
 * Scope assignment is identity-based: Telegram ids in `TG_LOGIN_ADMINS` are granted full `platform-admins` scopes; everyone else authenticates but receives an empty scope set, failing every per-tool gate.
-* `TELEGRAM_OIDC_CLIENT_SECRET` is the credential mctl-telegram presents as an OIDC Relying Party at Telegram's token endpoint. It is sensitive on the same tier as `OAUTH_JWT_SIGNING_KEY` — stored in Vault `secret/platform/mctl-telegram/oauth` (key `oidc-client-secret`), redacted in audit logs, and never logged. `TELEGRAM_LOGIN_BOT_TOKEN` is no longer load-bearing for authentication; it now only sends the daily new-client digest.
+* `TELEGRAM_OIDC_CLIENT_SECRET` is the credential mctl-telegram presents as an OIDC Relying Party at Telegram's token endpoint. It is sensitive on the same tier as `OAUTH_JWT_SIGNING_KEY` — redacted in audit logs and never logged. `TELEGRAM_LOGIN_BOT_TOKEN` is no longer load-bearing for authentication; it now only sends the daily new-client digest.
 
 ### Refresh tokens
 
@@ -46,13 +46,13 @@ The `/oauth/token` endpoint supports `grant_type=refresh_token` so a client can 
 * **Reuse detection.** Every token in a rotation lineage shares a `family_id`. Presenting an already-rotated token revokes the entire family — a stolen-token replay cannot outlive the legitimate client's next refresh.
 * **Bounded lifetime.** Absolute expiry is `OAUTH_REFRESH_TOKEN_TTL` (default 30 days); a background sweeper deletes expired rows.
 
-## Legacy coupling: shared `OAUTH_JWT_SECRET` with mctl-api (`AUTH_MODE=shared-hmac-legacy`)
+## Legacy mode: `AUTH_MODE=shared-hmac-legacy`
 
-The legacy `shared-hmac` (alias `shared-hmac-legacy`) auth mode validates JWTs by re-implementing mctl-api's HMAC-SHA256 verifier and reading the **same** `OAUTH_JWT_SECRET` from Vault (`secret/platform/oauth-jwt-secret`). It is retained for one minor release so existing Claude.ai connector sessions survive the rollout to `local-jwt`:
+The legacy `shared-hmac` (alias `shared-hmac-legacy`) auth mode validates JWTs signed by an external authorization server using a shared `OAUTH_JWT_SECRET`. It exists for backwards compatibility when mctl-telegram is deployed alongside another service that issues the tokens.
 
-* **Impact**: compromise of the `mctl-telegram` pod's secret material is equivalent to compromise of `mctl-api`'s — an attacker can mint valid platform tokens.
-* **Mitigation today**: rotate `OAUTH_JWT_SECRET` for **both** services in the same change. Failing to do so will lock out users on whichever side is stale.
-* **Plan**: drop `shared-hmac-legacy` in mctl-telegram 0.8.0.
+* **Impact**: the two services share secret material — compromise of either one allows minting valid tokens for both.
+* **Mitigation**: rotate `OAUTH_JWT_SECRET` for both services simultaneously. Use `AUTH_MODE=local-jwt` for new deployments.
+* **Plan**: `shared-hmac-legacy` will be removed in a future minor release.
 
 ## Cryptographic invariants
 
