@@ -25,7 +25,7 @@ spec:
               The session pool utilization is at {{ $value | humanizePercentage }}.
               Consider increasing the replica count or raising TELEGRAM_MAX_SESSIONS
               if headroom permits.
-            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramnearcapacity"
 
         - alert: MctlTelegramPoolNearCapacity
           expr: |
@@ -41,7 +41,7 @@ spec:
               The session pool utilization is at {{ $value | humanizePercentage }}.
               The pool is critically full. Scale out immediately or raise
               TELEGRAM_MAX_SESSIONS if headroom permits.
-            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramnearcapacity"
 
         - alert: MctlTelegramFloodWaitSpike
           expr: |
@@ -57,7 +57,7 @@ spec:
               Telegram flood-wait events are arriving at {{ $value | humanize }} per
               second. This indicates rate-limit pressure from Telegram. Reduce
               request fan-out or add backoff logic.
-            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramfloodwaitspike"
 
         - alert: MctlTelegramFloodWaitSpike
           expr: sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 2
@@ -71,7 +71,7 @@ spec:
               Telegram flood-wait events are arriving at {{ $value | humanize }} per
               second. Heavy rate-limit pressure detected. Reduce request fan-out or
               add backoff logic immediately.
-            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramfloodwaitspike"
 
         - alert: MctlTelegramOAuthPendingStuck
           expr: mctl_oauth_pending_auth_size > 100
@@ -85,7 +85,7 @@ spec:
               There are {{ $value | humanize }} in-flight OAuth authorization flows. A sustained
               high value with no corresponding traffic suggests abandoned flows or
               bot-scan traffic against /oauth/authorize.
-            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramoauthpendingstuck"
 
     - name: mctl-telegram-tool-availability
       rules:

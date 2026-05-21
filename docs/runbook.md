@@ -1,0 +1,734 @@
+# mctl-telegram Operational Runbook
+
+This runbook covers the Beta-tier alert playbooks for mctl-telegram. Each
+section maps to one or more Prometheus alert rules defined in
+`deploy/alerts/mctl-telegram.rules.yaml`.
+
+Canary incidents are out of scope here; see
+[docs/runbooks/canary.md](runbooks/canary.md).
+
+---
+
+## Table of contents
+
+- [MctlTelegramNearCapacity — session pool near capacity](#mctltelegramnearcapacity)
+- [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
+- [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
+- [JwtFailures — authentication failure spike](#jwtfailures)
+- [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
+- [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
+- [SloBurnRate — SLO error-budget burn-rate alerts](#sloburnrate)
+- [Canary](#canary)
+
+---
+
+<a id="mctltelegramnearcapacity"></a>
+## MctlTelegramNearCapacity — session pool near capacity
+
+### Symptom
+
+- Alert `MctlTelegramPoolNearCapacity` fires with severity **warning** when
+  `mctl_telegram_client_pool_size / mctl_telegram_pool_capacity > 0.85` for
+  5 minutes.
+- Alert fires with severity **critical** when the ratio exceeds **0.95** for
+  2 minutes.
+- Both alerts only fire when `mctl_telegram_pool_capacity > 0`. When
+  `mctl_telegram_pool_capacity == -1`, the cap is disabled and these alerts
+  will not fire.
+
+### Likely causes
+
+- Organic user growth: more users are using Telegram tooling concurrently
+  than the current cap can accommodate.
+- A previous scale-down reduced pod count without adjusting
+  `TELEGRAM_MAX_SESSIONS`, leaving fewer total pool slots.
+- A session leak: clients that should be removed from the pool are not being
+  cleaned up by the pool GC goroutine.
+- Cap is too low for the actual memory headroom available in the pod.
+
+### Diagnostic queries
+
+Current pool utilization ratio:
+
+```promql
+mctl_telegram_client_pool_size / mctl_telegram_pool_capacity
+```
+
+Absolute pool size and capacity:
+
+```promql
+mctl_telegram_client_pool_size
+mctl_telegram_pool_capacity
+```
+
+Session lifecycle counters (connected vs. revoked):
+
+```promql
+rate(mctl_sessions_connected_total[5m])
+sum(rate(mctl_sessions_revoked_total[5m])) by (reason)
+```
+
+### Mitigation
+
+1. **Check whether the cap is intentionally enabled.** If
+   `mctl_telegram_pool_capacity == -1`, the pool is uncapped. Do not proceed
+   to raise `TELEGRAM_MAX_SESSIONS` without first deciding on a cap. Set an
+   explicit cap, then re-evaluate whether HPA or a higher `TELEGRAM_MAX_SESSIONS`
+   is appropriate.
+
+2. **Verify RAM headroom before raising `TELEGRAM_MAX_SESSIONS`.** Use the
+   3 MB-per-session planning figure from [docs/hpa.md](hpa.md). Consult the
+   `TELEGRAM_MAX_SESSIONS` table in that document for recommended values per
+   pod memory tier (256 MiB → 45, 512 MiB → 110, 1 GiB → 270). Do not raise
+   the cap past what the pod memory limit can safely accommodate.
+
+3. **Scale out via HPA.** If the Prometheus Adapter HPA is configured,
+   confirm it is reacting. A target of 70% utilization is recommended; see
+   [docs/hpa.md](hpa.md) for the Kubernetes HPA stanza.
+
+4. **Raise `TELEGRAM_MAX_SESSIONS` on the Deployment** (rolling restart):
+   ```sh
+   kubectl -n mctl-telegram set env deployment/mctl-telegram \
+     TELEGRAM_MAX_SESSIONS=<new-value>
+   ```
+   Only do this after confirming RAM headroom as above.
+
+5. **Critical severity.** If the critical alert fired, scale out immediately.
+   New connections will be rejected once the pool is full, causing tool
+   invocation errors that will trigger the `MctlToolAvailabilityFastBurn`
+   alert. See [SloBurnRate](#sloburnrate).
+
+### Escalation
+
+- **Warning**: investigate within 30 minutes. No immediate page.
+- **Critical**: page the mctl-telegram on-call immediately. Pool exhaustion
+  causes user-visible tool failures.
+- Escalate to the platform team if pod memory limits cannot be increased and
+  more replicas are not available.
+
+### Postmortem trigger
+
+Open a postmortem if:
+- The critical alert fires and pool exhaustion causes tool errors that
+  consume more than 10% of the monthly error budget.
+- The pool hit 100% utilization (pool_size >= pool_capacity) for any
+  measurable duration.
+
+---
+
+<a id="mctltelegramfloodwaitspike"></a>
+## MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike
+
+### Symptom
+
+- Alert `MctlTelegramFloodWaitSpike` fires with severity **warning** when
+  `sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 0.5` per second for
+  2 minutes.
+- Alert fires with severity **critical** when the rate exceeds **2 events/s**
+  for 2 minutes.
+- Each FLOOD_WAIT_X event from Telegram is counted even if the subsequent
+  retry succeeds.
+
+### Likely causes
+
+- One or more MCP tools are generating excessive Telegram API calls, either
+  due to a burst of user requests or a misbehaving client.
+- A single high-volume user is invoking tools faster than Telegram's
+  per-account rate limit allows.
+- A load test or bot is targeting the MCP endpoint with no rate limiting on
+  the client side.
+- Telegram temporarily lowers rate limits during an incident on their side.
+
+### Diagnostic queries
+
+Identify which MCP tool is generating the most flood-wait events:
+
+```promql
+topk(5, rate(mctl_telegram_flood_wait_events_total[5m])) by (tool)
+```
+
+Total flood-wait event rate across all tools:
+
+```promql
+sum(rate(mctl_telegram_flood_wait_events_total[5m]))
+```
+
+Correlate with tool invocation rate to find the offending tool:
+
+```promql
+sum(rate(mctl_tool_invocations_total[5m])) by (tool)
+```
+
+To identify the offending user, search structured slog logs (JSON) for
+`flood_wait` events with the `user_id` field:
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
+  | grep flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+```
+
+### Mitigation
+
+1. **Warning severity.** The `borrowWithRetry()` function retries up to 3
+   times with up to 60 seconds sleep per attempt. Warning-level events may
+   self-resolve without intervention.
+
+2. **Identify the offending tool and user** using the queries above. If a
+   single `user_id` is responsible, consider revoking their session or
+   applying a stricter per-user rate limit.
+
+3. **Reduce tool fan-out.** If the flood-wait is tied to a specific tool
+   (e.g., `list_dialogs` called in tight loops), coordinate with the calling
+   agent to add client-side backoff.
+
+4. **Critical severity.** Tool invocations on the affected user's account
+   will fail once retries are exhausted. Those failures count against the
+   tool-availability SLO. Check [SloBurnRate](#sloburnrate).
+
+5. If flood-wait pressure is coming from a bot scan, check
+   [RateLimitSpike](#ratelimitspike) and consider IP-level blocking at the
+   ingress layer.
+
+### Escalation
+
+- **Warning**: investigate within 1 hour if the rate does not self-resolve.
+- **Critical**: page mctl-telegram on-call. Sustained critical-level
+  flood-waits will exhaust tool-availability error budget.
+- Escalate to Telegram if the flood-wait pattern is account-wide rather
+  than isolated to specific tools — this may indicate a Telegram-side
+  incident.
+
+### Postmortem trigger
+
+Open a postmortem if:
+- A critical flood-wait spike lasts more than 30 minutes.
+- The flood-wait spike causes tool-availability SLO fast-burn alert to fire.
+
+---
+
+<a id="mctltelegramoauthpendingstuck"></a>
+## MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck
+
+### Symptom
+
+- Alert `MctlTelegramOAuthPendingStuck` fires with severity **warning** when
+  `mctl_oauth_pending_auth_size > 100` for **15 minutes**.
+- `mctl_oauth_pending_auth_size` is refreshed every minute by the OAuth
+  server's background sampler.
+
+### Likely causes
+
+- **Sweeper goroutine stopped.** The OAuth server contains a background
+  sweeper that removes expired pending auth flows. If the goroutine panicked
+  or was not started, stale entries accumulate.
+- **Telegram OIDC IdP is down.** Users start the authorization flow
+  (`/oauth/authorize`) but Telegram cannot complete the callback
+  (`/oauth/telegram/callback`), leaving flows in the pending map.
+- **Bot scan against `/oauth/authorize`.** Automated scanners or bots
+  initiating OAuth flows without completing them will grow the pending count.
+- **Deployment with `UseDBForOAuth=true`.** In this mode pending flows are
+  stored in the database. A stuck DB transaction or migration failure can
+  prevent cleanup.
+
+### Diagnostic queries
+
+Current size of the pending auth map:
+
+```promql
+mctl_oauth_pending_auth_size
+```
+
+OAuth endpoint error rate (look for 5xx on the callback route):
+
+```promql
+sum(rate(mctl_http_requests_total{route="/oauth/telegram/callback",status_code=~"5.."}[5m]))
+```
+
+HTTP traffic to `/oauth/authorize` (detect bot scan):
+
+```promql
+sum(rate(mctl_http_requests_total{route="/oauth/authorize"}[5m])) by (status_code)
+```
+
+When `UseDBForOAuth=true`, run the following against the production database
+to count recent pending flows:
+
+```sql
+SELECT COUNT(*) FROM oauth_pending_auth
+WHERE created_at >= NOW() - INTERVAL '10 minutes';
+```
+
+### Mitigation
+
+1. **Check pod logs for sweeper errors:**
+   ```sh
+   kubectl -n mctl-telegram logs -l app=mctl-telegram --since=20m \
+     | grep -E 'oauth|sweeper|pending'
+   ```
+
+2. **Restart the pod** to clear the in-memory pending map. Trade-off: any
+   users currently in the OAuth flow will have their flow interrupted and
+   will need to restart the authorization.
+   ```sh
+   kubectl -n mctl-telegram rollout restart deployment/mctl-telegram
+   ```
+
+3. **If a bot scan is suspected**, check access logs for the
+   `/oauth/authorize` route and coordinate with the platform team to apply
+   IP-level blocking or CAPTCHA protection at the ingress.
+
+4. **If Telegram IdP is down**, monitor Telegram's status page. The pending
+   flows will time out naturally once the sweeper runs. The alert will clear
+   once the map drains below 100 after the sweeper catches up.
+
+5. **`UseDBForOAuth=true` mode:** After a pod restart, verify the DB count
+   from the query above is decreasing. If rows are not being deleted, inspect
+   DB connection health and migration state.
+
+### Escalation
+
+- **Warning**: investigate within 30 minutes. If a bot scan is identified,
+  escalate to the platform/security team immediately.
+- Escalate to the platform team if the OAuth server restart does not clear
+  the count and the DB query shows no cleanup activity.
+
+### Postmortem trigger
+
+Open a postmortem if:
+- The OAuth pending map grows to over 1 000 entries, suggesting active
+  abuse or a prolonged sweeper outage.
+- The stuck pending state prevents legitimate users from completing OAuth
+  authorization for more than 30 minutes.
+
+---
+
+<a id="jwtfailures"></a>
+## JwtFailures — authentication failure spike
+
+### Symptom
+
+- No dedicated alert rule fires for JWT failures by default, but a spike in
+  `mctl_auth_failures_total` will surface in the SLO burn-rate alerts if
+  failures reach tools that are counted in the tool-availability SLI.
+- Operationally monitor: `rate(mctl_auth_failures_total[5m]) > 0` as an ad
+  hoc query during incidents.
+- `mctl_auth_failures_total` is labeled by `reason` and `provider`.
+
+### Likely causes
+
+- **`jwt_expired`**: Caller's token has expired. Normal at low rates;
+  a spike indicates a misconfigured token TTL or a client not refreshing
+  tokens.
+- **`jwt_invalid_signature`**: The signing key used to generate the token
+  does not match the key currently configured in the server. Often caused by
+  a JWT secret rotation that was not propagated to all pods simultaneously.
+- **`jwt_invalid_issuer`**: The `iss` claim in the token does not match the
+  server's expected issuer value (`OAUTH_JWT_ISSUER` env var).
+- **`jwt_missing_audience` / `jwt_wrong_audience`**: The `aud` claim is
+  absent or does not match the server's audience (`OAUTH_JWT_AUDIENCE` env
+  var).
+- **`bearer_scheme_error`**: The `Authorization` header is malformed —
+  missing the `Bearer ` prefix or the header is absent entirely.
+- **`other`**: Catch-all for unexpected validation errors; check pod logs.
+- **Provider context:** `provider` label values are `local-jwt`,
+  `shared-hmac`, and `local-dev`.
+
+### Diagnostic queries
+
+Auth failure rate by reason and provider:
+
+```promql
+sum(rate(mctl_auth_failures_total[5m])) by (reason, provider)
+```
+
+Top failure reasons:
+
+```promql
+topk(5, sum(rate(mctl_auth_failures_total[5m])) by (reason))
+```
+
+Failure rate for JWT signature/expiry reasons specifically:
+
+```promql
+sum(rate(mctl_auth_failures_total{reason=~"jwt_invalid_signature|jwt_expired"}[5m])) by (provider)
+```
+
+### Mitigation
+
+1. **`jwt_invalid_signature` spike** indicates a secret rotation issue.
+   - For `local-jwt` provider: the server uses `OAUTH_JWT_SIGNING_KEY`
+     (preferred) or `OAUTH_JWT_SECRET` (deprecated fallback). Ensure the
+     new key is deployed to **all** pods before rotating the issuing
+     service's key. Use a rolling deployment with `maxUnavailable=0`.
+   - For `shared-hmac` provider: `OAUTH_JWT_SECRET` must match between the
+     token issuer and the mctl-telegram server. Redeploy both in the same
+     release.
+
+2. **`jwt_expired` spike**: investigate whether client token TTL
+   configuration has changed, or whether a clock skew exists between token
+   issuer and server. Check NTP sync on both sides.
+
+3. **`jwt_invalid_issuer` / audience failures**: check `OAUTH_JWT_ISSUER`
+   and `OAUTH_JWT_AUDIENCE` environment variables are consistent with the
+   values embedded in issued tokens.
+
+4. **`bearer_scheme_error` spike**: usually a misconfigured calling client.
+   Identify the caller from pod logs (search for `bearer_scheme_error` in
+   structured slog output) and fix the client's `Authorization` header
+   construction.
+
+5. **Sustained high failure rates** that cause 401 responses at scale will
+   not directly count against the tool-availability SLI (unauthenticated
+   requests are rejected before a tool is invoked) but will affect the OAuth
+   endpoint availability SLO if the failures originate from the token
+   endpoint. Monitor [SloBurnRate](#sloburnrate) in parallel.
+
+### Escalation
+
+- If `jwt_invalid_signature` or `jwt_expired` spikes to >10% of all
+   requests and a secret rotation is not in progress, page the
+   mctl-telegram on-call — the key material may have been corrupted or
+   leaked.
+- Escalate to the security team if `jwt_invalid_signature` failures persist
+  after confirming the deployed key is correct (possible token forgery
+  attempt).
+
+### Postmortem trigger
+
+Open a postmortem if:
+- A JWT secret rotation causes a user-visible outage lasting more than 5
+  minutes.
+- `jwt_invalid_signature` failures are confirmed to be caused by an
+  unauthorized key (security incident).
+
+---
+
+<a id="telegramclienterrors"></a>
+## TelegramClientErrors — Telegram client error rate spike
+
+### Symptom
+
+- No dedicated alert rule is wired by default; this metric is a raw signal
+  used for triage during pool-related or flood-wait incidents.
+- `mctl_telegram_client_errors_total` is a plain Counter with no labels. It
+  counts every Telegram MTProto client goroutine exit with a non-context-canceled
+  error.
+- A rising rate indicates that live client goroutines are crashing or
+  disconnecting unexpectedly.
+
+### Likely causes
+
+- Telegram data center connectivity issues causing MTProto connections to
+  drop.
+- MTProto authentication key invalidation (Telegram revoked the session
+  server-side).
+- Telegram server returning unhandled error codes that cause the `gotd/td`
+  client goroutine to exit.
+- Resource exhaustion on the pod (OOM, file descriptor limit) causing
+  connection failures.
+- Network policy change blocking egress to Telegram data centers (ports 443
+  and 80 to `149.154.0.0/16` and `91.108.0.0/14`).
+
+### Diagnostic queries
+
+Rate of Telegram client errors:
+
+```promql
+rate(mctl_telegram_client_errors_total[5m])
+```
+
+Correlate with pool size (client errors reduce the pool):
+
+```promql
+mctl_telegram_client_pool_size
+```
+
+Session revocation rate (client errors often trigger revocations):
+
+```promql
+sum(rate(mctl_sessions_revoked_total[5m])) by (reason)
+```
+
+To retrieve the actual error category, inspect pod logs for the structured
+slog warning emitted on each client exit:
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
+  | grep 'telegram client exited' \
+  | jq -r '{user_id, err}'
+```
+
+The log line has the form:
+
+```json
+{"level":"WARN","msg":"telegram client exited","user_id":"...","err":"..."}
+```
+
+### Mitigation
+
+1. **Isolated error for a single user**: the pool will remove the failed
+   client and the user will receive an error on next invocation. This is
+   self-healing; the client is re-established on the next `Borrow()` call.
+
+2. **Sustained error rate affecting many users**: check pod logs for
+   recurring `err` values. If the error is a Telegram connectivity issue
+   (e.g., `EOF`, `connection reset by peer`), check network egress from the
+   pod to Telegram data centers:
+   ```sh
+   kubectl -n mctl-telegram exec deploy/mctl-telegram -- \
+     nc -zv 149.154.167.51 443
+   ```
+
+3. **Auth key invalidation (`AUTH_KEY_UNREGISTERED`)**: the session is
+   permanently broken and must be revoked. The user must re-authorize via
+   the OAuth flow. Check whether a bulk Telegram session invalidation
+   occurred.
+
+4. **OOM / fd exhaustion**: check pod memory usage and `kubectl describe`
+   for OOMKilled events. Reduce `TELEGRAM_MAX_SESSIONS` or scale out.
+
+### Escalation
+
+- Escalate to the platform team if Telegram DC connectivity is interrupted
+  for all pods simultaneously (network policy regression).
+- Escalate to Telegram support if `AUTH_KEY_UNREGISTERED` errors affect
+  a large fraction of sessions simultaneously (Telegram-side mass revocation).
+
+### Postmortem trigger
+
+Open a postmortem if:
+- Telegram client errors cause a measurable reduction in `mctl_telegram_client_pool_size`
+  (>5% of pool) and tool failures exceed the fast-burn SLO threshold.
+- Connectivity to Telegram DCs is interrupted for more than 5 minutes.
+
+---
+
+<a id="ratelimitspike"></a>
+## RateLimitSpike — HTTP rate-limit event spike
+
+### Symptom
+
+- No dedicated alert rule is wired by default. Monitor this metric during
+  traffic incidents or bot-scan investigations.
+- `mctl_rate_limit_events_total` counts HTTP 429 responses, labeled by
+  `identity_kind`: `user` (authenticated, rate-limited by `user_id`) or
+  `anon` (unauthenticated, rate-limited by IP).
+- A spike in `anon` rate-limit events typically indicates a bot scan or DDoS
+  attempt. A spike in `user` events indicates one or more authenticated
+  callers exceeding per-user request budgets.
+
+### Likely causes
+
+- **`anon` spike**: bot scan, vulnerability scanner, or load test targeting
+  the service from unauthenticated endpoints.
+- **`user` spike**: a misbehaving or misconfigured MCP client sending too
+  many requests. May also indicate an agent loop that is not respecting
+  backoff signals.
+- **`anon` spike coinciding with `mctltelegramoauthpendingstuck`**: bots
+  targeting `/oauth/authorize` will generate both `anon` rate-limit events
+  and pending OAuth flows. Check [MctlTelegramOAuthPendingStuck](#mctltelegramoauthpendingstuck).
+
+### Diagnostic queries
+
+Rate-limit event rate by identity kind:
+
+```promql
+sum(rate(mctl_rate_limit_events_total[5m])) by (identity_kind)
+```
+
+Overall HTTP request rate (for context):
+
+```promql
+sum(rate(mctl_http_requests_total[5m])) by (route, status_code)
+```
+
+To identify which `user_id` is being rate-limited, search pod logs:
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
+  | grep 'rate_limit' | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+```
+
+### Mitigation
+
+1. **`anon` spike from a specific IP range**: coordinate with the platform
+   team to apply IP-level blocking at the ingress (nginx / cloud load
+   balancer WAF rules). Rate-limiting at the application layer is a last
+   resort.
+
+2. **`user` spike from a specific caller**: identify the `user_id` from
+   pod logs. Contact the user or, if the behavior is abusive, revoke the
+   session:
+   ```sh
+   # call the revoke endpoint (requires admin token)
+   curl -X POST https://tg.mctl.ai/admin/sessions/<user_id>/revoke \
+     -H "Authorization: Bearer <admin-token>"
+   ```
+
+3. **The rate limiter is protecting the Telegram pool.** High `anon` or
+   `user` rate-limit events at the HTTP layer mean the pool is protected;
+   do not lower the rate-limit thresholds without understanding the traffic
+   source.
+
+4. **Sustained `anon` flood coinciding with OAuth pending stuck**: prioritize
+   fixing the bot scan first (ingress block) before restarting the OAuth
+   server, to avoid the pending map refilling immediately after restart.
+
+### Escalation
+
+- Escalate to the platform/security team for any `anon` spike that persists
+  for more than 10 minutes and cannot be attributed to a known load test.
+- Escalate to the mctl-telegram on-call if the rate-limit spike is causing
+  tool-availability SLO burn (authenticated users being incorrectly
+  rate-limited).
+
+### Postmortem trigger
+
+Open a postmortem if:
+- An `anon` spike causes authenticated users to experience degraded
+  availability due to shared infrastructure resource contention.
+- Rate-limit configuration is found to be incorrect (e.g., thresholds too
+  low, causing legitimate traffic to be throttled).
+
+---
+
+<a id="sloburnrate"></a>
+## SloBurnRate — SLO error-budget burn-rate alerts
+
+### Symptom
+
+One or more of the following multi-window burn-rate alerts fire:
+
+| Alert | Severity | Window | Threshold |
+|-------|----------|--------|-----------|
+| `MctlToolAvailabilityFastBurn` | page | 1h | error rate >7.2% |
+| `MctlToolAvailabilitySlowBurn` | ticket | 6h | error rate >3.0% |
+| `MctlOAuthAvailabilityFastBurn` | page | 1h | error rate >1.440% |
+| `MctlOAuthAvailabilitySlowBurn` | ticket | 6h | error rate >0.600% |
+| `MctlSessionBorrowFastBurn` | page | 1h | error rate >14.4% |
+| `MctlSessionBorrowSlowBurn` | ticket | 6h | error rate >6.0% |
+
+Fast-burn (page severity) means 14.4x the allowed burn rate — the monthly
+error budget is exhausted in under 2 hours at this rate. Slow-burn (ticket
+severity) means 6x — 30-day budget exhausted in under 5 days.
+
+### Likely causes
+
+- **MctlToolAvailabilityFastBurn/SlowBurn**: Telegram client errors
+  (see [TelegramClientErrors](#telegramclienterrors)), pool exhaustion
+  (see [MctlTelegramNearCapacity](#mctltelegramnearcapacity)), or
+  flood-wait retries exhausted (see [MctlTelegramFloodWaitSpike](#mctltelegramfloodwaitspike)).
+- **MctlOAuthAvailabilityFastBurn/SlowBurn**: OAuth server errors (500s on
+  `/oauth/token` or `/oauth/telegram/callback`). Check the OAuth pending
+  state (see [MctlTelegramOAuthPendingStuck](#mctltelegramoauthpendingstuck))
+  and JWT failures (see [JwtFailures](#jwtfailures)).
+- **MctlSessionBorrowFastBurn/SlowBurn**: Session store errors, database
+  connectivity failures, or session corruption. TTL expirations
+  (`expired_idle`, `expired_absolute`) are excluded from the SLI
+  denominator.
+
+### Diagnostic queries
+
+MCP tool availability error rate (1h window):
+
+```promql
+sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
+/
+sum(rate(mctl_tool_invocations_total[1h]))
+```
+
+Tool error rate broken down by tool:
+
+```promql
+sum(rate(mctl_tool_invocations_total{status="error"}[5m])) by (tool)
+```
+
+OAuth endpoint 5xx rate (1h window):
+
+```promql
+sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback",status_code=~"5.."}[1h]))
+/
+sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[1h]))
+```
+
+Session borrow error rate (1h window, excluding TTL expirations):
+
+```promql
+sum(rate(mctl_sessions_borrow_total{result="error"}[1h]))
+/
+sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[1h]))
+```
+
+Current sessions active:
+
+```promql
+mctl_sessions_active
+```
+
+### Mitigation
+
+1. **Identify the root-cause alert.** A tool-availability burn is typically
+   downstream of a Telegram-layer or pool-layer problem. Check the other
+   sections in this runbook in the following order:
+   - [MctlTelegramNearCapacity](#mctltelegramnearcapacity)
+   - [MctlTelegramFloodWaitSpike](#mctltelegramfloodwaitspike)
+   - [TelegramClientErrors](#telegramclienterrors)
+
+2. **Halt non-critical rollouts during the incident.** Any in-progress
+   deployment that is not a hotfix for the current incident must be paused:
+   ```sh
+   kubectl -n mctl-telegram rollout pause deployment/mctl-telegram
+   ```
+   Resume after the incident is resolved:
+   ```sh
+   kubectl -n mctl-telegram rollout resume deployment/mctl-telegram
+   ```
+
+3. **Fast-burn incidents: page if root cause not identified within 30 minutes.**
+   If the root cause cannot be identified and mitigated within 30 minutes
+   of the fast-burn alert firing, page additional on-call responders.
+
+4. **Error budget exhausted: activate feature freeze.** When the 28-day
+   rolling SLI drops below the SLO target, activate the error-budget policy
+   from [docs/slo.md](slo.md):
+   - Freeze all non-`reliability` and non-`security` PRs.
+   - Gate production deploys: only proceed when the 6h burn rate is below 1x.
+   - Resume normal flow once the SLI returns to target and the remaining
+     budget is at least 50%.
+
+5. **Slow-burn alerts (ticket severity)**: file a reliability ticket
+   immediately. Root-cause investigation should begin within one business
+   day.
+
+6. **Session borrow burn**: check database connectivity and migration state.
+   A schema migration that locks the `sessions` table will cause borrow
+   errors for the duration of the lock.
+
+### Escalation
+
+- **Fast-burn page**: on-call must respond within 5 minutes. If root cause
+  not identified within 30 minutes, escalate to the second on-call and
+  notify the engineering manager.
+- **Slow-burn ticket**: assign to the reliability rotation within one
+  business day. No page required unless it escalates to fast-burn.
+- Escalate to the platform team for infrastructure-layer issues (database
+  outage, Kubernetes control-plane degradation).
+
+### Postmortem trigger
+
+Open a postmortem if:
+- A fast-burn incident lasts more than 30 minutes, OR
+- The incident consumes more than 10% of the monthly error budget for any
+  SLO.
+
+See [docs/slo.md](slo.md) for the full error-budget policy and recovery
+criteria.
+
+---
+
+<a id="canary"></a>
+## Canary
+
+Canary incidents (alert `MctlTelegramCanaryFailing`) use separate canary-specific
+metrics that are not part of the main server metrics registry. See
+[docs/runbooks/canary.md](runbooks/canary.md) for the full canary runbook.
