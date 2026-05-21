@@ -8,7 +8,7 @@ import (
 
 func TestSecurity_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Security().ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -24,6 +24,10 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Tamper-evident audit log",
 		"Prompt-injection content boundary",
 		"Session TTL",
+		// shared chrome — unified with landing/docs
+		`class="topbar"`,
+		"accent-swatch",
+		`<a href="/security" class="active">security</a>`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/security missing %q", must)
@@ -33,7 +37,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 
 func TestPrivacy_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Privacy().ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -43,6 +47,10 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"What is NOT stored",
 		"Self-service controls",
 		"audit/verify",
+		// shared chrome — unified with landing/docs
+		`class="topbar"`,
+		"accent-swatch",
+		`<a href="/privacy" class="active">privacy</a>`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/privacy missing %q", must)
@@ -97,7 +105,7 @@ func TestDocs_ServesHTML(t *testing.T) {
 
 func TestSecurity_NoStaleAuthModel(t *testing.T) {
 	w := httptest.NewRecorder()
-	Security().ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "api.mctl.ai, verified via shared HMAC") {
 		t.Fatal("/security still contains stale trust boundary description: \"api.mctl.ai, verified via shared HMAC\"")
@@ -106,7 +114,7 @@ func TestSecurity_NoStaleAuthModel(t *testing.T) {
 
 func TestPrivacy_NoStaleAuthModel(t *testing.T) {
 	w := httptest.NewRecorder()
-	Privacy().ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "GitHub OAuth login proxied through") {
 		t.Fatal("/privacy still contains stale GitHub OAuth reference: \"GitHub OAuth login proxied through\"")

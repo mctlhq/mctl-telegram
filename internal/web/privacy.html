@@ -1,63 +1,43 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mctl-telegram — privacy</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{template "ui_head" .}}
 <style>
-  :root {
-    --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
-    --surface-line: #1e2227; --surface-line-strong: #2a3040;
-    --surface-fg: #e6e7e9; --surface-fg-muted: #9ba1ab; --surface-fg-subtle: #5c636e;
-    --accent: #00e5ff; --accent-highlight: #00bfdf;
-    --status-ok: #00e676; --status-warn: #ffb300; --status-bad: #ff5252;
-    --syntax-key: #82aaff; --syntax-string: #c3e88d;
-    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  /* Page-specific prose styling, built on the shared design tokens. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
   }
-</style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://ui.mctl.ai/mctl.css">
-<style>
-  html { background: #0a0b0d; color: #e6e7e9; }
-  body {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: 15px; line-height: 1.55;
-    max-width: 760px; margin: 2.5rem auto; padding: 0 1.25rem;
-    background: var(--surface-bg); color: var(--surface-fg);
-  }
-  a { color: var(--accent); }
-  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
-  .lead { color: var(--surface-fg-muted); margin: .25rem 0 1.5rem; }
-  .muted { color: var(--surface-fg-muted); font-size: .9rem; }
-  code {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card); padding: 1px 5px; border-radius: 4px;
-    color: var(--syntax-key);
-  }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text-dim); }
+  th { font-weight: 600; color: var(--text); }
+  td strong { color: var(--text); }
+  ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
+  li { margin-bottom: 8px; line-height: 1.6; }
+  li strong { color: var(--text); }
   pre {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card); border: 1px solid var(--surface-line);
-    padding: .75rem 1rem; border-radius: 6px; overflow-x: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 13px; color: var(--text);
   }
-  .card {
-    background: var(--surface-card); border: 1px solid var(--surface-line);
-    border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0;
-  }
-  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
-  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--surface-line); vertical-align: top; }
-  th { font-weight: 600; color: var(--surface-fg-muted); }
 </style>
 </head>
 <body>
-  <p class="muted"><a href="/">← back to setup</a></p>
-  <h1>Privacy and data handling</h1>
-  <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Privacy</span>
+    </div>
+    <h1>Privacy and <span class="accent">data handling</span></h1>
+    <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
+  </section>
 
   <h2>Data inventory</h2>
   <table>
@@ -108,17 +88,17 @@
 
   <h2>Self-service controls</h2>
   <p>You can remove your data and inspect what was recorded at any time without operator involvement:</p>
-  <pre>POST /api/account/disconnect    # mark session revoked (keeps row, no Telegram access)
+  <pre>POST   /api/account/disconnect   # mark session revoked (keeps row, no Telegram access)
 DELETE /api/account              # remove the encrypted session blob and row entirely
-GET  /api/account                # connection status + per-account send_enabled flag
-GET  /api/account/audit          # newest-first audit rows (limit, before)
-GET  /api/account/audit/verify   # recompute the hash chain and prove audit was not tampered with</pre>
+GET    /api/account              # connection status + per-account send_enabled flag
+GET    /api/account/audit        # newest-first audit rows (limit, before)
+GET    /api/account/audit/verify # recompute the hash chain and prove audit was not tampered with</pre>
   <p>Equivalent MCP tools: <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, <code>get_my_audit_log</code>. Disconnect and delete tear down the in-memory MTProto client atomically with the DB write so a concurrent request cannot piggyback on the doomed session.</p>
 
   <h2>Who can access your data</h2>
   <ul>
     <li><strong>You</strong>, via the MCP tools and HTTP endpoints listed above.</li>
-    <li><strong>The deployment operator</strong>, who has Kubernetes/database access to the running service. There is no in-service admin tool that exposes another user's session in plaintext, but operator with sql access could read the encrypted blob; without the <code>ENCRYPTION_KEY</code> they cannot decrypt it.</li>
+    <li><strong>The deployment operator</strong>, who has Kubernetes/database access to the running service. There is no in-service admin tool that exposes another user's session in plaintext, but an operator with SQL access could read the encrypted blob; without the <code>ENCRYPTION_KEY</code> they cannot decrypt it.</li>
     <li><strong>Anyone who compromises the running pod</strong> could read every session in memory while requests are in flight (this is true of any server-side MTProto host; mitigations are the <em>Local Bridge</em> roadmap).</li>
   </ul>
 
@@ -126,12 +106,16 @@ GET  /api/account/audit/verify   # recompute the hash chain and prove audit was 
   <ul>
     <li><strong>Telegram</strong> (transport) — your MTProto session is, by definition, used to talk to Telegram. They see the same traffic any Telegram client would generate.</li>
     <li><strong>Telegram</strong> (identity) — your identity comes from a Telegram sign-in flow handled directly by this server.</li>
-    <li>No analytics, advertising, or third-party tracking is injected by this service. The landing/<code>/security</code>/<code>/privacy</code> pages serve inline CSS only and contact no external hosts.</li>
+    <li>No analytics, advertising, or third-party tracking is injected by this service. The OAuth-flow pages (connect, session management) serve inline CSS only under a strict Content-Security-Policy and contact no external hosts; the public content pages (home, docs, security, privacy) load the mctl design system stylesheet and web fonts from a CDN for presentation.</li>
   </ul>
 
   <h2>Contact</h2>
   <p>Privacy and security inquiries: <strong>dmitri+security@mctl.ai</strong>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
 
-  <p class="muted"><a href="/">← back to setup</a> · <a href="/security">security model</a></p>
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
 </body>
 </html>

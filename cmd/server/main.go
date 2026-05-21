@@ -150,8 +150,8 @@ func main() {
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer))
-	mux.Get("/security", web.Security())
-	mux.Get("/privacy", web.Privacy())
+	mux.Get("/security", web.Security(cfg.PublicBaseURL))
+	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL))
 	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer))
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds

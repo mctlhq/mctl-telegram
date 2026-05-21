@@ -1,69 +1,50 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mctl-telegram — security model</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{template "ui_head" .}}
 <style>
-  :root {
-    --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
-    --surface-line: #1e2227; --surface-line-strong: #2a3040;
-    --surface-fg: #e6e7e9; --surface-fg-muted: #9ba1ab; --surface-fg-subtle: #5c636e;
-    --accent: #00e5ff; --accent-highlight: #00bfdf;
-    --status-ok: #00e676; --status-warn: #ffb300; --status-bad: #ff5252;
-    --syntax-key: #82aaff; --syntax-string: #c3e88d;
-    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
-  }
-</style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://ui.mctl.ai/mctl.css">
-<style>
-  html { background: #0a0b0d; color: #e6e7e9; }
-  body {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: 15px; line-height: 1.55;
-    max-width: 760px; margin: 2.5rem auto; padding: 0 1.25rem;
-    background: var(--surface-bg); color: var(--surface-fg);
-  }
-  a { color: var(--accent); }
-  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
-  .lead { color: var(--surface-fg-muted); margin: .25rem 0 1.5rem; }
-  .muted { color: var(--surface-fg-muted); font-size: .9rem; }
-  code {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card); padding: 1px 5px; border-radius: 4px;
-    color: var(--syntax-key);
-  }
-  pre {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: .88em;
-    background: var(--surface-card); border: 1px solid var(--surface-line);
-    padding: .75rem 1rem; border-radius: 6px; overflow-x: auto;
-  }
-  .card {
-    background: var(--surface-card); border: 1px solid var(--surface-line);
-    border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0;
+  /* Page-specific prose styling, built on the shared design tokens. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
   }
   .warn {
-    background: color-mix(in srgb, var(--status-bad) 6%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-bad) 50%, transparent);
-    border-left: 3px solid var(--status-bad);
-    border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0;
+    background: var(--warn-soft);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    border-left: 3px solid var(--danger);
+    border-radius: var(--mctl-radius-lg);
+    padding: 16px 20px; margin: 20px 0; color: var(--text-dim);
   }
-  table { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92em; }
-  td, th { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--surface-line); vertical-align: top; }
-  th { font-weight: 600; color: var(--surface-fg-muted); }
+  .warn strong { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text-dim); }
+  th { font-weight: 600; color: var(--text); }
+  ul, ol { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
+  li { margin-bottom: 8px; line-height: 1.6; }
+  li strong { color: var(--text); }
+  pre {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 13px; color: var(--text);
+  }
 </style>
 </head>
 <body>
-  <p class="muted"><a href="/">← back to setup</a></p>
-  <h1>Security model</h1>
-  <p class="lead">Threat model, cryptographic invariants, and known coupling for this deployment.</p>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Security model</span>
+    </div>
+    <h1>Security <span class="accent">model</span></h1>
+    <p class="lead">Threat model, cryptographic invariants, and known coupling for this deployment.</p>
+  </section>
 
   <div class="warn">
     <strong>Not zero-knowledge.</strong> mctl-telegram makes outbound MTProto calls
@@ -168,6 +149,10 @@
   <h2>Prompt-injection content boundary</h2>
   <p>Read tools (<code>get_unread_messages</code>, <code>get_messages</code>) wrap every Telegram message body in <code>&lt;telegram-content origin="telegram" peer="<i>redacted</i>" untrusted="true"&gt;…&lt;/telegram-content&gt;</code>. A top-level <code>notice</code> field repeats the same guidance in prose. Adversarial closing-tag literals inside a message body are escaped to the underscore form so a sender cannot break out of the untrusted block. The wrapping is best-effort signalling — clients are free to ignore it — but it gives an LLM a clear data-vs-instructions boundary that prompt-injection text cannot remove on its own.</p>
 
-  <p class="muted"><a href="/">← back to setup</a> · <a href="/privacy">privacy policy</a> · <a href="https://github.com/mctlhq/mctl-telegram/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md in repo</a></p>
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
 </body>
 </html>
