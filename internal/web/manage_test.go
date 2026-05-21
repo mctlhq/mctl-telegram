@@ -19,7 +19,7 @@ func newManageTestStore(t *testing.T) *db.Store {
 	t.Helper()
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "manage.db") + "?_pragma=busy_timeout(5000)"
-	conn, err := db.Open(ctx, dsn)
+	conn, err := db.Open(ctx, dsn, 0, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

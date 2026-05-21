@@ -16,7 +16,7 @@ import (
 
 func newTestStore(t *testing.T) *db.Store {
 	t.Helper()
-	rawDB, err := db.Open(context.Background(), "file::memory:?cache=shared")
+	rawDB, err := db.Open(context.Background(), "file::memory:?cache=shared", 0, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
