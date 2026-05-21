@@ -53,11 +53,11 @@ type Config struct {
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
-	// DBMaxOpenConns caps the Postgres connection pool. 0 means use the
-	// driver default (10). Set via DB_MAX_OPEN_CONNS.
+	// DBMaxOpenConns caps the Postgres connection pool. 0 means keep the
+	// prior default of 10. Set via DB_MAX_OPEN_CONNS.
 	DBMaxOpenConns int
-	// DBMaxIdleConns sets the Postgres idle connection count. 0 means use
-	// the driver default (2). Set via DB_MAX_IDLE_CONNS.
+	// DBMaxIdleConns sets the Postgres idle connection count. 0 means keep
+	// the prior default of 2. Set via DB_MAX_IDLE_CONNS.
 	DBMaxIdleConns int
 }
 

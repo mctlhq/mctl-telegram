@@ -30,13 +30,14 @@ const (
 )
 
 var (
-	flagUsers  = flag.Int("users", 100, "number of concurrent virtual users")
-	flagRamp   = flag.Duration("ramp", 2*time.Minute, "linear ramp duration")
-	flagHold   = flag.Duration("hold", 10*time.Minute, "sustained-load hold duration")
-	flagTarget = flag.String("target", "", "base URL of the staging deployment (required)")
-	flagTokens = flag.String("tokens", "", "path to newline-delimited bearer token file (required)")
-	flagPeer   = flag.String("peer", "", "Telegram peer for get_messages calls (required)")
-	flagOut    = flag.String("out", "results.json", "path for JSON results file")
+	flagUsers     = flag.Int("users", 100, "number of concurrent virtual users")
+	flagRamp      = flag.Duration("ramp", 2*time.Minute, "linear ramp duration")
+	flagHold      = flag.Duration("hold", 10*time.Minute, "sustained-load hold duration")
+	flagTarget    = flag.String("target", "", "base URL of the staging deployment (required)")
+	flagTokens    = flag.String("tokens", "", "path to newline-delimited bearer token file (required)")
+	flagPeer      = flag.String("peer", "", "Telegram peer for get_messages calls (required)")
+	flagOut       = flag.String("out", "results.json", "path for JSON results file")
+	flagAllowSend = flag.Bool("allow-send", false, "exercise send_message (delivers REAL messages when the server runs with ALLOW_SEND=true); default false measures prepare_send_message only")
 )
 
 // callResult records a single tool-call outcome.
@@ -234,14 +235,22 @@ func callTool(ctx context.Context, client *http.Client, target, token string, re
 }
 
 // extractSSEData pulls the JSON payload from a text/event-stream body.
-// It returns the first "data: ..." line's payload, or the original body if
-// no data line is found.
+// It returns the last non-empty "data: ..." line's payload (the final MCP
+// result event), or the original body if no data line is found.
 func extractSSEData(body []byte) []byte {
+	// MCP over SSE may emit progress/keepalive frames before the final result
+	// event, so return the last non-empty data: payload, not the first.
+	var last []byte
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "data:") {
-			return []byte(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			if payload := []byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))); len(payload) > 0 {
+				last = payload
+			}
 		}
+	}
+	if last != nil {
+		return last
 	}
 	return body
 }
@@ -249,7 +258,7 @@ func extractSSEData(body []byte) []byte {
 // runVirtualUser is the per-goroutine load-generation loop. It selects a tool
 // using the 70/25/5 weighted distribution, sends one MCP call, records the
 // outcome, then sleeps for a random 0-500 ms jitter before the next call.
-func runVirtualUser(ctx context.Context, client *http.Client, target, token, peer string, s *resultStore, counter *atomic.Int64) {
+func runVirtualUser(ctx context.Context, client *http.Client, target, token, peer string, s *resultStore, counter *atomic.Int64, allowSend bool) {
 	// Use a per-goroutine RNG seeded from the shared counter to avoid
 	// correlated selections across goroutines.
 	rng := rand.New(rand.NewSource(counter.Add(1)))
@@ -285,7 +294,13 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 			if confirmID == "" {
 				break
 			}
-			// No "mode" field: server defaults to draft. No message is delivered.
+			// Guard: send_message can deliver a REAL Telegram message when the
+			// server runs with ALLOW_SEND=true. Only exercise it when the
+			// operator explicitly opts in via -allow-send; otherwise we measure
+			// prepare_send_message latency only.
+			if !allowSend {
+				break
+			}
 			id2 := int(counter.Add(1))
 			_, lat2, err2 := callTool(ctx, client, target, token, id2, toolSendMessage, map[string]any{
 				"peer":            peer,
@@ -569,6 +584,11 @@ func main() {
 	fmt.Printf("starting load test: %d users, ramp %s, hold %s, target %s\n",
 		numUsers, flagRamp.String(), flagHold.String(), *flagTarget)
 
+	// Start the metrics poller before the ramp loop so ramp-phase peaks
+	// (goroutine count, pool size) are captured, not just the hold phase.
+	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	go pollMetrics(pollerCtx, client, *flagTarget, pm)
+
 	var wg sync.WaitGroup
 	for i := 0; i < numUsers; i++ {
 		if i > 0 && rampInterval > 0 {
@@ -578,14 +598,10 @@ func main() {
 		wg.Add(1)
 		go func(tok string) {
 			defer wg.Done()
-			runVirtualUser(holdCtx, client, *flagTarget, tok, *flagPeer, s, &counter)
+			runVirtualUser(holdCtx, client, *flagTarget, tok, *flagPeer, s, &counter, *flagAllowSend)
 		}(token)
 	}
 	fmt.Printf("all %d users started; holding for %s\n", numUsers, flagHold.String())
-
-	// Start metrics poller during the hold phase.
-	pollerCtx, pollerCancel := context.WithCancel(context.Background())
-	go pollMetrics(pollerCtx, client, *flagTarget, pm)
 
 	// Wait for the hold phase to complete.
 	time.Sleep(*flagHold)
