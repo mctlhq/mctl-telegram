@@ -8,8 +8,12 @@ permissions: {}
 
 jobs:
   review:
-    # Skip drafts; synchronize re-reviews after each fix-up push.
-    if: github.event.pull_request.draft == false
+    # Skip drafts and fork PRs: CLAUDE_CODE_OAUTH_TOKEN is not available to
+    # forks, so the step would fail with a secret-not-found error. External
+    # contributors get build/test/CodeQL feedback instead.
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
