@@ -53,6 +53,12 @@ type Config struct {
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
+	// DBMaxOpenConns caps the Postgres connection pool. 0 means keep the
+	// prior default of 10. Set via DB_MAX_OPEN_CONNS.
+	DBMaxOpenConns int
+	// DBMaxIdleConns sets the Postgres idle connection count. 0 means keep
+	// the prior default of 2. Set via DB_MAX_IDLE_CONNS.
+	DBMaxIdleConns int
 }
 
 func Load() (*Config, error) {
@@ -88,6 +94,8 @@ func Load() (*Config, error) {
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
+	c.DBMaxOpenConns = envInt("DB_MAX_OPEN_CONNS", 0)
+	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))

@@ -48,7 +48,7 @@ func main() {
 
 	ctx := context.Background()
 
-	rawDB, err := db.Open(ctx, cfg.DatabaseURL)
+	rawDB, err := db.Open(ctx, cfg.DatabaseURL, 0, 0)
 	if err != nil {
 		die(fmt.Errorf("db open: %w", err))
 	}

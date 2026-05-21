@@ -23,7 +23,9 @@ func driverFor(dsn string) (driver string, isPg bool) {
 
 // Open opens a database connection. SQLite (modernc, pure Go) for `file:...`
 // DSNs and any unrecognized prefix; pgx/stdlib for `postgres://`.
-func Open(ctx context.Context, dsn string) (*sql.DB, error) {
+// maxOpenConns and maxIdleConns are Postgres-only tuning knobs; pass 0 to
+// keep the prior defaults (10 open, 2 idle). SQLite always uses 1 open conn.
+func Open(ctx context.Context, dsn string, maxOpenConns, maxIdleConns int) (*sql.DB, error) {
 	driver, isPg := driverFor(dsn)
 	dbConn, err := sql.Open(driver, dsn)
 	if err != nil {
@@ -34,8 +36,16 @@ func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping %s: %w", driver, err)
 	}
 	if isPg {
-		dbConn.SetMaxOpenConns(10)
-		dbConn.SetMaxIdleConns(2)
+		open := 10
+		if maxOpenConns > 0 {
+			open = maxOpenConns
+		}
+		idle := 2
+		if maxIdleConns > 0 {
+			idle = maxIdleConns
+		}
+		dbConn.SetMaxOpenConns(open)
+		dbConn.SetMaxIdleConns(idle)
 	} else {
 		dbConn.SetMaxOpenConns(1)
 	}

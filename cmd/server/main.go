@@ -57,7 +57,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	rawDB, err := db.Open(ctx, cfg.DatabaseURL)
+	rawDB, err := db.Open(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns)
 	if err != nil {
 		slog.Error("db open", "err", err)
 		os.Exit(1)
