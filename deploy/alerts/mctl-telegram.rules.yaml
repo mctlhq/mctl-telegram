@@ -13,6 +13,7 @@ spec:
         - alert: MctlTelegramPoolNearCapacity
           expr: |
             (mctl_telegram_client_pool_size / mctl_telegram_pool_capacity) > 0.85
+            and (mctl_telegram_client_pool_size / mctl_telegram_pool_capacity) < 0.95
             and mctl_telegram_pool_capacity > 0
           for: 5m
           labels:
@@ -43,7 +44,9 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramnearcapacity"
 
         - alert: MctlTelegramFloodWaitSpike
-          expr: sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 0.5
+          expr: |
+            sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 0.5
+            and sum(rate(mctl_telegram_flood_wait_events_total[5m])) < 2
           for: 2m
           labels:
             severity: warning
@@ -79,7 +82,7 @@ spec:
           annotations:
             summary: "mctl-telegram OAuth pending authorizations above 100"
             description: >
-              There are {{ $value }} in-flight OAuth authorization flows. A sustained
+              There are {{ $value | humanize }} in-flight OAuth authorization flows. A sustained
               high value with no corresponding traffic suggests abandoned flows or
               bot-scan traffic against /oauth/authorize.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramoauthpendingstuck"
