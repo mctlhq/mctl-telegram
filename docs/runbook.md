@@ -144,7 +144,7 @@ Open a postmortem if:
 Identify which MCP tool is generating the most flood-wait events:
 
 ```promql
-topk(5, rate(mctl_telegram_flood_wait_events_total[5m])) by (tool)
+topk(5, sum by (tool) (rate(mctl_telegram_flood_wait_events_total[5m])))
 ```
 
 Total flood-wait event rate across all tools:
@@ -164,7 +164,7 @@ To identify the offending user, search structured slog logs (JSON) for
 
 ```sh
 kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
-  | grep flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+  | grep -i flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
 ```
 
 ### Mitigation
@@ -542,12 +542,17 @@ Overall HTTP request rate (for context):
 sum(rate(mctl_http_requests_total[5m])) by (route, status_code)
 ```
 
-To identify which `user_id` is being rate-limited, search pod logs:
+Break the 429s down by identity kind (`anon` vs `user`):
 
-```sh
-kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
-  | grep 'rate_limit' | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+```promql
+sum(rate(mctl_rate_limit_events_total[5m])) by (identity_kind)
 ```
+
+Note: 429 responses are not structured-logged with a `user_id`, and
+`mctl_rate_limit_events_total` carries only the `identity_kind` label — it
+cannot attribute a spike to a single user. To pin down a specific abusive
+caller, correlate the request-path audit logs (which do carry `user_id`)
+over the same window.
 
 ### Mitigation
 
@@ -556,13 +561,19 @@ kubectl -n mctl-telegram logs -l app=mctl-telegram --since=5m \
    balancer WAF rules). Rate-limiting at the application layer is a last
    resort.
 
-2. **`user` spike from a specific caller**: identify the `user_id` from
-   pod logs. Contact the user or, if the behavior is abusive, revoke the
-   session:
+2. **`user` spike from a specific caller**: identify the offending
+   `telegram_id` via `list_telegram_identities`. Contact the user or, if the
+   behavior is abusive, revoke their session with the admin-only
+   `revoke_telegram_session` MCP tool (requires the `admin:users` scope).
+   There is no REST admin endpoint; it is an MCP `tools/call` against the
+   `/mcp` endpoint (after the standard `initialize` handshake):
    ```sh
-   # call the revoke endpoint (requires admin token)
-   curl -X POST https://tg.mctl.ai/admin/sessions/<user_id>/revoke \
-     -H "Authorization: Bearer <admin-token>"
+   curl -X POST https://tg.mctl.ai/mcp \
+     -H "Authorization: Bearer <admin-token>" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -H "Mcp-Session-Id: <id from initialize>" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"revoke_telegram_session","arguments":{"telegram_id":<id>}}}'
    ```
 
 3. **The rate limiter is protecting the Telegram pool.** High `anon` or
@@ -608,9 +619,11 @@ One or more of the following multi-window burn-rate alerts fire:
 | `MctlSessionBorrowFastBurn` | page | 1h | error rate >14.4% |
 | `MctlSessionBorrowSlowBurn` | ticket | 6h | error rate >6.0% |
 
-Fast-burn (page severity) means 14.4x the allowed burn rate — the monthly
-error budget is exhausted in under 2 hours at this rate. Slow-burn (ticket
-severity) means 6x — 30-day budget exhausted in under 5 days.
+Fast-burn (page severity) means 14.4x the allowed burn rate — at that rate
+the full 30-day error budget is exhausted in about 2 days (30d / 14.4 ≈ 50
+hours). The 1h alert window is what makes it page-worthy: it catches the
+burn early, long before the budget is gone. Slow-burn (ticket severity)
+means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
 
 ### Likely causes
 
