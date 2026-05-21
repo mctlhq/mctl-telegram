@@ -71,6 +71,26 @@ func TestProbeOAuthMetadataMissingField(t *testing.T) {
 	}
 }
 
+func TestProbeOAuthMetadataInvalidURL(t *testing.T) {
+	// Fields present but not URLs → should fail validation.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"issuer":                 "not-a-url",
+			"authorization_endpoint": "https://example.com/auth",
+			"token_endpoint":         "https://example.com/token",
+		})
+	}))
+	defer srv.Close()
+
+	err := probeOAuthMetadata(t.Context(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected non-nil error for non-URL issuer")
+	}
+	if !strings.Contains(err.Error(), "issuer") {
+		t.Errorf("error should mention issuer, got: %v", err)
+	}
+}
+
 func TestProbeOAuthMetadataNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -122,9 +142,32 @@ func TestProbeMCPToolJSONRPCError(t *testing.T) {
 	}
 }
 
-func TestProbeMCPToolFloodWait(t *testing.T) {
+func TestProbeMCPToolFloodWait_SuccessIsError(t *testing.T) {
+	// isError=true with FLOOD_WAIT in content → floodWait=true, error returned.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return a success-shaped response whose content text mentions FLOOD_WAIT_30.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "FLOOD_WAIT_30"}},
+				"isError": true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	if err == nil {
+		t.Fatal("expected non-nil error for isError=true FLOOD_WAIT response")
+	}
+	if result == nil || !result.floodWait {
+		t.Errorf("expected floodWait=true, got result=%v", result)
+	}
+}
+
+func TestProbeMCPToolFloodWait_NotErrorWhenIsErrorFalse(t *testing.T) {
+	// isError=false: content that mentions FLOOD_WAIT_ is user data, not an error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0",
 			"id":      1,
@@ -137,8 +180,31 @@ func TestProbeMCPToolFloodWait(t *testing.T) {
 	defer srv.Close()
 
 	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
+	if err != nil {
+		t.Fatalf("expected nil error when isError=false, got: %v", err)
+	}
+	if result == nil || result.floodWait {
+		t.Errorf("expected floodWait=false for isError=false, got result=%v", result)
+	}
+}
+
+func TestProbeMCPToolFloodWait_JSONRPCError(t *testing.T) {
+	// JSON-RPC error with FLOOD_WAIT in message → floodWait=true.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"error": map[string]any{
+				"code":    -32603,
+				"message": "FLOOD_WAIT_60: flood wait",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	result, err := probeMCPTool(t.Context(), srv.Client(), srv.URL, "/mcp", "token", "list_dialogs", map[string]any{"limit": 5})
 	if err == nil {
-		t.Fatal("expected non-nil error for FLOOD_WAIT response")
+		t.Fatal("expected non-nil error for FLOOD_WAIT JSON-RPC error")
 	}
 	if result == nil || !result.floodWait {
 		t.Errorf("expected floodWait=true, got result=%v", result)

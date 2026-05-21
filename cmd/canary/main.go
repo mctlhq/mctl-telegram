@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -162,17 +163,34 @@ func probeOAuthMetadata(ctx context.Context, client *http.Client, baseURL string
 		return fmt.Errorf("parse JSON: %w", err)
 	}
 
-	if meta.Issuer == "" {
-		return errors.New("oauth metadata missing required field: issuer")
+	if !strings.HasPrefix(meta.Issuer, "https://") && !strings.HasPrefix(meta.Issuer, "http://") {
+		return fmt.Errorf("oauth metadata issuer is not a URL: %q", meta.Issuer)
 	}
-	if meta.AuthorizationEndpoint == "" {
-		return errors.New("oauth metadata missing required field: authorization_endpoint")
+	if !strings.HasPrefix(meta.AuthorizationEndpoint, "https://") && !strings.HasPrefix(meta.AuthorizationEndpoint, "http://") {
+		return fmt.Errorf("oauth metadata authorization_endpoint is not a URL: %q", meta.AuthorizationEndpoint)
 	}
-	if meta.TokenEndpoint == "" {
-		return errors.New("oauth metadata missing required field: token_endpoint")
+	if !strings.HasPrefix(meta.TokenEndpoint, "https://") && !strings.HasPrefix(meta.TokenEndpoint, "http://") {
+		return fmt.Errorf("oauth metadata token_endpoint is not a URL: %q", meta.TokenEndpoint)
 	}
 
 	return nil
+}
+
+// isFloodWaitMsg reports whether the string contains a Telegram FLOOD_WAIT signal.
+func isFloodWaitMsg(s string) bool {
+	return strings.Contains(s, "FLOOD_WAIT_") || strings.Contains(s, "FLOOD_PREMIUM_WAIT_")
+}
+
+// isFloodWaitContent reports whether any content item's text field contains a
+// Telegram FLOOD_WAIT signal. Only called when isError=true so we do not
+// false-positive on user message content that happens to contain the substring.
+func isFloodWaitContent(content []map[string]any) bool {
+	for _, c := range content {
+		if text, ok := c["text"].(string); ok && isFloodWaitMsg(text) {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonRPCRequest is the JSON-RPC 2.0 request body sent to the MCP endpoint.
@@ -257,18 +275,13 @@ func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, be
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	// Check for flood-wait before parsing, since the substring may appear
-	// anywhere in the response text including inside error messages.
-	floodWait := bytes.Contains(respBytes, []byte("FLOOD_WAIT_")) ||
-		bytes.Contains(respBytes, []byte("FLOOD_PREMIUM_WAIT_"))
-
 	var rpcResp jsonRPCResponse
 	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
 		return nil, fmt.Errorf("parse JSON-RPC response: %w", err)
 	}
 
 	if rpcResp.Error != nil {
-		if floodWait {
+		if isFloodWaitMsg(rpcResp.Error.Message) {
 			return &probeMCPToolResult{floodWait: true},
 				fmt.Errorf("MCP JSON-RPC error (flood_wait): code=%d message=%s", rpcResp.Error.Code, rpcResp.Error.Message)
 		}
@@ -280,7 +293,7 @@ func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, be
 	}
 
 	if rpcResp.Result.IsError {
-		if floodWait {
+		if isFloodWaitContent(rpcResp.Result.Content) {
 			return &probeMCPToolResult{floodWait: true},
 				errors.New("MCP tool returned isError=true (flood_wait)")
 		}
@@ -289,13 +302,6 @@ func probeMCPTool(ctx context.Context, client *http.Client, baseURL, mcpPath, be
 
 	if rpcResp.Result.Content == nil {
 		return nil, errors.New("MCP tool result has nil content")
-	}
-
-	if floodWait {
-		// Content was non-nil and isError was false, but the response body
-		// still mentions a flood-wait condition somewhere; treat as failure.
-		return &probeMCPToolResult{floodWait: true},
-			errors.New("MCP response contains FLOOD_WAIT signal")
 	}
 
 	return &probeMCPToolResult{floodWait: false}, nil
@@ -400,10 +406,9 @@ func main() {
 		pusher := push.New(cfg.pushgateway, "mctl_telegram_canary").Gatherer(met.registry)
 		if pushErr := pusher.Push(); pushErr != nil {
 			slog.Error("pushgateway push failed", "err", pushErr)
-			// Do not override the exit code from the probe result.
-		} else {
-			slog.Info("metrics pushed to pushgateway", "url", cfg.pushgateway)
+			os.Exit(1)
 		}
+		slog.Info("metrics pushed to pushgateway", "url", cfg.pushgateway)
 		if !ok {
 			os.Exit(1)
 		}

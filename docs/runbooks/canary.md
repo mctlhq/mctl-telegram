@@ -41,9 +41,9 @@ failure pushes `0` and increments
   broken, or TLS cert expired. Cross-check with
   `mctl_telegram_up`-style readiness metrics for the server.
 - **`list_dialogs`** — bearer token rotated or expired; MCP layer is
-  unhealthy; `FLOOD_WAIT_*` from Telegram (the canary reports
-  `floodWait=true` in its result and a non-zero counter increment for
-  the `flood_wait` reason).
+  unhealthy; `FLOOD_WAIT_*` from Telegram (the canary logs
+  `flood_wait=true` in its slog output and increments
+  `mctl_telegram_canary_step_failure_total{step="list_dialogs"}`).
 - **`get_unread_messages`** — the test peer was deleted or
   re-permissioned; usually not user-facing, can be hidden by setting
   `CANARY_PROBE_UNREAD=false` on the CronJob while investigating.
