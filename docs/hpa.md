@@ -103,22 +103,27 @@ The mctl-gitops kustomize base for this adapter configuration lives under
 
 ## Alerts
 
-Add the following PrometheusRule to alert on sustained pool-full conditions:
+Alert rules are defined in `deploy/alerts/mctl-telegram.rules.yaml` as a
+`monitoring.coreos.com/v1` `PrometheusRule` manifest. The manifest covers
+three alerts:
 
-```yaml
-- alert: MctlTelegramPoolNearCapacity
-  expr: |
-    mctl_telegram_client_pool_size / mctl_telegram_pool_capacity > 0.85
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "mctl-telegram session pool above 85% capacity"
-    description: >
-      Pod {{ $labels.pod }} is at {{ $value | humanizePercentage }} of its
-      TELEGRAM_MAX_SESSIONS cap. Consider increasing the replica count or
-      raising TELEGRAM_MAX_SESSIONS if headroom permits.
+- **MctlTelegramPoolNearCapacity** (warning at >85%, critical at >95%) — fires
+  when the session pool fills up and the cap is positive.
+- **MctlTelegramFloodWaitSpike** (warning at >0.5 events/s, critical at >2
+  events/s) — fires on sustained Telegram rate-limit pressure.
+- **MctlTelegramOAuthPendingStuck** (warning) — fires when more than 100
+  OAuth authorization flows remain in-flight for 15 minutes or longer.
+
+To deploy, apply the manifest to the cluster:
+
 ```
+kubectl apply -f deploy/alerts/mctl-telegram.rules.yaml
+```
+
+Alternatively, mirror it to `mctl-gitops` under
+`platform-gitops/infra-components/observability/vm-rules/` (where
+`mctl-telegram-alerts.yaml` already lives). The VictoriaMetrics operator
+auto-converts the `PrometheusRule` to a `VMRule` on apply.
 
 ## Notes
 
@@ -127,13 +132,13 @@ Add the following PrometheusRule to alert on sustained pool-full conditions:
   values in that case and the HPA target will not trigger — which is intentional.
   Enable the cap explicitly before enabling HPA.
 
-- The FloodWait counter `mctl_telegram_flood_wait_events_total` can be used to
-  alert on Telegram rate-limit pressure independently of session count.
+- The FloodWait counter `mctl_telegram_flood_wait_events_total` is covered by
+  the `MctlTelegramFloodWaitSpike` alert defined in
+  `deploy/alerts/mctl-telegram.rules.yaml`.
 
-- `mctl_oauth_pending_auth_size` tracks the number of in-flight OAuth
-  authorization flows. A sustained non-zero value with no corresponding traffic
-  suggests abandoned flows or an uptick in bot-scan traffic against
-  `/oauth/authorize`.
+- `mctl_oauth_pending_auth_size` is covered by the
+  `MctlTelegramOAuthPendingStuck` alert defined in
+  `deploy/alerts/mctl-telegram.rules.yaml`.
 
 ## Grafana dashboard
 

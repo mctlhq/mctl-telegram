@@ -1,0 +1,88 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mctl-telegram
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: mctl-telegram.rules
+      rules:
+        - alert: MctlTelegramPoolNearCapacity
+          expr: |
+            (mctl_telegram_client_pool_size / mctl_telegram_pool_capacity) > 0.85
+            and (mctl_telegram_client_pool_size / mctl_telegram_pool_capacity) < 0.95
+            and mctl_telegram_pool_capacity > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram session pool above 85% capacity"
+            description: >
+              The session pool utilization is at {{ $value | humanizePercentage }}.
+              Consider increasing the replica count or raising TELEGRAM_MAX_SESSIONS
+              if headroom permits.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+
+        - alert: MctlTelegramPoolNearCapacity
+          expr: |
+            (mctl_telegram_client_pool_size / mctl_telegram_pool_capacity) > 0.95
+            and mctl_telegram_pool_capacity > 0
+          for: 2m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram session pool above 95% capacity"
+            description: >
+              The session pool utilization is at {{ $value | humanizePercentage }}.
+              The pool is critically full. Scale out immediately or raise
+              TELEGRAM_MAX_SESSIONS if headroom permits.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+
+        - alert: MctlTelegramFloodWaitSpike
+          expr: |
+            sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 0.5
+            and sum(rate(mctl_telegram_flood_wait_events_total[5m])) < 2
+          for: 2m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram flood-wait rate above 0.5 events/s"
+            description: >
+              Telegram flood-wait events are arriving at {{ $value | humanize }} per
+              second. This indicates rate-limit pressure from Telegram. Reduce
+              request fan-out or add backoff logic.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+
+        - alert: MctlTelegramFloodWaitSpike
+          expr: sum(rate(mctl_telegram_flood_wait_events_total[5m])) > 2
+          for: 2m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram flood-wait rate above 2 events/s"
+            description: >
+              Telegram flood-wait events are arriving at {{ $value | humanize }} per
+              second. Heavy rate-limit pressure detected. Reduce request fan-out or
+              add backoff logic immediately.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
+
+        - alert: MctlTelegramOAuthPendingStuck
+          expr: mctl_oauth_pending_auth_size > 100
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram OAuth pending authorizations above 100"
+            description: >
+              There are {{ $value | humanize }} in-flight OAuth authorization flows. A sustained
+              high value with no corresponding traffic suggests abandoned flows or
+              bot-scan traffic against /oauth/authorize.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/hpa.md#alerts"
