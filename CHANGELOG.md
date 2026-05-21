@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.23.1](https://github.com/mctlhq/mctl-telegram/compare/0.23.0...0.23.1) (2026-05-21)
+
+
+### Bug Fixes
+
+* **canary:** address P3 review findings ([f5e6cac](https://github.com/mctlhq/mctl-telegram/commit/f5e6cac0cba4c7c7a19c4c4e889e95e46511008a))
+* **canary:** initialize MCP session before tools/call ([11b2795](https://github.com/mctlhq/mctl-telegram/commit/11b2795e6a37417706af354724df0ed3a7f869d1))
+* **canary:** initialize MCP session before tools/call ([5f0ca47](https://github.com/mctlhq/mctl-telegram/commit/5f0ca47ad3a9fbf3966282626667a1f06765e07a))
+* **web:** remove accent color picker from navbar ([1e13883](https://github.com/mctlhq/mctl-telegram/commit/1e13883285d130b8749e68b2b9668e10bc48c702))
+
 ## [0.23.0](https://github.com/mctlhq/mctl-telegram/compare/0.22.0...0.23.0) (2026-05-20)
 
 
