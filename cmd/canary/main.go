@@ -257,14 +257,17 @@ func initMCPSession(ctx context.Context, client *http.Client, baseURL, mcpPath, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", fmt.Errorf("initialize returned HTTP %d", resp.StatusCode)
 	}
 
 	sessionID := resp.Header.Get("Mcp-Session-Id")
 	if sessionID == "" {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", errors.New("server did not return Mcp-Session-Id header")
 	}
 
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return sessionID, nil
 }
 

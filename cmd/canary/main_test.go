@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/client_golang/prometheus/push"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // validMCPResponse returns a well-formed JSON-RPC 2.0 success response for a
@@ -124,6 +125,16 @@ func TestProbeOAuthMetadataNon200(t *testing.T) {
 
 func TestInitMCPSessionSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req jsonRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method != "initialize" {
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Mcp-Session-Id", "test-session-123")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0",
@@ -300,7 +311,7 @@ func newFakeServer(t *testing.T, oauthHandler http.HandlerFunc, mcpHandler http.
 			return
 		}
 		// Re-inject the already-read body for the delegate handler.
-		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		mcpHandler(w, r)
 	})
 	return httptest.NewServer(mux)
