@@ -180,7 +180,11 @@ func main() {
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
 	}
 
-	provider := selectProvider(cfg, store)
+	provider, err := selectProvider(cfg, store)
+	if err != nil {
+		slog.Error("invalid AUTH_MODE; refusing to start", "err", err)
+		os.Exit(1)
+	}
 
 	// Session management dashboard — only mounted in local-jwt mode alongside
 	// the self-connect wizard. Requires auth so only the session owner can
@@ -338,7 +342,7 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 //     trust JWTs signed by api.mctl.ai via the shared OAUTH_JWT_SECRET.
 //     "shared-hmac" is accepted as an alias for the legacy mode for the
 //     duration of one minor release.
-func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
+func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "local-jwt":
 		// Use the canonicalised issuer (trailing slash stripped) so the
@@ -355,10 +359,9 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			AudienceRequired: cfg.OAUTHJWTAudReq,
 		})
 		if err != nil {
-			slog.Error("local-jwt init failed; refusing to start", "err", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("local-jwt init failed: %w", err)
 		}
-		return p
+		return p, nil
 	case "shared-hmac", "shared-hmac-legacy":
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
@@ -367,15 +370,13 @@ func selectProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			AudienceRequired: cfg.OAUTHJWTAudReq,
 		})
 		if err != nil {
-			slog.Error("shared-hmac init failed; refusing to start", "err", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("shared-hmac init failed: %w", err)
 		}
-		return p
+		return p, nil
 	case "local-dev":
-		return localdev.New(store, cfg.OperatorLogin)
+		return localdev.New(store, cfg.OperatorLogin), nil
 	default:
-		slog.Warn("unknown AUTH_MODE, falling back to local-dev", "auth_mode", cfg.AuthMode)
-		return localdev.New(store, cfg.OperatorLogin)
+		return nil, fmt.Errorf("unknown AUTH_MODE %q: must be one of local-jwt, shared-hmac, local-dev", cfg.AuthMode)
 	}
 }
 
@@ -535,11 +536,10 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		}
 		return p
 	default:
-		// AUTH_MODE=local-dev (or unknown → falls through to localdev in
-		// selectProvider). The whole server is already in developer-bypass
-		// mode in this branch — using localdev on /bridge as well keeps the
-		// local CLI workflow functional without re-introducing a
-		// production fail-open.
+		// AUTH_MODE=local-dev. Unknown modes are rejected earlier by
+		// selectProvider, so this branch only runs in developer-bypass mode.
+		// Using localdev on /bridge as well keeps the local CLI workflow
+		// functional without re-introducing a production fail-open.
 		return localdev.New(store, cfg.OperatorLogin)
 	}
 }
