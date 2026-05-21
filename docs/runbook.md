@@ -511,8 +511,9 @@ Open a postmortem if:
 - No dedicated alert rule is wired by default. Monitor this metric during
   traffic incidents or bot-scan investigations.
 - `mctl_rate_limit_events_total` counts HTTP 429 responses, labeled by
-  `identity_kind`: `user` (authenticated, rate-limited by `user_id`) or
-  `anon` (unauthenticated, rate-limited by IP).
+  `identity_kind`: `user` (authenticated, rate-limited per `user_id`) or
+  `anon` (unauthenticated — all such requests share a single global token
+  bucket, not per-IP buckets).
 - A spike in `anon` rate-limit events typically indicates a bot scan or DDoS
   attempt. A spike in `user` events indicates one or more authenticated
   callers exceeding per-user request budgets.
