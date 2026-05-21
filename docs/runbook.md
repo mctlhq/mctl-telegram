@@ -167,6 +167,16 @@ kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
   | grep -i flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
 ```
 
+> **Caveat — logs are incomplete for warning-level spikes.** The
+> `mctl_telegram_flood_wait_events_total` metric is incremented on *every*
+> `FLOOD_WAIT` inside `borrowWithRetry()`, but `borrowWithRetry()` itself emits
+> no log line — a `flood_wait`-bearing entry only appears when retries are
+> exhausted and the tool returns an error. Warning-level spikes that self-retry
+> successfully therefore produce little or no log output. Use the metric (with
+> its `tool` label) as the authoritative detection and per-tool signal; treat
+> the log grep above as best-effort per-user attribution for error-level
+> (exhausted-retry) events only.
+
 ### Mitigation
 
 1. **Warning severity.** The `borrowWithRetry()` function retries up to 3
@@ -377,11 +387,13 @@ sum(rate(mctl_auth_failures_total{reason=~"jwt_invalid_signature|jwt_expired"}[5
    structured slog output) and fix the client's `Authorization` header
    construction.
 
-5. **Sustained high failure rates** that cause 401 responses at scale will
-   not directly count against the tool-availability SLI (unauthenticated
-   requests are rejected before a tool is invoked) but will affect the OAuth
-   endpoint availability SLO if the failures originate from the token
-   endpoint. Monitor [SloBurnRate](#sloburnrate) in parallel.
+5. **Sustained high failure rates** that cause 401 responses at scale do not
+   count against any availability SLO: the tool-availability SLI excludes
+   them (unauthenticated requests are rejected before a tool is invoked), and
+   the OAuth burn-rate rules count only `status_code=~"5.."`, so authn-driven
+   401s from the token endpoint never burn that budget either. Treat a 401
+   spike as a client-misconfiguration or attack signal, not an SLO event;
+   investigate the failure reason directly rather than waiting on burn alerts.
 
 ### Escalation
 
@@ -511,7 +523,8 @@ Open a postmortem if:
 - No dedicated alert rule is wired by default. Monitor this metric during
   traffic incidents or bot-scan investigations.
 - `mctl_rate_limit_events_total` counts HTTP 429 responses, labeled by
-  `identity_kind`: `user` (authenticated, rate-limited per `user_id`) or
+  `identity_kind`: `user` (authenticated — bucketed by `identityKey()`, which
+  prefers the JWT subject, then the GitHub login, then the numeric user ID) or
   `anon` (unauthenticated — all such requests share a single global token
   bucket, not per-IP buckets).
 - A spike in `anon` rate-limit events typically indicates a bot scan or DDoS
@@ -590,9 +603,12 @@ over the same window.
 
 - Escalate to the platform/security team for any `anon` spike that persists
   for more than 10 minutes and cannot be attributed to a known load test.
-- Escalate to the mctl-telegram on-call if the rate-limit spike is causing
-  tool-availability SLO burn (authenticated users being incorrectly
-  rate-limited).
+- Escalate to the mctl-telegram on-call if legitimate authenticated users are
+  being incorrectly rate-limited (confirmed via support reports or a `user`
+  spike with no matching abuse pattern). Note: HTTP 429s are emitted by the
+  pre-tool middleware and never increment `mctl_tool_invocations_total`, so a
+  rate-limit spike does not register as tool-availability SLO burn — judge
+  user impact from the 429 rate and reports, not the burn-rate alerts.
 
 ### Postmortem trigger
 
