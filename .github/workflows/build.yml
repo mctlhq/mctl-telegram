@@ -29,6 +29,22 @@ jobs:
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
 
+  promtool-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: install prometheus
+        run: |
+          PROM_VERSION=2.52.0
+          curl -sSfL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+      - name: check alert rules
+        run: |
+          # The manifest is a PrometheusRule CRD; promtool expects a bare rules
+          # file (top-level groups:), so extract .spec before validating.
+          yq '.spec' deploy/alerts/mctl-telegram.rules.yaml > /tmp/rules.yaml
+          promtool check rules /tmp/rules.yaml
+
   lint-grafana-json:
     runs-on: ubuntu-latest
     steps:

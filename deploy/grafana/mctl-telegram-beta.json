@@ -523,6 +523,244 @@
       ],
       "title": "Rate limit events by identity kind",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
+      "id": 20,
+      "title": "SLO",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "28-day rolling MCP tool availability SLI. Green >= 99.5% (target), yellow >= 99.0%, red below 99.0%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.990},
+              {"color": "green", "value": 0.995}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 55},
+      "id": 21,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["last"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(mctl_tool_invocations_total{status=\"ok\"}[28d])) / sum(rate(mctl_tool_invocations_total[28d]))",
+          "legendFormat": "tool availability",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool availability SLI (28d)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "28-day rolling OAuth endpoint availability SLI (/oauth/token and /oauth/telegram/callback). Green >= 99.9% (target), yellow >= 99.5%, red below 99.5%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.995},
+              {"color": "green", "value": 0.999}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 55},
+      "id": 22,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["last"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "1 - ((sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) or on() vector(0)) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])))",
+          "legendFormat": "OAuth availability",
+          "refId": "A"
+        }
+      ],
+      "title": "OAuth availability SLI (28d)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Remaining MCP tool availability error budget in minutes over the 30-day window (SLO 99.5%, budget 216 min). A value above 0 means budget remains; below 0 means the budget is exhausted.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 60},
+              {"color": "green", "value": 108}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 55},
+      "id": 23,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["last"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "(0.005 * 30 * 24 * 60) - ((sum(rate(mctl_tool_invocations_total{status=\"error\"}[28d])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[28d])) * 30 * 24 * 60)",
+          "legendFormat": "tool budget remaining",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool availability budget remaining (min)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Remaining OAuth availability error budget in minutes over the 30-day window (SLO 99.9%, budget 43 min).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 10},
+              {"color": "green", "value": 21}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 55},
+      "id": 24,
+      "options": {
+        "reduceOptions": {
+          "calcs": ["last"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "(0.001 * 30 * 24 * 60) - ((sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\",status_code=~\"5..\"}[28d])) or on() vector(0)) / sum(rate(mctl_http_requests_total{route=~\"/oauth/token|/oauth/telegram/callback\"}[28d])) * 30 * 24 * 60)",
+          "legendFormat": "OAuth budget remaining",
+          "refId": "A"
+        }
+      ],
+      "title": "OAuth availability budget remaining (min)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "MCP tool availability burn rate for 1h and 6h windows. Reference lines at 14.4x (fast-burn page threshold) and 6x (slow-burn ticket threshold). A burn rate of 1.0 means the SLO is just meeting its target. See docs/slo.md.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "fast-burn threshold (14.4x)"},
+            "properties": [
+              {"id": "custom.lineStyle", "value": {"fill": "dash"}},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "slow-burn threshold (6x)"},
+            "properties": [
+              {"id": "custom.lineStyle", "value": {"fill": "dash"}},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 59},
+      "id": 25,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "((sum(rate(mctl_tool_invocations_total{status=\"error\"}[1h])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[1h]))) / 0.005",
+          "legendFormat": "burn rate 1h",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "((sum(rate(mctl_tool_invocations_total{status=\"error\"}[6h])) or on() vector(0)) / sum(rate(mctl_tool_invocations_total[6h]))) / 0.005",
+          "legendFormat": "burn rate 6h",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "vector(14.4)",
+          "legendFormat": "fast-burn threshold (14.4x)",
+          "refId": "C"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "vector(6)",
+          "legendFormat": "slow-burn threshold (6x)",
+          "refId": "D"
+        }
+      ],
+      "title": "Tool availability burn rate (1h and 6h)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

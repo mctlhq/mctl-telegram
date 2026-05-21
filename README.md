@@ -137,6 +137,8 @@ docker compose up -d
 
 Services started: `app` (mctl-telegram on port 8080) and `db` (Postgres 16).
 
+For Beta-tier service-level objectives, error-budget policy, and burn-rate alert definitions, see [docs/slo.md](docs/slo.md).
+
 ## Connecting to Claude.ai
 
 1. Start mctl-telegram and confirm the well-known is reachable:
