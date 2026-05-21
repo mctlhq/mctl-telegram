@@ -1,0 +1,32 @@
+services:
+  app:
+    image: ghcr.io/mctlhq/mctl-telegram:latest
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://mctl:${POSTGRES_PASSWORD:-mctl}@db:5432/mctl_telegram?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mctl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mctl}
+      POSTGRES_DB: mctl_telegram
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mctl -d mctl_telegram"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  db_data:
