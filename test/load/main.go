@@ -120,10 +120,17 @@ type peakMetrics struct {
 	rssBytes        float64
 	goroutines      float64
 	floodWaitByTool map[string]float64
+	// floodWaitBaseline records the counter value on the first scrape per
+	// tool so buildReport can report the run-local delta rather than the
+	// server-lifetime cumulative total (the metric is a monotonic counter).
+	floodWaitBaseline map[string]float64
 }
 
 func newPeakMetrics() *peakMetrics {
-	return &peakMetrics{floodWaitByTool: map[string]float64{}}
+	return &peakMetrics{
+		floodWaitByTool:   map[string]float64{},
+		floodWaitBaseline: map[string]float64{},
+	}
 }
 
 func (pm *peakMetrics) update(name string, labels map[string]string, value float64) {
@@ -148,6 +155,9 @@ func (pm *peakMetrics) update(name string, labels map[string]string, value float
 		}
 	case "mctl_telegram_flood_wait_events_total":
 		if tool := labels["tool"]; tool != "" {
+			if _, seen := pm.floodWaitBaseline[tool]; !seen {
+				pm.floodWaitBaseline[tool] = value
+			}
 			if value > pm.floodWaitByTool[tool] {
 				pm.floodWaitByTool[tool] = value
 			}
@@ -230,6 +240,13 @@ func callTool(ctx context.Context, client *http.Client, target, token string, re
 	}
 	if rpcResp.Error != nil {
 		return nil, latency, fmt.Errorf("rpc error: %s", rpcResp.Error.Message)
+	}
+	// MCP tools report application-level failures (FLOOD_WAIT, invalid peer,
+	// auth rejection) as a successful JSON-RPC response with isError=true.
+	// Treat those as errors so they don't contaminate latency percentiles.
+	var toolRes mcpToolResult
+	if json.Unmarshal(rpcResp.Result, &toolRes) == nil && toolRes.IsError {
+		return nil, latency, fmt.Errorf("tool error (isError=true)")
 	}
 	return rpcResp.Result, latency, nil
 }
@@ -395,6 +412,12 @@ func scrapeMetrics(ctx context.Context, client *http.Client, target string, pm *
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// e.g. 403 when the load-test host is outside METRICS_ALLOW_CIDR.
+		// Warn instead of silently leaving every peak at zero.
+		fmt.Fprintf(os.Stderr, "warning: /metrics returned HTTP %d; peak metrics will be incomplete\n", resp.StatusCode)
+		return
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return
@@ -450,9 +473,15 @@ type loadTestResults struct {
 
 func buildReport(s *resultStore, pm *peakMetrics, target string, users int, ramp, hold time.Duration, peer string) loadTestResults {
 	pm.mu.Lock()
+	// Report the run-local delta: peak observed minus the first-scrape
+	// baseline, since the underlying metric is a monotonic counter.
 	floodCopy := make(map[string]float64, len(pm.floodWaitByTool))
 	for k, v := range pm.floodWaitByTool {
-		floodCopy[k] = v
+		delta := v - pm.floodWaitBaseline[k]
+		if delta < 0 {
+			delta = 0
+		}
+		floodCopy[k] = delta
 	}
 	peakPoolSize := pm.poolSize
 	peakSessions := pm.sessionsActive
