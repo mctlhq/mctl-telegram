@@ -58,8 +58,11 @@ type Registry struct {
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
-// round-trips.
-var toolDurationBuckets = []float64{.05, .1, .25, .5, 1, 2.5, 5, 10}
+// round-trips. The explicit 2 and 4 boundaries align with the latency SLO
+// thresholds in docs/slo.md (read p95 < 2s, destructive p95 < 4s) so the
+// burn-rate quantiles read directly off a bucket edge instead of being
+// linearly interpolated between 1s and 2.5s.
+var toolDurationBuckets = []float64{.05, .1, .25, .5, 1, 2, 2.5, 4, 5, 10}
 
 // SetOAuthPendingAuthSize sets the mctl_oauth_pending_auth_size gauge to n.
 // This method satisfies the oauth.metricsIface interface so a *Registry can be
