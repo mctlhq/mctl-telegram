@@ -49,6 +49,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"What is NOT stored",
 		"Self-service controls",
 		"audit/verify",
+		"privacy@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
 		"accent-swatch",
