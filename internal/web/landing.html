@@ -89,6 +89,10 @@
     width: 18px; height: 18px;
     stroke-width: 1.75;
   }
+  @media (prefers-reduced-motion: reduce) {
+    .use-card { transition: border-color .2s; }
+    .use-card:hover { transform: none; }
+  }
   .use-card h3 {
     font-family: var(--font-display), system-ui, sans-serif;
     font-size: 15px;
@@ -434,14 +438,18 @@
   if (copyBtn) {
     copyBtn.addEventListener('click', function () {
       var url = copyBtn.dataset.url;
+      var label = copyBtn.textContent;
       if (navigator.clipboard) {
         navigator.clipboard.writeText(url).then(function () {
           copyBtn.textContent = 'Copied!';
-          setTimeout(function () { copyBtn.textContent = 'Copy MCP URL'; }, 2000);
+          setTimeout(function () { copyBtn.textContent = label; }, 2000);
+        }).catch(function () {
+          copyBtn.textContent = url;
+          setTimeout(function () { copyBtn.textContent = label; }, 4000);
         });
       } else {
         copyBtn.textContent = url;
-        setTimeout(function () { copyBtn.textContent = 'Copy MCP URL'; }, 4000);
+        setTimeout(function () { copyBtn.textContent = label; }, 4000);
       }
     });
   }

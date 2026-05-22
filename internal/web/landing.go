@@ -16,12 +16,27 @@ var landingHTML string
 //go:embed favicon.svg
 var faviconSVG []byte
 
+//go:embed og.png
+var ogPNG []byte
+
 // Favicon returns the SVG favicon at /favicon.svg and /favicon.ico.
 func Favicon() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write(faviconSVG)
+	}
+}
+
+// OGImage serves the social-share preview image referenced by the og:image and
+// twitter:image meta tags at /og.png. PNG rather than SVG: major crawlers
+// (Twitter/X, Facebook, LinkedIn, Slack) do not rasterize SVG for link
+// previews, so an SVG og:image renders as a broken image everywhere.
+func OGImage() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(ogPNG)
 	}
 }
 
@@ -45,14 +60,24 @@ type landingData struct {
 // auth model this is the same as publicBaseURL — mctl-telegram is its own
 // authorization server. The legacy "shared-hmac" mode points it at
 // https://api.mctl.ai; main.go decides which one to pass in.
-func Landing(publicBaseURL, mcpPath, authServer string) http.HandlerFunc {
+//
+// showManage gates the "manage" nav/footer link: /telegram/connect/manage is
+// only mounted in local-jwt mode, so main.go passes false for shared-hmac
+// deployments to avoid a 404.
+func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.HandlerFunc {
 	base := strings.TrimRight(publicBaseURL, "/")
 	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
 	if authServer == "" {
 		authServer = base
 	}
 	data := landingData{
-		Data:         ui.Data{Title: "mctl-telegram — Your Telegram, inside your AI assistant", NavActive: "home", PublicBaseURL: base},
+		Data: ui.Data{
+			Title:         "mctl-telegram — Your Telegram, inside your AI assistant",
+			Description:   "Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft and review replies, and search your full history — no extra apps, encrypted and revocable any time.",
+			NavActive:     "home",
+			PublicBaseURL: base,
+			ShowManage:    showManage,
+		},
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,
