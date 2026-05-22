@@ -87,6 +87,21 @@ spec:
               bot-scan traffic against /oauth/authorize.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramoauthpendingstuck"
 
+        - alert: MctlBridgeDaemonsFlapping
+          expr: changes(mctl_bridge_active_daemons[10m]) > 20
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram Local Bridge daemons flapping"
+            description: >
+              The mctl_bridge_active_daemons gauge changed more than 20 times in the
+              last 10 minutes, indicating rapid connect/disconnect cycling. This may
+              signal a looping reconnect, a token rotation problem, or network
+              instability on a daemon host.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
+
     - name: mctl-telegram-tool-availability
       rules:
         - alert: MctlToolAvailabilityFastBurn

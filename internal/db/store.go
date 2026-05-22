@@ -758,6 +758,7 @@ type AuditEntry struct {
 	PeerRedacted  string    `json:"peer_redacted,omitempty"`
 	Status        string    `json:"status"`
 	ErrorRedacted string    `json:"error,omitempty"`
+	CallPath      string    `json:"call_path,omitempty"`
 }
 
 // ListAuditFor returns the user's most recent audit-log rows, newest first.
@@ -780,14 +781,14 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	var err error
 	if before.IsZero() {
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT created_at, tool_name, peer_redacted, status, error FROM audit_logs
+			`SELECT created_at, tool_name, peer_redacted, status, error, call_path FROM audit_logs
 			 WHERE user_id = $1
 			 ORDER BY id DESC LIMIT $2`,
 			userID, limit,
 		)
 	} else {
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT created_at, tool_name, peer_redacted, status, error FROM audit_logs
+			`SELECT created_at, tool_name, peer_redacted, status, error, call_path FROM audit_logs
 			 WHERE user_id = $1 AND created_at < $2
 			 ORDER BY id DESC LIMIT $3`,
 			userID, before, limit,
@@ -800,13 +801,14 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	out := make([]AuditEntry, 0, limit)
 	for rows.Next() {
 		var (
-			ts     time.Time
-			tool   string
-			peer   sql.NullString
-			status string
-			errCol sql.NullString
+			ts       time.Time
+			tool     string
+			peer     sql.NullString
+			status   string
+			errCol   sql.NullString
+			callPath sql.NullString
 		)
-		if err := rows.Scan(&ts, &tool, &peer, &status, &errCol); err != nil {
+		if err := rows.Scan(&ts, &tool, &peer, &status, &errCol, &callPath); err != nil {
 			return nil, fmt.Errorf("scan audit: %w", err)
 		}
 		out = append(out, AuditEntry{
@@ -815,6 +817,7 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 			PeerRedacted:  peer.String,
 			Status:        status,
 			ErrorRedacted: errCol.String,
+			CallPath:      callPath.String,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -869,6 +872,13 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // audit must never block a user request — but a write that fails leaves a
 // gap in the per-user hash chain that VerifyAuditChain will report.
 //
+// callPath distinguishes relay-forwarded calls ("local") from server-side
+// hosted calls (""). Every M4+ row stores a non-NULL call_path (the empty
+// string for hosted calls) so it is distinguishable from pre-M4 rows, whose
+// call_path is NULL. Both the stored value and its hash contribution are the
+// raw string — see hashAuditEntry, which only folds call_path into the hash
+// when it is non-NULL.
+//
 // Hash-chain semantics (M3.1):
 //   - prev_hash = the entry_hash of this user's most recent prior row, or
 //     32 bytes of zero when this is the first row for the user.
@@ -880,7 +890,7 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // serialise. SQLite uses BEGIN IMMEDIATE which acquires a write lock for
 // the same effect on a single-writer connection. Without this, two
 // concurrent writes would race on prev_hash and break the chain.
-func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg string) {
+func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath string) {
 	createdAt := time.Now().UTC()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -904,12 +914,12 @@ func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacte
 	if len(prev) == 0 {
 		prev = make([]byte, sha256.Size)
 	}
-	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, createdAt)
+	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt)
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry,
+		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
 	); err != nil {
 		return
 	}
@@ -940,7 +950,7 @@ type AuditChainVerification struct {
 // pre-M3.1 gap visible to the user.
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash
+		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path
 		 FROM audit_logs
 		 WHERE user_id = $1
 		 ORDER BY id ASC`,
@@ -963,8 +973,9 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 			createdAt time.Time
 			prevHash  []byte
 			entryHash []byte
+			callPath  sql.NullString
 		)
-		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash); err != nil {
+		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash, &callPath); err != nil {
 			return AuditChainVerification{}, fmt.Errorf("scan audit: %w", err)
 		}
 		if entryHash == nil || prevHash == nil {
@@ -986,7 +997,7 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, createdAt)
+		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt)
 		if !bytesEqual(recomputed, entryHash) {
 			return AuditChainVerification{
 				OK:         false,

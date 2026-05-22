@@ -16,11 +16,11 @@ func TestListAuditFor_FiltersByUserAndOrdersNewestFirst(t *testing.T) {
 
 	// Two rows for alice, one for bob; insert order matters for the
 	// "newest first" assertion.
-	s.LogToolCall(ctx, alice, "list_dialogs", "", "ok", "")
+	s.LogToolCall(ctx, alice, "list_dialogs", "", "ok", "", "")
 	time.Sleep(5 * time.Millisecond)
-	s.LogToolCall(ctx, alice, "get_messages", "user:hash", "ok", "")
+	s.LogToolCall(ctx, alice, "get_messages", "user:hash", "ok", "", "")
 	time.Sleep(5 * time.Millisecond)
-	s.LogToolCall(ctx, bob, "list_dialogs", "", "ok", "")
+	s.LogToolCall(ctx, bob, "list_dialogs", "", "ok", "", "")
 
 	got, err := s.ListAuditFor(ctx, alice, 50, time.Time{})
 	if err != nil {
@@ -43,8 +43,8 @@ func TestListAuditFor_CrossTenantIsolation(t *testing.T) {
 	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
 	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
 
-	s.LogToolCall(ctx, alice, "list_dialogs", "", "ok", "")
-	s.LogToolCall(ctx, bob, "list_dialogs", "", "ok", "")
+	s.LogToolCall(ctx, alice, "list_dialogs", "", "ok", "", "")
+	s.LogToolCall(ctx, bob, "list_dialogs", "", "ok", "", "")
 
 	// alice must NOT see bob's rows.
 	got, err := s.ListAuditFor(ctx, alice, 50, time.Time{})
@@ -61,7 +61,7 @@ func TestListAuditFor_LimitClamp(t *testing.T) {
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "u", "", "test")
 	for i := 0; i < 5; i++ {
-		s.LogToolCall(ctx, uid, "x", "", "ok", "")
+		s.LogToolCall(ctx, uid, "x", "", "ok", "", "")
 	}
 
 	// limit=0 → clamps to 50 (returns all 5)
@@ -122,7 +122,7 @@ func TestSweepAuditLog_ZeroRetentionIsNoop(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "u", "", "test")
-	s.LogToolCall(ctx, uid, "x", "", "ok", "")
+	s.LogToolCall(ctx, uid, "x", "", "ok", "", "")
 	rows, err := s.SweepAuditLog(ctx, 0)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
