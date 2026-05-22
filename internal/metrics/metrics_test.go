@@ -22,6 +22,8 @@ var expectedMetricNames = []string{
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
 	"mctl_sessions_borrow_total",
+	"mctl_bridge_active_daemons",
+	"mctl_bridge_calls_total",
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
@@ -45,6 +47,8 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
 	reg.SessionsBorrowTotal.WithLabelValues("ok").Add(0)
+	reg.BridgeActiveDaemons.Set(0)
+	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
 
 	mfs, err := reg.Prometheus.Gather()
 	if err != nil {

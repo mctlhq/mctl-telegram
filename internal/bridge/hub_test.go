@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 func TestHub_RegisterAndUnregister(t *testing.T) {
@@ -102,4 +105,75 @@ func TestHub_DeliverWithoutPendingIsNoop(t *testing.T) {
 	h.Register(1)
 	// No pending call with this ID — Deliver should be a no-op, not panic.
 	h.Deliver(1, EncodeResponse("never-issued", nil))
+}
+
+func TestHub_CallOverloadedReturnsError(t *testing.T) {
+	h := NewHub()
+	send := h.Register(42)
+
+	// Drain the send channel so calls don't block on the send select.
+	// We never reply so all calls will be stuck waiting for a response.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for range send {
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Launch maxPendingCalls goroutines that each start a Call; they will block
+	// waiting for a response. The (maxPendingCalls+1)th call must return
+	// ErrDaemonOverloaded immediately.
+	ready := make(chan struct{}, maxPendingCalls)
+	for i := 0; i < maxPendingCalls; i++ {
+		go func(n int) {
+			ready <- struct{}{}
+			// These calls will block until ctx is cancelled.
+			_, _ = h.Call(ctx, 42, EncodeCall(fmt.Sprintf("id-%d", n), "t", nil))
+		}(i)
+	}
+
+	// Wait for all goroutines to have incremented pendingCount.
+	for i := 0; i < maxPendingCalls; i++ {
+		<-ready
+	}
+	// Give goroutines a moment to reach the pending counter increment.
+	time.Sleep(20 * time.Millisecond)
+
+	// The next call must be rejected immediately.
+	_, err := h.Call(ctx, 42, EncodeCall("overload", "t", nil))
+	if !errors.Is(err, ErrDaemonOverloaded) {
+		t.Fatalf("expected ErrDaemonOverloaded when at capacity, got %v", err)
+	}
+
+	// Cancel the context to unblock all pending goroutines, then close send.
+	cancel()
+	h.Unregister(42)
+	<-drainDone
+}
+
+func TestHub_WithMetrics_NoPanicOnRegisterUnregister(t *testing.T) {
+	m := metrics.New()
+	h := NewHub().WithMetrics(m)
+
+	// Register a new user — gauge should go to 1.
+	h.Register(10)
+	// Re-register same user — gauge must stay at 1 (eviction, not add).
+	h.Register(10)
+	// Unregister — gauge should go back to 0.
+	h.Unregister(10)
+
+	// Register and unregister via UnregisterSend.
+	send := h.Register(11)
+	h.UnregisterSend(11, send)
+
+	// Stale UnregisterSend should be a no-op (channel mismatch).
+	h.Register(12)
+	h.UnregisterSend(12, send) // wrong channel; should not decrement
+	h.Unregister(12)
+	// If the gauge double-decremented we'd go negative, but we can't
+	// easily read a prometheus.Gauge value without the dto package here.
+	// The test ensures no panics on all paths.
 }

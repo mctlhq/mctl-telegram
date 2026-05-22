@@ -1095,7 +1095,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	s.enables[esTok] = es
 	s.mu.Unlock()
-	s.store.LogToolCall(r.Context(), uid, "connect:oidc_callback", "", "ok", "")
+	s.store.LogToolCall(r.Context(), uid, "connect:oidc_callback", "", "ok", "", "")
 	if es.isWizardMode() {
 		es.step = stepPermissions
 		renderEnablePermissions(w, enablePermissionsPage{Issuer: s.cfg.Issuer, EnableToken: esTok})

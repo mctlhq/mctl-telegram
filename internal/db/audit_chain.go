@@ -21,7 +21,9 @@ import (
 //  5. status (len-prefixed)
 //  6. error (len-prefixed)
 //  7. created_at unix-nanos BE64
-func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string, createdAt time.Time) []byte {
+//  8. call_path (len-prefixed, appended after errMsg, separated by \x00 semantics
+//     via the length-prefix encoding)
+func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol, callPath string, createdAt time.Time) []byte {
 	h := sha256.New()
 	h.Write(prev)
 	writeBE64(h, uint64(userID))
@@ -30,6 +32,7 @@ func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string
 	writeLenPrefixed(h, []byte(status))
 	writeLenPrefixed(h, []byte(errCol))
 	writeBE64(h, uint64(createdAt.UTC().UnixNano()))
+	writeLenPrefixed(h, []byte(callPath))
 	return h.Sum(nil)
 }
 

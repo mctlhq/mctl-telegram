@@ -91,23 +91,44 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 	env := bridge.EncodeCall(callID, tool, argsJSON)
 	resp, err := s.Hub.Call(ctx, id.UserID, env)
 	if err != nil {
+		if errors.Is(err, bridge.ErrDaemonOverloaded) {
+			if s.Metrics != nil {
+				s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
+			}
+			return toolErr("local-bridge daemon is overloaded — too many in-flight calls, try again shortly"), nil
+		}
 		if errors.Is(err, bridge.ErrNoDaemonConnected) {
 			return toolErr("local-bridge daemon not connected — run `mctl-telegram-local daemon`"), nil
 		}
 		if errors.Is(err, bridge.ErrCallTimeout) {
+			if s.Metrics != nil {
+				s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
+			}
 			return toolErr("local-bridge call timed out — daemon may be unresponsive"), nil
+		}
+		if s.Metrics != nil {
+			s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
 		}
 		return toolErr("local-bridge call: %v", err), nil
 	}
 	switch resp.Type {
 	case bridge.TypeResponse:
+		if s.Metrics != nil {
+			s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "ok").Inc()
+		}
 		if resp.Result == nil {
 			return mcplib.NewToolResultText("null"), nil
 		}
 		return mcplib.NewToolResultText(string(resp.Result)), nil
 	case bridge.TypeError:
+		if s.Metrics != nil {
+			s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
+		}
 		return toolErr("%s", resp.Error), nil
 	default:
+		if s.Metrics != nil {
+			s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
+		}
 		return toolErr("bridge: unexpected response type %q", resp.Type), nil
 	}
 }
@@ -142,7 +163,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "list_dialogs", args)
-				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res), startedAt)
+				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res), startedAt, "local")
 				return res, err2
 			}
 		}
@@ -193,7 +214,7 @@ Empty result means no unread messages match (including: peer has unread but text
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_unread_messages", args)
-				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(stringArg(args, "peer", "")), bridgeResultErr(res), startedAt)
+				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(stringArg(args, "peer", "")), bridgeResultErr(res), startedAt, "local")
 				return res, err2
 			}
 		}
@@ -353,7 +374,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 				if modeErr == nil && accountMode == "local" {
 					res, err2 := s.bridgeCall(ctx, id, "send_message", args)
-					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
+					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
 					return res, err2
 				}
 			}
@@ -417,7 +438,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "get_messages", args)
-				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
+				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
 				return res, err2
 			}
 		}
@@ -563,7 +584,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && mode == "local" {
 				res, err2 := s.bridgeCall(ctx, id, "pin_message", args)
-				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt)
+				s.audit(ctx, id, "pin_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
 				return res, err2
 			}
 		}
@@ -977,7 +998,7 @@ func jsonResult(v any) (*mcplib.CallToolResult, error) {
 	return mcplib.NewToolResultText(string(b)), nil
 }
 
-func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time) {
+func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, callPath ...string) {
 	uid := int64(0)
 	if id != nil {
 		uid = id.UserID
@@ -988,7 +1009,11 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		status = "error"
 		msg = err.Error()
 	}
-	s.Store.LogToolCall(ctx, uid, tool, peer, status, msg)
+	cp := ""
+	if len(callPath) > 0 {
+		cp = callPath[0]
+	}
+	s.Store.LogToolCall(ctx, uid, tool, peer, status, msg, cp)
 	if s.Metrics != nil && !startedAt.IsZero() {
 		elapsed := time.Since(startedAt).Seconds()
 		s.Metrics.ToolInvocationDuration.WithLabelValues(tool).Observe(elapsed)
@@ -1002,6 +1027,9 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	attrs := []any{"tool", tool, "user_id", uid, "status", status}
 	if peer != "" {
 		attrs = append(attrs, "peer", peer)
+	}
+	if cp != "" {
+		attrs = append(attrs, "call_path", cp)
 	}
 	if err != nil {
 		// Resolution failures format the user-supplied peer verbatim

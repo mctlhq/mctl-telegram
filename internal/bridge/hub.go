@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // ErrNoDaemonConnected is returned by Hub.Call when the target user has
@@ -18,24 +21,35 @@ var ErrNoDaemonConnected = errors.New("local-bridge daemon not connected")
 // did not respond within DeadlineCall.
 var ErrCallTimeout = errors.New("local-bridge call timed out")
 
+// ErrDaemonOverloaded is returned by Hub.Call when the daemon already has
+// maxPendingCalls in-flight calls. The MCP surface should translate this
+// into a human-readable error that asks the user to retry.
+var ErrDaemonOverloaded = errors.New("local-bridge daemon overloaded")
+
+// maxPendingCalls is the per-daemon cap on concurrent in-flight calls.
+// When the count reaches this limit, new Hub.Call invocations are
+// rejected with ErrDaemonOverloaded rather than queuing unboundedly.
+const maxPendingCalls = 100
+
 // daemonConn is the in-memory handle for one connected daemon. The
-// actual websocket connection is held by the transport layer
-// (deferred); here we abstract over a send-channel + a pending-call
-// map keyed by envelope ID.
+// actual websocket connection is held by the transport layer; here we
+// abstract over a send-channel + a pending-call map keyed by envelope ID.
 type daemonConn struct {
-	send    chan Envelope
-	pending sync.Map // map[string]chan Envelope
+	send         chan Envelope
+	pending      sync.Map   // map[string]chan Envelope
+	pendingCount atomic.Int64
 }
 
 // Hub multiplexes per-user daemon connections. There is at most one
 // active daemon per user_id; a new Register evicts the previous one.
 // Hub does not own the websocket transport — it sees only Envelopes —
 // so the same Hub is exercised by tests via in-process channels and
-// by the real /bridge endpoint via the websocket adapter (deferred).
+// by the real /bridge endpoint via the websocket adapter.
 type Hub struct {
-	mu   sync.Mutex
-	conn map[int64]*daemonConn
-	now  func() time.Time
+	mu      sync.Mutex
+	conn    map[int64]*daemonConn
+	now     func() time.Time
+	metrics *metrics.Registry
 }
 
 // NewHub builds an empty hub. Wire it into cmd/server/main.go and a
@@ -45,6 +59,14 @@ func NewHub() *Hub {
 		conn: map[int64]*daemonConn{},
 		now:  time.Now,
 	}
+}
+
+// WithMetrics wires a *metrics.Registry so daemon connection events are
+// reflected in the mctl_bridge_active_daemons gauge. Returns the receiver
+// for chaining.
+func (h *Hub) WithMetrics(m *metrics.Registry) *Hub {
+	h.metrics = m
+	return h
 }
 
 // Register adds a daemon connection for the user. Any previous
@@ -59,6 +81,13 @@ func (h *Hub) Register(userID int64) chan Envelope {
 	defer h.mu.Unlock()
 	if prev, ok := h.conn[userID]; ok {
 		close(prev.send)
+		// Eviction of an existing daemon: the gauge stays at 1 for this user
+		// because a new one is about to be registered. Net change = 0.
+	} else {
+		// Brand-new connection for this user.
+		if h.metrics != nil {
+			h.metrics.BridgeActiveDaemons.Inc()
+		}
 	}
 	dc := &daemonConn{send: make(chan Envelope, 16)}
 	h.conn[userID] = dc
@@ -73,6 +102,9 @@ func (h *Hub) Unregister(userID int64) {
 	if dc, ok := h.conn[userID]; ok {
 		delete(h.conn, userID)
 		close(dc.send)
+		if h.metrics != nil {
+			h.metrics.BridgeActiveDaemons.Dec()
+		}
 	}
 }
 
@@ -94,14 +126,18 @@ func (h *Hub) UnregisterSend(userID int64, send chan Envelope) {
 	if dc.send == send {
 		delete(h.conn, userID)
 		close(dc.send)
+		if h.metrics != nil {
+			h.metrics.BridgeActiveDaemons.Dec()
+		}
 	}
 }
 
 // Call queues an envelope for the daemon and waits up to DeadlineCall
 // for a matching response. Returns ErrNoDaemonConnected when there is
-// no registered daemon; ErrCallTimeout on no response. Concurrent
-// Calls for the same user are fine — each gets its own pending entry
-// keyed by env.ID.
+// no registered daemon; ErrCallTimeout on no response;
+// ErrDaemonOverloaded when more than maxPendingCalls are already in
+// flight for this daemon. Concurrent Calls for the same user are fine
+// — each gets its own pending entry keyed by env.ID.
 func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, error) {
 	h.mu.Lock()
 	dc, ok := h.conn[userID]
@@ -109,6 +145,16 @@ func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, e
 	if !ok {
 		return Envelope{}, ErrNoDaemonConnected
 	}
+
+	// Backpressure: reject the call immediately if the daemon is already
+	// saturated. This prevents unbounded memory growth when a daemon is
+	// slow or stuck.
+	if dc.pendingCount.Add(1) > maxPendingCalls {
+		dc.pendingCount.Add(-1)
+		return Envelope{}, ErrDaemonOverloaded
+	}
+	defer dc.pendingCount.Add(-1)
+
 	reply := make(chan Envelope, 1)
 	dc.pending.Store(env.ID, reply)
 	defer dc.pending.Delete(env.ID)

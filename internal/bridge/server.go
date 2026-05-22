@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -13,6 +14,10 @@ import (
 )
 
 const pingInterval = 25 * time.Second
+
+// pongDeadline is how long the reader waits for any frame after the writer
+// has sent a ping before considering the peer dead and closing the connection.
+const pongDeadline = 5 * time.Second
 
 // identityLabel returns a stable, log-safe label for an Identity across
 // auth providers. localjwt issues Identity.Subject (e.g. "tg:<id>"), the
@@ -90,15 +95,38 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 
 		done := make(chan struct{}, 2)
 
+		// pingPending is atomically set to 1 by the writer after sending a
+		// ping, and cleared to 0 by the reader after receiving any frame.
+		// The reader enforces a pongDeadline-long context timeout while
+		// pingPending is 1 so a silent daemon is detected quickly.
+		var pingPending atomic.Int32
+
 		// reader goroutine: receive frames from the daemon.
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for {
+				// Build the read context for this iteration. When a ping is
+				// outstanding, apply a short deadline so a silent daemon is
+				// detected within pongDeadline. The cancel must be called
+				// explicitly (not via defer) so each iteration gets a fresh
+				// context rather than accumulating cancelled ones.
+				readCtx := ctx
+				var readCancel context.CancelFunc
+				if pingPending.Load() != 0 {
+					readCtx, readCancel = context.WithTimeout(ctx, pongDeadline)
+				}
 				var env Envelope
-				if err := wsjson.Read(ctx, conn, &env); err != nil {
-					// Connection closed or context cancelled — either is expected.
+				err := wsjson.Read(readCtx, conn, &env)
+				if readCancel != nil {
+					readCancel()
+				}
+				if err != nil {
+					// Connection closed, context cancelled, or pong deadline
+					// exceeded — any of these terminates the connection.
 					return
 				}
+				// Any frame resets the ping-pending flag, including pong.
+				pingPending.Store(0)
 				switch env.Type {
 				case TypePing:
 					pong := Envelope{Type: TypePong, ID: env.ID}
@@ -132,6 +160,8 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 					if err := wsjson.Write(ctx, conn, ping); err != nil {
 						return
 					}
+					// Signal the reader that a pong is expected.
+					pingPending.Store(1)
 				case <-ctx.Done():
 					return
 				}

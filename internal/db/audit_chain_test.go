@@ -23,9 +23,9 @@ func TestVerifyAuditChain_FreshChainVerifies(t *testing.T) {
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
 
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "")
-	s.LogToolCall(ctx, uid, "send_message:draft", "user:hash", "ok", "")
+	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "")
+	s.LogToolCall(ctx, uid, "send_message:draft", "user:hash", "ok", "", "")
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {
@@ -43,9 +43,9 @@ func TestVerifyAuditChain_DetectsTamperedRow(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "")
-	s.LogToolCall(ctx, uid, "send_message:sent", "user:hash", "ok", "")
+	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "")
+	s.LogToolCall(ctx, uid, "send_message:sent", "user:hash", "ok", "", "")
 
 	// Tamper: rewrite the middle row's tool_name without touching its hash.
 	var middleID int64
@@ -77,8 +77,8 @@ func TestLogToolCall_ChainsAcrossEntries(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "a", "", "ok", "")
-	s.LogToolCall(ctx, uid, "b", "", "ok", "")
+	s.LogToolCall(ctx, uid, "a", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "b", "", "ok", "", "")
 
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT entry_hash, prev_hash FROM audit_logs WHERE user_id=$1 ORDER BY id ASC`,
@@ -117,9 +117,9 @@ func TestVerifyAuditChain_IsolatedPerUser(t *testing.T) {
 	s := newTestStore(t)
 	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
 	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
-	s.LogToolCall(ctx, alice, "a", "", "ok", "")
-	s.LogToolCall(ctx, bob, "b", "", "ok", "")
-	s.LogToolCall(ctx, alice, "c", "", "ok", "")
+	s.LogToolCall(ctx, alice, "a", "", "ok", "", "")
+	s.LogToolCall(ctx, bob, "b", "", "ok", "", "")
+	s.LogToolCall(ctx, alice, "c", "", "ok", "", "")
 
 	// alice's chain doesn't include bob's row, so alice's chain is
 	// a→c (verified). bob's chain has one row (verified). Tamper bob

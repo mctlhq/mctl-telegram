@@ -111,6 +111,12 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// call_path column on audit_logs (M4). Distinguishes relay-forwarded
+	// calls ('local') from server-side hosted calls ('hosted').
+	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "call_path",
+		"TEXT DEFAULT 'hosted'", "TEXT DEFAULT 'hosted'"); err != nil {
+		return err
+	}
 	// Telegram-native identity columns (users): replaces github_login as the
 	// primary key. github_login becomes nullable so widget-issued user rows
 	// (which never have a GitHub login) can coexist with legacy ones during
