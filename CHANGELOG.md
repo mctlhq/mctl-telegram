@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.29.4](https://github.com/mctlhq/mctl-telegram/compare/0.29.3...0.29.4) (2026-05-22)
+
+
+### Bug Fixes
+
+* address P3 nits from review ([212535a](https://github.com/mctlhq/mctl-telegram/commit/212535a9d85f7f30f6268017a04f887c41d031ec))
+* change send_message default mode from draft to send ([24cfa06](https://github.com/mctlhq/mctl-telegram/commit/24cfa06b5dc27f7acc0b60a5ef6b5b5dc5f19ab8))
+* change send_message default mode from draft to send ([67e18a2](https://github.com/mctlhq/mctl-telegram/commit/67e18a2e189568451c4b962ae225720a480a08cc))
+
 ## [0.29.3](https://github.com/mctlhq/mctl-telegram/compare/0.29.2...0.29.3) (2026-05-22)
 
 
