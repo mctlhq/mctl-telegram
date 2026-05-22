@@ -506,7 +506,6 @@
     /* Let the topbar + nav wrap instead of overflowing the viewport. */
     .topbar { flex-wrap: wrap; gap: 10px 0; }
     .topbar .meta { flex-wrap: wrap; gap: 10px 12px; font-size: 11px; }
-    .topbar .meta .hide-sm { display: none; }
     h1 { font-size: 28px; }
     .lead { font-size: 15px; }
     .tbl { font-size: 12.5px; }

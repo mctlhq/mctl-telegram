@@ -20,7 +20,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Not zero-knowledge",
 		"Cryptographic invariants",
-		"dmitri+security@mctl.ai",
+		"support@mctl.ai",
 		"Tamper-evident audit log",
 		"Prompt-injection content boundary",
 		"Session TTL",
