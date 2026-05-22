@@ -384,28 +384,6 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 	}
 }
 
-// extractConfirmationID parses a confirmation_id out of an MCP tool result
-// payload. The prepare_send_message tool returns a text content block
-// containing JSON with a "confirmation_id" key.
-func extractConfirmationID(raw json.RawMessage) string {
-	var result mcpToolResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return ""
-	}
-	for _, c := range result.Content {
-		if c.Type != "text" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(c.Text), &m); err != nil {
-			continue
-		}
-		if cid, ok := m["confirmation_id"].(string); ok && cid != "" {
-			return cid
-		}
-	}
-	return ""
-}
 
 // parsePrometheusLine parses one line of Prometheus text-format exposition.
 // Returns ok=false for comments, empty lines, or malformed entries.

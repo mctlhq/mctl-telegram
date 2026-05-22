@@ -241,7 +241,6 @@ Empty result means no unread messages match (including: peer has unread but text
 	return tool, handler
 }
 
-
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
@@ -474,7 +473,7 @@ Inputs:
   peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
   message_id — required: integer ID of the message to pin/unpin.
   unpin — optional bool, default false. Set to true to unpin.
-  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 60s, single-shot, must echo same (peer, message_id, unpin).
+  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 5m, single-shot, must echo same (peer, message_id, unpin).
 
 Use get_messages to find message IDs before calling this tool. The two-step prepare→confirm flow exists to keep an LLM from drifting the (peer, message_id) silently between agreeing on what to pin and the live pin call.`),
 		mcplib.WithString("peer",
