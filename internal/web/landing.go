@@ -4,9 +4,10 @@ package web
 
 import (
 	_ "embed"
-	"html/template"
 	"net/http"
 	"strings"
+
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 //go:embed landing.html
@@ -24,13 +25,16 @@ func Favicon() http.HandlerFunc {
 	}
 }
 
-var landingTmpl = template.Must(template.New("landing").Parse(landingHTML))
+var landingTmpl = ui.New("landing", landingHTML)
 
+// landingData is shared by the landing and docs pages: it embeds the shared
+// chrome data (Title, NavActive, PublicBaseURL) and adds the deployment URLs
+// both templates render.
 type landingData struct {
-	PublicBaseURL string
-	MCPURL        string
-	WellKnownURL  string
-	AuthServer    string
+	ui.Data
+	MCPURL       string
+	WellKnownURL string
+	AuthServer   string
 }
 
 // Landing renders the connection-instructions HTML at PublicBaseURL/.
@@ -48,16 +52,12 @@ func Landing(publicBaseURL, mcpPath, authServer string) http.HandlerFunc {
 		authServer = base
 	}
 	data := landingData{
-		PublicBaseURL: base,
-		MCPURL:        base + mcpPath,
-		WellKnownURL:  base + "/.well-known/oauth-protected-resource",
-		AuthServer:    authServer,
+		Data:         ui.Data{Title: "mctl-telegram — Your Telegram, inside your AI assistant", NavActive: "home", PublicBaseURL: base},
+		MCPURL:       base + mcpPath,
+		WellKnownURL: base + "/.well-known/oauth-protected-resource",
+		AuthServer:   authServer,
 	}
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = landingTmpl.Execute(w, data)
-	}
+	return chromePage(landingTmpl, "landing", data)
 }
 
 // BrowserRedirect wraps an MCP Streamable-HTTP handler so that a plain

@@ -14,6 +14,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 // ManagePool is the minimal interface ManageServer needs from telegram.ClientPool.
@@ -117,52 +118,40 @@ type managePageData struct {
 	Issuer      string
 }
 
-const manageHead = `<!doctype html>
+const manageExtraCSS = `
+  .field-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .field-row:last-of-type { border-bottom: none; }
+  .field-label { color: var(--text-dim); }
+  .field-value { font-weight: 500; color: var(--text); }
+  .btn-danger {
+    display: inline-block; margin-top: 16px; font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 14px; font-weight: 600; padding: 9px 16px; border: 0; cursor: pointer;
+    border-radius: var(--mctl-radius-md); background: var(--danger); color: #fff;
+  }
+  .btn-danger:hover { filter: brightness(.92); }
+  .card .btn-secondary { margin-top: 16px; margin-left: 8px; }
+`
+
+var manageHead = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Manage Telegram session</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-           background: #f6f8fa; color: #1f2328; margin: 0; padding: 40px 20px; }
-    .card { max-width: 460px; margin: 0 auto; background: #ffffff; border: 1px solid #d0d7de;
-            border-radius: 12px; padding: 32px 28px; box-shadow: 0 1px 3px rgba(27,31,36,0.04); }
-    h1 { font-size: 22px; margin: 0 0 12px; font-weight: 600; }
-    p { line-height: 1.5; margin: 8px 0; }
-    .meta { font-size: 13px; color: #57606a; margin-top: 20px; }
-    .field-row { display: flex; justify-content: space-between; padding: 8px 0;
-                 border-bottom: 1px solid #d0d7de; font-size: 14px; }
-    .field-row:last-of-type { border-bottom: none; }
-    .field-label { color: #57606a; }
-    .field-value { font-weight: 500; }
-    button { margin-top: 16px; font-size: 14px; font-weight: 600; padding: 8px 14px;
-             border: 1px solid rgba(27,31,36,0.15); border-radius: 6px; cursor: pointer; }
-    .btn-danger { background: #cf222e; color: #ffffff; border-color: transparent; }
-    .btn-danger:hover { background: #a40e26; }
-    .btn-secondary { background: #f6f8fa; color: #1f2328; margin-left: 8px; }
-    .btn-secondary:hover { background: #e9ebef; }
-    .error { background: #ffebe9; border: 1px solid #ff818266; border-radius: 6px;
-             padding: 10px 12px; font-size: 13px; color: #cf222e; margin: 12px 0; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #0d1117; color: #e6edf3; }
-      .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
-      h1 { color: #e6edf3; }
-      .meta { color: #8b949e; }
-      .field-row { border-bottom-color: #30363d; }
-      .field-label { color: #8b949e; }
-      .btn-secondary { background: #21262d; color: #e6edf3; border-color: #30363d; }
-      .btn-secondary:hover { background: #30363d; }
-      .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
-    }
-  </style>
+  <title>Manage Telegram session</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + manageExtraCSS + `</style>
 </head>
 <body>
-  <div class="card">
+  <div class="wrap">
+` + ui.TopbarLite + `
+  <main class="auth-main">
+    <div class="card">
 `
 
-const manageFoot = `  </div>
+var manageFoot = `    </div>
+  </main>
+` + ui.FooterLite + `
+  </div>
 </body>
 </html>`
 

@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"html/template"
 	"net/http"
+
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 type enablePhonePage struct {
@@ -53,80 +55,64 @@ type enableErrorPage struct {
 	Message string
 }
 
-// enableHead / enableFoot wrap every screen. The CSS is the GitHub light/dark
-// palette also used by the authorize page, kept inline so the page renders
-// with no CDN and the CSP can forbid every external source.
-const enableHead = `<!doctype html>
+// enableExtraCSS adds the enable-flow-specific controls (labelled fields,
+// checkboxes, password show/hide, notice, radio group) on top of the shared
+// design tokens + component CSS + auth-card CSS. Inlined so the page renders
+// with no CDN and the strict CSP can forbid every external source.
+const enableExtraCSS = `
+  .field { display: block; margin: 20px 0 8px; }
+  .field span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
+  .field input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 9px 10px;
+                 border: 1px solid var(--border-strong); border-radius: var(--mctl-radius-md);
+                 background: var(--surface-elevated); color: var(--text); font-family: var(--font-mono); }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text-dim); margin: 14px 0; }
+  .check input { margin-top: 2px; }
+  button { margin-top: 16px; width: 100%; font-family: var(--font-display), system-ui, sans-serif;
+           font-size: 15px; font-weight: 600; padding: 11px 16px; border: 0; cursor: pointer;
+           border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; }
+  button:hover { filter: brightness(.92); }
+  .pwwrap { position: relative; }
+  .pwwrap input { padding-right: 46px; }
+  .pwtoggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 42px;
+              margin: 0; padding: 0; border: none; border-radius: 0 var(--mctl-radius-md) var(--mctl-radius-md) 0;
+              background: none; color: var(--text-dim); cursor: pointer;
+              display: flex; align-items: center; justify-content: center; }
+  .pwtoggle:hover { background: none; color: var(--text); }
+  .notice { background: color-mix(in srgb, var(--accent) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+            border-radius: var(--mctl-radius-md); padding: 10px 12px; font-size: 13px; color: var(--text-dim); margin: 12px 0; }
+  .radio-group { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+  .radio-group label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; color: var(--text-dim); margin-top: 0; }
+  .radio-group input { margin-top: 3px; }
+`
+
+// enableHead / enableFoot wrap every screen, sharing the mctl design tokens,
+// component CSS, and auth-card CSS with the rest of the site. All inlined so
+// the strict CSP can forbid every external source.
+var enableHead = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Enable message access</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-           background: #f6f8fa; color: #1f2328; margin: 0; padding: 40px 20px; }
-    .card { max-width: 460px; margin: 0 auto; background: #ffffff; border: 1px solid #d0d7de;
-            border-radius: 12px; padding: 32px 28px; box-shadow: 0 1px 3px rgba(27,31,36,0.04); }
-    h1 { font-size: 22px; margin: 0 0 12px; font-weight: 600; }
-    p { line-height: 1.5; margin: 8px 0; }
-    .meta { font-size: 13px; color: #57606a; margin-top: 20px; }
-    .url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
-    .field { display: block; margin: 20px 0 8px; }
-    .field span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-    .field input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 9px 10px;
-                   border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #1f2328; }
-    .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: #57606a; margin: 14px 0; }
-    .check input { margin-top: 2px; }
-    button { margin-top: 16px; width: 100%; font-size: 15px; font-weight: 600; padding: 10px 14px;
-             border: 1px solid rgba(27,31,36,0.15); border-radius: 6px; background: #1f883d;
-             color: #ffffff; cursor: pointer; }
-    button:hover { background: #1a7f37; }
-    .error { background: #ffebe9; border: 1px solid #ff818266; border-radius: 6px;
-             padding: 10px 12px; font-size: 13px; color: #cf222e; margin: 12px 0; }
-    .pwwrap { position: relative; }
-    .pwwrap input { padding-right: 46px; }
-    .pwtoggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 42px;
-                margin: 0; padding: 0; border: none; border-radius: 0 6px 6px 0;
-                background: none; color: #57606a; cursor: pointer;
-                display: flex; align-items: center; justify-content: center; }
-    .pwtoggle:hover { background: none; color: #1f2328; }
-    .steps { display: flex; list-style: none; padding: 0; margin: 0 0 20px; gap: 0; }
-    .steps li { flex: 1; text-align: center; font-size: 12px; padding: 6px 4px;
-                border-bottom: 2px solid #d0d7de; color: #57606a; }
-    .steps li.active { border-bottom-color: #1f883d; color: #1f883d; font-weight: 600; }
-    .notice { background: #ddf4ff; border: 1px solid #54aeff; border-radius: 6px;
-              padding: 10px 12px; font-size: 13px; color: #0969da; margin: 12px 0; }
-    .radio-group { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
-    .radio-group label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; }
-    .radio-group input { margin-top: 3px; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #0d1117; color: #e6edf3; }
-      .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
-      h1 { color: #e6edf3; }
-      .meta { color: #8b949e; }
-      .url { color: #58a6ff; }
-      .field span { color: #e6edf3; }
-      .field input { background: #0d1117; border-color: #30363d; color: #e6edf3; }
-      .check { color: #8b949e; }
-      .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
-      .pwtoggle { color: #8b949e; }
-      .pwtoggle:hover { color: #e6edf3; }
-      .steps li { border-bottom-color: #30363d; color: #8b949e; }
-      .steps li.active { border-bottom-color: #3fb950; color: #3fb950; }
-      .notice { background: #051d4d; border-color: #1f6feb; color: #79c0ff; }
-    }
-  </style>
+  <title>Enable message access</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + `</style>
 </head>
 <body>
-  <div class="card">
+  <div class="wrap">
+` + ui.TopbarLite + `
+  <main class="auth-main">
+    <div class="card">
 `
 
-const enableFoot = `  </div>
+var enableFoot = `    </div>
+  </main>
+` + ui.FooterLite + `
+  </div>
 </body>
 </html>`
 
-var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
@@ -155,7 +141,7 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
        encrypted session blob — never your password.</p>
 ` + enableFoot))
 
-var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
@@ -178,7 +164,7 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
        screen to receive a fresh one.</p>
 ` + enableFoot))
 
-var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="steps">
+var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
@@ -232,7 +218,7 @@ var enableErrorTemplate = template.Must(template.New("enableError").Parse(enable
     <p class="meta">Return to your MCP client and start the connection again.</p>
 ` + enableFoot))
 
-var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="steps">
+var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li class="active">Permissions</li>
       <li>Phone number</li>

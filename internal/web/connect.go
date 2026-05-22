@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 // OAuthExchanger is the minimal interface ConnectServer needs from oauth.Server.
@@ -243,54 +245,30 @@ func connectRandomToken(n int) string {
 
 // ----- HTML templates -----
 
-// The landing and success pages share the CSS palette defined in
-// internal/oauth/enable_access_page.go (enableHead / enableFoot). The
-// templates are inlined here so the web package is self-contained.
+// The connect pages share the lite (strict-CSP) chrome from internal/ui:
+// inlined design tokens + component CSS + auth-card CSS, the static topbar,
+// and the footer. No external resources or JS, matching the existing CSP.
 
-const connectHead = `<!doctype html>
+var connectHead = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Connect Telegram account</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-           background: #f6f8fa; color: #1f2328; margin: 0; padding: 40px 20px; }
-    .card { max-width: 460px; margin: 0 auto; background: #ffffff; border: 1px solid #d0d7de;
-            border-radius: 12px; padding: 32px 28px; box-shadow: 0 1px 3px rgba(27,31,36,0.04); }
-    h1 { font-size: 22px; margin: 0 0 12px; font-weight: 600; }
-    p { line-height: 1.5; margin: 8px 0; }
-    .meta { font-size: 13px; color: #57606a; margin-top: 20px; }
-    .url { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
-    .btn { display: inline-block; margin-top: 20px; width: 100%; box-sizing: border-box;
-           font-size: 15px; font-weight: 600; padding: 10px 14px; text-align: center;
-           border: 1px solid rgba(27,31,36,0.15); border-radius: 6px; background: #1f883d;
-           color: #ffffff; text-decoration: none; }
-    .btn:hover { background: #1a7f37; }
-    .error { background: #ffebe9; border: 1px solid #ff818266; border-radius: 6px;
-             padding: 10px 12px; font-size: 13px; color: #cf222e; margin: 12px 0; }
-    .steps { display: flex; list-style: none; padding: 0; margin: 0 0 20px; gap: 0; }
-    .steps li { flex: 1; text-align: center; font-size: 12px; padding: 6px 4px;
-                border-bottom: 2px solid #d0d7de; color: #57606a; }
-    .steps li.active { border-bottom-color: #1f883d; color: #1f883d; font-weight: 600; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #0d1117; color: #e6edf3; }
-      .card { background: #161b22; border-color: #30363d; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
-      h1 { color: #e6edf3; }
-      .meta { color: #8b949e; }
-      .url { color: #58a6ff; }
-      .error { background: #2d1314; border-color: #6b3030; color: #f85149; }
-      .steps li { border-bottom-color: #30363d; color: #8b949e; }
-      .steps li.active { border-bottom-color: #3fb950; color: #3fb950; }
-    }
-  </style>
+  <title>Connect Telegram account</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + `</style>
 </head>
 <body>
-  <div class="card">
+  <div class="wrap">
+` + ui.TopbarLite + `
+  <main class="auth-main">
+    <div class="card">
 `
 
-const connectFoot = `  </div>
+var connectFoot = `    </div>
+  </main>
+` + ui.FooterLite + `
+  </div>
 </body>
 </html>`
 
@@ -311,7 +289,7 @@ type connectErrorData struct {
 	RetryURL string
 }
 
-var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <ol class="steps">
+var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <ol class="flow-steps">
       <li class="active">Sign in with Telegram</li>
       <li>Permissions</li>
       <li>Phone number</li>
@@ -326,7 +304,7 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))
 
-var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="steps">
+var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
       <li>Phone number</li>

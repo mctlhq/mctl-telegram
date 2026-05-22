@@ -1,358 +1,8 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mctl-telegram — Your Telegram, inside your AI assistant</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="shortcut icon" href="/favicon.ico">
+{{template "ui_head" .}}
 <style>
-  /*
-   * Inline fallback for the mctl design tokens — keeps the page readable and
-   * theme/accent switching functional if ui.mctl.ai/mctl.css fails to load.
-   * When the CDN stylesheet loads it is sourced AFTER this block and overrides
-   * every token (equal specificity, later wins). Mirrors mctl.css.
-   */
-  :root {
-    --mctl-radius-sm: 2px;
-    --mctl-radius-md: 4px;
-    --mctl-radius-lg: 8px;
-    --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
-    --surface-line: #1f242b; --surface-line-strong: #2a313a;
-    --surface-fg: #e6e7e9; --surface-fg-muted: #a4a8ae; --surface-fg-subtle: #6b7079;
-    --accent: #00e5ff; --accent-highlight: #7df2ff;
-    --status-ok: #7cf2a4; --status-warn: #f5a524; --status-bad: #ff6b6b;
-    --font-display: 'Geist', system-ui, -apple-system, sans-serif;
-    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
-  }
-  [data-theme='light'] {
-    --surface-bg: #f1ede4; --surface-elevated: #f1ede4; --surface-card: #f1ede4;
-    --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
-    --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
-  }
-
-</style>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://ui.mctl.ai/mctl.css">
-<script>
-  // Resolve theme and set data-theme BEFORE paint to avoid flash.
-  // mctl.css has no prefers-color-scheme fallback, so the attribute
-  // must always be present.
-  (function () {
-    var root = document.documentElement;
-    var t;
-    try {
-      t = localStorage.getItem('mctl-theme');
-    } catch (e) {}
-    if (t !== 'light' && t !== 'dark') {
-      t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-    }
-    root.setAttribute('data-theme', t);
-  })();
-</script>
-<style>
-  /*
-   * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css).
-   * The landing keeps its own internal variable names but aliases them onto the
-   * mctl semantic tokens, so dark/light flips and accent swaps are handled by
-   * mctl.css's [data-theme] / [data-accent] layers automatically.
-   */
-  :root {
-    --bg:            var(--surface-bg);
-    --bg-elev:       var(--surface-elevated);
-    --surface:       var(--surface-card);
-    --surface-2:     color-mix(in srgb, var(--surface-card) 78%, var(--surface-line));
-    --border:        var(--surface-line);
-    --border-strong: var(--surface-line-strong);
-    --text:          var(--surface-fg);
-    --text-dim:      var(--surface-fg-muted);
-    --muted:         var(--surface-fg-subtle);
-    --accent-2:      var(--status-ok);     /* terminal green */
-    --warn:          var(--status-warn);
-    --danger:        var(--status-bad);
-    --code-fg:       var(--accent-highlight);
-    --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
-    --accent-2-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
-    --warn-soft:     color-mix(in srgb, var(--warn) 14%, transparent);
-    --grid:          color-mix(in srgb, var(--surface-line) 80%, transparent);
-    color-scheme: dark;
-  }
-  /*
-   * The mctl accents are tuned for the dark surface and keep the same bright
-   * value in mctl.css's light theme — on the warm paper background that drops
-   * accent-coloured text (links, tool names, step counters) well below the
-   * WCAG AA contrast floor. Darken each accent for light mode here so the page
-   * is legible whether the tokens come from the CDN or the inline fallback.
-   */
-  :root[data-theme="light"] {
-    color-scheme: light;
-    --accent:  color-mix(in srgb, #00e5ff 46%, #000);
-    --code-fg: var(--accent);
-  }
-
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-
-  body {
-    font-family: var(--font-display), system-ui, -apple-system, sans-serif;
-    font-size: 15px;
-    line-height: 1.6;
-    color: var(--text);
-    background: var(--bg);
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    background-image:
-      radial-gradient(circle at 1px 1px, var(--grid) 1px, transparent 0);
-    background-size: 28px 28px;
-    background-position: 0 0;
-    background-attachment: fixed;
-    transition: background-color .2s, color .2s;
-  }
-
-  /* Decorative top scanline */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0 0 auto 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--accent) 30%, var(--accent-2) 70%, transparent);
-    opacity: .6;
-    z-index: 5;
-    pointer-events: none;
-  }
-
-  .wrap {
-    max-width: 920px;
-    margin: 0 auto;
-    padding: 0 24px;
-  }
-
-  /* ===== Top bar ===== */
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 0;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 56px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    letter-spacing: .02em;
-    color: var(--text-dim);
-  }
-  .topbar .brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    color: var(--text);
-    font-weight: 600;
-  }
-  .topbar .brand .mark {
-    width: 22px; height: 22px;
-    border: 1px solid var(--accent);
-    display: inline-grid;
-    place-items: center;
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 700;
-    border-radius: var(--mctl-radius-md);
-    background: var(--accent-soft);
-  }
-  .topbar .meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 16px;
-  }
-  .topbar a {
-    color: var(--text-dim);
-    text-decoration: none;
-    transition: color .15s;
-  }
-  .topbar a:hover { color: var(--text); }
-
-  /* ===== Hero ===== */
-  .hero {
-    margin-bottom: 56px;
-    position: relative;
-  }
-  .hero .eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .14em;
-    color: var(--text-dim);
-    margin-bottom: 22px;
-  }
-  .status-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--accent-2);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent);
-    animation: pulse 2s infinite;
-  }
-  @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent); }
-    70%  { box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent-2) 0%, transparent); }
-    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 0%, transparent); }
-  }
-  h1 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: clamp(28px, 4vw, 44px);
-    font-weight: 600;
-    line-height: 1.1;
-    letter-spacing: -.02em;
-    margin: 0 0 16px;
-    color: var(--text);
-  }
-  h1 .accent { color: var(--accent); }
-  h1 .slash { color: var(--muted); margin: 0 .15em; }
-  .lead {
-    font-size: 17px;
-    line-height: 1.55;
-    color: var(--text-dim);
-    margin: 0 0 32px;
-    max-width: 62ch;
-    text-wrap: pretty;
-  }
-
-  /* ===== Section headers ===== */
-  section { margin-top: 64px; }
-  .section-head {
-    display: flex;
-    align-items: baseline;
-    gap: 16px;
-    margin-bottom: 22px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-  }
-  .section-head h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 22px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0;
-    letter-spacing: -.01em;
-  }
-
-  /* ===== Body content ===== */
-  p { color: var(--text-dim); margin: 0 0 14px; text-wrap: pretty; }
-  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); transition: border-color .15s, color .15s; }
-  a:hover { border-bottom-color: var(--accent); }
-
-  code, pre, .mono {
-    font-family: var(--font-mono);
-  }
-  code {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    padding: 1px 6px;
-    border-radius: var(--mctl-radius-md);
-    font-size: .85em;
-    color: var(--code-fg);
-  }
-  a code { color: inherit; }
-
-  /* Ordered list — numbered chips */
-  ol.steps {
-    list-style: none;
-    counter-reset: step;
-    padding: 0;
-    margin: 0;
-  }
-  ol.steps > li {
-    counter-increment: step;
-    position: relative;
-    padding: 14px 16px 14px 56px;
-    border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-lg);
-    background: var(--surface);
-    margin-bottom: 10px;
-    color: var(--text-dim);
-    transition: border-color .15s, transform .15s;
-  }
-  ol.steps > li:hover { border-color: var(--border-strong); }
-  ol.steps > li::before {
-    content: counter(step, decimal-leading-zero);
-    position: absolute;
-    left: 16px; top: 14px;
-    width: 28px; height: 28px;
-    display: inline-grid;
-    place-items: center;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--accent);
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    border-radius: var(--mctl-radius-md);
-  }
-  ol.steps strong { color: var(--text); font-weight: 600; }
-  ol.steps em { font-style: normal; color: var(--text); }
-
-  .muted { color: var(--muted); font-size: 13px; }
-
-  /* ===== Theme toggle ===== */
-  .theme-toggle {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px; height: 28px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--text-dim);
-    border-radius: var(--mctl-radius-md);
-    cursor: pointer;
-    padding: 0;
-    transition: color .15s, border-color .15s, background .15s;
-    font: inherit;
-  }
-  .theme-toggle:hover {
-    color: var(--text);
-    border-color: var(--border-strong);
-    background: var(--surface-2);
-  }
-  .theme-toggle svg { width: 14px; height: 14px; }
-  /* data-theme is always set by the pre-paint script. */
-  .theme-toggle .icon-sun  { display: none; }
-  .theme-toggle .icon-moon { display: block; }
-  :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
-  :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
-
-  /* ===== Footer ===== */
-  footer {
-    margin: 80px 0 40px;
-    padding-top: 24px;
-    border-top: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: var(--muted);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 18px;
-    align-items: center;
-    justify-content: space-between;
-  }
-  footer .links {
-    display: inline-flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px 18px;
-  }
-  footer a { color: var(--text-dim); border-bottom-color: transparent; }
-  footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
-  footer .sep { color: var(--border-strong); }
-  footer code { font-size: 11px; background: transparent; border: 0; padding: 0; color: var(--text-dim); }
-
-  /* Inline helpers */
-  .url { word-break: break-all; }
-
-  /* Section anchor offset */
-  section { scroll-margin-top: 24px; }
-
   /* CTA buttons */
   .cta-btn {
     display: inline-flex;
@@ -519,34 +169,12 @@
     border-top: 1px solid var(--border);
   }
 
-  /* Responsive */
-  @media (max-width: 768px) {
-    .wrap { padding: 0 20px; }
-    .topbar .meta .hide-md { display: none; }
-    .theme-toggle { width: 44px; height: 44px; }
-  }
+  /* Responsive — landing-specific only; shared breakpoints live in components.css */
   @media (max-width: 640px) {
-    .wrap { padding: 0 18px; }
-    .topbar .meta { gap: 12px; font-size: 11px; }
-    .topbar .meta .hide-sm { display: none; }
-    h1 { font-size: 28px; }
-    .lead { font-size: 15px; }
     .card-grid { grid-template-columns: 1fr; }
     .flow-diagram { flex-direction: column; }
     .flow-arrow { transform: rotate(90deg); padding: 4px 0; }
     .cta-row { flex-direction: column; align-items: flex-start; }
-  }
-  @media (max-width: 480px) {
-    .wrap { padding: 0 14px; }
-    h1 { font-size: 24px; letter-spacing: -.015em; }
-    .lead { font-size: 14px; }
-    .endpoint .url { font-size: 14px; }
-    ol.steps > li { padding: 10px 12px 10px 44px; }
-    ol.steps > li::before { left: 10px; top: 10px; width: 26px; height: 26px; font-size: 11px; }
-    pre code { font-size: 12px; }
-    .tbl { font-size: 12px; }
-    section { margin-top: 40px; }
-    .topbar { margin-bottom: 36px; }
   }
 </style>
 </head>
@@ -554,24 +182,7 @@
 
 <div class="wrap">
 
-  <!-- ============ Top bar ============ -->
-  <header class="topbar">
-    <a class="brand" href="/">
-      <span class="mark">M</span>
-      <span>mctl-telegram</span>
-    </a>
-    <nav class="meta">
-      <a href="#how-it-works">how it works</a>
-      <a href="/docs">docs</a>
-      <a href="/security">security</a>
-      <a href="/privacy">privacy</a>
-      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
-        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
-      </button>
-    </nav>
-  </header>
+  {{template "ui_topbar" .}}
 
   <!-- ============ Hero ============ -->
   <section class="hero" style="margin-top: 0;">
@@ -733,34 +344,12 @@
     </dl>
   </section>
 
-  <!-- ============ Footer ============ -->
-  <footer>
-    <div class="links">
-      <span class="brand-mark">mctl-telegram</span>
-      <span class="sep">·</span>
-      <a href="/docs">docs</a>
-      <span class="sep">·</span>
-      <a href="/security">security</a>
-      <span class="sep">·</span>
-      <a href="/privacy">privacy</a>
-      <span class="sep">·</span>
-      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">source</a>
-    </div>
-    <span>resource: <code>{{.PublicBaseURL}}</code></span>
-  </footer>
+  {{template "ui_footer" .}}
 
 </div>
 
+{{template "ui_script" .}}
 <script>
-  // Theme toggle: cycles light ↔ dark, persists in localStorage.
-  function toggleTheme() {
-    var root = document.documentElement;
-    var cur = root.getAttribute('data-theme') || 'dark';
-    var next = cur === 'light' ? 'dark' : 'light';
-    root.setAttribute('data-theme', next);
-    try { localStorage.setItem('mctl-theme', next); } catch (e) {}
-  }
-
   // Copy MCP URL button.
   var copyBtn = document.getElementById('copy-mcp-url');
   if (copyBtn) {
@@ -777,10 +366,6 @@
       }
     });
   }
-
-  // Wire up handlers without inline onclick attributes, so the markup stays
-  // compatible with a strict Content-Security-Policy (script-src 'self').
-  document.querySelector('.theme-toggle').addEventListener('click', toggleTheme);
 </script>
 </body>
 </html>
