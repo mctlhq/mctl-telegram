@@ -317,9 +317,9 @@ Inputs (required):
   text — message body (plain text).
 Inputs (optional):
   mode — "draft" (default) or "send". Default is dry-run.
-  confirmation_id — REQUIRED when mode="send". Obtain it from prepare_send_message; valid for 60s, single-shot, and must echo the same (peer, text). Without it, mode="send" is rejected.
+  confirmation_id — Optional. If supplied (obtained from prepare_send_message), it is validated before sending (valid for 60s, single-shot, must match the same peer and text). If omitted, mode="send" proceeds directly without a confirmation step.
 
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true, mode="send", and a fresh matching confirmation_id. Any missing piece returns a dry-run preview with reason in dry_reason.`),
+Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true, and mode="send". Any missing piece returns a dry-run preview with reason in dry_reason.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -333,7 +333,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			mcplib.Enum("draft", "send"),
 		),
 		mcplib.WithString("confirmation_id",
-			mcplib.Description("Confirmation id from prepare_send_message. Required when mode=send."),
+			mcplib.Description("Optional. Confirmation id from prepare_send_message. If provided it is validated (hash, expiry, single-shot); if omitted the send proceeds without a confirmation step."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -348,14 +348,12 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
-		// Even when every other gate is open, mode=send still requires a
-		// matching confirmation_id. We consume it here so a downstream
-		// failure cannot be silently retried with the same id.
-		if realSend {
-			if confID == "" {
-				realSend = false
-				dryReason = "mode=send requires confirmation_id — call prepare_send_message first"
-			} else if _, cerr := s.Confirms.Consume(confID, id.UserID, HashSendPayload(peer, text)); cerr != nil {
+		// If a confirmation_id is supplied, validate and consume it so a
+		// downstream failure cannot be silently retried with the same id.
+		// When no confirmation_id is provided the send proceeds directly —
+		// all other gates (ALLOW_SEND, scope, send_enabled) still apply.
+		if realSend && confID != "" {
+			if _, cerr := s.Confirms.Consume(confID, id.UserID, HashSendPayload(peer, text)); cerr != nil {
 				realSend = false
 				switch {
 				case errors.Is(cerr, ErrConfirmationMismatch):
