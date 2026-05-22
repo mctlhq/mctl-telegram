@@ -14,7 +14,7 @@ This document describes the current direction for mctl-telegram. It is a living 
 ## Later
 
 - Multi-account support (multiple Telegram accounts per identity)
-- Local Bridge mode (M4) — MTProto session lives on the user's machine; server acts as relay only
+- Local Bridge mode hardening (M4) — beta is available today (MTProto session lives on the user's machine; the server acts as a relay only); remaining work is production-readiness and broader client support
 - Per-tool scope granularity improvements
 - Optional admin dashboard
 
