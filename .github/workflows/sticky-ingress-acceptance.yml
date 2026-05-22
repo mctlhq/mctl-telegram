@@ -47,7 +47,11 @@ jobs:
           sudo chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
 
       - name: create kind cluster
-        run: kind create cluster --image "${KIND_NODE_IMAGE}" --wait 120s
+        run: |
+          kind create cluster --image "${KIND_NODE_IMAGE}" --wait 120s
+          # The ingress-nginx kind provider pins the controller to a node
+          # labelled ingress-ready=true; label the single node so it schedules.
+          kubectl label nodes --all ingress-ready=true --overwrite
 
       - name: install ingress-nginx
         run: |
