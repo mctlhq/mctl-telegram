@@ -28,7 +28,7 @@ p95 latency across all read-only tools:
 ```promql
 histogram_quantile(0.95, sum by(le)(
   rate(mctl_tool_invocation_duration_seconds_bucket{
-    tool=~"list_dialogs|get_unread_messages|get_messages|get_my_audit_log|prepare_send_message|prepare_pin_message|list_telegram_identities"
+    tool=~"list_dialogs|get_unread_messages|get_messages|get_my_audit_log|prepare_pin_message|list_telegram_identities"
   }[5m])
 ))
 ```
@@ -84,7 +84,6 @@ expired_idle, expired_absolute, error.
 | `get_unread_messages` | read |
 | `get_messages` | read |
 | `get_my_audit_log` | read |
-| `prepare_send_message` | read |
 | `prepare_pin_message` | read |
 | `list_telegram_identities` | read (admin) |
 | `send_message` | destructive |

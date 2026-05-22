@@ -143,7 +143,7 @@
   </ul>
 
   <h2>Rate limiting</h2>
-  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. Destructive prepare steps (<code>prepare_send_message</code>, <code>prepare_pin_message</code>) also consume a per-(identity, peer) bucket — 20 actions per peer per hour — so a single bad actor cannot fan a payload at one recipient up to the global ceiling. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
+  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. <code>send_message</code> (direct) and <code>prepare_pin_message</code> also consume a per-(identity, peer) bucket — 20 actions per peer per hour — so a single bad actor cannot fan a payload at one recipient up to the global ceiling. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
 
   <h2>Session TTL</h2>
   <p>Each MTProto session carries two expiry knobs, enforced by the request path and a background sweeper:</p>

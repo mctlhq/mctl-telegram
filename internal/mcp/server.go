@@ -72,7 +72,6 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolListDialogs())
 	srv.AddTool(s.toolGetUnreadMessages())
 	srv.AddTool(s.toolGetMessages())
-	srv.AddTool(s.toolPrepareSendMessage())
 	srv.AddTool(s.toolSendMessage())
 	srv.AddTool(s.toolPreparePinMessage())
 	srv.AddTool(s.toolPinMessage())
