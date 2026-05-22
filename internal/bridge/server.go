@@ -161,11 +161,16 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 					}
 				case <-ticker.C:
 					ping := Envelope{Type: TypePing, ID: "ping"}
+					// Mark the pong as expected BEFORE writing the ping. If the
+					// daemon's reply were processed by the reader before this
+					// store, the reader could clear a flag that was never set,
+					// leaving pingPending=1 with no outstanding ping. Setting it
+					// first closes that (sub-microsecond) window; a spurious
+					// extra pong only re-clears an already-clear flag.
+					pingPending.Store(1)
 					if err := wsjson.Write(ctx, conn, ping); err != nil {
 						return
 					}
-					// Signal the reader that a pong is expected.
-					pingPending.Store(1)
 				case <-ctx.Done():
 					return
 				}
