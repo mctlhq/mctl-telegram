@@ -28,6 +28,8 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		`class="topbar"`,
 		"accent-swatch",
 		`<a href="/security" class="active">security</a>`,
+		// mobile: wide table must sit in a horizontal-scroll wrapper
+		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/security missing %q", must)
@@ -51,6 +53,8 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		`class="topbar"`,
 		"accent-swatch",
 		`<a href="/privacy" class="active">privacy</a>`,
+		// mobile: wide table must sit in a horizontal-scroll wrapper
+		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/privacy missing %q", must)
@@ -96,6 +100,8 @@ func TestDocs_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Available tools",
 		"https://tg.mctl.ai/mcp",
+		// mobile: wide tables must sit in horizontal-scroll wrappers
+		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/docs missing %q", must)
