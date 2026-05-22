@@ -432,6 +432,33 @@
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--swatch);
   }
 
+  /* ===== Light/dark toggle ===== */
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px; height: 28px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    border-radius: var(--mctl-radius-md);
+    cursor: pointer;
+    padding: 0;
+    transition: color .15s, border-color .15s, background .15s;
+    font: inherit;
+  }
+  .theme-toggle:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+    background: var(--surface-2);
+  }
+  .theme-toggle svg { width: 14px; height: 14px; }
+  /* data-theme is always set by the pre-paint script. */
+  .theme-toggle .icon-sun  { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
+  :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
+
   /* ===== Footer ===== */
   footer {
     margin: 80px 0 40px;

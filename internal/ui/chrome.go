@@ -7,7 +7,8 @@
 // Two tiers are provided:
 //   - "full"  — content pages (landing, docs, security, privacy). Loads
 //     ui.mctl.ai/mctl.css + Google Fonts as progressive enhancement and runs
-//     the theme/accent toggle JS.
+//     the light/dark + accent toggle JS (the choice persists in localStorage;
+//     it defaults to the OS preference until the user flips it).
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'). No external resources
 //     and no JS: same palette via inlined tokens, theme follows the OS via a
@@ -73,6 +74,10 @@ var defs = `
         <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
         <button class="accent-swatch" type="button" data-pick="lilac"     aria-label="Lilac accent"     title="Lilac"></button>
       </span>
+      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+      </button>
     </nav>
   </header>{{end}}
 
