@@ -348,10 +348,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
-		// If a confirmation_id is supplied, validate and consume it so a
-		// downstream failure cannot be silently retried with the same id.
-		// When no confirmation_id is provided the send proceeds directly —
-		// all other gates (ALLOW_SEND, scope, send_enabled) still apply.
+		// When confID is provided, consume it so a failed send cannot be retried with the same id.
 		if realSend && confID != "" {
 			if _, cerr := s.Confirms.Consume(confID, id.UserID, HashSendPayload(peer, text)); cerr != nil {
 				realSend = false
@@ -365,14 +362,11 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				}
 			}
 		}
-		// For direct sends (no confirmation_id), apply the per-peer rate limit
-		// here. In the two-step flow the limit is consumed by prepare_send_message;
-		// without that step we enforce it at send time to preserve the same cap.
+		// When confID is absent, enforce the per-peer rate limit here instead of at prepare time.
 		if realSend && confID == "" {
-			peerRedacted := telegram.RedactPeer(peer)
-			if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
 				realSend = false
-				dryReason = "per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"
+				dryReason = r
 			}
 		}
 		var result *telegram.SendResult
@@ -955,6 +949,13 @@ func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, m
 		return false, "per-account send_enabled=false — contact the operator to enable real sends for your account"
 	}
 	return true, ""
+}
+
+func evaluateDirectSendLimiter(limiter *audit.RateLimiter, id *auth.Identity, peerRedacted string) (blocked bool, reason string) {
+	if limiter != nil && !limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+		return true, "per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"
+	}
+	return false, ""
 }
 
 func requireScope(id *auth.Identity, scope string) error {

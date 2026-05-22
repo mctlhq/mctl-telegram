@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -99,6 +100,30 @@ func TestEvaluateSendGate_AllChecksPass(t *testing.T) {
 	}
 	if reason != "" {
 		t.Fatalf("expected empty reason on success, got %q", reason)
+	}
+}
+
+func TestDirectSendLimiter_AllowsWhenBudgetAvailable(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1}
+	blocked, reason := evaluateDirectSendLimiter(limiter, id, "@peer")
+	if blocked {
+		t.Fatalf("expected allowed, got reason=%q", reason)
+	}
+}
+
+func TestDirectSendLimiter_BlocksWhenExhausted(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1}
+	for i := 0; i < audit.PeerSendCap; i++ {
+		limiter.AllowPeer(id, "@peer", audit.PeerSendCap, audit.PeerWindow)
+	}
+	blocked, reason := evaluateDirectSendLimiter(limiter, id, "@peer")
+	if !blocked {
+		t.Fatal("expected blocked after exhausting budget")
+	}
+	if !strings.Contains(reason, "rate limit") {
+		t.Errorf("unexpected reason %q", reason)
 	}
 }
 
