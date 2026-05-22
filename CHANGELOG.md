@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/mctlhq/mctl-telegram/compare/0.27.0...0.28.0) (2026-05-22)
+
+
+### Features
+
+* sticky-routing replica-identity observability ([#91](https://github.com/mctlhq/mctl-telegram/issues/91) Layer 2) ([d589cc8](https://github.com/mctlhq/mctl-telegram/commit/d589cc8726dcecf5eb05d82edc8de270418dfa13))
+
+
+### Bug Fixes
+
+* **bridge,mcp:** clear P3 nits from [#125](https://github.com/mctlhq/mctl-telegram/issues/125) review ([2b54d37](https://github.com/mctlhq/mctl-telegram/commit/2b54d37216297c2aadc1a8419b9404bf606b26ea))
+
 ## [0.27.0](https://github.com/mctlhq/mctl-telegram/compare/0.26.2...0.27.0) (2026-05-22)
 
 
