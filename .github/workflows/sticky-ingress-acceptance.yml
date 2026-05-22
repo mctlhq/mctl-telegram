@@ -1,0 +1,270 @@
+name: sticky-ingress-acceptance
+
+# Acceptance gate for the Layer-1 sticky-routing reference manifests
+# (deploy/ingress/sticky-{nginx,envoy}.yaml). It does NOT accept "looks-right
+# YAML": each job stands up the real controller/runtime on an ephemeral kind
+# cluster and proves the manifest is accepted AND functional -- the Ingress
+# passes the ingress-nginx admission webhook (a real nginx -t) and the
+# EnvoyFilter is reflected in the gateway's proxy-config, then a request
+# carrying a bearer JWT flows through and X-Mctl-Route-Key is set from the
+# JWT sub with no Lua runtime error.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/ingress/**"
+      - ".github/workflows/sticky-ingress-acceptance.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  KIND_VERSION: v0.24.0
+  KIND_NODE_IMAGE: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+  KUBECTL_VERSION: v1.31.0
+  INGRESS_NGINX_REF: controller-v1.11.3
+  ISTIO_VERSION: 1.23.2
+  # base64url payload of {"sub":"tg:123456789","exp":1999999999}; the routing
+  # tier never verifies the signature, so header/sig segments are placeholders.
+  TEST_JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZzoxMjM0NTY3ODkiLCJleHAiOjE5OTk5OTk5OTl9.sig
+  EXPECTED_SUB: "tg:123456789"
+  TEST_HOST: mctl-telegram.example.com
+
+jobs:
+  nginx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: install kind + kubectl
+        run: |
+          curl -sSfLo /usr/local/bin/kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl -sSfLo /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+
+      - name: create kind cluster
+        run: kind create cluster --image "${KIND_NODE_IMAGE}" --wait 120s
+
+      - name: install ingress-nginx
+        run: |
+          kubectl apply -f \
+            "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_REF}/deploy/static/provider/kind/deploy.yaml"
+          kubectl -n ingress-nginx wait --for=condition=Available \
+            deploy/ingress-nginx-controller --timeout=180s
+          # The admission webhook must be reachable before we apply the Ingress.
+          kubectl -n ingress-nginx wait --for=condition=Complete \
+            job/ingress-nginx-admission-patch --timeout=120s || true
+
+      - name: deploy echo backend
+        run: |
+          kubectl create namespace mctl
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo
+            namespace: mctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels: { app: echo }
+            template:
+              metadata:
+                labels: { app: echo }
+              spec:
+                containers:
+                  - name: echo
+                    image: mendhak/http-https-echo:31
+                    env:
+                      - name: HTTP_PORT
+                        value: "8080"
+                    ports:
+                      - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mctl-telegram
+            namespace: mctl
+          spec:
+            selector: { app: echo }
+            ports:
+              - port: 8080
+                targetPort: 8080
+          EOF
+          kubectl -n mctl wait --for=condition=Available deploy/echo --timeout=120s
+
+      - name: apply Ingress (admission webhook == nginx -t gate)
+        run: kubectl apply -f deploy/ingress/sticky-nginx.yaml
+
+      - name: runtime smoke
+        run: |
+          set -euo pipefail
+          # Give the controller a moment to program the new Ingress + Lua.
+          sleep 15
+          kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80 &
+          PF_PID=$!
+          trap 'kill $PF_PID' EXIT
+          sleep 5
+
+          # A forged client header must be stripped and replaced by the JWT sub.
+          BODY=$(curl -sS --fail \
+            -H "Host: ${TEST_HOST}" \
+            -H "Authorization: Bearer ${TEST_JWT}" \
+            -H "X-Mctl-Route-Key: forged-by-client" \
+            http://localhost:8080/)
+          echo "$BODY"
+          ROUTE_KEY=$(echo "$BODY" | jq -r '.headers["x-mctl-route-key"] // empty')
+          echo "route key seen by upstream: '${ROUTE_KEY}'"
+          test "$ROUTE_KEY" = "${EXPECTED_SUB}"
+
+      - name: dump controller logs on failure
+        if: failure()
+        run: kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=100 || true
+
+  istio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: install kind + kubectl + istioctl
+        run: |
+          curl -sSfLo /usr/local/bin/kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl -sSfLo /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+          curl -sSfL https://istio.io/downloadIstio | ISTIO_VERSION="${ISTIO_VERSION}" sh -
+          sudo install "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
+
+      - name: create kind cluster
+        run: kind create cluster --image "${KIND_NODE_IMAGE}" --wait 120s
+
+      - name: install istio (default profile, includes ingress gateway)
+        run: |
+          istioctl install --set profile=default -y
+          kubectl -n istio-system wait --for=condition=Available \
+            deploy/istiod deploy/istio-ingressgateway --timeout=240s
+
+      - name: deploy echo backend + gateway routing
+        run: |
+          kubectl create namespace mctl
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo
+            namespace: mctl
+          spec:
+            replicas: 1
+            selector:
+              matchLabels: { app: echo }
+            template:
+              metadata:
+                labels: { app: echo }
+              spec:
+                containers:
+                  - name: echo
+                    image: mendhak/http-https-echo:31
+                    env:
+                      - name: HTTP_PORT
+                        value: "8080"
+                    ports:
+                      - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mctl-telegram
+            namespace: mctl
+          spec:
+            selector: { app: echo }
+            ports:
+              - name: http
+                port: 8080
+                targetPort: 8080
+          ---
+          apiVersion: networking.istio.io/v1alpha3
+          kind: Gateway
+          metadata:
+            name: mctl-telegram-gw
+            namespace: mctl
+          spec:
+            selector:
+              istio: ingressgateway
+            servers:
+              - port: { number: 80, name: http, protocol: HTTP }
+                hosts: ["mctl-telegram.example.com"]
+          ---
+          apiVersion: networking.istio.io/v1alpha3
+          kind: VirtualService
+          metadata:
+            name: mctl-telegram-vs
+            namespace: mctl
+          spec:
+            hosts: ["mctl-telegram.example.com"]
+            gateways: ["mctl-telegram-gw"]
+            http:
+              - route:
+                  - destination:
+                      host: mctl-telegram.mctl.svc.cluster.local
+                      port: { number: 8080 }
+          EOF
+          kubectl -n mctl wait --for=condition=Available deploy/echo --timeout=120s
+
+      - name: apply sticky EnvoyFilter + DestinationRule
+        run: kubectl apply -f deploy/ingress/sticky-envoy.yaml
+
+      - name: istioctl analyze (must be clean)
+        run: |
+          set -euo pipefail
+          sleep 10
+          # Fail only on Error-level findings; setup-specific warnings (e.g. no
+          # sidecar injection on the test backend) must not fail the gate.
+          istioctl analyze --all-namespaces --failure-threshold=Error
+
+      - name: proxy-config reflection (filter actually applied)
+        run: |
+          set -euo pipefail
+          GW_POD=$(kubectl -n istio-system get pod -l istio=ingressgateway \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "gateway pod: ${GW_POD}"
+          # Allow the EnvoyFilter to propagate to the gateway proxy.
+          for i in $(seq 1 12); do
+            if istioctl proxy-config listener "${GW_POD}.istio-system" -o json \
+                | grep -q "envoy.filters.http.lua"; then
+              echo "lua filter reflected in gateway proxy-config"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "lua filter NOT found in gateway proxy-config" >&2
+          istioctl proxy-config listener "${GW_POD}.istio-system" -o json | grep -i lua || true
+          exit 1
+
+      - name: runtime smoke
+        run: |
+          set -euo pipefail
+          kubectl -n istio-system port-forward svc/istio-ingressgateway 8080:80 &
+          PF_PID=$!
+          trap 'kill $PF_PID' EXIT
+          sleep 5
+
+          BODY=$(curl -sS --fail \
+            -H "Host: ${TEST_HOST}" \
+            -H "Authorization: Bearer ${TEST_JWT}" \
+            -H "X-Mctl-Route-Key: forged-by-client" \
+            http://localhost:8080/)
+          echo "$BODY"
+          ROUTE_KEY=$(echo "$BODY" | jq -r '.headers["x-mctl-route-key"] // empty')
+          echo "route key seen by upstream: '${ROUTE_KEY}'"
+          test "$ROUTE_KEY" = "${EXPECTED_SUB}"
+
+      - name: dump gateway logs on failure
+        if: failure()
+        run: |
+          kubectl -n istio-system logs -l istio=ingressgateway --tail=100 || true
