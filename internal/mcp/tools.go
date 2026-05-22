@@ -98,6 +98,9 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 			return toolErr("local-bridge daemon is overloaded — too many in-flight calls, try again shortly"), nil
 		}
 		if errors.Is(err, bridge.ErrNoDaemonConnected) {
+			if s.Metrics != nil {
+				s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
+			}
 			return toolErr("local-bridge daemon not connected — run `mctl-telegram-local daemon`"), nil
 		}
 		if errors.Is(err, bridge.ErrCallTimeout) {
