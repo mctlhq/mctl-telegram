@@ -106,7 +106,7 @@ GET    /api/account/audit/verify # recompute the hash chain and prove audit was 
   <ul>
     <li><strong>You</strong>, via the MCP tools and HTTP endpoints listed above.</li>
     <li><strong>The deployment operator</strong>, who has Kubernetes/database access to the running service. There is no in-service admin tool that exposes another user's session in plaintext, but an operator with SQL access could read the encrypted blob; without the <code>ENCRYPTION_KEY</code> they cannot decrypt it.</li>
-    <li><strong>Anyone who compromises the running pod</strong> could read every session in memory while requests are in flight (this is true of any server-side MTProto host; mitigations are the <em>Local Bridge</em> roadmap).</li>
+    <li><strong>Anyone who compromises the running pod</strong> could read every session in memory while requests are in flight (this is true of any server-side MTProto host; mitigations are available via <em>Local Bridge</em> mode (beta, self-hosted), which keeps the session off the server entirely).</li>
   </ul>
 
   <h2>Third parties</h2>
