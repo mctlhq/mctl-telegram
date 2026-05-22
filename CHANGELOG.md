@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.29.1](https://github.com/mctlhq/mctl-telegram/compare/0.29.0...0.29.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **mcp:** apply per-peer rate limit on direct send_message path ([59b9aaf](https://github.com/mctlhq/mctl-telegram/commit/59b9aafb199bc8b7944acefff7541db132d441e4))
+* **mcp:** extract evaluateDirectSendLimiter and add unit tests ([04f6004](https://github.com/mctlhq/mctl-telegram/commit/04f6004c60db8fefd4b0e9359f21cda20e36179b))
+* **mcp:** make confirmation_id optional in send_message ([10ae76c](https://github.com/mctlhq/mctl-telegram/commit/10ae76c2b66e376cdaba2696919b8b6e82133167))
+* **mcp:** make confirmation_id optional in send_message ([3e42287](https://github.com/mctlhq/mctl-telegram/commit/3e42287bf0d9f54ce51805df09be33f00d5f9ceb))
+
 ## [0.29.0](https://github.com/mctlhq/mctl-telegram/compare/0.28.1...0.29.0) (2026-05-22)
 
 
