@@ -15,7 +15,7 @@ const ConfirmationTTL = 5 * time.Minute
 
 // Confirmation is the server-side handle for an in-flight destructive
 // action that needs a two-step prepare→confirm dance. Stored in-memory only:
-// short-lived (≤60s), single-shot, lost on pod restart by design. A user
+// short-lived (≤5m), single-shot, lost on pod restart by design. A user
 // who refreshes their workflow simply prepares again.
 type Confirmation struct {
 	ID          string
