@@ -40,11 +40,11 @@ jobs:
 
       - name: install kind + kubectl
         run: |
-          curl -sSfLo /usr/local/bin/kind \
+          sudo curl -sSfLo /usr/local/bin/kind \
             "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          curl -sSfLo /usr/local/bin/kubectl \
+          sudo curl -sSfLo /usr/local/bin/kubectl \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+          sudo chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
 
       - name: create kind cluster
         run: kind create cluster --image "${KIND_NODE_IMAGE}" --wait 120s
@@ -133,11 +133,11 @@ jobs:
 
       - name: install kind + kubectl + istioctl
         run: |
-          curl -sSfLo /usr/local/bin/kind \
+          sudo curl -sSfLo /usr/local/bin/kind \
             "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
-          curl -sSfLo /usr/local/bin/kubectl \
+          sudo curl -sSfLo /usr/local/bin/kubectl \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+          sudo chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
           curl -sSfL https://istio.io/downloadIstio | ISTIO_VERSION="${ISTIO_VERSION}" sh -
           sudo install "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
 
