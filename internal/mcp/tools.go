@@ -864,7 +864,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
-		return false, "mode=draft (default) — call with mode:'send' to send for real"
+		return false, "mode=draft — pass mode='send' to send for real"
 	}
 	if !allowSend {
 		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
