@@ -241,71 +241,6 @@ Empty result means no unread messages match (including: peer has unread but text
 	return tool, handler
 }
 
-func (s *Server) toolPrepareSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
-	tool := mcplib.NewTool("prepare_send_message",
-		mcplib.WithTitleAnnotation("Prepare a Telegram send"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`Snapshot a send_message call you intend to confirm momentarily.
-
-Returns a one-shot confirmation_id valid for 60s that send_message must echo back with mode=send. The pair is bound to (peer, text) — changing either between prepare and confirm invalidates the confirmation. The prepare step itself is read-only and never reaches Telegram.
-
-Inputs (required):
-  peer — same accepted forms as send_message.
-  text — message body (plain text).
-
-Output: {confirmation_id, peer_redacted, text_preview, payload_hash, expires_at}.
-
-The two-step flow exists so an LLM cannot quietly drift the payload between agreeing on a draft with the user and reaching for the live send: any mutation forces a fresh prepare round.`),
-		mcplib.WithString("peer",
-			mcplib.Required(),
-			mcplib.Description("Peer to send to."),
-		),
-		mcplib.WithString("text",
-			mcplib.Required(),
-			mcplib.Description("Message text the live send_message will use."),
-		),
-	)
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		startedAt := time.Now()
-		id := auth.From(ctx)
-		if id == nil {
-			s.audit(ctx, id, "prepare_send_message", "", errors.New("authentication required"), startedAt)
-			return mcplib.NewToolResultError("authentication required"), nil
-		}
-		args := req.GetArguments()
-		peer := stringArg(args, "peer", "")
-		text := stringArg(args, "text", "")
-		if peer == "" || text == "" {
-			s.audit(ctx, id, "prepare_send_message", "", errors.New("peer and text are required"), startedAt)
-			return mcplib.NewToolResultError("peer and text are required"), nil
-		}
-		peerRedacted := telegram.RedactPeer(peer)
-		// Per-peer rate limit on the prepare step: if a caller exhausts
-		// the per-peer budget, refuse to issue a confirmation. The token
-		// is consumed at prepare time so a quick prepare→prepare loop
-		// can't sidestep the cap. Returning an error keeps the surface
-		// honest — there is no draft preview for prepare.
-		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil, startedAt)
-			return mcplib.NewToolResultError("per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
-		}
-		hash := HashSendPayload(peer, text)
-		c, err := s.Confirms.Issue(id.UserID, "send", hash)
-		if err != nil {
-			return toolErr("prepare_send_message: %v", err), nil
-		}
-		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil, startedAt)
-		return jsonResult(map[string]any{
-			"confirmation_id": c.ID,
-			"peer_redacted":   telegram.RedactPeer(peer),
-			"text_preview":    truncate(text, 200),
-			"payload_hash":    hash,
-			"expires_at":      c.ExpiresAt.UTC(),
-		})
-	}
-	return tool, handler
-}
-
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
@@ -317,7 +252,7 @@ Inputs (required):
   text — message body (plain text).
 Inputs (optional):
   mode — "draft" (default) or "send". Default is dry-run.
-  confirmation_id — Optional. If supplied (obtained from prepare_send_message), it is validated before sending (valid for 60s, single-shot, must match the same peer and text). If omitted, mode="send" proceeds directly without a confirmation step.
+  confirmation_id — Optional. If supplied, it is validated before sending (valid for 5m, single-shot, must match the same peer and text). If omitted, mode="send" proceeds directly without a confirmation step.
 
 Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true, and mode="send". Any missing piece returns a dry-run preview with reason in dry_reason.`),
 		mcplib.WithString("peer",
@@ -333,7 +268,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			mcplib.Enum("draft", "send"),
 		),
 		mcplib.WithString("confirmation_id",
-			mcplib.Description("Optional. Confirmation id from prepare_send_message. If provided it is validated (hash, expiry, single-shot); if omitted the send proceeds without a confirmation step."),
+			mcplib.Description("Optional. If provided it is validated (hash, expiry, single-shot); if omitted the send proceeds without a confirmation step."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -354,7 +289,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				realSend = false
 				switch {
 				case errors.Is(cerr, ErrConfirmationMismatch):
-					dryReason = "confirmation_id was issued for a different (peer, text) — re-run prepare_send_message"
+					dryReason = "confirmation_id was issued for a different (peer, text) — omit it to send without confirmation"
 				case errors.Is(cerr, ErrConfirmationWrongUser):
 					dryReason = "confirmation_id belongs to another identity"
 				default:
@@ -472,7 +407,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 60s that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
+Returns a one-shot confirmation_id valid for 5m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
 Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expires_at}.`),
@@ -538,7 +473,7 @@ Inputs:
   peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
   message_id — required: integer ID of the message to pin/unpin.
   unpin — optional bool, default false. Set to true to unpin.
-  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 60s, single-shot, must echo same (peer, message_id, unpin).
+  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 5m, single-shot, must echo same (peer, message_id, unpin).
 
 Use get_messages to find message IDs before calling this tool. The two-step prepare→confirm flow exists to keep an LLM from drifting the (peer, message_id) silently between agreeing on what to pin and the live pin call.`),
 		mcplib.WithString("peer",

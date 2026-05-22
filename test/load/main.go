@@ -25,7 +25,6 @@ import (
 const (
 	toolListDialogs = "list_dialogs"
 	toolGetMessages = "get_messages"
-	toolPrepareSend = "prepare_send_message"
 	toolSendMessage = "send_message"
 )
 
@@ -37,7 +36,7 @@ var (
 	flagTokens    = flag.String("tokens", "", "path to newline-delimited bearer token file (required)")
 	flagPeer      = flag.String("peer", "", "Telegram peer for get_messages calls (required)")
 	flagOut       = flag.String("out", "results.json", "path for JSON results file")
-	flagAllowSend = flag.Bool("allow-send", false, "exercise the send_message call path in draft mode (no real message delivered); default false measures prepare_send_message only")
+	flagAllowSend = flag.Bool("allow-send", false, "exercise the send_message call path in draft mode (no real message delivered)")
 )
 
 // callResult records a single tool-call outcome.
@@ -106,7 +105,6 @@ func newResultStore() *resultStore {
 		stats: map[string]*toolStats{
 			toolListDialogs: {},
 			toolGetMessages: {},
-			toolPrepareSend: {},
 			toolSendMessage: {},
 		},
 	}
@@ -364,34 +362,16 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolGetMessages, map[string]any{"peer": peer})
 			s.stats[toolGetMessages].record(callResult{latency: lat, isErr: err != nil})
 
-		default: // send sequence (5%): prepare then send (draft mode)
-			prepRaw, lat1, err := callTool(ctx, client, target, token, sessionID, id, toolPrepareSend, map[string]any{
-				"peer": peer,
-				"text": "load test dry run",
-			})
-			s.stats[toolPrepareSend].record(callResult{latency: lat1, isErr: err != nil})
-			if err != nil || prepRaw == nil {
-				break
-			}
-			confirmID := extractConfirmationID(prepRaw)
-			if confirmID == "" {
-				break
-			}
-			// Only exercise send_message when explicitly opted in via
-			// -allow-send; otherwise measure prepare_send_message only. Even
-			// when enabled we pass mode=draft so no real Telegram message is
-			// delivered during a load test.
+		default: // send_message (5%): direct call, draft mode
 			if !allowSend {
 				break
 			}
-			id2 := int(counter.Add(1))
-			_, lat2, err2 := callTool(ctx, client, target, token, sessionID, id2, toolSendMessage, map[string]any{
-				"peer":            peer,
-				"text":            "load test dry run",
-				"confirmation_id": confirmID,
-				"mode":            "draft",
+			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolSendMessage, map[string]any{
+				"peer": peer,
+				"text": "load test dry run",
+				"mode": "draft",
 			})
-			s.stats[toolSendMessage].record(callResult{latency: lat2, isErr: err2 != nil})
+			s.stats[toolSendMessage].record(callResult{latency: lat, isErr: err != nil})
 		}
 
 		// Inter-call jitter: 0-500 ms uniform random.
@@ -404,28 +384,6 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 	}
 }
 
-// extractConfirmationID parses a confirmation_id out of an MCP tool result
-// payload. The prepare_send_message tool returns a text content block
-// containing JSON with a "confirmation_id" key.
-func extractConfirmationID(raw json.RawMessage) string {
-	var result mcpToolResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return ""
-	}
-	for _, c := range result.Content {
-		if c.Type != "text" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(c.Text), &m); err != nil {
-			continue
-		}
-		if cid, ok := m["confirmation_id"].(string); ok && cid != "" {
-			return cid
-		}
-	}
-	return ""
-}
 
 // parsePrometheusLine parses one line of Prometheus text-format exposition.
 // Returns ok=false for comments, empty lines, or malformed entries.
@@ -569,7 +527,7 @@ func buildReport(s *resultStore, pm *peakMetrics, target string, users int, ramp
 		FloodWaits:     floodCopy,
 	}
 
-	for _, name := range []string{toolListDialogs, toolGetMessages, toolPrepareSend, toolSendMessage} {
+	for _, name := range []string{toolListDialogs, toolGetMessages, toolSendMessage} {
 		count, errCount, p50, p95, p99 := s.stats[name].snapshot()
 		var rate float64
 		if count > 0 {

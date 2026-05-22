@@ -86,8 +86,8 @@ const PeerWindow = time.Hour
 // from the peer); we never key on the raw peer string so a redacted audit
 // log can still reconstruct which bucket was touched.
 //
-// Called from the destructive-action gate (prepare_send_message / send /
-// prepare_pin_message / pin) in addition to the per-request middleware
+// Called from the destructive-action gate (send / prepare_pin_message / pin)
+// in addition to the per-request middleware
 // limiter. A user can issue many reads per minute but only N writes per
 // peer per hour.
 func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, window time.Duration) bool {
