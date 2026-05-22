@@ -1,0 +1,121 @@
+# deploy/ingress/sticky-nginx.yaml
+#
+# ingress-nginx (community edition, v1.2+) configuration for sticky per-user
+# routing in multi-replica mctl-telegram deployments.
+#
+# HOW IT WORKS
+# ------------
+# Each MCP request carries an Authorization: Bearer <jwt> header whose payload
+# (the middle dot-delimited segment) contains a "sub" claim of the form
+# "tg:<telegram_id>". The Lua block below:
+#   1. Strips any client-supplied X-Mctl-Route-Key header (prevents forgery).
+#   2. Extracts the JWT payload, base64url-decodes it, reads the "sub" claim.
+#   3. Sets X-Mctl-Route-Key to that value.
+# ingress-nginx then performs ketama consistent-hash routing on the header,
+# directing all requests with the same sub to the same upstream pod.
+#
+# WHY access_by_lua_block (NOT bare statements in configuration-snippet)
+# ----------------------------------------------------------------------
+# configuration-snippet is injected verbatim into the nginx `location` block as
+# nginx configuration directives. Bare Lua statements there are not valid nginx
+# config and fail `nginx -t` on reload (the controller rejects the Ingress via
+# its admission webhook). Lua must run inside an access_by_lua_block directive,
+# which executes during the access phase -- before upstream selection, so the
+# hash sees the server-injected header. The header-stripping directive
+# (more_clear_input_headers, from the bundled headers-more module) is a real
+# nginx directive and stays outside the Lua block.
+#
+# SECURITY ANALYSIS
+# -----------------
+# The JWT signature is NOT verified at this tier. This is intentional:
+#   - ingress-nginx community edition does not ship HS256 verification; adding
+#     it would require distributing the JWT signing key outside the pod.
+#   - The routing key carries no authorization weight. The application auth
+#     middleware (internal/auth) re-verifies the full JWT on every request and
+#     rejects tampered tokens. Editing the sub to target a different pod still
+#     gets rejected by that pod's auth check -- no privilege escalation.
+#
+# DOWNWARD API
+# ------------
+# For the replica_id label in mctl_telegram_replica_id to be useful, inject
+# POD_NAME via the Kubernetes downward API in the Deployment spec:
+#
+#   env:
+#     - name: POD_NAME
+#       valueFrom:
+#         fieldRef:
+#           fieldPath: metadata.name
+#
+# REQUIREMENTS
+# ------------
+# - ingress-nginx >= v1.2 (LuaJIT enabled by default in the official image)
+# - Snippet annotations must be enabled on the controller. Since v1.9 they are
+#   DISABLED by default for security (an Ingress author could otherwise inject
+#   arbitrary nginx config). configuration-snippet is also classed a "Critical"
+#   risk annotation. Set both in the controller ConfigMap:
+#       allow-snippet-annotations: "true"
+#       annotations-risk-level: "Critical"   # needed on v1.12+
+#   This is acceptable here because the platform team -- not tenants -- owns the
+#   overlay that carries this annotation. If your cluster cannot enable
+#   snippets, do routing at the Istio/Envoy tier (see sticky-envoy.yaml).
+# - Update the namespace, service name, and host fields below for your cluster.
+#
+# NOTE: standalone reference manifest. The platform team adapts it into the
+# appropriate kustomize overlay in mctl-gitops before deploying. Validated by
+# the sticky-ingress-acceptance CI workflow (kind + ingress-nginx admission +
+# runtime smoke).
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mctl-telegram
+  namespace: mctl
+  annotations:
+    # Ketama consistent-hash on the server-injected routing header.
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$http_x_mctl_route_key"
+
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      # Strip any client-supplied routing header to prevent forgery. Runs
+      # before the Lua block re-derives it from the verified-downstream JWT.
+      more_clear_input_headers "X-Mctl-Route-Key";
+
+      access_by_lua_block {
+        local auth = ngx.var.http_authorization
+        if not auth then return end
+        local token = string.match(auth, "^[Bb]earer%s+(.+)$")
+        if not token then return end
+
+        -- Collect the dot-delimited JWT segments; the payload is segment 2.
+        local seg = {}
+        for part in string.gmatch(token, "[^.]+") do
+          seg[#seg + 1] = part
+        end
+        if not seg[2] then return end
+
+        -- base64url -> standard base64 with padding, then decode.
+        local b64 = seg[2]:gsub("-", "+"):gsub("_", "/")
+        local pad = (4 - #b64 % 4) % 4
+        b64 = b64 .. string.rep("=", pad)
+        local payload = ngx.decode_base64(b64)
+        if not payload then return end
+
+        -- Extract the sub claim. A pattern match avoids depending on a JSON
+        -- module; sub values are "tg:<digits>" so they contain no quotes.
+        local sub = string.match(payload, '"sub"%s*:%s*"([^"]+)"')
+        if sub then
+          ngx.req.set_header("X-Mctl-Route-Key", sub)
+        end
+      }
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mctl-telegram.example.com  # replace with your hostname
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mctl-telegram
+                port:
+                  number: 8080

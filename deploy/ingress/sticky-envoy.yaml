@@ -1,0 +1,167 @@
+# deploy/ingress/sticky-envoy.yaml
+#
+# Istio EnvoyFilter + DestinationRule for sticky per-user routing in
+# multi-replica mctl-telegram deployments behind an Envoy ingress gateway.
+#
+# HOW IT WORKS
+# ------------
+# The EnvoyFilter inserts a Lua HTTP filter (before the router) that:
+#   1. Strips any client-supplied x-mctl-route-key header (prevents forgery).
+#   2. Extracts the JWT payload, base64url-decodes it, reads the "sub" claim.
+#   3. Sets x-mctl-route-key to that value.
+# The DestinationRule then uses consistent-hash load balancing on that header,
+# directing all requests with the same sub to the same upstream pod.
+#
+# WHY top-level Lua (NOT LuaPerRoute) AND a hand-rolled base64url decoder
+# -----------------------------------------------------------------------
+# Two semantics that a previous attempt got wrong:
+#   - An HTTP_FILTER insert needs the filter's top-level config type,
+#     envoy.extensions.filters.http.lua.v3.Lua. LuaPerRoute is a per-route
+#     override applied via typed_per_filter_config, not a filter definition;
+#     using it for the HTTP_FILTER patch makes Istio/Envoy reject or ignore it.
+#   - Envoy's Lua runtime exposes no global `base64` module, so base64.decode()
+#     errors at request time. We decode in pure Lua instead (b64url_decode
+#     below) -- it uses only string/math primitives available in Envoy's LuaJIT.
+#
+# SECURITY ANALYSIS
+# -----------------
+# The JWT signature is NOT verified at this tier. This is intentional:
+#   - Without the Istio JWT AuthN filter, Envoy does not ship HS256
+#     verification as a first-class feature, and we do not want to distribute
+#     the signing key to the gateway.
+#   - The routing key carries no authorization weight. The application auth
+#     middleware (internal/auth) re-verifies the full JWT on every request and
+#     rejects tampered tokens. Editing the sub to target a different pod still
+#     gets rejected by that pod's auth check -- no privilege escalation.
+#
+# DOWNWARD API
+# ------------
+# For the replica_id label in mctl_telegram_replica_id to be useful, inject
+# POD_NAME via the Kubernetes downward API in the Deployment spec:
+#
+#   env:
+#     - name: POD_NAME
+#       valueFrom:
+#         fieldRef:
+#           fieldPath: metadata.name
+#
+# REQUIREMENTS
+# ------------
+# - Istio >= 1.14 (Lua filter support is stable in this range)
+# - Update namespace, host, and workload labels below for your cluster.
+#
+# GATEWAY API ALTERNATIVE
+# -----------------------
+# For clusters on Gateway API v1.2+ without Istio, an equivalent setup uses an
+# HTTPRoute request-header-modifier filter with a BackendLBPolicy (GEP-1731)
+# consistent_hash.httpHeader. BackendLBPolicy is experimental in v1.2; the
+# Istio DestinationRule below is the stable, widely-deployed choice.
+#
+# NOTE: standalone reference manifest. The platform team adapts it into the
+# appropriate kustomize overlay in mctl-gitops before deploying. Validated by
+# the sticky-ingress-acceptance CI workflow (kind + istio: istioctl analyze,
+# proxy-config reflection, and a runtime smoke).
+---
+# EnvoyFilter: inject the Lua HTTP filter that extracts the JWT sub and sets
+# the routing header on the ingress gateway.
+#
+# A gateway-scoped EnvoyFilter must live in the gateway's own namespace
+# (istio-system for the default ingress gateway) -- an EnvoyFilter in the
+# application namespace only matches workloads in that same namespace, so it
+# would silently never patch the shared gateway. The workloadSelector narrows
+# it to the gateway pods so it does not touch sidecars.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: mctl-telegram-route-key
+  namespace: istio-system  # the ingress gateway's namespace
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway  # adjust to your gateway's pod label
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.lua
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            default_source_code:
+              inline_string: |
+                -- Pure-Lua base64url decoder (Envoy's Lua runtime has no
+                -- base64 module). Returns the decoded string, or "" on bad
+                -- input -- never errors, so a malformed token is just ignored.
+                local function b64url_decode(input)
+                  local alphabet =
+                    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+                  input = input:gsub('-', '+'):gsub('_', '/')
+                  local pad = (4 - #input % 4) % 4
+                  input = input .. string.rep('=', pad)
+                  input = input:gsub('[^' .. alphabet .. '=]', '')
+                  return (input:gsub('.', function(c)
+                    if c == '=' then return '' end
+                    -- find with plain=true: '+' (and other base64 chars) are
+                    -- Lua pattern metacharacters, so a pattern search would
+                    -- crash the request. A '+' reaches here whenever the JWT's
+                    -- base64url payload contained a '-' (converted on input).
+                    local x, bits = alphabet:find(c, 1, true) - 1, ''
+                    for i = 6, 1, -1 do
+                      bits = bits .. (x % 2 ^ i - x % 2 ^ (i - 1) > 0 and '1' or '0')
+                    end
+                    return bits
+                  end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(byte)
+                    if #byte ~= 8 then return '' end
+                    local value = 0
+                    for i = 1, 8 do
+                      value = value + (byte:sub(i, i) == '1' and 2 ^ (8 - i) or 0)
+                    end
+                    return string.char(value)
+                  end))
+                end
+
+                function envoy_on_request(request_handle)
+                  local headers = request_handle:headers()
+                  -- Strip any client-supplied routing header (forgery guard).
+                  headers:remove("x-mctl-route-key")
+
+                  local auth = headers:get("authorization")
+                  if not auth then return end
+                  local token = string.match(auth, "^[Bb]earer%s+(.+)$")
+                  if not token then return end
+
+                  local seg = {}
+                  for part in string.gmatch(token, "[^.]+") do
+                    seg[#seg + 1] = part
+                  end
+                  if not seg[2] then return end
+
+                  local payload = b64url_decode(seg[2])
+                  if not payload or payload == "" then return end
+
+                  local sub = string.match(payload, '"sub"%s*:%s*"([^"]+)"')
+                  if sub then
+                    headers:replace("x-mctl-route-key", sub)
+                  end
+                end
+---
+# DestinationRule: consistent-hash load balancing on the routing header.
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: mctl-telegram-sticky
+  namespace: mctl
+spec:
+  host: mctl-telegram.mctl.svc.cluster.local  # adjust FQDN for your cluster
+  trafficPolicy:
+    loadBalancer:
+      consistentHash:
+        httpHeaderName: "x-mctl-route-key"
