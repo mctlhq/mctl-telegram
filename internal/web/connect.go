@@ -245,9 +245,9 @@ func connectRandomToken(n int) string {
 
 // ----- HTML templates -----
 
-// The landing and success pages share the CSS palette defined in
-// internal/oauth/enable_access_page.go (enableHead / enableFoot). The
-// templates are inlined here so the web package is self-contained.
+// The connect pages share the lite (strict-CSP) chrome from internal/ui:
+// inlined design tokens + component CSS + auth-card CSS, the static topbar,
+// and the footer. No external resources or JS, matching the existing CSP.
 
 var connectHead = `<!doctype html>
 <html lang="en">

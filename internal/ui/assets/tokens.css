@@ -35,6 +35,7 @@
    */
   @media (prefers-color-scheme: light) {
     :root:not([data-theme]) {
+      color-scheme: light;
       --surface-bg: #f1ede4; --surface-elevated: #f1ede4; --surface-card: #f1ede4;
       --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
       --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
