@@ -61,9 +61,9 @@ jobs:
           kubectl -n ingress-nginx wait --for=condition=Complete \
             job/ingress-nginx-admission-patch --timeout=180s
           kubectl -n ingress-nginx rollout status \
-            deploy/ingress-nginx-controller --timeout=180s
+            deploy/ingress-nginx-controller --timeout=300s
           kubectl -n ingress-nginx wait --for=condition=Ready pod \
-            -l app.kubernetes.io/component=controller --timeout=180s
+            -l app.kubernetes.io/component=controller --timeout=300s
 
       - name: deploy echo backend
         run: |
@@ -142,9 +142,13 @@ jobs:
           echo "route key seen by upstream: '${ROUTE_KEY}'"
           test "$ROUTE_KEY" = "${EXPECTED_SUB}"
 
-      - name: dump controller logs on failure
+      - name: dump diagnostics on failure
         if: failure()
-        run: kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=100 || true
+        run: |
+          kubectl -n ingress-nginx get pods -o wide || true
+          kubectl -n ingress-nginx describe pod \
+            -l app.kubernetes.io/component=controller || true
+          kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=100 || true
 
   istio:
     runs-on: ubuntu-latest
