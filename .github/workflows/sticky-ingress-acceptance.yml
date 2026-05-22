@@ -69,6 +69,18 @@ jobs:
           kubectl -n ingress-nginx wait --for=condition=Ready pod \
             -l app.kubernetes.io/component=controller --timeout=300s
 
+      - name: enable snippet annotations
+        run: |
+          # Snippet annotations are disabled by default since v1.9 (and
+          # configuration-snippet is a "Critical"-risk annotation), so the
+          # manifest documents this prerequisite and the gate must enable it
+          # to validate the real manifest.
+          kubectl -n ingress-nginx patch configmap ingress-nginx-controller \
+            --type merge \
+            -p '{"data":{"allow-snippet-annotations":"true","annotations-risk-level":"Critical"}}'
+          # Give the controller time to observe the ConfigMap and reload.
+          sleep 15
+
       - name: deploy echo backend
         run: |
           kubectl create namespace mctl

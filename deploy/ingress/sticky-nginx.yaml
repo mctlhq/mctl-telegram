@@ -49,6 +49,15 @@
 # REQUIREMENTS
 # ------------
 # - ingress-nginx >= v1.2 (LuaJIT enabled by default in the official image)
+# - Snippet annotations must be enabled on the controller. Since v1.9 they are
+#   DISABLED by default for security (an Ingress author could otherwise inject
+#   arbitrary nginx config). configuration-snippet is also classed a "Critical"
+#   risk annotation. Set both in the controller ConfigMap:
+#       allow-snippet-annotations: "true"
+#       annotations-risk-level: "Critical"   # needed on v1.12+
+#   This is acceptable here because the platform team -- not tenants -- owns the
+#   overlay that carries this annotation. If your cluster cannot enable
+#   snippets, do routing at the Istio/Envoy tier (see sticky-envoy.yaml).
 # - Update the namespace, service name, and host fields below for your cluster.
 #
 # NOTE: standalone reference manifest. The platform team adapts it into the
