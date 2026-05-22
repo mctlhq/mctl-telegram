@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.27.0](https://github.com/mctlhq/mctl-telegram/compare/0.26.2...0.27.0) (2026-05-22)
+
+
+### Features
+
+* **agents:** issue-94-local-bridge-m4-finish-community-release ([7a6279a](https://github.com/mctlhq/mctl-telegram/commit/7a6279a434c11ea8838d816e948aa541bcad34f9))
+
+
+### Bug Fixes
+
+* scope privacy page contact to privacy inquiries only ([9d8bce3](https://github.com/mctlhq/mctl-telegram/commit/9d8bce3c4ea5662b23dc90a6cdbcb54a3dd45587))
+* topic-specific contact emails on security/privacy ([298f531](https://github.com/mctlhq/mctl-telegram/commit/298f53170b97a957ceab0808cec0c4b32cdf84e7))
+* use topic-specific contact emails on security/privacy pages ([75ecf2c](https://github.com/mctlhq/mctl-telegram/commit/75ecf2c5b3b84d9b0ecf47d29d37b2bc1d6e2744))
+
 ## [0.26.2](https://github.com/mctlhq/mctl-telegram/compare/0.26.1...0.26.2) (2026-05-22)
 
 
