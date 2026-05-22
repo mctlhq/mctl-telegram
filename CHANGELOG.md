@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.29.2](https://github.com/mctlhq/mctl-telegram/compare/0.29.1...0.29.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* **mcp:** address P2/P3 review findings ([76fc59c](https://github.com/mctlhq/mctl-telegram/commit/76fc59c0b0f1db8103f9e024478d2b70e16137d0))
+* **mcp:** address remaining P2/P3 review findings ([f88f192](https://github.com/mctlhq/mctl-telegram/commit/f88f192b4977ed6d2549454fbc68dab2a13dbfea))
+* **mcp:** remove prepare_send_message tool and raise confirmation TTL to 5m ([e855111](https://github.com/mctlhq/mctl-telegram/commit/e8551112d4bb46df2bc8b27b3353c82797f981ab))
+* **mcp:** remove prepare_send_message tool, raise confirmation TTL to 5m ([67370d2](https://github.com/mctlhq/mctl-telegram/commit/67370d288cc846745235e228b306d41243940d51))
+
 ## [0.29.1](https://github.com/mctlhq/mctl-telegram/compare/0.29.0...0.29.1) (2026-05-22)
 
 
