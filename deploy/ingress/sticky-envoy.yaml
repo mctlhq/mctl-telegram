@@ -109,7 +109,11 @@ spec:
                   input = input:gsub('[^' .. alphabet .. '=]', '')
                   return (input:gsub('.', function(c)
                     if c == '=' then return '' end
-                    local x, bits = alphabet:find(c) - 1, ''
+                    -- find with plain=true: '+' (and other base64 chars) are
+                    -- Lua pattern metacharacters, so a pattern search would
+                    -- crash the request. A '+' reaches here whenever the JWT's
+                    -- base64url payload contained a '-' (converted on input).
+                    local x, bits = alphabet:find(c, 1, true) - 1, ''
                     for i = 6, 1, -1 do
                       bits = bits .. (x % 2 ^ i - x % 2 ^ (i - 1) > 0 and '1' or '0')
                     end
@@ -145,7 +149,7 @@ spec:
 
                   local sub = string.match(payload, '"sub"%s*:%s*"([^"]+)"')
                   if sub then
-                    headers:add("x-mctl-route-key", sub)
+                    headers:replace("x-mctl-route-key", sub)
                   end
                 end
 ---

@@ -24,11 +24,15 @@ env:
   KIND_VERSION: v0.24.0
   KIND_NODE_IMAGE: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
   KUBECTL_VERSION: v1.31.0
-  INGRESS_NGINX_REF: controller-v1.11.3
+  # Pinned to the controller-v1.11.3 commit SHA (mutable tags can move).
+  INGRESS_NGINX_REF: f6456ea86c6c330e7cf401ade70ce1faa757265b
   ISTIO_VERSION: 1.23.2
-  # base64url payload of {"sub":"tg:123456789","exp":1999999999}; the routing
-  # tier never verifies the signature, so header/sig segments are placeholders.
-  TEST_JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZzoxMjM0NTY3ODkiLCJleHAiOjE5OTk5OTk5OTl9.sig
+  # base64url payload of {"sub":"tg:123456789","x":"  >","exp":1999999999}; the
+  # routing tier never verifies the signature, so header/sig are placeholders.
+  # The "  >" claim makes the payload's base64url contain a '-', exercising the
+  # base64url->base64 conversion path in the Lua decoders (an all-alphanumeric
+  # token would never produce a '-').
+  TEST_JWT: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZzoxMjM0NTY3ODkiLCJ4IjoiICA-IiwiZXhwIjoxOTk5OTk5OTk5fQ.sig
   EXPECTED_SUB: "tg:123456789"
   TEST_HOST: mctl-telegram.example.com
 
