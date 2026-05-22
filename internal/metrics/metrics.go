@@ -55,6 +55,11 @@ type Registry struct {
 	// OAuthPendingAuthSize reflects the current count of pending OAuth
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
+
+	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
+	// replica_id. Operators use it to verify that a given user_id consistently
+	// hits the same replica by cross-referencing with pod-scoped pool metrics.
+	TelegramReplicaID *prometheus.GaugeVec
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -129,6 +134,12 @@ func New() *Registry {
 		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
 	})
 
+	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "mctl_telegram_replica_id",
+		Help: "Info gauge (always 1) identifying this replica. " +
+			"Label replica_id is sourced from REPLICA_ID / POD_NAME env vars.",
+	}, []string{"replica_id"})
+
 	r.SessionsConnectedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_sessions_connected_total",
 		Help: "Total new Telegram sessions persisted via SaveSession.",
@@ -168,6 +179,7 @@ func New() *Registry {
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
 		r.SessionsBorrowTotal,
+		r.TelegramReplicaID,
 	)
 	return r
 }
