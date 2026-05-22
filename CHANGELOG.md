@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2](https://github.com/mctlhq/mctl-telegram/compare/0.26.1...0.26.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* show accent picker on mobile + support@mctl.ai contact ([4953376](https://github.com/mctlhq/mctl-telegram/commit/49533763ec69df9d9c151686d35d4c8ccb4c46b2))
+* show accent picker on mobile and use support@mctl.ai contact ([4e5ba55](https://github.com/mctlhq/mctl-telegram/commit/4e5ba554105f839c626cfcf63437f56da7bde9f4))
+
 ## [0.26.1](https://github.com/mctlhq/mctl-telegram/compare/0.26.0...0.26.1) (2026-05-22)
 
 
