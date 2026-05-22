@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/mctlhq/mctl-telegram/compare/0.26.0...0.26.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **web:** make all pages mobile-responsive ([eec51ee](https://github.com/mctlhq/mctl-telegram/commit/eec51eef98e84b0051a12435f7ce696d6b50acef))
+* **web:** make all pages mobile-responsive ([45f3fdb](https://github.com/mctlhq/mctl-telegram/commit/45f3fdb9efc8ccc436672120ebb973d8bfa84d05))
+
 ## [0.26.0](https://github.com/mctlhq/mctl-telegram/compare/0.25.0...0.26.0) (2026-05-22)
 
 
