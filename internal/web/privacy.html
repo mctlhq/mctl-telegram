@@ -22,6 +22,11 @@
     border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
     font-family: var(--font-mono); font-size: 13px; color: var(--text);
   }
+  @media (max-width: 640px) {
+    h2 { font-size: 18px; }
+    table { font-size: 13px; }
+    td, th { padding: 7px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -40,6 +45,7 @@
   </section>
 
   <h2>Data inventory</h2>
+  <div class="table-scroll">
   <table>
     <thead><tr><th>Where</th><th>Contents</th><th>Why</th><th>Retention</th></tr></thead>
     <tbody>
@@ -75,6 +81,7 @@
       </tr>
     </tbody>
   </table>
+  </div>
 
   <h2>What is NOT stored</h2>
   <ul>
@@ -110,7 +117,7 @@ GET    /api/account/audit/verify # recompute the hash chain and prove audit was 
   </ul>
 
   <h2>Contact</h2>
-  <p>Privacy and security inquiries: <strong>dmitri+security@mctl.ai</strong>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
+  <p>Privacy and security inquiries: <strong>support@mctl.ai</strong>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
 
   {{template "ui_footer" .}}
 

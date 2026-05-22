@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.26.2](https://github.com/mctlhq/mctl-telegram/compare/0.26.1...0.26.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* show accent picker on mobile + support@mctl.ai contact ([4953376](https://github.com/mctlhq/mctl-telegram/commit/49533763ec69df9d9c151686d35d4c8ccb4c46b2))
+* show accent picker on mobile and use support@mctl.ai contact ([4e5ba55](https://github.com/mctlhq/mctl-telegram/commit/4e5ba554105f839c626cfcf63437f56da7bde9f4))
+
+## [0.26.1](https://github.com/mctlhq/mctl-telegram/compare/0.26.0...0.26.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **web:** make all pages mobile-responsive ([eec51ee](https://github.com/mctlhq/mctl-telegram/commit/eec51eef98e84b0051a12435f7ce696d6b50acef))
+* **web:** make all pages mobile-responsive ([45f3fdb](https://github.com/mctlhq/mctl-telegram/commit/45f3fdb9efc8ccc436672120ebb973d8bfa84d05))
+
+## [0.26.0](https://github.com/mctlhq/mctl-telegram/compare/0.25.0...0.26.0) (2026-05-22)
+
+
+### Features
+
+* **web:** restore light/dark theme toggle in shared chrome ([e21d7d8](https://github.com/mctlhq/mctl-telegram/commit/e21d7d863ccaebb87e37e1ea68384f69dd72ef87))
+* **web:** restore light/dark theme toggle in shared chrome ([8c91110](https://github.com/mctlhq/mctl-telegram/commit/8c911105884976a791781df3d31f866d3e5b26e0))
+
 ## [0.25.0](https://github.com/mctlhq/mctl-telegram/compare/0.24.0...0.25.0) (2026-05-22)
 
 

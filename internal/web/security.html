@@ -29,6 +29,11 @@
     border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
     font-family: var(--font-mono); font-size: 13px; color: var(--text);
   }
+  @media (max-width: 640px) {
+    h2 { font-size: 18px; }
+    table { font-size: 13px; }
+    td, th { padding: 7px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -56,10 +61,11 @@
   </div>
 
   <h2>Reporting vulnerabilities</h2>
-  <p>Email <strong>dmitri+security@mctl.ai</strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgement target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
+  <p>Email <strong>support@mctl.ai</strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgement target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
 
   <h2>Trust boundaries</h2>
   <p>Per user, the service brokers two trust relationships:</p>
+  <div class="table-scroll">
   <table>
     <thead><tr><th>Boundary</th><th>Trusted credential</th><th>Lives</th></tr></thead>
     <tbody>
@@ -75,6 +81,7 @@
       </tr>
     </tbody>
   </table>
+  </div>
   <p>Compromise of either boundary compromises only the affected operator's account — not other users — provided the per-user session key derivation is intact (see <em>Cryptographic invariants</em> below).</p>
 
   <h2>What the server sees</h2>
