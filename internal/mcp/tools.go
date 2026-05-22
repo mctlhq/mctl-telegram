@@ -365,6 +365,16 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				}
 			}
 		}
+		// For direct sends (no confirmation_id), apply the per-peer rate limit
+		// here. In the two-step flow the limit is consumed by prepare_send_message;
+		// without that step we enforce it at send time to preserve the same cap.
+		if realSend && confID == "" {
+			peerRedacted := telegram.RedactPeer(peer)
+			if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+				realSend = false
+				dryReason = "per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"
+			}
+		}
 		var result *telegram.SendResult
 		var err error
 		if !realSend {
