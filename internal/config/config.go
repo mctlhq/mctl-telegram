@@ -59,6 +59,9 @@ type Config struct {
 	// DBMaxIdleConns sets the Postgres idle connection count. 0 means keep
 	// the prior default of 2. Set via DB_MAX_IDLE_CONNS.
 	DBMaxIdleConns int
+	// ReplicaID identifies this pod for observability. Sourced from
+	// REPLICA_ID env var; falls back to POD_NAME; falls back to "unknown".
+	ReplicaID string
 }
 
 func Load() (*Config, error) {
@@ -96,6 +99,7 @@ func Load() (*Config, error) {
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
 	c.DBMaxOpenConns = envInt("DB_MAX_OPEN_CONNS", 0)
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
+	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))

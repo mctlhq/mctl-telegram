@@ -94,6 +94,17 @@ func main() {
 		m.TelegramPoolCapacity.Set(-1)
 	}
 
+	// Set the replica-identity info gauge and emit a structured startup log.
+	// replica_id is sourced from REPLICA_ID env var, falling back to POD_NAME,
+	// then to "unknown". In Kubernetes, wire POD_NAME via the downward API:
+	//   env:
+	//     - name: POD_NAME
+	//       valueFrom:
+	//         fieldRef:
+	//           fieldPath: metadata.name
+	m.TelegramReplicaID.WithLabelValues(cfg.ReplicaID).Set(1)
+	slog.Info("replica identity", "replica_id", cfg.ReplicaID)
+
 	// Periodic background job that revokes sessions whose idle (30d) or
 	// absolute (90d) TTL has elapsed. CheckSessionValid on every Borrow
 	// is the authoritative gate; this sweeper just bounds how long an
