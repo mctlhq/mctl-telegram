@@ -64,8 +64,8 @@
       <tr>
         <td><code>audit_logs</code> table</td>
         <td>Tool name, redacted peer reference (truncated/hashed), status, and a redacted error string. <strong>No message text, no phone numbers, no session bytes.</strong></td>
-        <td>Operational visibility, abuse detection, and to power the planned <code>get_my_audit_log</code> tool</td>
-        <td>Currently retained indefinitely. A 90-day sweeper is planned (M2); until it ships, ask the operator for an earlier purge if you need one.</td>
+        <td>Operational visibility, abuse detection, and to power the <code>get_my_audit_log</code> tool</td>
+        <td>Retained for 90 days, then removed by the audit-log sweeper (window configurable via <code>AUDIT_RETENTION_DAYS</code>; set to 0 to keep indefinitely).</td>
       </tr>
       <tr>
         <td>Process memory</td>
