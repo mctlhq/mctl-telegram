@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.0](https://github.com/mctlhq/mctl-telegram/compare/0.28.1...0.29.0) (2026-05-22)
+
+
+### Features
+
+* **ingress:** Layer-1 sticky routing manifests + acceptance gate ([76825f3](https://github.com/mctlhq/mctl-telegram/commit/76825f3401d685d85224cbb5ce1f22847038edfb))
+* **ingress:** Layer-1 sticky routing manifests + acceptance gate ([0a1be8e](https://github.com/mctlhq/mctl-telegram/commit/0a1be8e990e57ae4dcf052031176f90ef15dbf2d))
+
+
+### Bug Fixes
+
+* **ingress:** plain find() in envoy base64 decoder + harden gate JWT ([78affe1](https://github.com/mctlhq/mctl-telegram/commit/78affe1c12d8f2dbff07b08a6f477a271f327969))
+
 ## [0.28.1](https://github.com/mctlhq/mctl-telegram/compare/0.28.0...0.28.1) (2026-05-22)
 
 
