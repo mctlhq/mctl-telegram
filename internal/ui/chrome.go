@@ -68,7 +68,7 @@ var defs = `
       <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>security</a>
       <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>privacy</a>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github ↗</a>
-      <span class="accent-picker hide-sm" role="group" aria-label="Accent color">
+      <span class="accent-picker" role="group" aria-label="Accent color">
         <button class="accent-swatch" type="button" data-pick="cyan"      aria-label="Cyan accent"      title="Cyan"></button>
         <button class="accent-swatch" type="button" data-pick="lime"      aria-label="Lime accent"      title="Lime"></button>
         <button class="accent-swatch" type="button" data-pick="vermilion" aria-label="Vermilion accent" title="Vermilion"></button>
