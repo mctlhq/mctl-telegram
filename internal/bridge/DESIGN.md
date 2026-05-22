@@ -1,4 +1,4 @@
-# Local Bridge (M4) — design and remaining work
+# Local Bridge (M4) — design and implementation status
 
 ## Goal
 
@@ -29,12 +29,18 @@ trail of which tool was called, when.
                                        └────────────────┘
 ```
 
-## What this PR (scaffolding) ships
+## What is implemented (as of M4)
+
+### Server-side
 
 - **Schema columns**: `telegram_accounts.mode` (`'hosted' | 'local'`,
   default `'hosted'`) and `telegram_accounts.bridge_token_hash`
   (SHA-256 of the most-recent registered daemon JWT). Idempotent
   migration via `addColumnIfMissing`.
+- **Audit column**: `audit_logs.call_path TEXT DEFAULT 'hosted'`
+  distinguishes relay-forwarded calls (`'local'`) from server-side
+  hosted calls (`'hosted'`). Included in the hash-chain canonical input
+  after `errMsg`.
 - **Protocol** (`internal/bridge/protocol.go`): the JSON envelope shape
   the daemon and the relay exchange — `call`, `response`, `error`,
   `ping`, `pong`. Args and Result are `json.RawMessage` so the relay
@@ -42,37 +48,69 @@ trail of which tool was called, when.
 - **Hub** (`internal/bridge/hub.go`): in-process router that
   multiplexes per-user daemon connections; `Call` blocks until the
   daemon answers or the deadline elapses; `Register`/`Unregister`
-  manage the singleton-per-user invariant. Exercised by in-process
-  tests; the websocket transport is not yet wired.
-- **Binary stub** (`cmd/local`): subcommands `init`, `login`, `connect`,
-  `daemon` print a TODO message and exit non-zero. The CLI shape is
-  there so the next implementer can fill in commands without
-  reorganising.
+  manage the singleton-per-user invariant. Backpressure via
+  `pendingCount` atomic: `Hub.Call` returns `ErrDaemonOverloaded` when
+  more than 100 calls are in flight for a daemon, preventing runaway
+  memory growth under slow or stuck daemons.
+- **Websocket transport** (`internal/bridge/server.go`): upgrades HTTP
+  to websocket at `GET /bridge`; verifies bearer JWT (must have
+  `aud="bridge"`); enforces `mode='local'` on the account; wires into
+  the Hub. Ping/pong liveness: writer sends a ping every 25 s, reader
+  enforces a 5 s pong deadline by setting a read deadline on the
+  underlying connection.
+- **Bridge token endpoint** (`internal/bridge/tokenhandler.go`):
+  `POST /api/bridge/token` exchanges an MCP JWT for a short-lived
+  bridge JWT (`aud="bridge"`, 1 h TTL) that the daemon uses to
+  authenticate its websocket connection.
+- **Dispatch in MCP tools** (`internal/mcp/tools.go`): every read/write
+  tool checks `telegram_accounts.mode`; when `'local'`, calls
+  `Hub.Call` via `bridgeCall()` instead of `Pool.Borrow`. Errors
+  `ErrNoDaemonConnected`, `ErrCallTimeout`, and `ErrDaemonOverloaded`
+  map to clean human-readable tool errors. `BridgeCallsTotal` counter
+  is incremented with `{tool, status}` labels after each call.
+- **Audit** (`internal/db/store.go`): `LogToolCall` accepts a
+  `callPath` parameter; bridge-dispatched calls pass `"local"`,
+  hosted calls pass `""` (stored as `'hosted'` in the column).
+- **Metrics** (`internal/metrics/metrics.go`):
+  - `mctl_bridge_active_daemons` gauge — incremented on Register,
+    decremented on Unregister/UnregisterSend.
+  - `mctl_bridge_calls_total{tool, status}` counter — incremented by
+    `bridgeCall()` in the MCP layer after each hub round-trip.
+- **Security page** (`internal/web/security.html`): "Local Bridge mode"
+  section describes the data-flow guarantees for `mode='local'` users.
+- **CLI** (`cmd/local`): subcommands `init`, `login`, `connect`, `daemon`
+  are scaffolded; implementations are deferred — see Daemon-side below.
 
-## What remains for a production-usable Local Bridge
+### Alert rules
 
-### Server-side (this repo)
+- `MctlBridgeDaemonsFlapping` (warning): fires when the
+  `mctl_bridge_active_daemons` gauge changes more than 20 times in 10
+  minutes — a sign of looping reconnects.
 
-1. **Websocket transport**. Pick a library (recommendation: `nhooyr/websocket`
-   for stdlib-friendly API, no goroutine leaks on graceful shutdown).
-   Adapter at `internal/bridge/server.go`:
-   - Upgrade HTTP → websocket at `GET /bridge`.
-   - Verify the bearer JWT (must be shared-HMAC with `aud="bridge"`).
-   - Look up the user via the existing `auth.Provider`.
-   - Call `Hub.Register(userID)` and pump frames in both directions.
-   - On disconnect, `Hub.Unregister(userID)`.
-2. **Mount** at `cmd/server/main.go` behind the auth middleware (same
-   provider as `/mcp`, with `audience="bridge"` enforcement).
-3. **Dispatch in MCP tools**. In every read/write tool handler, if the
-   user's `telegram_accounts.mode == 'local'`, call `Hub.Call` instead
-   of `Pool.Borrow`. Marshal the tool arguments, await the response,
-   surface `ErrNoDaemonConnected` as a clean "user is offline" tool
-   error.
-4. **Audit**. Bridge calls still go through `Store.LogToolCall` so the
-   user's audit log and hash chain include them. Add a `via=local`
-   marker in the audit row so a user can see whether a call ran
-   through their daemon or hosted-mode (probably as a new column or
-   suffix in `tool_name`).
+## Remaining gaps
+
+### Server-side
+
+1. **Pong deadline hardening.** The current 5 s read-deadline window is
+   set per-ping but only reset on non-ping frames. Under a highly
+   loaded daemon that sends only pong frames the deadline logic is
+   correct; under a daemon that sends pong AND response frames
+   simultaneously the reset is conservative (errs toward keeping the
+   connection alive). No known bug, but worth a focused review.
+2. **Keychain integration.** The bridge token is currently stored in
+   memory by the daemon and lost on restart; a persist-to-OS-keychain
+   path is needed for the production daemon workflow.
+3. **Distribution / release packaging.** `cmd/local` is not yet built
+   into a released binary; release-please does not produce a
+   `mctl-telegram-local` artifact. Needs Dockerfile + GoReleaser config.
+
+### Cross-repo
+
+- **mctl-api**: new OAuth scope `local-bridge`; new endpoint
+  `/oauth/local-bridge/authorize` that emits a JWT with `aud="bridge"`.
+- **mctl-web Worker**: handle `?for=local-bridge` redirect target.
+- **mctl-portal** (optional): "Connected daemons" view so a user can
+  see when their daemon last contacted the relay.
 
 ### Daemon-side (`cmd/local`)
 
@@ -94,15 +132,7 @@ trail of which tool was called, when.
    `internal/telegram` helpers, sends responses back. Auto-rotates
    the bridge JWT 5 minutes before expiry.
 
-### Cross-repo
-
-- **mctl-api**: new OAuth scope `local-bridge`; new endpoint
-  `/oauth/local-bridge/authorize` that emits a JWT with `aud="bridge"`.
-- **mctl-web Worker**: handle `?for=local-bridge` redirect target.
-- **mctl-portal** (optional): "Connected daemons" view so a user can
-  see when their daemon last contacted the relay.
-
-### Trust-model deltas (must be reflected on /security)
+## Trust-model notes (reflected on /security)
 
 - For `mode='local'` users, the server NEVER sees `session_encrypted`
   (the column is NULL) and the MTProto plaintext only exists on the
@@ -114,7 +144,7 @@ trail of which tool was called, when.
   need to encrypt MCP payloads with the daemon's public key; that
   needs Claude.ai client support which doesn't exist today.
 
-### Migration story
+## Migration story
 
 - Default for new accounts is still `mode='hosted'` — backward
   compatible.
@@ -124,19 +154,3 @@ trail of which tool was called, when.
 - An `unconnect` HTTP/MCP endpoint flips a user back to hosted-mode
   (or deletes the row entirely). Symmetric with the existing
   `disconnect_telegram_account` tool.
-
-## Why this isn't done in the M1-M4 6-hour effort window
-
-- Websocket transport + reconnect/backoff/ping handling alone is
-  several days of careful work to get right under partial-network
-  failures.
-- The daemon CLI needs an actually-secure passphrase prompt, KDF, and
-  OS-keychain integration on three platforms (macOS/Linux/Windows).
-- Cross-repo coordination requires mctl-api PRs that have not been
-  drafted yet.
-- The plan's own estimate (`plans/humble-seeking-simon.md`) puts M4
-  at 4-6 weeks.
-
-What is here is the protocol shape, the hub, the schema columns, and
-a stub binary — enough for the next implementer to land the rest in
-slices without reorganising the package layout.

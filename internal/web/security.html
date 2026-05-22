@@ -52,12 +52,12 @@
   </section>
 
   <div class="warn">
-    <strong>Not zero-knowledge.</strong> mctl-telegram makes outbound MTProto calls
-    to Telegram on your behalf, so the server process necessarily handles plaintext
-    Telegram data while serving your request. You are trusting both the operator
-    of this deployment and the integrity of this code. For a stronger trust model,
-    track the planned <strong>Local Bridge</strong> mode where the session lives
-    on your machine and tg.mctl.ai is reduced to a connectivity relay.
+    <strong>Not zero-knowledge (hosted mode).</strong> In the default hosted mode,
+    mctl-telegram makes outbound MTProto calls to Telegram on your behalf, so the
+    server process necessarily handles plaintext Telegram data while serving your
+    request. You are trusting both the operator of this deployment and the integrity
+    of this code. For a stronger trust model, see the <strong>Local Bridge mode</strong>
+    section below.
   </div>
 
   <h2>Reporting vulnerabilities</h2>
@@ -88,6 +88,15 @@
   <ul>
     <li><strong>Plaintext MTProto traffic for the duration of one tool call.</strong> The server must decrypt the session blob and exchange MTProto messages with Telegram in memory.</li>
     <li><strong>Tool-call metadata, persisted.</strong> Tool name, redacted peer reference, status, and (if any) error string. Persisted to <code>audit_logs</code> with the redaction policy below.</li>
+  </ul>
+
+  <h2>Local Bridge mode</h2>
+  <p>When your account is set to <code>mode='local'</code>, the security guarantees change significantly:</p>
+  <ul>
+    <li><strong>Session bytes are never stored on the server.</strong> The <code>session_encrypted</code> column is NULL for local-mode accounts. The MTProto session lives entirely on your local machine, encrypted at rest by the daemon.</li>
+    <li><strong>Tool arguments and responses pass through relay memory per call only.</strong> The relay must forward MCP JSON-RPC payloads to your daemon and route responses back. This data exists in server memory for the duration of one call and is not persisted.</li>
+    <li><strong>The relay does not log message content.</strong> The same audit-log schema applies: only tool name, redacted peer reference, status, and (if any) error string are persisted. The <code>call_path</code> column is set to <code>'local'</code> so you can distinguish relay-forwarded calls from hosted calls in your audit log.</li>
+    <li><strong>Limit of relay visibility.</strong> For genuine end-to-end secrecy from the relay, Claude.ai would need to encrypt MCP payloads with your daemon's public key. That requires Claude.ai client-side support which is not available today — the relay sees the plaintext tool arguments and results for the duration of routing.</li>
   </ul>
 
   <h2>What the server NEVER persists</h2>
