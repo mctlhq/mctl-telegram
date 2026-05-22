@@ -55,6 +55,15 @@ type Registry struct {
 	// OAuthPendingAuthSize reflects the current count of pending OAuth
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
+
+	// Local Bridge.
+	// BridgeActiveDaemons is the current number of connected Local Bridge
+	// daemon websocket connections. Incremented on Hub.Register, decremented
+	// on Hub.Unregister / Hub.UnregisterSend.
+	BridgeActiveDaemons prometheus.Gauge
+	// BridgeCallsTotal counts hub round-trips, labeled by tool and status
+	// ("ok" or "error"). Incremented by bridgeCall() in the MCP layer.
+	BridgeCallsTotal *prometheus.CounterVec
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -151,6 +160,16 @@ func New() *Registry {
 			"exclude them from the availability SLI denominator.",
 	}, []string{"result"})
 
+	r.BridgeActiveDaemons = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_bridge_active_daemons",
+		Help: "Current number of Local Bridge daemon websocket connections registered with the Hub.",
+	})
+
+	r.BridgeCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_bridge_calls_total",
+		Help: "Total Local Bridge hub round-trips, labeled by tool name and status (ok or error).",
+	}, []string{"tool", "status"})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
@@ -168,6 +187,8 @@ func New() *Registry {
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
 		r.SessionsBorrowTotal,
+		r.BridgeActiveDaemons,
+		r.BridgeCallsTotal,
 	)
 	return r
 }

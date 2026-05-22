@@ -2,6 +2,7 @@ package db
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/binary"
 	"hash"
 	"time"
@@ -21,7 +22,11 @@ import (
 //  5. status (len-prefixed)
 //  6. error (len-prefixed)
 //  7. created_at unix-nanos BE64
-func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string, createdAt time.Time) []byte {
+//  8. call_path (len-prefixed) — appended ONLY when callPath.Valid (M4+ rows).
+//     Rows written before the M4 call_path column was added have a NULL
+//     call_path and were hashed over fields 1–7 only; omitting the field
+//     here for NULL keeps those pre-M4 chains valid after the column lands.
+func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string, callPath sql.NullString, createdAt time.Time) []byte {
 	h := sha256.New()
 	h.Write(prev)
 	writeBE64(h, uint64(userID))
@@ -30,6 +35,9 @@ func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string
 	writeLenPrefixed(h, []byte(status))
 	writeLenPrefixed(h, []byte(errCol))
 	writeBE64(h, uint64(createdAt.UTC().UnixNano()))
+	if callPath.Valid {
+		writeLenPrefixed(h, []byte(callPath.String))
+	}
 	return h.Sum(nil)
 }
 

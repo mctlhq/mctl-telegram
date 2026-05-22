@@ -325,7 +325,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-lf.needCode:
-		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "", "")
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
@@ -335,7 +335,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-lf.done:
 		if lf.err != nil {
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 				Error: "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again.",
@@ -346,7 +346,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// auth on the session storage). Nothing more to collect.
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "send code timeout")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "send code timeout", "")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 			Error: "Timed out contacting Telegram. Please try again.",
@@ -403,7 +403,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-lf.needPw:
-		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "", "")
 		es.step = stepPassword
 		renderEnablePassword(w, enablePasswordPage{
 			Issuer:      s.cfg.Issuer,
@@ -413,17 +413,17 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-lf.done:
 		if lf.err != nil {
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
 			})
 			return
 		}
-		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "", "")
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify code timeout")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify code timeout", "")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the code. Please start again.",
@@ -480,17 +480,17 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.done:
 		if lf.err != nil {
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error())
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
 			})
 			return
 		}
-		s.store.LogToolCall(r.Context(), es.uid, "connect:2fa_submitted", "", "ok", "")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:2fa_submitted", "", "ok", "", "")
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify password timeout")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify password timeout", "")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the password. Please start again.",
@@ -505,7 +505,7 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	s.mu.Lock()
 	delete(s.enables, esTok)
 	s.mu.Unlock()
-	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "")
+	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "", "")
 	s.issueAuthCode(w, r, es.oc)
 }
 

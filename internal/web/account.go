@@ -209,7 +209,7 @@ func (h *AccountHandlers) audit(r *http.Request, id *auth.Identity, tool string,
 		status = "error"
 		msg = err.Error()
 	}
-	h.Store.LogToolCall(r.Context(), id.UserID, tool, "", status, msg)
+	h.Store.LogToolCall(r.Context(), id.UserID, tool, "", status, msg, "")
 }
 
 func writeAccountJSON(w http.ResponseWriter, code int, body any) {
