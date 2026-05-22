@@ -154,7 +154,14 @@ capacity planning described above.
 Sticky routing operates at two independent layers, both of which must be active
 for multi-replica deployment to be safe:
 
-**Layer 1 — Load-balancer consistent-hash routing** (see `deploy/ingress/`):
+> **Status:** Layer 2 (replica-identity observability) ships in this repository.
+> Layer 1 (the ingress consistent-hash manifests) is **not** shipped here yet —
+> it is tracked separately in issue #126 with a controller-acceptance gate,
+> because the ingress Lua + Istio/Envoy config semantics are an error-prone area
+> that needs its own design + review cycle. The description below documents the
+> intended Layer-1 design.
+
+**Layer 1 — Load-balancer consistent-hash routing** (tracked in issue #126):
 An ingress-tier Lua snippet extracts the `sub` claim from the JWT payload
 (`tg:<telegram_id>`), sets it as the `X-Mctl-Route-Key` request header, and
 NGINX (or Envoy) performs ketama consistent-hash routing on that header value.
@@ -241,13 +248,12 @@ prevents further spurious notifications.
 Monitor `mctl_telegram_client_errors_total` for spikes after scale events as an
 indirect indicator of session churn.
 
-### Ingress example files
+### Ingress manifests (deferred — issue #126)
 
-- `deploy/ingress/sticky-nginx.yaml` — NGINX Ingress Controller (community
-  edition, v1.2+) with ketama consistent-hash routing on the extracted JWT sub.
-- `deploy/ingress/sticky-envoy.yaml` — Istio EnvoyFilter + DestinationRule for
-  Envoy-based ingress, with a note on the experimental Gateway API
-  `BackendLBPolicy` alternative.
-
-These files are standalone examples. The platform team adapts them into the
-appropriate kustomize overlay in `mctl-gitops` before deploying.
+The Layer-1 ingress reference manifests (NGINX `access_by_lua_block` consistent-hash
+routing and the Istio EnvoyFilter equivalent) are **not** in this repository yet.
+They are tracked in issue #126, which requires a controller-acceptance gate before
+merge: the NGINX config must pass reload/admission, the EnvoyFilter must show up in
+`istioctl proxy-config` after `istioctl analyze`, and a bearer-token request must
+flow through without a Lua runtime error. Until that lands, run multi-replica
+deployments only with an externally provided, validated consistent-hash ingress.
