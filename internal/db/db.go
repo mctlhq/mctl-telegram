@@ -112,9 +112,14 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		return err
 	}
 	// call_path column on audit_logs (M4). Distinguishes relay-forwarded
-	// calls ('local') from server-side hosted calls ('hosted').
+	// calls ('local') from server-side hosted calls (''). No DEFAULT: the
+	// column is left NULL for rows that pre-date M4 so they stay
+	// distinguishable from M4+ rows (which always write a non-NULL value).
+	// A non-NULL default ('hosted') would retroactively change the canonical
+	// hash input of every pre-M4 row and make VerifyAuditChain report the
+	// whole chain as tampered — see hashAuditEntry's NULL handling.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "call_path",
-		"TEXT DEFAULT 'hosted'", "TEXT DEFAULT 'hosted'"); err != nil {
+		"TEXT", "TEXT"); err != nil {
 		return err
 	}
 	// Telegram-native identity columns (users): replaces github_login as the

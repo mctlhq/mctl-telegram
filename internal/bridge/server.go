@@ -105,21 +105,25 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for {
-				// Build the read context for this iteration. When a ping is
-				// outstanding, apply a short deadline so a silent daemon is
-				// detected within pongDeadline. The cancel must be called
+				// Every read is bounded by a deadline so a silent daemon can
+				// never block the reader indefinitely — even when the ping is
+				// sent by the writer *after* this read has already begun (in
+				// which case pingPending is still 0 at this point). The base
+				// bound is pingInterval+pongDeadline, the maximum gap between
+				// frames on a healthy connection (the writer pings every
+				// pingInterval and a live daemon answers within pongDeadline).
+				// When a ping is already outstanding we tighten the bound to
+				// pongDeadline for fast detection. readCancel is called
 				// explicitly (not via defer) so each iteration gets a fresh
 				// context rather than accumulating cancelled ones.
-				readCtx := ctx
-				var readCancel context.CancelFunc
+				readTimeout := pingInterval + pongDeadline
 				if pingPending.Load() != 0 {
-					readCtx, readCancel = context.WithTimeout(ctx, pongDeadline)
+					readTimeout = pongDeadline
 				}
+				readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
 				var env Envelope
 				err := wsjson.Read(readCtx, conn, &env)
-				if readCancel != nil {
-					readCancel()
-				}
+				readCancel()
 				if err != nil {
 					// Connection closed, context cancelled, or pong deadline
 					// exceeded — any of these terminates the connection.

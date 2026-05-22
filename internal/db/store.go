@@ -873,8 +873,11 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // gap in the per-user hash chain that VerifyAuditChain will report.
 //
 // callPath distinguishes relay-forwarded calls ("local") from server-side
-// hosted calls ("" or "hosted"). An empty string is stored as the column
-// default ('hosted') by the database.
+// hosted calls (""). Every M4+ row stores a non-NULL call_path (the empty
+// string for hosted calls) so it is distinguishable from pre-M4 rows, whose
+// call_path is NULL. Both the stored value and its hash contribution are the
+// raw string — see hashAuditEntry, which only folds call_path into the hash
+// when it is non-NULL.
 //
 // Hash-chain semantics (M3.1):
 //   - prev_hash = the entry_hash of this user's most recent prior row, or
@@ -911,12 +914,12 @@ func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacte
 	if len(prev) == 0 {
 		prev = make([]byte, sha256.Size)
 	}
-	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, callPath, createdAt)
+	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt)
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, nullable(callPath),
+		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
 	); err != nil {
 		return
 	}
@@ -994,7 +997,7 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath.String, createdAt)
+		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt)
 		if !bytesEqual(recomputed, entryHash) {
 			return AuditChainVerification{
 				OK:         false,

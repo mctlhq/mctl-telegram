@@ -111,12 +111,17 @@ func TestHub_CallOverloadedReturnsError(t *testing.T) {
 	h := NewHub()
 	send := h.Register(42)
 
-	// Drain the send channel so calls don't block on the send select.
-	// We never reply so all calls will be stuck waiting for a response.
+	// Drain the send channel so calls don't block on the send select, and
+	// signal each received envelope. Call increments pendingCount BEFORE it
+	// sends on `send` (see Hub.Call), so receiving an envelope here is proof
+	// that call's pendingCount.Add(1) has already happened. We never reply,
+	// so every call then blocks waiting for a response.
+	received := make(chan struct{}, maxPendingCalls)
 	drainDone := make(chan struct{})
 	go func() {
 		defer close(drainDone)
 		for range send {
+			received <- struct{}{}
 		}
 	}()
 
@@ -126,21 +131,19 @@ func TestHub_CallOverloadedReturnsError(t *testing.T) {
 	// Launch maxPendingCalls goroutines that each start a Call; they will block
 	// waiting for a response. The (maxPendingCalls+1)th call must return
 	// ErrDaemonOverloaded immediately.
-	ready := make(chan struct{}, maxPendingCalls)
 	for i := 0; i < maxPendingCalls; i++ {
 		go func(n int) {
-			ready <- struct{}{}
 			// These calls will block until ctx is cancelled.
 			_, _ = h.Call(ctx, 42, EncodeCall(fmt.Sprintf("id-%d", n), "t", nil))
 		}(i)
 	}
 
-	// Wait for all goroutines to have incremented pendingCount.
+	// Reliable barrier (no sleep): once we've received maxPendingCalls
+	// envelopes, all maxPendingCalls calls have passed pendingCount.Add(1)
+	// and are blocked on their reply, so the daemon is exactly at capacity.
 	for i := 0; i < maxPendingCalls; i++ {
-		<-ready
+		<-received
 	}
-	// Give goroutines a moment to reach the pending counter increment.
-	time.Sleep(20 * time.Millisecond)
 
 	// The next call must be rejected immediately.
 	_, err := h.Call(ctx, 42, EncodeCall("overload", "t", nil))

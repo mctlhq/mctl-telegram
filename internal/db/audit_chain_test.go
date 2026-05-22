@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"testing"
+	"time"
 )
 
 func TestVerifyAuditChain_EmptyChainIsOK(t *testing.T) {
@@ -109,6 +112,43 @@ func TestLogToolCall_ChainsAcrossEntries(t *testing.T) {
 	// Second row's prev_hash equals first row's entry_hash.
 	if !bytesEqual(got[1].prev, got[0].entry) {
 		t.Fatal("second row prev_hash must equal first row entry_hash")
+	}
+}
+
+// A row written before the M4 call_path column existed has call_path = NULL
+// and an entry_hash computed over fields 1–7 only. After M4 adds the column,
+// VerifyAuditChain must still accept it (and any M4 rows chained on top),
+// otherwise every user's pre-M4 history reports as tampered on upgrade.
+func TestVerifyAuditChain_PreM4NullCallPathVerifies(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
+
+	createdAt := time.Now().UTC()
+	prev := make([]byte, sha256.Size)
+	// Hash without call_path (callPath.Valid == false) — exactly how the
+	// pre-M4 code hashed the row.
+	entry := hashAuditEntry(prev, uid, "legacy_tool", "", "ok", "", sql.NullString{}, createdAt)
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL)`,
+		uid, "legacy_tool", nil, "ok", nil, createdAt, prev, entry,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	// An M4 row (non-NULL call_path) chains on top of the legacy row.
+	s.LogToolCall(ctx, uid, "m4_tool", "", "ok", "", "local")
+
+	res, err := s.VerifyAuditChain(ctx, uid)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("pre-M4 NULL call_path row must verify, got %+v", res)
+	}
+	if res.Verified != 2 {
+		t.Fatalf("expected Verified=2, got %d", res.Verified)
 	}
 }
 
