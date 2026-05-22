@@ -27,14 +27,13 @@ func TestFullChrome(t *testing.T) {
 		"<footer>",
 		"https://tg.mctl.ai",
 		`<a href="/docs" class="active">docs</a>`,
+		// Light/dark toggle — content pages can flip the theme.
+		`class="theme-toggle"`,
+		`aria-label="Toggle theme"`,
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
 		}
-	}
-	// The light/dark toggle was removed; theme follows the OS.
-	if strings.Contains(out, "theme-toggle") {
-		t.Error("full page must not contain the removed theme-toggle")
 	}
 }
 
