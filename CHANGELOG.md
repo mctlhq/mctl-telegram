@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.25.0](https://github.com/mctlhq/mctl-telegram/compare/0.24.0...0.25.0) (2026-05-22)
+
+
+### Features
+
+* **web:** unify visual style across all pages via shared chrome ([6ebc8cf](https://github.com/mctlhq/mctl-telegram/commit/6ebc8cfc8167aeef0327c948eb4d2361eafb9677))
+* **web:** unify visual style across all pages via shared chrome ([99d12a3](https://github.com/mctlhq/mctl-telegram/commit/99d12a3976259cb94c5cd919da2f9d8a0df2f00b))
+
+
+### Bug Fixes
+
+* **metrics:** add 2s/4s latency buckets for SLO p95 accuracy ([de56c7b](https://github.com/mctlhq/mctl-telegram/commit/de56c7bffa1c5231f7241550854934ebc5b687bf))
+* **web:** address P3 review nits — stale comment + lite color-scheme ([c7651f1](https://github.com/mctlhq/mctl-telegram/commit/c7651f12d714413d5ac7514a1fc9adbbbd71483c))
+* **web:** theme always follows OS, drop stale mctl-theme preference ([2684d8b](https://github.com/mctlhq/mctl-telegram/commit/2684d8b1202dddf5cf4f953a7c997177e923ca81))
+
 ## [0.24.0](https://github.com/mctlhq/mctl-telegram/compare/0.23.1...0.24.0) (2026-05-21)
 
 
