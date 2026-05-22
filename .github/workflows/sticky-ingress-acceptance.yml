@@ -53,11 +53,17 @@ jobs:
         run: |
           kubectl apply -f \
             "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_REF}/deploy/static/provider/kind/deploy.yaml"
-          kubectl -n ingress-nginx wait --for=condition=Available \
-            deploy/ingress-nginx-controller --timeout=180s
-          # The admission webhook must be reachable before we apply the Ingress.
+          # The admission webhook's TLS cert is provisioned by these jobs; the
+          # webhook server only accepts connections once the controller pod is
+          # Ready. Wait for all of it before applying the Ingress.
           kubectl -n ingress-nginx wait --for=condition=Complete \
-            job/ingress-nginx-admission-patch --timeout=120s || true
+            job/ingress-nginx-admission-create --timeout=180s
+          kubectl -n ingress-nginx wait --for=condition=Complete \
+            job/ingress-nginx-admission-patch --timeout=180s
+          kubectl -n ingress-nginx rollout status \
+            deploy/ingress-nginx-controller --timeout=180s
+          kubectl -n ingress-nginx wait --for=condition=Ready pod \
+            -l app.kubernetes.io/component=controller --timeout=180s
 
       - name: deploy echo backend
         run: |
@@ -99,7 +105,21 @@ jobs:
           kubectl -n mctl wait --for=condition=Available deploy/echo --timeout=120s
 
       - name: apply Ingress (admission webhook == nginx -t gate)
-        run: kubectl apply -f deploy/ingress/sticky-nginx.yaml
+        run: |
+          set -euo pipefail
+          # Retry only to ride out a brief webhook-not-listening window. A
+          # genuinely invalid Lua config produces a validation error that
+          # recurs on every retry, so the gate still fails on a real bug.
+          for i in $(seq 1 15); do
+            if kubectl apply -f deploy/ingress/sticky-nginx.yaml; then
+              echo "ingress accepted by admission webhook"
+              exit 0
+            fi
+            echo "apply failed (attempt $i) -- retrying"
+            sleep 6
+          done
+          echo "ingress was never accepted by the admission webhook" >&2
+          exit 1
 
       - name: runtime smoke
         run: |
