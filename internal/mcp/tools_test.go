@@ -26,7 +26,7 @@ func newToolsTestStore(t *testing.T) *db.Store {
 	return &db.Store{DB: conn}
 }
 
-func TestEvaluateSendGate_DraftDefault(t *testing.T) {
+func TestEvaluateSendGate_DraftMode(t *testing.T) {
 	real, reason := evaluateSendGate(context.Background(), nil, nil, "draft", true)
 	if real || reason == "" {
 		t.Fatalf("draft must never go live: real=%v reason=%q", real, reason)

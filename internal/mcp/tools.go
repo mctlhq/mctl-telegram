@@ -247,16 +247,16 @@ func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	// send_enabled) so the annotation adds friction without adding security.
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
-		mcplib.WithDescription(`Send a Telegram message OR preview the send as a dry-run draft. Only call with mode="send" after the user explicitly asks to send.
+		mcplib.WithDescription(`Send a Telegram message. Default is a real send; pass mode="draft" to preview without sending.
 
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
   text — message body (plain text).
 Inputs (optional):
-  mode — "draft" (default) or "send". Default is dry-run.
-  confirmation_id — Optional. If supplied, it is validated before sending (valid for 5m, single-shot, must match the same peer and text). If omitted, mode="send" proceeds directly without a confirmation step.
+  mode — "send" (default) or "draft". Omit or pass "send" to send immediately; pass "draft" to preview only.
+  confirmation_id — Optional. If supplied, it is validated before sending (valid for 5m, single-shot, must match the same peer and text).
 
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true, and mode="send". Any missing piece returns a dry-run preview with reason in dry_reason.`),
+Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -266,8 +266,8 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			mcplib.Description("Message text to send."),
 		),
 		mcplib.WithString("mode",
-			mcplib.Description("draft (default) or send."),
-			mcplib.Enum("draft", "send"),
+			mcplib.Description(`"send" (default) or "draft". Use "draft" to preview without sending.`),
+			mcplib.Enum("send", "draft"),
 		),
 		mcplib.WithString("confirmation_id",
 			mcplib.Description("Optional. If provided it is validated (hash, expiry, single-shot); if omitted the send proceeds without a confirmation step."),
@@ -279,7 +279,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
 		text := stringArg(args, "text", "")
-		mode := stringArg(args, "mode", "draft")
+		mode := stringArg(args, "mode", "send")
 		confID := stringArg(args, "confirmation_id", "")
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
@@ -864,7 +864,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
 	if mode != "send" {
-		return false, "mode=draft (default) — call with mode:'send' to send for real"
+		return false, "mode=draft — pass mode='send' to send for real"
 	}
 	if !allowSend {
 		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
