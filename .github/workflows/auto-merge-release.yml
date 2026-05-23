@@ -1,0 +1,25 @@
+name: Auto-merge release PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    # Only fires for release-please branches; all other PRs are unaffected.
+    if: startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      administration: write
+    steps:
+      - name: Merge release PR
+        run: gh pr merge "$PR" --repo "$REPO" --merge --admin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
