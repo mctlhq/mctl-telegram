@@ -231,12 +231,12 @@ var enablePermissionsTemplate = template.Must(template.New("enablePermissions").
       <input type="hidden" name="es" value="{{.EnableToken}}">
       <div class="radio-group">
         <label>
-          <input type="radio" name="send_optin" value="readonly" checked>
-          Read only (recommended) &#8212; the connector can read messages but cannot send.
+          <input type="radio" name="send_optin" value="send" checked>
+          Read + send (recommended) &#8212; the connector can read and send messages on your behalf.
         </label>
         <label>
-          <input type="radio" name="send_optin" value="send">
-          Read + send &#8212; the connector can also send messages on your behalf.
+          <input type="radio" name="send_optin" value="readonly">
+          Read only &#8212; the connector can read messages but cannot send.
         </label>
       </div>
       <button type="submit">Continue</button>

@@ -429,3 +429,118 @@ func TestSendMessage_ExpiredConfirmationDryReason(t *testing.T) {
 		t.Errorf("dry_reason must mention prepare_send_message, got %q", dryReason)
 	}
 }
+
+// seedAccountWithSession creates a user resolvable by telegram id with one
+// active telegram_accounts row, returning the internal user id.
+func seedAccountWithSession(t *testing.T, store *db.Store, tgID int64, sendEnabled bool) int64 {
+	t.Helper()
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, tgID, "seed", "Seed User")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, send_enabled) VALUES($1, $2, $3)`,
+		uid, []byte("blob"), sendEnabled,
+	); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	return uid
+}
+
+func TestToolSetAccountSend_RequiresAdminScope(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountSend()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_send",
+		Arguments: map[string]any{"telegram_id": float64(123), "enabled": true},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected scope rejection for identity without admin:users")
+	}
+}
+
+func TestToolSetAccountSend_HappyPath(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 555, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountSend()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_send",
+		Arguments: map[string]any{"telegram_id": float64(555), "enabled": true},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got tool error: %s", contentText(result))
+	}
+	var out map[string]any
+	if jsonErr := json.Unmarshal([]byte(contentText(result)), &out); jsonErr != nil {
+		t.Fatalf("result is not JSON: %v", jsonErr)
+	}
+	if out["send_enabled"] != true || out["ok"] != true {
+		t.Errorf("unexpected response: %v", out)
+	}
+	on, serr := store.IsSendEnabled(ctx, uid)
+	if serr != nil || !on {
+		t.Errorf("send_enabled not persisted: on=%v err=%v", on, serr)
+	}
+}
+
+func TestToolSetAccountSend_UserNotFound(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountSend()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_send",
+		Arguments: map[string]any{"telegram_id": float64(999999), "enabled": true},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for unknown telegram_id")
+	}
+}
+
+// A user with no active session row must get a clear error, not a silent ok=true.
+func TestToolSetAccountSend_NoActiveSession(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(ctx, 777, "nosess", "No Session"); err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountSend()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_send",
+		Arguments: map[string]any{"telegram_id": float64(777), "enabled": true},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error when user has no active session")
+	}
+	if !strings.Contains(contentText(result), "no active Telegram session") {
+		t.Errorf("unexpected error text: %s", contentText(result))
+	}
+}

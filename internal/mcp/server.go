@@ -91,6 +91,7 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolGetMyAuditLog())
 	srv.AddTool(s.toolListIdentities())
 	srv.AddTool(s.toolSetAccess())
+	srv.AddTool(s.toolSetAccountSend())
 	srv.AddTool(s.toolGetUserAuditLog())
 	srv.AddTool(s.toolRevokeSession())
 

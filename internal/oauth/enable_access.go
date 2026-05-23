@@ -176,7 +176,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		if sendOptIn {
-			if serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
+			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
 				return
 			}
