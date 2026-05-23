@@ -154,7 +154,9 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("list_dialogs",
 		mcplib.WithTitleAnnotation("List Telegram Dialogs"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`List the operator's Telegram dialogs with type, title, username and unread count.
 
 Inputs:
@@ -205,7 +207,9 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 func (s *Server) toolGetUnreadMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_unread_messages",
 		mcplib.WithTitleAnnotation("Get Unread Messages"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Fetch unread messages, optionally scoped to one peer.
 
 Inputs:
@@ -344,7 +348,9 @@ func truncate(s string, n int) string {
 func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_messages",
 		mcplib.WithTitleAnnotation("Get Messages"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Fetch recent messages from a specific peer (full history, not just unread).
 
 Inputs:
@@ -401,7 +407,9 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("prepare_pin_message",
 		mcplib.WithTitleAnnotation("Prepare a pin/unpin"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
 Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
@@ -546,6 +554,7 @@ func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc
 	tool := mcplib.NewTool("disconnect_telegram_account",
 		mcplib.WithTitleAnnotation("Disconnect Telegram account"),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Disconnect your Telegram account from this server.
 
 Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
@@ -589,6 +598,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("delete_telegram_account",
 		mcplib.WithTitleAnnotation("Delete Telegram account (hard delete)"),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
 Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to reconnect, the operator must re-run the login CLI.
@@ -628,6 +638,8 @@ func (s *Server) toolGetMyAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_my_audit_log",
 		mcplib.WithTitleAnnotation("Read your own audit log"),
 		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Return the audit-log rows recorded for tool calls and HTTP account actions made by your identity.
 
 Inputs (all optional):
@@ -679,7 +691,9 @@ This tool is part of the self-service transparency surface — operators cannot 
 func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("list_telegram_identities",
 		mcplib.WithTitleAnnotation("List Telegram identities"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
 
 Output: JSON array of {telegram_id, username, display_name, access_tier, has_session}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account).
@@ -706,6 +720,8 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_telegram_access",
 		mcplib.WithTitleAnnotation("Set a Telegram user's access tier"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Grant or revoke the "client" access tier for a Telegram user.
 
 Inputs:
@@ -749,6 +765,8 @@ The user must have signed in via the Login Widget at least once (so a users row 
 func (s *Server) toolSetAccountSend() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_account_send",
 		mcplib.WithTitleAnnotation("Enable or disable a user's real sending"),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Enable or disable real message sending for a user's active Telegram session — flips the per-account send_enabled gate.
 
 Inputs:
@@ -803,7 +821,9 @@ The user must have an active session. New accounts are send-enabled by default; 
 func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_user_audit_log",
 		mcplib.WithTitleAnnotation("Read any user's audit log"),
-		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Return the audit-log rows for any Telegram user — the operator-facing counterpart of get_my_audit_log. Use list_telegram_identities to find the telegram_id.
 
 Inputs:
@@ -867,6 +887,7 @@ func (s *Server) toolRevokeSession() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("revoke_telegram_session",
 		mcplib.WithTitleAnnotation("Revoke a Telegram user's session"),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Revoke the active MTProto session of a Telegram user and close their in-memory client. The user keeps their access tier; on their next reconnect the in-browser setup (phone → SMS → 2FA) runs again. Use this to clear a stuck or unfinished session.
 
 Inputs:
