@@ -29,6 +29,9 @@ type Server struct {
 	// Metrics is optional; when non-nil, tool invocation counters and
 	// duration histograms are recorded.
 	Metrics *metrics.Registry
+	// PeerCache is an optional in-memory cache for resolved Telegram peers.
+	// When nil (default), every call resolves the peer fresh via the Telegram API.
+	PeerCache *telegram.PeerCache
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -60,6 +63,13 @@ func (s *Server) WithHub(h *bridge.Hub) *Server {
 // their durations are histogrammed. Returns the receiver for chaining.
 func (s *Server) WithMetrics(m *metrics.Registry) *Server {
 	s.Metrics = m
+	return s
+}
+
+// WithPeerCache wires an in-memory peer resolution cache to reduce repeated
+// ContactsResolveUsername calls. Returns the receiver for chaining.
+func (s *Server) WithPeerCache(pc *telegram.PeerCache) *Server {
+	s.PeerCache = pc
 	return s
 }
 

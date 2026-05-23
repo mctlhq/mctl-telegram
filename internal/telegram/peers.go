@@ -92,6 +92,26 @@ func isNumeric(s string) bool {
 	return true
 }
 
+// ResolvePeerCached resolves a peer using the provided PeerCache to avoid
+// repeated ContactsResolveUsername calls for the same (userID, peerSpec) pair.
+// When cache is nil or userID is 0, it falls through to ResolvePeer directly.
+// The resolved InputPeerClass is stored in the cache on success.
+func ResolvePeerCached(ctx context.Context, c *telegram.Client, peerSpec string, cache *PeerCache, userID int64) (tg.InputPeerClass, error) {
+	if cache != nil && userID != 0 {
+		if peer, ok := cache.Get(userID, peerSpec); ok {
+			return peer, nil
+		}
+	}
+	peer, err := ResolvePeer(ctx, c, peerSpec)
+	if err != nil {
+		return nil, err
+	}
+	if cache != nil && userID != 0 {
+		cache.Set(userID, peerSpec, peer)
+	}
+	return peer, nil
+}
+
 // RedactPeer turns a peer string into a stable tag suitable for audit logs.
 // We never log usernames or numeric ids verbatim — emit type + length only.
 func RedactPeer(raw string) string {

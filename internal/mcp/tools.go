@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/gotd/td/tgerr"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
@@ -26,11 +27,25 @@ const (
 	maxFloodWaitSleep   = 60 * time.Second
 )
 
+// retryPolicy returns whether err should trigger a retry and how many seconds
+// to sleep before the next attempt. It covers FLOOD_WAIT_X, FLOOD_PREMIUM_WAIT_X,
+// and PEER_FLOOD (code 420 without a numeric suffix).
+func retryPolicy(err error) (bool, int) {
+	if n := telegram.FloodWaitSeconds(err); n > 0 {
+		return true, n
+	}
+	var rpcErr *tgerr.Error
+	if errors.As(err, &rpcErr) && rpcErr.Message == "PEER_FLOOD" {
+		return true, 60
+	}
+	return false, 0
+}
+
 // borrowWithRetry wraps Pool.Borrow with up to maxFloodWaitRetries transparent
-// retries when Telegram returns FLOOD_WAIT_X. Each wait is capped at
-// maxFloodWaitSleep. Context cancellation during a sleep causes an immediate
+// retries when Telegram returns FLOOD_WAIT_X or PEER_FLOOD. Each wait is capped
+// at maxFloodWaitSleep. Context cancellation during a sleep causes an immediate
 // return with ctx.Err(). The flood-wait counter is incremented on every
-// observed FloodWait error (including the one on the final attempt).
+// observed transient error (including the one on the final attempt).
 func (s *Server) borrowWithRetry(
 	ctx context.Context,
 	tool string,
@@ -40,14 +55,19 @@ func (s *Server) borrowWithRetry(
 	var lastErr error
 	for attempt := 0; attempt <= maxFloodWaitRetries; attempt++ {
 		lastErr = s.Pool.Borrow(ctx, userID, fn)
-		wait := telegram.FloodWaitSeconds(lastErr)
-		if wait == 0 {
-			// Not a FloodWait error — return immediately (success or other error).
+		shouldRetry, wait := retryPolicy(lastErr)
+		if !shouldRetry {
+			// Not a retryable error — return immediately (success or other error).
 			return lastErr
 		}
-		// Record every FloodWait event so operators can observe total pressure.
+		// Record every transient event so operators can observe total pressure.
 		if s.Metrics != nil {
-			s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues(tool).Inc()
+			var rpcErr *tgerr.Error
+			if errors.As(lastErr, &rpcErr) && rpcErr.Message == "PEER_FLOOD" {
+				s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues("peer_flood").Inc()
+			} else {
+				s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues(tool).Inc()
+			}
 		}
 		if attempt == maxFloodWaitRetries {
 			break
@@ -310,7 +330,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		var err error
 		if !realSend {
 			// Dry-run never touches Telegram so we don't require TG_API_* configured.
-			result, err = telegram.SendMessage(ctx, nil, peer, text, false, dryReason)
+			result, err = telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 		} else {
 			if s.Hub != nil {
 				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
@@ -322,7 +342,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			}
 			err = s.borrowWithRetry(ctx, "send_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 				var inner error
-				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason)
+				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason, s.PeerCache, id.UserID)
 				return inner
 			})
 		}
@@ -388,7 +408,7 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		var msgs []telegram.Message
 		err := s.borrowWithRetry(ctx, "get_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
-			msgs, err = telegram.GetMessages(ctx, c, peer, limit)
+			msgs, err = telegram.GetMessages(ctx, c, peer, limit, s.PeerCache, id.UserID)
 			return err
 		})
 		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)

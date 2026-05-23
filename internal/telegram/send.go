@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 type SendResult struct {
@@ -24,7 +26,9 @@ type SendResult struct {
 //
 // Gate is evaluated by the caller; this fn assumes the green light when
 // realSend is true.
-func SendMessage(ctx context.Context, c *telegram.Client, peer string, text string, realSend bool, dryReason string) (*SendResult, error) {
+//
+// cache and userID enable peer resolution caching; pass nil and 0 to disable.
+func SendMessage(ctx context.Context, c *telegram.Client, peer string, text string, realSend bool, dryReason string, cache *PeerCache, userID int64) (*SendResult, error) {
 	if text == "" {
 		return nil, fmt.Errorf("text required")
 	}
@@ -37,7 +41,7 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		}, nil
 	}
 
-	inputPeer, err := ResolvePeer(ctx, c, peer)
+	inputPeer, err := ResolvePeerCached(ctx, c, peer, cache, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -49,13 +53,19 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		}
 		randomID = int64(binary.LittleEndian.Uint64(b[:]))
 	}
-	updates, err := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	updates, sendErr := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     inputPeer,
 		Message:  text,
 		RandomID: randomID,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("send: %w", err)
+	if sendErr != nil {
+		// Evict cache entry on PEER_ID_INVALID so a stale access hash does not
+		// block future sends for the rest of the TTL window.
+		var rpcErr *tgerr.Error
+		if errors.As(sendErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
+			cache.Evict(userID, peer)
+		}
+		return nil, fmt.Errorf("send: %w", sendErr)
 	}
 	msgID := extractMessageID(updates)
 	return &SendResult{

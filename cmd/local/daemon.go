@@ -315,7 +315,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		var msgs []tg.Message
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit)
+			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, nil, 0)
 			return err
 		})
 		if dispErr == nil {
@@ -343,7 +343,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		var sendResult *tg.SendResult
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			sendResult, err = tg.SendMessage(ctx, c, args.Peer, args.Text, realSend, dryReason)
+			sendResult, err = tg.SendMessage(ctx, c, args.Peer, args.Text, realSend, dryReason, nil, 0)
 			return err
 		})
 		if dispErr == nil {
