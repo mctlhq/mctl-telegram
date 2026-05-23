@@ -17,22 +17,36 @@
     </div>
     <h1>Developer <span class="accent">reference</span></h1>
     <p class="lead">
-      Tool catalogue, scopes, storage schema, and smoke-test for the mctl-telegram MCP connector.
+      Tool catalogue, scopes, storage schema, and release checklist for the mctl-telegram MCP connector.
     </p>
   </section>
 
   <!-- ============ 01 Connector setup ============ -->
   <section id="setup">
     <div class="section-head">
-      <h2>Add as a custom connector in Claude.ai</h2>
+      <h2>Add as a custom connector (ChatGPT Apps or Claude)</h2>
     </div>
     <ol class="steps">
-      <li>Open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai → Customize → Connectors</a> and click <em>Add custom connector</em>.</li>
-      <li>Paste the Remote MCP URL: <code class="url">{{.MCPURL}}</code></li>
-      <li>Authentication: <strong>OAuth</strong>. Claude.ai discovers this server as its own authorization server via the well-known documents at <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
-      <li>You will see a <em>"Connect Telegram to Claude"</em> page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
+      <li><strong>ChatGPT Apps:</strong> enable Developer Mode under <em>Settings → Apps &amp; Connectors → Advanced settings</em>, then open <em>Settings → Connectors → Create</em> and set the connector URL to <code class="url">{{.MCPURL}}</code>.</li>
+      <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai → Customize → Connectors</a> and click <em>Add custom connector</em>.</li>
+      <li>Authentication: <strong>OAuth</strong>. Clients discover this server as its own authorization server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+      <li>You will see a Telegram connect page with a Telegram Login Widget. Click it, confirm the login in your Telegram app, and you are signed in.</li>
       <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
     </ol>
+  </section>
+
+  <section id="apps-sdk-readiness">
+    <div class="section-head">
+      <h2>Apps SDK readiness checklist</h2>
+    </div>
+    <ul class="ctrl">
+      <li><strong>Public product pages:</strong> ensure <code>/</code>, <code>/docs</code>, <code>/security</code>, and <code>/privacy</code> are accessible over HTTPS.</li>
+      <li><strong>OAuth discovery:</strong> validate both well-known documents resolve and reference the same auth server.</li>
+      <li><strong>MCP protocol health:</strong> run <code>initialize</code>, list tools, and one read-only tool call with MCP Inspector or ChatGPT Developer Mode.</li>
+      <li><strong>Safety defaults:</strong> keep <code>send_message</code> in default draft path unless all real-send gates are intentionally enabled.</li>
+      <li><strong>User controls:</strong> verify account disconnect/delete and audit-log endpoints are reachable and documented.</li>
+      <li><strong>Submission package:</strong> prepare privacy policy URL, MCP/tool details, screenshots, and test prompts/responses for dashboard review.</li>
+    </ul>
   </section>
 
   <!-- ============ 02 Tools ============ -->

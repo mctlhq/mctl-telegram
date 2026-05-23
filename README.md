@@ -2,7 +2,7 @@
 
 Go remote MCP server exposing Telegram user-account access (via `gotd/td` MTProto) as MCP tools — `list_dialogs`, `get_unread_messages`, `get_messages`, `send_message`, `pin_message`, and account controls — for Claude.ai and any MCP-compatible client.
 
-Status: **experimental / beta** (v0.x). Seven tools, OAuth-protected, draft-by-default send gate. Telegram session is per-operator and persisted encrypted. APIs and tool schemas may change before v1.0.
+Status: **Apps SDK readiness track** (v0.x). Seven tools, OAuth-protected, draft-by-default send gate, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-operator and persisted encrypted. APIs and tool schemas may change before v1.0.
 
 ## Security and privacy model
 
@@ -149,6 +149,25 @@ For Beta-tier service-level objectives, error-budget policy, and burn-rate alert
    * Remote MCP URL: `https://<your-host>/mcp`
    * Authentication: OAuth (the connector discovers the authorization server from the well-known metadata).
 3. Complete the Telegram login flow in the browser; the issued access token is used automatically on every MCP request.
+
+## Connecting to ChatGPT Apps (Draft → review-ready)
+
+1. In ChatGPT, open **Settings → Apps & Connectors → Advanced settings** and enable Developer Mode if needed.
+2. Open **Settings → Connectors → Create** and set the connector URL to the public MCP endpoint: `https://<your-host>/mcp`.
+3. Ensure these public pages are reachable over HTTPS:
+   - Landing: `https://<your-host>/`
+   - Docs: `https://<your-host>/docs`
+   - Security: `https://<your-host>/security`
+   - Privacy: `https://<your-host>/privacy`
+4. Verify OAuth discovery:
+   - `https://<your-host>/.well-known/oauth-protected-resource`
+   - `https://<your-host>/.well-known/oauth-authorization-server`
+5. Run a live handshake (`initialize`) and at least one read-only tool call with MCP Inspector or ChatGPT Developer Mode before submitting.
+
+Submission notes:
+- Keep real sends gated (default `mode=draft`, `ALLOW_SEND=false`) until review sign-off.
+- If you enable real sends later, keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
+- Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 
 ## Operations: Canary account
 
