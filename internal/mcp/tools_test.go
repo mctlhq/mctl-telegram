@@ -166,6 +166,43 @@ func TestBorrowErrResultFloodWait(t *testing.T) {
 	}
 }
 
+func TestRetryPolicy_FloodWait(t *testing.T) {
+	err := tgerr.New(420, "FLOOD_WAIT_30")
+	ok, n := retryPolicy(err)
+	if !ok {
+		t.Fatal("expected retry=true for FLOOD_WAIT_30")
+	}
+	if n != 30 {
+		t.Errorf("sleep = %d, want 30", n)
+	}
+}
+
+func TestRetryPolicy_PeerFlood(t *testing.T) {
+	err := tgerr.New(420, "PEER_FLOOD")
+	ok, n := retryPolicy(err)
+	if !ok {
+		t.Fatal("expected retry=true for PEER_FLOOD")
+	}
+	if n != 60 {
+		t.Errorf("sleep = %d, want 60", n)
+	}
+}
+
+func TestRetryPolicy_PermanentError(t *testing.T) {
+	err := tgerr.New(400, "PEER_ID_INVALID")
+	ok, _ := retryPolicy(err)
+	if ok {
+		t.Fatal("expected retry=false for PEER_ID_INVALID")
+	}
+}
+
+func TestRetryPolicy_Nil(t *testing.T) {
+	ok, _ := retryPolicy(nil)
+	if ok {
+		t.Fatal("expected retry=false for nil error")
+	}
+}
+
 // makePrepareSendRequest constructs a CallToolRequest with the given peer and
 // text arguments, matching the structure expected by toolPrepareSendMessage.
 func makePrepareSendRequest(peer, text string) mcplib.CallToolRequest {

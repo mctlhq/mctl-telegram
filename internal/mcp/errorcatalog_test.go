@@ -134,3 +134,31 @@ func TestMtprotoErrResultNonTgerr(t *testing.T) {
 		t.Errorf("expected nil for non-tgerr error, got %+v", result)
 	}
 }
+
+func TestMtprotoErrResultPeerFlood(t *testing.T) {
+	err := tgerr.New(420, "PEER_FLOOD")
+	result := mtprotoErrResult("test_tool", err)
+	if result == nil {
+		t.Fatal("expected non-nil result for PEER_FLOOD")
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true")
+	}
+	text := contentText(result)
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+		t.Fatalf("content is not valid JSON: %v — content: %q", err, text)
+	}
+	if v, _ := envelope["error"].(string); v != "RISK_GATED" {
+		t.Errorf("error = %q, want %q", v, "RISK_GATED")
+	}
+	if v, ok := envelope["retry_after_seconds"].(float64); !ok || int(v) != 60 {
+		t.Errorf("retry_after_seconds = %v, want 60", envelope["retry_after_seconds"])
+	}
+	if v, _ := envelope["message"].(string); v == "" {
+		t.Error("message must not be empty")
+	}
+	if v, _ := envelope["action"].(string); v == "" {
+		t.Error("action must not be empty")
+	}
+}

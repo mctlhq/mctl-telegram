@@ -17,6 +17,12 @@ type catalogEntry struct {
 	action  string
 }
 
+type transientEntry struct {
+	message           string
+	action            string
+	retryAfterSeconds int
+}
+
 var mtprotoErrCatalog = map[string]catalogEntry{
 	"PEER_ID_INVALID": {
 		message: "The peer ID is not valid for this account. Use @username, user:<id>, chat:<id>, or channel:<id>.",
@@ -68,6 +74,17 @@ var mtprotoErrCatalog = map[string]catalogEntry{
 	},
 }
 
+// mtprotoTransientCatalog lists MTProto error codes that are transient (not
+// permanent permission failures) and should be surfaced with a structured
+// RISK_GATED envelope so callers can retry intelligently.
+var mtprotoTransientCatalog = map[string]transientEntry{
+	"PEER_FLOOD": {
+		message:           "Telegram's anti-abuse gate temporarily blocked this peer operation.",
+		action:            "Wait 60 seconds and retry the same call.",
+		retryAfterSeconds: 60,
+	},
+}
+
 // floodWaitSeconds parses a FLOOD_WAIT_N or SLOWMODE_WAIT_N error code and
 // returns the number of seconds to wait. Returns (0, false) if the code does
 // not match either prefix or the suffix is not a valid integer.
@@ -100,7 +117,7 @@ func mtprotoErrResult(tool string, err error) *mcplib.CallToolResult {
 		return nil
 	}
 
-	slog.Warn("mcp mtproto error", "tool", tool, "message", rpcErr.Message, "code", rpcErr.Code)
+	slog.Warn("mcp mtproto error", "tool", tool, "mtproto_code", rpcErr.Message, "http_code", rpcErr.Code)
 
 	if n, ok := floodWaitSeconds(rpcErr.Message); ok {
 		var errKey, msg string
@@ -121,6 +138,20 @@ func mtprotoErrResult(tool string, err error) *mcplib.CallToolResult {
 		b, err := json.Marshal(envelope)
 		if err != nil {
 			return mcplib.NewToolResultError(msg + " " + action)
+		}
+		return mcplib.NewToolResultError(string(b))
+	}
+
+	if entry, ok := mtprotoTransientCatalog[rpcErr.Message]; ok {
+		envelope := map[string]any{
+			"error":               "RISK_GATED",
+			"message":             entry.message,
+			"retry_after_seconds": entry.retryAfterSeconds,
+			"action":              entry.action,
+		}
+		b, err := json.Marshal(envelope)
+		if err != nil {
+			return mcplib.NewToolResultError(entry.message + " " + entry.action)
 		}
 		return mcplib.NewToolResultError(string(b))
 	}
