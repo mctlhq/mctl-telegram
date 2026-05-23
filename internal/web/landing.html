@@ -354,7 +354,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends regardless of tool arguments. Real sends additionally require your account <code>send_enabled</code> flag, the <code>telegram:messages:send</code> scope, and <code>mode=send</code> in the tool call.</dd>
+        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does ChatGPT see?</dt>

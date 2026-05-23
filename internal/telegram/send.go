@@ -13,7 +13,13 @@ import (
 )
 
 type SendResult struct {
+	// Sent is the unambiguous "did this reach Telegram?" flag. It is the
+	// first field so any client (including ChatGPT mobile) reading the result
+	// gets a clear boolean rather than having to interpret Mode. false ⇒ a
+	// dry-run preview; true ⇒ a real send.
+	Sent      bool   `json:"sent"`
 	Mode      string `json:"mode"` // "send" or "draft"
+	Notice    string `json:"notice,omitempty"`
 	PeerInput string `json:"peer"`
 	Text      string `json:"text"`
 	Truncated bool   `json:"truncated,omitempty"`
@@ -34,7 +40,9 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 	}
 	if !realSend {
 		return &SendResult{
+			Sent:      false,
 			Mode:      "draft",
+			Notice:    "Draft preview — this message was NOT sent.",
 			PeerInput: peer,
 			Text:      text,
 			DryReason: dryReason,
@@ -73,6 +81,7 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 				})
 				if sendErr2 == nil {
 					return &SendResult{
+						Sent:      true,
 						Mode:      "send",
 						PeerInput: peer,
 						Text:      text,
@@ -85,6 +94,7 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 	}
 	msgID := extractMessageID(updates)
 	return &SendResult{
+		Sent:      true,
 		Mode:      "send",
 		PeerInput: peer,
 		Text:      text,

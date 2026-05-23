@@ -100,7 +100,7 @@
           <td><code>send_message</code></td>
           <td><span class="pill pill-write">write</span></td>
           <td><code>telegram:messages:send</code></td>
-          <td>On tg.mctl.ai, <code>ALLOW_SEND=false</code> blocks real sends (dry-run preview with <code>dry_reason</code>). Real send additionally requires identity scope, per-account <code>send_enabled=true</code>, and <code>mode=send</code>.</td>
+          <td>No mode argument — the gate decides. On tg.mctl.ai, <code>ALLOW_SEND=false</code> blocks real sends and returns a dry-run preview (<code>sent=false</code>, with <code>dry_reason</code>). A real send additionally requires identity scope and per-account <code>send_enabled=true</code>.</td>
         </tr>
         <tr>
           <td><code>pin_message</code></td>

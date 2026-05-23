@@ -362,14 +362,17 @@ func runVirtualUser(ctx context.Context, client *http.Client, target, token, pee
 			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolGetMessages, map[string]any{"peer": peer})
 			s.stats[toolGetMessages].record(callResult{latency: lat, isErr: err != nil})
 
-		default: // send_message (5%): direct call, draft mode
+		default: // send_message (5%)
+			// send_message no longer has a "draft" mode — the server gate
+			// (ALLOW_SEND, scope, send_enabled) alone decides whether a call
+			// sends for real. So this case is opt-in behind -allow-send to
+			// avoid blasting real Telegram messages during a load run.
 			if !allowSend {
 				break
 			}
 			_, lat, err := callTool(ctx, client, target, token, sessionID, id, toolSendMessage, map[string]any{
 				"peer": peer,
-				"text": "load test dry run",
-				"mode": "draft",
+				"text": "mctl-telegram load test",
 			})
 			s.stats[toolSendMessage].record(callResult{latency: lat, isErr: err != nil})
 		}
