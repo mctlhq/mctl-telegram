@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.1](https://github.com/mctlhq/mctl-telegram/compare/0.30.0...0.30.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* address review on set_account_send + TTL drift ([9bc70e0](https://github.com/mctlhq/mctl-telegram/commit/9bc70e0e7ccf0e1362fa6072771538e263d7076a))
+* send-by-default connect + ChatGPT prepare/send flow ([88ea49b](https://github.com/mctlhq/mctl-telegram/commit/88ea49bfe3ffa3b287943b418f67e521773319d8))
+* send-by-default connect + ChatGPT prepare/send flow ([39c00ae](https://github.com/mctlhq/mctl-telegram/commit/39c00ae9fd41b09a9597d74b9385f4179a34ec8f))
+
 ## [0.30.0](https://github.com/mctlhq/mctl-telegram/compare/0.29.4...0.30.0) (2026-05-23)
 
 
