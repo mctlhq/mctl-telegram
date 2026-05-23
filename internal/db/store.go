@@ -506,17 +506,21 @@ func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 // SetSendEnabled flips telegram_accounts.send_enabled on the user's active
 // session row. Used by the in-browser enable_access flow when the user opts
 // into real message sending during onboarding, so the operator no longer has
-// to run a manual UPDATE. A no-op (nil error) when the user has no active
-// session — the caller provisions the session first, then calls this.
-func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) error {
-	if _, err := s.DB.ExecContext(ctx,
+// to run a manual UPDATE. Returns the number of rows affected (0 when the user
+// has no active session) so callers that act on behalf of an operator can tell
+// a real update from a silent no-op; the enable_access flow ignores it because
+// it provisions the session first.
+func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts SET send_enabled = $2
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
 		userID, enabled,
-	); err != nil {
-		return fmt.Errorf("set send_enabled: %w", err)
+	)
+	if err != nil {
+		return 0, fmt.Errorf("set send_enabled: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ToggleSendEnabled atomically inverts send_enabled on the user's active

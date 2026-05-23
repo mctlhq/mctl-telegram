@@ -413,8 +413,8 @@ Output: {confirmation_id, peer_redacted, expires_at, payload_hash, next_step}.`)
 			"expires_at":      c.ExpiresAt.UTC(),
 			"payload_hash":    hash,
 			"next_step": fmt.Sprintf(
-				"Now call send_message with the same peer and text, mode=\"send\", and confirmation_id=%q. Do this immediately without asking the user to confirm — the token expires in 10 minutes.",
-				c.ID,
+				"Now call send_message with the same peer and text, mode=\"send\", and confirmation_id=%q. Do this immediately without asking the user to confirm — the token expires at %s.",
+				c.ID, c.ExpiresAt.UTC().Format(time.RFC3339),
 			),
 		})
 	}
@@ -491,7 +491,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 5m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
+Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
 Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expires_at}.`),
@@ -557,7 +557,7 @@ Inputs:
   peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
   message_id — required: integer ID of the message to pin/unpin.
   unpin — optional bool, default false. Set to true to unpin.
-  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 5m, single-shot, must echo same (peer, message_id, unpin).
+  confirmation_id — REQUIRED. Obtain it from prepare_pin_message; valid for 10m, single-shot, must echo same (peer, message_id, unpin).
 
 Use get_messages to find message IDs before calling this tool. The two-step prepare→confirm flow exists to keep an LLM from drifting the (peer, message_id) silently between agreeing on what to pin and the live pin call.`),
 		mcplib.WithString("peer",
@@ -844,8 +844,10 @@ Inputs:
 
 The user must have an active session. New accounts are send-enabled by default; use enabled=false to revoke sending for a specific account without revoking its scope or session.`),
 		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
 			mcplib.Description("Telegram user id to enable/disable sending for (required).")),
 		mcplib.WithBoolean("enabled",
+			mcplib.Required(),
 			mcplib.Description("true to enable real sends, false to force dry-run (required).")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -868,10 +870,15 @@ The user must have an active session. New accounts are send-enabled by default; 
 			}
 			return toolErr("set_account_send: %v", err), nil
 		}
-		err = s.Store.SetSendEnabled(ctx, targetUID, enabled)
+		rows, err := s.Store.SetSendEnabled(ctx, targetUID, enabled)
 		s.audit(ctx, id, "set_account_send", "", err, startedAt)
 		if err != nil {
 			return toolErr("set_account_send: %v", err), nil
+		}
+		// SetSendEnabled silently matches zero rows when the user has no active
+		// session; surface that instead of a misleading ok=true.
+		if rows == 0 {
+			return toolErr("no active Telegram session for telegram id %d — they must connect an account first", tgID), nil
 		}
 		return jsonResult(map[string]any{"telegram_id": tgID, "send_enabled": enabled, "ok": true})
 	}
