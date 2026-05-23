@@ -261,12 +261,17 @@ Empty result means no unread messages match (including: peer has unread but text
 }
 
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
-	// destructiveHint omitted: ChatGPT blocks destructive-annotated tools before the server call,
-	// making them impossible to invoke. Safety is enforced by runtime gates (ALLOW_SEND, scope,
-	// send_enabled) so the annotation adds friction without adding security.
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Send a Telegram message.
+
+Draft-by-default: the message is sent for real only when the server send
+gate is fully open (ALLOW_SEND=true, the telegram:messages:send scope, and
+per-account send_enabled=true). Otherwise this returns a dry-run preview
+(sent=false) with the proposed text and a dry_reason — nothing is sent. The
+result's "sent" field tells you which happened.
 
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
@@ -289,20 +294,34 @@ Inputs (required):
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
-		canSend, blockReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend)
-		if !canSend {
-			s.audit(ctx, id, "send_message:blocked", telegram.RedactPeer(peer), nil, startedAt)
-			return toolErr("send blocked: %s", blockReason), nil
+		// The send gate is authoritative. The tool exposes no mode parameter,
+		// so any client-supplied mode is irrelevant: a real send happens only
+		// when ALLOW_SEND, the send scope, per-account send_enabled, and the
+		// per-peer rate limit all pass.
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend)
+		if canSend {
+			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
+				canSend = false
+				dryReason = r
+			}
 		}
-		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
-			s.audit(ctx, id, "send_message:blocked", telegram.RedactPeer(peer), nil, startedAt)
-			return toolErr("send blocked: %s", r), nil
+		if !canSend {
+			// Draft-by-default: when the gate denies, return a successful
+			// dry-run preview (not an error) so the review-before-send
+			// workflow renders cleanly. No Telegram API call is made.
+			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
+			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
+			return jsonResult(result)
 		}
 		var result *telegram.SendResult
 		var err error
 		if s.Hub != nil {
 			accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && accountMode == "local" {
+				// Gates passed server-side; signal the daemon to really send.
+				// The daemon treats a missing/non-"send" mode as a dry-run, so
+				// without this the local-bridge send would silently no-op.
+				args["mode"] = "send"
 				res, err2 := s.bridgeCall(ctx, id, "send_message", args)
 				s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
 				return res, err2

@@ -27,7 +27,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 | `list_dialogs`                | `readOnly`        | Inputs: `limit` (≤200, default 50), optional `query`. Peer id format: `user:<id>` / `chat:<id>` / `channel:<id>`. |
 | `get_unread_messages`         | `readOnly`        | Inputs: optional `peer`, `limit` (≤200). Returns only unread messages. |
 | `get_messages`                | `readOnly`        | Full message history for a specific peer, not just unread. |
-| `send_message`                | `destructive`     | Inputs: `peer`, `text`, optional `mode` ∈ `{draft, send}`. Default `draft`. Real send requires all of: server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`, and `mode=send`. Otherwise returns dry-run preview with `dry_reason`. |
+| `send_message`                | `destructive`     | Inputs: `peer`, `text`. Draft-by-default: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`). Otherwise returns a dry-run preview (`sent=false`) with `dry_reason` — nothing is sent. The result's `sent` field indicates which happened. |
 | `pin_message`                 | `destructive`     | Inputs: `peer`, `message_id`, `unpin` (bool). |
 | `disconnect_telegram_account` | `destructive`     | Soft-revokes your session — marks it revoked and tears down the in-memory MTProto client. |
 | `delete_telegram_account`     | `destructive`     | Hard-deletes the encrypted session blob and all per-account metadata from the server. |

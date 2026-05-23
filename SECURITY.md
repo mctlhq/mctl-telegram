@@ -67,9 +67,9 @@ Real Telegram sends require **all** of:
 1. Server flag `ALLOW_SEND=true` (Helm values).
 2. Identity has `telegram:messages:send` scope (group → scope map in `internal/auth/sharedhmac/verifier.go`).
 3. `telegram_accounts.send_enabled = true` for that operator (set out-of-band).
-4. Tool call argument `mode=send` (default is `draft`).
+4. Per-peer send rate limit not exhausted.
 
-Any condition false → response is a dry-run preview containing the proposed text and the failing-condition reason in `dry_reason`. `mode=draft` never reaches the Telegram API.
+`send_message` takes no mode argument — the gate alone decides. Any condition false → response is a dry-run preview (`sent=false`) containing the proposed text and the failing-condition reason in `dry_reason`; nothing reaches the Telegram API.
 
 ## Authentication-required mode
 

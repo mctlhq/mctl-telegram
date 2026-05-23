@@ -130,14 +130,14 @@
   </ul>
 
   <h2>Send-gate (defense in depth)</h2>
-  <p>On production tg.mctl.ai, <code>ALLOW_SEND=false</code> is the default — all <code>send_message</code> calls return a dry-run preview regardless of the <code>mode</code> argument. Real Telegram sends require <strong>all</strong> of:</p>
+  <p>On production tg.mctl.ai, <code>ALLOW_SEND=false</code> is the default — every <code>send_message</code> call returns a dry-run preview. <code>send_message</code> takes no mode argument; the gate alone decides. Real Telegram sends require <strong>all</strong> of:</p>
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code> (Helm values).</li>
     <li>Identity has <code>telegram:messages:send</code> scope (group &#8594; scope map).</li>
     <li><code>telegram_accounts.send_enabled = true</code> for that operator.</li>
-    <li>Tool call argument <code>mode=send</code>.</li>
+    <li>Per-peer send rate limit not exhausted.</li>
   </ol>
-  <p>Any condition false &#8594; response is a dry-run preview containing the proposed text and the failing-condition reason in <code>dry_reason</code>. Passing <code>mode=draft</code> also never reaches the Telegram API.</p>
+  <p>Any condition false &#8594; response is a dry-run preview (<code>sent=false</code>) containing the proposed text and the failing-condition reason in <code>dry_reason</code>; nothing reaches the Telegram API.</p>
 
   <h2>Authentication-required mode</h2>
   <ul>
