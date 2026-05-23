@@ -113,6 +113,10 @@
   }
   .topbar a:hover { color: var(--text); }
   .topbar a.active { color: var(--accent); }
+  .topbar a.gh-link {
+    display: inline-flex;
+    align-items: center;
+  }
 
   /* ===== Hero ===== */
   .hero {
