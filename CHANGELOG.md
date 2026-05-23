@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.6](https://github.com/mctlhq/mctl-telegram/compare/0.30.5...0.30.6) (2026-05-23)
+
+
+### Bug Fixes
+
+* **mcp:** annotate send_message as destructive/open-world for submission ([c7a8bcc](https://github.com/mctlhq/mctl-telegram/commit/c7a8bcc5e6f0e72173a051d4e20b510e300227f7))
+* **mcp:** annotate send_message as destructive/open-world for submission ([56f8864](https://github.com/mctlhq/mctl-telegram/commit/56f886450b06d4bd00149f897df2be71f88aec6a))
+
 ## [0.30.5](https://github.com/mctlhq/mctl-telegram/compare/0.30.4...0.30.5) (2026-05-23)
 
 
