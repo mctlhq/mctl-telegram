@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.2](https://github.com/mctlhq/mctl-telegram/compare/0.30.1...0.30.2) (2026-05-23)
+
+
+### Bug Fixes
+
+* remove prepare_send_message to fix mobile ChatGPT send stall ([c19f73e](https://github.com/mctlhq/mctl-telegram/commit/c19f73e8f126cb62a511ea5184eeebebf0c558f2))
+* remove prepare_send_message to fix mobile ChatGPT send stall ([273d903](https://github.com/mctlhq/mctl-telegram/commit/273d9035b657ed73705267ae7588ebc97468bb0b))
+
 ## [0.30.1](https://github.com/mctlhq/mctl-telegram/compare/0.30.0...0.30.1) (2026-05-23)
 
 
