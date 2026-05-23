@@ -62,12 +62,7 @@ func (s *Server) borrowWithRetry(
 		}
 		// Record every transient event so operators can observe total pressure.
 		if s.Metrics != nil {
-			var rpcErr *tgerr.Error
-			if errors.As(lastErr, &rpcErr) && rpcErr.Message == "PEER_FLOOD" {
-				s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues("peer_flood").Inc()
-			} else {
-				s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues(tool).Inc()
-			}
+			s.Metrics.TelegramFloodWaitEventsTotal.WithLabelValues(tool).Inc()
 		}
 		if attempt == maxFloodWaitRetries {
 			break

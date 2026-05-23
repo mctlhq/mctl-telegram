@@ -59,11 +59,27 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		RandomID: randomID,
 	})
 	if sendErr != nil {
-		// Evict cache entry on PEER_ID_INVALID so a stale access hash does not
-		// block future sends for the rest of the TTL window.
 		var rpcErr *tgerr.Error
 		if errors.As(sendErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
+			// Evict the stale entry and retry once. PEER_ID_INVALID guarantees
+			// MessagesSendMessage did NOT deliver the message, so a single retry
+			// after fresh resolution carries no double-send risk.
 			cache.Evict(userID, peer)
+			if inputPeer2, err2 := ResolvePeerCached(ctx, c, peer, cache, userID); err2 == nil {
+				updates2, sendErr2 := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+					Peer:     inputPeer2,
+					Message:  text,
+					RandomID: randomID,
+				})
+				if sendErr2 == nil {
+					return &SendResult{
+						Mode:      "send",
+						PeerInput: peer,
+						Text:      text,
+						MessageID: extractMessageID(updates2),
+					}, nil
+				}
+			}
 		}
 		return nil, fmt.Errorf("send: %w", sendErr)
 	}

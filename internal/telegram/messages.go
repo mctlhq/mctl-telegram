@@ -46,29 +46,41 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 	}
 	var targets []target
 
+	var peerFound bool // true if peerSpec matched a dialog entry (even with 0 unread)
 	for _, dc := range dialogs {
 		d, ok := dc.(*tg.Dialog)
-		if !ok || d.UnreadCount == 0 {
+		if !ok {
 			continue
 		}
 		hint := dialogFromPeer(d, users, chats)
 		if hint == nil {
 			continue
 		}
-		input := inputPeerFromPeer(d.Peer, users, chats)
-		if input == nil {
+		// Apply peer filter before the unread gate so peerFound is set even
+		// when the matching peer has zero unread messages.
+		if peerSpec != "" && hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
-		if peerSpec != "" && hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
+		if peerSpec != "" {
+			peerFound = true
+		}
+		if d.UnreadCount == 0 {
+			continue
+		}
+		input := inputPeerFromPeer(d.Peer, users, chats)
+		if input == nil {
 			continue
 		}
 		targets = append(targets, target{input: input, dialog: d, hint: hint})
 	}
 
-	// When an explicit peer was requested but not found in the dialog list,
-	// return an actionable error rather than a silent empty result.
+	// Peer explicitly requested but absent from the dialog list → actionable error.
+	// Peer found with zero unread messages → correct result is an empty slice.
 	if peerSpec != "" && len(targets) == 0 {
-		return nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
+		if !peerFound {
+			return nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
+		}
+		return []Message{}, nil
 	}
 
 	out := make([]Message, 0, limit)
@@ -228,11 +240,19 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		Limit: limit,
 	})
 	if histErr != nil {
-		// Evict the cache entry on PEER_ID_INVALID so a stale access hash
-		// does not block future calls for the rest of the TTL window.
 		var rpcErr *tgerr.Error
 		if errors.As(histErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
+			// Evict the stale entry and retry once with a fresh resolution.
+			// MessagesGetHistory is read-only so the retry is always safe.
 			cache.Evict(userID, peerSpec)
+			if input2, err2 := ResolvePeerCached(ctx, c, peerSpec, cache, userID); err2 == nil {
+				if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+					Peer:  input2,
+					Limit: limit,
+				}); err3 == nil {
+					return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), nil
+				}
+			}
 		}
 		return nil, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}
