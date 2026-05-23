@@ -164,8 +164,8 @@ For Beta-tier service-level objectives, error-budget policy, and burn-rate alert
    - Security: `https://<your-host>/security`
    - Privacy: `https://<your-host>/privacy`
 4. Verify OAuth discovery:
-   - `https://<your-host>/.well-known/oauth-protected-resource`
-   - `https://<your-host>/.well-known/oauth-authorization-server`
+   - Fetch `https://<your-host>/.well-known/oauth-protected-resource` (always served on your host).
+   - Follow the `authorization_servers` URL it advertises and confirm that server's `/.well-known/oauth-authorization-server` resolves. In the default `local-jwt` mode this is your own host; in `shared-hmac`/`shared-hmac-legacy` mode discovery points at `https://api.mctl.ai`, so do **not** expect that document on `<your-host>`.
 5. Run a live handshake (`initialize`) and at least one read-only tool call with MCP Inspector or ChatGPT Developer Mode before submitting.
 
 ### Quick connect to the hosted endpoint (`tg.mctl.ai`)

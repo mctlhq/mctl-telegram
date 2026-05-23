@@ -54,7 +54,7 @@
     </div>
     <ul class="ctrl">
       <li><strong>Public product pages:</strong> ensure <code>/</code>, <code>/docs</code>, <code>/security</code>, and <code>/privacy</code> are accessible over HTTPS.</li>
-      <li><strong>OAuth discovery:</strong> validate both well-known documents resolve and reference the same auth server.</li>
+      <li><strong>OAuth discovery:</strong> fetch <code>/.well-known/oauth-protected-resource</code> on your host, then follow the <code>authorization_servers</code> URL it advertises and confirm that server's <code>/.well-known/oauth-authorization-server</code> resolves. In <code>local-jwt</code> mode that is your own host; in <code>shared-hmac</code> mode it is <code>api.mctl.ai</code>.</li>
       <li><strong>MCP protocol health:</strong> run <code>initialize</code>, list tools, and one read-only tool call with MCP Inspector or ChatGPT Developer Mode.</li>
       <li><strong>Safety defaults:</strong> on tg.mctl.ai, <code>ALLOW_SEND=false</code> keeps all sends in dry-run until all opt-in gates are enabled.</li>
       <li><strong>User controls:</strong> verify account disconnect/delete and audit-log endpoints are reachable and documented.</li>
