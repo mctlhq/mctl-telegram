@@ -218,7 +218,26 @@ func main() {
 	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
 
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m)
+
+	// Instantiate the peer cache and start a background sweep goroutine so
+	// stale entries do not accumulate over the lifetime of the process. The
+	// 10-minute default TTL means a 5-minute sweep interval bounds the worst-
+	// case overhang to one extra TTL window.
+	peerCache := telegram.NewPeerCache()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				peerCache.Sweep()
+			}
+		}
+	}()
+
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache)
 
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
