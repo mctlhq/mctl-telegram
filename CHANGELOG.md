@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.30.0](https://github.com/mctlhq/mctl-telegram/compare/0.29.4...0.30.0) (2026-05-23)
+
+
+### Features
+
+* **agents:** issue-154-nav-replace-github-text-link-with-a-gith ([577eb84](https://github.com/mctlhq/mctl-telegram/commit/577eb843febfad08b3483f54a04a4fd5fda0c44e))
+* **agents:** issue-158-non-deterministic-safety-block-on-get-me ([#162](https://github.com/mctlhq/mctl-telegram/issues/162)) ([72ab309](https://github.com/mctlhq/mctl-telegram/commit/72ab309d45998206220c683e9170c06e70bc5a6a))
+* **agents:** issue-159-live-send-unusable-when-prepare-send-mes ([63f433d](https://github.com/mctlhq/mctl-telegram/commit/63f433db8a04a3ea6743b93283bc1caf3292026f))
+* **mcp:** re-introduce prepare_send_message as read-only tool ([fae8e93](https://github.com/mctlhq/mctl-telegram/commit/fae8e93a06fa93ee83c33cb12678f22d180ca466))
+* **ui:** replace GitHub text link with inline SVG icon in topbar ([2568a30](https://github.com/mctlhq/mctl-telegram/commit/2568a3018c51498b27cd24ef91541598c84c1617))
+
+
+### Bug Fixes
+
+* **docs:** audit-log retention sweeper ships, not planned ([#164](https://github.com/mctlhq/mctl-telegram/issues/164)) ([82db999](https://github.com/mctlhq/mctl-telegram/commit/82db9995ec3d214077c8cced84ba998926225f46))
+* **docs:** mark Local Bridge mode as beta-available in ROADMAP ([#151](https://github.com/mctlhq/mctl-telegram/issues/151)) ([545ac17](https://github.com/mctlhq/mctl-telegram/commit/545ac171dc9267a3bfd848a6ee5c73074d8e86ab))
+* **ui:** add .gh-link rule to align nav GitHub icon ([30e129f](https://github.com/mctlhq/mctl-telegram/commit/30e129fbe1cfdb626122dc6e4bfd7068928124ff))
+
 ## [0.29.4](https://github.com/mctlhq/mctl-telegram/compare/0.29.3...0.29.4) (2026-05-22)
 
 
