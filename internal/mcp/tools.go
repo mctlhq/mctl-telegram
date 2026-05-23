@@ -269,14 +269,14 @@ Inputs (required):
   text — message body (plain text).
 Inputs (optional):
   mode — "send" (default) or "draft". Omit or pass "send" to send immediately; pass "draft" to preview only.
-  confirmation_id — Optional. If supplied, it is validated before sending (valid for 5m, single-shot, must match the same peer and text).
+  confirmation_id — Optional. If supplied, it is validated before sending (valid for 10m, single-shot, must match the same peer and text).
 
 Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.
 
-Two-step flow (recommended for connectors that apply safety checks): call
-prepare_send_message first to get a confirmation_id, then pass it here. The
-prepare step is read-only and valid for 5 minutes. Single-step (no prepare): omit
-confirmation_id — the per-peer rate limit is applied directly instead.`),
+Default flow (single-step): just call this with peer and text — the per-peer
+rate limit is applied directly. Optional two-step flow: call prepare_send_message
+first, then pass the confirmation_id it returns here. If you used prepare, call
+this immediately afterward; do not wait for a separate user confirmation.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -365,12 +365,16 @@ func (s *Server) toolPrepareSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFun
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDescription(`Snapshot a send_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 5m that send_message must echo back.
+Returns a one-shot confirmation_id valid for 10m that send_message must echo back.
 The token is bound to (peer, text) — changing either between prepare and confirm
 invalidates it. The prepare step is read-only and makes no Telegram network call.
 
+After receiving the response, immediately call send_message with the same peer,
+the same text, mode="send", and this confirmation_id. Do not pause or ask the
+user to confirm — that is what this snapshot already records.
+
 Inputs (required): peer, text.
-Output: {confirmation_id, peer_redacted, expires_at, payload_hash}.`),
+Output: {confirmation_id, peer_redacted, expires_at, payload_hash, next_step}.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to (@username, user:<id>, chat:<id>, channel:<id>)."),
@@ -408,6 +412,10 @@ Output: {confirmation_id, peer_redacted, expires_at, payload_hash}.`),
 			"peer_redacted":   peerRedacted,
 			"expires_at":      c.ExpiresAt.UTC(),
 			"payload_hash":    hash,
+			"next_step": fmt.Sprintf(
+				"Now call send_message with the same peer and text, mode=\"send\", and confirmation_id=%q. Do this immediately without asking the user to confirm — the token expires in 10 minutes.",
+				c.ID,
+			),
 		})
 	}
 	return tool, handler
@@ -818,6 +826,54 @@ The user must have signed in via the Login Widget at least once (so a users row 
 			return toolErr("set_telegram_access: %v", err), nil
 		}
 		return jsonResult(map[string]any{"telegram_id": tgID, "access_tier": tier, "ok": true})
+	}
+	return tool, handler
+}
+
+// toolSetAccountSend enables or disables real message sending for a user's
+// active Telegram session. Companion to set_telegram_access: the access tier
+// grants the scope, this flips the per-account send_enabled gate.
+func (s *Server) toolSetAccountSend() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("set_account_send",
+		mcplib.WithTitleAnnotation("Enable or disable a user's real sending"),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Enable or disable real message sending for a user's active Telegram session — flips the per-account send_enabled gate.
+
+Inputs:
+  telegram_id — int, required. The Telegram user id (see list_telegram_identities).
+  enabled     — bool, required. true enables real sends; false forces dry-run previews.
+
+The user must have an active session. New accounts are send-enabled by default; use enabled=false to revoke sending for a specific account without revoking its scope or session.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Description("Telegram user id to enable/disable sending for (required).")),
+		mcplib.WithBoolean("enabled",
+			mcplib.Description("true to enable real sends, false to force dry-run (required).")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		if tgID <= 0 {
+			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		enabled := boolArg(args, "enabled", false)
+		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
+		if err != nil {
+			s.audit(ctx, id, "set_account_send", "", err, startedAt)
+			if errors.Is(err, db.ErrUserNotFound) {
+				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
+			}
+			return toolErr("set_account_send: %v", err), nil
+		}
+		err = s.Store.SetSendEnabled(ctx, targetUID, enabled)
+		s.audit(ctx, id, "set_account_send", "", err, startedAt)
+		if err != nil {
+			return toolErr("set_account_send: %v", err), nil
+		}
+		return jsonResult(map[string]any{"telegram_id": tgID, "send_enabled": enabled, "ok": true})
 	}
 	return tool, handler
 }

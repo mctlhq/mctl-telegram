@@ -10,8 +10,9 @@ import (
 )
 
 // ConfirmationTTL is the window between prepare_* and the matching live
-// send/pin. 5 minutes accommodates multi-turn LLM reasoning delays.
-const ConfirmationTTL = 5 * time.Minute
+// send/pin. 10 minutes accommodates multi-turn LLM reasoning delays and
+// connectors (e.g. ChatGPT) that pause for a user turn between the two calls.
+const ConfirmationTTL = 10 * time.Minute
 
 // Confirmation is the server-side handle for an in-flight destructive
 // action that needs a two-step prepare→confirm dance. Stored in-memory only:

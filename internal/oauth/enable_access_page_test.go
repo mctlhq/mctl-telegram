@@ -48,6 +48,28 @@ func TestRenderEnablePassword_NonceScopedScript(t *testing.T) {
 	}
 }
 
+// Sending is opt-out, not opt-in: the connect UI must default to send-enabled.
+// The wizard permissions screen pre-selects the "send" radio and the non-wizard
+// phone screen pre-checks the send_optin checkbox.
+func TestEnableUI_DefaultsToSendEnabled(t *testing.T) {
+	permRec := httptest.NewRecorder()
+	renderEnablePermissions(permRec, enablePermissionsPage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})
+	perm := permRec.Body.String()
+	if !strings.Contains(perm, `value="send" checked`) {
+		t.Errorf("permissions screen must default-select the send radio; body=%s", perm)
+	}
+	if strings.Contains(perm, `value="readonly" checked`) {
+		t.Errorf("permissions screen must not default-select read-only")
+	}
+
+	phoneRec := httptest.NewRecorder()
+	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", SendOptIn: true})
+	phone := phoneRec.Body.String()
+	if !strings.Contains(phone, `name="send_optin" value="on" checked`) {
+		t.Errorf("phone screen must pre-check the send_optin checkbox when SendOptIn=true; body=%s", phone)
+	}
+}
+
 // A leaked/reused nonce would let an injected script replay it, so each
 // render must mint a fresh one.
 func TestRenderEnablePassword_FreshNoncePerRequest(t *testing.T) {
