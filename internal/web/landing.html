@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 {{template "ui_head" .}}
+<meta name="description" content="Connect your Telegram account to ChatGPT, Claude, and other MCP clients. OAuth-authenticated MCP server with encrypted sessions, read tools, and opt-in send controls.">
 <style>
   /* CTA buttons */
   .cta-btn {
@@ -188,21 +189,21 @@
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
       <span class="status-dot" aria-hidden="true"></span>
-      <span>Operational · Remote MCP Server · v1</span>
+      <span>ChatGPT App · MCP Server · tg.mctl.ai</span>
     </div>
     <h1>Your Telegram,<br><span class="accent">inside your AI assistant</span></h1>
     <p class="lead">
-      Give Claude, ChatGPT, or any MCP client read and write access to your Telegram chats — straight from the chat, with no extra apps.
+      Install from the ChatGPT App Directory or connect via Settings &#8594; Apps. Summarise chats, search messages, and draft replies from ChatGPT, Claude, or any MCP client — with OAuth sign-in to your own Telegram account.
     </p>
     <div class="cta-row">
-      <button class="cta-btn" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
+      <a class="cta-btn" href="#chatgpt">Install in ChatGPT</a>
+      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
       <a class="btn-secondary" href="https://claude.ai/customize/connectors">Add to Claude</a>
-      <a class="btn-secondary" href="#connect">Set up in ChatGPT</a>
-      <a href="/docs">See the docs</a>
+      <a href="/docs#apps-sdk-readiness">See the docs</a>
     </div>
     <p class="muted">
-      Works with any MCP client — Claude, ChatGPT, Cursor, Windsurf, and more.
-      Claude opens directly; ChatGPT setup takes pasting the MCP URL into connector settings.
+      <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
+      <a href="mailto:support@mctl.ai">support@mctl.ai</a>
     </p>
   </section>
 
@@ -273,16 +274,46 @@
     </ol>
   </section>
 
-  <!-- ============ Connecting ============ -->
+  <!-- ============ ChatGPT Apps ============ -->
+  <section id="chatgpt">
+    <div class="section-head">
+      <h2>Install in ChatGPT</h2>
+    </div>
+    <ol class="steps">
+      <li>Open ChatGPT &#8594; <strong>Settings &#8594; Apps</strong> and select your draft app (or install from the App Directory once published).</li>
+      <li>Set the MCP server URL to <code class="url">{{.MCPURL}}</code>.</li>
+      <li>Authentication: <strong>OAuth</strong>. ChatGPT discovers this server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+      <li>Complete the Telegram sign-in flow in your browser when prompted.</li>
+      <li>Test with a read-only tool (<code>list_dialogs</code> or <code>get_unread_messages</code>) before enabling real sends. On tg.mctl.ai, real sends stay blocked until all opt-in gates are enabled (see <a href="/security">send-gate</a>).</li>
+      <li>Review our <a href="/privacy">privacy policy</a> and <a href="/security">security model</a> before connecting your account.</li>
+    </ol>
+  </section>
+
+  <!-- ============ Other clients ============ -->
   <section id="connect">
     <div class="section-head">
-      <h2>Connecting</h2>
+      <h2>Other MCP clients</h2>
     </div>
     <ol class="steps">
       <li><strong>Any client:</strong> copy the MCP URL <code class="url">{{.MCPURL}}</code> and add it as a custom connector. Authentication is <em>OAuth</em> — you sign in with Telegram once during setup.</li>
       <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors">Connectors settings</a>, choose <em>Add custom connector</em>, and paste the MCP URL.</li>
-      <li><strong>ChatGPT:</strong> open <em>Settings &#8594; Connectors</em>, add a custom connector, and paste the MCP URL. Requires a plan with custom connectors enabled.</li>
+      <li><strong>Cursor, Windsurf, and others:</strong> paste the MCP URL into your client's remote MCP connector settings. See <a href="/docs#chatgpt-setup">/docs</a> for OAuth discovery URLs and a smoke-test command.</li>
     </ol>
+  </section>
+
+  <!-- ============ Data at a glance ============ -->
+  <section id="data">
+    <div class="section-head">
+      <h2>Data at a glance</h2>
+    </div>
+    <div class="trust-card">
+      <ul>
+        <li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account, plus audit metadata (tool name, redacted peer reference — never message text).</li>
+        <li><strong>Not stored:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens in logs.</li>
+        <li><strong>Through ChatGPT:</strong> your prompts, tool arguments, and tool results pass through the ChatGPT client to reach this server; ChatGPT's own data practices apply to that traffic.</li>
+        <li><strong>Your controls:</strong> disconnect or delete your account at any time via MCP tools or the HTTP API. Full inventory in our <a href="/privacy">privacy policy</a>.</li>
+      </ul>
+    </div>
   </section>
 
   <!-- ============ Trust ============ -->
@@ -305,8 +336,8 @@
         <a href="/docs#controls">Developer reference</a>
       </div>
       <p style="margin-top: 16px; font-size: 13.5px;">
-        Local Bridge mode (beta, self-hosted) keeps the session on your own machine, reducing trust to connectivity only.
-        It runs from source today; a one-command install is on the way. See <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.
+        <strong>Optional:</strong> Local Bridge mode (beta, self-hosted) keeps the session on your own machine instead of this server.
+        It is not required for the ChatGPT App. See <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.
       </p>
     </div>
   </section>
@@ -323,7 +354,11 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. The default mode is draft — your assistant prepares a message for your review but never sends it. Real sends require the server ALLOW_SEND flag, your account opt-in, and the mode=send argument in the tool call.</dd>
+        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends regardless of tool arguments. Real sends additionally require your account <code>send_enabled</code> flag, the <code>telegram:messages:send</code> scope, and <code>mode=send</code> in the tool call.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>What data does ChatGPT see?</dt>
+        <dd>Your conversation prompts, the tool arguments ChatGPT sends (e.g. peer, message text for drafts), and the tool results this server returns. That traffic is handled by ChatGPT under OpenAI's policies. This server stores only an encrypted session blob and audit metadata — see <a href="/privacy">/privacy</a>.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does mctl-telegram store?</dt>
@@ -339,9 +374,25 @@
       </div>
       <div class="faq-item">
         <dt>What is the Local Bridge?</dt>
-        <dd>A mode (in beta, self-hosted) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay, removing the server-side session trust requirement entirely. It works today via self-hosted setup; a one-command install and full docs land with the community release. See <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.</dd>
+        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path. See <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>.</dd>
       </div>
     </dl>
+  </section>
+
+  <!-- ============ Support ============ -->
+  <section id="support">
+    <div class="section-head">
+      <h2>Support and publisher</h2>
+    </div>
+    <div class="trust-card">
+      <ul>
+        <li><strong>Publisher:</strong> mctl</li>
+        <li><strong>Support:</strong> <a href="mailto:support@mctl.ai">support@mctl.ai</a></li>
+        <li><strong>Privacy policy:</strong> <a href="/privacy">{{.PublicBaseURL}}/privacy</a></li>
+        <li><strong>Security reports:</strong> <a href="mailto:security@mctl.ai">security@mctl.ai</a> (see <a href="/security">/security</a>)</li>
+        <li><strong>Source code:</strong> <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> (open source — audit, self-host, or contribute)</li>
+      </ul>
+    </div>
   </section>
 
   {{template "ui_footer" .}}

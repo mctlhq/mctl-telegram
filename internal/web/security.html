@@ -63,6 +63,9 @@
   <h2>Reporting vulnerabilities</h2>
   <p>Email <strong>security@mctl.ai</strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgement target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
 
+  <h2>End-user support</h2>
+  <p>For product help (setup, disconnect, billing questions): email <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Do not use the security address for general support.</p>
+
   <h2>Trust boundaries</h2>
   <p>Per user, the service brokers two trust relationships:</p>
   <div class="table-scroll">
@@ -70,7 +73,7 @@
     <thead><tr><th>Boundary</th><th>Trusted credential</th><th>Lives</th></tr></thead>
     <tbody>
       <tr>
-        <td>Inbound HTTP (Claude.ai → <code>/mcp</code>)</td>
+        <td>Inbound HTTP (ChatGPT / Claude / MCP clients &#8594; <code>/mcp</code>)</td>
         <td>OAuth JWT issued and verified by this server (local-jwt mode); shared-hmac-legacy mode uses <code>api.mctl.ai</code></td>
         <td>Bearer header, per-request</td>
       </tr>
@@ -96,7 +99,7 @@
     <li><strong>Session bytes are never stored on the server.</strong> The <code>session_encrypted</code> column is NULL for local-mode accounts. The MTProto session lives entirely on your local machine, encrypted at rest by the daemon.</li>
     <li><strong>Tool arguments and responses pass through relay memory per call only.</strong> The relay must forward MCP JSON-RPC payloads to your daemon and route responses back. This data exists in server memory for the duration of one call and is not persisted.</li>
     <li><strong>The relay does not log message content.</strong> The same audit-log schema applies: only tool name, redacted peer reference, status, and (if any) error string are persisted. The <code>call_path</code> column is set to <code>'local'</code> so you can distinguish relay-forwarded calls from hosted calls in your audit log.</li>
-    <li><strong>Limit of relay visibility.</strong> For genuine end-to-end secrecy from the relay, Claude.ai would need to encrypt MCP payloads with your daemon's public key. That requires Claude.ai client-side support which is not available today — the relay sees the plaintext tool arguments and results for the duration of routing.</li>
+    <li><strong>Limit of relay visibility.</strong> For genuine end-to-end secrecy from the relay, the MCP client would need to encrypt payloads with your daemon's public key. That requires client-side support which is not available today — the relay sees the plaintext tool arguments and results for the duration of routing.</li>
   </ul>
 
   <h2>What the server NEVER persists</h2>
@@ -127,14 +130,14 @@
   </ul>
 
   <h2>Send-gate (defense in depth)</h2>
-  <p>Real Telegram sends require <strong>all</strong> of:</p>
+  <p>On production tg.mctl.ai, <code>ALLOW_SEND=false</code> is the default — all <code>send_message</code> calls return a dry-run preview regardless of the <code>mode</code> argument. Real Telegram sends require <strong>all</strong> of:</p>
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code> (Helm values).</li>
-    <li>Identity has <code>telegram:messages:send</code> scope (group → scope map).</li>
+    <li>Identity has <code>telegram:messages:send</code> scope (group &#8594; scope map).</li>
     <li><code>telegram_accounts.send_enabled = true</code> for that operator.</li>
-    <li>Tool call argument <code>mode=send</code> (default is <code>draft</code>).</li>
+    <li>Tool call argument <code>mode=send</code>.</li>
   </ol>
-  <p>Any condition false → response is a dry-run preview containing the proposed text and the failing-condition reason in <code>dry_reason</code>. <code>mode=draft</code> never reaches the Telegram API.</p>
+  <p>Any condition false &#8594; response is a dry-run preview containing the proposed text and the failing-condition reason in <code>dry_reason</code>. Passing <code>mode=draft</code> also never reaches the Telegram API.</p>
 
   <h2>Authentication-required mode</h2>
   <ul>

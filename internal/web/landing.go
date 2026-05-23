@@ -1,5 +1,5 @@
 // Package web serves the human-facing landing page that explains how
-// to wire mctl-telegram into Claude.ai as a custom MCP connector.
+// to connect mctl-telegram via ChatGPT Apps, Claude.ai, and other MCP clients.
 package web
 
 import (
@@ -37,9 +37,9 @@ type landingData struct {
 	AuthServer   string
 }
 
-// Landing renders the connection-instructions HTML at PublicBaseURL/.
-// MCPPath is rendered into the page so the operator sees the exact URL
-// to paste into Claude.ai's "Add custom connector" dialog.
+// Landing renders the product landing page at PublicBaseURL/.
+// MCPPath is rendered into the page so users see the exact URL
+// to paste into ChatGPT Apps or a custom MCP connector dialog.
 //
 // authServer is the issuer URL used by the OAuth flow. For the Telegram-native
 // auth model this is the same as publicBaseURL — mctl-telegram is its own
