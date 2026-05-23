@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.3](https://github.com/mctlhq/mctl-telegram/compare/0.30.2...0.30.3) (2026-05-23)
+
+
+### Bug Fixes
+
+* **mcp:** correct tool annotation hints for ChatGPT App submission ([700ac53](https://github.com/mctlhq/mctl-telegram/commit/700ac530037ca9c6a945ec29c8b16900655658a9))
+* **mcp:** correct tool annotation hints for ChatGPT App submission ([929d6dd](https://github.com/mctlhq/mctl-telegram/commit/929d6dd4ee2ea64dc9831224dc66f282c8421a2f))
+* remove mode=draft from send_message — always send for real ([3f66f8b](https://github.com/mctlhq/mctl-telegram/commit/3f66f8b03188df49e246b8fa65f62cf5f8ce670b))
+
 ## [0.30.2](https://github.com/mctlhq/mctl-telegram/compare/0.30.1...0.30.2) (2026-05-23)
 
 
