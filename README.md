@@ -152,20 +152,31 @@ For Beta-tier service-level objectives, error-budget policy, and burn-rate alert
 
 ## Connecting to ChatGPT Apps (Draft → review-ready)
 
-1. In ChatGPT, open **Settings → Apps & Connectors → Advanced settings** and enable Developer Mode if needed.
-2. Open **Settings → Connectors → Create** and set the connector URL to the public MCP endpoint: `https://<your-host>/mcp`.
+> Note: mctl-telegram does **not** require an `OPENAI_API_KEY` server-side.
+> ChatGPT connects to your MCP endpoint using OAuth bearer tokens issued by
+> this service.
+
+1. In ChatGPT, open **Settings → Apps** and select your draft app (enable Developer Mode first if required).
+2. Set the MCP server URL to the public endpoint: `https://<your-host>/mcp` (OAuth auth).
 3. Ensure these public pages are reachable over HTTPS:
    - Landing: `https://<your-host>/`
    - Docs: `https://<your-host>/docs`
    - Security: `https://<your-host>/security`
    - Privacy: `https://<your-host>/privacy`
 4. Verify OAuth discovery:
-   - `https://<your-host>/.well-known/oauth-protected-resource`
-   - `https://<your-host>/.well-known/oauth-authorization-server`
+   - Fetch `https://<your-host>/.well-known/oauth-protected-resource` (always served on your host).
+   - Follow the `authorization_servers` URL it advertises and confirm that server's `/.well-known/oauth-authorization-server` resolves. In the default `local-jwt` mode this is your own host; in `shared-hmac`/`shared-hmac-legacy` mode discovery points at `https://api.mctl.ai`, so do **not** expect that document on `<your-host>`.
 5. Run a live handshake (`initialize`) and at least one read-only tool call with MCP Inspector or ChatGPT Developer Mode before submitting.
 
+### Quick connect to the hosted endpoint (`tg.mctl.ai`)
+
+If you are using the shared hosted deployment, configure:
+
+- Landing page: `https://tg.mctl.ai/`
+- MCP connector URL: `https://tg.mctl.ai/mcp`
+
 Submission notes:
-- Keep real sends gated (default `mode=draft`, `ALLOW_SEND=false`) until review sign-off.
+- Keep real sends gated (`ALLOW_SEND=false` on tg.mctl.ai blocks all real sends until opt-in gates are enabled).
 - If you enable real sends later, keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
 - Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 

@@ -93,6 +93,8 @@ var defs = `
       <span class="sep">·</span>
       <a href="/privacy">privacy</a>
       <span class="sep">·</span>
+      <a href="mailto:support@mctl.ai">support</a>
+      <span class="sep">·</span>
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">source</a>
     </div>
     <span>resource: <code>{{.PublicBaseURL}}</code></span>

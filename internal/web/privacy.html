@@ -44,6 +44,14 @@
     <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
   </section>
 
+  <h2>ChatGPT Apps users</h2>
+  <p>When you install mctl-telegram as a ChatGPT App, the following data flows apply:</p>
+  <ul>
+    <li><strong>Through ChatGPT:</strong> your conversation prompts, MCP tool arguments (e.g. peer identifiers, draft message text), and tool results returned by this server. That traffic is processed by OpenAI under their privacy policy.</li>
+    <li><strong>Stored by this server:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are transient — fetched for the request and not written to disk.</li>
+    <li><strong>Revoke access:</strong> call <code>disconnect_telegram_account</code> or <code>delete_telegram_account</code> via MCP, use the HTTP endpoints below, or remove the app from ChatGPT settings.</li>
+  </ul>
+
   <h2>Data inventory</h2>
   <div class="table-scroll">
   <table>
@@ -117,7 +125,7 @@ GET    /api/account/audit/verify # recompute the hash chain and prove audit was 
   </ul>
 
   <h2>Contact</h2>
-  <p>Privacy inquiries: <strong>privacy@mctl.ai</strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
+  <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Privacy inquiries: <strong><a href="mailto:privacy@mctl.ai">privacy@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
 
   {{template "ui_footer" .}}
 

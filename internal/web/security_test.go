@@ -21,6 +21,10 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Not zero-knowledge",
 		"Cryptographic invariants",
 		"security@mctl.ai",
+		"support@mctl.ai",
+		"End-user support",
+		"ChatGPT / Claude / MCP clients",
+		"ALLOW_SEND=false",
 		"Tamper-evident audit log",
 		"Prompt-injection content boundary",
 		"Session TTL",
@@ -45,11 +49,13 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
+		"ChatGPT Apps users",
 		"Data inventory",
 		"What is NOT stored",
 		"Self-service controls",
 		"audit/verify",
 		"privacy@mctl.ai",
+		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
 		"accent-swatch",
@@ -73,13 +79,18 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"Your Telegram,",
 		"inside your AI assistant",
+		"Install in ChatGPT",
 		"Copy MCP URL",
-		"Add to Claude",
+		`id="chatgpt"`,
+		`id="support"`,
+		"Settings &#8594; Apps",
+		"support@mctl.ai",
 		`id="connect"`,
 		"How it works",
 		`href="/security"`,
 		`href="/privacy"`,
 		"Common questions",
+		"What data does ChatGPT see?",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("landing missing %q", must)
@@ -101,12 +112,40 @@ func TestDocs_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Available tools",
 		"https://tg.mctl.ai/mcp",
+		"Apps SDK readiness checklist",
+		"chatgpt-setup",
+		"support@mctl.ai",
+		"ALLOW_SEND=false",
 		// mobile: wide tables must sit in horizontal-scroll wrappers
 		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/docs missing %q", must)
 		}
+	}
+}
+
+func TestPrivacy_HasSupportContact(t *testing.T) {
+	w := httptest.NewRecorder()
+	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, "support@mctl.ai") {
+		t.Fatal("/privacy missing support@mctl.ai")
+	}
+	if !strings.Contains(body, "ChatGPT Apps users") {
+		t.Fatal("/privacy missing ChatGPT Apps users section")
+	}
+}
+
+func TestSecurity_MentionsChatGPTOrMCPClients(t *testing.T) {
+	w := httptest.NewRecorder()
+	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	body := w.Body.String()
+	if strings.Contains(body, "Claude.ai →") {
+		t.Fatal("/security still uses Claude-only inbound boundary label")
+	}
+	if !strings.Contains(body, "ChatGPT") {
+		t.Fatal("/security missing ChatGPT in inbound boundary")
 	}
 }
 
