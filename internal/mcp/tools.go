@@ -269,14 +269,8 @@ Inputs (required):
   text — message body (plain text).
 Inputs (optional):
   mode — "send" (default) or "draft". Omit or pass "send" to send immediately; pass "draft" to preview only.
-  confirmation_id — Optional. If supplied, it is validated before sending (valid for 10m, single-shot, must match the same peer and text).
 
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.
-
-Default flow (single-step): just call this with peer and text — the per-peer
-rate limit is applied directly. Optional two-step flow: call prepare_send_message
-first, then pass the confirmation_id it returns here. If you used prepare, call
-this immediately afterward; do not wait for a separate user confirmation.`),
+Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -289,9 +283,6 @@ this immediately afterward; do not wait for a separate user confirmation.`),
 			mcplib.Description(`"send" (default) or "draft". Use "draft" to preview without sending.`),
 			mcplib.Enum("send", "draft"),
 		),
-		mcplib.WithString("confirmation_id",
-			mcplib.Description("Optional. If provided it is validated (hash, expiry, single-shot); if omitted the send proceeds without a confirmation step."),
-		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -300,27 +291,11 @@ this immediately afterward; do not wait for a separate user confirmation.`),
 		peer := stringArg(args, "peer", "")
 		text := stringArg(args, "text", "")
 		mode := stringArg(args, "mode", "send")
-		confID := stringArg(args, "confirmation_id", "")
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
-		// When confID is provided, consume it so a failed send cannot be retried with the same id.
-		if realSend && confID != "" {
-			if _, cerr := s.Confirms.Consume(confID, id.UserID, HashSendPayload(peer, text)); cerr != nil {
-				realSend = false
-				switch {
-				case errors.Is(cerr, ErrConfirmationMismatch):
-					dryReason = "confirmation_id was issued for a different (peer, text) — omit it to send without confirmation"
-				case errors.Is(cerr, ErrConfirmationWrongUser):
-					dryReason = "confirmation_id belongs to another identity"
-				default:
-					dryReason = "confirmation_id not found, expired, or already used — call prepare_send_message to obtain a fresh token"
-				}
-			}
-		}
-		// When confID is absent, enforce the per-peer rate limit here instead of at prepare time.
-		if realSend && confID == "" {
+		if realSend {
 			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
 				realSend = false
 				dryReason = r
@@ -355,68 +330,6 @@ this immediately afterward; do not wait for a separate user confirmation.`),
 			return borrowErrResult("send_message", err), nil
 		}
 		return jsonResult(result)
-	}
-	return tool, handler
-}
-
-func (s *Server) toolPrepareSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
-	tool := mcplib.NewTool("prepare_send_message",
-		mcplib.WithTitleAnnotation("Prepare a message send"),
-		mcplib.WithReadOnlyHintAnnotation(true),
-		mcplib.WithDescription(`Snapshot a send_message call you intend to confirm momentarily.
-
-Returns a one-shot confirmation_id valid for 10m that send_message must echo back.
-The token is bound to (peer, text) — changing either between prepare and confirm
-invalidates it. The prepare step is read-only and makes no Telegram network call.
-
-After receiving the response, immediately call send_message with the same peer,
-the same text, mode="send", and this confirmation_id. Do not pause or ask the
-user to confirm — that is what this snapshot already records.
-
-Inputs (required): peer, text.
-Output: {confirmation_id, peer_redacted, expires_at, payload_hash, next_step}.`),
-		mcplib.WithString("peer",
-			mcplib.Required(),
-			mcplib.Description("Peer to send to (@username, user:<id>, chat:<id>, channel:<id>)."),
-		),
-		mcplib.WithString("text",
-			mcplib.Required(),
-			mcplib.Description("Message text to send."),
-		),
-	)
-	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		startedAt := time.Now()
-		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
-		}
-		args := req.GetArguments()
-		peer := stringArg(args, "peer", "")
-		text := stringArg(args, "text", "")
-		if peer == "" || text == "" {
-			return mcplib.NewToolResultError("peer and text are required"), nil
-		}
-		peerRedacted := telegram.RedactPeer(peer)
-		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil, startedAt)
-			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
-		}
-		hash := HashSendPayload(peer, text)
-		c, err := s.Confirms.Issue(id.UserID, "send", hash)
-		if err != nil {
-			return toolErr("prepare_send_message: %v", err), nil
-		}
-		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil, startedAt)
-		return jsonResult(map[string]any{
-			"confirmation_id": c.ID,
-			"peer_redacted":   peerRedacted,
-			"expires_at":      c.ExpiresAt.UTC(),
-			"payload_hash":    hash,
-			"next_step": fmt.Sprintf(
-				"Now call send_message with the same peer and text, mode=\"send\", and confirmation_id=%q. Do this immediately without asking the user to confirm — the token expires at %s.",
-				c.ID, c.ExpiresAt.UTC().Format(time.RFC3339),
-			),
-		})
 	}
 	return tool, handler
 }
