@@ -261,11 +261,10 @@ Empty result means no unread messages match (including: peer has unread but text
 }
 
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
-	// destructiveHint omitted: ChatGPT blocks destructive-annotated tools before the server call,
-	// making them impossible to invoke. Safety is enforced by runtime gates (ALLOW_SEND, scope,
-	// send_enabled) so the annotation adds friction without adding security.
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithDescription(`Send a Telegram message.
 
 Draft-by-default: the message is sent for real only when the server send
