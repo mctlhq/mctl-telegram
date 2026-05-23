@@ -39,7 +39,7 @@ jobs:
         run: |
           PR=$(echo "$PR_JSON" | jq -r '.number')
           echo "Auto-merging release PR #$PR"
-          gh pr merge "$PR" --repo "$REPO" --merge --admin
+          gh pr merge "$PR" --repo "$REPO" --merge --admin --delete-branch
 
       - name: Generate Platform App token
         if: ${{ steps.release.outputs.release_created == 'true' }}
