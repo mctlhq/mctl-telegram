@@ -12,34 +12,12 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # administration: write lets the auto-merge step bypass branch
-      # protection on the release PR (a version-bump + changelog commit that
-      # the default GITHUB_TOKEN cannot get a review/CI signal for, since
-      # release-please opens it with that same token).
-      administration: write
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      # Auto-merge the release PR the action just opened. A standalone
-      # workflow on `pull_request` cannot do this: release-please opens the PR
-      # with GITHUB_TOKEN, and GitHub suppresses workflow triggers for default-
-      # token events, so the pull_request event never fires. Merging here, in
-      # the same run, sidesteps that. The merge pushes to main, which re-runs
-      # this workflow; that run sees release_created and cuts the tag below.
-      - name: Auto-merge release PR
-        if: ${{ steps.release.outputs.prs_created == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_JSON: ${{ steps.release.outputs.pr }}
-          REPO: ${{ github.repository }}
-        run: |
-          PR=$(echo "$PR_JSON" | jq -r '.number')
-          echo "Auto-merging release PR #$PR"
-          gh pr merge "$PR" --repo "$REPO" --merge --admin --delete-branch
 
       - name: Generate Platform App token
         if: ${{ steps.release.outputs.release_created == 'true' }}
