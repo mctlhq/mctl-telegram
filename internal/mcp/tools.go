@@ -276,7 +276,12 @@ Inputs (optional):
   mode — "send" (default) or "draft". Omit or pass "send" to send immediately; pass "draft" to preview only.
   confirmation_id — Optional. If supplied, it is validated before sending (valid for 5m, single-shot, must match the same peer and text).
 
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.`),
+Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.
+
+Two-step flow (recommended for connectors that apply safety checks): call
+prepare_send_message first to get a confirmation_id, then pass it here. The
+prepare step is read-only and valid for 5 minutes. Single-step (no prepare): omit
+confirmation_id — the per-peer rate limit is applied directly instead.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -315,7 +320,7 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 				case errors.Is(cerr, ErrConfirmationWrongUser):
 					dryReason = "confirmation_id belongs to another identity"
 				default:
-					dryReason = "confirmation_id not found, expired, or already used"
+					dryReason = "confirmation_id not found, expired, or already used — call prepare_send_message to obtain a fresh token"
 				}
 			}
 		}
@@ -355,6 +360,60 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			return borrowErrResult("send_message", err), nil
 		}
 		return jsonResult(result)
+	}
+	return tool, handler
+}
+
+func (s *Server) toolPrepareSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("prepare_send_message",
+		mcplib.WithTitleAnnotation("Prepare a message send"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDescription(`Snapshot a send_message call you intend to confirm momentarily.
+
+Returns a one-shot confirmation_id valid for 5m that send_message must echo back.
+The token is bound to (peer, text) — changing either between prepare and confirm
+invalidates it. The prepare step is read-only and makes no Telegram network call.
+
+Inputs (required): peer, text.
+Output: {confirmation_id, peer_redacted, expires_at, payload_hash}.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer to send to (@username, user:<id>, chat:<id>, channel:<id>)."),
+		),
+		mcplib.WithString("text",
+			mcplib.Required(),
+			mcplib.Description("Message text to send."),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		text := stringArg(args, "text", "")
+		if peer == "" || text == "" {
+			return mcplib.NewToolResultError("peer and text are required"), nil
+		}
+		peerRedacted := telegram.RedactPeer(peer)
+		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil, startedAt)
+			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
+		}
+		hash := HashSendPayload(peer, text)
+		c, err := s.Confirms.Issue(id.UserID, "send", hash)
+		if err != nil {
+			return toolErr("prepare_send_message: %v", err), nil
+		}
+		s.audit(ctx, id, "prepare_send_message", peerRedacted, nil, startedAt)
+		return jsonResult(map[string]any{
+			"confirmation_id": c.ID,
+			"peer_redacted":   peerRedacted,
+			"expires_at":      c.ExpiresAt.UTC(),
+			"payload_hash":    hash,
+		})
 	}
 	return tool, handler
 }

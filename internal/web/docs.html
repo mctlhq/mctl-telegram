@@ -164,7 +164,7 @@
         <tr>
           <td><code>audit_logs</code></td>
           <td>Tool name, redacted peer reference, status, error. <strong style="color: var(--text)">Never the message body, phone number, or session bytes.</strong></td>
-          <td>Retained indefinitely today; 90-day sweeper is planned (M2). Ask the operator if you need an earlier purge.</td>
+          <td>Retained for 90 days, then removed by the audit-log sweeper (window configurable via <code>AUDIT_RETENTION_DAYS</code>; set to 0 to keep indefinitely). Ask the operator if you need an earlier purge.</td>
         </tr>
       </tbody>
     </table>
