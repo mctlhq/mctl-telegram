@@ -27,6 +27,8 @@ func TestFullChrome(t *testing.T) {
 		"<footer>",
 		"https://tg.mctl.ai",
 		`<a href="/docs" class="active">docs</a>`,
+		// GitHub icon link — inline SVG with accessible label.
+		`aria-label="GitHub"`,
 		// Light/dark toggle — content pages can flip the theme.
 		`class="theme-toggle"`,
 		`aria-label="Toggle theme"`,
