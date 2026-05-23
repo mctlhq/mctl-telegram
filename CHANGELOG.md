@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.4](https://github.com/mctlhq/mctl-telegram/compare/0.30.3...0.30.4) (2026-05-23)
+
+
+### Bug Fixes
+
+* **send:** preserve draft-preview contract, fix bridge propagation ([93fd781](https://github.com/mctlhq/mctl-telegram/commit/93fd7817f1250a4501f62e98f094e9dbb10ff1cd))
+* **send:** preserve draft-preview contract, fix bridge propagation ([23ba8a1](https://github.com/mctlhq/mctl-telegram/commit/23ba8a1a3884c71502a183f34280cec79d6b37e7))
+* set destructiveHint=false and openWorldHint=false on send_message ([877d0e0](https://github.com/mctlhq/mctl-telegram/commit/877d0e04e293c32011c22edcedc2e97e4292e016))
+
 ## [0.30.3](https://github.com/mctlhq/mctl-telegram/compare/0.30.2...0.30.3) (2026-05-23)
 
 
