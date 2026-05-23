@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.5](https://github.com/mctlhq/mctl-telegram/compare/0.30.4...0.30.5) (2026-05-23)
+
+
+### Bug Fixes
+
+* **web:** reorder CTA buttons — install actions first, Copy MCP URL after ([1105240](https://github.com/mctlhq/mctl-telegram/commit/1105240c88713e0ccc50cae0bcf05eab999d21a6))
+
 ## [0.30.4](https://github.com/mctlhq/mctl-telegram/compare/0.30.3...0.30.4) (2026-05-23)
 
 
