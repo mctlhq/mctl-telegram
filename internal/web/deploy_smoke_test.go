@@ -86,7 +86,11 @@ func TestPublicPagesSmoke(t *testing.T) {
 		t.Fatalf("GET /: status %d", code)
 	}
 	landing := string(body)
-	for _, must := range []string{"support@mctl.ai", `id="chatgpt"`, "Settings &#8594; Apps"} {
+	// Do not assert on the support email literal: Cloudflare Email Obfuscation
+	// rewrites mailto addresses into /cdn-cgi/l/email-protection blobs on the
+	// live host, so "support@mctl.ai" never appears verbatim. Assert on stable
+	// structural markers instead.
+	for _, must := range []string{`id="chatgpt"`, `id="support"`, "Settings &#8594; Apps"} {
 		if !strings.Contains(landing, must) {
 			t.Fatalf("landing missing %q", must)
 		}

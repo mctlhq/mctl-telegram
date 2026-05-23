@@ -263,8 +263,14 @@ Empty result means no unread messages match (including: peer has unread but text
 func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
-		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithOpenWorldHintAnnotation(false),
+		// Annotations describe the worst-case real behavior, as ChatGPT App
+		// submission requires: when the gate is open this delivers an
+		// irreversible message (destructive) to an arbitrary Telegram peer
+		// (open-world). The server-side gate, not the annotation, is what
+		// keeps tg.mctl.ai in dry-run by default.
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithDescription(`Send a Telegram message.
 
 Draft-by-default: the message is sent for real only when the server send
