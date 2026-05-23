@@ -266,15 +266,11 @@ func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	// send_enabled) so the annotation adds friction without adding security.
 	tool := mcplib.NewTool("send_message",
 		mcplib.WithTitleAnnotation("Send Telegram Message"),
-		mcplib.WithDescription(`Send a Telegram message. Default is a real send; pass mode="draft" to preview without sending.
+		mcplib.WithDescription(`Send a Telegram message.
 
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
-  text — message body (plain text).
-Inputs (optional):
-  mode — "send" (default) or "draft". Omit or pass "send" to send immediately; pass "draft" to preview only.
-
-Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:messages:send" scope, per-account send_enabled=true. Any missing piece returns a dry-run preview with reason in dry_reason regardless of mode.`),
+  text — message body (plain text).`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -283,10 +279,6 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 			mcplib.Required(),
 			mcplib.Description("Message text to send."),
 		),
-		mcplib.WithString("mode",
-			mcplib.Description(`"send" (default) or "draft". Use "draft" to preview without sending.`),
-			mcplib.Enum("send", "draft"),
-		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -294,42 +286,34 @@ Real sending requires ALL of: ALLOW_SEND=true on server, identity has "telegram:
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
 		text := stringArg(args, "text", "")
-		mode := stringArg(args, "mode", "send")
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
-		realSend, dryReason := evaluateSendGate(ctx, s.Store, id, mode, s.AllowSend)
-		if realSend {
-			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
-				realSend = false
-				dryReason = r
-			}
+		canSend, blockReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend)
+		if !canSend {
+			s.audit(ctx, id, "send_message:blocked", telegram.RedactPeer(peer), nil, startedAt)
+			return toolErr("send blocked: %s", blockReason), nil
+		}
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
+			s.audit(ctx, id, "send_message:blocked", telegram.RedactPeer(peer), nil, startedAt)
+			return toolErr("send blocked: %s", r), nil
 		}
 		var result *telegram.SendResult
 		var err error
-		if !realSend {
-			// Dry-run never touches Telegram so we don't require TG_API_* configured.
-			result, err = telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
-		} else {
-			if s.Hub != nil {
-				accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
-				if modeErr == nil && accountMode == "local" {
-					res, err2 := s.bridgeCall(ctx, id, "send_message", args)
-					s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
-					return res, err2
-				}
+		if s.Hub != nil {
+			accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && accountMode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "send_message", args)
+				s.audit(ctx, id, "send_message:via-bridge", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
+				return res, err2
 			}
-			err = s.borrowWithRetry(ctx, "send_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-				var inner error
-				result, inner = telegram.SendMessage(ctx, c, peer, text, true, dryReason, s.PeerCache, id.UserID)
-				return inner
-			})
 		}
-		status := "draft"
-		if realSend && err == nil {
-			status = "sent"
-		}
-		s.audit(ctx, id, "send_message:"+status, telegram.RedactPeer(peer), err, startedAt)
+		err = s.borrowWithRetry(ctx, "send_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			var inner error
+			result, inner = telegram.SendMessage(ctx, c, peer, text, true, "", s.PeerCache, id.UserID)
+			return inner
+		})
+		s.audit(ctx, id, "send_message:sent", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
 			return borrowErrResult("send_message", err), nil
 		}
@@ -933,10 +917,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 	return tool, handler
 }
 
-func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, mode string, allowSend bool) (real bool, reason string) {
-	if mode != "send" {
-		return false, "mode=draft — pass mode='send' to send for real"
-	}
+func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool) (real bool, reason string) {
 	if !allowSend {
 		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
 	}
