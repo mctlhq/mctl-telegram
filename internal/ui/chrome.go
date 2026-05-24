@@ -65,6 +65,7 @@ var defs = `
     <nav class="meta">
       <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>home</a>
       <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>docs</a>
+      <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>demo</a>
       <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>security</a>
       <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>privacy</a>
       <a href="/terms"{{if eq .NavActive "terms"}} class="active"{{end}}>terms</a>
