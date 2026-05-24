@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.34.0](https://github.com/mctlhq/mctl-telegram/compare/0.33.0...0.34.0) (2026-05-24)
+
+
+### Features
+
+* **ui:** add demo link to topbar nav ([9c3bae0](https://github.com/mctlhq/mctl-telegram/commit/9c3bae0248c85ba9123aa077a5896549b6006f76))
+* **ui:** add demo link to topbar nav ([2e773f0](https://github.com/mctlhq/mctl-telegram/commit/2e773f01d569154006863ddc1f572456cd890f27))
+
 ## [0.33.0](https://github.com/mctlhq/mctl-telegram/compare/0.32.0...0.33.0) (2026-05-24)
 
 
