@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/netctx"
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
@@ -68,6 +69,12 @@ func (l *demoRateLimiter) allow(key string) bool {
 	}
 	w := l.windows[key]
 	if w == nil || now.After(w.reset) {
+		// Refuse to track a brand-new key once the map is full (all live), so a
+		// burst from many distinct source IPs cannot grow windows without bound
+		// on this unauthenticated endpoint.
+		if w == nil && len(l.windows) >= demoMaxIPWindow {
+			return false
+		}
 		l.windows[key] = &demoWindow{count: 1, reset: now.Add(demoRateWindow)}
 		return true
 	}
@@ -88,6 +95,12 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Bound the body before ParseForm reads it: the form only ever carries a
+	// short state token, username, and password. Without this an unauthenticated
+	// caller could stream a large body (ParseForm has no built-in cap for
+	// urlencoded bodies) before the per-IP limiter below fires, and it bounds the
+	// ConstantTimeCompare input length. Mirrors handleClientRegistration.
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := r.ParseForm(); err != nil {
 		renderEnableError(w, "Invalid form submission. Close this page and reconnect from your MCP client.")
 		return
@@ -136,8 +149,10 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 
 	uid, err := s.store.UserIDByTelegramID(r.Context(), s.cfg.DemoReviewerTGID)
 	if errors.Is(err, db.ErrUserNotFound) {
+		// Operator misconfiguration, not a client error — surface as 5xx so it
+		// is distinguishable in monitoring from a malformed/expired request.
 		slog.Error("oauth: demo reviewer account not provisioned", "tg_id", s.cfg.DemoReviewerTGID)
-		renderEnableError(w, "The demo account is not provisioned on this server. Contact the operator.")
+		renderDemoServerError(w, "The demo account is not provisioned on this server. Contact the operator.")
 		return
 	}
 	if err != nil {
@@ -147,7 +162,7 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, serr := s.store.CheckSessionValid(r.Context(), uid); serr != nil {
 		slog.Error("oauth: demo reviewer session not usable", "err", serr)
-		renderEnableError(w, "The demo account has no active Telegram session. Contact the operator.")
+		renderDemoServerError(w, "The demo account has no active Telegram session. Contact the operator.")
 		return
 	}
 
@@ -169,7 +184,15 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) consumePending(ctx context.Context, state string) (*pendingAuth, bool) {
 	if s.useDB {
 		dbPA, err := s.store.ConsumeOAuthPending(ctx, state, s.cfg.CodeTTL)
+		if errors.Is(err, db.ErrOAuthNotFound) {
+			return nil, false
+		}
 		if err != nil {
+			// An unexpected DB error must not look like "state not found": log it
+			// so a transient outage during a review session leaves a trace
+			// instead of a misleading "session expired" page. Mirrors
+			// handleTelegramCallback.
+			slog.Error("oauth: consume demo pending failed", "err", err)
 			return nil, false
 		}
 		return &pendingAuth{
@@ -197,13 +220,25 @@ func (s *Server) consumePending(ctx context.Context, state string) (*pendingAuth
 	return p, true
 }
 
-// clientIP returns the request's source IP for rate-limiting. RemoteAddr is the
-// TCP peer (host:port); we key on host. No X-Forwarded-For trust — the limit is
-// defense-in-depth, not an authorization decision.
+// clientIP returns the trusted source IP for rate-limiting the brute-force gate.
+//
+// It keys on the real TCP socket peer captured by the http.Server ConnContext
+// hook (internal/netctx), NOT r.RemoteAddr. The server runs chi middleware.RealIP
+// globally, which rewrites r.RemoteAddr from client-controllable X-Forwarded-For
+// / X-Real-IP headers — so keying on r.RemoteAddr would let an attacker rotate
+// that header to mint a fresh rate-limit bucket per request and defeat the limit.
+// The socket peer is set before any middleware runs and cannot be forged.
+//
+// Falls back to r.RemoteAddr only when the ConnContext peer is absent (tests that
+// construct requests directly).
 func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	addr := netctx.Peer(r.Context())
+	if addr == "" {
+		addr = r.RemoteAddr
+	}
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return r.RemoteAddr
+		return addr
 	}
 	return host
 }
@@ -271,4 +306,12 @@ func renderDemoChooser(w http.ResponseWriter, p demoChooserPage) {
 
 func renderDemoChooserStatus(w http.ResponseWriter, status int, p demoChooserPage) {
 	renderEnable(w, status, demoChooserTemplate, p, "")
+}
+
+// renderDemoServerError renders the shared error page at HTTP 500. Used for
+// operator-side misconfiguration (demo account not provisioned / no active
+// session) so the status reflects a server-side problem rather than a malformed
+// request, while the reviewer still sees a friendly message.
+func renderDemoServerError(w http.ResponseWriter, msg string) {
+	renderEnable(w, http.StatusInternalServerError, enableErrorTemplate, enableErrorPage{Message: msg}, "")
 }

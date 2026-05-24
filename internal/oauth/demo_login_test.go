@@ -200,7 +200,7 @@ func TestDemoLogin_NotProvisioned(t *testing.T) {
 	state := demoAuthorizeState(t, mux, challenge)
 
 	rec := postDemoLogin(mux, state, demoUser, demoPass)
-	if rec.Code != http.StatusBadRequest {
+	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("not-provisioned status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

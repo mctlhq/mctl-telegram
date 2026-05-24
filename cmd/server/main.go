@@ -27,6 +27,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/digest"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
+	"github.com/mctlhq/mctl-telegram/internal/netctx"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -284,7 +285,7 @@ func main() {
 		// CIDR allowlist against the real socket address — not the r.RemoteAddr
 		// value that middleware.RealIP rewrites from X-Forwarded-For headers.
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			return context.WithValue(ctx, socketPeerKey{}, c.RemoteAddr().String())
+			return netctx.WithPeer(ctx, c.RemoteAddr().String())
 		},
 	}
 
@@ -338,7 +339,7 @@ func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 		// which middleware.RealIP may have overwritten with a header value.
 		// A client that forges X-Forwarded-For cannot bypass the CIDR check
 		// because the TCP-level address is set before any request handling.
-		rawAddr, _ := r.Context().Value(socketPeerKey{}).(string)
+		rawAddr := netctx.Peer(r.Context())
 		if rawAddr == "" {
 			rawAddr = r.RemoteAddr // fallback for tests that bypass ConnContext
 		}
@@ -354,11 +355,6 @@ func metricsHandler(m *metrics.Registry, allowCIDR string) http.HandlerFunc {
 		h.ServeHTTP(w, r)
 	}
 }
-
-// socketPeerKey is the context key used by the http.Server ConnContext hook to
-// store the real TCP peer address before middleware.RealIP can overwrite
-// r.RemoteAddr with X-Forwarded-For values.
-type socketPeerKey struct{}
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
