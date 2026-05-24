@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.31.0](https://github.com/mctlhq/mctl-telegram/compare/0.30.6...0.31.0) (2026-05-24)
+
+
+### Features
+
+* **web:** add /terms terms-of-service page ([5e7f0b1](https://github.com/mctlhq/mctl-telegram/commit/5e7f0b1413db4ec103a1afce0ff9df57aac41a16))
+* **web:** serve OpenAI Apps domain-verification token ([5f102bf](https://github.com/mctlhq/mctl-telegram/commit/5f102bf1152a1d1f3172a6eb1bf61d0df4ea0188))
+
+
+### Bug Fixes
+
+* **mcp:** mark Telegram-reading tools as open-world ([d1d69a7](https://github.com/mctlhq/mctl-telegram/commit/d1d69a779820593b53031d9346067ef80ec02183))
+* **oauth:** raise authorize state cap to 4096 for OpenAI Apps relay ([41b1f37](https://github.com/mctlhq/mctl-telegram/commit/41b1f37d735da360e57e026dfb070938753bda17))
+
 ## [0.30.6](https://github.com/mctlhq/mctl-telegram/compare/0.30.5...0.30.6) (2026-05-23)
 
 
