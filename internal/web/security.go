@@ -31,9 +31,13 @@ var securityHTML string
 //go:embed privacy.html
 var privacyHTML string
 
+//go:embed terms.html
+var termsHTML string
+
 var (
 	securityTmpl = ui.New("security", securityHTML)
 	privacyTmpl  = ui.New("privacy", privacyHTML)
+	termsTmpl    = ui.New("terms", termsHTML)
 )
 
 // Security serves the human-readable threat model at /security. The HTML is
@@ -55,6 +59,16 @@ func Privacy(publicBaseURL string) http.HandlerFunc {
 	return chromePage(privacyTmpl, "privacy", ui.Data{
 		Title:         "mctl-telegram — privacy",
 		NavActive:     "privacy",
+		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+	})
+}
+
+// Terms serves the terms of service at /terms. Same rationale as Security()
+// above — a hand-authored static page, anonymous-accessible.
+func Terms(publicBaseURL string) http.HandlerFunc {
+	return chromePage(termsTmpl, "terms", ui.Data{
+		Title:         "mctl-telegram — terms of service",
+		NavActive:     "terms",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 	})
 }

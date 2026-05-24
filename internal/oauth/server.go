@@ -771,8 +771,13 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthorizeError(w, "invalid_request", "redirect_uri exceeds 2048 bytes")
 		return
 	}
-	if len(state) > 512 {
-		s.writeAuthorizeError(w, "invalid_request", "state exceeds 512 bytes")
+	// state is an opaque pass-through the client echoes back on redirect. The
+	// OpenAI Apps platform packs a base64 relay blob (oauth_id, app_id,
+	// version_id, org_id, target_uri) into it that already runs ~525 bytes, and
+	// can grow with longer target URIs, so the cap must clear that with headroom
+	// while still bounding the in-memory pending entry against OOM abuse.
+	if len(state) > 4096 {
+		s.writeAuthorizeError(w, "invalid_request", "state exceeds 4096 bytes")
 		return
 	}
 	if len(scope) > 1024 {

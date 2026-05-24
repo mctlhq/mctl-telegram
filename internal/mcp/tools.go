@@ -156,7 +156,8 @@ func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("List Telegram Dialogs"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithOpenWorldHintAnnotation(false),
+		// Reaches Telegram (external system), like send/pin — openWorld=true.
+		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithDescription(`List the operator's Telegram dialogs with type, title, username and unread count.
 
 Inputs:
@@ -209,7 +210,8 @@ func (s *Server) toolGetUnreadMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithTitleAnnotation("Get Unread Messages"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithOpenWorldHintAnnotation(false),
+		// Reaches Telegram (external system), like send/pin — openWorld=true.
+		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithDescription(`Fetch unread messages, optionally scoped to one peer.
 
 Inputs:
@@ -359,7 +361,8 @@ func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Get Messages"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
-		mcplib.WithOpenWorldHintAnnotation(false),
+		// Reaches Telegram (external system), like send/pin — openWorld=true.
+		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithDescription(`Fetch recent messages from a specific peer (full history, not just unread).
 
 Inputs:

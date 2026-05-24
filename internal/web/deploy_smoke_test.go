@@ -40,7 +40,7 @@ func TestPublicPagesSmoke(t *testing.T) {
 	base := strings.TrimRight(strings.TrimSpace(getenv("SMOKE_BASE_URL", "http://127.0.0.1:8080")), "/")
 
 	// Landing is checked separately below for content; the rest just need 200.
-	for _, p := range []string{"/privacy", "/security", "/docs"} {
+	for _, p := range []string{"/privacy", "/security", "/terms", "/docs"} {
 		if code, _ := fetch(t, base, p); code != http.StatusOK {
 			t.Fatalf("GET %s: status %d", p, code)
 		}
@@ -79,6 +79,14 @@ func TestPublicPagesSmoke(t *testing.T) {
 	}
 	if asMeta.Issuer == "" || asMeta.TokenEndpoint == "" {
 		t.Fatalf("authorization-server metadata missing issuer/token_endpoint: %+v", asMeta)
+	}
+
+	// OpenAI Apps domain verification: the submission flow pings this origin-root
+	// well-known path and expects the verification token back as plain text.
+	if code, body := fetch(t, base, "/.well-known/openai-apps-challenge"); code != http.StatusOK {
+		t.Fatalf("GET /.well-known/openai-apps-challenge: status %d", code)
+	} else if got := strings.TrimSpace(string(body)); got == "" {
+		t.Fatal("openai-apps-challenge returned an empty token")
 	}
 
 	code, body = fetch(t, base, "/")

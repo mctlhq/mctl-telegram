@@ -1095,6 +1095,44 @@ func newMockRouter() *mockRouter {
 	}
 }
 
+// TestAuthorize_LongState guards the OpenAI Apps platform, whose relay state
+// (openai_platform_oauth_relay__<base64 JSON>) runs ~525 bytes and once tripped
+// a 512-byte cap. A realistic long state must be accepted (302 to Telegram);
+// only an abusive multi-KB state is rejected.
+func TestAuthorize_LongState(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	_, challenge := pkceVerifierAndChallenge()
+
+	authorize := func(state string) *httptest.ResponseRecorder {
+		q := url.Values{
+			"response_type":         {"code"},
+			"client_id":             {"claude.ai"},
+			"redirect_uri":          {"https://claude.ai/cb"},
+			"state":                 {state},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+		}
+		req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+		rec := httptest.NewRecorder()
+		mux.serve("GET", "/oauth/authorize", rec, req)
+		return rec
+	}
+
+	if rec := authorize("openai_platform_oauth_relay__" + strings.Repeat("a", 600)); rec.Code != http.StatusFound {
+		t.Fatalf("629-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := authorize(strings.Repeat("a", 4096)); rec.Code != http.StatusFound {
+		t.Fatalf("at-limit 4096-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := authorize(strings.Repeat("a", 4097)); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "state exceeds 4096 bytes") {
+		t.Fatalf("4097-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func (m *mockRouter) Get(p string, h http.HandlerFunc)  { m.getH[p] = h }
 func (m *mockRouter) Post(p string, h http.HandlerFunc) { m.postH[p] = h }
 
