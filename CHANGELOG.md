@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.34.1](https://github.com/mctlhq/mctl-telegram/compare/0.34.0...0.34.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* **ui:** tidy footer layout on mobile ([2009448](https://github.com/mctlhq/mctl-telegram/commit/20094485391410ba452d3d4b70634b87721e6a9e))
+* **ui:** tidy footer layout on mobile ([48cd8dc](https://github.com/mctlhq/mctl-telegram/commit/48cd8dc4fed5333bfa2ad876073c7833bcc0fc59))
+
 ## [0.34.0](https://github.com/mctlhq/mctl-telegram/compare/0.33.0...0.34.0) (2026-05-24)
 
 
