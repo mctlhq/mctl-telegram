@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.0](https://github.com/mctlhq/mctl-telegram/compare/0.32.0...0.33.0) (2026-05-24)
+
+
+### Features
+
+* **web:** add /demo page for ChatGPT App review recording ([43f5a94](https://github.com/mctlhq/mctl-telegram/commit/43f5a9487fa7a1a40f80d85614bdfe190c9723fc))
+* **web:** add /demo page for ChatGPT App review recording ([aeefd00](https://github.com/mctlhq/mctl-telegram/commit/aeefd0008a8252eaca1f0fbf41d84565c0f1e7e7))
+
 ## [0.32.0](https://github.com/mctlhq/mctl-telegram/compare/0.31.0...0.32.0) (2026-05-24)
 
 
