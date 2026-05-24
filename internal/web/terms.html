@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<style>
+  /* Page-specific prose styling, built on the shared design tokens. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
+  }
+  ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
+  li { margin-bottom: 8px; line-height: 1.6; }
+  li strong { color: var(--text); }
+  p { color: var(--text-dim); line-height: 1.6; }
+  p strong { color: var(--text); }
+  @media (max-width: 640px) {
+    h2 { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Terms</span>
+    </div>
+    <h1>Terms of <span class="accent">service</span></h1>
+    <p class="lead">The terms under which you may use mctl-telegram. See <a href="/privacy">/privacy</a> for data handling and <a href="/security">/security</a> for the threat model.</p>
+  </section>
+
+  <h2>What this service is</h2>
+  <p>mctl-telegram is an open-source MCP server that lets an AI assistant act on your behalf against your own Telegram user account over MTProto. It is an independent project. It is <strong>not affiliated with, endorsed by, or operated by Telegram or OpenAI</strong>, and "Telegram" and "ChatGPT" are trademarks of their respective owners.</p>
+
+  <h2>Your account and your responsibility</h2>
+  <ul>
+    <li>You connect <strong>your own</strong> Telegram account. You must have the right to use that account and to authorise this service to act through it.</li>
+    <li>You are solely responsible for the messages, drafts, and actions performed through the service, and for complying with Telegram's own Terms of Service and any applicable law.</li>
+    <li>You must not use the service to send spam, harass, impersonate, distribute malware, or for any unlawful or abusive purpose. Automated bulk messaging may violate Telegram's rules and can get your account limited or banned — that risk is yours.</li>
+  </ul>
+
+  <h2>Sending messages</h2>
+  <p>On the hosted deployment at <code>tg.mctl.ai</code>, sending is <strong>gated and dry-run by default</strong>: <code>send_message</code> returns a preview (<code>sent=false</code>) instead of delivering anything. Real delivery happens only when every opt-in gate is enabled (server <code>ALLOW_SEND</code>, your account <code>send_enabled</code> flag, and the <code>telegram:messages:send</code> scope). Once those are enabled, the service <strong>will send real messages to real people</strong> on your behalf, and a sent message cannot be unsent. Enable sending only if you accept that.</p>
+
+  <h2>Beta software, no warranty</h2>
+  <p>The service is provided <strong>"as is" and "as available", without warranties of any kind</strong>, express or implied, including fitness for a particular purpose and non-infringement. Parts of it (including Local Bridge mode) are beta and may change or break. To the maximum extent permitted by law, the operator and contributors are <strong>not liable</strong> for any loss or damage arising from your use of the service, including account limitations, lost or misdirected messages, or downtime.</p>
+
+  <h2>Availability and changes</h2>
+  <p>There is no uptime guarantee. The service may be modified, suspended, or discontinued at any time. These terms may be updated; continued use after a change means you accept the updated terms. You can stop using the service and remove your data at any time via <code>disconnect_telegram_account</code> / <code>delete_telegram_account</code> or the HTTP endpoints listed on <a href="/privacy">/privacy</a>.</p>
+
+  <h2>Contact</h2>
+  <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. The source is open at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> — audit it, self-host it, or contribute.</p>
+
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
+</body>
+</html>

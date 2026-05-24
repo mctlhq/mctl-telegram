@@ -69,6 +69,34 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 }
 
+func TestTerms_ServesHTML(t *testing.T) {
+	w := httptest.NewRecorder()
+	Terms("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/terms", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("expected text/html, got %q", ct)
+	}
+	body := w.Body.String()
+	for _, must := range []string{
+		"Terms of",
+		"not affiliated with, endorsed by, or operated by Telegram or OpenAI",
+		"your own",
+		"gated and dry-run by default",
+		"spam",
+		"without warranties of any kind",
+		"support@mctl.ai",
+		// shared chrome — unified with landing/docs
+		`class="topbar"`,
+		`<a href="/terms" class="active">terms</a>`,
+	} {
+		if !strings.Contains(body, must) {
+			t.Fatalf("/terms missing %q", must)
+		}
+	}
+}
+
 func TestLanding_HasTransparencySections(t *testing.T) {
 	w := httptest.NewRecorder()
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
