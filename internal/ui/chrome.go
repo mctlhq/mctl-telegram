@@ -37,7 +37,7 @@ var toggleJS string
 // (e.g. MCPURL) sit alongside these.
 type Data struct {
 	Title         string // <title> text
-	NavActive     string // "home" | "docs" | "security" | "privacy" | "terms" | ""
+	NavActive     string // "home" | "docs" | "security" | "privacy" | "terms" | "demo" | ""
 	PublicBaseURL string // shown in the footer
 }
 
@@ -95,6 +95,8 @@ var defs = `
       <a href="/privacy">privacy</a>
       <span class="sep">·</span>
       <a href="/terms">terms</a>
+      <span class="sep">·</span>
+      <a href="/demo">demo</a>
       <span class="sep">·</span>
       <a href="mailto:support@mctl.ai">support</a>
       <span class="sep">·</span>

@@ -62,6 +62,12 @@ type Config struct {
 	// ReplicaID identifies this pod for observability. Sourced from
 	// REPLICA_ID env var; falls back to POD_NAME; falls back to "unknown".
 	ReplicaID string
+	// DemoVideoURL is the walkthrough video shown on the public /demo page
+	// (for the ChatGPT App Directory review). Empty → the page renders a
+	// "coming soon" placeholder. Accepts a YouTube/Loom share URL or a direct
+	// .mp4/.webm URL; see internal/web.classifyDemoVideo. Set via
+	// DEMO_VIDEO_URL.
+	DemoVideoURL string
 }
 
 func Load() (*Config, error) {
@@ -100,6 +106,7 @@ func Load() (*Config, error) {
 	c.DBMaxOpenConns = envInt("DB_MAX_OPEN_CONNS", 0)
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
+	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))

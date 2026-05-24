@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<meta name="description" content="Demo walkthrough for MCTL Telegram, a ChatGPT app for searching, summarizing, drafting, and sending Telegram messages with confirmation.">
+<style>
+  /* Page-specific prose styling, built on the shared design tokens. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
+  }
+  p { color: var(--text-dim); line-height: 1.6; }
+  p strong { color: var(--text); }
+
+  /* Responsive 16:9 video frame for iframe / <video> embeds. */
+  .video-frame {
+    position: relative; width: 100%; margin: 8px 0 4px;
+    aspect-ratio: 16 / 9; background: var(--surface-elevated);
+    border: 1px solid var(--border); border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  .video-frame iframe, .video-frame video {
+    position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+  }
+
+  /* Placeholder shown until DEMO_VIDEO_URL is configured. */
+  .video-placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; gap: 8px; height: 100%; padding: 24px;
+  }
+  .video-placeholder .big {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 18px; font-weight: 600; color: var(--text);
+  }
+  .video-placeholder .sub { font-size: 14px; color: var(--muted); }
+
+  .video-link { margin: 8px 0; }
+
+  /* Checklist of what the recording covers. */
+  ol.covers { list-style: none; counter-reset: cov; padding: 0; margin: 14px 0; }
+  ol.covers li {
+    counter-increment: cov; position: relative; padding: 12px 14px 12px 48px;
+    border: 1px solid var(--border); border-radius: var(--mctl-radius-md);
+    margin-bottom: 10px; background: var(--surface);
+  }
+  ol.covers li::before {
+    content: counter(cov); position: absolute; left: 12px; top: 12px;
+    width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 13px; font-weight: 600;
+    background: var(--accent); color: #0a0b0d;
+  }
+  ol.covers li .t { font-weight: 600; color: var(--text); }
+  ol.covers li .d { display: block; margin-top: 3px; font-size: 14px; color: var(--text-dim); line-height: 1.55; }
+
+  .cta { margin: 28px 0 4px; }
+
+  @media (max-width: 640px) {
+    h2 { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Demo</span>
+    </div>
+    <h1>MCTL Telegram <span class="accent">demo</span></h1>
+    <p class="lead">A short walkthrough showing how MCTL Telegram connects your own Telegram account to ChatGPT, searches chats, summarizes messages, drafts replies, and sends messages only after confirmation.</p>
+  </section>
+
+  <h2>Watch the walkthrough</h2>
+  {{if eq .VideoKind "youtube"}}
+  <div class="video-frame">
+    <iframe src="{{.EmbedURL}}" title="MCTL Telegram demo" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  </div>
+  {{else if eq .VideoKind "loom"}}
+  <div class="video-frame">
+    <iframe src="{{.EmbedURL}}" title="MCTL Telegram demo" loading="lazy" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  </div>
+  {{else if eq .VideoKind "file"}}
+  <div class="video-frame">
+    <video controls preload="metadata" src="{{.EmbedURL}}">Your browser does not support the video tag. <a href="{{.EmbedURL}}">Open the video</a>.</video>
+  </div>
+  {{else if eq .VideoKind "link"}}
+  <p class="video-link">Watch the demo here: <a href="{{.EmbedURL}}" target="_blank" rel="noopener">{{.RawURL}}</a></p>
+  {{else}}
+  <div class="video-frame">
+    <div class="video-placeholder">
+      <span class="big">Demo video coming soon</span>
+      <span class="sub">This page will host the review demo for MCTL Telegram.</span>
+    </div>
+  </div>
+  {{end}}
+
+  <h2>What the demo covers</h2>
+  <ol class="covers">
+    <li><span class="t">Connect a Telegram account</span><span class="d">Start the Telegram connection flow and authorize access.</span></li>
+    <li><span class="t">Search chats and messages</span><span class="d">Find relevant chats or messages from the connected account.</span></li>
+    <li><span class="t">Summarize unread or recent messages</span><span class="d">Generate a concise summary of recent Telegram activity.</span></li>
+    <li><span class="t">Draft a reply</span><span class="d">Prepare a response without sending it automatically.</span></li>
+    <li><span class="t">Send with confirmation</span><span class="d">Outgoing messages require explicit user confirmation before sending.</span></li>
+    <li><span class="t">Pin important messages</span><span class="d">Save or mark important messages for later reference.</span></li>
+    <li><span class="t">Review audit logs</span><span class="d">Show recent app actions and account activity.</span></li>
+    <li><span class="t">Disconnect or revoke access</span><span class="d">Demonstrate how the user can remove the Telegram connection.</span></li>
+  </ol>
+
+  <h2>User control and safety</h2>
+  <p>MCTL Telegram is designed for use with the user's own Telegram account. Message sending requires explicit confirmation, and users can disconnect or revoke access at any time. See <a href="/privacy">/privacy</a> for data handling and <a href="/terms">/terms</a> for the terms of service.</p>
+
+  <p class="cta"><a class="btn-secondary" href="/">Visit app website</a></p>
+
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
+</body>
+</html>
