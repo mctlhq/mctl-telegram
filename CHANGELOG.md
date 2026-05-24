@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.35.1](https://github.com/mctlhq/mctl-telegram/compare/0.35.0...0.35.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* **oauth:** allow cross-origin redirect after sign-in (CSP form-action) ([8d4dabc](https://github.com/mctlhq/mctl-telegram/commit/8d4dabcbec3f0da4016ed4d3113f0d5988b725af))
+* **oauth:** allow cross-origin redirect after sign-in (CSP form-action) ([080e6a8](https://github.com/mctlhq/mctl-telegram/commit/080e6a834f3f93449025e69fc2d123558fa4d5fb))
+
 ## [0.35.0](https://github.com/mctlhq/mctl-telegram/compare/0.34.1...0.35.0) (2026-05-24)
 
 
