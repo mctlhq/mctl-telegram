@@ -20,9 +20,9 @@ func TestToolAnnotations(t *testing.T) {
 		tool                             mcplib.Tool
 		readOnly, destructive, openWorld bool
 	}{
-		{"list_dialogs", first(s.toolListDialogs()), false, false, false},
-		{"get_unread_messages", first(s.toolGetUnreadMessages()), false, false, false},
-		{"get_messages", first(s.toolGetMessages()), false, false, false},
+		{"list_dialogs", first(s.toolListDialogs()), false, false, true},
+		{"get_unread_messages", first(s.toolGetUnreadMessages()), false, false, true},
+		{"get_messages", first(s.toolGetMessages()), false, false, true},
 		{"prepare_pin_message", first(s.toolPreparePinMessage()), false, false, false},
 		{"list_telegram_identities", first(s.toolListIdentities()), false, false, false},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog()), false, false, false},

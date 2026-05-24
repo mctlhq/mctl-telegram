@@ -1124,6 +1124,9 @@ func TestAuthorize_LongState(t *testing.T) {
 	if rec := authorize("openai_platform_oauth_relay__" + strings.Repeat("a", 600)); rec.Code != http.StatusFound {
 		t.Fatalf("629-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if rec := authorize(strings.Repeat("a", 4096)); rec.Code != http.StatusFound {
+		t.Fatalf("at-limit 4096-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 	if rec := authorize(strings.Repeat("a", 4097)); rec.Code != http.StatusBadRequest ||
 		!strings.Contains(rec.Body.String(), "state exceeds 4096 bytes") {
 		t.Fatalf("4097-byte state: status = %d, body = %s", rec.Code, rec.Body.String())
