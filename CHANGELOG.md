@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/mctlhq/mctl-telegram/compare/0.34.1...0.35.0) (2026-05-24)
+
+
+### Features
+
+* **oauth:** add password-gated reviewer/demo auth-mode ([e15a552](https://github.com/mctlhq/mctl-telegram/commit/e15a5522aeed726b8cf8ef3ac95f289a68884be6))
+* **oauth:** password-gated reviewer/demo auth-mode ([de12127](https://github.com/mctlhq/mctl-telegram/commit/de12127634d76daec9b9c4cdbe0e96035028c8c5))
+
+
+### Bug Fixes
+
+* **oauth:** harden demo reviewer login per review ([d33ac80](https://github.com/mctlhq/mctl-telegram/commit/d33ac806629fa6616cfe2da164a1068978fd8802))
+
 ## [0.34.1](https://github.com/mctlhq/mctl-telegram/compare/0.34.0...0.34.1) (2026-05-24)
 
 
