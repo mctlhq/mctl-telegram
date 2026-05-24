@@ -486,6 +486,10 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,
 		UseDBForOAuth:            useDBForOAuth,
+		DemoReviewerEnabled:      cfg.DemoReviewerEnabled,
+		DemoReviewerUsername:     cfg.DemoReviewerUsername,
+		DemoReviewerPassword:     cfg.DemoReviewerPassword,
+		DemoReviewerTGID:         cfg.DemoReviewerTGID,
 	}, store)
 	if err != nil {
 		return nil, err
@@ -511,7 +515,12 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"client_count", len(clients),
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
+		"demo_reviewer", cfg.DemoReviewerEnabled,
 	)
+	if cfg.DemoReviewerEnabled {
+		slog.Warn("DEMO_REVIEWER_ENABLED is on — /oauth/authorize exposes a password-gated reviewer login; disable after the review",
+			"demo_tg_id", cfg.DemoReviewerTGID)
+	}
 	return srv, nil
 }
 

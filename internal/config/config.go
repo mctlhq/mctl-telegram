@@ -68,6 +68,18 @@ type Config struct {
 	// .mp4/.webm URL; see internal/web.classifyDemoVideo. Set via
 	// DEMO_VIDEO_URL.
 	DemoVideoURL string
+	// Reviewer/demo auth-mode for the ChatGPT App Directory review. When
+	// DemoReviewerEnabled is true the /oauth/authorize page offers a
+	// password-gated "reviewer access" path that authenticates as a single
+	// pre-provisioned demo Telegram identity, bypassing the live Telegram
+	// OIDC login (no phone/SMS). The demo account is expected to be a
+	// throwaway with a pre-seeded MTProto session and send_enabled=false so
+	// every send stays a dry-run preview. Off by default; enabled only during
+	// review and disabled again after approval. See internal/oauth.
+	DemoReviewerEnabled  bool   // DEMO_REVIEWER_ENABLED
+	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
+	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
+	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
 }
 
 func Load() (*Config, error) {
@@ -107,6 +119,21 @@ func Load() (*Config, error) {
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
+	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
+	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")
+	c.DemoReviewerPassword = os.Getenv("DEMO_REVIEWER_PASSWORD")
+	if v := os.Getenv("DEMO_REVIEWER_TG_ID"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("DEMO_REVIEWER_TG_ID must be integer: %w", err)
+		}
+		c.DemoReviewerTGID = n
+	}
+	if c.DemoReviewerEnabled {
+		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
+			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
+		}
+	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
