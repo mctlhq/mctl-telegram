@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.0](https://github.com/mctlhq/mctl-telegram/compare/0.31.0...0.32.0) (2026-05-24)
+
+
+### Features
+
+* **mcp:** add outputSchema to all MCP tool descriptors ([25d9c22](https://github.com/mctlhq/mctl-telegram/commit/25d9c2219e35a414c1861af592122a3520c5a3fc))
+* **mcp:** add outputSchema to tool descriptors ([8f2efdd](https://github.com/mctlhq/mctl-telegram/commit/8f2efdd0a5e745896900cc8cf531876f706b9f3c))
+
 ## [0.31.0](https://github.com/mctlhq/mctl-telegram/compare/0.30.6...0.31.0) (2026-05-24)
 
 
