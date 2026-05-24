@@ -158,6 +158,7 @@ func main() {
 	mux.Get("/readyz", healthz)
 	mux.Get("/metrics", metricsHandler(m, cfg.MetricsAllowCIDR))
 	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg, authServer))
+	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer))
