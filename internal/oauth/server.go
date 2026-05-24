@@ -78,6 +78,11 @@ type Server struct {
 	// newer flow just provisioned. Entries are created on demand and never
 	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
+
+	// demoLimiter throttles /oauth/demo/login attempts per client IP so the
+	// password-gated reviewer path cannot be brute-forced. Non-nil only when
+	// the reviewer/demo auth-mode is enabled.
+	demoLimiter *demoRateLimiter
 }
 
 // metricsIface is the minimum surface of metrics.Registry used by oauth.Server.
@@ -232,6 +237,20 @@ type Config struct {
 	// instead of the in-memory maps. Set to true when DATABASE_URL starts with
 	// "postgres://" or "postgresql://". Has no effect when the store is nil.
 	UseDBForOAuth bool
+
+	// Reviewer/demo auth-mode for the ChatGPT App Directory review.
+	//
+	// When DemoReviewerEnabled is true, /oauth/authorize renders a chooser page
+	// offering both the normal "Sign in with Telegram" path and a password-gated
+	// "reviewer access" form. A correct DemoReviewerUsername/DemoReviewerPassword
+	// posted to /oauth/demo/login authenticates as DemoReviewerTGID directly,
+	// bypassing the live Telegram OIDC login (no phone/SMS). The demo account is
+	// expected to be a throwaway with a pre-seeded MTProto session and
+	// send_enabled=false, so every send stays a dry-run preview. Off by default.
+	DemoReviewerEnabled  bool
+	DemoReviewerUsername string
+	DemoReviewerPassword string // compared in constant time, never logged
+	DemoReviewerTGID     int64
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the Telegram
@@ -378,6 +397,9 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		clients: map[string]*clientReg{},
 		enables: map[string]*enableSession{},
 		loginFn: telegram.Login,
+	}
+	if cfg.DemoReviewerEnabled {
+		s.demoLimiter = newDemoRateLimiter(s.clock)
 	}
 	// Pre-register the built-in self-connect client. Zero CreatedAt ensures the
 	// background sweeper never evicts it (the sweep condition
@@ -685,6 +707,11 @@ func (s *Server) Register(mux Router) {
 	mux.Post("/oauth/telegram/enable_access/start", s.handleEnableStart)
 	mux.Post("/oauth/telegram/enable_access/code", s.handleEnableCode)
 	mux.Post("/oauth/telegram/enable_access/password", s.handleEnablePassword)
+	// Reviewer/demo auth-mode. Registered unconditionally; the handler is a
+	// no-op (404-equivalent) unless DemoReviewerEnabled is set, so a route
+	// table is stable across config. CSRF/state is carried by the server-side
+	// "state" token minted at /oauth/authorize.
+	mux.Post("/oauth/demo/login", s.handleDemoLogin)
 }
 
 // Router is the minimum chi.Router surface we depend on. Lets us write
@@ -895,12 +922,29 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 
+	tgURL := s.tgoidc.AuthCodeURL(serverState, nonce, tgChallenge)
+
+	// Reviewer/demo auth-mode: instead of redirecting straight to Telegram,
+	// render a chooser offering both the normal Telegram sign-in and a
+	// password-gated reviewer path. The reviewer form posts the server-side
+	// state to /oauth/demo/login, which authenticates as the pre-provisioned
+	// demo identity without the live Telegram OIDC login. Off by default, so
+	// the normal redirect below is unchanged for every other deployment.
+	if s.cfg.DemoReviewerEnabled {
+		renderDemoChooser(w, demoChooserPage{
+			Issuer:      s.cfg.Issuer,
+			TelegramURL: tgURL,
+			State:       serverState,
+		})
+		return
+	}
+
 	// Hand the browser to Telegram's OIDC authorization endpoint. Telegram
 	// renders its own account-selection and consent screen, then 302s back to
 	// /oauth/telegram/callback with ?code=&state=serverState. tgChallenge is
 	// the Telegram-leg PKCE challenge — independent of the MCP client's
 	// codeChallenge held in pending and verified later at /oauth/token.
-	http.Redirect(w, r, s.tgoidc.AuthCodeURL(serverState, nonce, tgChallenge), http.StatusFound)
+	http.Redirect(w, r, tgURL, http.StatusFound)
 }
 
 func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
