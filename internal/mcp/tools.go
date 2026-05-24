@@ -137,7 +137,19 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 		if resp.Result == nil {
 			return mcplib.NewToolResultText("null"), nil
 		}
-		return mcplib.NewToolResultText(string(resp.Result)), nil
+		// Tools that can route through the bridge (list_dialogs,
+		// get_unread_messages, get_messages, send_message, pin_message) declare
+		// an outputSchema, so this path must also return structuredContent or
+		// the schema contract is violated. The daemon already returns the same
+		// JSON shape the direct path produces; decode it generically into a
+		// map so structuredContent is present and accurate without re-coupling
+		// to a concrete struct that could silently drop daemon-side fields.
+		res := mcplib.NewToolResultText(string(resp.Result))
+		var structured map[string]any
+		if err := json.Unmarshal(resp.Result, &structured); err == nil {
+			res.StructuredContent = structured
+		}
+		return res, nil
 	case bridge.TypeError:
 		if s.Metrics != nil {
 			s.Metrics.BridgeCallsTotal.WithLabelValues(tool, "error").Inc()
@@ -158,6 +170,7 @@ func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
+		mcplib.WithOutputSchema[listDialogsResult](),
 		mcplib.WithDescription(`List the operator's Telegram dialogs with type, title, username and unread count.
 
 Inputs:
@@ -200,7 +213,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		if err != nil {
 			return borrowErrResult("list_dialogs", err), nil
 		}
-		return jsonResult(map[string]any{"dialogs": dialogs})
+		return jsonResult(listDialogsResult{Dialogs: dialogs})
 	}
 	return tool, handler
 }
@@ -212,6 +225,7 @@ func (s *Server) toolGetUnreadMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
+		mcplib.WithOutputSchema[messagesResult](),
 		mcplib.WithDescription(`Fetch unread messages, optionally scoped to one peer.
 
 Inputs:
@@ -254,9 +268,9 @@ Empty result means no unread messages match (including: peer has unread but text
 		if err != nil {
 			return borrowErrResult("get_unread_messages", err), nil
 		}
-		return jsonResult(map[string]any{
-			"messages": wrapMessages(msgs),
-			"notice":   untrustedContentNotice,
+		return jsonResult(messagesResult{
+			Messages: wrapMessages(msgs),
+			Notice:   untrustedContentNotice,
 		})
 	}
 	return tool, handler
@@ -273,6 +287,7 @@ func (s *Server) toolSendMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
+		mcplib.WithOutputSchema[telegram.SendResult](),
 		mcplib.WithDescription(`Send a Telegram message.
 
 Draft-by-default: the message is sent for real only when the server send
@@ -363,6 +378,7 @@ func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
+		mcplib.WithOutputSchema[messagesResult](),
 		mcplib.WithDescription(`Fetch recent messages from a specific peer (full history, not just unread).
 
 Inputs:
@@ -408,9 +424,9 @@ Output: {notice, messages: [{id, peer, peer_title, text, date}]}. Every message 
 		if err != nil {
 			return borrowErrResult("get_messages", err), nil
 		}
-		return jsonResult(map[string]any{
-			"messages": wrapMessages(msgs),
-			"notice":   untrustedContentNotice,
+		return jsonResult(messagesResult{
+			Messages: wrapMessages(msgs),
+			Notice:   untrustedContentNotice,
 		})
 	}
 	return tool, handler
@@ -422,6 +438,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[preparePinResult](),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
 Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
@@ -468,13 +485,13 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 			return toolErr("prepare_pin_message: %v", err), nil
 		}
 		s.audit(ctx, id, "prepare_pin_message", telegram.RedactPeer(peer), nil, startedAt)
-		return jsonResult(map[string]any{
-			"confirmation_id": c.ID,
-			"peer_redacted":   telegram.RedactPeer(peer),
-			"message_id":      messageID,
-			"unpin":           unpin,
-			"payload_hash":    hash,
-			"expires_at":      c.ExpiresAt.UTC(),
+		return jsonResult(preparePinResult{
+			ConfirmationID: c.ID,
+			PeerRedacted:   telegram.RedactPeer(peer),
+			MessageID:      messageID,
+			Unpin:          unpin,
+			PayloadHash:    hash,
+			ExpiresAt:      c.ExpiresAt.UTC(),
 		})
 	}
 	return tool, handler
@@ -484,6 +501,7 @@ func (s *Server) toolPinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pin_message",
 		mcplib.WithTitleAnnotation("Pin / Unpin Telegram Message"),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOutputSchema[pinMessageResult](),
 		mcplib.WithDescription(`Pin or unpin a message in a Telegram chat. Requires the operator to have "Pin Messages" admin rights in the target chat.
 
 Inputs:
@@ -557,7 +575,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		if err != nil {
 			return borrowErrResult("pin_message", err), nil
 		}
-		return jsonResult(map[string]any{"status": action, "peer": peer, "message_id": messageID})
+		return jsonResult(pinMessageResult{Status: action, Peer: peer, MessageID: messageID})
 	}
 	return tool, handler
 }
@@ -567,6 +585,7 @@ func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithTitleAnnotation("Disconnect Telegram account"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[disconnectResult](),
 		mcplib.WithDescription(`Disconnect your Telegram account from this server.
 
 Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
@@ -598,9 +617,9 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		if err != nil {
 			return toolErr("disconnect: %v", err), nil
 		}
-		return jsonResult(map[string]any{
-			"disconnected":       true,
-			"had_active_session": had,
+		return jsonResult(disconnectResult{
+			Disconnected:     true,
+			HadActiveSession: had,
 		})
 	}
 	return tool, handler
@@ -611,6 +630,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Delete Telegram account (hard delete)"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[deleteResult](),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
 Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to reconnect, the operator must re-run the login CLI.
@@ -638,9 +658,9 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		if err != nil {
 			return toolErr("delete: %v", err), nil
 		}
-		return jsonResult(map[string]any{
-			"deleted":      true,
-			"rows_removed": rows,
+		return jsonResult(deleteResult{
+			Deleted:     true,
+			RowsRemoved: rows,
 		})
 	}
 	return tool, handler
@@ -652,6 +672,7 @@ func (s *Server) toolGetMyAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[auditLogResult](),
 		mcplib.WithDescription(`Return the audit-log rows recorded for tool calls and HTTP account actions made by your identity.
 
 Inputs (all optional):
@@ -691,9 +712,9 @@ This tool is part of the self-service transparency surface — operators cannot 
 		if err != nil {
 			return toolErr("get_my_audit_log: %v", err), nil
 		}
-		return jsonResult(map[string]any{
-			"entries": entries,
-			"count":   len(entries),
+		return jsonResult(auditLogResult{
+			Entries: entries,
+			Count:   len(entries),
 		})
 	}
 	return tool, handler
@@ -706,6 +727,7 @@ func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[identitiesResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
 
 Output: JSON array of {telegram_id, username, display_name, access_tier, has_session}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account).
@@ -723,7 +745,7 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 		if err != nil {
 			return toolErr("list_telegram_identities: %v", err), nil
 		}
-		return jsonResult(map[string]any{"identities": rows, "count": len(rows)})
+		return jsonResult(identitiesResult{Identities: rows, Count: len(rows)})
 	}
 	return tool, handler
 }
@@ -734,6 +756,7 @@ func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Set a Telegram user's access tier"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[setAccessResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Grant or revoke the "client" access tier for a Telegram user.
 
 Inputs:
@@ -766,7 +789,7 @@ The user must have signed in via the Login Widget at least once (so a users row 
 		if err != nil {
 			return toolErr("set_telegram_access: %v", err), nil
 		}
-		return jsonResult(map[string]any{"telegram_id": tgID, "access_tier": tier, "ok": true})
+		return jsonResult(setAccessResult{TelegramID: tgID, AccessTier: tier, OK: true})
 	}
 	return tool, handler
 }
@@ -779,6 +802,7 @@ func (s *Server) toolSetAccountSend() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Enable or disable a user's real sending"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[setAccountSendResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Enable or disable real message sending for a user's active Telegram session — flips the per-account send_enabled gate.
 
 Inputs:
@@ -823,7 +847,7 @@ The user must have an active session. New accounts are send-enabled by default; 
 		if rows == 0 {
 			return toolErr("no active Telegram session for telegram id %d — they must connect an account first", tgID), nil
 		}
-		return jsonResult(map[string]any{"telegram_id": tgID, "send_enabled": enabled, "ok": true})
+		return jsonResult(setAccountSendResult{TelegramID: tgID, SendEnabled: enabled, OK: true})
 	}
 	return tool, handler
 }
@@ -836,6 +860,7 @@ func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[auditLogResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Return the audit-log rows for any Telegram user — the operator-facing counterpart of get_my_audit_log. Use list_telegram_identities to find the telegram_id.
 
 Inputs:
@@ -884,9 +909,9 @@ Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error}], count}. 
 		if err != nil {
 			return toolErr("get_user_audit_log: %v", err), nil
 		}
-		return jsonResult(map[string]any{
-			"entries": entries,
-			"count":   len(entries),
+		return jsonResult(auditLogResult{
+			Entries: entries,
+			Count:   len(entries),
 		})
 	}
 	return tool, handler
@@ -900,6 +925,7 @@ func (s *Server) toolRevokeSession() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithTitleAnnotation("Revoke a Telegram user's session"),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[revokeSessionResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). Revoke the active MTProto session of a Telegram user and close their in-memory client. The user keeps their access tier; on their next reconnect the in-browser setup (phone → SMS → 2FA) runs again. Use this to clear a stuck or unfinished session.
 
 Inputs:
@@ -940,7 +966,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 		if err != nil {
 			return toolErr("revoke_telegram_session: %v", err), nil
 		}
-		return jsonResult(map[string]any{"telegram_id": tgID, "revoked": revoked})
+		return jsonResult(revokeSessionResult{TelegramID: tgID, Revoked: revoked})
 	}
 	return tool, handler
 }
@@ -1019,12 +1045,100 @@ func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
 	return toolErr("%s: %v", tool, err)
 }
 
+// Result structs below give each tool a concrete, reflectable type so
+// WithOutputSchema[T] produces a meaningful JSON Schema and jsonResult emits
+// matching structuredContent. JSON tags reproduce the exact wire shape the
+// tools returned before (when they used map[string]any), so clients see no
+// change in field names or values.
+
+// listDialogsResult is the success payload of list_dialogs.
+type listDialogsResult struct {
+	Dialogs []telegram.Dialog `json:"dialogs"`
+}
+
+// messagesResult is the success payload of get_messages and
+// get_unread_messages: wrapped (untrusted-tagged) messages plus the prose
+// notice that repeats the untrusted-content guidance.
+type messagesResult struct {
+	Messages []telegram.Message `json:"messages"`
+	Notice   string             `json:"notice"`
+}
+
+// preparePinResult is the success payload of prepare_pin_message.
+type preparePinResult struct {
+	ConfirmationID string    `json:"confirmation_id"`
+	PeerRedacted   string    `json:"peer_redacted"`
+	MessageID      int       `json:"message_id"`
+	Unpin          bool      `json:"unpin"`
+	PayloadHash    string    `json:"payload_hash"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
+// pinMessageResult is the success payload of pin_message.
+type pinMessageResult struct {
+	Status    string `json:"status"`
+	Peer      string `json:"peer"`
+	MessageID int    `json:"message_id"`
+}
+
+// disconnectResult is the success payload of disconnect_telegram_account.
+type disconnectResult struct {
+	Disconnected     bool `json:"disconnected"`
+	HadActiveSession bool `json:"had_active_session"`
+}
+
+// deleteResult is the success payload of delete_telegram_account.
+type deleteResult struct {
+	Deleted     bool  `json:"deleted"`
+	RowsRemoved int64 `json:"rows_removed"`
+}
+
+// auditLogResult is the success payload of get_my_audit_log and
+// get_user_audit_log.
+type auditLogResult struct {
+	Entries []db.AuditEntry `json:"entries"`
+	Count   int             `json:"count"`
+}
+
+// identitiesResult is the success payload of list_telegram_identities.
+type identitiesResult struct {
+	Identities []db.IdentityRow `json:"identities"`
+	Count      int              `json:"count"`
+}
+
+// setAccessResult is the success payload of set_telegram_access.
+type setAccessResult struct {
+	TelegramID int64  `json:"telegram_id"`
+	AccessTier string `json:"access_tier"`
+	OK         bool   `json:"ok"`
+}
+
+// setAccountSendResult is the success payload of set_account_send.
+type setAccountSendResult struct {
+	TelegramID  int64 `json:"telegram_id"`
+	SendEnabled bool  `json:"send_enabled"`
+	OK          bool  `json:"ok"`
+}
+
+// revokeSessionResult is the success payload of revoke_telegram_session.
+type revokeSessionResult struct {
+	TelegramID int64 `json:"telegram_id"`
+	Revoked    bool  `json:"revoked"`
+}
+
+// jsonResult marshals v to a pretty-printed JSON text content block (for
+// back-compat) and also attaches it as StructuredContent. Tools declare a
+// matching outputSchema via WithOutputSchema[T]; per the MCP spec a tool that
+// advertises an outputSchema MUST return structuredContent conforming to it,
+// so the structured value here is the same v the schema was reflected from.
 func jsonResult(v any) (*mcplib.CallToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return mcplib.NewToolResultError("encode: " + err.Error()), nil
 	}
-	return mcplib.NewToolResultText(string(b)), nil
+	res := mcplib.NewToolResultText(string(b))
+	res.StructuredContent = v
+	return res, nil
 }
 
 func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, callPath ...string) {
