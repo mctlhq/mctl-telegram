@@ -297,10 +297,19 @@ func renderEnable(w http.ResponseWriter, status int, t *template.Template, data 
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+	// form-action allows 'self' https: rather than just 'self': the final step of
+	// the enable_access and demo-reviewer flows POSTs to a same-origin path that
+	// answers with a 302 to the OAuth client's redirect_uri (e.g. chatgpt.com).
+	// CSP form-action also governs redirect targets of a form submission, so
+	// 'self' alone silently blocks that cross-origin hop and the sign-in appears
+	// to do nothing. The redirect target is not user-controlled here — it is the
+	// server-validated, pre-registered redirect_uri — so 'self' https: does not
+	// widen the real trust boundary. (Tightening to the exact client origin per
+	// flow is a possible follow-up.)
+	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'"
 	if nonce != "" {
 		csp = "default-src 'none'; script-src 'nonce-" + nonce +
-			"'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+			"'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", csp)
