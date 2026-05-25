@@ -20,6 +20,8 @@ var expectedMetricNames = []string{
 	"mctl_telegram_client_errors_total",
 	"mctl_telegram_flood_wait_events_total",
 	"mctl_oauth_pending_auth_size",
+	"mctl_login_phone_step_total",
+	"mctl_login_phone_to_code_duration_seconds",
 	"mctl_sessions_connected_total",
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
@@ -46,6 +48,8 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.TelegramClientErrorsTotal.Add(0)
 	reg.TelegramFloodWaitEventsTotal.WithLabelValues("list_dialogs").Add(0)
 	reg.OAuthPendingAuthSize.Set(0)
+	reg.LoginPhoneStepTotal.WithLabelValues("ok").Add(0)
+	reg.LoginPhoneToCodeDuration.Observe(0)
 	reg.SessionsConnectedTotal.Add(0)
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
@@ -95,6 +99,38 @@ func TestSessionsBorrowTotal_AllLabelValues(t *testing.T) {
 	}
 	if got := len(found.GetMetric()); got != len(results) {
 		t.Errorf("expected %d metric series, got %d", len(results), got)
+	}
+}
+
+// TestObserveLoginPhoneStep verifies that the counter increments for every
+// result and that the latency histogram is observed only for "ok".
+func TestObserveLoginPhoneStep(t *testing.T) {
+	reg := New()
+	reg.ObserveLoginPhoneStep("ok", 3.2)
+	reg.ObserveLoginPhoneStep("timeout", 90)
+	reg.ObserveLoginPhoneStep("error", 1)
+
+	if got := testutil.ToFloat64(reg.LoginPhoneStepTotal.WithLabelValues("ok")); got != 1 {
+		t.Errorf("ok counter = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.LoginPhoneStepTotal.WithLabelValues("timeout")); got != 1 {
+		t.Errorf("timeout counter = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.LoginPhoneStepTotal.WithLabelValues("error")); got != 1 {
+		t.Errorf("error counter = %v, want 1", got)
+	}
+
+	// Only the single "ok" observation should land in the histogram.
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "mctl_login_phone_to_code_duration_seconds" {
+			if got := mf.GetMetric()[0].GetHistogram().GetSampleCount(); got != 1 {
+				t.Errorf("histogram sample count = %d, want 1 (ok only)", got)
+			}
+		}
 	}
 }
 
