@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.37.0](https://github.com/mctlhq/mctl-telegram/compare/0.36.0...0.37.0) (2026-05-25)
+
+
+### Features
+
+* **web:** serve demo walkthrough video on /demo ([fa5c498](https://github.com/mctlhq/mctl-telegram/commit/fa5c498ccc51e947f3fe81538c1d4b0dd18ce6aa))
+* **web:** serve demo walkthrough video on /demo ([1d9085d](https://github.com/mctlhq/mctl-telegram/commit/1d9085d60b881cb63c598a5816ca3200ddecccb7))
+
 ## [0.36.0](https://github.com/mctlhq/mctl-telegram/compare/0.35.1...0.36.0) (2026-05-25)
 
 
