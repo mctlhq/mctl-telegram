@@ -56,6 +56,17 @@ type Registry struct {
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
 
+	// Enable_access login flow (in-browser phone -> SMS -> 2FA).
+	// LoginPhoneStepTotal counts phone-step outcomes, labeled by result:
+	// "ok" (SendCode returned and the code screen was shown), "timeout"
+	// (connect/SendCode exceeded enableSendCodeWait — the stall failure mode),
+	// or "error" (Telegram returned an RPC error).
+	LoginPhoneStepTotal *prometheus.CounterVec
+	// LoginPhoneToCodeDuration measures connect + SendCode wall-clock latency
+	// for successful phone steps, in seconds. The buckets reach 90s to bracket
+	// enableSendCodeWait so a near-timeout p95 is readable off a bucket edge.
+	LoginPhoneToCodeDuration prometheus.Histogram
+
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
 	// hits the same replica by cross-referencing with pod-scoped pool metrics.
@@ -77,11 +88,28 @@ type Registry struct {
 // linearly interpolated between 1s and 2.5s.
 var toolDurationBuckets = []float64{.05, .1, .25, .5, 1, 2, 2.5, 4, 5, 10}
 
+// loginPhaseBuckets brackets the connect + SendCode round-trip up to the
+// enableSendCodeWait (90s) handler ceiling. A healthy SendCode lands in the
+// low single digits; values approaching 45-90s indicate the stall this metric
+// exists to surface.
+var loginPhaseBuckets = []float64{.5, 1, 2, 5, 10, 20, 30, 45, 60, 90}
+
 // SetOAuthPendingAuthSize sets the mctl_oauth_pending_auth_size gauge to n.
 // This method satisfies the oauth.metricsIface interface so a *Registry can be
 // passed to oauth.Server.WithMetrics without importing this package from oauth.
 func (r *Registry) SetOAuthPendingAuthSize(n float64) {
 	r.OAuthPendingAuthSize.Set(n)
+}
+
+// ObserveLoginPhoneStep records the outcome and latency of one enable_access
+// phone step. Satisfies oauth.metricsIface. The duration histogram is observed
+// only for "ok" so timeouts/errors do not skew the latency distribution; the
+// counter records every outcome for rate-based alerting.
+func (r *Registry) ObserveLoginPhoneStep(result string, seconds float64) {
+	r.LoginPhoneStepTotal.WithLabelValues(result).Inc()
+	if result == "ok" {
+		r.LoginPhoneToCodeDuration.Observe(seconds)
+	}
 }
 
 // New constructs a Registry with all collectors registered on a fresh
@@ -142,6 +170,17 @@ func New() *Registry {
 		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
 	})
 
+	r.LoginPhoneStepTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_login_phone_step_total",
+		Help: "Total enable_access phone-step outcomes, labeled by result: ok, timeout, error.",
+	}, []string{"result"})
+
+	r.LoginPhoneToCodeDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "mctl_login_phone_to_code_duration_seconds",
+		Help:    "Wall-clock seconds from phone submit to the SMS-code screen (connect + SendCode), successful steps only.",
+		Buckets: loginPhaseBuckets,
+	})
+
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
 		Help: "Info gauge (always 1) identifying this replica. " +
@@ -196,6 +235,8 @@ func New() *Registry {
 		r.SessionsRevokedTotal,
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
+		r.LoginPhoneStepTotal,
+		r.LoginPhoneToCodeDuration,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,

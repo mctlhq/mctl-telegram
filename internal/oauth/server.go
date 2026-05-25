@@ -90,6 +90,9 @@ type Server struct {
 // package directly (avoiding a circular import if metrics ever needs oauth).
 type metricsIface interface {
 	SetOAuthPendingAuthSize(float64)
+	// ObserveLoginPhoneStep records the duration and outcome of the enable_access
+	// phone -> SendCode wait. result is "ok", "timeout", or "error".
+	ObserveLoginPhoneStep(result string, seconds float64)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the

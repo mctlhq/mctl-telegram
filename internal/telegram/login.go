@@ -6,13 +6,38 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+// loginRPCTimeout bounds every individual MTProto RPC issued during an
+// interactive login (SendCode, SignIn, the SRP password exchange, Self).
+// Without it these inherit the caller's CodeTTL context (~30m): a stuck
+// SendCode then hangs for the whole TTL, holding uidLoginMutex and surfacing
+// only as the handler's coarse "send code timeout". With a per-RPC deadline a
+// stall returns context.DeadlineExceeded promptly, which propagates as a
+// classified login error and frees the mutex. Sized well above a healthy
+// round-trip but below the enableSendCodeWait (90s) handler ceiling.
+const loginRPCTimeout = 25 * time.Second
+
+// rpcTimeoutMiddleware wraps each tg.Invoker call with a bounded context so a
+// single hung MTProto RPC cannot stall the whole login flow. It is attached
+// only to the short-lived login client, never the message-serving pool.
+func rpcTimeoutMiddleware(d time.Duration) telegram.Middleware {
+	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
+		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+			ctx, cancel := context.WithTimeout(ctx, d)
+			defer cancel()
+			return next.Invoke(ctx, input, output)
+		}
+	})
+}
 
 // Login runs the interactive phone -> code -> 2FA-password flow for a single
 // user. Session bytes are persisted into the DB via the SessionStore. Returns
@@ -43,6 +68,9 @@ func Login(
 			AppVersion:     "1.0",
 			SystemLangCode: "en",
 			LangCode:       "en",
+		},
+		Middlewares: []telegram.Middleware{
+			rpcTimeoutMiddleware(loginRPCTimeout),
 		},
 	})
 

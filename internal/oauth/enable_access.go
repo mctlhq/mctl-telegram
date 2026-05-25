@@ -395,8 +395,20 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	es.step = stepCode
 	lf := es.flow
 
+	// phoneStart bounds the connect + SendCode round-trip that this select waits
+	// on. observePhoneStep records its duration and outcome so the
+	// SendCode-stall failure mode (the "send code timeout" below) is queryable
+	// and alertable, not just visible as a coarse audit row.
+	phoneStart := time.Now()
+	observePhoneStep := func(result string) {
+		if s.metrics != nil {
+			s.metrics.ObserveLoginPhoneStep(result, time.Since(phoneStart).Seconds())
+		}
+	}
+
 	select {
 	case <-lf.needCode:
+		observePhoneStep("ok")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "", "")
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
@@ -407,6 +419,16 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-lf.done:
 		if lf.err != nil {
+			// Mirror shortReason: a per-RPC deadline (the 25s loginRPCTimeout) or
+			// a superseded flow surfaces here as context.DeadlineExceeded/Canceled
+			// — that is the SendCode-stall the timeout alert watches, so record it
+			// as "timeout", not "error" (which is reserved for Telegram RPC errors
+			// like PHONE_NUMBER_INVALID / FLOOD_WAIT).
+			result := "error"
+			if errors.Is(lf.err, context.DeadlineExceeded) || errors.Is(lf.err, context.Canceled) {
+				result = "timeout"
+			}
+			observePhoneStep(result)
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
@@ -416,8 +438,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		}
 		// Login completed without ever asking for a code (a pre-existing
 		// auth on the session storage). Nothing more to collect.
+		observePhoneStep("ok")
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
+		observePhoneStep("timeout")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "send code timeout", "")
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
