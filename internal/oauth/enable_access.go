@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ const (
 // the channel sends are near-instant because the login goroutine is already
 // parked in askCode/askPassword by the time a handler writes to them.
 const (
-	enableSendCodeWait = 45 * time.Second
+	enableSendCodeWait = 90 * time.Second
 	enableSignInWait   = 60 * time.Second
 	enableChanSendWait = 10 * time.Second
 )
@@ -136,6 +137,24 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	go func() {
 		defer cancel()
 		defer close(lf.done)
+		// The per-step HTTP handler abandons its wait after enableSendCodeWait/
+		// enableSignInWait and logs only a coarse "timeout" to the audit, while
+		// this goroutine keeps running on bgCtx (CodeTTL). Without this it is the
+		// only place that sees the real telegram.Login error (FLOOD_WAIT, DC
+		// dial failure, RPC hang surfacing as the bgCtx deadline), so log the
+		// final outcome here regardless of whether a handler is still waiting.
+		started := time.Now()
+		defer func() {
+			if lf.err != nil {
+				slog.Error("enable: telegram login failed",
+					"uid", uid, "want_tg_id", wantTgID,
+					"elapsed", time.Since(started).String(), "err", lf.err)
+			} else {
+				slog.Info("enable: telegram login succeeded",
+					"uid", uid, "tg_id", lf.tgUserID,
+					"elapsed", time.Since(started).String())
+			}
+		}()
 		// Serialise login work for this uid. A /start re-submission cancels
 		// the prior flow and starts a new one; without this lock the cancelled
 		// predecessor — if its login RPC had already returned — could still
