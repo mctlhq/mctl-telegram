@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.38.2](https://github.com/mctlhq/mctl-telegram/compare/0.38.1...0.38.2) (2026-05-25)
+
+
+### Bug Fixes
+
+* **oauth:** log telegram login outcome and raise send-code wait to 90s ([15da019](https://github.com/mctlhq/mctl-telegram/commit/15da0197292047645d22549d2067568b6e89d22c))
+* **oauth:** log telegram login outcome and raise send-code wait to 90s ([285b1cb](https://github.com/mctlhq/mctl-telegram/commit/285b1cb377448989c8a4048742bed4d1408cb807))
+
 ## [0.38.1](https://github.com/mctlhq/mctl-telegram/compare/0.38.0...0.38.1) (2026-05-25)
 
 
