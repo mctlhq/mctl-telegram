@@ -362,6 +362,76 @@ func TestEnableAccess_ExpiredToken(t *testing.T) {
 	}
 }
 
+// getEnableSession fetches the live *enableSession for an es token (same-package
+// access) so a test can hold its lock and simulate a slow concurrent step.
+func getEnableSession(t *testing.T, srv *Server, esTok string) *enableSession {
+	t.Helper()
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	es := srv.enables[esTok]
+	if es == nil {
+		t.Fatalf("no enable session for token %q", esTok)
+	}
+	return es
+}
+
+// TestEnableAccess_ConcurrentStep_RecoversInsteadOfDeadEnd reproduces the
+// regression where a duplicate/concurrent step submit (common from in-app
+// browsers and MCP clients re-issuing a POST) lost the per-session lock race and
+// dead-ended the user on the "Sign-in interrupted" page. A submit that briefly
+// loses the race must now wait, acquire, and continue the flow.
+func TestEnableAccess_ConcurrentStep_RecoversInsteadOfDeadEnd(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	// Hold the session lock, release it shortly (well within enableLockWait):
+	// the /start submit must wait, then render the code screen — not the
+	// terminal wait page.
+	sess := getEnableSession(t, srv, es)
+	sess.lock.Lock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		sess.lock.Unlock()
+	}()
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contended start = %d (want 200 code screen); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Errorf("contended start did not render the code screen: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "still finishing") {
+		t.Errorf("duplicate submit dead-ended instead of recovering: %s", rec.Body.String())
+	}
+}
+
+// TestEnableAccess_LockHeldThroughout_ShowsNonTerminalWait confirms that when a
+// step genuinely holds the lock for the whole window (e.g. /start mid-SendCode),
+// the loser gets the non-terminal "still finishing" page rather than crashing.
+func TestEnableAccess_LockHeldThroughout_ShowsNonTerminalWait(t *testing.T) {
+	prev := enableLockWait
+	enableLockWait = 50 * time.Millisecond
+	t.Cleanup(func() { enableLockWait = prev })
+
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	sess := getEnableSession(t, srv, es)
+	sess.lock.Lock()
+	defer sess.lock.Unlock()
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("lock-held start = %d (want 400 wait page); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "still finishing") {
+		t.Errorf("expected the non-terminal wait page, got: %s", rec.Body.String())
+	}
+}
+
 // telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
 // for tgID and returns the callback response recorder. It points the fake
 // authenticator at tgID so Exchange resolves that identity.
