@@ -328,6 +328,23 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A duplicate /start that acquired the lock after the original already
+	// advanced to the code screen must NOT cancel and relaunch the live flow
+	// (that would invalidate the SMS code the user is entering and send a
+	// second one). Re-render the code screen instead. A legitimate restart
+	// after an error arrives with es.step == stepPhone (every error branch
+	// resets it via renderEnablePhoneStep), so this only catches duplicates.
+	if es.step == stepCode && es.flow != nil {
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+		})
+		return
+	}
+
 	rawPhone := r.FormValue("phone")
 	// In wizard mode the send permission was already captured by
 	// handleEnablePermissions; in non-wizard mode read it from the form.

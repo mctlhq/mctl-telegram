@@ -475,6 +475,44 @@ func TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep(t *testing.T) 
 	}
 }
 
+// TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch covers the P1
+// fix: a duplicate /start arriving after the original advanced to the code
+// screen must re-render the code screen and NOT cancel/relaunch the live login
+// flow (which would invalidate the user's SMS code and send a second one).
+func TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	// First /start advances to the code screen.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("first start did not reach the code screen: %d", rec.Code)
+	}
+	sess := getEnableSession(t, srv, es)
+	flowBefore := sess.flow
+
+	// Duplicate /start at stepCode: re-render the code screen, leave the live
+	// flow untouched.
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("duplicate start did not re-render the code screen: %d %s", rec.Code, rec.Body.String())
+	}
+	if sess.flow != flowBefore {
+		t.Errorf("duplicate start relaunched the login flow (flow pointer changed)")
+	}
+	if sess.step != stepCode {
+		t.Errorf("es.step = %v, want stepCode", sess.step)
+	}
+
+	// The original code submission still succeeds against the un-cancelled flow.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusFound {
+		t.Fatalf("code after duplicate start = %d (want 302)", rec.Code)
+	}
+}
+
 // telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
 // for tgID and returns the callback response recorder. It points the fake
 // authenticator at tgID so Exchange resolves that identity.
