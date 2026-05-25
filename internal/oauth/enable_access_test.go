@@ -432,6 +432,49 @@ func TestEnableAccess_LockHeldThroughout_ShowsNonTerminalWait(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep covers the P2
+// fix: a duplicate /code submit arriving after the original advanced to the
+// password step must re-render the password screen WITHOUT resetting es.step to
+// stepPhone — otherwise the real user's password submission would be bounced
+// back to the phone screen.
+func TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(true, nil)) // 2FA path
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK {
+		t.Fatalf("start: %d", rec.Code)
+	}
+	// First /code advances to the password screen.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("first code did not reach the password screen: %d", rec.Code)
+	}
+
+	sess := getEnableSession(t, srv, es)
+
+	// Duplicate /code now (es.step is already stepPassword): must re-render the
+	// password screen, not bounce to phone, and must not reset es.step.
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("duplicate code did not re-render the password screen: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "enable_access/start") {
+		t.Errorf("duplicate code bounced back to the phone screen")
+	}
+	if sess.step != stepPassword {
+		t.Errorf("es.step = %v, want stepPassword (duplicate must not reset it)", sess.step)
+	}
+
+	// The real user's password submission must still succeed.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}}); rec.Code != http.StatusFound {
+		t.Fatalf("password after duplicate code = %d (want 302)", rec.Code)
+	}
+}
+
 // telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
 // for tgID and returns the callback response recorder. It points the fake
 // authenticator at tgID so Exchange resolves that identity.
