@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.38.1](https://github.com/mctlhq/mctl-telegram/compare/0.38.0...0.38.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* **oauth:** don't reset es.step when a duplicate code/password submit races ([4343645](https://github.com/mctlhq/mctl-telegram/commit/4343645edc1f172cfd806f2a162d187cb2aaaa83))
+* **oauth:** guard handleEnableStart against duplicate /start cancelling live flow ([ef27626](https://github.com/mctlhq/mctl-telegram/commit/ef276269061219897ff7b150c442876bcad3f83c))
+* **oauth:** recover from concurrent enable-step submits instead of dead-ending ([00e2683](https://github.com/mctlhq/mctl-telegram/commit/00e2683eee7e708f8ceb9f0f6afdc624c42c0bdf))
+* **oauth:** recover from concurrent enable-step submits instead of dead-ending ([1f9995c](https://github.com/mctlhq/mctl-telegram/commit/1f9995cdc0f31127f6aa24b797dbef8031e4668f))
+
 ## [0.38.0](https://github.com/mctlhq/mctl-telegram/compare/0.37.2...0.38.0) (2026-05-25)
 
 
