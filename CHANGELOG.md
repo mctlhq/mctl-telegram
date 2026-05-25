@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.36.0](https://github.com/mctlhq/mctl-telegram/compare/0.35.1...0.36.0) (2026-05-25)
+
+
+### Features
+
+* **mcp:** force dry-run for reviewer/demo account sends ([ecc3459](https://github.com/mctlhq/mctl-telegram/commit/ecc345946e3e2e1a82c5bc47c188f636efdfe124))
+* **mcp:** force dry-run for the reviewer/demo account's sends ([8b10a4d](https://github.com/mctlhq/mctl-telegram/commit/8b10a4da1ec76439abb70ff5eb66fac3b222fb38))
+
 ## [0.35.1](https://github.com/mctlhq/mctl-telegram/compare/0.35.0...0.35.1) (2026-05-24)
 
 
