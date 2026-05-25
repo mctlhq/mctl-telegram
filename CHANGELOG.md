@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.39.0](https://github.com/mctlhq/mctl-telegram/compare/0.38.2...0.39.0) (2026-05-25)
+
+
+### Features
+
+* **telegram:** bound login RPCs and instrument the SendCode step ([6273c78](https://github.com/mctlhq/mctl-telegram/commit/6273c78183a726b008e74e0794b4ec2c71ff6163))
+* **telegram:** bound login RPCs and instrument the SendCode step ([d4a4ae5](https://github.com/mctlhq/mctl-telegram/commit/d4a4ae59f5b5aa6e829f7165c6d65269c9a955c4))
+
+
+### Bug Fixes
+
+* **oauth:** classify per-RPC deadline as timeout so the stall alert fires ([0e6e196](https://github.com/mctlhq/mctl-telegram/commit/0e6e196606661e517f3f9fe8c270103875806e20))
+
 ## [0.38.2](https://github.com/mctlhq/mctl-telegram/compare/0.38.1...0.38.2) (2026-05-25)
 
 
