@@ -362,6 +362,157 @@ func TestEnableAccess_ExpiredToken(t *testing.T) {
 	}
 }
 
+// getEnableSession fetches the live *enableSession for an es token (same-package
+// access) so a test can hold its lock and simulate a slow concurrent step.
+func getEnableSession(t *testing.T, srv *Server, esTok string) *enableSession {
+	t.Helper()
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	es := srv.enables[esTok]
+	if es == nil {
+		t.Fatalf("no enable session for token %q", esTok)
+	}
+	return es
+}
+
+// TestEnableAccess_ConcurrentStep_RecoversInsteadOfDeadEnd reproduces the
+// regression where a duplicate/concurrent step submit (common from in-app
+// browsers and MCP clients re-issuing a POST) lost the per-session lock race and
+// dead-ended the user on the "Sign-in interrupted" page. A submit that briefly
+// loses the race must now wait, acquire, and continue the flow.
+func TestEnableAccess_ConcurrentStep_RecoversInsteadOfDeadEnd(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	// Hold the session lock, release it shortly (well within enableLockWait):
+	// the /start submit must wait, then render the code screen — not the
+	// terminal wait page.
+	sess := getEnableSession(t, srv, es)
+	sess.lock.Lock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		sess.lock.Unlock()
+	}()
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contended start = %d (want 200 code screen); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Errorf("contended start did not render the code screen: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "still finishing") {
+		t.Errorf("duplicate submit dead-ended instead of recovering: %s", rec.Body.String())
+	}
+}
+
+// TestEnableAccess_LockHeldThroughout_ShowsNonTerminalWait confirms that when a
+// step genuinely holds the lock for the whole window (e.g. /start mid-SendCode),
+// the loser gets the non-terminal "still finishing" page rather than crashing.
+func TestEnableAccess_LockHeldThroughout_ShowsNonTerminalWait(t *testing.T) {
+	prev := enableLockWait
+	enableLockWait = 50 * time.Millisecond
+	t.Cleanup(func() { enableLockWait = prev })
+
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	sess := getEnableSession(t, srv, es)
+	sess.lock.Lock()
+	defer sess.lock.Unlock()
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("lock-held start = %d (want 400 wait page); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "still finishing") {
+		t.Errorf("expected the non-terminal wait page, got: %s", rec.Body.String())
+	}
+}
+
+// TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep covers the P2
+// fix: a duplicate /code submit arriving after the original advanced to the
+// password step must re-render the password screen WITHOUT resetting es.step to
+// stepPhone — otherwise the real user's password submission would be bounced
+// back to the phone screen.
+func TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(true, nil)) // 2FA path
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK {
+		t.Fatalf("start: %d", rec.Code)
+	}
+	// First /code advances to the password screen.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("first code did not reach the password screen: %d", rec.Code)
+	}
+
+	sess := getEnableSession(t, srv, es)
+
+	// Duplicate /code now (es.step is already stepPassword): must re-render the
+	// password screen, not bounce to phone, and must not reset es.step.
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("duplicate code did not re-render the password screen: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "enable_access/start") {
+		t.Errorf("duplicate code bounced back to the phone screen")
+	}
+	if sess.step != stepPassword {
+		t.Errorf("es.step = %v, want stepPassword (duplicate must not reset it)", sess.step)
+	}
+
+	// The real user's password submission must still succeed.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}}); rec.Code != http.StatusFound {
+		t.Fatalf("password after duplicate code = %d (want 302)", rec.Code)
+	}
+}
+
+// TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch covers the P1
+// fix: a duplicate /start arriving after the original advanced to the code
+// screen must re-render the code screen and NOT cancel/relaunch the live login
+// flow (which would invalidate the user's SMS code and send a second one).
+func TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	// First /start advances to the code screen.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("first start did not reach the code screen: %d", rec.Code)
+	}
+	sess := getEnableSession(t, srv, es)
+	flowBefore := sess.flow
+
+	// Duplicate /start at stepCode: re-render the code screen, leave the live
+	// flow untouched.
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("duplicate start did not re-render the code screen: %d %s", rec.Code, rec.Body.String())
+	}
+	if sess.flow != flowBefore {
+		t.Errorf("duplicate start relaunched the login flow (flow pointer changed)")
+	}
+	if sess.step != stepCode {
+		t.Errorf("es.step = %v, want stepCode", sess.step)
+	}
+
+	// The original code submission still succeeds against the un-cancelled flow.
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusFound {
+		t.Fatalf("code after duplicate start = %d (want 302)", rec.Code)
+	}
+}
+
 // telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
 // for tgID and returns the callback response recorder. It points the fake
 // authenticator at tgID so Exchange resolves that identity.

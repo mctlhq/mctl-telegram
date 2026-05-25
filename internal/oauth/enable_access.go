@@ -41,6 +41,16 @@ const (
 	enableChanSendWait = 10 * time.Second
 )
 
+// enableLockWait bounds how long a concurrent/duplicate step submit waits for
+// the per-session lock before giving up. The mutating steps hold the lock only
+// for microseconds; only handleEnableStart holds it longer (during the MTProto
+// SendCode round-trip). Waiting briefly lets a duplicate submit — common from
+// in-app browsers and MCP clients that re-issue a POST — resolve and continue
+// the flow instead of dead-ending the user on an error page. A var so tests can
+// shrink it — tests that override it must run sequentially (no t.Parallel), as
+// it is read without synchronisation.
+var enableLockWait = 2 * time.Second
+
 // enableSession is the server-side state of one in-browser enable_access flow,
 // keyed by an unguessable "es" token minted at the Telegram callback. It carries
 // the OAuth context so the flow can resume the authorization-code dance once
@@ -51,10 +61,10 @@ type enableSession struct {
 	tgID      int64 // Telegram user id, == oc.TelegramID
 	createdAt time.Time
 
-	// lock serialises handlers for this session: each handler TryLocks it
-	// for the duration of one step. A concurrent double-submit fails the
-	// TryLock and is told to wait, so step/flow below need no further
-	// synchronisation between handlers.
+	// lock serialises handlers for this session: each handler holds it for
+	// the duration of one step (acquired via acquireStepLock, which waits
+	// briefly so a concurrent double-submit resolves instead of dead-ending),
+	// so step/flow below need no further synchronisation between handlers.
 	lock      sync.Mutex
 	step      enableStep
 	phone     string
@@ -199,6 +209,32 @@ func (es *enableSession) isWizardMode() bool {
 	return es.oc.ClientID == ConnectClientID
 }
 
+// acquireStepLock waits up to enableLockWait for the session lock, polling so a
+// duplicate or concurrent step submit does not dead-end the user. The
+// permissions step releases the lock in microseconds; handleEnableStart/Code/
+// Password hold it across their MTProto round-trip. On acquiring, the handler
+// runs normally and its es.step guard re-renders the correct screen for the
+// current step (without resetting it). It returns false only when the lock is
+// held for the whole window — e.g. a step still awaiting Telegram — in which
+// case the caller shows a non-terminal "still finishing" page; it also returns
+// false if the request is cancelled. The caller owns the unlock on success.
+func (es *enableSession) acquireStepLock(ctx context.Context) bool {
+	deadline := time.Now().Add(enableLockWait)
+	for {
+		if es.lock.TryLock() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
 // handleEnablePermissions receives the permissions choice (read-only vs
 // read+send), records the opt-in, and advances to the phone screen.
 func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request) {
@@ -207,8 +243,8 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 		renderEnableError(w, "This sign-in session has expired. Close this page and reconnect from your MCP client.")
 		return
 	}
-	if !es.lock.TryLock() {
-		renderEnableError(w, "Another step of this sign-in is still in progress. Wait a moment, then retry.")
+	if !es.acquireStepLock(r.Context()) {
+		renderEnableError(w, "The previous step is still finishing — it can take a moment while Telegram responds. Wait, then resubmit.")
 		return
 	}
 	defer es.lock.Unlock()
@@ -281,14 +317,31 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		renderEnableError(w, "This sign-in session has expired. Close this page and reconnect from your MCP client.")
 		return
 	}
-	if !es.lock.TryLock() {
-		renderEnableError(w, "Another step of this sign-in is still in progress. Wait a moment, then retry.")
+	if !es.acquireStepLock(r.Context()) {
+		renderEnableError(w, "The previous step is still finishing — it can take a moment while Telegram responds. Wait, then resubmit.")
 		return
 	}
 	defer es.lock.Unlock()
 
 	if s.cfg.TGAPIID == 0 || s.cfg.TGAPIHash == "" {
 		renderEnableError(w, "This server is not configured for in-browser Telegram login. Contact the operator.")
+		return
+	}
+
+	// A duplicate /start that acquired the lock after the original already
+	// advanced to the code screen must NOT cancel and relaunch the live flow
+	// (that would invalidate the SMS code the user is entering and send a
+	// second one). Re-render the code screen instead. A legitimate restart
+	// after an error arrives with es.step == stepPhone (every error branch
+	// resets it via renderEnablePhoneStep), so this only catches duplicates.
+	if es.step == stepCode && es.flow != nil {
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+		})
 		return
 	}
 
@@ -362,13 +415,26 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		renderEnableError(w, "This sign-in session has expired. Close this page and reconnect from your MCP client.")
 		return
 	}
-	if !es.lock.TryLock() {
-		renderEnableError(w, "Another step of this sign-in is still in progress. Wait a moment, then retry.")
+	if !es.acquireStepLock(r.Context()) {
+		renderEnableError(w, "The previous step is still finishing — it can take a moment while Telegram responds. Wait, then resubmit.")
 		return
 	}
 	defer es.lock.Unlock()
 
 	if es.step != stepCode || es.flow == nil {
+		// A duplicate submit that acquired the lock after the original advanced
+		// to stepPassword must re-render the password screen — NOT call
+		// renderEnablePhoneStep, which writes es.step = stepPhone and would
+		// bounce the real user back to the phone screen on their next submit.
+		if es.step == stepPassword {
+			renderEnablePassword(w, enablePasswordPage{
+				Issuer:      s.cfg.Issuer,
+				EnableToken: esTok,
+				WizardMode:  es.isWizardMode(),
+				WizardStep:  3,
+			})
+			return
+		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
@@ -439,13 +505,20 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		renderEnableError(w, "This sign-in session has expired. Close this page and reconnect from your MCP client.")
 		return
 	}
-	if !es.lock.TryLock() {
-		renderEnableError(w, "Another step of this sign-in is still in progress. Wait a moment, then retry.")
+	if !es.acquireStepLock(r.Context()) {
+		renderEnableError(w, "The previous step is still finishing — it can take a moment while Telegram responds. Wait, then resubmit.")
 		return
 	}
 	defer es.lock.Unlock()
 
 	if es.step != stepPassword || es.flow == nil {
+		// If the original request already finished the sign-in (stepDone), a
+		// late duplicate must not reset es.step; the session is done. The real
+		// user already has their authorization code.
+		if es.step == stepDone {
+			renderEnableError(w, "This sign-in already completed. Return to your MCP client.")
+			return
+		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
