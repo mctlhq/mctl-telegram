@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/mctlhq/mctl-telegram/compare/0.37.2...0.38.0) (2026-05-25)
+
+
+### Features
+
+* **agents:** issue-202-mctl-telegram-canary-cronjob-stuck-on-im ([#211](https://github.com/mctlhq/mctl-telegram/issues/211)) ([9d77c82](https://github.com/mctlhq/mctl-telegram/commit/9d77c826b90b9cc610d653b8ac83208f6d4d0ae5))
+
 ## [0.37.2](https://github.com/mctlhq/mctl-telegram/compare/0.37.1...0.37.2) (2026-05-25)
 
 
