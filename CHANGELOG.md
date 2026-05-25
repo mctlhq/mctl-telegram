@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.1](https://github.com/mctlhq/mctl-telegram/compare/0.37.0...0.37.1) (2026-05-25)
+
+
+### Miscellaneous Chores
+
+* release 0.37.1 ([56a0446](https://github.com/mctlhq/mctl-telegram/commit/56a0446c1fb82713d09415338a904d3ae960e87f))
+
 ## [0.37.0](https://github.com/mctlhq/mctl-telegram/compare/0.36.0...0.37.0) (2026-05-25)
 
 
