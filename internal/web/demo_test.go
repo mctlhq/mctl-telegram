@@ -55,6 +55,20 @@ func TestDemo_Placeholder(t *testing.T) {
 	}
 }
 
+func TestDemoWalkthrough(t *testing.T) {
+	w := httptest.NewRecorder()
+	DemoWalkthrough().ServeHTTP(w, httptest.NewRequest("GET", "/demo/walkthrough.mp4", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4", ct)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("expected non-empty video body")
+	}
+}
+
 func TestDemo_YouTubeEmbed(t *testing.T) {
 	w := httptest.NewRecorder()
 	Demo("https://tg.mctl.ai", "https://youtu.be/dQw4w9WgXcQ").ServeHTTP(w, httptest.NewRequest("GET", "/demo", nil))

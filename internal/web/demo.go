@@ -1,11 +1,13 @@
 package web
 
 import (
+	"bytes"
 	_ "embed"
 	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
@@ -13,7 +15,27 @@ import (
 //go:embed demo.html
 var demoHTML string
 
+//go:embed walkthrough.mp4
+var demoWalkthroughMP4 []byte
+
 var demoTmpl = ui.New("demo", demoHTML)
+
+// demoWalkthroughModTime is a fixed timestamp so http.ServeContent can emit a
+// stable Last-Modified / conditional-request response for the embedded video.
+var demoWalkthroughModTime = time.Date(2026, time.May, 25, 0, 0, 0, 0, time.UTC)
+
+// DemoWalkthrough serves the embedded screen-recorded walkthrough as an mp4 at
+// /demo/walkthrough.mp4. Anonymous-accessible like the /demo page itself.
+// http.ServeContent handles range requests, Content-Length, and conditional
+// GETs; the Content-Type is fixed to video/mp4 and the response is cached
+// aggressively since the bytes are baked into the binary.
+func DemoWalkthrough() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeContent(w, r, "walkthrough.mp4", demoWalkthroughModTime, bytes.NewReader(demoWalkthroughMP4))
+	}
+}
 
 // Video-kind discriminators rendered by demo.html. "none" shows the
 // placeholder; the others select an iframe / <video> / plain link.

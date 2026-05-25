@@ -167,6 +167,7 @@ func main() {
 	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL))
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL))
 	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL))
+	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())
 	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer))
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
