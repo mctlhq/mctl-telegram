@@ -242,6 +242,12 @@ func main() {
 	}()
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache)
+	// Force the reviewer/demo account's sends to dry-run previews. Only armed
+	// when reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
+	// silently gag a real account once the review feature is turned off.
+	if cfg.DemoReviewerEnabled {
+		mcpSrv = mcpSrv.WithDemoReviewer(cfg.DemoReviewerTGID)
+	}
 
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
 	// a short-lived bridge JWT (aud=bridge, 1h TTL) that the local daemon
