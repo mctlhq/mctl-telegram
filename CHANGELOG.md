@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.37.2](https://github.com/mctlhq/mctl-telegram/compare/0.37.1...0.37.2) (2026-05-25)
+
+
+### Features
+
+* **web:** refresh /demo walkthrough video (full 8-step run) ([51cab8c](https://github.com/mctlhq/mctl-telegram/commit/51cab8cef21db9d2008bcdbc8b86631f558695f7))
+* **web:** refresh /demo walkthrough video (full 8-step run) ([a86cde1](https://github.com/mctlhq/mctl-telegram/commit/a86cde1691c2e142539ac10a4e8832912b3353c0))
+
+
+### Miscellaneous Chores
+
+* force release for refreshed /demo walkthrough video ([829d55a](https://github.com/mctlhq/mctl-telegram/commit/829d55aeb91d7a895551a7ab6dd5739cfc8c5f64))
+
 ## [0.37.1](https://github.com/mctlhq/mctl-telegram/compare/0.37.0...0.37.1) (2026-05-25)
 
 
