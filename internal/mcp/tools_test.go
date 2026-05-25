@@ -124,8 +124,16 @@ func TestEvaluateSendGate_ReviewerForcedDryRun(t *testing.T) {
 	if real {
 		t.Fatal("reviewer identity must be forced to dry-run despite send_enabled=true")
 	}
-	if reason == "" {
-		t.Fatal("expected a dry-run reason for the reviewer account")
+	if !strings.Contains(reason, "preview-only") {
+		t.Fatalf("expected the reviewer-specific dry-run reason, got %q", reason)
+	}
+
+	// The reviewer check runs ahead of the ALLOW_SEND guard, so even with the
+	// server flag off the reviewer sees the reviewer-specific reason, not a
+	// generic one.
+	real, reason = evaluateSendGate(ctx, s, id, false, reviewerTGID)
+	if real || !strings.Contains(reason, "preview-only") {
+		t.Fatalf("reviewer reason must take precedence over ALLOW_SEND=false (real=%v reason=%q)", real, reason)
 	}
 
 	// A non-reviewer identity on the same server (reviewer mode armed) is

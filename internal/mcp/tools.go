@@ -972,20 +972,22 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 }
 
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64) (real bool, reason string) {
-	if !allowSend {
-		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
-	}
 	if id == nil {
 		return false, "no authenticated identity (send requires auth)"
 	}
-	// Reviewer/demo account: force a dry-run preview unconditionally, before any
-	// other check. This is independent of the per-account send_enabled flag,
-	// which the in-browser connect flow re-enables on every reconnect, and of
-	// the MCP client's own write-confirmation UI, which ChatGPT may auto-resolve.
-	// Tying the guarantee to the reviewer identity is the only dependable way to
-	// keep the App Directory reviewer's sends preview-only.
+	// Reviewer/demo account: force a dry-run preview unconditionally, ahead of
+	// every other check, so the reviewer always sees the preview-only reason
+	// (not a generic ALLOW_SEND/scope message). This is independent of the
+	// per-account send_enabled flag, which the in-browser connect flow re-enables
+	// on every reconnect, and of the MCP client's own write-confirmation UI,
+	// which ChatGPT may auto-resolve. Tying the guarantee to the reviewer
+	// identity is the only dependable way to keep the App Directory reviewer's
+	// sends preview-only.
 	if demoReviewerTGID != 0 && id.TelegramID == demoReviewerTGID {
 		return false, "reviewer/demo account — sending is preview-only; no message is delivered"
+	}
+	if !allowSend {
+		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
 	}
 	if !id.HasScope("telegram:messages:send") {
 		return false, "identity missing telegram:messages:send scope"
