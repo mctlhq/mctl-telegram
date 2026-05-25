@@ -40,7 +40,7 @@ spec:
               The canary CronJob has not successfully pushed metrics to
               Pushgateway in the last 10 minutes (schedule is */2 * * * *).
               The CronJob may be failing to start or complete. Check pod logs
-              and CronJob status in the mctl-telegram namespace.
+              and CronJob status in the labs namespace.
               Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md
         - alert: MctlTelegramCanaryAbsent
           expr: absent_over_time(mctl_telegram_canary_success[15m])
