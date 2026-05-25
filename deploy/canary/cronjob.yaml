@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: mctl-telegram-canary
-  namespace: mctl-telegram
+  namespace: labs
 spec:
   schedule: "*/2 * * * *"
   concurrencyPolicy: Forbid
@@ -13,13 +13,15 @@ spec:
       activeDeadlineSeconds: 120
       template:
         spec:
+          imagePullSecrets:
+            - name: ghcr-credentials
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
           containers:
             - name: canary
-              image: ghcr.io/mctlhq/mctl-telegram:0.23.1
+              image: ghcr.io/mctlhq/mctl-telegram:0.37.2
               command: ["/usr/local/bin/mctl-telegram-canary"]
               securityContext:
                 allowPrivilegeEscalation: false
