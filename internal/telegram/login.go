@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/gotd/td/session"
@@ -51,7 +52,13 @@ func Login(
 		password: askPassword,
 	}
 
+	// Breadcrumbs to localise where a stuck login hangs: the enable_access
+	// handler only records a coarse "send code timeout" in the audit, so these
+	// distinguish a dial/handshake hang (never reach "connection established")
+	// from a SendCode hang (established, but the auth flow never returns).
+	slog.InfoContext(ctx, "telegram login: connecting to telegram", "user_id", userID)
 	runErr := client.Run(ctx, func(ctx context.Context) error {
+		slog.InfoContext(ctx, "telegram login: connection established, running auth flow", "user_id", userID)
 		_, authErr := client.Auth().Status(ctx)
 		if authErr != nil {
 			// Fresh session — proceed with flow.

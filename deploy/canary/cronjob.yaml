@@ -4,6 +4,11 @@ metadata:
   name: mctl-telegram-canary
   namespace: labs
 spec:
+  # Suspended while debugging the enable_access SendCode timeout: the every-2-min
+  # list_dialogs probe shares the server's Telegram egress IP, and we are ruling
+  # out whether it contributes to new-login SendCode throttling. Re-enable
+  # (suspend: false) once the login hang is diagnosed.
+  suspend: true
   schedule: "*/2 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
