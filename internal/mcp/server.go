@@ -32,6 +32,13 @@ type Server struct {
 	// PeerCache is an optional in-memory cache for resolved Telegram peers.
 	// When nil (default), every call resolves the peer fresh via the Telegram API.
 	PeerCache *telegram.PeerCache
+	// DemoReviewerTGID, when non-zero, forces every send from that Telegram
+	// identity to a dry-run preview regardless of the per-account send_enabled
+	// flag (set by WithDemoReviewer only when reviewer mode is enabled). This is
+	// the authoritative barrier for the ChatGPT App Directory reviewer account:
+	// the connect flow re-enables send_enabled and ChatGPT may auto-execute the
+	// send tool, so neither is a dependable preview-only guarantee on its own.
+	DemoReviewerTGID int64
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -70,6 +77,14 @@ func (s *Server) WithMetrics(m *metrics.Registry) *Server {
 // ContactsResolveUsername calls. Returns the receiver for chaining.
 func (s *Server) WithPeerCache(pc *telegram.PeerCache) *Server {
 	s.PeerCache = pc
+	return s
+}
+
+// WithDemoReviewer pins the demo/reviewer Telegram id whose sends are forced to
+// dry-run previews. Pass 0 (the default) to disable. Returns the receiver for
+// chaining.
+func (s *Server) WithDemoReviewer(tgID int64) *Server {
+	s.DemoReviewerTGID = tgID
 	return s
 }
 

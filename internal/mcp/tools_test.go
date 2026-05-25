@@ -30,7 +30,7 @@ func newToolsTestStore(t *testing.T) *db.Store {
 
 func TestEvaluateSendGate_ServerFlagOff(t *testing.T) {
 	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
-	real, reason := evaluateSendGate(context.Background(), nil, id, false)
+	real, reason := evaluateSendGate(context.Background(), nil, id, false, 0)
 	if real {
 		t.Fatal("ALLOW_SEND=false must block real send")
 	}
@@ -41,7 +41,7 @@ func TestEvaluateSendGate_ServerFlagOff(t *testing.T) {
 
 func TestEvaluateSendGate_MissingScope(t *testing.T) {
 	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
-	real, reason := evaluateSendGate(context.Background(), nil, id, true)
+	real, reason := evaluateSendGate(context.Background(), nil, id, true, 0)
 	if real {
 		t.Fatal("missing send scope must block real send")
 	}
@@ -65,7 +65,7 @@ func TestEvaluateSendGate_PerAccountFlagOff(t *testing.T) {
 	}
 
 	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
-	real, reason := evaluateSendGate(ctx, s, id, true)
+	real, reason := evaluateSendGate(ctx, s, id, true, 0)
 	if real {
 		t.Fatal("per-account send_enabled=false must block real send")
 	}
@@ -89,12 +89,59 @@ func TestEvaluateSendGate_AllChecksPass(t *testing.T) {
 	}
 
 	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
-	real, reason := evaluateSendGate(ctx, s, id, true)
+	real, reason := evaluateSendGate(ctx, s, id, true, 0)
 	if !real {
 		t.Fatalf("all gates passed but real=false (reason=%q)", reason)
 	}
 	if reason != "" {
 		t.Fatalf("expected empty reason on success, got %q", reason)
+	}
+}
+
+// TestEvaluateSendGate_ReviewerForcedDryRun proves the reviewer/demo identity is
+// forced to a dry-run preview even when every other gate is wide open
+// (ALLOW_SEND=true, send scope present, per-account send_enabled=true). This is
+// the App Directory safety guarantee: the connect flow re-enables send_enabled
+// and ChatGPT can auto-execute the send tool, so only the reviewer-identity
+// check keeps the demo account's sends preview-only.
+func TestEvaluateSendGate_ReviewerForcedDryRun(t *testing.T) {
+	const reviewerTGID int64 = 8745115872
+	ctx := context.Background()
+	s := newToolsTestStore(t)
+	uid, err := s.EnsureUser(ctx, "reviewer", "", "test")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, send_enabled) VALUES($1, $2, $3)`,
+		uid, []byte("blob"), true,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	id := &auth.Identity{UserID: uid, TelegramID: reviewerTGID, Scopes: []string{"telegram:messages:send"}}
+	real, reason := evaluateSendGate(ctx, s, id, true, reviewerTGID)
+	if real {
+		t.Fatal("reviewer identity must be forced to dry-run despite send_enabled=true")
+	}
+	if !strings.Contains(reason, "preview-only") {
+		t.Fatalf("expected the reviewer-specific dry-run reason, got %q", reason)
+	}
+
+	// The reviewer check runs ahead of the ALLOW_SEND guard, so even with the
+	// server flag off the reviewer sees the reviewer-specific reason, not a
+	// generic one.
+	real, reason = evaluateSendGate(ctx, s, id, false, reviewerTGID)
+	if real || !strings.Contains(reason, "preview-only") {
+		t.Fatalf("reviewer reason must take precedence over ALLOW_SEND=false (real=%v reason=%q)", real, reason)
+	}
+
+	// A non-reviewer identity on the same server (reviewer mode armed) is
+	// unaffected: its sends still pass when its own gates are open.
+	other := &auth.Identity{UserID: uid, TelegramID: 210408407, Scopes: []string{"telegram:messages:send"}}
+	real, _ = evaluateSendGate(ctx, s, other, true, reviewerTGID)
+	if !real {
+		t.Fatal("non-reviewer identity must not be gagged by reviewer mode")
 	}
 }
 
