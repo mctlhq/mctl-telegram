@@ -125,12 +125,17 @@ func TestObserveLoginPhoneStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
+	var found bool
 	for _, mf := range mfs {
 		if mf.GetName() == "mctl_login_phone_to_code_duration_seconds" {
+			found = true
 			if got := mf.GetMetric()[0].GetHistogram().GetSampleCount(); got != 1 {
 				t.Errorf("histogram sample count = %d, want 1 (ok only)", got)
 			}
 		}
+	}
+	if !found {
+		t.Error("mctl_login_phone_to_code_duration_seconds not found in gathered output")
 	}
 }
 

@@ -419,7 +419,16 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-lf.done:
 		if lf.err != nil {
-			observePhoneStep("error")
+			// Mirror shortReason: a per-RPC deadline (the 25s loginRPCTimeout) or
+			// a superseded flow surfaces here as context.DeadlineExceeded/Canceled
+			// — that is the SendCode-stall the timeout alert watches, so record it
+			// as "timeout", not "error" (which is reserved for Telegram RPC errors
+			// like PHONE_NUMBER_INVALID / FLOOD_WAIT).
+			result := "error"
+			if errors.Is(lf.err, context.DeadlineExceeded) || errors.Is(lf.err, context.Canceled) {
+				result = "timeout"
+			}
+			observePhoneStep(result)
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
