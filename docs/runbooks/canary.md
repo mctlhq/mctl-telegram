@@ -32,8 +32,8 @@ failure pushes `0` and increments
    instant value — 1 means the step failed in the last run.)
 2. Inspect the most recent CronJob pod logs:
    ```sh
-   kubectl -n mctl-telegram get pods -l job-name --sort-by=.metadata.creationTimestamp | tail
-   kubectl -n mctl-telegram logs <pod-name>
+   kubectl -n labs get pods -l job-name --sort-by=.metadata.creationTimestamp | tail
+   kubectl -n labs logs <pod-name>
    ```
    The canary logs each step with `slog` JSON and includes the HTTP
    status / RPC error inline.
@@ -67,7 +67,7 @@ failure pushes `0` and increments
   see related alerts).
 - **Stop the canary while debugging** — suspend the CronJob:
   ```sh
-  kubectl -n mctl-telegram patch cronjob mctl-telegram-canary \
+  kubectl -n labs patch cronjob mctl-telegram-canary \
     --type merge -p '{"spec":{"suspend":true}}'
   ```
   Unsuspend after the underlying issue is resolved.
