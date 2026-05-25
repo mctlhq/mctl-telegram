@@ -213,10 +213,11 @@ func (es *enableSession) isWizardMode() bool {
 // steps release the lock in microseconds, so the common case (an in-app browser
 // re-issuing a POST) acquires almost immediately and the handler then runs
 // normally — the per-step es.step guards turn a stale duplicate into a harmless
-// re-render of the right screen. It returns false only when another step
-// genuinely holds the lock for the whole window (e.g. a /start still contacting
-// Telegram), in which case the caller shows a non-terminal "still finishing"
-// page. The caller owns the unlock on success.
+// re-render of the right screen. It returns false only when the lock is held
+// for the whole window — e.g. handleEnableStart awaiting SendCode, or
+// handleEnableCode/handleEnablePassword awaiting SignIn — in which case the
+// caller shows a non-terminal "still finishing" page. The caller owns the
+// unlock on success.
 func (es *enableSession) acquireStepLock() bool {
 	deadline := time.Now().Add(enableLockWait)
 	for {
