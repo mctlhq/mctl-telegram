@@ -281,7 +281,12 @@ func main() {
 	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
-	mux.Mount(cfg.MCPPath, web.BrowserRedirect(mcpHandler, "/"))
+	// OriginGuard runs before auth: a present browser Origin must be on the
+	// allowlist (DNS-rebinding protection); no-Origin server-to-server clients
+	// pass through. BrowserRedirect stays outermost so human GETs still land on
+	// the instructions page.
+	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
+	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
