@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.40.0](https://github.com/mctlhq/mctl-telegram/compare/0.39.0...0.40.0) (2026-05-26)
+
+
+### Features
+
+* **mcp:** explicit tool annotations + ChatGPT Apps submission readiness ([a121f5a](https://github.com/mctlhq/mctl-telegram/commit/a121f5af7fdee5f4c33eff5899e0fb54627d8ee3))
+* **mcp:** explicit tool annotations and ChatGPT Apps submission readiness ([d59c45a](https://github.com/mctlhq/mctl-telegram/commit/d59c45a2076329a87803fa5eeee4eef4777ea0e7))
+
 ## [0.39.0](https://github.com/mctlhq/mctl-telegram/compare/0.38.2...0.39.0) (2026-05-25)
 
 
