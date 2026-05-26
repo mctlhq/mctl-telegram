@@ -52,6 +52,7 @@ func main() {
 		"allow_send", cfg.AllowSend,
 		"mcp_path", cfg.MCPPath,
 		"addr", cfg.Addr,
+		"allowed_origins", cfg.AllowedOrigins,
 		"telegram_configured", cfg.TGAPIID != 0 && cfg.TGAPIHash != "",
 	)
 

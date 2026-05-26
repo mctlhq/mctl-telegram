@@ -147,6 +147,10 @@ func Load() (*Config, error) {
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
 			c.AllowedOrigins = []string{origin}
+		} else {
+			slog.Warn("ALLOWED_ORIGINS is empty and PUBLIC_BASE_URL has no parseable origin; "+
+				"the /mcp Origin guard is disabled (all origins allowed)",
+				"public_base_url", c.PublicBaseURL)
 		}
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
@@ -294,8 +298,6 @@ func parseInt64CSV(s string) []int64 {
 	return parts
 }
 
-// parseStringCSV splits a comma-separated list, trimming whitespace and
-// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS.
 // originOf returns the scheme://host[:port] origin of a base URL, matching the
 // shape of a browser Origin header. Returns "" if rawURL has no scheme/host.
 func originOf(rawURL string) string {
@@ -306,6 +308,8 @@ func originOf(rawURL string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// parseStringCSV splits a comma-separated list, trimming whitespace and
+// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS and ALLOWED_ORIGINS.
 func parseStringCSV(s string) []string {
 	if s == "" {
 		return nil
