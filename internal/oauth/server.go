@@ -1064,6 +1064,27 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// When open registration is on (AutoApproveClients), materialize the
+	// transient client grant to DB so admin tools reflect the real tier and
+	// revokes stay unambiguous. Only writes on first sign-in (dbTier=="");
+	// an explicit "none" set by an admin is never overwritten.
+	if s.cfg.AutoApproveClients {
+		dbTier, err := s.store.GetAccessTier(r.Context(), identity.TelegramID)
+		if err != nil {
+			slog.Error("get access tier for auto-grant failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if dbTier == "" {
+			if err := s.store.SetAccessTier(r.Context(), identity.TelegramID, db.TierClient); err != nil {
+				slog.Error("auto-set client tier failed", "telegram_id", identity.TelegramID, "err", err)
+				// non-fatal: transient grant in isClientTier still covers this user
+			} else {
+				slog.Info("auto-granted client tier on sign-in", "telegram_id", identity.TelegramID)
+			}
+		}
+	}
+
 	oc := oauthCtx{
 		ClientID:      pending.ClientID,
 		RedirectURI:   pending.RedirectURI,
