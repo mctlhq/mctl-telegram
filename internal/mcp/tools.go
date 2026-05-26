@@ -166,7 +166,8 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("list_dialogs",
 		mcplib.WithTitleAnnotation("List Telegram Dialogs"),
-		mcplib.WithReadOnlyHintAnnotation(false),
+		// readOnly=true: pure read; audit row is internal observability, enabling Claude auto-permit.
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
@@ -221,7 +222,8 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 func (s *Server) toolGetUnreadMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_unread_messages",
 		mcplib.WithTitleAnnotation("Get Unread Messages"),
-		mcplib.WithReadOnlyHintAnnotation(false),
+		// readOnly=true: pure read; audit row is internal observability, enabling Claude auto-permit.
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
@@ -374,7 +376,8 @@ func truncate(s string, n int) string {
 func (s *Server) toolGetMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_messages",
 		mcplib.WithTitleAnnotation("Get Messages"),
-		mcplib.WithReadOnlyHintAnnotation(false),
+		// readOnly=true: pure read; audit row is internal observability, enabling Claude auto-permit.
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		// Reaches Telegram (external system), like send/pin — openWorld=true.
 		mcplib.WithOpenWorldHintAnnotation(true),
