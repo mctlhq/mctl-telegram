@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +14,14 @@ type Config struct {
 	Addr               string
 	PublicBaseURL      string
 	MCPPath            string
+	// AllowedOrigins is the Origin-header allowlist for the /mcp endpoint
+	// (DNS-rebinding protection). Requests with no Origin header are always
+	// allowed — server-to-server MCP clients (claude.ai, MCP Inspector, curl)
+	// send none, and an over-strict check would break them. A present Origin
+	// must match one of these entries (scheme://host[:port]) or the request is
+	// rejected with 403. Set via ALLOWED_ORIGINS (comma-separated); defaults to
+	// the PUBLIC_BASE_URL origin.
+	AllowedOrigins []string
 	AuthMode           string
 	AuthRequired       bool
 	OperatorLogin      string
@@ -132,6 +141,16 @@ func Load() (*Config, error) {
 	if c.DemoReviewerEnabled {
 		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
+		}
+	}
+	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
+	if len(c.AllowedOrigins) == 0 {
+		if origin := originOf(c.PublicBaseURL); origin != "" {
+			c.AllowedOrigins = []string{origin}
+		} else {
+			slog.Warn("ALLOWED_ORIGINS is empty and PUBLIC_BASE_URL has no parseable origin; "+
+				"the /mcp Origin guard is disabled (all origins allowed)",
+				"public_base_url", c.PublicBaseURL)
 		}
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
@@ -279,8 +298,18 @@ func parseInt64CSV(s string) []int64 {
 	return parts
 }
 
+// originOf returns the scheme://host[:port] origin of a base URL, matching the
+// shape of a browser Origin header. Returns "" if rawURL has no scheme/host.
+func originOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // parseStringCSV splits a comma-separated list, trimming whitespace and
-// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS.
+// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS and ALLOWED_ORIGINS.
 func parseStringCSV(s string) []string {
 	if s == "" {
 		return nil

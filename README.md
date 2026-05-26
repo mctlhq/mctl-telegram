@@ -98,6 +98,7 @@ Key variables:
 | `DATABASE_URL`                | `postgres://...` or `file:./mctl-telegram.db?_pragma=journal_mode(WAL)`     |
 | `ALLOW_SEND`                  | `false` by default; set `true` only after validating the send gate          |
 | `PUBLIC_BASE_URL`             | External HTTPS base URL, e.g. `https://tg.example.com`                     |
+| `ALLOWED_ORIGINS`             | optional; comma-separated Origin allowlist for `/mcp` (DNS-rebinding protection). No-Origin requests always pass; defaults to the `PUBLIC_BASE_URL` origin |
 | `OAUTH_ACCESS_TOKEN_TTL`      | optional, default `1h`                                                      |
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
 
