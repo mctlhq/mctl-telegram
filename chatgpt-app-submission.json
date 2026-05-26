@@ -10,24 +10,24 @@
   "tools": {
     "list_dialogs": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": true,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Retrieves Telegram dialog metadata but records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only retrieval of Telegram dialog metadata; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Reads dialog metadata from Telegram, an external third-party system, but does not publish content or change Telegram state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
     },
     "get_unread_messages": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": true,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Retrieves unread Telegram messages but records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only retrieval of unread Telegram messages; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Reads message data from Telegram, an external third-party system, but does not publish content or change Telegram state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
@@ -46,12 +46,12 @@
     },
     "get_messages": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": true,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Retrieves recent Telegram messages but records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only retrieval of recent Telegram messages; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Reads message data from Telegram, an external third-party system, but does not publish content or change Telegram state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }

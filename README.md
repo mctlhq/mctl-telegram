@@ -26,9 +26,9 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 
 | Tool                          | MCP annotations | Notes |
 |-------------------------------|----------------------|-------|
-| `list_dialogs`                | `readOnly=false`, `destructive=false`, `openWorld=true` | Reads Telegram dialogs and writes audit metadata. Inputs: `limit` (≤200, default 50), optional `query`. |
-| `get_unread_messages`         | `readOnly=false`, `destructive=false`, `openWorld=true` | Reads unread Telegram messages and writes audit metadata. Inputs: optional `peer`, `limit` (≤200). |
-| `get_messages`                | `readOnly=false`, `destructive=false`, `openWorld=true` | Reads recent message history for a specific peer and writes audit metadata. |
+| `list_dialogs`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads Telegram dialogs (audit row is internal observability). Inputs: `limit` (≤200, default 50), optional `query`. |
+| `get_unread_messages`         | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads unread Telegram messages (audit row is internal observability). Inputs: optional `peer`, `limit` (≤200). |
+| `get_messages`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads recent message history for a specific peer (audit row is internal observability). |
 | `send_message`                | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `text`. Preview-only by default: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`). Otherwise returns `sent=false` with `dry_reason`; no message is delivered. |
 | `prepare_pin_message`         | `readOnly=false`, `destructive=false`, `openWorld=false` | Creates a local one-shot confirmation record for a later `pin_message` call. |
 | `pin_message`                 | `readOnly=false`, `destructive=true`, `openWorld=true` | Pins or unpins a Telegram message after a matching confirmation id. |
