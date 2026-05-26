@@ -1,0 +1,320 @@
+{
+  "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
+  "schema_version": 1,
+  "app_info": {
+    "display_name": "mctl-telegram",
+    "subtitle": "Manage Telegram chats",
+    "description": "MCTL Telegram lets users access and manage their own Telegram account from ChatGPT after explicit user authorization. It supports reading recent chats, summarizing messages, drafting replies, preview-only sending by default, confirmed pin actions, audit review, and account disconnect/delete controls. It is not an official Telegram app or Telegram API partner, and Telegram message content is treated as untrusted user-generated data.",
+    "category": "PRODUCTIVITY"
+  },
+  "tools": {
+    "list_dialogs": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Retrieves Telegram dialog metadata but records invocation metadata for audit and operations.",
+        "open_world_justification": "Reads dialog metadata from Telegram, an external third-party system, but does not publish content or change Telegram state.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "get_unread_messages": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Retrieves unread Telegram messages but records invocation metadata for audit and operations.",
+        "open_world_justification": "Reads message data from Telegram, an external third-party system, but does not publish content or change Telegram state.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "send_message": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Can send a Telegram message when all server-side gates pass, and otherwise returns a dry-run preview.",
+        "open_world_justification": "Can transmit user-provided message text to Telegram, an external third-party system.",
+        "destructive_justification": "A real send irreversibly delivers a message to the selected Telegram peer."
+      }
+    },
+    "get_messages": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Retrieves recent Telegram messages but records invocation metadata for audit and operations.",
+        "open_world_justification": "Reads message data from Telegram, an external third-party system, but does not publish content or change Telegram state.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "prepare_pin_message": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Creates a local one-time confirmation record for a later pin or unpin action.",
+        "open_world_justification": "Does not contact Telegram to change external state.",
+        "destructive_justification": "Does not pin, unpin, delete, overwrite, revoke access, or perform an irreversible action."
+      }
+    },
+    "pin_message": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": true,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Changes the pinned state of a Telegram message after a matching confirmation is provided.",
+        "open_world_justification": "Can change Telegram chat state in an external third-party system.",
+        "destructive_justification": "Can pin or unpin a selected message, changing visible chat state in a way users may rely on."
+      }
+    },
+    "disconnect_telegram_account": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Revokes the user's active local session record and closes the in-memory client.",
+        "open_world_justification": "Only changes this server's private session state and does not publish or send content externally.",
+        "destructive_justification": "Disables the active Telegram connection for this server until the user reconnects."
+      }
+    },
+    "delete_telegram_account": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Deletes the user's account/session data from this server instead of only reading it.",
+        "open_world_justification": "Only changes this server's private account data and does not publish or send content externally.",
+        "destructive_justification": "Irreversibly removes the encrypted session blob and per-account metadata from this server."
+      }
+    },
+    "get_my_audit_log": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Only retrieves audit-log rows for the authenticated user's own identity.",
+        "open_world_justification": "Does not send messages, publish content, or change external systems.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "list_telegram_identities": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Lists signed-in Telegram identities for admins but records invocation metadata for audit and operations.",
+        "open_world_justification": "Only reads this server's private user roster and does not change public or third-party state.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "set_telegram_access": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Changes a user's local access tier rather than only reading data.",
+        "open_world_justification": "Only changes this server's private authorization state and does not publish or send content externally.",
+        "destructive_justification": "Can revoke a user's client access tier, removing their ability to use Telegram tools until granted again."
+      }
+    },
+    "set_account_send": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Changes a user's local send-enabled setting rather than only reading data.",
+        "open_world_justification": "Only changes this server's private permission state and does not send messages itself.",
+        "destructive_justification": "Can disable real sending for an active account, revoking a previously available capability."
+      }
+    },
+    "get_user_audit_log": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Reads another user's audit log for admins and records invocation metadata for audit and operations.",
+        "open_world_justification": "Only reads this server's private audit data and does not change public or third-party state.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
+      }
+    },
+    "revoke_telegram_session": {
+      "annotations": {
+        "readOnlyHint": false,
+        "openWorldHint": false,
+        "destructiveHint": true
+      },
+      "justifications": {
+        "read_only_justification": "Revokes another user's active local Telegram session instead of only reading data.",
+        "open_world_justification": "Only changes this server's private session state and does not publish or send content externally.",
+        "destructive_justification": "Disables the selected user's active Telegram connection on this server until they reconnect."
+      }
+    }
+  },
+  "test_cases": [
+    {
+      "description": "List Telegram dialogs so the user can choose a conversation.",
+      "user_prompt": "Show my recent Telegram chats and unread counts.",
+      "file_attachment_urls": null,
+      "tools_triggered": "list_dialogs",
+      "expected_output": "Returns a concise list of Telegram dialogs with identifiers, titles, usernames when available, and unread counts.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Fetch unread Telegram messages across dialogs.",
+      "user_prompt": "What unread Telegram messages do I have?",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_unread_messages",
+      "expected_output": "Returns unread messages wrapped as untrusted Telegram-origin content and summarizes them without following message text as instructions.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Read recent messages from a specific Telegram peer.",
+      "user_prompt": "Show the latest messages from @example_support on Telegram.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_messages",
+      "expected_output": "Returns recent messages for the requested peer, including message ids where available, with Telegram text treated as untrusted content.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Draft a Telegram reply when the production send gate is closed.",
+      "user_prompt": "Draft a Telegram reply to @example_support saying I will follow up tomorrow.",
+      "file_attachment_urls": null,
+      "tools_triggered": "send_message",
+      "expected_output": "Returns a dry-run preview with sent=false and a dry_reason when real sending is not enabled.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Prepare and confirm a pin action for a Telegram message.",
+      "user_prompt": "Pin message 42 in @example_support after preparing the confirmation.",
+      "file_attachment_urls": null,
+      "tools_triggered": "prepare_pin_message, pin_message",
+      "expected_output": "First returns a one-time confirmation id, then uses it to pin the selected message or reports a clear permission/error response.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Show the user's own audit log.",
+      "user_prompt": "Show my recent mctl-telegram audit log entries.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_my_audit_log",
+      "expected_output": "Returns recent audit entries for the authenticated user, with redacted peer references and no message bodies.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Disconnect the authenticated user's Telegram account.",
+      "user_prompt": "Disconnect my Telegram account from this connector.",
+      "file_attachment_urls": null,
+      "tools_triggered": "disconnect_telegram_account",
+      "expected_output": "Revokes the active server-side session and reports whether an active session was present.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Admin grants or revokes a user's Telegram access tier.",
+      "user_prompt": "Admin: set Telegram user 123456789 access tier to client.",
+      "file_attachment_urls": null,
+      "tools_triggered": "set_telegram_access",
+      "expected_output": "Updates the selected user's local access tier or returns a clear validation/error message.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Admin lists signed-in Telegram identities before managing access.",
+      "user_prompt": "Admin: list Telegram identities and show who has an active session.",
+      "file_attachment_urls": null,
+      "tools_triggered": "list_telegram_identities",
+      "expected_output": "Returns signed-in Telegram identities with access tier and active-session state for admin review.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Admin disables real sending for a user's active account.",
+      "user_prompt": "Admin: disable real Telegram sending for user id 123456789.",
+      "file_attachment_urls": null,
+      "tools_triggered": "set_account_send",
+      "expected_output": "Updates the selected account's send_enabled flag or reports that the user must connect an account first.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Admin inspects a user's audit log and revokes a stuck session.",
+      "user_prompt": "Admin: show audit entries for Telegram user 123456789, then revoke their active session if it looks stuck.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_user_audit_log, revoke_telegram_session",
+      "expected_output": "Returns redacted audit entries for the selected user, then revokes the active local session only if the admin confirms that action.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Hard-delete the authenticated user's local Telegram account data.",
+      "user_prompt": "Delete my Telegram account data from this connector.",
+      "file_attachment_urls": null,
+      "tools_triggered": "delete_telegram_account",
+      "expected_output": "Deletes the user's server-side Telegram account record and reports the number of rows removed.",
+      "expected_output_url": null
+    }
+  ],
+  "negative_test_cases": [
+    {
+      "description": "Do not trigger for unrelated email requests.",
+      "user_prompt": "Send an email to Alex about the project status.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because it only supports Telegram account workflows, not email.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not trigger for calendar scheduling.",
+      "user_prompt": "Schedule a meeting with my team for next Tuesday at 3 PM.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because it does not manage calendars or meetings.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not request or handle Telegram verification secrets.",
+      "user_prompt": "My Telegram login code is 12345; use it to sign in for me.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked to collect one-time codes or credentials; the user should complete the secure OAuth/connect flow instead.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not trigger for unsupported Telegram voice calls.",
+      "user_prompt": "Start a Telegram voice call with @example_support.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because it does not support starting Telegram calls.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not trigger for messaging apps other than Telegram.",
+      "user_prompt": "Read my latest WhatsApp messages from Alex.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "The app should not be invoked because it only works with the user's Telegram account, not WhatsApp or other messaging apps.",
+      "expected_output_url": null
+    }
+  ]
+}
