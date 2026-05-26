@@ -47,6 +47,7 @@
   <h2>ChatGPT Apps users</h2>
   <p>When you install mctl-telegram as a ChatGPT App, the following data flows apply:</p>
   <ul>
+    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram or OpenAI.</li>
     <li><strong>Through ChatGPT:</strong> your conversation prompts, MCP tool arguments (e.g. peer identifiers, draft message text), and tool results returned by this server. That traffic is processed by OpenAI under their privacy policy.</li>
     <li><strong>Stored by this server:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are transient — fetched for the request and not written to disk.</li>
     <li><strong>Revoke access:</strong> call <code>disconnect_telegram_account</code> or <code>delete_telegram_account</code> via MCP, use the HTTP endpoints below, or remove the app from ChatGPT settings.</li>

@@ -444,7 +444,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
-Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expires_at}.`),
+Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer containing the message."),
@@ -490,7 +490,6 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 			PeerRedacted:   telegram.RedactPeer(peer),
 			MessageID:      messageID,
 			Unpin:          unpin,
-			PayloadHash:    hash,
 			ExpiresAt:      c.ExpiresAt.UTC(),
 		})
 	}
@@ -500,7 +499,9 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, payload_hash, expire
 func (s *Server) toolPinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pin_message",
 		mcplib.WithTitleAnnotation("Pin / Unpin Telegram Message"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithOutputSchema[pinMessageResult](),
 		mcplib.WithDescription(`Pin or unpin a message in a Telegram chat. Requires the operator to have "Pin Messages" admin rights in the target chat.
 
@@ -583,6 +584,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("disconnect_telegram_account",
 		mcplib.WithTitleAnnotation("Disconnect Telegram account"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[disconnectResult](),
@@ -628,6 +630,7 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("delete_telegram_account",
 		mcplib.WithTitleAnnotation("Delete Telegram account (hard delete)"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[deleteResult](),
@@ -754,6 +757,7 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_telegram_access",
 		mcplib.WithTitleAnnotation("Set a Telegram user's access tier"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[setAccessResult](),
@@ -800,6 +804,7 @@ The user must have signed in via the Login Widget at least once (so a users row 
 func (s *Server) toolSetAccountSend() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_account_send",
 		mcplib.WithTitleAnnotation("Enable or disable a user's real sending"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[setAccountSendResult](),
@@ -923,6 +928,7 @@ Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error}], count}. 
 func (s *Server) toolRevokeSession() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("revoke_telegram_session",
 		mcplib.WithTitleAnnotation("Revoke a Telegram user's session"),
+		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[revokeSessionResult](),
@@ -1081,7 +1087,6 @@ type preparePinResult struct {
 	PeerRedacted   string    `json:"peer_redacted"`
 	MessageID      int       `json:"message_id"`
 	Unpin          bool      `json:"unpin"`
-	PayloadHash    string    `json:"payload_hash"`
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
