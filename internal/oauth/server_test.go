@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +144,39 @@ func stateFromAuthorize(t *testing.T, mux *mockRouter, challenge string) string 
 	return st
 }
 
+var interstitialHrefRe = regexp.MustCompile(`class="btnlink" href="([^"]*)"`)
+
+// authCodeRedirect returns the client redirect target (carrying ?code=&state=)
+// from a successful authorization step, accepting either the bare 302 (used for
+// same-host wizard / loopback clients) or the success interstitial (200,
+// rendered for external clients like claude.ai). Both deliver the browser to
+// the same redirect_uri, so callers that only care about the final code/state
+// are agnostic to which one was emitted.
+func authCodeRedirect(t *testing.T, rec *httptest.ResponseRecorder) *url.URL {
+	t.Helper()
+	switch rec.Code {
+	case http.StatusFound:
+		loc, err := url.Parse(rec.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("302 redirect parse: %v", err)
+		}
+		return loc
+	case http.StatusOK:
+		m := interstitialHrefRe.FindStringSubmatch(rec.Body.String())
+		if m == nil {
+			t.Fatalf("success interstitial carried no redirect href: %s", rec.Body.String())
+		}
+		loc, err := url.Parse(html.UnescapeString(m[1]))
+		if err != nil {
+			t.Fatalf("interstitial href parse: %v", err)
+		}
+		return loc
+	default:
+		t.Fatalf("unexpected auth-code status %d: %s", rec.Code, rec.Body.String())
+		return nil
+	}
+}
+
 // callbackWithState runs the Telegram OIDC callback GET (?code=&state=) and
 // returns the recorder.
 func callbackWithState(t *testing.T, mux *mockRouter, state string) *httptest.ResponseRecorder {
@@ -169,13 +204,7 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 
 	// 2. /oauth/telegram/callback — Telegram redirects back with code+state.
 	rec := callbackWithState(t, mux, state)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("callback status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("redirect parse: %v", err)
-	}
+	loc := authCodeRedirect(t, rec)
 	if loc.Host != "claude.ai" || loc.Path != "/cb" {
 		t.Errorf("redirect target = %s", loc)
 	}
@@ -227,6 +256,56 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	}
 }
 
+// TestIssueAuthCode_ExternalRendersInterstitial confirms an external client
+// (claude.ai) gets the 200 success interstitial — carrying the code+state in
+// the fallback link and a nonce'd auto-redirect script — instead of a bare 302.
+func TestIssueAuthCode_ExternalRendersInterstitial(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, 210408407)
+
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+	rec := callbackWithState(t, mux, state)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("external client status = %d, want 200 interstitial; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "Return to Claude") {
+		t.Errorf("interstitial missing the Claude return control: %s", body)
+	}
+	loc := authCodeRedirect(t, rec)
+	if loc.Host != "claude.ai" || loc.Path != "/cb" || loc.Query().Get("code") == "" {
+		t.Errorf("interstitial redirect target wrong: %s", loc)
+	}
+	if loc.Query().Get("state") != "client-state-abc" {
+		t.Errorf("interstitial state echo = %q", loc.Query().Get("state"))
+	}
+	// Exactly the one nonce'd inline script (the auto-redirect) may run.
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'nonce-") {
+		t.Errorf("interstitial CSP missing script nonce: %q", csp)
+	}
+}
+
+func TestConnectAppName(t *testing.T) {
+	cases := []struct {
+		host string
+		want string
+	}{
+		{"claude.ai", "Claude"},
+		{"console.anthropic.com", "Claude"},
+		{"chatgpt.com", "ChatGPT"},
+		{"platform.openai.com", "ChatGPT"},
+		{"example.com", "your app"},
+	}
+	for _, c := range cases {
+		if got := connectAppName(c.host); got != c.want {
+			t.Errorf("connectAppName(%q) = %q, want %q", c.host, got, c.want)
+		}
+	}
+}
+
 // TestDoublePKCE_LegsIndependent confirms the MCP-client PKCE and the
 // Telegram-leg PKCE never cross: the verifier handed to Telegram's Exchange is
 // the server-generated Telegram-leg one, and the nonce round-trips intact.
@@ -238,9 +317,7 @@ func TestDoublePKCE_LegsIndependent(t *testing.T) {
 
 	clientVerifier, clientChallenge := pkceVerifierAndChallenge()
 	state := stateFromAuthorize(t, mux, clientChallenge)
-	if rec := callbackWithState(t, mux, state); rec.Code != http.StatusFound {
-		t.Fatalf("callback = %d body=%s", rec.Code, rec.Body.String())
-	}
+	authCodeRedirect(t, callbackWithState(t, mux, state))
 
 	f := authFake(srv)
 	if f.lastCodeVerifier == "" {
@@ -642,11 +719,7 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 
 	verifier, challenge := pkceVerifierAndChallenge()
 	state := stateFromAuthorize(t, mux, challenge)
-	rec := callbackWithState(t, mux, state)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("callback status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	loc, _ := url.Parse(rec.Header().Get("Location"))
+	loc := authCodeRedirect(t, callbackWithState(t, mux, state))
 	code := loc.Query().Get("code")
 
 	form := url.Values{}
@@ -657,7 +730,7 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 	form.Set("code_verifier", verifier)
 	req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	mux.serve("POST", "/oauth/token", rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("token status = %d", rec.Code)
@@ -1073,11 +1146,7 @@ func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challen
 	t.Helper()
 	seedSession(t, srv, 210408407)
 	state := stateFromAuthorize(t, mux, challenge)
-	rec := callbackWithState(t, mux, state)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("callback status %d: %s", rec.Code, rec.Body.String())
-	}
-	loc, _ := url.Parse(rec.Header().Get("Location"))
+	loc := authCodeRedirect(t, callbackWithState(t, mux, state))
 	return codeState{code: loc.Query().Get("code")}
 }
 

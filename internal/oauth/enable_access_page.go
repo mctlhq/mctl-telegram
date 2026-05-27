@@ -1,8 +1,10 @@
 package oauth
 
 // enable_access_page.go holds the HTML for the in-browser enable_access flow:
-// the phone, SMS-code, 2FA-password, and error screens. They need no
-// JavaScript and no external resources, so the CSP forbids scripts entirely.
+// the phone, SMS-code, 2FA-password, error, and post-auth success screens. They
+// use no external resources, so the CSP forbids every external source. Most need
+// no JavaScript; the 2FA-password (show/hide toggle) and success (auto-redirect)
+// screens carry one nonce-authorized inline <script> each.
 
 import (
 	"bytes"
@@ -55,6 +57,20 @@ type enableErrorPage struct {
 	Message string
 }
 
+// connectSuccessPage backs the interstitial shown after an authorization_code
+// is minted for an external OAuth client (claude.ai / chatgpt.com). It replaces
+// the bare 302 so the user gets a visible "connected" confirmation and an
+// explicit return control — the claude.ai -> Desktop-app hand-off is
+// Anthropic-side and can silently fail to refocus the backgrounded app.
+type connectSuccessPage struct {
+	// RedirectURL is the fully-built client redirect_uri carrying ?code=&state=.
+	RedirectURL string
+	// AppName is the human label for the client ("Claude" / "ChatGPT").
+	AppName string
+	// Nonce authorizes the single inline <script> that auto-redirects.
+	Nonce string
+}
+
 // enableExtraCSS adds the enable-flow-specific controls (labelled fields,
 // checkboxes, password show/hide, notice, radio group) on top of the shared
 // design tokens + component CSS + auth-card CSS. Inlined so the page renders
@@ -84,6 +100,10 @@ const enableExtraCSS = `
   .radio-group { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
   .radio-group label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; color: var(--text-dim); margin-top: 0; }
   .radio-group input { margin-top: 3px; }
+  .btnlink { display: inline-block; margin-top: 16px; text-decoration: none; text-align: center;
+             font-family: var(--font-display), system-ui, sans-serif; font-size: 15px; font-weight: 600;
+             padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; }
+  .btnlink:hover { filter: brightness(.92); }
 `
 
 // enableHead / enableFoot wrap every screen, sharing the mctl design tokens,
@@ -218,6 +238,17 @@ var enableErrorTemplate = template.Must(template.New("enableError").Parse(enable
     <p class="meta">Return to your MCP client and start the connection again.</p>
 ` + enableFoot))
 
+var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(enableHead + `    <h1>&#10003; Telegram connected</h1>
+    <p>Your Telegram account is now linked. Returning you to {{.AppName}}&#8230;</p>
+    <p>If {{.AppName}} does not reopen automatically (it may be behind this window), use the
+       button below.</p>
+    <a class="btnlink" href="{{.RedirectURL}}">Return to {{.AppName}}</a>
+    <p class="meta">You can close this tab once {{.AppName}} shows the connection as active.</p>
+    <script nonce="{{.Nonce}}">
+      setTimeout(function () { window.location.replace("{{.RedirectURL}}"); }, 1200);
+    </script>
+` + enableFoot))
+
 var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li class="active">Permissions</li>
@@ -264,6 +295,20 @@ func renderEnablePassword(w http.ResponseWriter, p enablePasswordPage) {
 	}
 	p.Nonce = nonce
 	renderEnable(w, http.StatusOK, enablePasswordTemplate, p, nonce)
+}
+
+// renderConnectSuccess shows the post-auth interstitial for external OAuth
+// clients. Like the password screen it mints a per-request CSP nonce for its
+// single inline <script> (the delayed auto-redirect); the visible
+// "Return to {AppName}" link is the no-JS fallback and works regardless.
+func renderConnectSuccess(w http.ResponseWriter, p connectSuccessPage) {
+	nonce, err := newCSPNonce()
+	if err != nil {
+		http.Error(w, "csp nonce: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	p.Nonce = nonce
+	renderEnable(w, http.StatusOK, connectSuccessTemplate, p, nonce)
 }
 
 func renderEnableError(w http.ResponseWriter, msg string) {
