@@ -298,6 +298,8 @@ func TestConnectAppName(t *testing.T) {
 		{"chatgpt.com", "ChatGPT"},
 		{"platform.openai.com", "ChatGPT"},
 		{"example.com", "your app"},
+		{"claude-shim.example.com", "your app"}, // substring must not mislabel
+		{"notopenai.com", "your app"},
 	}
 	for _, c := range cases {
 		if got := connectAppName(c.host); got != c.want {

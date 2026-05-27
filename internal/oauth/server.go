@@ -1283,6 +1283,11 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 func (s *Server) isExternalRedirect(u *url.URL) bool {
 	iss, err := url.Parse(s.cfg.Issuer)
 	if err != nil {
+		// Issuer is validated non-empty at startup, so this should never fire;
+		// log it so a future misconfiguration is discoverable rather than
+		// silently routing every redirect (including same-host) through the
+		// interstitial.
+		slog.Warn("oauth: issuer parse failed; treating redirect as external", "issuer", s.cfg.Issuer, "err", err)
 		return true
 	}
 	return !strings.EqualFold(u.Host, iss.Host)
@@ -1292,13 +1297,25 @@ func (s *Server) isExternalRedirect(u *url.URL) bool {
 func connectAppName(host string) string {
 	h := strings.ToLower(host)
 	switch {
-	case strings.Contains(h, "claude") || strings.Contains(h, "anthropic"):
+	case hostMatches(h, "claude.ai", "anthropic.com"):
 		return "Claude"
-	case strings.Contains(h, "chatgpt") || strings.Contains(h, "openai"):
+	case hostMatches(h, "chatgpt.com", "openai.com"):
 		return "ChatGPT"
 	default:
 		return "your app"
 	}
+}
+
+// hostMatches reports whether host equals one of domains or is a subdomain of
+// one. Exact/suffix matching avoids the substring trap where an unrelated host
+// such as "claude-shim.example.com" would be mislabelled.
+func hostMatches(host string, domains ...string) bool {
+	for _, d := range domains {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // ----- /oauth/token -----
