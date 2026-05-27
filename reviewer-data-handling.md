@@ -141,6 +141,21 @@ LLM a clear data-vs-instructions boundary.
 
 ---
 
+## K — Telegram ToS and AI content use
+
+mctl-telegram does not train, fine-tune, benchmark, validate, or develop AI models using
+Telegram data. Telegram content is processed transiently only to fulfill the authenticated
+user's explicit tool request (summarization, search, translation, drafting). The service does
+not scrape, index, harvest, aggregate, or persist Telegram message bodies.
+
+Users are responsible for using the connector only where they have appropriate rights and
+consent to process chat content. The connector operates only on the authenticated user's own
+account and does not bypass Telegram permissions. Group and channel messages involve content
+from third parties; users should apply the connector only to conversations where they have
+appropriate authorization.
+
+---
+
 ## Reference pages
 
 | Page | URL |
