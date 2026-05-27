@@ -89,4 +89,4 @@ jobs:
               `gh pr review ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} --approve --body "No P1/P2 findings (<n> P3). Good to merge."`
             - One or more P1/P2 findings: request changes —
               `gh pr review ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} --request-changes --body "Has P1/P2 findings, changes requested: <summary>"`
-          claude_args: '--model claude-sonnet-4-6 --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
+          claude_args: '--model claude-opus-4-7 --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
