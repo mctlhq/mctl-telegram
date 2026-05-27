@@ -1257,7 +1257,65 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 		q.Set("state", oc.ClientState)
 	}
 	u.RawQuery = q.Encode()
+
+	// For external OAuth clients (claude.ai / chatgpt.com) render a success
+	// interstitial instead of a bare 302. The final claude.ai -> Desktop-app
+	// hand-off is Anthropic-side and can silently fail to refocus the
+	// backgrounded app, leaving the user unsure the connection worked (they then
+	// retry, each retry a fresh dynamic registration). The interstitial gives a
+	// visible confirmation + an explicit return control while still
+	// auto-redirecting so the web flow stays near-seamless. The self-hosted
+	// wizard's own same-host redirect keeps the 302 — it renders its own page.
+	if s.isExternalRedirect(u) {
+		renderConnectSuccess(w, connectSuccessPage{
+			RedirectURL: u.String(),
+			AppName:     connectAppName(u.Host),
+		})
+		return
+	}
 	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+// isExternalRedirect reports whether u targets a different host than the issuer.
+// Same-host redirects are the self-hosted connect wizard
+// (Issuer + "/telegram/connect/done"), which renders its own completion page;
+// only genuinely external clients get the success interstitial.
+func (s *Server) isExternalRedirect(u *url.URL) bool {
+	iss, err := url.Parse(s.cfg.Issuer)
+	if err != nil {
+		// Issuer is validated non-empty at startup, so this should never fire;
+		// log it so a future misconfiguration is discoverable rather than
+		// silently routing every redirect (including same-host) through the
+		// interstitial.
+		slog.Warn("oauth: issuer parse failed; treating redirect as external", "issuer", s.cfg.Issuer, "err", err)
+		return true
+	}
+	return !strings.EqualFold(u.Host, iss.Host)
+}
+
+// connectAppName maps a redirect_uri host to a human label for the success page.
+func connectAppName(host string) string {
+	h := strings.ToLower(host)
+	switch {
+	case hostMatches(h, "claude.ai", "anthropic.com"):
+		return "Claude"
+	case hostMatches(h, "chatgpt.com", "openai.com"):
+		return "ChatGPT"
+	default:
+		return "your app"
+	}
+}
+
+// hostMatches reports whether host equals one of domains or is a subdomain of
+// one. Exact/suffix matching avoids the substring trap where an unrelated host
+// such as "claude-shim.example.com" would be mislabelled.
+func hostMatches(host string, domains ...string) bool {
+	for _, d := range domains {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // ----- /oauth/token -----

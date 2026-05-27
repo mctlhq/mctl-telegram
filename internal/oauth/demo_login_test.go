@@ -80,13 +80,7 @@ func TestDemoLogin_HappyPath(t *testing.T) {
 	state := demoAuthorizeState(t, mux, challenge)
 
 	rec := postDemoLogin(mux, state, demoUser, demoPass)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("demo login status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil {
-		t.Fatalf("redirect parse: %v", err)
-	}
+	loc := authCodeRedirect(t, rec)
 	if loc.Host != "claude.ai" || loc.Path != "/cb" {
 		t.Errorf("redirect target = %s", loc)
 	}
@@ -149,10 +143,7 @@ func TestDemoLogin_WrongPasswordThenRetry(t *testing.T) {
 
 	// The same state must still be redeemable with the correct password.
 	rec = postDemoLogin(mux, state, demoUser, demoPass)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("retry status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "code=") {
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
 		t.Errorf("retry redirect missing code: %s", loc)
 	}
 }
