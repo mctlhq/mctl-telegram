@@ -81,30 +81,49 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 
 ## Data handling
 
-The full package is in `reviewer-data-handling.md` (also at
-https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md).
-Key statements for the submission form:
+Full package: `reviewer-data-handling.md` —
+https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
 
-**What we store:** encrypted Telegram session blob (AES-256-GCM, per-user HKDF key), Telegram user
-ID + display name/username, audit metadata (tool name, redacted peer reference, status, timestamp).
+### Form field: Privacy / data handling
+```
+mctl-telegram stores only the minimum data required to operate the connector: Telegram identity
+metadata (user ID, display name, username), an AES-256-GCM encrypted MTProto session blob,
+session metadata, and audit metadata. Message bodies and media are fetched live from Telegram
+only when the authenticated user invokes a tool and are not persisted in the database, logs,
+audit logs, or files. Audit logs contain only tool name, redacted peer reference, status,
+timestamp, and tamper-evidence hash-chain data. Users can revoke or delete their Telegram
+account connection using MCP tools. The hosted service is not zero-knowledge: infrastructure
+operators with privileged access to both the database and the master encryption key could
+theoretically decrypt stored session blobs.
 
-**What we do not store:** message bodies. Messages are fetched live from Telegram only when the
-authenticated user invokes a tool. They are returned to the caller and not written to any database,
-log, or file. Phone numbers, 2FA passwords, raw session bytes, and authorization headers are also
-never persisted.
+Additional reviewer data-handling package:
+https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
+```
 
-**Encryption:** master key stored in HashiCorp Vault, injected via Kubernetes ExternalSecret as an
-env var. Not committed to source code or GitOps configuration. Per-user HKDF-SHA256 subkeys mean
-one compromised session does not expose others.
+### Form field: External services
+```
+The connector communicates with Telegram's MTProto API on behalf of the authenticated user.
+No analytics, advertising, telemetry, or data broker services are used. Tool results are
+returned to the MCP client selected by the user.
+```
 
-**Access scoping:** every tool extracts the caller's identity from the validated OAuth JWT only — no
-tool accepts a user ID as a parameter. Cross-user message access is not possible at the tool layer.
+### Form field: Authentication
+```
+OAuth 2.1 with mandatory PKCE (S256) and RFC 7591 Dynamic Client Registration. Each MCP tool
+derives caller identity from the validated OAuth JWT bearer token server-side. No tool accepts
+a caller-supplied user ID parameter.
+```
 
-**OIDC scope:** login requests `openid profile` only. The `telegram:bot_access` scope (which
-previously surfaced an "Allow messages" toggle) was removed in 0.41.0.
+### Form field: Write actions
+```
+Read tools and write tools are separate. Read tools are annotated readOnlyHint=true. Tools that
+modify Telegram state (send, pin, revoke, delete, admin actions) are annotated destructiveHint
+or equivalent. Real message sending is additionally gated by: server-level ALLOW_SEND flag,
+per-user send_enabled flag, and the telegram:messages:send scope. No tool argument bypasses
+the send gate.
+```
 
-**Operator trust boundary:**
-
+### Operator trust boundary (reviewer notes)
 > The application does not persist message contents. Messages are fetched live from Telegram only
 > when the authenticated user invokes a tool. Access is scoped to the authenticated user, and no
 > tool permits cross-user message access.
@@ -116,6 +135,9 @@ previously surfaced an "Allow messages" toggle) was removed in 0.41.0.
 > boundary of any hosted service that handles user credentials on the user's behalf, and it is
 > explicitly documented at https://tg.mctl.ai/security.
 
+**OIDC scope:** login requests `openid profile` only. The `telegram:bot_access` scope (which
+previously surfaced an "Allow messages" toggle) was removed in 0.41.0.
+
 ## Policy narrative — Telegram is a third party
 This is a **user-authorized client to the user's own Telegram account** over Telegram's official
 MTProto API (`api_id`/`api_hash` from my.telegram.org). It is **not a scraper, not a relay, and not
@@ -124,9 +146,43 @@ the user remains responsible for complying with Telegram's terms. Non-affiliatio
 the public landing/demo/privacy pages.
 
 ## Pre-submission checklist
-- [ ] Exercise all 14 tools via MCP Inspector.
-- [ ] Re-test as a custom connector in Claude after the OriginGuard release (confirm no regression).
-- [ ] Provide populated reviewer test-account credentials in the form.
-- [ ] Confirm privacy/terms/docs/logo URLs resolve over HTTPS.
-- [ ] Set the GA date.
-- [ ] In the form's data-handling / privacy field, include: "Additional reviewer data-handling package is available in the repository: https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md"
+
+**Repository**
+- [ ] `reviewer-data-handling.md` on `main` with accurate claims
+- [ ] No public page uses "we cannot access messages" or "E2EE" in hosted-service context
+- [ ] All form privacy fields use "not persisted" framing, not "cannot access"
+
+**MCP endpoint**
+- [ ] Server reachable over HTTPS from Claude custom connector
+- [ ] OAuth callback for Claude registered and working
+- [ ] Token endpoint supports `application/x-www-form-urlencoded`
+- [ ] OAuth discovery docs (`.well-known/*`) public and not WAF-blocked
+
+**Tool metadata**
+- [ ] All 14 tools have a `title` field
+- [ ] Read tools (`list_dialogs`, `get_unread_messages`, `get_messages`, `prepare_pin_message`,
+      `get_my_audit_log`, `list_telegram_identities`, `get_user_audit_log`): `readOnlyHint=true`
+- [ ] Write/destructive tools: `destructiveHint=true` or equivalent
+- [ ] No tool mixes read + write operations
+- [ ] Tool descriptions are narrow, non-promotional, accurate
+- [ ] Errors are actionable, not generic 500s
+
+**Send gates**
+- [ ] `ALLOW_SEND=false` default documented
+- [ ] Per-user `send_enabled` gate documented
+- [ ] `telegram:messages:send` scope requirement documented
+- [ ] No tool argument bypasses send gate
+
+**Test account**
+- [ ] Realistic sample dialogs (no real personal data)
+- [ ] Has unread messages for testing
+- [ ] `send_enabled=false` so every `send_message` is dry-run preview
+- [ ] `admin:users` scope so all 14 tools are reviewable
+- [ ] Reviewer credentials provided in the form (not committed here)
+
+**Submission**
+- [ ] Exercise all 14 tools via MCP Inspector before submitting
+- [ ] Re-test as a custom connector in Claude after OriginGuard release (0.41.0)
+- [ ] Confirm privacy/terms/docs/logo URLs resolve over HTTPS
+- [ ] Set the GA date
+- [ ] Paste form field text from the "Form field:" sections above
