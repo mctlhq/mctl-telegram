@@ -81,7 +81,9 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 
 ## Data handling
 
-The full package is in `reviewer-data-handling.md`. Key statements for the submission form:
+The full package is in `reviewer-data-handling.md` (also at
+https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md).
+Key statements for the submission form:
 
 **What we store:** encrypted Telegram session blob (AES-256-GCM, per-user HKDF key), Telegram user
 ID + display name/username, audit metadata (tool name, redacted peer reference, status, timestamp).
@@ -127,3 +129,4 @@ the public landing/demo/privacy pages.
 - [ ] Provide populated reviewer test-account credentials in the form.
 - [ ] Confirm privacy/terms/docs/logo URLs resolve over HTTPS.
 - [ ] Set the GA date.
+- [ ] In the form's data-handling / privacy field, include: "Additional reviewer data-handling package is available in the repository: https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md"
