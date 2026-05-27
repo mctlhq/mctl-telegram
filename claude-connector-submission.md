@@ -79,6 +79,41 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
   firewall/conditional-access policy. The custom connector already connects successfully, so no
   egress change is required.
 
+## Data handling
+
+The full package is in `reviewer-data-handling.md`. Key statements for the submission form:
+
+**What we store:** encrypted Telegram session blob (AES-256-GCM, per-user HKDF key), Telegram user
+ID + display name/username, audit metadata (tool name, redacted peer reference, status, timestamp).
+
+**What we do not store:** message bodies. Messages are fetched live from Telegram only when the
+authenticated user invokes a tool. They are returned to the caller and not written to any database,
+log, or file. Phone numbers, 2FA passwords, raw session bytes, and authorization headers are also
+never persisted.
+
+**Encryption:** master key stored in HashiCorp Vault, injected via Kubernetes ExternalSecret as an
+env var. Not committed to source code or GitOps configuration. Per-user HKDF-SHA256 subkeys mean
+one compromised session does not expose others.
+
+**Access scoping:** every tool extracts the caller's identity from the validated OAuth JWT only — no
+tool accepts a user ID as a parameter. Cross-user message access is not possible at the tool layer.
+
+**OIDC scope:** login requests `openid profile` only. The `telegram:bot_access` scope (which
+previously surfaced an "Allow messages" toggle) was removed in 0.41.0.
+
+**Operator trust boundary:**
+
+> The application does not persist message contents. Messages are fetched live from Telegram only
+> when the authenticated user invokes a tool. Access is scoped to the authenticated user, and no
+> tool permits cross-user message access.
+>
+> Telegram session secrets are encrypted at rest using AES-256-GCM with per-user derived keys.
+> The master encryption key is stored in HashiCorp Vault and not committed to code or
+> configuration. Infrastructure operators with privileged access to both the database and the
+> encryption key could theoretically decrypt stored session blobs. This is the inherent trust
+> boundary of any hosted service that handles user credentials on the user's behalf, and it is
+> explicitly documented at https://tg.mctl.ai/security.
+
 ## Policy narrative — Telegram is a third party
 This is a **user-authorized client to the user's own Telegram account** over Telegram's official
 MTProto API (`api_id`/`api_hash` from my.telegram.org). It is **not a scraper, not a relay, and not
