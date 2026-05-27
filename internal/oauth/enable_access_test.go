@@ -15,6 +15,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	_ "modernc.org/sqlite"
 )
 
@@ -102,6 +103,7 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -130,6 +132,7 @@ func stubLoginWrongAccount() LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err

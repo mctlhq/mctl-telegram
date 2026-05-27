@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -15,6 +16,31 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+// LoginConfig carries optional wiring for the interactive login client. The
+// zero value is valid (no global limiter), so callers that do not need
+// api_id-wide throttling — e.g. cmd/login — can omit it entirely.
+type LoginConfig struct {
+	// GlobalMiddleware, when non-nil, is inserted into the login client's
+	// MTProto invoker chain. main.go passes the same instance it gives the
+	// ClientPool so the login client and the message-serving pool share one
+	// api_id-wide rate budget. A first-time login (auth.sendCode) is the most
+	// flood-sensitive call against the shared TG_API_ID, so it must be subject
+	// to the same ceiling as steady-state traffic.
+	GlobalMiddleware telegram.Middleware
+}
+
+// loginFloodWaitMaxWait bounds a single FLOOD_WAIT sleep on the login client.
+// A genuine flood-wait from Telegram is honoured up to this ceiling; a longer
+// demanded wait surfaces as an error rather than parking the login goroutine
+// (which holds uidLoginMutex) for minutes. Kept at the per-RPC timeout so a
+// waiter sleep cannot outlive the rpcTimeoutMiddleware budget.
+const loginFloodWaitMaxWait = loginRPCTimeout
+
+// loginFloodWaitMaxRetries caps flood-wait retries during login. Two retries
+// absorb a transient FLOOD_WAIT without letting a persistently throttled
+// api_id stall the interactive flow indefinitely.
+const loginFloodWaitMaxRetries = 2
 
 // loginRPCTimeout bounds every individual MTProto RPC issued during an
 // interactive login (SendCode, SignIn, the SRP password exchange, Self).
@@ -39,6 +65,29 @@ func rpcTimeoutMiddleware(d time.Duration) telegram.Middleware {
 	})
 }
 
+// loginMiddlewares builds the MTProto invoker chain for the interactive login
+// client, outermost first (gotd applies index 0 first):
+//
+//	floodwait -> [globalRateLimit] -> rpcTimeout -> invoke
+//
+// floodwait sits outermost so its sleep+retry re-acquires a global rate token
+// and gets a fresh per-RPC deadline on each attempt; rpcTimeout is innermost so
+// it bounds only the actual RPC, never the waiter's sleep. The optional global
+// limiter (shared with the pool) is omitted when nil so the chain stays
+// allocation-minimal and behaviour is unchanged when the limiter is disabled.
+func loginMiddlewares(cfg LoginConfig) []telegram.Middleware {
+	mws := []telegram.Middleware{
+		floodwait.NewSimpleWaiter().
+			WithMaxRetries(loginFloodWaitMaxRetries).
+			WithMaxWait(loginFloodWaitMaxWait),
+	}
+	if cfg.GlobalMiddleware != nil {
+		mws = append(mws, cfg.GlobalMiddleware)
+	}
+	mws = append(mws, rpcTimeoutMiddleware(loginRPCTimeout))
+	return mws
+}
+
 // Login runs the interactive phone -> code -> 2FA-password flow for a single
 // user. Session bytes are persisted into the DB via the SessionStore. Returns
 // the resolved Telegram user metadata for storage in telegram_accounts.
@@ -51,12 +100,17 @@ func Login(
 	phone string,
 	askCode func(ctx context.Context) (string, error),
 	askPassword func(ctx context.Context) (string, error),
+	cfgs ...LoginConfig,
 ) (telegramUserID int64, displayName, username string, err error) {
 	if apiID == 0 || apiHash == "" {
 		return 0, "", "", errors.New("TG_API_ID / TG_API_HASH must be set before login")
 	}
 	if phone == "" {
 		return 0, "", "", errors.New("phone required")
+	}
+	var cfg LoginConfig
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
 	}
 
 	sessStore := &SessionStore{UserID: userID, Store: store}
@@ -69,9 +123,7 @@ func Login(
 			SystemLangCode: "en",
 			LangCode:       "en",
 		},
-		Middlewares: []telegram.Middleware{
-			rpcTimeoutMiddleware(loginRPCTimeout),
-		},
+		Middlewares: loginMiddlewares(cfg),
 	})
 
 	authenticator := &interactiveAuthenticator{

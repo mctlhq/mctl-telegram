@@ -1,0 +1,41 @@
+name: Preview Deploy
+run-name: "preview-deploy main-${{ github.sha }}"
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Generate Platform App token
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+
+      - name: Dispatch preview release-deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${SHA::7}"
+          gh workflow run release-deploy.yaml \
+            --repo mctlhq/mctl-gitops \
+            --ref main \
+            -f repo=mctlhq/mctl-telegram \
+            -f git_ref="$SHA" \
+            -f image_name=ghcr.io/mctlhq/mctl-telegram \
+            -f image_tag="main-${SHORT_SHA}" \
+            -f team_name=labs \
+            -f component_name=mctl-telegram-preview

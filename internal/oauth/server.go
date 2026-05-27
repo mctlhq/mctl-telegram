@@ -72,6 +72,12 @@ type Server struct {
 	// stub without dialing real Telegram. New sets it to telegram.Login.
 	loginFn LoginFunc
 
+	// loginCfg is forwarded to loginFn on every enable_access login. It carries
+	// the shared api_id-wide rate-limit middleware so the interactive login
+	// client throttles against the same budget as the pool. Zero value = no
+	// extra wiring. Set via WithLoginConfig.
+	loginCfg telegram.LoginConfig
+
 	// loginMu serialises enable_access login goroutines per users.id (key
 	// int64 -> *sync.Mutex). Two flows for the same uid must not interleave,
 	// or a cancelled-but-still-running predecessor could revoke the session a
@@ -103,6 +109,14 @@ func (s *Server) WithMetrics(m metricsIface) *Server {
 	return s
 }
 
+// WithLoginConfig sets the telegram.LoginConfig forwarded to every
+// enable_access login (e.g. the shared api_id-wide rate-limit middleware).
+// Returns the receiver for chaining.
+func (s *Server) WithLoginConfig(cfg telegram.LoginConfig) *Server {
+	s.loginCfg = cfg
+	return s
+}
+
 // LoginFunc matches the signature of telegram.Login. The enable_access flow
 // drives it from a background goroutine with channel-backed askCode/askPassword
 // callbacks.
@@ -115,6 +129,7 @@ type LoginFunc func(
 	phone string,
 	askCode func(context.Context) (string, error),
 	askPassword func(context.Context) (string, error),
+	cfgs ...telegram.LoginConfig,
 ) (telegramUserID int64, displayName, username string, err error)
 
 // Config captures everything the OAuth server needs at construction time.
