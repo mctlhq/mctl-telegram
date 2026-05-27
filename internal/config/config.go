@@ -11,9 +11,9 @@ import (
 )
 
 type Config struct {
-	Addr               string
-	PublicBaseURL      string
-	MCPPath            string
+	Addr          string
+	PublicBaseURL string
+	MCPPath       string
 	// AllowedOrigins is the Origin-header allowlist for the /mcp endpoint
 	// (DNS-rebinding protection). Requests with no Origin header are always
 	// allowed — server-to-server MCP clients (claude.ai, MCP Inspector, curl)
@@ -21,7 +21,7 @@ type Config struct {
 	// must match one of these entries (scheme://host[:port]) or the request is
 	// rejected with 403. Set via ALLOWED_ORIGINS (comma-separated); defaults to
 	// the PUBLIC_BASE_URL origin.
-	AllowedOrigins []string
+	AllowedOrigins     []string
 	AuthMode           string
 	AuthRequired       bool
 	OperatorLogin      string
@@ -62,6 +62,18 @@ type Config struct {
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
+	// TGAPIRatePerSec is the api_id-wide MTProto RPC ceiling shared across every
+	// live client (the pool plus the short-lived login client), expressed in
+	// requests per second. All sessions authenticate under one TG_API_ID, so a
+	// burst across many user accounts can get the *app credentials* flood-banned
+	// even though each account's own per-account budget is fine. This bounds the
+	// aggregate. 0 (default) disables the limiter — non-breaking. Set via
+	// TG_API_RATE_PER_SEC.
+	TGAPIRatePerSec float64
+	// TGAPIRateBurst is the token-bucket burst size for the api_id-wide limiter.
+	// Ignored when TGAPIRatePerSec <= 0. 0 falls back to ceil(TGAPIRatePerSec)
+	// (at least 1). Set via TG_API_RATE_BURST.
+	TGAPIRateBurst int
 	// DBMaxOpenConns caps the Postgres connection pool. 0 means keep the
 	// prior default of 10. Set via DB_MAX_OPEN_CONNS.
 	DBMaxOpenConns int
@@ -124,6 +136,8 @@ func Load() (*Config, error) {
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
+	c.TGAPIRatePerSec = envFloat("TG_API_RATE_PER_SEC", 0)
+	c.TGAPIRateBurst = envInt("TG_API_RATE_BURST", 0)
 	c.DBMaxOpenConns = envInt("DB_MAX_OPEN_CONNS", 0)
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
@@ -247,6 +261,18 @@ func envInt(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func envFloat(key string, def float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func envDuration(key string, def time.Duration) time.Duration {

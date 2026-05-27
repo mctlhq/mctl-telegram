@@ -62,7 +62,12 @@ type ClientPool struct {
 	APIHash     string
 	IdleTimeout time.Duration
 	MaxSessions int // 0 = no cap; set via WithMaxSessions
-	Store       *db.Store
+	// globalMW, when non-nil, is attached to every pooled client so all live
+	// sessions share one api_id-wide MTProto rate budget. Set via
+	// WithGlobalMiddleware. The login client (telegram.Login) receives the same
+	// instance so the whole process throttles against one shared TG_API_ID.
+	globalMW telegram.Middleware
+	Store    *db.Store
 	// metrics is optional; when non-nil, pool size and error counters are
 	// maintained.
 	metrics *metrics.Registry
@@ -103,6 +108,15 @@ func (p *ClientPool) WithMetrics(m *metrics.Registry) *ClientPool {
 // (default, preserving previous behaviour). Returns the receiver for chaining.
 func (p *ClientPool) WithMaxSessions(n int) *ClientPool {
 	p.MaxSessions = n
+	return p
+}
+
+// WithGlobalMiddleware attaches mw to every client the pool constructs, sharing
+// one api_id-wide rate limit across all live sessions. Pass the same instance
+// to telegram.Login (via LoginConfig.GlobalMiddleware) so the login client is
+// bound by the same budget. nil is a no-op. Returns the receiver for chaining.
+func (p *ClientPool) WithGlobalMiddleware(mw telegram.Middleware) *ClientPool {
+	p.globalMW = mw
 	return p
 }
 
@@ -256,9 +270,11 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	}
 
 	store := &SessionStore{UserID: userID, Store: p.Store}
-	client := telegram.NewClient(p.APIID, p.APIHash, telegram.Options{
-		SessionStorage: store,
-	})
+	opts := telegram.Options{SessionStorage: store}
+	if p.globalMW != nil {
+		opts.Middlewares = []telegram.Middleware{p.globalMW}
+	}
+	client := telegram.NewClient(p.APIID, p.APIHash, opts)
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &entry{
 		client:   client,
