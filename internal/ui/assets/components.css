@@ -152,6 +152,9 @@
   .hero .eyebrow { animation: fadeUp .45s cubic-bezier(.22,.68,0,1.2) .05s both; }
   .hero h1       { animation: fadeUp .5s  cubic-bezier(.22,.68,0,1.2) .13s both; }
   .hero .lead    { animation: fadeUp .5s  cubic-bezier(.22,.68,0,1.2) .22s both; }
+  @media (prefers-reduced-motion: reduce) {
+    .hero .eyebrow, .hero h1, .hero .lead, .cta-row, .hero .muted { animation: none; }
+  }
   .status-dot {
     width: 8px; height: 8px;
     border-radius: 50%;
