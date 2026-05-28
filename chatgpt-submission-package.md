@@ -29,9 +29,22 @@ hosted service is not zero-knowledge: infrastructure operators with privileged a
 the database and the master encryption key could theoretically decrypt stored session blobs.
 This trust boundary is documented explicitly at https://tg.mctl.ai/security.
 
-Read tools and write tools are separated. Real sending is gated by server configuration,
-per-user send_enabled flag, and the telegram:messages:send scope. The test account has
-send_enabled=false, so every send_message invocation during review is a dry-run preview.
+Read tools and write tools are separated. Write operations require explicit confirmation
+steps: send_message returns a dry-run preview (sent=false, dry_reason field) before anything
+reaches Telegram; pin_message requires a matching confirmation_id from a prior
+prepare_pin_message call. Real sending is further gated by server configuration, per-user
+send_enabled flag, and the telegram:messages:send scope. Per-peer rate limits (20 actions/
+peer/hour) prevent AI-driven message flooding. The test account has send_enabled=false, so
+every send_message invocation during review is a dry-run preview.
+
+Users who require a stronger trust model can use Local Bridge mode (beta), which keeps the
+MTProto session entirely on the user's own device — no session bytes stored on the server.
+
+Existing Telegram MCP tools are mostly local/self-hosted with broad surfaces (80+ tools,
+contact management, media upload, admin group operations). mctl-telegram is intentionally
+narrower: 9 user-facing tools + 5 admin-only operator controls (14 total), no contact management, no media upload, no admin group
+operations, each tool is read XOR write. Users can cryptographically verify their audit log
+has not been tampered with (GET /api/account/audit/verify).
 
 Additional reviewer data-handling package:
 https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md

@@ -35,6 +35,13 @@ replies, **preview-only sending by default**, confirmed pin actions, audit revie
 disconnect/delete controls. It is an **independent project — not an official Telegram app or
 Telegram API partner**, and Telegram message content is treated as untrusted user-generated data.
 
+Existing Telegram MCP tools are mostly local/self-hosted with broad surfaces. mctl-telegram is
+intentionally narrower and safer for hosted review: 9 user-facing tools + 5 admin-only
+operator controls (14 total), each tool is read XOR write, no contact management, no media
+upload, no admin group operations. Write operations
+require explicit confirmation steps; per-peer rate limits prevent AI-driven flooding; send is
+disabled by default. Users can cryptographically verify their audit log via hash chain.
+
 ## Tools (14)
 Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capability is by
 `destructiveHint`. Every tool has a `title` and explicit `readOnlyHint`/`destructiveHint`/
@@ -75,6 +82,13 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
   (server-to-server clients send none); a present Origin must be on the `ALLOWED_ORIGINS` allowlist.
 - Telegram session blobs encrypted at rest (AES-256-GCM); audit log redacts message text, phone
   numbers, session bytes, and secrets.
+- **Two-step write confirmation:** `send_message` returns a dry-run preview before anything
+  reaches Telegram; `pin_message` requires a `confirmation_id` from a prior `prepare_pin_message`.
+- **Per-peer rate limiting:** 20 send/pin actions per peer per hour — prevents AI-driven flooding.
+- **Tamper-evident audit chain:** SHA-256 hash chain on `audit_logs`; users can verify at
+  `GET /api/account/audit/verify`.
+- **Local Bridge mode (beta):** keeps MTProto session entirely on the user's device — no session
+  bytes on the server for users who want a stronger trust model.
 - Egress note: Anthropic's docs list outbound CIDR `160.79.104.0/21`; only relevant behind a
   firewall/conditional-access policy. The custom connector already connects successfully, so no
   egress change is required.
