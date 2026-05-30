@@ -71,9 +71,13 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 - **Username + flow:** provided in the form. **Password:** supply in the form directly (never
   committed). The demo account has a pre-seeded MTProto session and `send_enabled=false`, so every
   `send_message` stays a dry-run preview.
-- **Admin note:** the reviewer demo account intentionally holds `admin:users`, so the 5 admin tools
-  are deliberately reviewable. They are operator/self-host administration controls, gated behind
-  the `admin:users` scope — not general consumer surface.
+- **Admin note:** the reviewer demo account holds `admin:users` (it is in the server `TG_LOGIN_ADMINS`
+  allowlist), so the 5 admin tools are deliberately reviewable. They are operator/self-host
+  administration controls, gated behind the `admin:users` scope — not general consumer surface.
+- **Connect fresh:** establish a **new** connection via the reviewer login. The `admin:users` scope
+  (and the 5 admin tools) is granted at connection time, so a freshly connected reviewer session has
+  it; reusing a stale token issued before the account was made admin would not. A normal first-time
+  reviewer connection gets it automatically.
 
 ## Security
 - OAuth 2.1 with mandatory PKCE (S256) and RFC 7591 Dynamic Client Registration.

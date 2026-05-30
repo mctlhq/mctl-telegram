@@ -37,6 +37,10 @@ send_enabled flag, and the telegram:messages:send scope. Per-peer rate limits (2
 peer/hour) prevent AI-driven message flooding. The test account has send_enabled=false, so
 every send_message invocation during review is a dry-run preview.
 
+Please establish a fresh connection via the provided reviewer login. The demo account is in the
+server admin allowlist, so a newly connected reviewer session is granted the admin:users scope and
+can exercise the 5 admin tools in addition to the 9 user-facing tools (all 14 reviewable).
+
 Users who require a stronger trust model can use Local Bridge mode (beta), which keeps the
 MTProto session entirely on the user's own device — no session bytes stored on the server.
 
