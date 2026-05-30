@@ -117,6 +117,12 @@ func realPath(p string) (string, error) {
 		if !os.IsNotExist(rerr) {
 			return "", rerr
 		}
+		// EvalSymlinks ENOENT on an intermediate component: use lstat to
+		// distinguish a broken symlink (deny) from a truly absent directory
+		// (keep walking up).
+		if _, lstatErr := os.Lstat(dir); lstatErr == nil {
+			return "", fmt.Errorf("path denied: broken symlink %q", dir)
+		}
 	}
 	return abs, nil
 }

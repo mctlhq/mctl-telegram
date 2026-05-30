@@ -146,6 +146,22 @@ func TestAllowed_BrokenSymlink(t *testing.T) {
 	}
 }
 
+func TestAllowed_IntermediateBrokenSymlink(t *testing.T) {
+	root := t.TempDir()
+
+	// Create a broken symlink that acts as a parent directory component.
+	// path = root/broken_dir/file.txt where broken_dir is a broken symlink.
+	brokenDir := filepath.Join(root, "broken_dir")
+	if err := os.Symlink(filepath.Join(root, "nonexistent_target"), brokenDir); err != nil {
+		t.Skip("symlink creation failed (unsupported on this OS)")
+	}
+
+	_, err := Allowed([]string{root}, filepath.Join(brokenDir, "file.txt"))
+	if err == nil {
+		t.Error("expected Allowed() to deny path through intermediate broken symlink, got nil error")
+	}
+}
+
 func TestAllowed_SymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	escape := t.TempDir()
