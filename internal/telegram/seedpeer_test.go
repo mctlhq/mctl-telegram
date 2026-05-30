@@ -60,8 +60,8 @@ func TestSeedPeerCache(t *testing.T) {
 	})
 }
 
-// TestSeedPeerCache_SkipsZeroHash verifies that "min" entities (AccessHash==0)
-// are not seeded and never overwrite a valid hash already in the cache.
+// TestSeedPeerCache_SkipsZeroHash verifies that zero-access-hash entities are
+// not seeded and never overwrite a valid hash already in the cache.
 func TestSeedPeerCache_SkipsZeroHash(t *testing.T) {
 	pc := NewPeerCache()
 	// Pre-seed valid hashes as if resolved earlier via username.
@@ -78,6 +78,27 @@ func TestSeedPeerCache_SkipsZeroHash(t *testing.T) {
 	}
 	if got, _ := pc.Get(7, "channel:100"); got.(*tg.InputPeerChannel).AccessHash != 8888 {
 		t.Errorf("channel hash overwritten by zero-hash min object: %v", got)
+	}
+}
+
+// TestSeedPeerCache_SkipsMin verifies that "min" entities — whose access hash is
+// non-zero but unusable for messages.* APIs — are not seeded and never overwrite
+// a valid hash already in the cache.
+func TestSeedPeerCache_SkipsMin(t *testing.T) {
+	pc := NewPeerCache()
+	pc.Set(7, "user:42", &tg.InputPeerUser{UserID: 42, AccessHash: 9999})
+	pc.Set(7, "channel:100", &tg.InputPeerChannel{ChannelID: 100, AccessHash: 8888})
+
+	// Min objects with a (non-zero) limited-context access hash.
+	users := map[int64]*tg.User{42: {ID: 42, Min: true, AccessHash: 1234}}
+	chats := map[int64]tg.ChatClass{100: &tg.Channel{ID: 100, Min: true, AccessHash: 5678}}
+	seedPeerCache(pc, 7, users, chats)
+
+	if got, _ := pc.Get(7, "user:42"); got.(*tg.InputPeerUser).AccessHash != 9999 {
+		t.Errorf("min user overwrote a valid cached hash: %v", got)
+	}
+	if got, _ := pc.Get(7, "channel:100"); got.(*tg.InputPeerChannel).AccessHash != 8888 {
+		t.Errorf("min channel overwrote a valid cached hash: %v", got)
 	}
 }
 
