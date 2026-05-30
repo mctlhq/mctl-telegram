@@ -53,7 +53,7 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 | `get_unread_messages` | read | Return unread messages, optionally for one peer. |
 | `get_messages` | read | Return recent message history for a specific peer. |
 | `send_message` | write | Send a message. **Preview-only by default**: real send requires `ALLOW_SEND=true` + `telegram:messages:send` scope + per-account `send_enabled=true`; otherwise returns `sent=false` dry-run. |
-| `prepare_pin_message` | read | Create a local one-shot confirmation id for a later `pin_message` (no Telegram mutation). |
+| `prepare_pin_message` | prep (`readOnlyHint=false`, `destructiveHint=false`) | Create a local one-shot confirmation id for a later `pin_message`. No Telegram mutation, but it writes a local confirmation record, so it is not annotated read-only. |
 | `pin_message` | write | Pin/unpin a message after a matching confirmation id. |
 | `get_my_audit_log` | read | Return the authenticated user's own audit rows. |
 | `disconnect_telegram_account` | write | Soft-revoke the caller's session and tear down the in-memory MTProto client. |
@@ -69,15 +69,22 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
   authenticates as a single pre-provisioned demo Telegram identity — **no phone/SMS/2FA needed**.
   Enabled via `DEMO_REVIEWER_*` server config during review.
 - **Username + flow:** provided in the form. **Password:** supply in the form directly (never
-  committed). The demo account has a pre-seeded MTProto session and `send_enabled=false`, so every
-  `send_message` stays a dry-run preview.
-- **Admin note:** the reviewer demo account holds `admin:users` (it is in the server `TG_LOGIN_ADMINS`
-  allowlist), so the 5 admin tools are deliberately reviewable. They are operator/self-host
-  administration controls, gated behind the `admin:users` scope — not general consumer surface.
-- **Connect fresh:** establish a **new** connection via the reviewer login. The `admin:users` scope
-  (and the 5 admin tools) is granted at connection time, so a freshly connected reviewer session has
-  it; reusing a stale token issued before the account was made admin would not. A normal first-time
-  reviewer connection gets it automatically.
+  committed). The demo account has a pre-seeded, populated MTProto session and `send_enabled=false`,
+  so every `send_message` stays a dry-run preview.
+- **Step-by-step setup (unfamiliar reviewer):**
+  1. In Claude → Settings → Connectors, **Add custom connector** with URL `https://tg.mctl.ai/mcp`.
+  2. Complete the OAuth flow.
+  3. On the `/authorize` page choose **reviewer login** and enter the provided username/password.
+  4. Confirm you are connected as the demo identity **@mctlhq** (`8745115872`).
+  5. Run the recommended user-tool flow (list chats → read/summarize → draft → send → pin → audit).
+  6. Sends are **dry-run/preview-only** for this account (nothing is delivered).
+- **Permission boundary (expected behavior):** the reviewer demo account is a **normal client-tier
+  user**, NOT an admin. The **9 user-facing tools work**; the **5 admin tools** (`list_telegram_identities`,
+  `set_telegram_access`, `set_account_send`, `get_user_audit_log`, `revoke_telegram_session`) are
+  gated behind the `admin:users` scope and will return a **clean "authorization denied / missing scope
+  admin:users"** response for the reviewer — **that is the correct, expected behavior**, demonstrating
+  the scope boundary. Their successful behavior is operator/self-host administration, verifiable with
+  operator credentials on request.
 
 ## Security
 - OAuth 2.1 with mandatory PKCE (S256) and RFC 7591 Dynamic Client Registration.
@@ -141,27 +148,58 @@ per-user send_enabled flag, and the telegram:messages:send scope. No tool argume
 the send gate.
 ```
 
-### Operator trust boundary (reviewer notes)
-> The application does not persist message contents. Messages are fetched live from Telegram only
-> when the authenticated user invokes a tool. Access is scoped to the authenticated user, and no
-> tool permits cross-user message access.
+### Server-side data access — explicit disclosure (remote mode)
+> **This is a remote, hosted MCP server. It stores the user's encrypted Telegram MTProto session
+> server-side, and the backend can technically access the Telegram chats and messages available to
+> the authorized account when fulfilling a user-requested tool call.** We do not claim the service
+> "cannot access your messages" in remote mode. Message *contents* are not persisted — they are
+> fetched live from Telegram only during a tool call and returned to the user's MCP client — but the
+> capability to read them exists by construction.
 >
-> Telegram session secrets are encrypted at rest using AES-256-GCM with per-user derived keys.
-> The master encryption key is stored in HashiCorp Vault and not committed to code or
-> configuration. Infrastructure operators with privileged access to both the database and the
-> encryption key could theoretically decrypt stored session blobs. This is the inherent trust
-> boundary of any hosted service that handles user credentials on the user's behalf, and it is
-> explicitly documented at https://tg.mctl.ai/security.
+> **Mitigations:** access is user-scoped (no tool permits cross-user access); sessions are encrypted
+> at rest (AES-256-GCM, per-user derived keys, master key in HashiCorp Vault, not in code/config); a
+> tamper-evident hash-chained audit log records every tool call; users can revoke/delete at any time;
+> and the data is **never used for training, never sold, and never accessed outside the user's own
+> requests**. Infrastructure operators with privileged access to both the DB and the Vault key could
+> theoretically decrypt session blobs — the inherent trust boundary of any hosted credential service,
+> documented at https://tg.mctl.ai/security. (A future **Local Bridge** keeps the session on the
+> user's own device — that is the only mode where the server cannot access messages.)
 
 **OIDC scope:** login requests `openid profile` only. The `telegram:bot_access` scope (which
 previously surfaced an "Allow messages" toggle) was removed in 0.41.0.
 
-## Policy narrative — Telegram is a third party
+## Policy narrative — API ownership / Telegram is a third party
 This is a **user-authorized client to the user's own Telegram account** over Telegram's official
-MTProto API (`api_id`/`api_hash` from my.telegram.org). It is **not a scraper, not a relay, and not
-an unofficial pass-through**: it acts only on the single account the user explicitly connects, and
-the user remains responsible for complying with Telegram's terms. Non-affiliation copy is live on
-the public landing/demo/privacy pages.
+MTProto API. Explicitly:
+- mctl-telegram is a **user-authorized client for the user's own Telegram account** — not a scraper,
+  relay, or unofficial pass-through; it acts only on the single account the user explicitly connects.
+- It uses **Telegram's official MTProto client API** with `api_id`/`api_hash` from my.telegram.org.
+- It does **not** claim to be Telegram or an official Telegram app/partner (non-affiliation copy is
+  live on the public landing/demo/privacy pages).
+- The **service domain is `tg.mctl.ai`**, and **all OAuth + MCP endpoints** (`/mcp`, `/authorize`,
+  `/token`, `/register`, `/.well-known/*`) are served under that domain we own.
+- **Data access is user-scoped and requires explicit user authorization** (OAuth 2.1); the user
+  remains responsible for complying with Telegram's terms.
+- **Third-party connection:** Telegram / MTProto.
+
+## Compliance attestations (for the Data & Compliance form fields)
+- **Health data:** No. Does not request, process, or intentionally access health data.
+- **Prohibited use cases:** Does **not** transfer money, cryptocurrency, or financial assets; does
+  **not** generate images, video, or audio via AI models.
+- **Claude-side data:** Does **not** access Claude memory, chat history, conversation summaries, or
+  user files.
+- **Allowed link URIs:** Does **not** use `ui/open-link`; **allowed link URIs: none**. No third-party
+  (Telegram) domains are listed.
+- **MCP Apps assets:** Remote MCP server with **no** `ui/open-link` / interactive UI components /
+  MCP-App widgets → MCP-App carousel screenshots are **not applicable**.
+
+## Architecture decision — Remote now, MCPB (local) later
+This directory submission is the **Remote MCP connector** (custom-connector over Streamable HTTP),
+chosen for **Claude web + mobile + hosted** support. Remote means the encrypted Telegram session is
+stored server-side (disclosed above). A **privacy-first Local Bridge / MCPB Desktop variant** — where
+the Telegram session stays **on the user's device** — is tracked **separately** and would submit via
+the MCPB path with its own README `privacy_policies` + open-source requirements. Not part of this
+submission.
 
 ## Pre-submission checklist
 
@@ -193,11 +231,12 @@ the public landing/demo/privacy pages.
 - [ ] `telegram:messages:send` scope requirement documented
 - [ ] No tool argument bypasses send gate
 
-**Test account**
-- [ ] Realistic sample dialogs (no real personal data)
-- [ ] Has unread messages for testing
+**Test account (fully populated)**
+- [ ] Several dialogs incl. ≥1 private chat and ≥1 group/supergroup/channel (no real personal data)
+- [ ] Has **unread** messages for testing; enough history to exercise list/get/summarize flows
 - [ ] `send_enabled=false` so every `send_message` is dry-run preview
-- [ ] `admin:users` scope so all 14 tools are reviewable
+- [ ] Reviewer account is **non-admin (client tier)** — 9 user tools work; the 5 admin tools return a
+      clean scope-denied (`admin:users`) = expected boundary; admin-tool success shown with operator creds
 - [ ] Reviewer credentials provided in the form (not committed here)
 
 **Submission**
@@ -216,10 +255,11 @@ Inspector / ChatGPT Developer Mode).
 
 Reason: without a real OAuth login and real tool calls, we cannot fully verify that:
 - the submitted examples match the currently deployed runtime;
-- the reviewer demo account receives the expected scopes;
-- all 14 tools are visible and callable;
-- dry-run behavior is shown correctly;
-- admin tools are available only after a fresh reviewer connection.
+- the reviewer demo account receives the expected (client-tier) scopes;
+- the 9 user-facing tools are callable and the 5 admin tools return a clean scope-denied for the
+  reviewer (the expected permission boundary);
+- dry-run/preview-only send behavior is shown correctly;
+- error messages are actionable (no raw 500 / opaque Telegram errors).
 
 Do not submit until this manual pass is completed and recorded.
 

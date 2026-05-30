@@ -239,7 +239,7 @@
       "user_prompt": "Admin: set Telegram user 123456789 access tier to client.",
       "file_attachment_urls": null,
       "tools_triggered": "set_telegram_access",
-      "expected_output": "Updates the selected user's local access tier or returns a clear validation/error message.",
+      "expected_output": "Admin-only (requires admin:users). With the non-admin reviewer account this returns a clean authorization-denied / missing-scope admin:users message (the expected permission boundary). With operator credentials it updates the selected user's local access tier or returns a clear validation/error message.",
       "expected_output_url": null
     },
     {
@@ -247,7 +247,7 @@
       "user_prompt": "Admin: list Telegram identities and show who has an active session.",
       "file_attachment_urls": null,
       "tools_triggered": "list_telegram_identities",
-      "expected_output": "Returns signed-in Telegram identities with access tier and active-session state for admin review.",
+      "expected_output": "Admin-only (requires admin:users). With the non-admin reviewer account this returns a clean authorization-denied / missing-scope admin:users message (the expected permission boundary). With operator credentials it returns signed-in Telegram identities with access tier and active-session state for admin review.",
       "expected_output_url": null
     },
     {
@@ -255,7 +255,7 @@
       "user_prompt": "Admin: disable real Telegram sending for user id 123456789.",
       "file_attachment_urls": null,
       "tools_triggered": "set_account_send",
-      "expected_output": "Updates the selected account's send_enabled flag or reports that the user must connect an account first.",
+      "expected_output": "Admin-only (requires admin:users). With the non-admin reviewer account this returns a clean authorization-denied / missing-scope admin:users message (the expected permission boundary). With operator credentials it updates the selected account's send_enabled flag or reports that the user must connect an account first.",
       "expected_output_url": null
     },
     {
@@ -263,7 +263,7 @@
       "user_prompt": "Admin: show audit entries for Telegram user 123456789, then revoke their active session if it looks stuck.",
       "file_attachment_urls": null,
       "tools_triggered": "get_user_audit_log, revoke_telegram_session",
-      "expected_output": "Returns redacted audit entries for the selected user, then revokes the active local session only if the admin confirms that action.",
+      "expected_output": "Admin-only (requires admin:users). With the non-admin reviewer account this returns a clean authorization-denied / missing-scope admin:users message (the expected permission boundary). With operator credentials it returns redacted audit entries for the selected user, then revokes the active local session only if the admin confirms that action.",
       "expected_output_url": null
     },
     {
