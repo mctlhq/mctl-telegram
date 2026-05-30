@@ -142,10 +142,13 @@ func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, cha
 		return
 	}
 	for _, u := range users {
-		// Skip "min" user objects (access hash intentionally withheld): a
-		// zero-hash entry is itself unusable and would overwrite a valid hash
-		// previously cached via ContactsResolveUsername.
-		if u == nil || u.AccessHash == 0 {
+		// Skip unusable access hashes. A zero hash obviously can't resolve, and a
+		// "min" user (https://core.telegram.org/api/min) carries an access hash
+		// valid only for limited contexts (e.g. profile photos) — NOT for
+		// messages.* APIs, which still return PEER_ID_INVALID. Seeding either
+		// would also overwrite a good full hash previously cached via
+		// ContactsResolveUsername.
+		if u == nil || u.Min || u.AccessHash == 0 {
 			continue
 		}
 		cache.Set(userID, fmt.Sprintf("user:%d", u.ID),
@@ -154,8 +157,9 @@ func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, cha
 	for _, c := range chats {
 		switch ch := c.(type) {
 		case *tg.Channel:
-			// Same guard as users: never seed (or overwrite) with a zero hash.
-			if ch.AccessHash == 0 {
+			// Same guard as users: skip min channels and zero hashes — neither is
+			// usable for messages.getHistory and both would clobber a good entry.
+			if ch.Min || ch.AccessHash == 0 {
 				continue
 			}
 			cache.Set(userID, fmt.Sprintf("channel:%d", ch.ID),
