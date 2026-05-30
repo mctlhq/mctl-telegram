@@ -21,7 +21,12 @@ type Dialog struct {
 
 // ListDialogs returns up to `limit` dialogs from the operator's main dialog
 // list, optionally filtered (case-insensitive substring) by `query`.
-func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query string) ([]Dialog, error) {
+//
+// When cache and userID are provided it seeds the shared PeerCache with the
+// access_hash for every returned peer, so a follow-up get_messages/send_message
+// for one of these dialogs resolves correctly instead of failing with
+// PEER_ID_INVALID/CHANNEL_INVALID. Pass a nil cache / zero userID to skip seeding.
+func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query string, cache *PeerCache, userID int64) ([]Dialog, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -35,6 +40,7 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 	}
 
 	users, chats, dialogs := decodeDialogsResult(res)
+	seedPeerCache(cache, userID, users, chats)
 	out := make([]Dialog, 0, len(dialogs))
 
 	for _, dc := range dialogs {
