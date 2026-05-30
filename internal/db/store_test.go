@@ -473,3 +473,70 @@ func TestToggleSendEnabled_AtomicFlip(t *testing.T) {
 		t.Fatal("expected false after second toggle")
 	}
 }
+
+// TestListIdentities_ConnectedVia verifies that the connected_via field is
+// populated from oauth_refresh_tokens.client_name (denormalized at issue time)
+// and is not affected by oauth_client_registrations TTL sweeps.
+func TestListIdentities_ConnectedVia(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	now := time.Now().UTC()
+
+	uid, err := s.EnsureUserByTelegramID(ctx, 100, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	// Active token with client_name set — should appear in connected_via.
+	if err := s.SaveRefreshToken(ctx, "tok-active", RefreshToken{
+		FamilyID:   "fam1",
+		UserID:     uid,
+		ClientID:   "client-claude",
+		ClientName: "Claude",
+		TelegramID: 100,
+		ExpiresAt:  now.Add(30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save active token: %v", err)
+	}
+
+	// Expired token — must NOT appear.
+	if err := s.SaveRefreshToken(ctx, "tok-expired", RefreshToken{
+		FamilyID:   "fam2",
+		UserID:     uid,
+		ClientID:   "client-old",
+		ClientName: "OldClient",
+		TelegramID: 100,
+		ExpiresAt:  now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("save expired token: %v", err)
+	}
+
+	// Token with empty client_name — must NOT appear (P3 filter).
+	if err := s.SaveRefreshToken(ctx, "tok-noname", RefreshToken{
+		FamilyID:   "fam3",
+		UserID:     uid,
+		ClientID:   "client-legacy",
+		ClientName: "",
+		TelegramID: 100,
+		ExpiresAt:  now.Add(30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save no-name token: %v", err)
+	}
+
+	rows, err := s.ListIdentities(ctx)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	var alice *IdentityRow
+	for i := range rows {
+		if rows[i].TelegramID == 100 {
+			alice = &rows[i]
+		}
+	}
+	if alice == nil {
+		t.Fatal("alice not found in identities")
+	}
+	if len(alice.ConnectedVia) != 1 || alice.ConnectedVia[0] != "Claude" {
+		t.Errorf("ConnectedVia = %v, want [Claude]", alice.ConnectedVia)
+	}
+}

@@ -263,18 +263,18 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 		return nil, err
 	}
 
-	// Fetch connected_via: distinct client names from active refresh tokens,
-	// joined to oauth_client_registrations. Works on both SQLite and Postgres.
+	// Fetch connected_via: distinct non-empty client names denormalized onto
+	// oauth_refresh_tokens at issue time, so the field survives oauth_client_registrations TTL sweeps.
 	clientRows, err := s.DB.QueryContext(ctx,
-		`SELECT u.telegram_login_id, cr.client_name
+		`SELECT u.telegram_login_id, rt.client_name
 		   FROM users u
 		   JOIN oauth_refresh_tokens rt ON rt.user_id = u.id
-		   JOIN oauth_client_registrations cr ON cr.client_id = rt.client_id
 		  WHERE u.telegram_login_id IS NOT NULL
 		    AND rt.revoked_at IS NULL
 		    AND rt.expires_at > $1
-		  GROUP BY u.telegram_login_id, cr.client_name
-		  ORDER BY u.telegram_login_id, cr.client_name`,
+		    AND rt.client_name <> ''
+		  GROUP BY u.telegram_login_id, rt.client_name
+		  ORDER BY u.telegram_login_id, rt.client_name`,
 		now,
 	)
 	if err != nil {

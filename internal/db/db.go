@@ -281,21 +281,13 @@ func sqliteSchema() []string {
 			telegram_id INTEGER NOT NULL,
 			telegram_username TEXT,
 			scope TEXT,
+			client_name TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at DATETIME NOT NULL,
 			revoked_at DATETIME
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
-		// Client registrations — persistent, not transient; needed for connected_via
-		// enrichment in ListIdentities. Matches the Postgres column set.
-		`CREATE TABLE IF NOT EXISTS oauth_client_registrations (
-			client_id      TEXT PRIMARY KEY,
-			client_name    TEXT NOT NULL DEFAULT '',
-			redirect_uris  TEXT NOT NULL,
-			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_oauth_client_regs_created_at ON oauth_client_registrations(created_at)`,
 	}
 }
 
@@ -347,6 +339,7 @@ func pgSchema() []string {
 			telegram_id BIGINT NOT NULL,
 			telegram_username TEXT,
 			scope TEXT,
+			client_name TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			expires_at TIMESTAMPTZ NOT NULL,
 			revoked_at TIMESTAMPTZ
