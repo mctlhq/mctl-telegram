@@ -46,6 +46,42 @@ func TestToolAnnotations(t *testing.T) {
 	}
 }
 
+// TestToolFilter verifies that toolPassesFilter respects the "read-only" mode.
+func TestToolFilter(t *testing.T) {
+	s := &Server{}
+	trueVal := true
+	falseVal := false
+
+	readOnlyTool := mcplib.Tool{Annotations: mcplib.ToolAnnotation{ReadOnlyHint: &trueVal}}
+	writeTool := mcplib.Tool{Annotations: mcplib.ToolAnnotation{ReadOnlyHint: &falseVal}}
+	noHintTool := mcplib.Tool{}
+
+	cases := []struct {
+		tool   mcplib.Tool
+		filter string
+		want   bool
+	}{
+		{readOnlyTool, "all", true},
+		{writeTool, "all", true},
+		{noHintTool, "all", true},
+		{readOnlyTool, "read-only", true},
+		{writeTool, "read-only", false},
+		{noHintTool, "read-only", false},
+		{readOnlyTool, "", true},   // empty filter treated as "all"
+		{writeTool, "", true},
+	}
+
+	_ = s // kept to avoid "declared but not used" in future where we test via Server
+
+	for _, c := range cases {
+		got := toolPassesFilter(c.tool, c.filter)
+		if got != c.want {
+			t.Errorf("toolPassesFilter(filter=%q, readOnly=%v) = %v, want %v",
+				c.filter, c.tool.Annotations.ReadOnlyHint, got, c.want)
+		}
+	}
+}
+
 // first drops the handler returned alongside a tool builder.
 func first(tool mcplib.Tool, _ mcpserver.ToolHandlerFunc) mcplib.Tool { return tool }
 

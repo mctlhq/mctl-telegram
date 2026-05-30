@@ -272,7 +272,7 @@ func main() {
 		}
 	}()
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
 	// Force the reviewer/demo account's sends to dry-run previews. Only armed
 	// when reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
 	// silently gag a real account once the review feature is turned off.
