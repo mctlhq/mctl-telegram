@@ -135,11 +135,20 @@ sent=false and a dry_reason field.
 - [ ] Reviewer prompt examples and expected outputs are current
 
 **Submission**
-- [ ] Exercise all 14 tools in ChatGPT Dev Mode before submitting
 - [ ] Confirm privacy/terms/docs URLs resolve over HTTPS
 - [ ] Set the GA date
 - [ ] Paste reviewer note from above into the notes field
 - [ ] Paste form field text from above into the corresponding form fields
+
+> **MANUAL VERIFICATION GATE — cannot be automated, do this last before Submit.**
+> Connect the connector **fresh** with the reviewer credentials in ChatGPT Developer Mode
+> (real OAuth login), then run **every** test case in `chatgpt-app-submission.json` against the
+> live runtime — actually invoking the tools, not just reading the JSON. This is the one step that
+> can't be automated: without a real OAuth login and live tool calls there is no way to confirm the
+> submission examples (test cases, tool hints, expected outputs) still match the **current runtime
+> and demo account**. Everything else (endpoint, OAuth discovery, OriginGuard, artifact↔runtime
+> annotation parity, deploy state) is verified by code/CI/curl/logs; this is not. Re-run it after
+> any redeploy that could change tool behavior or the demo account.
 
 ---
 

@@ -201,8 +201,17 @@ the public landing/demo/privacy pages.
 - [ ] Reviewer credentials provided in the form (not committed here)
 
 **Submission**
-- [ ] Exercise all 14 tools via MCP Inspector before submitting
 - [ ] Re-test as a custom connector in Claude after OriginGuard release (0.41.0)
 - [ ] Confirm privacy/terms/docs/logo URLs resolve over HTTPS
 - [ ] Set the GA date
 - [ ] Paste form field text from the "Form field:" sections above
+
+> **MANUAL VERIFICATION GATE — cannot be automated, do this last before Submit.**
+> Connect the connector **fresh** with the reviewer credentials (real OAuth login — in Claude as a
+> custom connector, or MCP Inspector), then run **every** test case against the live runtime,
+> actually invoking all 14 tools (not just reading the docs). This is the one step that can't be
+> automated: without a real OAuth login and live tool calls there is no way to confirm the
+> submission examples (tool hints, expected behavior) still match the **current runtime and demo
+> account**. Everything else (endpoint, `.well-known` discovery, OriginGuard, artifact↔runtime
+> annotation parity, deploy state) is verified by code/CI/curl/logs; this is not. Re-run it after
+> any redeploy that could change tool behavior or the demo account.
