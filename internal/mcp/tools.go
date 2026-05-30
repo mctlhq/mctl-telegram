@@ -1452,7 +1452,7 @@ Inputs (required):
 			result, inner = telegram.ForwardMessages(ctx, c, fromPeer, toPeer, messageIDs, s.PeerCache, id.UserID)
 			return inner
 		})
-		s.audit(ctx, id, "forward_messages", telegram.RedactPeer(fromPeer), err, startedAt)
+		s.audit(ctx, id, "forward_messages", toPeerRedacted, err, startedAt)
 		if err != nil {
 			return borrowErrResult("forward_messages", err), nil
 		}
