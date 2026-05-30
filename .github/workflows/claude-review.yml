@@ -75,7 +75,7 @@ jobs:
           fi
 
           case $score in
-            3) model="claude-opus-4-7" ;;
+            3) model="claude-sonnet-4-6" ;;
             2) model="claude-sonnet-4-6" ;;
             *) model="claude-haiku-4-5-20251001" ;;
           esac
