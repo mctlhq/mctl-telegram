@@ -18,7 +18,12 @@ func SetReaction(ctx context.Context, c *gotdtelegram.Client, peerSpec string, m
 		return fmt.Errorf("resolve peer: %w", err)
 	}
 
-	var reactions []tg.ReactionClass
+	// Use an explicit empty slice (not nil) when removing a reaction.
+	// In the TL encoding, nil may leave the Reaction field absent (flag not
+	// set), which means "no change" rather than "clear". An empty non-nil
+	// slice encodes as an empty Vector with the flag set, which Telegram
+	// interprets as "remove all reactions from this message".
+	reactions := []tg.ReactionClass{}
 	if emoji != "" {
 		reactions = []tg.ReactionClass{&tg.ReactionEmoji{Emoticon: emoji}}
 	}
