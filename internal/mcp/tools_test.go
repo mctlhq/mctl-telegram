@@ -355,3 +355,64 @@ func TestToolSetAccountSend_NoActiveSession(t *testing.T) {
 		t.Errorf("unexpected error text: %s", contentText(result))
 	}
 }
+
+func TestIntSliceArg(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    map[string]any
+		key     string
+		want    []int
+		wantOK  bool
+	}{
+		{
+			name:   "key absent",
+			args:   map[string]any{},
+			key:    "ids",
+			wantOK: false,
+		},
+		{
+			name:   "float64 elements (JSON numbers)",
+			args:   map[string]any{"ids": []any{float64(1), float64(2), float64(3)}},
+			key:    "ids",
+			want:   []int{1, 2, 3},
+			wantOK: true,
+		},
+		{
+			name:   "int elements",
+			args:   map[string]any{"ids": []any{10, 20}},
+			key:    "ids",
+			want:   []int{10, 20},
+			wantOK: true,
+		},
+		{
+			name:   "not a slice",
+			args:   map[string]any{"ids": "not a slice"},
+			key:    "ids",
+			wantOK: false,
+		},
+		{
+			name:   "empty slice",
+			args:   map[string]any{"ids": []any{}},
+			key:    "ids",
+			want:   []int{},
+			wantOK: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := intSliceArg(c.args, c.key)
+			if ok != c.wantOK {
+				t.Errorf("intSliceArg ok = %v, want %v", ok, c.wantOK)
+			}
+			if ok && len(got) != len(c.want) {
+				t.Errorf("intSliceArg len = %d, want %d", len(got), len(c.want))
+			}
+			for i := range c.want {
+				if i < len(got) && got[i] != c.want[i] {
+					t.Errorf("intSliceArg[%d] = %d, want %d", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
