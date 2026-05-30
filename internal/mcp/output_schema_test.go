@@ -33,6 +33,11 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"set_account_send", first(s.toolSetAccountSend())},
 		{"send_message", first(s.toolSendMessage())},
 		{"pin_message", first(s.toolPinMessage())},
+		{"edit_message", first(s.toolEditMessage())},
+		{"delete_messages", first(s.toolDeleteMessages())},
+		{"forward_messages", first(s.toolForwardMessages())},
+		{"search_messages", first(s.toolSearchMessages())},
+		{"set_reaction", first(s.toolSetReaction())},
 	}
 
 	for _, tc := range tools {

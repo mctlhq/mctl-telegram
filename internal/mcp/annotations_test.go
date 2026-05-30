@@ -34,6 +34,11 @@ func TestToolAnnotations(t *testing.T) {
 		{"set_account_send", first(s.toolSetAccountSend()), false, true, false},
 		{"send_message", first(s.toolSendMessage()), false, true, true},
 		{"pin_message", first(s.toolPinMessage()), false, true, true},
+		{"edit_message", first(s.toolEditMessage()), false, true, true},
+		{"delete_messages", first(s.toolDeleteMessages()), false, true, true},
+		{"forward_messages", first(s.toolForwardMessages()), false, true, true},
+		{"search_messages", first(s.toolSearchMessages()), true, false, true},
+		{"set_reaction", first(s.toolSetReaction()), false, false, true},
 	}
 
 	for _, c := range cases {

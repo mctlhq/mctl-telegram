@@ -108,6 +108,11 @@ func (s *Server) HTTPHandler() http.Handler {
 	srv.AddTool(s.toolSetAccountSend())
 	srv.AddTool(s.toolGetUserAuditLog())
 	srv.AddTool(s.toolRevokeSession())
+	srv.AddTool(s.toolEditMessage())
+	srv.AddTool(s.toolDeleteMessages())
+	srv.AddTool(s.toolForwardMessages())
+	srv.AddTool(s.toolSearchMessages())
+	srv.AddTool(s.toolSetReaction())
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,
