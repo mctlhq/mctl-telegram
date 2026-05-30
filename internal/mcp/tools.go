@@ -1317,13 +1317,28 @@ Inputs (required):
 		if peer == "" || messageID == 0 || text == "" {
 			return mcplib.NewToolResultError("peer, message_id, and text are required"), nil
 		}
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		if !canSend {
+			return mcplib.NewToolResultError("edit blocked: " + dryReason), nil
+		}
+		peerRedacted := telegram.RedactPeer(peer)
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+			s.audit(ctx, id, "edit_message:rate_limited", peerRedacted, nil, startedAt)
+			return mcplib.NewToolResultError(r), nil
+		}
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				return mcplib.NewToolResultError("edit_message is not yet supported for local-bridge accounts"), nil
+			}
+		}
 		var result *telegram.EditResult
 		err := s.borrowWithRetry(ctx, "edit_message", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var inner error
 			result, inner = telegram.EditMessage(ctx, c, peer, messageID, text, s.PeerCache, id.UserID)
 			return inner
 		})
-		s.audit(ctx, id, "edit_message", telegram.RedactPeer(peer), err, startedAt)
+		s.audit(ctx, id, "edit_message", peerRedacted, err, startedAt)
 		if err != nil {
 			return borrowErrResult("edit_message", err), nil
 		}
@@ -1358,13 +1373,28 @@ Inputs (required):
 		if peer == "" || !ok || len(messageIDs) == 0 {
 			return mcplib.NewToolResultError("peer and non-empty message_ids are required"), nil
 		}
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		if !canSend {
+			return mcplib.NewToolResultError("delete blocked: " + dryReason), nil
+		}
+		peerRedacted := telegram.RedactPeer(peer)
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+			s.audit(ctx, id, "delete_messages:rate_limited", peerRedacted, nil, startedAt)
+			return mcplib.NewToolResultError(r), nil
+		}
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				return mcplib.NewToolResultError("delete_messages is not yet supported for local-bridge accounts"), nil
+			}
+		}
 		var result *telegram.DeleteResult
 		err := s.borrowWithRetry(ctx, "delete_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var inner error
 			result, inner = telegram.DeleteMessages(ctx, c, peer, messageIDs, s.PeerCache, id.UserID)
 			return inner
 		})
-		s.audit(ctx, id, "delete_messages", telegram.RedactPeer(peer), err, startedAt)
+		s.audit(ctx, id, "delete_messages", peerRedacted, err, startedAt)
 		if err != nil {
 			return borrowErrResult("delete_messages", err), nil
 		}
@@ -1399,6 +1429,22 @@ Inputs (required):
 		messageIDs, ok := intSliceArg(args, "message_ids")
 		if fromPeer == "" || toPeer == "" || !ok || len(messageIDs) == 0 {
 			return mcplib.NewToolResultError("from_peer, to_peer, and non-empty message_ids are required"), nil
+		}
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		if !canSend {
+			return mcplib.NewToolResultError("forward blocked: " + dryReason), nil
+		}
+		// Rate-limit on the destination peer (outbound message target).
+		toPeerRedacted := telegram.RedactPeer(toPeer)
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, toPeerRedacted); blocked {
+			s.audit(ctx, id, "forward_messages:rate_limited", toPeerRedacted, nil, startedAt)
+			return mcplib.NewToolResultError(r), nil
+		}
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				return mcplib.NewToolResultError("forward_messages is not yet supported for local-bridge accounts"), nil
+			}
 		}
 		var result *telegram.ForwardResult
 		err := s.borrowWithRetry(ctx, "forward_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
@@ -1440,12 +1486,23 @@ Inputs (optional):
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
+		if err := requireScope(id, "telegram:messages:read"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		args := req.GetArguments()
 		query := stringArg(args, "query", "")
 		peer := stringArg(args, "peer", "")
 		limit := intArg(args, "limit", 20)
 		if query == "" {
 			return mcplib.NewToolResultError("query is required"), nil
+		}
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "search_messages", args)
+				s.audit(ctx, id, "search_messages", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
+				return res, err2
+			}
 		}
 		var msgs []telegram.Message
 		err := s.borrowWithRetry(ctx, "search_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
@@ -1503,10 +1560,25 @@ Inputs (optional):
 		if peer == "" || messageID == 0 {
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
 		}
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		if !canSend {
+			return mcplib.NewToolResultError("reaction blocked: " + dryReason), nil
+		}
+		peerRedacted := telegram.RedactPeer(peer)
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+			s.audit(ctx, id, "set_reaction:rate_limited", peerRedacted, nil, startedAt)
+			return mcplib.NewToolResultError(r), nil
+		}
+		if s.Hub != nil {
+			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && mode == "local" {
+				return mcplib.NewToolResultError("set_reaction is not yet supported for local-bridge accounts"), nil
+			}
+		}
 		err := s.borrowWithRetry(ctx, "set_reaction", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			return telegram.SetReaction(ctx, c, peer, messageID, emoji, big, s.PeerCache, id.UserID)
 		})
-		s.audit(ctx, id, "set_reaction", telegram.RedactPeer(peer), err, startedAt)
+		s.audit(ctx, id, "set_reaction", peerRedacted, err, startedAt)
 		if err != nil {
 			return borrowErrResult("set_reaction", err), nil
 		}
