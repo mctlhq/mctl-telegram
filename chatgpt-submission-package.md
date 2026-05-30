@@ -140,15 +140,25 @@ sent=false and a dry_reason field.
 - [ ] Paste reviewer note from above into the notes field
 - [ ] Paste form field text from above into the corresponding form fields
 
-> **MANUAL VERIFICATION GATE — cannot be automated, do this last before Submit.**
-> Connect the connector **fresh** with the reviewer credentials in ChatGPT Developer Mode
-> (real OAuth login), then run **every** test case in `chatgpt-app-submission.json` against the
-> live runtime — actually invoking the tools, not just reading the JSON. This is the one step that
-> can't be automated: without a real OAuth login and live tool calls there is no way to confirm the
-> submission examples (test cases, tool hints, expected outputs) still match the **current runtime
-> and demo account**. Everything else (endpoint, OAuth discovery, OriginGuard, artifact↔runtime
-> annotation parity, deploy state) is verified by code/CI/curl/logs; this is not. Re-run it after
-> any redeploy that could change tool behavior or the demo account.
+### Manual gate: ChatGPT Developer Mode verification
+
+This is the only non-automated submission gate.
+
+Before submitting to the ChatGPT App Directory, run all documented test cases in ChatGPT Developer
+Mode using the provided reviewer credentials.
+
+Reason: without a real OAuth login and real tool calls through ChatGPT, we cannot fully verify that:
+- the submitted examples match the currently deployed runtime;
+- the reviewer demo account receives the expected scopes;
+- all 14 tools are visible and callable;
+- dry-run behavior is shown correctly;
+- admin tools are available only after a fresh reviewer connection.
+
+Do not submit until this manual Developer Mode pass is completed and recorded.
+
+(Everything else — endpoint, OAuth discovery, OriginGuard, artifact↔runtime annotation parity,
+deploy state — is already verified by code/CI/curl/logs. Re-run this gate after any redeploy that
+could change tool behavior or the demo account.)
 
 ---
 

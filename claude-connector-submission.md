@@ -206,12 +206,23 @@ the public landing/demo/privacy pages.
 - [ ] Set the GA date
 - [ ] Paste form field text from the "Form field:" sections above
 
-> **MANUAL VERIFICATION GATE — cannot be automated, do this last before Submit.**
-> Connect the connector **fresh** with the reviewer credentials (real OAuth login — in Claude as a
-> custom connector, or MCP Inspector), then run **every** test case against the live runtime,
-> actually invoking all 14 tools (not just reading the docs). This is the one step that can't be
-> automated: without a real OAuth login and live tool calls there is no way to confirm the
-> submission examples (tool hints, expected behavior) still match the **current runtime and demo
-> account**. Everything else (endpoint, `.well-known` discovery, OriginGuard, artifact↔runtime
-> annotation parity, deploy state) is verified by code/CI/curl/logs; this is not. Re-run it after
-> any redeploy that could change tool behavior or the demo account.
+### Manual gate: live Developer Mode / connector verification
+
+This is the only non-automated submission gate.
+
+Before submitting to the Claude Connector Directory, run all documented test cases against the live
+connector using the provided reviewer credentials — as a custom connector in Claude (or via MCP
+Inspector / ChatGPT Developer Mode).
+
+Reason: without a real OAuth login and real tool calls, we cannot fully verify that:
+- the submitted examples match the currently deployed runtime;
+- the reviewer demo account receives the expected scopes;
+- all 14 tools are visible and callable;
+- dry-run behavior is shown correctly;
+- admin tools are available only after a fresh reviewer connection.
+
+Do not submit until this manual pass is completed and recorded.
+
+(Everything else — endpoint, `.well-known` discovery, OriginGuard, artifact↔runtime annotation
+parity, deploy state — is already verified by code/CI/curl/logs. Re-run this gate after any redeploy
+that could change tool behavior or the demo account.)
