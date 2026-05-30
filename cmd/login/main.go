@@ -38,6 +38,10 @@ func main() {
 	useQR := flag.Bool("qr", false, "Use QR code login instead of phone+SMS (recommended when Telegram is open on another device)")
 	flag.Parse()
 
+	if *useQR && *phone != "" {
+		fmt.Fprintln(os.Stderr, "--phone and --qr are mutually exclusive")
+		os.Exit(2)
+	}
 	if !*useQR && *phone == "" {
 		fmt.Fprintln(os.Stderr, "one of --phone or --qr is required")
 		os.Exit(2)

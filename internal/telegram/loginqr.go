@@ -60,7 +60,13 @@ func LoginQR(
 	})
 
 	runErr := client.Run(ctx, func(ctx context.Context) error {
-		qr := qrlogin.NewQR(client.API(), apiID, apiHash, qrlogin.Options{})
+		qr := qrlogin.NewQR(client.API(), apiID, apiHash, qrlogin.Options{
+			// Migrate wires the DC-migration callback so QR auth succeeds for
+			// accounts whose home DC differs from the client's current DC.
+			// Without this, auth.loginTokenMigrateTo returns an error instead
+			// of transparently importing the accepted token.
+			Migrate: client.MigrateTo,
+		})
 		auth, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
 			url := token.URL()
 			return show(ctx, url, renderQR(url))
