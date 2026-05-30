@@ -11,7 +11,7 @@ require (
 	github.com/gotd/contrib v0.21.1
 	github.com/gotd/td v0.144.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/mark3labs/mcp-go v0.54.0
+	github.com/mark3labs/mcp-go v0.54.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	golang.org/x/crypto v0.51.0
@@ -19,6 +19,7 @@ require (
 	golang.org/x/term v0.43.0
 	golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.50.1
+	rsc.io/qr v0.2.0
 )
 
 require (
@@ -73,5 +74,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )
