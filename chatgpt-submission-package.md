@@ -37,9 +37,24 @@ send_enabled flag, and the telegram:messages:send scope. Per-peer rate limits (2
 peer/hour) prevent AI-driven message flooding. The test account has send_enabled=false, so
 every send_message invocation during review is a dry-run preview.
 
-Please establish a fresh connection via the provided reviewer login. The demo account is in the
-server admin allowlist, so a newly connected reviewer session is granted the admin:users scope and
-can exercise the 5 admin tools in addition to the 9 user-facing tools (all 14 reviewable).
+Please establish a fresh connection via the provided reviewer login. The demo account is a normal
+client-tier user (NOT an admin): the 9 user-facing tools work, and the 5 admin tools return a clean
+"authorization denied / missing scope admin:users" response — that is the correct, expected
+permission boundary. The admin tools are operator/self-host controls; their successful behavior is
+verifiable separately with operator credentials on request.
+
+Compliance attestations: Health data — No (not requested/processed/accessed). Does not transfer
+money, cryptocurrency, or financial assets; does not generate images, video, or audio via AI models.
+Does not access ChatGPT/Claude memory, chat history, conversation summaries, or user files. Does not
+use ui/open-link; allowed link URIs: none (no third-party domains). No interactive UI components, so
+app-carousel screenshots are not applicable.
+
+Server-side data access (remote mode): this hosted server stores the user's encrypted Telegram
+MTProto session server-side and can technically access the authorized account's chats/messages when
+fulfilling a user-requested tool call. Message contents are not persisted; data is never used for
+training, never sold, and never accessed outside the user's own requests; access is user-scoped,
+encrypted at rest, audit-logged, and user-revocable. We do not claim the service "cannot access
+messages" in remote mode.
 
 Users who require a stronger trust model can use Local Bridge mode (beta), which keeps the
 MTProto session entirely on the user's own device — no session bytes stored on the server.
@@ -126,11 +141,12 @@ sent=false and a dry_reason field.
 - [ ] `send_message` description mentions preview-only default
 - [ ] All test cases in `chatgpt-app-submission.json` are verified against current runtime
 
-**Test account**
-- [ ] Realistic sample dialogs (no real personal data)
-- [ ] Has unread messages for testing
+**Test account (fully populated)**
+- [ ] Several dialogs incl. ≥1 private chat and ≥1 group/supergroup/channel (no real personal data)
+- [ ] Has **unread** messages + enough history for list/get/summarize flows
 - [ ] `send_enabled=false` (every `send_message` is dry-run preview)
-- [ ] `admin:users` scope so all 14 tools are reviewable
+- [ ] Reviewer account is **non-admin (client tier)** — 9 user tools work; 5 admin tools return a
+      clean scope-denied (expected); admin-tool success shown with operator creds
 - [ ] Reviewer credentials provided in the form (not committed)
 - [ ] Reviewer prompt examples and expected outputs are current
 
@@ -149,10 +165,11 @@ Mode using the provided reviewer credentials.
 
 Reason: without a real OAuth login and real tool calls through ChatGPT, we cannot fully verify that:
 - the submitted examples match the currently deployed runtime;
-- the reviewer demo account receives the expected scopes;
-- all 14 tools are visible and callable;
-- dry-run behavior is shown correctly;
-- admin tools are available only after a fresh reviewer connection.
+- the reviewer demo account receives the expected (client-tier) scopes;
+- the 9 user-facing tools are callable and the 5 admin tools return a clean scope-denied for the
+  reviewer (expected permission boundary);
+- dry-run/preview-only send behavior is shown correctly;
+- error messages are actionable (no raw 500 / opaque Telegram errors).
 
 Do not submit until this manual Developer Mode pass is completed and recorded.
 

@@ -1,11 +1,90 @@
 package mcp
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
+
+// allRuntimeTools returns every MCP tool keyed by name — the single source of
+// truth the parity test compares the submission JSON against.
+func allRuntimeTools(s *Server) map[string]mcplib.Tool {
+	return map[string]mcplib.Tool{
+		"list_dialogs":                first(s.toolListDialogs()),
+		"get_unread_messages":         first(s.toolGetUnreadMessages()),
+		"get_messages":                first(s.toolGetMessages()),
+		"send_message":                first(s.toolSendMessage()),
+		"prepare_pin_message":         first(s.toolPreparePinMessage()),
+		"pin_message":                 first(s.toolPinMessage()),
+		"get_my_audit_log":            first(s.toolGetMyAuditLog()),
+		"disconnect_telegram_account": first(s.toolDisconnectAccount()),
+		"delete_telegram_account":     first(s.toolDeleteAccount()),
+		"list_telegram_identities":    first(s.toolListIdentities()),
+		"set_telegram_access":         first(s.toolSetAccess()),
+		"set_account_send":            first(s.toolSetAccountSend()),
+		"get_user_audit_log":          first(s.toolGetUserAuditLog()),
+		"revoke_telegram_session":     first(s.toolRevokeSession()),
+	}
+}
+
+// TestAnnotationsMatchSubmissionJSON enforces the G-PARITY gate: the annotation
+// hints in chatgpt-app-submission.json (what ChatGPT/Claude reviewers read) must
+// exactly match the runtime tool annotations for every tool. If they ever drift,
+// a reviewer sees behavior that contradicts the submitted JSON — a review failure.
+func TestAnnotationsMatchSubmissionJSON(t *testing.T) {
+	const jsonPath = "../../chatgpt-app-submission.json"
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", jsonPath, err)
+	}
+	var doc struct {
+		Tools map[string]struct {
+			Annotations struct {
+				ReadOnlyHint    *bool `json:"readOnlyHint"`
+				OpenWorldHint   *bool `json:"openWorldHint"`
+				DestructiveHint *bool `json:"destructiveHint"`
+			} `json:"annotations"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", jsonPath, err)
+	}
+
+	runtime := allRuntimeTools(&Server{})
+	if len(doc.Tools) != len(runtime) {
+		t.Fatalf("tool count mismatch: JSON has %d, runtime has %d", len(doc.Tools), len(runtime))
+	}
+
+	deref := func(b *bool) bool { return b != nil && *b }
+	for name, jt := range doc.Tools {
+		rt, ok := runtime[name]
+		if !ok {
+			t.Errorf("JSON tool %q has no runtime tool", name)
+			continue
+		}
+		a := rt.Annotations
+		if a.Title == "" {
+			t.Errorf("%s: runtime tool missing title", name)
+		}
+		if jt.Annotations.ReadOnlyHint == nil || deref(a.ReadOnlyHint) != *jt.Annotations.ReadOnlyHint {
+			t.Errorf("%s: readOnlyHint runtime=%v JSON=%v", name, a.ReadOnlyHint, jt.Annotations.ReadOnlyHint)
+		}
+		if jt.Annotations.DestructiveHint == nil || deref(a.DestructiveHint) != *jt.Annotations.DestructiveHint {
+			t.Errorf("%s: destructiveHint runtime=%v JSON=%v", name, a.DestructiveHint, jt.Annotations.DestructiveHint)
+		}
+		if jt.Annotations.OpenWorldHint != nil && deref(a.OpenWorldHint) != *jt.Annotations.OpenWorldHint {
+			t.Errorf("%s: openWorldHint runtime=%v JSON=%v", name, a.OpenWorldHint, jt.Annotations.OpenWorldHint)
+		}
+	}
+	for name := range runtime {
+		if _, ok := doc.Tools[name]; !ok {
+			t.Errorf("runtime tool %q missing from submission JSON", name)
+		}
+	}
+}
 
 // TestToolAnnotations locks the MCP tool annotation hints that the ChatGPT App
 // submission depends on. mcp-go's NewTool defaults are
@@ -67,7 +146,7 @@ func TestToolFilter(t *testing.T) {
 		{readOnlyTool, "read-only", true},
 		{writeTool, "read-only", false},
 		{noHintTool, "read-only", false},
-		{readOnlyTool, "", true},   // empty filter treated as "all"
+		{readOnlyTool, "", true}, // empty filter treated as "all"
 		{writeTool, "", true},
 	}
 
