@@ -72,6 +72,10 @@ func rejectUnsafePatterns(path string) error {
 // When the path does not exist yet (e.g. a file about to be created), we
 // resolve as many leading components as exist so that directory-level
 // symlinks (e.g. /var → /private/var on macOS) are still followed.
+//
+// Broken symlinks (lstat succeeds but EvalSymlinks fails with ENOENT) are
+// denied — their canonical target is unknown so the sandbox cannot be
+// enforced.
 func realPath(p string) (string, error) {
 	abs, err := filepath.Abs(filepath.Clean(p))
 	if err != nil {
@@ -83,6 +87,12 @@ func realPath(p string) (string, error) {
 	}
 	if !os.IsNotExist(err) {
 		return "", err
+	}
+	// EvalSymlinks returned ENOENT. Use lstat to distinguish:
+	//   lstat OK  → path exists as a broken symlink → cannot determine target → deny
+	//   lstat ENOENT → path truly does not exist → use parent-walking fallback
+	if _, lstatErr := os.Lstat(abs); lstatErr == nil {
+		return "", fmt.Errorf("path denied: broken symlink %q", abs)
 	}
 	// File does not exist — resolve the nearest existing ancestor and re-append
 	// the trailing components so symlinks in the parent dirs are followed.

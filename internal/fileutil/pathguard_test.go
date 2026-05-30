@@ -119,6 +119,21 @@ func TestAllowed(t *testing.T) {
 	}
 }
 
+func TestAllowed_BrokenSymlink(t *testing.T) {
+	root := t.TempDir()
+
+	// Create a symlink inside root that points to a non-existent target.
+	link := filepath.Join(root, "broken")
+	if err := os.Symlink(filepath.Join(root, "nonexistent"), link); err != nil {
+		t.Skip("symlink creation failed (unsupported on this OS)")
+	}
+
+	_, err := Allowed([]string{root}, link)
+	if err == nil {
+		t.Error("expected Allowed() to deny a broken symlink, got nil error")
+	}
+}
+
 func TestAllowed_SymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	escape := t.TempDir()
