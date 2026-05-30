@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.1](https://github.com/mctlhq/mctl-telegram/compare/0.41.0...0.41.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **telegram:** skip min peers when seeding peer cache ([#254](https://github.com/mctlhq/mctl-telegram/issues/254)) ([70e44e2](https://github.com/mctlhq/mctl-telegram/commit/70e44e2383903286595938ad3e54f9a38e5e8573))
+
 ## [0.41.0](https://github.com/mctlhq/mctl-telegram/compare/0.40.0...0.41.0) (2026-05-30)
 
 
