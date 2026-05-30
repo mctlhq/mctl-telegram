@@ -730,7 +730,9 @@ This tool is part of the self-service transparency surface — operators cannot 
 func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("list_telegram_identities",
 		mcplib.WithTitleAnnotation("List Telegram identities"),
-		mcplib.WithReadOnlyHintAnnotation(false),
+		// readOnly=true: pure read; the audit row is internal observability, same
+		// rationale as list_dialogs/get_my_audit_log.
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[identitiesResult](),
@@ -865,7 +867,9 @@ The user must have an active session. New accounts are send-enabled by default; 
 func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_user_audit_log",
 		mcplib.WithTitleAnnotation("Read any user's audit log"),
-		mcplib.WithReadOnlyHintAnnotation(false),
+		// readOnly=true: pure read; the audit row is internal observability, same
+		// rationale as get_my_audit_log.
+		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[auditLogResult](),

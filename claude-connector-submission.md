@@ -174,9 +174,11 @@ the public landing/demo/privacy pages.
 
 **Tool metadata**
 - [ ] All 14 tools have a `title` field
-- [ ] Read tools (`list_dialogs`, `get_unread_messages`, `get_messages`, `prepare_pin_message`,
+- [ ] Read tools (`list_dialogs`, `get_unread_messages`, `get_messages`,
       `get_my_audit_log`, `list_telegram_identities`, `get_user_audit_log`): `readOnlyHint=true`
 - [ ] Write/destructive tools: `destructiveHint=true` or equivalent
+- [ ] `prepare_pin_message`: `readOnlyHint=false`, `destructiveHint=false` (creates a local
+      confirmation record — a side effect, but not a Telegram mutation)
 - [ ] No tool mixes read + write operations
 - [ ] Tool descriptions are narrow, non-promotional, accurate
 - [ ] Errors are actionable, not generic 500s

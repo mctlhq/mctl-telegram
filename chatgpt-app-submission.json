@@ -118,12 +118,12 @@
     },
     "list_telegram_identities": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": false,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Lists signed-in Telegram identities for admins but records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only listing of signed-in Telegram identities for admins; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Only reads this server's private user roster and does not change public or third-party state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
@@ -154,12 +154,12 @@
     },
     "get_user_audit_log": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": false,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Reads another user's audit log for admins and records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only retrieval of another user's audit-log rows for admins; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Only reads this server's private audit data and does not change public or third-party state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
