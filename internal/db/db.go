@@ -146,6 +146,10 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "client_name",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// Unique index on telegram_login_id (partial — NULLs ignored) so multiple
 	// pre-migration rows without telegram_login_id remain valid.
 	idxStmts := []string{

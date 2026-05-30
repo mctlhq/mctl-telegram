@@ -523,6 +523,21 @@ func TestListIdentities_ConnectedVia(t *testing.T) {
 		t.Fatalf("save no-name token: %v", err)
 	}
 
+	// Revoked token — must NOT appear.
+	if err := s.SaveRefreshToken(ctx, "tok-revoked", RefreshToken{
+		FamilyID:   "fam4",
+		UserID:     uid,
+		ClientID:   "client-revoked",
+		ClientName: "RevokedClient",
+		TelegramID: 100,
+		ExpiresAt:  now.Add(30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save revoked token: %v", err)
+	}
+	if _, err := s.RevokeRefreshTokenFamily(ctx, "fam4"); err != nil {
+		t.Fatalf("revoke token: %v", err)
+	}
+
 	rows, err := s.ListIdentities(ctx)
 	if err != nil {
 		t.Fatalf("ListIdentities: %v", err)
