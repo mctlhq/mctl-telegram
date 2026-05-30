@@ -125,6 +125,49 @@ func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64
 	return nil
 }
 
+// seedPeerCache populates the shared PeerCache with InputPeer values (including
+// the access_hash) for every entity returned alongside a dialog list, keyed by
+// the same canonical peer specs that ListDialogs/dialogFromPeer emit
+// ("user:<id>", "chat:<id>", "channel:<id>").
+//
+// This is the access-hash source of truth: MTProto rejects messages.* requests
+// for users and channels whose InputPeer carries a zero access_hash
+// (PEER_ID_INVALID / CHANNEL_INVALID). ResolvePeer can only build a zero-hash
+// InputPeer from a bare numeric "channel:<id>" spec, so without this seeding a
+// follow-up get_messages/send_message that misses the live dialog scan fails.
+// Seeding from the dialog entities lets ResolvePeerCached return a hash-bearing
+// peer instead. No-op when cache is nil or userID is 0.
+func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, chats map[int64]tg.ChatClass) {
+	if cache == nil || userID == 0 {
+		return
+	}
+	for _, u := range users {
+		// Skip "min" user objects (access hash intentionally withheld): a
+		// zero-hash entry is itself unusable and would overwrite a valid hash
+		// previously cached via ContactsResolveUsername.
+		if u == nil || u.AccessHash == 0 {
+			continue
+		}
+		cache.Set(userID, fmt.Sprintf("user:%d", u.ID),
+			&tg.InputPeerUser{UserID: u.ID, AccessHash: u.AccessHash})
+	}
+	for _, c := range chats {
+		switch ch := c.(type) {
+		case *tg.Channel:
+			// Same guard as users: never seed (or overwrite) with a zero hash.
+			if ch.AccessHash == 0 {
+				continue
+			}
+			cache.Set(userID, fmt.Sprintf("channel:%d", ch.ID),
+				&tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash})
+		case *tg.Chat:
+			// Basic groups need no access hash.
+			cache.Set(userID, fmt.Sprintf("chat:%d", ch.ID),
+				&tg.InputPeerChat{ChatID: ch.ID})
+		}
+	}
+}
+
 func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int) []Message {
 	var raw []tg.MessageClass
 	switch v := r.(type) {
@@ -202,6 +245,10 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
+	// Seed the shared peer cache so a later get_messages/send_message for any of
+	// these peers resolves with a valid access_hash even if it misses the live
+	// dialog scan below.
+	seedPeerCache(cache, userID, users, chats)
 
 	for _, dc := range dialogs {
 		d, ok := dc.(*tg.Dialog)
@@ -233,7 +280,8 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
 	input, resolveErr := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	if resolveErr != nil {
-		return nil, fmt.Errorf("peer %q not found in dialogs and direct resolution failed: %w", peerSpec, resolveErr)
+		return nil, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
+			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:  input,
@@ -241,18 +289,25 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 	})
 	if histErr != nil {
 		var rpcErr *tgerr.Error
-		if errors.As(histErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
-			// Evict the stale entry and retry once with a fresh resolution.
-			// MessagesGetHistory is read-only so the retry is always safe.
-			cache.Evict(userID, peerSpec)
-			if input2, err2 := ResolvePeerCached(ctx, c, peerSpec, cache, userID); err2 == nil {
-				if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-					Peer:  input2,
-					Limit: limit,
-				}); err3 == nil {
-					return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), nil
+		if errors.As(histErr, &rpcErr) && (rpcErr.Message == "PEER_ID_INVALID" || rpcErr.Message == "CHANNEL_INVALID") {
+			if cache != nil {
+				// Evict the stale entry and retry once with a fresh resolution.
+				// MessagesGetHistory is read-only so the retry is always safe.
+				cache.Evict(userID, peerSpec)
+				if input2, err2 := ResolvePeerCached(ctx, c, peerSpec, cache, userID); err2 == nil {
+					if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+						Peer:  input2,
+						Limit: limit,
+					}); err3 == nil {
+						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), nil
+					}
 				}
 			}
+			// A bare numeric "user:<id>"/"channel:<id>" carries no access_hash, so
+			// Telegram cannot identify the peer. Tell the caller how to recover
+			// instead of surfacing a raw RPC error that invites a retry loop.
+			return nil, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
+				"call list_dialogs and use an id exactly as returned there", peerSpec, rpcErr.Message)
 		}
 		return nil, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}

@@ -270,7 +270,8 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		var dialogs []tg.Dialog
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			dialogs, err = tg.ListDialogs(ctx, c, args.Limit, args.Query)
+			// The Local Bridge daemon keeps no shared peer cache; pass nil/0.
+			dialogs, err = tg.ListDialogs(ctx, c, args.Limit, args.Query, nil, 0)
 			return err
 		})
 		if dispErr == nil {

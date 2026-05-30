@@ -207,7 +207,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		var dialogs []telegram.Dialog
 		err := s.borrowWithRetry(ctx, "list_dialogs", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
-			dialogs, err = telegram.ListDialogs(ctx, c, limit, query)
+			dialogs, err = telegram.ListDialogs(ctx, c, limit, query, s.PeerCache, id.UserID)
 			return err
 		})
 		s.audit(ctx, id, "list_dialogs", "", err, startedAt)
