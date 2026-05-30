@@ -47,14 +47,18 @@ func WrapUntrustedContent(text, peerRedacted string) string {
 func wrapMessages(msgs []telegram.Message) []telegram.Message {
 	out := make([]telegram.Message, len(msgs))
 	for i, m := range msgs {
-		// Only sanitize non-empty text. Media-only messages (Text == "") must
-		// stay empty so WrapUntrustedContent's guard fires and the "[empty]"
-		// sentinel does not leak into the XML wrapper.
+		// Only sanitize non-empty fields. Empty text (media-only messages),
+		// empty From (anonymous channel posts), and empty PeerTitle must stay
+		// empty so the "[empty]" sentinel does not leak into MCP output.
 		if m.Text != "" {
 			m.Text = sanitize.UserContent(m.Text, 4096)
 		}
-		m.From = sanitize.Name(m.From, 100)
-		m.PeerTitle = sanitize.Name(m.PeerTitle, 100)
+		if m.From != "" {
+			m.From = sanitize.Name(m.From, 100)
+		}
+		if m.PeerTitle != "" {
+			m.PeerTitle = sanitize.Name(m.PeerTitle, 100)
+		}
 		peerRedacted := telegram.RedactPeer(m.Peer)
 		m.Text = WrapUntrustedContent(m.Text, peerRedacted)
 		out[i] = m
