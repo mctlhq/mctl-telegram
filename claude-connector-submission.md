@@ -201,8 +201,28 @@ the public landing/demo/privacy pages.
 - [ ] Reviewer credentials provided in the form (not committed here)
 
 **Submission**
-- [ ] Exercise all 14 tools via MCP Inspector before submitting
 - [ ] Re-test as a custom connector in Claude after OriginGuard release (0.41.0)
 - [ ] Confirm privacy/terms/docs/logo URLs resolve over HTTPS
 - [ ] Set the GA date
 - [ ] Paste form field text from the "Form field:" sections above
+
+### Manual gate: live Developer Mode / connector verification
+
+This is the only non-automated submission gate.
+
+Before submitting to the Claude Connector Directory, run all documented test cases against the live
+connector using the provided reviewer credentials — as a custom connector in Claude (or via MCP
+Inspector / ChatGPT Developer Mode).
+
+Reason: without a real OAuth login and real tool calls, we cannot fully verify that:
+- the submitted examples match the currently deployed runtime;
+- the reviewer demo account receives the expected scopes;
+- all 14 tools are visible and callable;
+- dry-run behavior is shown correctly;
+- admin tools are available only after a fresh reviewer connection.
+
+Do not submit until this manual pass is completed and recorded.
+
+(Everything else — endpoint, `.well-known` discovery, OriginGuard, artifact↔runtime annotation
+parity, deploy state — is already verified by code/CI/curl/logs. Re-run this gate after any redeploy
+that could change tool behavior or the demo account.)

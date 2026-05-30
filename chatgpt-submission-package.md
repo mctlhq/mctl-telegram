@@ -135,11 +135,30 @@ sent=false and a dry_reason field.
 - [ ] Reviewer prompt examples and expected outputs are current
 
 **Submission**
-- [ ] Exercise all 14 tools in ChatGPT Dev Mode before submitting
 - [ ] Confirm privacy/terms/docs URLs resolve over HTTPS
 - [ ] Set the GA date
 - [ ] Paste reviewer note from above into the notes field
 - [ ] Paste form field text from above into the corresponding form fields
+
+### Manual gate: ChatGPT Developer Mode verification
+
+This is the only non-automated submission gate.
+
+Before submitting to the ChatGPT App Directory, run all documented test cases in ChatGPT Developer
+Mode using the provided reviewer credentials.
+
+Reason: without a real OAuth login and real tool calls through ChatGPT, we cannot fully verify that:
+- the submitted examples match the currently deployed runtime;
+- the reviewer demo account receives the expected scopes;
+- all 14 tools are visible and callable;
+- dry-run behavior is shown correctly;
+- admin tools are available only after a fresh reviewer connection.
+
+Do not submit until this manual Developer Mode pass is completed and recorded.
+
+(Everything else — endpoint, OAuth discovery, OriginGuard, artifact↔runtime annotation parity,
+deploy state — is already verified by code/CI/curl/logs. Re-run this gate after any redeploy that
+could change tool behavior or the demo account.)
 
 ---
 
