@@ -136,3 +136,25 @@ func TestResponseWriter_WriteHeaderForwardedOnce(t *testing.T) {
 		t.Errorf("captured status = %d, want %d", rw.status, http.StatusInternalServerError)
 	}
 }
+
+// TestResponseWriter_WriteHeaderAfterWriteSuppressed covers the other path that
+// produces the superfluous-WriteHeader warning in practice: an implicit
+// Write() (which sets wroteHeader) followed by an explicit WriteHeader(). The
+// later WriteHeader must not be forwarded, and the captured status stays the
+// 200 default that Write() locked in.
+func TestResponseWriter_WriteHeaderAfterWriteSuppressed(t *testing.T) {
+	underlying := &countingHeaderWriter{ResponseWriter: httptest.NewRecorder()}
+	rw := &responseWriter{ResponseWriter: underlying, status: http.StatusOK}
+
+	if _, err := rw.Write([]byte("body")); err != nil { // implicitly marks wroteHeader
+		t.Fatalf("Write: %v", err)
+	}
+	rw.WriteHeader(http.StatusInternalServerError) // must be suppressed
+
+	if len(underlying.codes) != 0 {
+		t.Fatalf("expected 0 forwarded WriteHeader after Write, got %d (%v)", len(underlying.codes), underlying.codes)
+	}
+	if rw.status != http.StatusOK {
+		t.Errorf("captured status = %d, want %d", rw.status, http.StatusOK)
+	}
+}
