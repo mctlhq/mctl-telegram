@@ -736,7 +736,7 @@ func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithOutputSchema[identitiesResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
 
-Output: JSON array of {telegram_id, username, display_name, access_tier, has_session}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account).
+Output: JSON array of {telegram_id, username, display_name, access_tier, has_session, connected_via}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account). connected_via is a list of distinct OAuth client names (e.g. ["Claude"], ["ChatGPT"], ["Claude","ChatGPT"]) from active refresh tokens; omitted when unknown (tokens predate dynamic client registration).
 
 Use this to find a newly signed-in user, then grant them access with set_telegram_access.`),
 	)
