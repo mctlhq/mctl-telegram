@@ -36,6 +36,11 @@ func Allowed(roots []string, path string) (string, error) {
 	}
 
 	for _, root := range roots {
+		if root == "" {
+			// An empty root expands to the process CWD via filepath.Abs,
+			// silently widening the sandbox. Treat it as invalid and skip.
+			continue
+		}
 		realRoot, err := realPath(root)
 		if err != nil {
 			continue

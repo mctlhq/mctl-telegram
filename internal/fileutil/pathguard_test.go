@@ -98,6 +98,18 @@ func TestAllowed(t *testing.T) {
 			path:    filepath.Join(dir, "file.txt"),
 			wantErr: false,
 		},
+		{
+			name:    "empty string root skipped does not expand to CWD",
+			roots:   []string{"", outside},
+			path:    filepath.Join(dir, "file.txt"),
+			wantErr: true,
+		},
+		{
+			name:    "only empty string root is deny-all",
+			roots:   []string{""},
+			path:    filepath.Join(dir, "file.txt"),
+			wantErr: true,
+		},
 	}
 
 	for _, c := range cases {
