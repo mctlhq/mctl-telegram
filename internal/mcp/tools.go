@@ -1499,9 +1499,10 @@ Inputs (optional):
 		if s.Hub != nil {
 			mode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
 			if modeErr == nil && mode == "local" {
-				res, err2 := s.bridgeCall(ctx, id, "search_messages", args)
-				s.audit(ctx, id, "search_messages", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
-				return res, err2
+				// search_messages is not yet implemented in the local-bridge
+				// daemon. Return a clear error rather than routing to the bridge
+				// (which would return an opaque "unknown tool" error).
+				return mcplib.NewToolResultError("search_messages is not yet supported for local-bridge accounts"), nil
 			}
 		}
 		var msgs []telegram.Message
