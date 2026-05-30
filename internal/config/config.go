@@ -101,6 +101,10 @@ type Config struct {
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
 	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
+	// ToolFilter restricts which MCP tools are registered at startup.
+	// "all" (default) registers every tool; "read-only" registers only tools
+	// annotated with ReadOnlyHint=true. Set via MCP_TOOL_FILTER.
+	ToolFilter string // MCP_TOOL_FILTER
 }
 
 func Load() (*Config, error) {
@@ -156,6 +160,10 @@ func Load() (*Config, error) {
 		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
 		}
+	}
+	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
+	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
+		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {

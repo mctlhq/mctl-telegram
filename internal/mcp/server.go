@@ -39,6 +39,10 @@ type Server struct {
 	// the connect flow re-enables send_enabled and ChatGPT may auto-execute the
 	// send tool, so neither is a dependable preview-only guarantee on its own.
 	DemoReviewerTGID int64
+	// ToolFilter controls which MCP tools are registered. "all" (default)
+	// registers every tool; "read-only" registers only tools with
+	// ReadOnlyHint=true (set via WithToolFilter).
+	ToolFilter string
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -88,26 +92,52 @@ func (s *Server) WithDemoReviewer(tgID int64) *Server {
 	return s
 }
 
+// WithToolFilter sets the MCP tool registration filter. "all" registers every
+// tool; "read-only" registers only tools annotated with ReadOnlyHint=true,
+// providing an operator-level gate that prevents write tools from appearing in
+// the MCP tool list regardless of OAuth scopes. Returns the receiver for chaining.
+func (s *Server) WithToolFilter(f string) *Server {
+	s.ToolFilter = f
+	return s
+}
+
+// toolPassesFilter reports whether a tool should be registered given the
+// active filter mode. An unrecognised filter is treated as "all" (safe default).
+func toolPassesFilter(tool mcplib.Tool, filter string) bool {
+	if filter != "read-only" {
+		return true
+	}
+	return tool.Annotations.ReadOnlyHint != nil && *tool.Annotations.ReadOnlyHint
+}
+
+// addTool registers a (tool, handler) pair unless ToolFilter excludes the tool.
+// The pair arguments match the two-value return of s.toolXxx() builder methods.
+func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc) {
+	if toolPassesFilter(tool, s.ToolFilter) {
+		srv.AddTool(tool, handler)
+	}
+}
+
 func (s *Server) HTTPHandler() http.Handler {
 	srv := mcpserver.NewMCPServer(
 		"mctl-telegram",
 		"0.7.0",
 		mcpserver.WithToolCapabilities(true),
 	)
-	srv.AddTool(s.toolListDialogs())
-	srv.AddTool(s.toolGetUnreadMessages())
-	srv.AddTool(s.toolGetMessages())
-	srv.AddTool(s.toolSendMessage())
-	srv.AddTool(s.toolPreparePinMessage())
-	srv.AddTool(s.toolPinMessage())
-	srv.AddTool(s.toolDisconnectAccount())
-	srv.AddTool(s.toolDeleteAccount())
-	srv.AddTool(s.toolGetMyAuditLog())
-	srv.AddTool(s.toolListIdentities())
-	srv.AddTool(s.toolSetAccess())
-	srv.AddTool(s.toolSetAccountSend())
-	srv.AddTool(s.toolGetUserAuditLog())
-	srv.AddTool(s.toolRevokeSession())
+	{t, h := s.toolListDialogs(); s.addTool(srv, t, h)}
+	{t, h := s.toolGetUnreadMessages(); s.addTool(srv, t, h)}
+	{t, h := s.toolGetMessages(); s.addTool(srv, t, h)}
+	{t, h := s.toolSendMessage(); s.addTool(srv, t, h)}
+	{t, h := s.toolPreparePinMessage(); s.addTool(srv, t, h)}
+	{t, h := s.toolPinMessage(); s.addTool(srv, t, h)}
+	{t, h := s.toolDisconnectAccount(); s.addTool(srv, t, h)}
+	{t, h := s.toolDeleteAccount(); s.addTool(srv, t, h)}
+	{t, h := s.toolGetMyAuditLog(); s.addTool(srv, t, h)}
+	{t, h := s.toolListIdentities(); s.addTool(srv, t, h)}
+	{t, h := s.toolSetAccess(); s.addTool(srv, t, h)}
+	{t, h := s.toolSetAccountSend(); s.addTool(srv, t, h)}
+	{t, h := s.toolGetUserAuditLog(); s.addTool(srv, t, h)}
+	{t, h := s.toolRevokeSession(); s.addTool(srv, t, h)}
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,
