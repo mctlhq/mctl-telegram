@@ -39,4 +39,11 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`
 - Tag format: `MAJOR.MINOR.PATCH` (no `v` prefix)
 - Tag creation triggers release-please workflow → dispatches centralized `mctl-gitops/.github/workflows/release-deploy.yaml`
-- **Merge strategy: merge commits only** (`gh pr merge <N> --merge --delete-branch`, no squash, no rebase) — every feature branch stays visible as a bubble in the git graph (`Merge pull request #NNN from mctlhq/...`)
+- **Merge strategy: squash merges** (`gh pr merge <N> --squash --delete-branch`) — one clean
+  conventional commit per PR on `main`. This keeps the graph linear and gives release-please a
+  single changelog line per PR instead of a duplicated wall of text. The repo's squash format is
+  configured to `PR_TITLE` + blank body, so the PR title MUST be a conventional-commit subject
+  (e.g. `fix(telegram): ...`). Branch-protection "require up to date" no longer forces noisy
+  `Merge branch 'main' into ...` bubbles, because squash discards branch history on merge.
+  - This repo only (switched 2026-05-30). Other mctlhq repos still use merge commits until/unless
+    the convention is rolled out org-wide.
