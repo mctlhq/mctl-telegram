@@ -60,6 +60,27 @@ func TestSeedPeerCache(t *testing.T) {
 	})
 }
 
+// TestSeedPeerCache_SkipsZeroHash verifies that "min" entities (AccessHash==0)
+// are not seeded and never overwrite a valid hash already in the cache.
+func TestSeedPeerCache_SkipsZeroHash(t *testing.T) {
+	pc := NewPeerCache()
+	// Pre-seed valid hashes as if resolved earlier via username.
+	pc.Set(7, "user:42", &tg.InputPeerUser{UserID: 42, AccessHash: 9999})
+	pc.Set(7, "channel:100", &tg.InputPeerChannel{ChannelID: 100, AccessHash: 8888})
+
+	// A dialog scan returns "min" objects with no access hash.
+	users := map[int64]*tg.User{42: {ID: 42, AccessHash: 0}}
+	chats := map[int64]tg.ChatClass{100: &tg.Channel{ID: 100, AccessHash: 0}}
+	seedPeerCache(pc, 7, users, chats)
+
+	if got, _ := pc.Get(7, "user:42"); got.(*tg.InputPeerUser).AccessHash != 9999 {
+		t.Errorf("user hash overwritten by zero-hash min object: %v", got)
+	}
+	if got, _ := pc.Get(7, "channel:100"); got.(*tg.InputPeerChannel).AccessHash != 8888 {
+		t.Errorf("channel hash overwritten by zero-hash min object: %v", got)
+	}
+}
+
 func TestSeedPeerCache_NoOp(t *testing.T) {
 	users := map[int64]*tg.User{42: {ID: 42, AccessHash: 1}}
 

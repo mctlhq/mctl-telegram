@@ -142,7 +142,10 @@ func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, cha
 		return
 	}
 	for _, u := range users {
-		if u == nil {
+		// Skip "min" user objects (access hash intentionally withheld): a
+		// zero-hash entry is itself unusable and would overwrite a valid hash
+		// previously cached via ContactsResolveUsername.
+		if u == nil || u.AccessHash == 0 {
 			continue
 		}
 		cache.Set(userID, fmt.Sprintf("user:%d", u.ID),
@@ -151,6 +154,10 @@ func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, cha
 	for _, c := range chats {
 		switch ch := c.(type) {
 		case *tg.Channel:
+			// Same guard as users: never seed (or overwrite) with a zero hash.
+			if ch.AccessHash == 0 {
+				continue
+			}
 			cache.Set(userID, fmt.Sprintf("channel:%d", ch.ID),
 				&tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash})
 		case *tg.Chat:
