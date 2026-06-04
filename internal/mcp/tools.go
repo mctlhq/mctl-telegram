@@ -605,6 +605,15 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
+		// Server-side guard: the demo/reviewer identity may not disconnect its
+		// own account. The session is shared review infrastructure and a reviewer
+		// disconnect bricks the demo login until an operator re-logs in. Refuse
+		// before touching the pool or DB so the session row is left intact, and
+		// record the blocked attempt in the audit log.
+		if isDemoReviewer(id, s.DemoReviewerTGID) {
+			s.audit(ctx, id, "disconnect_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt)
+			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
+		}
 		// Pool eviction and DB revoke happen under the same mutex that
 		// acquire() takes. A concurrent Borrow() blocks until both are
 		// committed, so it cannot observe the doomed pool entry AND it
@@ -650,6 +659,15 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		id := auth.From(ctx)
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		// Server-side guard: the demo/reviewer identity may not hard-delete its
+		// own account. This is the tool that bricked the demo session during a
+		// prior review (the row + session blob are gone, unrecoverable without an
+		// operator re-login). Refuse before touching the pool or DB so the row is
+		// left intact, and record the blocked attempt in the audit log.
+		if isDemoReviewer(id, s.DemoReviewerTGID) {
+			s.audit(ctx, id, "delete_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt)
+			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
 		}
 		// RemoveAtomic for the same reason as disconnect — eviction and
 		// DB delete must commit under one lock so a concurrent Borrow()
@@ -984,6 +1002,22 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 	return tool, handler
 }
 
+// demoReviewerAccountMgmtRefusal is the user-facing message returned when the
+// pinned demo/reviewer identity attempts a destructive account-management tool
+// (disconnect/delete). The demo session is shared infrastructure for the
+// ChatGPT App Directory review; letting the reviewer disconnect or hard-delete
+// it bricks the login for the next reviewer and is expensive to recover (needs
+// an operator-driven in-pod re-login on the demo account).
+const demoReviewerAccountMgmtRefusal = "This demo reviewer account cannot be disconnected or deleted during review."
+
+// isDemoReviewer reports whether the authenticated identity is the pinned
+// demo/reviewer account. Centralises the identity check shared by the send gate
+// and the destructive account-management guards (disconnect/delete) so the
+// reviewer cannot self-destruct the demo session.
+func isDemoReviewer(id *auth.Identity, demoReviewerTGID int64) bool {
+	return id != nil && demoReviewerTGID != 0 && id.TelegramID == demoReviewerTGID
+}
+
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64) (real bool, reason string) {
 	if id == nil {
 		return false, "no authenticated identity (send requires auth)"
@@ -996,7 +1030,7 @@ func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, a
 	// which ChatGPT may auto-resolve. Tying the guarantee to the reviewer
 	// identity is the only dependable way to keep the App Directory reviewer's
 	// sends preview-only.
-	if demoReviewerTGID != 0 && id.TelegramID == demoReviewerTGID {
+	if isDemoReviewer(id, demoReviewerTGID) {
 		return false, "reviewer/demo account — sending is preview-only; no message is delivered"
 	}
 	if !allowSend {
