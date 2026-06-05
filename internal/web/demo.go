@@ -22,7 +22,7 @@ var demoTmpl = ui.New("demo", demoHTML)
 
 // demoWalkthroughModTime is a fixed timestamp so http.ServeContent can emit a
 // stable Last-Modified / conditional-request response for the embedded video.
-var demoWalkthroughModTime = time.Date(2026, time.June, 5, 0, 0, 0, 0, time.UTC)
+var demoWalkthroughModTime = time.Date(2026, time.June, 5, 18, 30, 0, 0, time.UTC)
 
 // DemoWalkthrough serves the embedded screen-recorded walkthrough as an mp4 at
 // /demo/walkthrough.mp4. Anonymous-accessible like the /demo page itself.
