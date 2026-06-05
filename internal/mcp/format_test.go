@@ -64,3 +64,27 @@ func TestWrapMessages_PreservesNonTextFields(t *testing.T) {
 		t.Fatal("wrapMessages should not mutate its input")
 	}
 }
+
+func TestWrapMessages_RedactsTelegramLoginSecrets(t *testing.T) {
+	in := []telegram.Message{
+		{
+			ID:   1,
+			Peer: "user:42",
+			Text: "Login code: 31535. Do not give this code to anyone.\nIP: 79.143.107.63",
+		},
+	}
+
+	out := wrapMessages(in)
+	if strings.Contains(out[0].Text, "31535") {
+		t.Fatalf("login code leaked: %q", out[0].Text)
+	}
+	if strings.Contains(out[0].Text, "79.143.107.63") {
+		t.Fatalf("login IP leaked: %q", out[0].Text)
+	}
+	if !strings.Contains(out[0].Text, "Login code: [redacted]") {
+		t.Fatalf("missing redacted login code marker: %q", out[0].Text)
+	}
+	if !strings.Contains(out[0].Text, "IP: [redacted]") {
+		t.Fatalf("missing redacted IP marker: %q", out[0].Text)
+	}
+}

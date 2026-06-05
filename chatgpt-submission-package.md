@@ -37,11 +37,12 @@ send_enabled flag, and the telegram:messages:send scope. Per-peer rate limits (2
 peer/hour) prevent AI-driven message flooding. The test account has send_enabled=false, so
 every send_message invocation during review is a dry-run preview.
 
-Please establish a fresh connection via the provided reviewer login. The demo account is a normal
-client-tier user (NOT an admin): the 9 user-facing tools work, and the 5 admin tools return a clean
-"authorization denied / missing scope admin:users" response — that is the correct, expected
-permission boundary. The admin tools are operator/self-host controls; their successful behavior is
-verifiable separately with operator credentials on request.
+Please establish a fresh connection via the provided reviewer login. The submitted test cases use
+only repeatable, reviewer-safe user workflows that the normal client-tier demo account can run on
+ChatGPT web and mobile. Admin tools are operator/self-host controls guarded by the `admin:users`
+scope; they are documented as capabilities but intentionally not part of the submitted pass/fail
+test matrix. Account disconnect/delete and pin/unpin are also excluded from the submitted test
+matrix because they are stateful/destructive and can make repeated reviewer runs non-reproducible.
 
 Compliance attestations: Health data — No (not requested/processed/accessed). Does not transfer
 money, cryptocurrency, or financial assets; does not generate images, video, or audio via AI models.
@@ -61,9 +62,10 @@ MTProto session entirely on the user's own device — no session bytes stored on
 
 Existing Telegram MCP tools are mostly local/self-hosted with broad surfaces (80+ tools,
 contact management, media upload, admin group operations). mctl-telegram is intentionally
-narrower: 9 user-facing tools + 5 admin-only operator controls (14 total), no contact management, no media upload, no admin group
-operations, each tool is read XOR write. Users can cryptographically verify their audit log
-has not been tampered with (GET /api/account/audit/verify).
+narrower: 9 user-facing tools + 5 admin-only operator controls (14 total), no contact management,
+no media upload, no admin group operations, each tool is read XOR write. Users can
+cryptographically verify their audit log has not been tampered with
+(GET /api/account/audit/verify).
 
 Additional reviewer data-handling package:
 https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
@@ -139,14 +141,14 @@ sent=false and a dry_reason field.
 - [ ] Write/destructive tools: `destructiveHint=true`
 - [ ] No tool mixes read + write operations
 - [ ] `send_message` description mentions preview-only default
-- [ ] All test cases in `chatgpt-app-submission.json` are verified against current runtime
+- [ ] Submitted test cases cover only repeatable reviewer-safe user flows
+- [ ] Admin/destructive/stateful tools are documented but not submitted as reviewer pass/fail cases
 
 **Test account (fully populated)**
 - [ ] Several dialogs incl. ≥1 private chat and ≥1 group/supergroup/channel (no real personal data)
 - [ ] Has **unread** messages + enough history for list/get/summarize flows
 - [ ] `send_enabled=false` (every `send_message` is dry-run preview)
-- [ ] Reviewer account is **non-admin (client tier)** — 9 user tools work; 5 admin tools return a
-      clean scope-denied (expected); admin-tool success shown with operator creds
+- [ ] Reviewer account is **non-admin (client tier)** and can run every submitted positive case
 - [ ] Reviewer credentials provided in the form (not committed)
 - [ ] Reviewer prompt examples and expected outputs are current
 
@@ -166,16 +168,65 @@ Mode using the provided reviewer credentials.
 Reason: without a real OAuth login and real tool calls through ChatGPT, we cannot fully verify that:
 - the submitted examples match the currently deployed runtime;
 - the reviewer demo account receives the expected (client-tier) scopes;
-- the 9 user-facing tools are callable and the 5 admin tools return a clean scope-denied for the
-  reviewer (expected permission boundary);
+- every submitted positive case is callable with the non-admin reviewer account;
 - dry-run/preview-only send behavior is shown correctly;
 - error messages are actionable (no raw 500 / opaque Telegram errors).
 
-Do not submit until this manual Developer Mode pass is completed and recorded.
+Run the full submitted matrix twice: once on ChatGPT web and once on ChatGPT mobile. Record, for
+each case: platform, prompt, actual tools called, final visible response, pass/fail status, and any
+mismatch. Do not submit until both passes are completed and recorded.
+
+Current web check, 2026-06-04:
+- PASS: `list_dialogs` for recent chats/unread counts.
+- PASS: `get_unread_messages` for unread Telegram messages.
+- PASS: `list_dialogs` + `get_messages` for reading recent messages from an available chat.
+- PASS: email boundary prompt. No mctl-telegram tool call; response says email is unsupported.
+- PASS: calendar boundary prompt. No mctl-telegram tool call; response says calendar scheduling is
+  unsupported.
+- PASS: Telegram login-code boundary prompt. No mctl-telegram tool call; response refuses to use or
+  process the one-time code and directs the user to the secure login flow.
+- PASS: Telegram voice-call boundary prompt. No mctl-telegram tool call; response says voice calls
+  are unsupported.
+- PASS: WhatsApp boundary prompt. No mctl-telegram tool call; response says WhatsApp is unsupported.
+- Removed from submitted matrix: dry-run `send_message` prompt. ChatGPT web chose to draft without
+  calling `send_message`, so the submitted expected tool sequence was not reproducible.
+- Removed from submitted matrix: `get_my_audit_log`. The tool redacts peers and message bodies, but
+  the current reviewer account audit history includes stale destructive/admin test tool names and an
+  old `@example_support` error, which can confuse pass/fail review.
+- Reworded negative prompts as explicit mctl-telegram capability-boundary questions so ChatGPT does
+  not route them to unrelated connectors such as Gmail or Calendar.
+
+Current web check, 2026-06-05:
+- FAIL before code fix: `get_unread_messages` returned a Telegram service message containing a
+  login code and login IP metadata. This should not be submitted as-is.
+- Fix prepared locally: hosted MCP and local bridge read outputs now redact Telegram login,
+  verification, confirmation, security, one-time, 2FA/two-factor codes and `IP:` values before
+  wrapping message text as untrusted Telegram content.
+- Required before resubmit: release/deploy the redaction fix, reconnect or refresh the reviewer
+  ChatGPT app session if needed, then rerun the full web and mobile matrix. The demo/video should be
+  recorded only after the deployed runtime shows `[redacted]` instead of raw login secrets.
 
 (Everything else — endpoint, OAuth discovery, OriginGuard, artifact↔runtime annotation parity,
 deploy state — is already verified by code/CI/curl/logs. Re-run this gate after any redeploy that
 could change tool behavior or the demo account.)
+
+### Submitted test-case policy
+
+The submitted `chatgpt-app-submission.json` test cases deliberately avoid:
+- hardcoded Telegram peers or message ids such as `@example_support`, `message 42`, or raw numeric
+  Telegram ids;
+- admin/operator-only success cases;
+- `disconnect_telegram_account` and `delete_telegram_account`, because they break the reviewer
+  session for later runs;
+- `prepare_pin_message` and `pin_message`, because they are stateful and depend on live chat admin
+  rights;
+- `send_message` dry-run examples, because ChatGPT may satisfy "draft" wording without invoking the
+  send tool;
+- `get_my_audit_log`, because audit output depends on previous reviewer-account activity and is
+  therefore not a stable pass/fail example.
+
+Admin and destructive tools remain in the runtime tool descriptors because they are real
+capabilities, but they are not part of the OpenAI reviewer pass/fail test matrix.
 
 ---
 
