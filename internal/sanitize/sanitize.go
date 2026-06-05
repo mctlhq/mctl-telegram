@@ -24,6 +24,8 @@ var invisibleChars = map[rune]bool{
 
 // excessiveNewlines matches three or more consecutive newlines.
 var excessiveNewlines = regexp.MustCompile(`\n{3,}`)
+var sensitiveCodeLine = regexp.MustCompile(`(?i)\b((?:telegram\s+)?(?:login|verification|confirmation|security|one[- ]time|2fa|two[- ]factor)\s+code\s*[:：]?\s*)[0-9][0-9 -]{3,18}[0-9]\b`)
+var sensitiveIPLine = regexp.MustCompile(`(?i)\b(IP\s*[:：]\s*)\d{1,3}(?:\.\d{1,3}){3}\b`)
 
 // UserContent strips control characters, invisible chars, and excessive
 // newlines from Telegram user-generated text before it is returned to an
@@ -70,4 +72,14 @@ func Name(text string, maxLength int) string {
 	result = strings.ReplaceAll(result, "\n", " ")
 	result = regexp.MustCompile(` {2,}`).ReplaceAllString(result, " ")
 	return strings.TrimSpace(result)
+}
+
+// SensitiveTelegramContent redacts Telegram-origin account security tokens
+// before message text is returned to an LLM client. Telegram service messages
+// can include login codes and login metadata; those are useful as a signal but
+// the actual secret value should never be exposed through an app tool result.
+func SensitiveTelegramContent(text string) string {
+	text = sensitiveCodeLine.ReplaceAllString(text, "${1}[redacted]")
+	text = sensitiveIPLine.ReplaceAllString(text, "${1}[redacted]")
+	return text
 }

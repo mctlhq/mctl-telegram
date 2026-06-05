@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/gotd/td/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/sanitize"
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -32,6 +33,9 @@ func wrapContent(text, peer string) string {
 func wrapMsgs(msgs []tg.Message) []tg.Message {
 	out := make([]tg.Message, len(msgs))
 	for i, m := range msgs {
+		if m.Text != "" {
+			m.Text = sanitize.SensitiveTelegramContent(sanitize.UserContent(m.Text, 4096))
+		}
 		m.Text = wrapContent(m.Text, tg.RedactPeer(m.Peer))
 		out[i] = m
 	}
