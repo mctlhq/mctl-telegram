@@ -80,6 +80,74 @@ func TestName(t *testing.T) {
 	}
 }
 
+func TestSensitiveTelegramContent(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "typical login code",
+			input: "Login code: 31535. Do not share it.",
+			want:  "Login code: [redacted]. Do not share it.",
+		},
+		{
+			name:  "verification code with spaces",
+			input: "verification code: 31 535",
+			want:  "verification code: [redacted]",
+		},
+		{
+			name:  "security code with hyphen",
+			input: "security code: 315-35",
+			want:  "security code: [redacted]",
+		},
+		{
+			name:  "bare telegram code",
+			input: "Telegram code: 31535",
+			want:  "Telegram code: [redacted]",
+		},
+		{
+			name:  "multiple codes",
+			input: "Login code: 31535; confirmation code: 42424",
+			want:  "Login code: [redacted]; confirmation code: [redacted]",
+		},
+		{
+			name:  "ipv4 only",
+			input: "IP: 79.143.107.63",
+			want:  "IP: [redacted]",
+		},
+		{
+			name:  "ipv6 only",
+			input: "IP: 2001:db8::1",
+			want:  "IP: [redacted]",
+		},
+		{
+			name:  "combined code and ip",
+			input: "Login code: 31535\nIP: 2001:db8::1",
+			want:  "Login code: [redacted]\nIP: [redacted]",
+		},
+		{
+			name:  "plain message unchanged",
+			input: "Meet at 31535 near gate 2.",
+			want:  "Meet at 31535 near gate 2.",
+		},
+		{
+			name:  "bare number without keyword unchanged",
+			input: "send 31535 now",
+			want:  "send 31535 now",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := SensitiveTelegramContent(c.input)
+			if got != c.want {
+				t.Errorf("SensitiveTelegramContent(%q) = %q, want %q", c.input, got, c.want)
+			}
+		})
+	}
+}
+
 func TestUserContent_LargeInput(t *testing.T) {
 	large := strings.Repeat("a", 5000)
 	got := UserContent(large, 4096)

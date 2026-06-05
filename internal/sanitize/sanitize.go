@@ -24,8 +24,12 @@ var invisibleChars = map[rune]bool{
 
 // excessiveNewlines matches three or more consecutive newlines.
 var excessiveNewlines = regexp.MustCompile(`\n{3,}`)
-var sensitiveCodeLine = regexp.MustCompile(`(?i)\b((?:telegram\s+)?(?:login|verification|confirmation|security|one[- ]time|2fa|two[- ]factor)\s+code\s*[:：]?\s*)[0-9][0-9 -]{3,18}[0-9]\b`)
-var sensitiveIPLine = regexp.MustCompile(`(?i)\b(IP\s*[:：]\s*)\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+// Telegram account/security service messages observed in review use English
+// code labels. Keep the keyword requirement so ordinary bare numbers in chats
+// are not redacted as false positives.
+var sensitiveCodeLine = regexp.MustCompile(`(?i)\b(((?:telegram\s+)?(?:login|verification|confirmation|security|one[- ]time|2fa|two[- ]factor)\s+code|telegram\s+code)\s*[:：]?\s*)[0-9][0-9 -]{3,18}[0-9]\b`)
+var sensitiveIPLine = regexp.MustCompile(`(?i)\b(IP\s*[:：]\s*)(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{0,4}:[0-9a-f:.]{2,45}(?:%\w+)?)\b`)
 
 // UserContent strips control characters, invisible chars, and excessive
 // newlines from Telegram user-generated text before it is returned to an
