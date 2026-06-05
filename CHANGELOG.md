@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.2](https://github.com/mctlhq/mctl-telegram/compare/0.41.1...0.41.2) (2026-06-04)
+
+
+### Bug Fixes
+
+* **mcp:** block disconnect/delete for demo reviewer identity ([#260](https://github.com/mctlhq/mctl-telegram/issues/260)) ([a5a4c3d](https://github.com/mctlhq/mctl-telegram/commit/a5a4c3df86120d8b5a20648ac77184d6a0419ef7))
+
 ## [0.41.1](https://github.com/mctlhq/mctl-telegram/compare/0.41.0...0.41.1) (2026-05-30)
 
 
