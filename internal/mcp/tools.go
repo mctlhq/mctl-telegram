@@ -792,8 +792,10 @@ Inputs:
 
 The user must have signed in via the Login Widget at least once (so a users row exists) before a tier can be set. The change takes effect on the user's next token issuance — they reconnect the connector to pick it up.`),
 		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
 			mcplib.Description("Telegram user id to grant/revoke (required).")),
 		mcplib.WithString("tier",
+			mcplib.Required(),
 			mcplib.Description(`"client" or "none" (required).`)),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -900,6 +902,7 @@ Inputs:
 
 Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error}], count}. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.`),
 		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
 			mcplib.Description("Telegram user id whose audit log to read (required).")),
 		mcplib.WithNumber("limit",
 			mcplib.Description("Max rows to return (default 50, max 500).")),
@@ -964,6 +967,7 @@ Inputs:
 
 Output: JSON {telegram_id, revoked}. revoked is false when the user had no active session.`),
 		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
 			mcplib.Description("Telegram user id whose session to revoke (required).")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
