@@ -35,10 +35,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 | `get_my_audit_log`            | `readOnly=true`, `destructive=false`, `openWorld=false` | Returns the authenticated user's own audit rows. |
 | `disconnect_telegram_account` | `readOnly=false`, `destructive=true`, `openWorld=false` | Soft-revokes your session and tears down the in-memory MTProto client. |
 | `delete_telegram_account`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Hard-deletes the encrypted session blob and per-account metadata from this server. |
-| `list_telegram_identities`    | `readOnly=false`, `destructive=false`, `openWorld=false` | Admin-only: lists signed-in Telegram identities and access state, with audit metadata. |
+| `list_telegram_identities`    | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: lists signed-in Telegram identities and access state, with audit metadata. |
 | `set_telegram_access`         | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: grants or revokes the local client access tier for a Telegram user. |
 | `set_account_send`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: enables or disables the per-account real-send gate. |
-| `get_user_audit_log`          | `readOnly=false`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
+| `get_user_audit_log`          | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
 | `revoke_telegram_session`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: revokes a user's active MTProto session on this server. |
 
 ## Quick start (local dev)
