@@ -2,9 +2,9 @@
   "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
   "schema_version": 1,
   "app_info": {
-    "display_name": "mctl-telegram",
+    "display_name": "MCTL for Telegram",
     "subtitle": "Manage Telegram chats",
-    "description": "MCTL Telegram lets users access and manage their own Telegram account from ChatGPT after explicit user authorization. It supports reading recent chats, summarizing messages, drafting replies, preview-only sending by default, confirmed pin actions, audit review, and account disconnect/delete controls. It is not an official Telegram app or Telegram API partner, and Telegram message content is treated as untrusted user-generated data.",
+    "description": "MCTL for Telegram lets users access and manage their own Telegram account from ChatGPT after explicit user authorization. It supports reading recent chats, summarizing messages, drafting replies, preview-only sending by default, confirmed pin actions, audit review, and account disconnect/delete controls. It is not an official Telegram app or Telegram API partner, and Telegram message content is treated as untrusted user-generated data.",
     "category": "PRODUCTIVITY"
   },
   "tools": {
