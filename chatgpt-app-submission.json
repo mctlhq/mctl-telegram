@@ -201,6 +201,22 @@
       "tools_triggered": "list_dialogs, get_messages",
       "expected_output": "Lists available Telegram chats, selects one listed dialog, and returns recent messages from that dialog with message metadata. Telegram-origin message text is treated as untrusted content and no hardcoded peer or message id is required.",
       "expected_output_url": null
+    },
+    {
+      "description": "Filter Telegram dialogs by a title or username substring.",
+      "user_prompt": "Search my Telegram chats for dialogs matching \"mctl\".",
+      "file_attachment_urls": null,
+      "tools_triggered": "list_dialogs",
+      "expected_output": "Returns dialogs whose title or username matches the case-insensitive query, or clearly states that no matching dialogs were found.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Review unread Telegram security notifications without exposing login secrets.",
+      "user_prompt": "Check my unread Telegram messages for account-security notifications. Summarize them without showing login codes, verification codes, IP addresses, or other sign-in secrets.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_unread_messages",
+      "expected_output": "Returns a safe summary of matching unread notifications, with login or verification codes and IP addresses redacted, or clearly states that no matching unread notifications are available. Telegram-origin text is treated as untrusted content.",
+      "expected_output_url": null
     }
   ],
   "negative_test_cases": [
