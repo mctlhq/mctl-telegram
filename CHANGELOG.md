@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.42.0](https://github.com/mctlhq/mctl-telegram/compare/0.41.2...0.42.0) (2026-07-03)
+
+
+### Features
+
+* **web:** refresh demo walkthrough ([4071b55](https://github.com/mctlhq/mctl-telegram/commit/4071b555d7d6e8a9270949837ff38fe0b264aa6a))
+* **web:** refresh demo walkthrough ([95df6f3](https://github.com/mctlhq/mctl-telegram/commit/95df6f3213ef852ce1b44e79b4f8c3748d01fa12))
+
+
+### Bug Fixes
+
+* **mcp:** mark admin tool telegram_id/tier params as required ([#272](https://github.com/mctlhq/mctl-telegram/issues/272)) ([0166fca](https://github.com/mctlhq/mctl-telegram/commit/0166fcab3068028c88f550d99251e74e1fad2a24))
+* **mcp:** redact telegram login secrets ([98912ab](https://github.com/mctlhq/mctl-telegram/commit/98912abe44b193f307d0e1c167b5904fadba852f))
+* **mcp:** redact telegram login secrets ([343cd77](https://github.com/mctlhq/mctl-telegram/commit/343cd770541eb0e5e08d97834d52e1e218b6687b))
+
 ## [0.41.2](https://github.com/mctlhq/mctl-telegram/compare/0.41.1...0.41.2) (2026-06-04)
 
 
