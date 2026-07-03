@@ -12,6 +12,10 @@ jobs:
   review:
     # pull_request: skip drafts and fork PRs (CLAUDE_CODE_OAUTH_TOKEN unavailable to forks)
     # issue_comment: only fire on PR comments containing '@claude review'
+    # from a maintainer (association pre-filter here; hard write-permission +
+    # same-repo check in the first step below) — on a public repo an ungated
+    # comment trigger lets any passerby burn review quota or prompt-inject
+    # the reviewer.
     if: >
       (
         github.event_name == 'pull_request' &&
@@ -20,7 +24,8 @@ jobs:
       ) || (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
-        contains(github.event.comment.body, '@claude review')
+        contains(github.event.comment.body, '@claude review') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
     permissions:
@@ -29,6 +34,27 @@ jobs:
       issues: write
       id-token: write
     steps:
+      # author_association alone is too coarse (MEMBER = any org member,
+      # COLLABORATOR includes read-only). Require actual write access, and
+      # refuse comment-triggered runs on fork PRs — the job would check out
+      # refs/pull/N/head, making fork-controlled files the workspace while
+      # the OAuth secret is available.
+      - name: Gate comment-triggered runs (write permission + same-repo)
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PERM=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission" --jq .permission)
+          case "$PERM" in
+            admin|maintain|write) ;;
+            *) echo "::error::@claude review requires write access (commenter has: $PERM)"; exit 1 ;;
+          esac
+          CROSS=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json isCrossRepository --jq .isCrossRepository)
+          if [ "$CROSS" != "false" ]; then
+            echo "::error::comment-triggered review is not supported on fork PRs"
+            exit 1
+          fi
+
       - name: Resolve PR branch for issue_comment trigger
         if: github.event_name == 'issue_comment'
         id: pr-ref
