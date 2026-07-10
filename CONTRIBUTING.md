@@ -5,7 +5,7 @@ Thank you for considering a contribution. This document covers dev setup, code c
 ## Development setup
 
 Requirements:
-- Go 1.25+
+- Go 1.26+
 - Telegram API credentials for MTProto testing — register at <https://my.telegram.org/apps>
 - Optional: `golangci-lint` for linting
 
