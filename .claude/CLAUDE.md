@@ -5,9 +5,9 @@ Go MCP server for Telegram user-account access (MTProto via `gotd/td`).
 This file is a helper for Claude Code and other AI coding agents. Canonical contributor instructions for humans are in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Stack
-- Go 1.25, `net/http` + `chi` router, `gotd/td` MTProto client, `mark3labs/mcp-go`
+- Go 1.26, `net/http` + `chi` router, `gotd/td` MTProto client, `mark3labs/mcp-go`
 - Structured logging with `slog` (JSON handler + redaction handler)
-- Multi-stage Docker (`golang:1.25-alpine` → `alpine:3.20`), non-root user 1000
+- Multi-stage Docker (`golang:1.26.5-alpine` → `alpine:3.20`), non-root user 1000
 - SQLite (local dev) or Postgres (production)
 
 ## Key paths
