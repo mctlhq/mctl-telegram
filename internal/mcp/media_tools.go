@@ -84,11 +84,27 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 		var mediaInfo *telegram.MediaInfo
 		err := s.borrowWithRetry(ctx, "prepare_get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			api := c.API()
-			result, err := api.MessagesGetMessages(ctx, &tg.MessagesGetMessagesRequest{
-				ID: []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
-			})
-			if err != nil {
-				return fmt.Errorf("MessagesGetMessages: %w", err)
+			inputPeer, resolveErr := telegram.ResolvePeerCached(ctx, c, peer, s.PeerCache, id.UserID)
+			if resolveErr != nil {
+				return fmt.Errorf("resolve peer: %w", resolveErr)
+			}
+			var result tg.MessagesMessagesClass
+			var err error
+			if ch, ok := inputPeer.(*tg.InputPeerChannel); ok {
+				result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+					Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
+					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
+				})
+				if err != nil {
+					return fmt.Errorf("ChannelsGetMessages: %w", err)
+				}
+			} else {
+				result, err = api.MessagesGetMessages(ctx, &tg.MessagesGetMessagesRequest{
+					ID: []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
+				})
+				if err != nil {
+					return fmt.Errorf("MessagesGetMessages: %w", err)
+				}
 			}
 			var rawMsgs []tg.MessageClass
 			switch v := result.(type) {
@@ -148,6 +164,9 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 						}
 					}
 				}
+			}
+			if !ref.IsDocument && ref.PhotoID == 0 {
+				return fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, mediaInfo.MediaType)
 			}
 			return nil
 		})
