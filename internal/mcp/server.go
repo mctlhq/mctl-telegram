@@ -43,14 +43,20 @@ type Server struct {
 	// registers every tool; "read-only" registers only tools with
 	// ReadOnlyHint=true (set via WithToolFilter).
 	ToolFilter string
+	// MediaStore holds pending media download references keyed by confirmation_id.
+	MediaStore *MediaStore
+	// MediaDownloadMaxBytes is the maximum number of bytes allowed per get_media
+	// download. 0 means no cap.
+	MediaDownloadMaxBytes int64
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 	return &Server{
-		Store:     store,
-		Pool:      pool,
-		AllowSend: allowSend,
-		Confirms:  NewConfirmStore(),
+		Store:      store,
+		Pool:       pool,
+		AllowSend:  allowSend,
+		Confirms:   NewConfirmStore(),
+		MediaStore: NewMediaStore(),
 	}
 }
 
@@ -130,6 +136,8 @@ func (s *Server) HTTPHandler() http.Handler {
 	{t, h := s.toolSendMessage(); s.addTool(srv, t, h)}
 	{t, h := s.toolPreparePinMessage(); s.addTool(srv, t, h)}
 	{t, h := s.toolPinMessage(); s.addTool(srv, t, h)}
+	{t, h := s.toolPrepareGetMedia(); s.addTool(srv, t, h)}
+	{t, h := s.toolGetMedia(); s.addTool(srv, t, h)}
 	{t, h := s.toolDisconnectAccount(); s.addTool(srv, t, h)}
 	{t, h := s.toolDeleteAccount(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetMyAuditLog(); s.addTool(srv, t, h)}
