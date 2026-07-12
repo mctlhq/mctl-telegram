@@ -8,18 +8,6 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// clampLimit mirrors the limit-guard logic in GetMessages / GetUnreadMessages
-// so the table-driven test below can exercise it without a live Telegram
-// connection.
-func clampLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	} else if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
 func TestLimitClamp(t *testing.T) {
 	cases := []struct {
 		in   int

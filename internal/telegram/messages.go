@@ -22,14 +22,21 @@ type Message struct {
 	Date      time.Time `json:"date"`
 }
 
+// clampLimit clamps a caller-supplied page size to the [1, 200] range,
+// defaulting non-positive values to 50.
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	} else if limit > 200 {
+		return 200
+	}
+	return limit
+}
+
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
 // `limit` total unread messages, scoped to one peer if provided.
 func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
-	if limit <= 0 {
-		limit = 50
-	} else if limit > 200 {
-		limit = 200
-	}
+	limit = clampLimit(limit)
 	api := c.API()
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
@@ -242,11 +249,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 	if peerSpec == "" {
 		return nil, fmt.Errorf("peer is required")
 	}
-	if limit <= 0 {
-		limit = 50
-	} else if limit > 200 {
-		limit = 200
-	}
+	limit = clampLimit(limit)
 	api := c.API()
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
