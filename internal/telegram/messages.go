@@ -25,8 +25,10 @@ type Message struct {
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
 // `limit` total unread messages, scoped to one peer if provided.
 func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	} else if limit > 200 {
+		limit = 200
 	}
 	api := c.API()
 
@@ -231,13 +233,19 @@ func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]
 // GetMessages fetches the last `limit` messages from a specific peer
 // regardless of read/unread state.
 //
+// beforeID, when non-zero, is passed as OffsetID to messages.getHistory so
+// only messages with ID strictly less than beforeID are returned, enabling
+// backward keyset pagination. Pass 0 to start from the most recent message.
+//
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
-func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, cache *PeerCache, userID int64) ([]Message, error) {
+func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, error) {
 	if peerSpec == "" {
 		return nil, fmt.Errorf("peer is required")
 	}
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	} else if limit > 200 {
+		limit = 200
 	}
 	api := c.API()
 
@@ -271,8 +279,9 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 			return nil, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
 		}
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:  input,
-			Limit: limit,
+			Peer:     input,
+			Limit:    limit,
+			OffsetID: beforeID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("MessagesGetHistory: %w", err)
@@ -288,8 +297,9 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:  input,
-		Limit: limit,
+		Peer:     input,
+		Limit:    limit,
+		OffsetID: beforeID,
 	})
 	if histErr != nil {
 		var rpcErr *tgerr.Error
@@ -300,8 +310,9 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 				cache.Evict(userID, peerSpec)
 				if input2, err2 := ResolvePeerCached(ctx, c, peerSpec, cache, userID); err2 == nil {
 					if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-						Peer:  input2,
-						Limit: limit,
+						Peer:     input2,
+						Limit:    limit,
+						OffsetID: beforeID,
 					}); err3 == nil {
 						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), nil
 					}

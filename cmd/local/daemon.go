@@ -308,26 +308,40 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 
 	case "get_messages":
 		var args struct {
-			Peer  string `json:"peer"`
-			Limit int    `json:"limit"`
+			Peer     string `json:"peer"`
+			Limit    int    `json:"limit"`
+			BeforeID int    `json:"before_id"`
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_messages: bad args: %v", err))
 		}
 		if args.Limit <= 0 {
 			args.Limit = 50
+		} else if args.Limit > 200 {
+			args.Limit = 200
 		}
 		var msgs []tg.Message
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, nil, 0)
+			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0)
 			return err
 		})
 		if dispErr == nil {
-			result, dispErr = json.Marshal(map[string]any{
+			resp := map[string]any{
 				"messages": wrapMsgs(msgs),
 				"notice":   untrustedNotice,
-			})
+			}
+			if len(msgs) == args.Limit {
+				// Compute minimum message ID for the backward-pagination cursor.
+				minID := msgs[0].ID
+				for _, m := range msgs[1:] {
+					if m.ID < minID {
+						minID = m.ID
+					}
+				}
+				resp["next_before_id"] = minID
+			}
+			result, dispErr = json.Marshal(resp)
 		}
 
 	case "send_message":
