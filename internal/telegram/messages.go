@@ -11,15 +11,141 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/sanitize"
 )
 
+// MediaInfo describes non-text content attached to a Telegram message.
+// It is nil when the message carries no media or only a web-page preview that
+// was already included in a text body. All fields except MediaType are omitted
+// when zero or not applicable.
+type MediaInfo struct {
+	MediaType string `json:"media_type"`
+	MimeType  string `json:"mime_type,omitempty"`
+	FileName  string `json:"file_name,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	Duration  int    `json:"duration,omitempty"` // seconds
+}
+
 type Message struct {
-	ID        int       `json:"id"`
-	Peer      string    `json:"peer"`
-	PeerTitle string    `json:"peer_title,omitempty"`
-	From      string    `json:"from,omitempty"`
-	Text      string    `json:"text"`
-	Date      time.Time `json:"date"`
+	ID        int        `json:"id"`
+	Peer      string     `json:"peer"`
+	PeerTitle string     `json:"peer_title,omitempty"`
+	From      string     `json:"from,omitempty"`
+	Text      string     `json:"text"`
+	Date      time.Time  `json:"date"`
+	MediaInfo *MediaInfo `json:"media_info,omitempty"`
+}
+
+// DecodeMediaInfo inspects a message's media field and returns a *MediaInfo
+// describing it, or nil when no downloadable or displayable media is attached.
+func DecodeMediaInfo(media tg.MessageMediaClass) *MediaInfo {
+	if media == nil {
+		return nil
+	}
+	switch m := media.(type) {
+	case *tg.MessageMediaEmpty:
+		return nil
+
+	case *tg.MessageMediaPhoto:
+		info := &MediaInfo{MediaType: "photo"}
+		if photo, ok := m.Photo.(*tg.Photo); ok {
+			// Find the largest size by area (W*H). Both plain and
+			// progressive-JPEG entries carry W/H; modern servers often return
+			// ONLY photoSizeProgressive for the full-resolution rendition, so
+			// skipping it would report thumbnail dimensions.
+			bestArea := 0
+			for _, sz := range photo.Sizes {
+				var w, h int
+				switch ps := sz.(type) {
+				case *tg.PhotoSize:
+					w, h = ps.W, ps.H
+				case *tg.PhotoSizeProgressive:
+					w, h = ps.W, ps.H
+				default:
+					continue
+				}
+				if area := w * h; area > bestArea {
+					bestArea = area
+					info.Width = w
+					info.Height = h
+				}
+			}
+		}
+		return info
+
+	case *tg.MessageMediaDocument:
+		doc, ok := m.Document.(*tg.Document)
+		if !ok {
+			return &MediaInfo{MediaType: "document"}
+		}
+		info := &MediaInfo{
+			MimeType: doc.MimeType,
+			Size:     doc.Size,
+		}
+		// Determine MediaType from document attributes. Sticker and audio
+		// (voice or music) attributes win immediately — audio overrides any
+		// video/animation classification set by an earlier attribute. Video
+		// and animation only fill an empty slot, so whichever appears first
+		// in the attribute list wins between them; anything left
+		// unclassified falls back to "document".
+		for _, attr := range doc.Attributes {
+			switch a := attr.(type) {
+			case *tg.DocumentAttributeSticker:
+				info.MediaType = "sticker"
+				return info
+			case *tg.DocumentAttributeAudio:
+				if a.Voice {
+					info.MediaType = "voice"
+				} else {
+					info.MediaType = "audio"
+				}
+				info.Duration = a.Duration
+				return info
+			case *tg.DocumentAttributeVideo:
+				if info.MediaType == "" {
+					info.MediaType = "video"
+					info.Duration = int(a.Duration)
+					info.Width = a.W
+					info.Height = a.H
+				}
+			case *tg.DocumentAttributeAnimated:
+				if info.MediaType == "" {
+					info.MediaType = "animation"
+				}
+			case *tg.DocumentAttributeFilename:
+				// Sender-controlled string that leaves the tool as plain JSON
+				// metadata (file_name), OUTSIDE the <telegram-content> wrapper
+				// used for message text — sanitize it so control characters,
+				// invisible chars, and multi-kilobyte instruction payloads
+				// can't ride along. 255 runes matches common FS limits.
+				info.FileName = sanitizeFileName(a.FileName)
+			}
+		}
+		if info.MediaType == "" {
+			info.MediaType = "document"
+		}
+		return info
+
+	case *tg.MessageMediaWebPage:
+		return &MediaInfo{MediaType: "web_page"}
+
+	case *tg.MessageMediaContact:
+		return &MediaInfo{MediaType: "contact"}
+
+	case *tg.MessageMediaGeo:
+		return &MediaInfo{MediaType: "location"}
+
+	case *tg.MessageMediaGeoLive:
+		return &MediaInfo{MediaType: "location"}
+
+	case *tg.MessageMediaPoll:
+		return &MediaInfo{MediaType: "poll"}
+
+	default:
+		return &MediaInfo{MediaType: "unsupported"}
+	}
 }
 
 // clampLimit clamps a caller-supplied page size to the [1, 200] range,
@@ -31,6 +157,19 @@ func clampLimit(limit int) int {
 		return 200
 	}
 	return limit
+}
+
+// sanitizeFileName cleans a sender-controlled document filename for
+// inclusion as plain JSON metadata in tool results. Unlike message text it
+// is not wrapped in a <telegram-content> boundary, so it must not carry
+// control/invisible characters or oversized payloads. Blank-after-cleaning
+// values become "" (field is omitempty), not the "[empty]" sentinel.
+func sanitizeFileName(name string) string {
+	cleaned := sanitize.Name(name, 255)
+	if cleaned == "[empty]" {
+		return ""
+	}
+	return cleaned
 }
 
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
@@ -204,6 +343,7 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*t
 			From:      resolveSender(msg.FromID, users, chats),
 			Text:      msg.Message,
 			Date:      time.Unix(int64(msg.Date), 0).UTC(),
+			MediaInfo: DecodeMediaInfo(msg.Media),
 		})
 		if len(out) >= max {
 			break

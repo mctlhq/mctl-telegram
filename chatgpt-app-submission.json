@@ -80,6 +80,30 @@
         "destructive_justification": "Can pin or unpin a selected message, changing visible chat state in a way users may rely on."
       }
     },
+    "prepare_get_media": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Fetches a message's media metadata from Telegram and issues a local one-time confirmation record; changes no external state.",
+        "open_world_justification": "Contacts Telegram (an external system) to read the message and its media metadata.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform an irreversible action."
+      }
+    },
+    "get_media": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Downloads media bytes for a previously confirmed message; changes no external state.",
+        "open_world_justification": "Contacts Telegram (an external system) to download the file contents.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform an irreversible action."
+      }
+    },
     "disconnect_telegram_account": {
       "annotations": {
         "readOnlyHint": false,

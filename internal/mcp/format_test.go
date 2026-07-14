@@ -65,6 +65,27 @@ func TestWrapMessages_PreservesNonTextFields(t *testing.T) {
 	}
 }
 
+func TestWrapMessages_MediaInfoPreserved(t *testing.T) {
+	in := []telegram.Message{
+		{
+			ID:        1,
+			Peer:      "user:42",
+			Text:      "",
+			MediaInfo: &telegram.MediaInfo{MediaType: "photo"},
+		},
+	}
+	out := wrapMessages(in)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 message back, got %d", len(out))
+	}
+	if out[0].MediaInfo == nil {
+		t.Fatal("MediaInfo must not be nil after wrapMessages")
+	}
+	if out[0].MediaInfo.MediaType != "photo" {
+		t.Errorf("MediaType = %q, want %q", out[0].MediaInfo.MediaType, "photo")
+	}
+}
+
 func TestWrapMessages_RedactsTelegramLoginSecrets(t *testing.T) {
 	in := []telegram.Message{
 		{

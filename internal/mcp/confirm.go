@@ -130,6 +130,20 @@ func HashSendPayload(peer, text string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// HashMediaPayload is the canonical hash for a prepare_get_media / get_media
+// pair, binding the confirmation to (peer, messageID).
+func HashMediaPayload(peer string, messageID int64) string {
+	h := sha256.New()
+	h.Write([]byte(peer))
+	h.Write([]byte{0})
+	var idBytes [8]byte
+	for i := 0; i < 8; i++ {
+		idBytes[7-i] = byte(messageID >> (8 * i))
+	}
+	h.Write(idBytes[:])
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // HashPinPayload is the equivalent for pin_message.
 func HashPinPayload(peer string, messageID int64, unpin bool) string {
 	h := sha256.New()

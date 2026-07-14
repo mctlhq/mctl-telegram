@@ -105,6 +105,9 @@ type Config struct {
 	// "all" (default) registers every tool; "read-only" registers only tools
 	// annotated with ReadOnlyHint=true. Set via MCP_TOOL_FILTER.
 	ToolFilter string // MCP_TOOL_FILTER
+	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
+	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
+	MediaDownloadMaxBytes int64 // MEDIA_DOWNLOAD_MAX_BYTES
 }
 
 func Load() (*Config, error) {
@@ -165,6 +168,7 @@ func Load() (*Config, error) {
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
+	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {

@@ -36,7 +36,7 @@ const maxPendingCalls = 100
 // abstract over a send-channel + a pending-call map keyed by envelope ID.
 type daemonConn struct {
 	send         chan Envelope
-	pending      sync.Map   // map[string]chan Envelope
+	pending      sync.Map // map[string]chan Envelope
 	pendingCount atomic.Int64
 }
 
@@ -168,7 +168,7 @@ func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, e
 	select {
 	case got := <-reply:
 		return got, nil
-	case <-time.After(DeadlineCall):
+	case <-time.After(DeadlineFor(env.Tool)):
 		return Envelope{}, ErrCallTimeout
 	case <-ctx.Done():
 		return Envelope{}, ctx.Err()
