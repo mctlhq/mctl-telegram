@@ -3,25 +3,22 @@ package mcp
 import (
 	"sync"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // MediaDownloadRef holds the server-side file location context for a pending
-// get_media call. The client never sees AccessHash or FileReference — only the
-// confirmation_id handle. Stored in MediaStore, keyed by confirmation_id.
+// get_media call. The client never sees the Location internals (AccessHash,
+// FileReference) — only the confirmation_id handle. Stored in MediaStore,
+// keyed by confirmation_id.
 type MediaDownloadRef struct {
-	Peer          string
-	MessageID     int
-	MediaType     string
-	MimeType      string
-	FileName      string
-	Size          int64
-	IsDocument    bool
-	DocID         int64
-	AccessHash    int64
-	FileReference []byte
-	// Photo-only fields:
-	PhotoID   int64
-	ThumbSize string // e.g. "m" — largest available *tg.PhotoSize type code
+	Peer      string
+	MessageID int
+	MediaType string
+	MimeType  string
+	FileName  string
+	Size      int64
+	Location  telegram.MediaFileLocation
 	ExpiresAt time.Time
 }
 

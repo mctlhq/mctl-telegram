@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -251,6 +255,70 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 
 // dispatchCall routes a TypeCall envelope to the appropriate Telegram function
 // and returns a TypeResponse or TypeError envelope.
+// localMediaStore is the daemon-side counterpart of the hosted server's
+// ConfirmStore+MediaStore pair for the prepare_get_media → get_media flow.
+// The hosted server forwards both calls to the bridge wholesale in local
+// mode, so the single-shot/TTL/pair-binding guarantees must be enforced
+// here. The daemon serves exactly one user, so a plain in-memory map with
+// random IDs is sufficient.
+type localMediaStore struct {
+	mu sync.Mutex
+	m  map[string]localMediaEntry
+}
+
+type localMediaEntry struct {
+	peer      string
+	messageID int
+	info      tg.MediaInfo
+	loc       tg.MediaFileLocation
+	expiresAt time.Time
+}
+
+const localMediaTTL = 10 * time.Minute
+
+var localMedia = &localMediaStore{m: map[string]localMediaEntry{}}
+
+func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc tg.MediaFileLocation) (string, time.Time) {
+	idBytes := make([]byte, 16)
+	_, _ = rand.Read(idBytes)
+	confID := hex.EncodeToString(idBytes)
+	expiresAt := time.Now().Add(localMediaTTL)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Opportunistically drop expired entries so abandoned prepares don't
+	// accumulate for the daemon's lifetime.
+	now := time.Now()
+	for k, e := range s.m {
+		if now.After(e.expiresAt) {
+			delete(s.m, k)
+		}
+	}
+	s.m[confID] = localMediaEntry{
+		peer:      peer,
+		messageID: messageID,
+		info:      info,
+		loc:       loc,
+		expiresAt: expiresAt,
+	}
+	return confID, expiresAt
+}
+
+// pop atomically consumes the confirmation. It fails when the ID is unknown,
+// expired, or bound to a different (peer, message_id) pair.
+func (s *localMediaStore) pop(confID, peer string, messageID int) (localMediaEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.m[confID]
+	if !ok {
+		return localMediaEntry{}, false
+	}
+	delete(s.m, confID)
+	if time.Now().After(e.expiresAt) || e.peer != peer || e.messageID != messageID {
+		return localMediaEntry{}, false
+	}
+	return e, true
+}
+
 func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
 	slog.Info("dispatch", "tool", env.Tool, "id", env.ID)
 
@@ -353,6 +421,73 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		})
 		if dispErr == nil {
 			result, dispErr = json.Marshal(sendResult)
+		}
+
+	case "prepare_get_media":
+		var args struct {
+			Peer      string `json:"peer"`
+			MessageID int    `json:"message_id"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("prepare_get_media: bad args: %v", err))
+		}
+		if args.Peer == "" || args.MessageID == 0 {
+			return bridge.EncodeError(env.ID, "prepare_get_media: peer and message_id are required")
+		}
+		var info *tg.MediaInfo
+		var loc *tg.MediaFileLocation
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			info, loc, err = tg.PrepareMediaRef(ctx, c, args.Peer, args.MessageID, nil, 0)
+			return err
+		})
+		if dispErr == nil {
+			confID, expiresAt := localMedia.put(args.Peer, args.MessageID, *info, *loc)
+			result, dispErr = json.Marshal(map[string]any{
+				"confirmation_id": confID,
+				"peer_redacted":   tg.RedactPeer(args.Peer),
+				"message_id":      args.MessageID,
+				"media_type":      info.MediaType,
+				"mime_type":       info.MimeType,
+				"file_name":       info.FileName,
+				"size":            info.Size,
+				"expires_at":      expiresAt,
+			})
+		}
+
+	case "get_media":
+		var args struct {
+			Peer           string `json:"peer"`
+			MessageID      int    `json:"message_id"`
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("get_media: bad args: %v", err))
+		}
+		if args.Peer == "" || args.MessageID == 0 {
+			return bridge.EncodeError(env.ID, "get_media: peer and message_id are required")
+		}
+		if args.ConfirmationID == "" {
+			return bridge.EncodeError(env.ID, "get_media: confirmation_id required — call prepare_get_media first")
+		}
+		entry, ok := localMedia.pop(args.ConfirmationID, args.Peer, args.MessageID)
+		if !ok {
+			return bridge.EncodeError(env.ID, "get_media: confirmation_id not found, expired, already used, or issued for a different (peer, message_id)")
+		}
+		var buf []byte
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			buf, err = tg.DownloadMedia(ctx, c, entry.loc, tg.DefaultMediaDownloadMaxBytes)
+			return err
+		})
+		if dispErr == nil {
+			result, dispErr = json.Marshal(map[string]any{
+				"media_type": entry.info.MediaType,
+				"mime_type":  entry.info.MimeType,
+				"file_name":  entry.info.FileName,
+				"size":       len(buf),
+				"data":       base64.StdEncoding.EncodeToString(buf),
+			})
 		}
 
 	case "pin_message":

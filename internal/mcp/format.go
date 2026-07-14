@@ -62,9 +62,6 @@ func wrapMessages(msgs []telegram.Message) []telegram.Message {
 		}
 		peerRedacted := telegram.RedactPeer(m.Peer)
 		m.Text = WrapUntrustedContent(m.Text, peerRedacted)
-		// MediaInfo is a pointer field on Message; the value-copy of m above
-		// carries the pointer unchanged, so the caller receives the same
-		// *MediaInfo the telegram package populated — no further handling needed.
 		out[i] = m
 	}
 	return out

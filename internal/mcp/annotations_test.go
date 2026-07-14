@@ -19,6 +19,8 @@ func allRuntimeTools(s *Server) map[string]mcplib.Tool {
 		"send_message":                first(s.toolSendMessage()),
 		"prepare_pin_message":         first(s.toolPreparePinMessage()),
 		"pin_message":                 first(s.toolPinMessage()),
+		"prepare_get_media":           first(s.toolPrepareGetMedia()),
+		"get_media":                   first(s.toolGetMedia()),
 		"get_my_audit_log":            first(s.toolGetMyAuditLog()),
 		"disconnect_telegram_account": first(s.toolDisconnectAccount()),
 		"delete_telegram_account":     first(s.toolDeleteAccount()),

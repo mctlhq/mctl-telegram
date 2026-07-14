@@ -50,18 +50,25 @@ func DecodeMediaInfo(media tg.MessageMediaClass) *MediaInfo {
 	case *tg.MessageMediaPhoto:
 		info := &MediaInfo{MediaType: "photo"}
 		if photo, ok := m.Photo.(*tg.Photo); ok {
-			// Find the largest PhotoSize by area (W*H). Only plain *tg.PhotoSize
-			// entries carry usable W/H dimensions; progressive/stripped variants
-			// do not.
+			// Find the largest size by area (W*H). Both plain and
+			// progressive-JPEG entries carry W/H; modern servers often return
+			// ONLY photoSizeProgressive for the full-resolution rendition, so
+			// skipping it would report thumbnail dimensions.
 			bestArea := 0
 			for _, sz := range photo.Sizes {
-				if ps, ok := sz.(*tg.PhotoSize); ok {
-					area := ps.W * ps.H
-					if area > bestArea {
-						bestArea = area
-						info.Width = ps.W
-						info.Height = ps.H
-					}
+				var w, h int
+				switch ps := sz.(type) {
+				case *tg.PhotoSize:
+					w, h = ps.W, ps.H
+				case *tg.PhotoSizeProgressive:
+					w, h = ps.W, ps.H
+				default:
+					continue
+				}
+				if area := w * h; area > bestArea {
+					bestArea = area
+					info.Width = w
+					info.Height = h
 				}
 			}
 		}
@@ -76,8 +83,12 @@ func DecodeMediaInfo(media tg.MessageMediaClass) *MediaInfo {
 			MimeType: doc.MimeType,
 			Size:     doc.Size,
 		}
-		// Determine MediaType and extract per-attribute metadata. Priority:
-		// sticker > voice > audio > video > animation > document.
+		// Determine MediaType from document attributes. Sticker and audio
+		// (voice or music) attributes win immediately — audio overrides any
+		// video/animation classification set by an earlier attribute. Video
+		// and animation only fill an empty slot, so whichever appears first
+		// in the attribute list wins between them; anything left
+		// unclassified falls back to "document".
 		for _, attr := range doc.Attributes {
 			switch a := attr.(type) {
 			case *tg.DocumentAttributeSticker:

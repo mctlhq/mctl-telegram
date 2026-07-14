@@ -8,7 +8,6 @@ import (
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
-	"github.com/gotd/td/tg"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -83,90 +82,19 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 		var ref *MediaDownloadRef
 		var mediaInfo *telegram.MediaInfo
 		err := s.borrowWithRetry(ctx, "prepare_get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-			api := c.API()
-			inputPeer, resolveErr := telegram.ResolvePeerCached(ctx, c, peer, s.PeerCache, id.UserID)
-			if resolveErr != nil {
-				return fmt.Errorf("resolve peer: %w", resolveErr)
+			info, loc, err := telegram.PrepareMediaRef(ctx, c, peer, messageID, s.PeerCache, id.UserID)
+			if err != nil {
+				return err
 			}
-			var result tg.MessagesMessagesClass
-			var err error
-			if ch, ok := inputPeer.(*tg.InputPeerChannel); ok {
-				result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
-					Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
-					ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
-				})
-				if err != nil {
-					return fmt.Errorf("ChannelsGetMessages: %w", err)
-				}
-			} else {
-				result, err = api.MessagesGetMessages(ctx, &tg.MessagesGetMessagesRequest{
-					ID: []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
-				})
-				if err != nil {
-					return fmt.Errorf("MessagesGetMessages: %w", err)
-				}
-			}
-			var rawMsgs []tg.MessageClass
-			switch v := result.(type) {
-			case *tg.MessagesMessages:
-				rawMsgs = v.Messages
-			case *tg.MessagesMessagesSlice:
-				rawMsgs = v.Messages
-			case *tg.MessagesChannelMessages:
-				rawMsgs = v.Messages
-			}
-			var msg *tg.Message
-			for _, mc := range rawMsgs {
-				if m, ok := mc.(*tg.Message); ok && m.ID == messageID {
-					msg = m
-					break
-				}
-			}
-			if msg == nil {
-				return fmt.Errorf("message %d not found", messageID)
-			}
-			mediaInfo = telegram.DecodeMediaInfo(msg.Media)
-			if mediaInfo == nil {
-				return fmt.Errorf("message %d has no downloadable media", messageID)
-			}
+			mediaInfo = info
 			ref = &MediaDownloadRef{
 				Peer:      peer,
 				MessageID: messageID,
-				MediaType: mediaInfo.MediaType,
-				MimeType:  mediaInfo.MimeType,
-				FileName:  mediaInfo.FileName,
-				Size:      mediaInfo.Size,
-			}
-			// Populate location fields from the raw media.
-			switch m := msg.Media.(type) {
-			case *tg.MessageMediaDocument:
-				if doc, ok := m.Document.(*tg.Document); ok {
-					ref.IsDocument = true
-					ref.DocID = doc.ID
-					ref.AccessHash = doc.AccessHash
-					ref.FileReference = doc.FileReference
-				}
-			case *tg.MessageMediaPhoto:
-				if photo, ok := m.Photo.(*tg.Photo); ok {
-					ref.IsDocument = false
-					ref.PhotoID = photo.ID
-					ref.AccessHash = photo.AccessHash
-					ref.FileReference = photo.FileReference
-					// Find the type code of the largest PhotoSize.
-					bestArea := 0
-					for _, sz := range photo.Sizes {
-						if ps, ok := sz.(*tg.PhotoSize); ok {
-							area := ps.W * ps.H
-							if area > bestArea {
-								bestArea = area
-								ref.ThumbSize = ps.Type
-							}
-						}
-					}
-				}
-			}
-			if !ref.IsDocument && ref.PhotoID == 0 {
-				return fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, mediaInfo.MediaType)
+				MediaType: info.MediaType,
+				MimeType:  info.MimeType,
+				FileName:  info.FileName,
+				Size:      info.Size,
+				Location:  *loc,
 			}
 			return nil
 		})
@@ -280,49 +208,9 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		dlErr := s.borrowWithRetry(downloadCtx, "get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-			api := c.API()
-			var loc tg.InputFileLocationClass
-			if ref.IsDocument {
-				loc = &tg.InputDocumentFileLocation{
-					ID:            ref.DocID,
-					AccessHash:    ref.AccessHash,
-					FileReference: ref.FileReference,
-					ThumbSize:     "",
-				}
-			} else {
-				loc = &tg.InputPhotoFileLocation{
-					ID:            ref.PhotoID,
-					AccessHash:    ref.AccessHash,
-					FileReference: ref.FileReference,
-					ThumbSize:     ref.ThumbSize,
-				}
-			}
-			offset := int64(0)
-			const chunkSize = 512 * 1024 // 512 KB per Telegram API limit
-			buf = nil
-			for {
-				res, err := api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-					Location: loc,
-					Offset:   offset,
-					Limit:    chunkSize,
-				})
-				if err != nil {
-					return fmt.Errorf("UploadGetFile: %w", err)
-				}
-				chunk, ok := res.(*tg.UploadFile)
-				if !ok {
-					return fmt.Errorf("unexpected UploadGetFile response type")
-				}
-				if len(chunk.Bytes) == 0 {
-					break
-				}
-				buf = append(buf, chunk.Bytes...)
-				offset += int64(len(chunk.Bytes))
-				if s.MediaDownloadMaxBytes > 0 && int64(len(buf)) > s.MediaDownloadMaxBytes {
-					return fmt.Errorf("download exceeded %d-byte cap mid-stream", s.MediaDownloadMaxBytes)
-				}
-			}
-			return nil
+			var err error
+			buf, err = telegram.DownloadMedia(ctx, c, ref.Location, s.MediaDownloadMaxBytes)
+			return err
 		})
 		s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), dlErr, startedAt)
 		if dlErr != nil {
