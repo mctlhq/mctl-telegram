@@ -105,6 +105,8 @@ func TestToolAnnotations(t *testing.T) {
 		{"get_unread_messages", first(s.toolGetUnreadMessages()), true, false, true},
 		{"get_messages", first(s.toolGetMessages()), true, false, true},
 		{"prepare_pin_message", first(s.toolPreparePinMessage()), false, false, false},
+		{"prepare_get_media", first(s.toolPrepareGetMedia()), true, false, true},
+		{"get_media", first(s.toolGetMedia()), true, false, true},
 		{"list_telegram_identities", first(s.toolListIdentities()), true, false, false},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog()), true, false, false},
 		{"get_my_audit_log", first(s.toolGetMyAuditLog()), true, false, false},
