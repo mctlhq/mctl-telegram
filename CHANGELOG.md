@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.43.0](https://github.com/mctlhq/mctl-telegram/compare/0.42.0...0.43.0) (2026-07-14)
+
+
+### Features
+
+* **telegram:** add before_id pagination to get_messages with a raw-page cursor ([#280](https://github.com/mctlhq/mctl-telegram/issues/280)) ([1f1dcad](https://github.com/mctlhq/mctl-telegram/commit/1f1dcadaff1efc7ff80ee4d4e70f183c6e7385c4))
+* **telegram:** surface media metadata and add prepare_get_media/get_media tools ([#279](https://github.com/mctlhq/mctl-telegram/issues/279)) ([3470292](https://github.com/mctlhq/mctl-telegram/commit/34702923bb8e51c6ccf997a13b3ef47e66e85b61))
+
+
+### Bug Fixes
+
+* **ci:** detect claude-review SDK failure the outcome field misses ([9452f1a](https://github.com/mctlhq/mctl-telegram/commit/9452f1ae404985a49d985d49077b1b1d00061779))
+* **ci:** detect claude-review SDK failure the outcome field misses ([982098c](https://github.com/mctlhq/mctl-telegram/commit/982098ce6b374454957c48306e54d4d659f079b5))
+* **ci:** upgrade Go toolchain to 1.26.5 ([fae73e3](https://github.com/mctlhq/mctl-telegram/commit/fae73e3ba2af998e4e15d1b21ad677c75cbbaa51))
+* **docs:** address submission accuracy review ([1717631](https://github.com/mctlhq/mctl-telegram/commit/1717631d3aae06153e1d4ca0e22ac1a15765fe1f))
+
 ## [0.42.0](https://github.com/mctlhq/mctl-telegram/compare/0.41.2...0.42.0) (2026-07-03)
 
 
