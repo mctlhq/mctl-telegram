@@ -135,7 +135,7 @@ func (s *Server) toolGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDescription(`Download media bytes for a Telegram message identified by (peer, message_id).
 
 Requires a confirmation_id from prepare_get_media for the same (peer, message_id) pair.
-The confirmation is single-shot and expires in 10 minutes.
+The confirmation becomes in-flight on first use and is released when the download completes. Concurrent retries receive an 'in progress' response.
 
 Returns the raw bytes encoded as standard base64 in the "data" field. Maximum download
 size is controlled by MEDIA_DOWNLOAD_MAX_BYTES (default 20 MiB).
@@ -180,19 +180,27 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 			}
 		}
 
-		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
+		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
 			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt)
 			switch {
 			case errors.Is(cerr, ErrConfirmationMismatch):
 				return mcplib.NewToolResultError("confirmation_id was issued for a different (peer, message_id) — re-run prepare_get_media"), nil
 			case errors.Is(cerr, ErrConfirmationWrongUser):
 				return mcplib.NewToolResultError("confirmation_id belongs to another identity"), nil
+			case errors.Is(cerr, ErrConfirmationInFlight):
+				return mcplib.NewToolResultError("download already in progress for this confirmation_id — retry shortly"), nil
 			default:
 				return mcplib.NewToolResultError("confirmation_id not found, expired, or already used"), nil
 			}
 		}
+		// Release the confirmation and media ref after the download terminates,
+		// regardless of whether the context was cancelled or the download failed.
+		defer func() {
+			s.Confirms.Finalize(confID)
+			s.MediaStore.Delete(confID)
+		}()
 
-		ref := s.MediaStore.Pop(confID)
+		ref := s.MediaStore.Get(confID)
 		if ref == nil {
 			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt)
 			return toolErr("media reference expired or missing — re-run prepare_get_media"), nil

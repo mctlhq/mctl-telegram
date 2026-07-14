@@ -24,6 +24,7 @@ type Confirmation struct {
 	Action      string // "send" | "pin" | "unpin"
 	PayloadHash string // sha256(canonical input) for tamper-detection
 	ExpiresAt   time.Time
+	InFlight    bool
 }
 
 // ConfirmStore is a tiny in-memory single-shot TTL map.
@@ -75,6 +76,10 @@ var ErrConfirmationMismatch = errors.New("confirmation payload hash does not mat
 // can be flagged in audit logs without conflating with the "expired" path.
 var ErrConfirmationWrongUser = errors.New("confirmation belongs to a different identity")
 
+// ErrConfirmationInFlight means the confirmation is currently being consumed by an
+// in-progress get_media download. The caller should retry shortly.
+var ErrConfirmationInFlight = errors.New("download already in progress for this confirmation_id")
+
 // Consume validates and removes a confirmation. Returns the Confirmation
 // when everything checks out; otherwise returns one of the Err* sentinels
 // above. Single-shot — even on mismatch the row is dropped to prevent a
@@ -97,6 +102,42 @@ func (s *ConfirmStore) Consume(id string, userID int64, payloadHash string) (*Co
 		return nil, ErrConfirmationMismatch
 	}
 	return c, nil
+}
+
+// Claim validates a confirmation and marks it as in-flight without deleting it.
+// Used by get_media to hold the entry open during a potentially long download.
+// Returns ErrConfirmationInFlight if the entry is already claimed by a concurrent download.
+// Unlike Consume, Claim does NOT delete the entry on expiry — the Sweep backstop handles that.
+func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Confirmation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.m[id]
+	if !ok {
+		return nil, ErrConfirmationNotFound
+	}
+	if s.now().After(c.ExpiresAt) {
+		return nil, ErrConfirmationNotFound
+	}
+	if c.UserID != userID {
+		return nil, ErrConfirmationWrongUser
+	}
+	if c.PayloadHash != payloadHash {
+		return nil, ErrConfirmationMismatch
+	}
+	if c.InFlight {
+		return nil, ErrConfirmationInFlight
+	}
+	c.InFlight = true
+	return c, nil
+}
+
+// Finalize removes the confirmation entry unconditionally. Called via defer in
+// toolGetMedia after the download completes (success or terminal error) to release
+// the in-flight lock and prevent the entry from persisting beyond the request lifetime.
+func (s *ConfirmStore) Finalize(id string) {
+	s.mu.Lock()
+	delete(s.m, id)
+	s.mu.Unlock()
 }
 
 // Sweep removes expired entries. Called from a goroutine in NewConfirmStore
