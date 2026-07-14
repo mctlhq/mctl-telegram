@@ -29,31 +29,59 @@ func TestLimitClamp(t *testing.T) {
 	}
 }
 
-// TestDecodeMessages_MinIDCursor verifies the assumption relied on by the
-// next_before_id computation: the minimum ID in a decoded batch matches what
-// we would compute with a linear scan.
-func TestDecodeMessages_MinIDCursor(t *testing.T) {
-	raw := &tg.MessagesMessages{
-		Messages: []tg.MessageClass{
-			&tg.Message{ID: 300, Message: "c"},
-			&tg.Message{ID: 200, Message: "b"},
-			&tg.Message{ID: 100, Message: "a"},
-		},
-	}
-	hint := &Dialog{ID: "user:1", Title: "Test"}
-	msgs := decodeMessages(raw, hint, nil, nil, 10)
-	if len(msgs) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(msgs))
-	}
-	minID := msgs[0].ID
-	for _, m := range msgs[1:] {
-		if m.ID < minID {
-			minID = m.ID
+func TestHistoryCursor(t *testing.T) {
+	t.Run("full page returns min raw ID", func(t *testing.T) {
+		raw := &tg.MessagesMessages{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.Message{ID: 200, Message: "b"},
+				&tg.Message{ID: 100, Message: "a"},
+			},
 		}
-	}
-	if minID != 100 {
-		t.Errorf("min ID = %d, want 100", minID)
-	}
+		if got := historyCursor(raw, 3); got != 100 {
+			t.Errorf("historyCursor = %d, want 100", got)
+		}
+	})
+
+	t.Run("short page means end of history", func(t *testing.T) {
+		raw := &tg.MessagesMessages{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+			},
+		}
+		if got := historyCursor(raw, 3); got != 0 {
+			t.Errorf("historyCursor = %d, want 0", got)
+		}
+	})
+
+	t.Run("service messages count toward page fullness and cursor", func(t *testing.T) {
+		// A full raw page whose entries include service messages (joins/pins):
+		// decodeMessages drops them, but the cursor must still be emitted and
+		// must point below the lowest raw entry, or pagination would stop
+		// early / re-fetch the service messages forever.
+		raw := &tg.MessagesMessagesSlice{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.MessageService{ID: 200},
+				&tg.Message{ID: 100, Message: "a"},
+				&tg.MessageService{ID: 50},
+			},
+		}
+		hint := &Dialog{ID: "user:1", Title: "Test"}
+		msgs := decodeMessages(raw, hint, nil, nil, 4)
+		if len(msgs) != 2 {
+			t.Fatalf("expected 2 decoded messages, got %d", len(msgs))
+		}
+		if got := historyCursor(raw, 4); got != 50 {
+			t.Errorf("historyCursor = %d, want 50 (min raw ID incl. service messages)", got)
+		}
+	})
+
+	t.Run("empty response", func(t *testing.T) {
+		if got := historyCursor(&tg.MessagesMessages{}, 3); got != 0 {
+			t.Errorf("historyCursor = %d, want 0", got)
+		}
+	})
 }
 
 func TestGetUnreadMessages_PeerNotFoundError(t *testing.T) {

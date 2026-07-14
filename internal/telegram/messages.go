@@ -212,6 +212,36 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*t
 	return out
 }
 
+// historyCursor computes the backward-pagination cursor for a
+// messages.getHistory response. It must be derived from the raw entries, not
+// the decoded []Message: decodeMessages drops service messages (joins, pins),
+// so a full raw page can decode to fewer than `requested` messages and a
+// post-filter length check would suppress the cursor while older history
+// still exists. Returns the minimum raw message ID when the raw page is full
+// (more history likely remains), or 0 when the page came back short (end of
+// history reached).
+func historyCursor(r tg.MessagesMessagesClass, requested int) int {
+	var raw []tg.MessageClass
+	switch v := r.(type) {
+	case *tg.MessagesMessages:
+		raw = v.Messages
+	case *tg.MessagesMessagesSlice:
+		raw = v.Messages
+	case *tg.MessagesChannelMessages:
+		raw = v.Messages
+	}
+	if requested <= 0 || len(raw) < requested {
+		return 0
+	}
+	minID := 0
+	for _, m := range raw {
+		if id := m.GetID(); minID == 0 || id < minID {
+			minID = id
+		}
+	}
+	return minID
+}
+
 func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) string {
 	if from == nil {
 		return ""
@@ -244,10 +274,19 @@ func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]
 // only messages with ID strictly less than beforeID are returned, enabling
 // backward keyset pagination. Pass 0 to start from the most recent message.
 //
+// The second return value is the next_before_id cursor: pass it as beforeID
+// on the next call to page further back, or stop when it is 0 (end of
+// history). It is computed from the raw history page, so it stays correct
+// even when service messages are filtered out of the returned slice. Note
+// one benign false positive: when the total history length is an exact
+// multiple of the page size, the final page still returns a cursor and the
+// following call returns an empty slice — callers must treat an empty result
+// as end-of-history regardless of the cursor.
+//
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
-func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, error) {
+func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, int, error) {
 	if peerSpec == "" {
-		return nil, fmt.Errorf("peer is required")
+		return nil, 0, fmt.Errorf("peer is required")
 	}
 	limit = clampLimit(limit)
 	api := c.API()
@@ -257,7 +296,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+		return nil, 0, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 	// Seed the shared peer cache so a later get_messages/send_message for any of
@@ -279,7 +318,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
 		if input == nil {
-			return nil, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
+			return nil, 0, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
 		}
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:     input,
@@ -287,16 +326,16 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 			OffsetID: beforeID,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("MessagesGetHistory: %w", err)
+			return nil, 0, fmt.Errorf("MessagesGetHistory: %w", err)
 		}
-		return decodeMessages(hist, hint, users, chats, limit), nil
+		return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist, limit), nil
 	}
 
 	// Fallback: peer not in dialog list — resolve directly.
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
 	input, resolveErr := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	if resolveErr != nil {
-		return nil, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
+		return nil, 0, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
 			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -317,20 +356,20 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 						Limit:    limit,
 						OffsetID: beforeID,
 					}); err3 == nil {
-						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), nil
+						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), historyCursor(hist2, limit), nil
 					}
 				}
 			}
 			// A bare numeric "user:<id>"/"channel:<id>" carries no access_hash, so
 			// Telegram cannot identify the peer. Tell the caller how to recover
 			// instead of surfacing a raw RPC error that invites a retry loop.
-			return nil, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
+			return nil, 0, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
 				"call list_dialogs and use an id exactly as returned there", peerSpec, rpcErr.Message)
 		}
-		return nil, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
+		return nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}
 	hint := &Dialog{ID: peerSpec, Title: peerSpec}
-	return decodeMessages(hist, hint, users, chats, limit), nil
+	return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist, limit), nil
 }
 
 func matchUsername(have, want string) bool {
