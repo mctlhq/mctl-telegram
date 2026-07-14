@@ -376,26 +376,29 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 
 	case "get_messages":
 		var args struct {
-			Peer  string `json:"peer"`
-			Limit int    `json:"limit"`
+			Peer     string `json:"peer"`
+			Limit    int    `json:"limit"`
+			BeforeID int    `json:"before_id"`
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_messages: bad args: %v", err))
 		}
-		if args.Limit <= 0 {
-			args.Limit = 50
-		}
 		var msgs []tg.Message
+		var nextBeforeID int
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, nil, 0)
+			msgs, nextBeforeID, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0)
 			return err
 		})
 		if dispErr == nil {
-			result, dispErr = json.Marshal(map[string]any{
+			resp := map[string]any{
 				"messages": wrapMsgs(msgs),
 				"notice":   untrustedNotice,
-			})
+			}
+			if nextBeforeID > 0 {
+				resp["next_before_id"] = nextBeforeID
+			}
+			result, dispErr = json.Marshal(resp)
 		}
 
 	case "send_message":
