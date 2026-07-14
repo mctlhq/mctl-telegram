@@ -213,25 +213,31 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*t
 }
 
 // historyCursor computes the backward-pagination cursor for a
-// messages.getHistory response. It must be derived from the raw entries, not
-// the decoded []Message: decodeMessages drops service messages (joins, pins),
-// so a full raw page can decode to fewer than `requested` messages and a
-// post-filter length check would suppress the cursor while older history
-// still exists. Returns the minimum raw message ID when the raw page is full
-// (more history likely remains), or 0 when the page came back short (end of
-// history reached).
-func historyCursor(r tg.MessagesMessagesClass, requested int) int {
+// messages.getHistory response.
+//
+// It must be derived from the raw entries, not the decoded []Message:
+// decodeMessages drops service messages (joins, pins), so a post-filter
+// length check would suppress the cursor while older history still exists.
+//
+// End-of-history detection relies on the response type, not on comparing
+// len(raw) against the requested limit: Telegram may return fewer entries
+// than requested even when more history remains (its server-side page size
+// caps below the advertised limit=200), so a "short page" is NOT a reliable
+// end signal. A messages.messages response IS reliable — Telegram sends that
+// constructor only when the result contains the complete history. Slice and
+// channel responses are partial by construction, so any non-empty one gets a
+// cursor; the paging client terminates on the eventual empty response, which
+// carries no cursor.
+func historyCursor(r tg.MessagesMessagesClass) int {
 	var raw []tg.MessageClass
 	switch v := r.(type) {
 	case *tg.MessagesMessages:
-		raw = v.Messages
+		// Complete history — nothing older remains.
+		return 0
 	case *tg.MessagesMessagesSlice:
 		raw = v.Messages
 	case *tg.MessagesChannelMessages:
 		raw = v.Messages
-	}
-	if requested <= 0 || len(raw) < requested {
-		return 0
 	}
 	minID := 0
 	for _, m := range raw {
@@ -275,13 +281,12 @@ func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]
 // backward keyset pagination. Pass 0 to start from the most recent message.
 //
 // The second return value is the next_before_id cursor: pass it as beforeID
-// on the next call to page further back, or stop when it is 0 (end of
-// history). It is computed from the raw history page, so it stays correct
-// even when service messages are filtered out of the returned slice. Note
-// one benign false positive: when the total history length is an exact
-// multiple of the page size, the final page still returns a cursor and the
-// following call returns an empty slice — callers must treat an empty result
-// as end-of-history regardless of the cursor.
+// on the next call to page further back, and stop when it is 0 — that is the
+// only end-of-history signal. It is computed from the raw history page, so
+// it stays correct even when service messages are filtered out of the
+// returned slice. An empty message slice with a non-zero cursor is valid
+// (the page contained only service messages) — keep paging until the cursor
+// is absent.
 //
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
 func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, int, error) {
@@ -328,7 +333,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		if err != nil {
 			return nil, 0, fmt.Errorf("MessagesGetHistory: %w", err)
 		}
-		return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist, limit), nil
+		return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist), nil
 	}
 
 	// Fallback: peer not in dialog list — resolve directly.
@@ -356,7 +361,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 						Limit:    limit,
 						OffsetID: beforeID,
 					}); err3 == nil {
-						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), historyCursor(hist2, limit), nil
+						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), historyCursor(hist2), nil
 					}
 				}
 			}
@@ -369,7 +374,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		return nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}
 	hint := &Dialog{ID: peerSpec, Title: peerSpec}
-	return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist, limit), nil
+	return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist), nil
 }
 
 func matchUsername(have, want string) bool {

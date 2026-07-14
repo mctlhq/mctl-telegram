@@ -30,7 +30,10 @@ func TestLimitClamp(t *testing.T) {
 }
 
 func TestHistoryCursor(t *testing.T) {
-	t.Run("full page returns min raw ID", func(t *testing.T) {
+	t.Run("complete-history response never emits a cursor", func(t *testing.T) {
+		// messages.messages (non-slice) means Telegram returned the entire
+		// history — even a well-populated one must not ask the client to
+		// keep paging.
 		raw := &tg.MessagesMessages{
 			Messages: []tg.MessageClass{
 				&tg.Message{ID: 300, Message: "c"},
@@ -38,27 +41,32 @@ func TestHistoryCursor(t *testing.T) {
 				&tg.Message{ID: 100, Message: "a"},
 			},
 		}
-		if got := historyCursor(raw, 3); got != 100 {
-			t.Errorf("historyCursor = %d, want 100", got)
-		}
-	})
-
-	t.Run("short page means end of history", func(t *testing.T) {
-		raw := &tg.MessagesMessages{
-			Messages: []tg.MessageClass{
-				&tg.Message{ID: 300, Message: "c"},
-			},
-		}
-		if got := historyCursor(raw, 3); got != 0 {
+		if got := historyCursor(raw); got != 0 {
 			t.Errorf("historyCursor = %d, want 0", got)
 		}
 	})
 
-	t.Run("service messages count toward page fullness and cursor", func(t *testing.T) {
-		// A full raw page whose entries include service messages (joins/pins):
-		// decodeMessages drops them, but the cursor must still be emitted and
-		// must point below the lowest raw entry, or pagination would stop
-		// early / re-fetch the service messages forever.
+	t.Run("slice page emits min raw ID even when shorter than requested", func(t *testing.T) {
+		// Telegram caps page sizes server-side, so a slice response smaller
+		// than the requested limit does NOT mean end of history — the cursor
+		// must still be emitted.
+		raw := &tg.MessagesMessagesSlice{
+			Count: 5000,
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.Message{ID: 200, Message: "b"},
+			},
+		}
+		if got := historyCursor(raw); got != 200 {
+			t.Errorf("historyCursor = %d, want 200", got)
+		}
+	})
+
+	t.Run("service messages count toward the cursor", func(t *testing.T) {
+		// A raw page whose entries include service messages (joins/pins):
+		// decodeMessages drops them, but the cursor must point below the
+		// lowest raw entry, or pagination would re-fetch the service
+		// messages forever.
 		raw := &tg.MessagesMessagesSlice{
 			Messages: []tg.MessageClass{
 				&tg.Message{ID: 300, Message: "c"},
@@ -72,14 +80,25 @@ func TestHistoryCursor(t *testing.T) {
 		if len(msgs) != 2 {
 			t.Fatalf("expected 2 decoded messages, got %d", len(msgs))
 		}
-		if got := historyCursor(raw, 4); got != 50 {
+		if got := historyCursor(raw); got != 50 {
 			t.Errorf("historyCursor = %d, want 50 (min raw ID incl. service messages)", got)
 		}
 	})
 
-	t.Run("empty response", func(t *testing.T) {
-		if got := historyCursor(&tg.MessagesMessages{}, 3); got != 0 {
+	t.Run("empty slice page terminates paging", func(t *testing.T) {
+		if got := historyCursor(&tg.MessagesMessagesSlice{Count: 5000}); got != 0 {
 			t.Errorf("historyCursor = %d, want 0", got)
+		}
+	})
+
+	t.Run("channel page behaves like a slice", func(t *testing.T) {
+		raw := &tg.MessagesChannelMessages{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 42, Message: "x"},
+			},
+		}
+		if got := historyCursor(raw); got != 42 {
+			t.Errorf("historyCursor = %d, want 42", got)
 		}
 	})
 }
