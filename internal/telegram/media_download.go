@@ -57,6 +57,19 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve peer: %w", err)
 	}
+	// A bare "channel:<id>"/"user:<id>" spec resolves to a zero AccessHash
+	// when the shared PeerCache is absent (Local Bridge daemon passes nil) or
+	// cold — Telegram rejects such peers with CHANNEL_INVALID/PEER_ID_INVALID.
+	// Recover the hash by scanning the dialog list, same source
+	// GetMessages/seedPeerCache use.
+	if peerNeedsAccessHash(inputPeer) {
+		fromDialogs, derr := findPeerInDialogs(ctx, api, peerSpec)
+		if derr != nil {
+			return nil, nil, fmt.Errorf("peer %q carries no access hash and was not found in the dialog list; "+
+				"call list_dialogs and use an id exactly as returned there: %w", peerSpec, derr)
+		}
+		inputPeer = fromDialogs
+	}
 	var result tg.MessagesMessagesClass
 	if ch, ok := inputPeer.(*tg.InputPeerChannel); ok {
 		result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
@@ -91,6 +104,19 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 	if msg == nil {
 		return nil, nil, fmt.Errorf("message %d not found", messageID)
 	}
+	// messages.getMessages looks up by GLOBAL message ID with no peer scoping
+	// (unlike channels.getMessages) — without this check the confirmation
+	// record could label media from a completely different chat with the
+	// requested peer.
+	if !messageBelongsToPeer(msg, inputPeer) {
+		return nil, nil, fmt.Errorf("message %d does not belong to peer %q", messageID, peerSpec)
+	}
+	// Content protection: the chat owner marked this content non-savable
+	// (Telegram clients disable saving/forwarding). Refuse to mint a
+	// download ref rather than silently bypassing the restriction.
+	if msg.Noforwards {
+		return nil, nil, fmt.Errorf("message %d is protected content (owner disabled saving/forwarding)", messageID)
+	}
 	info := DecodeMediaInfo(msg.Media)
 	if info == nil {
 		return nil, nil, fmt.Errorf("message %d has no downloadable media", messageID)
@@ -116,6 +142,71 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 		return nil, nil, fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, info.MediaType)
 	}
 	return info, loc, nil
+}
+
+// messageBelongsToPeer reports whether msg's owning dialog matches the
+// InputPeer the caller asked about. Channel messages arrive pre-scoped via
+// channels.getMessages, so a channel input always passes; user/chat inputs
+// are compared against the message's PeerID.
+func messageBelongsToPeer(msg *tg.Message, input tg.InputPeerClass) bool {
+	switch in := input.(type) {
+	case *tg.InputPeerChannel:
+		return true
+	case *tg.InputPeerUser:
+		p, ok := msg.PeerID.(*tg.PeerUser)
+		return ok && p.UserID == in.UserID
+	case *tg.InputPeerChat:
+		p, ok := msg.PeerID.(*tg.PeerChat)
+		return ok && p.ChatID == in.ChatID
+	default:
+		return false
+	}
+}
+
+// peerNeedsAccessHash reports whether the resolved InputPeer is missing the
+// access hash Telegram requires for messages.*/channels.* calls. Basic
+// groups (InputPeerChat) never carry one.
+func peerNeedsAccessHash(p tg.InputPeerClass) bool {
+	switch v := p.(type) {
+	case *tg.InputPeerChannel:
+		return v.AccessHash == 0
+	case *tg.InputPeerUser:
+		return v.AccessHash == 0
+	default:
+		return false
+	}
+}
+
+// findPeerInDialogs locates peerSpec in the dialog list and returns a
+// hash-bearing InputPeer for it — the same recovery GetMessages performs via
+// its dialog scan, for callers that run without a seeded PeerCache (the
+// Local Bridge daemon).
+func findPeerInDialogs(ctx context.Context, api *tg.Client, peerSpec string) (tg.InputPeerClass, error) {
+	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		Limit:      200,
+		OffsetPeer: &tg.InputPeerEmpty{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+	}
+	users, chats, dialogs := decodeDialogsResult(dlgRes)
+	for _, dc := range dialogs {
+		d, ok := dc.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		hint := dialogFromPeer(d, users, chats)
+		if hint == nil {
+			continue
+		}
+		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
+			continue
+		}
+		if input := inputPeerFromPeer(d.Peer, users, chats); input != nil {
+			return input, nil
+		}
+	}
+	return nil, fmt.Errorf("peer %q not in the dialog list", peerSpec)
 }
 
 // largestPhotoSizeType returns the type code of the largest downloadable

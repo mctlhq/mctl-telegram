@@ -156,6 +156,7 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 		return fmt.Errorf("dial bridge: %w", err)
 	}
 	defer conn.CloseNow()
+	conn.SetReadLimit(bridge.MaxMediaFrameBytes)
 
 	slog.Info("bridge connected")
 
@@ -239,7 +240,7 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 				slog.Debug("pong received", "id", env.ID)
 			case bridge.TypeCall:
 				go func(e bridge.Envelope) {
-					callCtx, callCancel := context.WithTimeout(sessionCtx, bridge.DeadlineCall)
+					callCtx, callCancel := context.WithTimeout(sessionCtx, bridge.DeadlineFor(e.Tool))
 					defer callCancel()
 					resp := dispatchCall(callCtx, pool, userID, e)
 					if werr := wsjson.Write(ctx, conn, resp); werr != nil {

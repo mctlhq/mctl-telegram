@@ -11,6 +11,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/sanitize"
 )
 
 // MediaInfo describes non-text content attached to a Telegram message.
@@ -114,7 +115,12 @@ func DecodeMediaInfo(media tg.MessageMediaClass) *MediaInfo {
 					info.MediaType = "animation"
 				}
 			case *tg.DocumentAttributeFilename:
-				info.FileName = a.FileName
+				// Sender-controlled string that leaves the tool as plain JSON
+				// metadata (file_name), OUTSIDE the <telegram-content> wrapper
+				// used for message text — sanitize it so control characters,
+				// invisible chars, and multi-kilobyte instruction payloads
+				// can't ride along. 255 runes matches common FS limits.
+				info.FileName = sanitizeFileName(a.FileName)
 			}
 		}
 		if info.MediaType == "" {
@@ -151,6 +157,19 @@ func clampLimit(limit int) int {
 		return 200
 	}
 	return limit
+}
+
+// sanitizeFileName cleans a sender-controlled document filename for
+// inclusion as plain JSON metadata in tool results. Unlike message text it
+// is not wrapped in a <telegram-content> boundary, so it must not carry
+// control/invisible characters or oversized payloads. Blank-after-cleaning
+// values become "" (field is omitempty), not the "[empty]" sentinel.
+func sanitizeFileName(name string) string {
+	cleaned := sanitize.Name(name, 255)
+	if cleaned == "[empty]" {
+		return ""
+	}
+	return cleaned
 }
 
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
