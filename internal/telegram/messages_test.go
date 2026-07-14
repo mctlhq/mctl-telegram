@@ -4,7 +4,104 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/gotd/td/tg"
 )
+
+func TestLimitClamp(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, 50},
+		{-1, 50},
+		{1, 1},
+		{50, 50},
+		{200, 200},
+		{201, 200},
+		{500, 200},
+	}
+	for _, tc := range cases {
+		got := clampLimit(tc.in)
+		if got != tc.want {
+			t.Errorf("clampLimit(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestHistoryCursor(t *testing.T) {
+	t.Run("complete-history response never emits a cursor", func(t *testing.T) {
+		// messages.messages (non-slice) means Telegram returned the entire
+		// history — even a well-populated one must not ask the client to
+		// keep paging.
+		raw := &tg.MessagesMessages{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.Message{ID: 200, Message: "b"},
+				&tg.Message{ID: 100, Message: "a"},
+			},
+		}
+		if got := historyCursor(raw); got != 0 {
+			t.Errorf("historyCursor = %d, want 0", got)
+		}
+	})
+
+	t.Run("slice page emits min raw ID even when shorter than requested", func(t *testing.T) {
+		// Telegram caps page sizes server-side, so a slice response smaller
+		// than the requested limit does NOT mean end of history — the cursor
+		// must still be emitted.
+		raw := &tg.MessagesMessagesSlice{
+			Count: 5000,
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.Message{ID: 200, Message: "b"},
+			},
+		}
+		if got := historyCursor(raw); got != 200 {
+			t.Errorf("historyCursor = %d, want 200", got)
+		}
+	})
+
+	t.Run("service messages count toward the cursor", func(t *testing.T) {
+		// A raw page whose entries include service messages (joins/pins):
+		// decodeMessages drops them, but the cursor must point below the
+		// lowest raw entry, or pagination would re-fetch the service
+		// messages forever.
+		raw := &tg.MessagesMessagesSlice{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 300, Message: "c"},
+				&tg.MessageService{ID: 200},
+				&tg.Message{ID: 100, Message: "a"},
+				&tg.MessageService{ID: 50},
+			},
+		}
+		hint := &Dialog{ID: "user:1", Title: "Test"}
+		msgs := decodeMessages(raw, hint, nil, nil, 4)
+		if len(msgs) != 2 {
+			t.Fatalf("expected 2 decoded messages, got %d", len(msgs))
+		}
+		if got := historyCursor(raw); got != 50 {
+			t.Errorf("historyCursor = %d, want 50 (min raw ID incl. service messages)", got)
+		}
+	})
+
+	t.Run("empty slice page terminates paging", func(t *testing.T) {
+		if got := historyCursor(&tg.MessagesMessagesSlice{Count: 5000}); got != 0 {
+			t.Errorf("historyCursor = %d, want 0", got)
+		}
+	})
+
+	t.Run("channel page behaves like a slice", func(t *testing.T) {
+		raw := &tg.MessagesChannelMessages{
+			Messages: []tg.MessageClass{
+				&tg.Message{ID: 42, Message: "x"},
+			},
+		}
+		if got := historyCursor(raw); got != 42 {
+			t.Errorf("historyCursor = %d, want 42", got)
+		}
+	})
+}
 
 func TestGetUnreadMessages_PeerNotFoundError(t *testing.T) {
 	// The error format when peerSpec is set but not in dialogs.
