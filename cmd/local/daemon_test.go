@@ -195,3 +195,20 @@ func TestLocalMediaStore_Put_SweepSkipsInFlight(t *testing.T) {
 		t.Fatal("sweep must not delete an in-flight entry, even past its expiresAt")
 	}
 }
+
+func TestLocalMediaStore_Unclaim_AllowsRetryClaim(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.unclaim(confID)
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim after unclaim: %v", err)
+	}
+}
+
+func TestLocalMediaStore_Unclaim_MissingIDIsNoop(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	s.unclaim("does-not-exist") // must not panic
+}

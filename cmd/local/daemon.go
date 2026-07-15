@@ -368,6 +368,20 @@ func (s *localMediaStore) finalize(confID string) {
 	s.mu.Unlock()
 }
 
+// unclaim releases the in-flight hold without deleting the entry, letting a
+// retry successfully claim it again — mirroring the hosted server's
+// ConfirmStore.Unclaim. Used when a download attempt was aborted by context
+// cancellation/timeout rather than terminating (success or a real error).
+// No-op if the id is missing or already finalized.
+func (s *localMediaStore) unclaim(confID string) {
+	s.mu.Lock()
+	if e, ok := s.m[confID]; ok {
+		e.inFlight = false
+		s.m[confID] = e
+	}
+	s.mu.Unlock()
+}
+
 func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
 	slog.Info("dispatch", "tool", env.Tool, "id", env.ID)
 
@@ -529,15 +543,24 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 			}
 			return bridge.EncodeError(env.ID, claimErr.Error())
 		}
-		// Release the in-flight hold after the download terminates, regardless
-		// of whether it succeeded, failed, or the context was cancelled.
-		defer localMedia.finalize(args.ConfirmationID)
 		var buf []byte
-		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+		dlErr := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			buf, err = tg.DownloadMedia(ctx, c, entry.loc, tg.DefaultMediaDownloadMaxBytes)
 			return err
 		})
+		if dlErr != nil && (errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded)) {
+			// Aborted by cancellation/timeout, not a terminal failure of the
+			// operation itself — release the in-flight hold but keep the
+			// entry alive so a retry with the same confirmation_id can pick
+			// the download back up instead of getting "not found".
+			localMedia.unclaim(args.ConfirmationID)
+			return bridge.EncodeError(env.ID, "get_media: download did not complete in time — retry with the same confirmation_id")
+		}
+		// Every other outcome (success or a real error) releases the entry
+		// for good.
+		localMedia.finalize(args.ConfirmationID)
+		dispErr = dlErr
 		if dispErr == nil {
 			result, dispErr = json.Marshal(map[string]any{
 				"media_type": entry.info.MediaType,

@@ -109,18 +109,24 @@ func (s *ConfirmStore) Consume(id string, userID int64, payloadHash string) (*Co
 // Returns ErrConfirmationInFlight if the entry is already claimed by a concurrent download.
 //
 // Checks run in a deliberate order:
-//  1. InFlight is checked first, before anything else — a retry racing a
-//     still-running download must always see ErrConfirmationInFlight, even
-//     past the nominal TTL, and can never be invalidated by an unrelated
-//     wrong-user or mismatched-payload probe against the same id.
-//  2. Expiry is checked next, before identity/payload — an expired entry
-//     must collapse to the same ErrConfirmationNotFound a truly-unknown id
-//     gets, same as the caller-facing contract Consume already promised
-//     ("cannot distinguish 'expired' from 'wrong id'"). Checking identity
-//     first would let a caller holding a stale confirmation_id learn it
-//     once belonged to a different user instead of just "not found". The
-//     entry is dropped here too — nothing periodically sweeps this map, so
-//     leaving it for a Sweep that's never called just leaks memory.
+//  1. If the entry is in-flight, identity/payload are still checked — a
+//     cross-user or mismatched-payload probe must still be classified as
+//     ErrConfirmationWrongUser/ErrConfirmationMismatch for audit purposes,
+//     joined with ErrConfirmationInFlight so callers that only care about
+//     "was this in-flight" (e.g. deciding whether to also release a
+//     MediaStore ref) can still detect it via errors.Is. Critically, the
+//     entry is never deleted on this branch: only the owning call's
+//     Finalize/Unclaim may release an in-flight entry, so a stray or
+//     malicious probe against someone else's id can't kill their download.
+//  2. Expiry is checked next, before identity/payload, for a not-in-flight
+//     entry — it must collapse to the same ErrConfirmationNotFound a truly-
+//     unknown id gets, same as the caller-facing contract Consume already
+//     promised ("cannot distinguish 'expired' from 'wrong id'"). Checking
+//     identity first would let a caller holding a stale confirmation_id
+//     learn it once belonged to a different user instead of just "not
+//     found". The entry is dropped here too — nothing periodically sweeps
+//     this map, so leaving it for a Sweep that's never called just leaks
+//     memory.
 //  3. WrongUser and PayloadHash mismatch are terminal failures on a
 //     not-yet-expired, not-in-flight entry: the row is dropped so a
 //     follow-up retry cannot observe the same id with a corrected pair,
@@ -133,6 +139,12 @@ func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Conf
 		return nil, ErrConfirmationNotFound
 	}
 	if c.InFlight {
+		if c.UserID != userID {
+			return nil, errors.Join(ErrConfirmationWrongUser, ErrConfirmationInFlight)
+		}
+		if c.PayloadHash != payloadHash {
+			return nil, errors.Join(ErrConfirmationMismatch, ErrConfirmationInFlight)
+		}
 		return nil, ErrConfirmationInFlight
 	}
 	if s.now().After(c.ExpiresAt) {
@@ -149,6 +161,20 @@ func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Conf
 	}
 	c.InFlight = true
 	return c, nil
+}
+
+// Unclaim releases the in-flight hold without deleting the entry, letting a
+// retry successfully Claim it again. Used when a download attempt was
+// aborted by context cancellation/timeout rather than terminating (success
+// or a real error): the client should be able to retry with the same
+// confirmation_id instead of hitting ErrConfirmationNotFound. No-op if the
+// id is missing or already finalized.
+func (s *ConfirmStore) Unclaim(id string) {
+	s.mu.Lock()
+	if c, ok := s.m[id]; ok {
+		c.InFlight = false
+	}
+	s.mu.Unlock()
 }
 
 // Finalize removes the confirmation entry unconditionally. Called via defer in

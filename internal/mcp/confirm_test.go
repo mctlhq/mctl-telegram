@@ -251,18 +251,25 @@ func TestConfirmStore_Claim_InFlightBeatsExpiry(t *testing.T) {
 	}
 }
 
-func TestConfirmStore_Claim_InFlightBeatsWrongUser(t *testing.T) {
-	// An in-flight entry must not be invalidated by an unrelated wrong-user
-	// or mismatched-payload probe against the same id — that would let a
-	// stray/buggy call kill someone else's legitimate in-flight download.
+func TestConfirmStore_Claim_InFlightWrongUserPreservesEntry(t *testing.T) {
+	// A wrong-user probe against an in-flight entry must still be classified
+	// as ErrConfirmationWrongUser (for correct audit signal), joined with
+	// ErrConfirmationInFlight so callers deciding whether to release other
+	// resources (e.g. a MediaStore ref) can detect "this entry is still
+	// live". The entry itself must never be deleted here — only the owning
+	// call's Finalize/Unclaim may release an in-flight entry.
 	s := NewConfirmStore()
 	hash := HashMediaPayload("@x", 42)
 	c, _ := s.Issue(1, "media", hash)
 	if _, err := s.Claim(c.ID, 1, hash); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if _, err := s.Claim(c.ID, 2, hash); !errors.Is(err, ErrConfirmationInFlight) {
-		t.Fatalf("wrong-user probe against an in-flight entry must return ErrConfirmationInFlight, got %v", err)
+	_, err := s.Claim(c.ID, 2, hash)
+	if !errors.Is(err, ErrConfirmationWrongUser) {
+		t.Fatalf("wrong-user probe against an in-flight entry must return ErrConfirmationWrongUser, got %v", err)
+	}
+	if !errors.Is(err, ErrConfirmationInFlight) {
+		t.Fatalf("wrong-user probe against an in-flight entry must also satisfy ErrConfirmationInFlight, got %v", err)
 	}
 	s.mu.Lock()
 	_, stillPresent := s.m[c.ID]
@@ -270,6 +277,52 @@ func TestConfirmStore_Claim_InFlightBeatsWrongUser(t *testing.T) {
 	if !stillPresent {
 		t.Fatal("in-flight entry must survive an unrelated wrong-user probe")
 	}
+}
+
+func TestConfirmStore_Claim_InFlightMismatchPreservesEntry(t *testing.T) {
+	// Same invariant as the wrong-user case, for a mismatched-payload probe.
+	s := NewConfirmStore()
+	hash := HashMediaPayload("@x", 42)
+	c, _ := s.Issue(1, "media", hash)
+	if _, err := s.Claim(c.ID, 1, hash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	wrong := HashMediaPayload("@y", 99)
+	_, err := s.Claim(c.ID, 1, wrong)
+	if !errors.Is(err, ErrConfirmationMismatch) {
+		t.Fatalf("mismatched-payload probe against an in-flight entry must return ErrConfirmationMismatch, got %v", err)
+	}
+	if !errors.Is(err, ErrConfirmationInFlight) {
+		t.Fatalf("mismatched-payload probe against an in-flight entry must also satisfy ErrConfirmationInFlight, got %v", err)
+	}
+	s.mu.Lock()
+	_, stillPresent := s.m[c.ID]
+	s.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("in-flight entry must survive an unrelated mismatched-payload probe")
+	}
+}
+
+func TestConfirmStore_Unclaim_AllowsRetryClaim(t *testing.T) {
+	s := NewConfirmStore()
+	hash := HashMediaPayload("@x", 42)
+	c, _ := s.Issue(1, "media", hash)
+	if _, err := s.Claim(c.ID, 1, hash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.Unclaim(c.ID)
+	got, err := s.Claim(c.ID, 1, hash)
+	if err != nil {
+		t.Fatalf("claim after unclaim: %v", err)
+	}
+	if !got.InFlight {
+		t.Fatal("claim after unclaim must set InFlight=true again")
+	}
+}
+
+func TestConfirmStore_Unclaim_MissingIDIsNoop(t *testing.T) {
+	s := NewConfirmStore()
+	s.Unclaim("does-not-exist") // must not panic
 }
 
 func TestConfirmStore_Consume_Unchanged(t *testing.T) {

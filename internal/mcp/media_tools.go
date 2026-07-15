@@ -201,11 +201,17 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 				return mcplib.NewToolResultError("confirmation_id not found, expired, or already used"), nil
 			}
 		}
-		// Release the confirmation and media ref after the download terminates,
-		// regardless of whether the context was cancelled or the download failed.
+		// Release the confirmation and media ref once we're done with them.
+		// released tracks whether that already happened via the cancellation
+		// branch below so the defer doesn't double-release; on every other
+		// path (missing/oversized ref, real download error, success) the
+		// defer's Finalize+Delete is what actually cleans up.
+		released := false
 		defer func() {
-			s.Confirms.Finalize(confID)
-			s.MediaStore.Delete(confID)
+			if !released {
+				s.Confirms.Finalize(confID)
+				s.MediaStore.Delete(confID)
+			}
 		}()
 
 		ref := s.MediaStore.Get(confID)
@@ -230,6 +236,18 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		})
 		s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), dlErr, startedAt)
 		if dlErr != nil {
+			if errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded) {
+				// The download was aborted by cancellation (client disconnect
+				// or the caller's own transport-level timeout) or by our own
+				// 60s cap — not a terminal failure of the operation itself.
+				// Release the in-flight hold but keep the confirmation and
+				// media ref alive so a retry with the same confirmation_id
+				// can pick the download back up instead of being told
+				// "not found".
+				s.Confirms.Unclaim(confID)
+				released = true
+				return mcplib.NewToolResultError("download did not complete in time — retry with the same confirmation_id"), nil
+			}
 			if errors.Is(dlErr, telegram.ErrPoolFull) {
 				return mcplib.NewToolResultError("server at session capacity — try again later"), nil
 			}
