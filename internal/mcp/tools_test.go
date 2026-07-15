@@ -511,3 +511,267 @@ func TestToolSetAccountSend_NoActiveSession(t *testing.T) {
 		t.Errorf("unexpected error text: %s", contentText(result))
 	}
 }
+
+// --- handler-level tests for the 5 new message-op tools ---
+
+func TestToolEditMessage_MissingArgs(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolEditMessage()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "edit_message",
+		Arguments: map[string]any{"peer": "user:1"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for missing message_id/text")
+	}
+}
+
+func TestToolEditMessage_SendGateBlocked(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: false}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolEditMessage()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "edit_message",
+		Arguments: map[string]any{
+			"peer":       "user:1",
+			"message_id": float64(42),
+			"text":       "hello",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when AllowSend=false")
+	}
+}
+
+func TestToolDeleteMessages_MissingArgs(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolDeleteMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "delete_messages",
+		Arguments: map[string]any{},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for missing peer/message_ids")
+	}
+}
+
+func TestToolDeleteMessages_SendGateBlocked(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: false}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolDeleteMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "delete_messages",
+		Arguments: map[string]any{
+			"peer":        "user:1",
+			"message_ids": []any{float64(1)},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when AllowSend=false")
+	}
+}
+
+func TestToolForwardMessages_MissingArgs(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolForwardMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "forward_messages",
+		Arguments: map[string]any{"from_peer": "user:1"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for missing to_peer/message_ids")
+	}
+}
+
+func TestToolForwardMessages_SendGateBlocked(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: false}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolForwardMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "forward_messages",
+		Arguments: map[string]any{
+			"from_peer":   "user:1",
+			"to_peer":     "user:2",
+			"message_ids": []any{float64(1)},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when AllowSend=false")
+	}
+}
+
+func TestToolSearchMessages_MissingScope(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSearchMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "search_messages",
+		Arguments: map[string]any{"query": "hello"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected scope error for identity without telegram:messages:read")
+	}
+}
+
+func TestToolSearchMessages_MissingQuery(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSearchMessages()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "search_messages",
+		Arguments: map[string]any{},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for missing query")
+	}
+}
+
+func TestToolSetReaction_MissingArgs(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetReaction()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_reaction",
+		Arguments: map[string]any{"emoji": "👍"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for missing peer/message_id")
+	}
+}
+
+func TestToolSetReaction_SendGateBlocked(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t), AllowSend: false}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetReaction()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "set_reaction",
+		Arguments: map[string]any{
+			"peer":       "user:1",
+			"message_id": float64(42),
+			"emoji":      "👍",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when AllowSend=false")
+	}
+}
+
+func TestIntSliceArg(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    map[string]any
+		key     string
+		want    []int
+		wantOK  bool
+	}{
+		{
+			name:   "key absent",
+			args:   map[string]any{},
+			key:    "ids",
+			wantOK: false,
+		},
+		{
+			name:   "float64 elements (JSON numbers)",
+			args:   map[string]any{"ids": []any{float64(1), float64(2), float64(3)}},
+			key:    "ids",
+			want:   []int{1, 2, 3},
+			wantOK: true,
+		},
+		{
+			name:   "int elements",
+			args:   map[string]any{"ids": []any{10, 20}},
+			key:    "ids",
+			want:   []int{10, 20},
+			wantOK: true,
+		},
+		{
+			name:   "not a slice",
+			args:   map[string]any{"ids": "not a slice"},
+			key:    "ids",
+			wantOK: false,
+		},
+		{
+			name:   "empty slice",
+			args:   map[string]any{"ids": []any{}},
+			key:    "ids",
+			want:   []int{},
+			wantOK: true,
+		},
+		{
+			name:   "mixed numeric and non-numeric elements",
+			args:   map[string]any{"ids": []any{float64(123), "not-a-number"}},
+			key:    "ids",
+			wantOK: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := intSliceArg(c.args, c.key)
+			if ok != c.wantOK {
+				t.Errorf("intSliceArg ok = %v, want %v", ok, c.wantOK)
+			}
+			if ok && len(got) != len(c.want) {
+				t.Errorf("intSliceArg len = %d, want %d", len(got), len(c.want))
+			}
+			for i := range c.want {
+				if i < len(got) && got[i] != c.want[i] {
+					t.Errorf("intSliceArg[%d] = %d, want %d", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}

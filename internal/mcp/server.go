@@ -146,6 +146,11 @@ func (s *Server) HTTPHandler() http.Handler {
 	{t, h := s.toolSetAccountSend(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetUserAuditLog(); s.addTool(srv, t, h)}
 	{t, h := s.toolRevokeSession(); s.addTool(srv, t, h)}
+	{t, h := s.toolEditMessage(); s.addTool(srv, t, h)}
+	{t, h := s.toolDeleteMessages(); s.addTool(srv, t, h)}
+	{t, h := s.toolForwardMessages(); s.addTool(srv, t, h)}
+	{t, h := s.toolSearchMessages(); s.addTool(srv, t, h)}
+	{t, h := s.toolSetReaction(); s.addTool(srv, t, h)}
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,
