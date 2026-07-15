@@ -610,6 +610,66 @@ func TestResolveScopes_AutoApprove(t *testing.T) {
 	}
 }
 
+// TestHandleTelegramCallback_AutoApproveMaterializesDBTier confirms the
+// callback-time side effect added alongside AutoApproveClients: a fresh
+// user's transient client grant is written to the DB on first sign-in, an
+// admin-set "none" is never overwritten, and re-sign-in is idempotent.
+func TestHandleTelegramCallback_AutoApproveMaterializesDBTier(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fresh user gets tier=client written on first sign-in", func(t *testing.T) {
+		fresh := int64(444000333)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+		})
+		telegramCallbackFor(t, srv, mux, fresh)
+		tier, err := srv.store.GetAccessTier(ctx, fresh)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != db.TierClient {
+			t.Fatalf("tier after first sign-in = %q, want %q", tier, db.TierClient)
+		}
+	})
+
+	t.Run("explicit none is never overwritten", func(t *testing.T) {
+		banned := int64(444000444)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+		})
+		if _, err := srv.store.EnsureUserByTelegramID(ctx, banned, "banned", "Banned"); err != nil {
+			t.Fatalf("ensure user: %v", err)
+		}
+		if err := srv.store.SetAccessTier(ctx, banned, db.TierNone); err != nil {
+			t.Fatalf("set tier none: %v", err)
+		}
+		telegramCallbackFor(t, srv, mux, banned)
+		tier, err := srv.store.GetAccessTier(ctx, banned)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != db.TierNone {
+			t.Fatalf("tier after sign-in = %q, want %q (must not be overwritten)", tier, db.TierNone)
+		}
+	})
+
+	t.Run("re-sign-in is idempotent", func(t *testing.T) {
+		fresh := int64(444000555)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+		})
+		telegramCallbackFor(t, srv, mux, fresh)
+		telegramCallbackFor(t, srv, mux, fresh)
+		tier, err := srv.store.GetAccessTier(ctx, fresh)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != db.TierClient {
+			t.Fatalf("tier after second sign-in = %q, want %q", tier, db.TierClient)
+		}
+	})
+}
+
 // TestEnableAccess_DBClientRoutedToPhoneScreen confirms a client granted via
 // the DB access_tier column (not the env allowlist) is likewise routed into
 // the enable_access phone screen, not 302'd past it.
