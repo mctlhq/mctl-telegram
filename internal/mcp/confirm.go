@@ -109,18 +109,22 @@ func (s *ConfirmStore) Consume(id string, userID int64, payloadHash string) (*Co
 // Returns ErrConfirmationInFlight if the entry is already claimed by a concurrent download.
 //
 // Checks run in a deliberate order:
-//  1. InFlight is checked first, before expiry/identity/payload — a retry
-//     racing a still-running download must always see ErrConfirmationInFlight,
-//     even if the nominal TTL has ticked over while the download (which can
-//     legitimately outlive it) is still executing. This also means an
-//     in-flight entry can never be invalidated by a wrong-user or
-//     mismatched-payload probe against the same id.
-//  2. WrongUser and PayloadHash mismatch are terminal failures once we know
-//     the entry is not in-flight: the row is dropped so a follow-up retry
-//     cannot observe the same id with a corrected pair, matching Consume's
-//     single-shot-on-any-failure model.
-//  3. Expiry is checked last and, unlike the above, does NOT delete the
-//     entry — the Sweep backstop handles that.
+//  1. InFlight is checked first, before anything else — a retry racing a
+//     still-running download must always see ErrConfirmationInFlight, even
+//     past the nominal TTL, and can never be invalidated by an unrelated
+//     wrong-user or mismatched-payload probe against the same id.
+//  2. Expiry is checked next, before identity/payload — an expired entry
+//     must collapse to the same ErrConfirmationNotFound a truly-unknown id
+//     gets, same as the caller-facing contract Consume already promised
+//     ("cannot distinguish 'expired' from 'wrong id'"). Checking identity
+//     first would let a caller holding a stale confirmation_id learn it
+//     once belonged to a different user instead of just "not found". The
+//     entry is dropped here too — nothing periodically sweeps this map, so
+//     leaving it for a Sweep that's never called just leaks memory.
+//  3. WrongUser and PayloadHash mismatch are terminal failures on a
+//     not-yet-expired, not-in-flight entry: the row is dropped so a
+//     follow-up retry cannot observe the same id with a corrected pair,
+//     matching Consume's single-shot-on-any-failure model.
 func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Confirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,6 +135,10 @@ func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Conf
 	if c.InFlight {
 		return nil, ErrConfirmationInFlight
 	}
+	if s.now().After(c.ExpiresAt) {
+		delete(s.m, id)
+		return nil, ErrConfirmationNotFound
+	}
 	if c.UserID != userID {
 		delete(s.m, id)
 		return nil, ErrConfirmationWrongUser
@@ -138,9 +146,6 @@ func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Conf
 	if c.PayloadHash != payloadHash {
 		delete(s.m, id)
 		return nil, ErrConfirmationMismatch
-	}
-	if s.now().After(c.ExpiresAt) {
-		return nil, ErrConfirmationNotFound
 	}
 	c.InFlight = true
 	return c, nil

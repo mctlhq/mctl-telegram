@@ -159,4 +159,39 @@ func TestLocalMediaStore_Claim_Expired(t *testing.T) {
 	if _, err := s.claim(confID, "peer:1", 10); !errors.Is(err, errLocalMediaNotFound) {
 		t.Fatalf("expired claim must return errLocalMediaNotFound, got %v", err)
 	}
+	// Nothing periodically sweeps this map outside of put()'s opportunistic
+	// pass, so an expired entry must be dropped on access.
+	s.mu.Lock()
+	_, stillPresent := s.m[confID]
+	s.mu.Unlock()
+	if stillPresent {
+		t.Fatal("claim must delete the entry on expiry")
+	}
+}
+
+func TestLocalMediaStore_Put_SweepSkipsInFlight(t *testing.T) {
+	// An in-flight download can legitimately outlive its nominal TTL. The
+	// opportunistic sweep in put() must not delete it out from under the
+	// running get_media call, or a concurrent retry would see "not found"
+	// instead of the in-flight response it's meant to get.
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.mu.Lock()
+	e := s.m[confID]
+	e.expiresAt = time.Now().Add(-time.Minute)
+	s.m[confID] = e
+	s.mu.Unlock()
+
+	// Trigger another put(), which runs the opportunistic sweep.
+	s.put("peer:2", 20, tg.MediaInfo{}, tg.MediaFileLocation{})
+
+	s.mu.Lock()
+	_, stillPresent := s.m[confID]
+	s.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("sweep must not delete an in-flight entry, even past its expiresAt")
+	}
 }

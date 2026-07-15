@@ -172,12 +172,29 @@ func TestConfirmStore_Claim_Expired(t *testing.T) {
 	if _, err := s.Claim(c.ID, 1, hash); !errors.Is(err, ErrConfirmationNotFound) {
 		t.Fatalf("expired Claim must return ErrConfirmationNotFound, got %v", err)
 	}
-	// Claim must NOT delete on expiry — entry remains for Sweep.
+	// Nothing periodically calls Sweep, so an expired entry must be dropped
+	// on access instead of leaking until process restart.
 	s.mu.Lock()
 	_, ok := s.m[c.ID]
 	s.mu.Unlock()
-	if !ok {
-		t.Fatal("Claim must not delete the entry on expiry — leave it for Sweep")
+	if ok {
+		t.Fatal("Claim must delete the entry on expiry — nothing else will")
+	}
+}
+
+func TestConfirmStore_Claim_ExpiredBeatsWrongUser(t *testing.T) {
+	// An expired entry belonging to a different user must collapse to the
+	// same ErrConfirmationNotFound an unknown id gets — checking identity
+	// first would leak "this id existed and belonged to someone else" to a
+	// caller holding a stale confirmation_id.
+	s := NewConfirmStore()
+	hash := HashMediaPayload("@x", 42)
+	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return fixed }
+	c, _ := s.Issue(1, "media", hash)
+	s.now = func() time.Time { return fixed.Add(ConfirmationTTL + time.Second) }
+	if _, err := s.Claim(c.ID, 2, hash); !errors.Is(err, ErrConfirmationNotFound) {
+		t.Fatalf("expired claim by a different user must return ErrConfirmationNotFound, got %v", err)
 	}
 }
 

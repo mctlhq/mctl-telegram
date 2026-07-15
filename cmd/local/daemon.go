@@ -297,10 +297,14 @@ func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Opportunistically drop expired entries so abandoned prepares don't
-	// accumulate for the daemon's lifetime.
+	// accumulate for the daemon's lifetime. Never sweep an in-flight entry:
+	// a download can legitimately outlive its nominal TTL, and deleting it
+	// out from under a running get_media call would make a concurrent
+	// retry see "not found" instead of the in-flight response it's meant
+	// to get.
 	now := time.Now()
 	for k, e := range s.m {
-		if now.After(e.expiresAt) {
+		if !e.inFlight && now.After(e.expiresAt) {
 			delete(s.m, k)
 		}
 	}
@@ -321,15 +325,17 @@ func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc
 // download for the same confirmation_id and get a spurious "not found".
 //
 // Checks run in the same deliberate order as the hosted store:
-//  1. in-flight is checked first, before the (peer, message_id) pair or
-//     expiry — a retry racing a still-running download must always see
-//     errLocalMediaInFlight, even past the nominal TTL, and can never be
-//     invalidated by an unrelated wrong-pair probe against the same id.
-//  2. A wrong-pair probe on a not-yet-claimed entry is a terminal failure:
-//     the entry is dropped so a follow-up retry with the correct pair
-//     cannot reuse the same id, matching the pre-Claim single-shot model.
-//  3. Expiry is checked last and does not delete the entry — the opportunistic
-//     sweep in put() handles that.
+//  1. in-flight is checked first, before anything else — a retry racing a
+//     still-running download must always see errLocalMediaInFlight, even
+//     past the nominal TTL, and can never be invalidated by an unrelated
+//     wrong-pair probe against the same id.
+//  2. Expiry is checked next and deletes the entry: nothing periodically
+//     sweeps this map outside of put()'s opportunistic pass, so leaving an
+//     expired entry in place on access just leaks it until the next prepare.
+//  3. A wrong-pair probe on a not-yet-expired, not-in-flight entry is a
+//     terminal failure: the entry is dropped so a follow-up retry with the
+//     correct pair cannot reuse the same id, matching the pre-Claim
+//     single-shot model.
 func (s *localMediaStore) claim(confID, peer string, messageID int) (localMediaEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,11 +346,12 @@ func (s *localMediaStore) claim(confID, peer string, messageID int) (localMediaE
 	if e.inFlight {
 		return localMediaEntry{}, errLocalMediaInFlight
 	}
-	if e.peer != peer || e.messageID != messageID {
+	if time.Now().After(e.expiresAt) {
 		delete(s.m, confID)
 		return localMediaEntry{}, errLocalMediaNotFound
 	}
-	if time.Now().After(e.expiresAt) {
+	if e.peer != peer || e.messageID != messageID {
+		delete(s.m, confID)
 		return localMediaEntry{}, errLocalMediaNotFound
 	}
 	e.inFlight = true

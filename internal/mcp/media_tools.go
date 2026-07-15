@@ -182,6 +182,14 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 
 		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
 			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt)
+			if !errors.Is(cerr, ErrConfirmationInFlight) {
+				// Claim already dropped (or never held) the ConfirmStore entry
+				// for every other failure mode — drop the matching MediaStore
+				// ref too so an expired or invalid probe doesn't leak it
+				// indefinitely. Never touch it on ErrConfirmationInFlight: that
+				// means a concurrent download legitimately owns this id.
+				s.MediaStore.Delete(confID)
+			}
 			switch {
 			case errors.Is(cerr, ErrConfirmationMismatch):
 				return mcplib.NewToolResultError("confirmation_id was issued for a different (peer, message_id) — re-run prepare_get_media"), nil
