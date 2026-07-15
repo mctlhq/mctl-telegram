@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -31,5 +33,75 @@ func TestWrapMsgs_RedactsTelegramLoginSecrets(t *testing.T) {
 	}
 	if !strings.HasPrefix(out[0].Text, `<telegram-content origin="telegram"`) {
 		t.Fatalf("message was not wrapped as untrusted Telegram content: %q", out[0].Text)
+	}
+}
+
+func TestLocalMediaStore_Claim_HappyPath(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+
+	got, err := s.claim(confID, "peer:1", 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !got.inFlight {
+		t.Fatal("claim must set inFlight=true")
+	}
+	s.mu.Lock()
+	_, stillPresent := s.m[confID]
+	s.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("claim must not delete the entry")
+	}
+}
+
+func TestLocalMediaStore_Claim_InFlight(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, err := s.claim(confID, "peer:1", 10); !errors.Is(err, errLocalMediaInFlight) {
+		t.Fatalf("second claim must return errLocalMediaInFlight, got %v", err)
+	}
+}
+
+func TestLocalMediaStore_Claim_ThenFinalize(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.finalize(confID)
+	if _, err := s.claim(confID, "peer:1", 10); !errors.Is(err, errLocalMediaNotFound) {
+		t.Fatalf("after finalize, claim must return errLocalMediaNotFound, got %v", err)
+	}
+}
+
+func TestLocalMediaStore_Claim_WrongPair(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+
+	if _, err := s.claim(confID, "peer:2", 10); !errors.Is(err, errLocalMediaNotFound) {
+		t.Fatalf("wrong peer must return errLocalMediaNotFound, got %v", err)
+	}
+	if _, err := s.claim(confID, "peer:1", 99); !errors.Is(err, errLocalMediaNotFound) {
+		t.Fatalf("wrong message_id must return errLocalMediaNotFound, got %v", err)
+	}
+}
+
+func TestLocalMediaStore_Claim_Expired(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+	s.mu.Lock()
+	e := s.m[confID]
+	e.expiresAt = time.Now().Add(-time.Minute)
+	s.m[confID] = e
+	s.mu.Unlock()
+
+	if _, err := s.claim(confID, "peer:1", 10); !errors.Is(err, errLocalMediaNotFound) {
+		t.Fatalf("expired claim must return errLocalMediaNotFound, got %v", err)
 	}
 }
