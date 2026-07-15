@@ -52,6 +52,7 @@ func wrapMessages(msgs []telegram.Message) []telegram.Message {
 		// empty so the "[empty]" sentinel does not leak into MCP output.
 		if m.Text != "" {
 			m.Text = sanitize.UserContent(m.Text, 4096)
+			m.Text = sanitize.SensitiveTelegramContent(m.Text)
 		}
 		if m.From != "" {
 			m.From = sanitize.Name(m.From, 100)

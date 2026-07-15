@@ -105,3 +105,56 @@ func TestHTTPMiddleware_StatusCodeLabel(t *testing.T) {
 		t.Error("expected status_code=204 label in mctl_http_requests_total")
 	}
 }
+
+// countingHeaderWriter records how many times WriteHeader reaches the
+// underlying writer and with which codes.
+type countingHeaderWriter struct {
+	http.ResponseWriter
+	codes []int
+}
+
+func (c *countingHeaderWriter) WriteHeader(code int) { c.codes = append(c.codes, code) }
+
+// TestResponseWriter_WriteHeaderForwardedOnce verifies a second WriteHeader call
+// is NOT forwarded to the underlying writer (preventing the net/http
+// "superfluous response.WriteHeader call" warning) and that the captured status
+// reflects the first code.
+func TestResponseWriter_WriteHeaderForwardedOnce(t *testing.T) {
+	underlying := &countingHeaderWriter{ResponseWriter: httptest.NewRecorder()}
+	rw := &responseWriter{ResponseWriter: underlying, status: http.StatusOK}
+
+	rw.WriteHeader(http.StatusInternalServerError)
+	rw.WriteHeader(http.StatusBadGateway) // must be ignored
+
+	if len(underlying.codes) != 1 {
+		t.Fatalf("expected exactly 1 forwarded WriteHeader, got %d (%v)", len(underlying.codes), underlying.codes)
+	}
+	if underlying.codes[0] != http.StatusInternalServerError {
+		t.Errorf("forwarded code = %d, want %d", underlying.codes[0], http.StatusInternalServerError)
+	}
+	if rw.status != http.StatusInternalServerError {
+		t.Errorf("captured status = %d, want %d", rw.status, http.StatusInternalServerError)
+	}
+}
+
+// TestResponseWriter_WriteHeaderAfterWriteSuppressed covers the other path that
+// produces the superfluous-WriteHeader warning in practice: an implicit
+// Write() (which sets wroteHeader) followed by an explicit WriteHeader(). The
+// later WriteHeader must not be forwarded, and the captured status stays the
+// 200 default that Write() locked in.
+func TestResponseWriter_WriteHeaderAfterWriteSuppressed(t *testing.T) {
+	underlying := &countingHeaderWriter{ResponseWriter: httptest.NewRecorder()}
+	rw := &responseWriter{ResponseWriter: underlying, status: http.StatusOK}
+
+	if _, err := rw.Write([]byte("body")); err != nil { // implicitly marks wroteHeader
+		t.Fatalf("Write: %v", err)
+	}
+	rw.WriteHeader(http.StatusInternalServerError) // must be suppressed
+
+	if len(underlying.codes) != 0 {
+		t.Fatalf("expected 0 forwarded WriteHeader after Write, got %d (%v)", len(underlying.codes), underlying.codes)
+	}
+	if rw.status != http.StatusOK {
+		t.Errorf("captured status = %d, want %d", rw.status, http.StatusOK)
+	}
+}

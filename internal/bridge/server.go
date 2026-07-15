@@ -85,6 +85,11 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			return
 		}
 
+		// Daemon responses carry get_media payloads (base64 of up to
+		// MEDIA_DOWNLOAD_MAX_BYTES); coder/websocket's default 32 KiB read
+		// limit would close the connection on the first real download.
+		conn.SetReadLimit(MaxMediaFrameBytes)
+
 		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id))
 		send := hub.Register(id.UserID)
 

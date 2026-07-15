@@ -168,6 +168,11 @@ type IdentityRow struct {
 	AccessTier  string    `json:"access_tier"`
 	HasSession  bool      `json:"has_session"`
 	CreatedAt   time.Time `json:"created_at"`
+	// ConnectedVia lists distinct OAuth client names (e.g. "Claude", "ChatGPT")
+	// for which this user holds a non-expired, non-revoked refresh token. Empty
+	// when the user has never completed an OAuth flow or all tokens predate
+	// dynamic client registration.
+	ConnectedVia []string `json:"connected_via,omitempty"`
 }
 
 // SetAccessTier sets users.access_tier for the user with the given Telegram
@@ -254,7 +259,45 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 		r.AccessTier = tier.String // "" when the column is NULL (unset)
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Fetch connected_via: distinct non-empty client names denormalized onto
+	// oauth_refresh_tokens at issue time, so the field survives oauth_client_registrations TTL sweeps.
+	clientRows, err := s.DB.QueryContext(ctx,
+		`SELECT u.telegram_login_id, rt.client_name
+		   FROM users u
+		   JOIN oauth_refresh_tokens rt ON rt.user_id = u.id
+		  WHERE u.telegram_login_id IS NOT NULL
+		    AND rt.revoked_at IS NULL
+		    AND rt.expires_at > $1
+		    AND rt.client_name <> ''
+		  GROUP BY u.telegram_login_id, rt.client_name
+		  ORDER BY u.telegram_login_id, rt.client_name`,
+		now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list identities client names: %w", err)
+	}
+	defer func() { _ = clientRows.Close() }()
+
+	// Build index by TelegramID for O(n) merge.
+	idx := make(map[int64]int, len(out))
+	for i, r := range out {
+		idx[r.TelegramID] = i
+	}
+	for clientRows.Next() {
+		var tgID int64
+		var clientName string
+		if err := clientRows.Scan(&tgID, &clientName); err != nil {
+			return nil, fmt.Errorf("scan client name: %w", err)
+		}
+		if i, ok := idx[tgID]; ok {
+			out[i].ConnectedVia = append(out[i].ConnectedVia, clientName)
+		}
+	}
+	return out, clientRows.Err()
 }
 
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.

@@ -24,6 +24,7 @@ type RefreshToken struct {
 	FamilyID         string
 	UserID           int64
 	ClientID         string
+	ClientName       string // display name of the OAuth client, e.g. "Claude", "ChatGPT"
 	TelegramID       int64
 	TelegramUsername string
 	Scope            string
@@ -70,10 +71,10 @@ func saveRefreshToken(ctx context.Context, ex execer, plaintext string, rt Refre
 	}
 	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, expires_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, client_name, expires_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		rt.FamilyID, hashRefreshToken(plaintext), rt.UserID, rt.ClientID,
-		rt.TelegramID, nullable(rt.TelegramUsername), nullable(rt.Scope), rt.ExpiresAt.UTC(),
+		rt.TelegramID, nullable(rt.TelegramUsername), nullable(rt.Scope), rt.ClientName, rt.ExpiresAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("insert refresh token: %w", err)
 	}
@@ -96,11 +97,11 @@ func (s *Store) LookupRefreshToken(ctx context.Context, plaintext string) (*Refr
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT family_id, user_id, client_id, telegram_id, telegram_username,
-		        scope, created_at, expires_at, revoked_at
+		        scope, client_name, created_at, expires_at, revoked_at
 		   FROM oauth_refresh_tokens WHERE token_hash = $1`,
 		hashRefreshToken(plaintext),
 	).Scan(&rt.FamilyID, &rt.UserID, &rt.ClientID, &rt.TelegramID, &username,
-		&scope, &rt.CreatedAt, &rt.ExpiresAt, &revoked)
+		&scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrRefreshTokenNotFound
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 func newToolsTestStore(t *testing.T) *db.Store {
@@ -142,6 +143,161 @@ func TestEvaluateSendGate_ReviewerForcedDryRun(t *testing.T) {
 	real, _ = evaluateSendGate(ctx, s, other, true, reviewerTGID)
 	if !real {
 		t.Fatal("non-reviewer identity must not be gagged by reviewer mode")
+	}
+}
+
+// activeAccountCount returns the number of non-revoked telegram_accounts rows
+// for a user — used to assert a blocked destructive call left the session
+// intact (count stays 1) vs. an allowed disconnect that revokes it (count 0).
+func activeAccountCount(t *testing.T, store *db.Store, uid int64) int {
+	t.Helper()
+	var n int
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`, uid,
+	).Scan(&n); err != nil {
+		t.Fatalf("count active accounts: %v", err)
+	}
+	return n
+}
+
+// totalAccountCount returns the total telegram_accounts rows (revoked or not)
+// for a user — used to assert a blocked delete left the row in place vs. an
+// allowed delete that hard-removes it.
+func totalAccountCount(t *testing.T, store *db.Store, uid int64) int {
+	t.Helper()
+	var n int
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&n); err != nil {
+		t.Fatalf("count accounts: %v", err)
+	}
+	return n
+}
+
+// latestAudit returns the newest audit_logs row for a user.
+func latestAudit(t *testing.T, store *db.Store, uid int64) (tool, status, errMsg string) {
+	t.Helper()
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT tool_name, status, COALESCE(error, '') FROM audit_logs WHERE user_id = $1 ORDER BY id DESC LIMIT 1`, uid,
+	).Scan(&tool, &status, &errMsg); err != nil {
+		t.Fatalf("read latest audit: %v", err)
+	}
+	return tool, status, errMsg
+}
+
+const guardReviewerTGID int64 = 8745115872
+
+// TestToolDisconnect_DemoReviewerBlocked proves the demo/reviewer identity is
+// refused when it tries to disconnect its own account, the session row is left
+// untouched, and the blocked attempt is audited.
+func TestToolDisconnect_DemoReviewerBlocked(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, guardReviewerTGID, false)
+	// Pool is deliberately nil: the guard must short-circuit before any pool/DB
+	// mutation, so a nil pool also proves nothing destructive ran.
+	srv := &Server{Store: store, DemoReviewerTGID: guardReviewerTGID}
+	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolDisconnectAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "disconnect_telegram_account"}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("demo reviewer disconnect must be refused")
+	}
+	if got := contentText(res); !strings.Contains(got, "cannot be disconnected or deleted during review") {
+		t.Fatalf("expected the reviewer refusal message, got %q", got)
+	}
+	if n := activeAccountCount(t, store, uid); n != 1 {
+		t.Fatalf("blocked disconnect must NOT revoke the session row (active=%d, want 1)", n)
+	}
+	tool, status, msg := latestAudit(t, store, uid)
+	if tool != "disconnect_telegram_account" || status != "error" || !strings.Contains(msg, "cannot be disconnected") {
+		t.Fatalf("blocked attempt not audited: tool=%q status=%q msg=%q", tool, status, msg)
+	}
+}
+
+// TestToolDelete_DemoReviewerBlocked proves the demo/reviewer identity is
+// refused when it tries to hard-delete its own account, the row survives, and
+// the blocked attempt is audited. This is the exact path that bricked the demo
+// session in a prior review.
+func TestToolDelete_DemoReviewerBlocked(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, guardReviewerTGID, false)
+	srv := &Server{Store: store, DemoReviewerTGID: guardReviewerTGID}
+	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolDeleteAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "delete_telegram_account"}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("demo reviewer delete must be refused")
+	}
+	if got := contentText(res); !strings.Contains(got, "cannot be disconnected or deleted during review") {
+		t.Fatalf("expected the reviewer refusal message, got %q", got)
+	}
+	if n := totalAccountCount(t, store, uid); n != 1 {
+		t.Fatalf("blocked delete must NOT remove the row (total=%d, want 1)", n)
+	}
+	tool, status, msg := latestAudit(t, store, uid)
+	if tool != "delete_telegram_account" || status != "error" || !strings.Contains(msg, "cannot be") {
+		t.Fatalf("blocked attempt not audited: tool=%q status=%q msg=%q", tool, status, msg)
+	}
+}
+
+// TestToolDisconnect_NormalUserAllowed proves a normal (non-reviewer) identity
+// can still disconnect even while reviewer mode is armed — its active session
+// row is revoked.
+func TestToolDisconnect_NormalUserAllowed(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const normalTGID int64 = 210408407
+	uid := seedAccountWithSession(t, store, normalTGID, false)
+	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
+	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolDisconnectAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "disconnect_telegram_account"}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("normal-user disconnect must succeed, got error: %s", contentText(res))
+	}
+	if n := activeAccountCount(t, store, uid); n != 0 {
+		t.Fatalf("normal disconnect must revoke the active session (active=%d, want 0)", n)
+	}
+}
+
+// TestToolDelete_NormalUserAllowed proves a normal (non-reviewer) identity can
+// still hard-delete its account even while reviewer mode is armed.
+func TestToolDelete_NormalUserAllowed(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const normalTGID int64 = 210408407
+	uid := seedAccountWithSession(t, store, normalTGID, false)
+	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
+	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolDeleteAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "delete_telegram_account"}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("normal-user delete must succeed, got error: %s", contentText(res))
+	}
+	if n := totalAccountCount(t, store, uid); n != 0 {
+		t.Fatalf("normal delete must hard-remove the row (total=%d, want 0)", n)
 	}
 }
 

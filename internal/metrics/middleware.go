@@ -49,10 +49,15 @@ type responseWriter struct {
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
-	if !rw.wroteHeader {
-		rw.status = code
-		rw.wroteHeader = true
+	// Forward only the first WriteHeader. A second call (e.g. an error handler
+	// writing a status after the MCP/SSE handler already sent 200) must not
+	// reach the underlying writer, or net/http logs "superfluous
+	// response.WriteHeader call" and the extra header is discarded anyway.
+	if rw.wroteHeader {
+		return
 	}
+	rw.status = code
+	rw.wroteHeader = true
 	rw.ResponseWriter.WriteHeader(code)
 }
 

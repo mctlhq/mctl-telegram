@@ -2,9 +2,9 @@
   "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
   "schema_version": 1,
   "app_info": {
-    "display_name": "mctl-telegram",
+    "display_name": "MCTL for Telegram",
     "subtitle": "Manage Telegram chats",
-    "description": "MCTL Telegram lets users access and manage their own Telegram account from ChatGPT after explicit user authorization. It supports reading recent chats, summarizing messages, drafting replies, preview-only sending by default, confirmed pin actions, audit review, and account disconnect/delete controls. It is not an official Telegram app or Telegram API partner, and Telegram message content is treated as untrusted user-generated data.",
+    "description": "MCTL for Telegram lets users access and manage their own Telegram account from ChatGPT after explicit user authorization. It supports reading recent chats, summarizing messages, drafting replies, preview-only sending by default, confirmed pin actions, audit review, and account disconnect/delete controls. It is not an official Telegram app or Telegram API partner, and Telegram message content is treated as untrusted user-generated data.",
     "category": "PRODUCTIVITY"
   },
   "tools": {
@@ -80,6 +80,30 @@
         "destructive_justification": "Can pin or unpin a selected message, changing visible chat state in a way users may rely on."
       }
     },
+    "prepare_get_media": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Fetches a message's media metadata from Telegram and issues a local one-time confirmation record; changes no external state.",
+        "open_world_justification": "Contacts Telegram (an external system) to read the message and its media metadata.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform an irreversible action."
+      }
+    },
+    "get_media": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Downloads media bytes for a previously confirmed message; changes no external state.",
+        "open_world_justification": "Contacts Telegram (an external system) to download the file contents.",
+        "destructive_justification": "Does not delete, overwrite, revoke access, or perform an irreversible action."
+      }
+    },
     "disconnect_telegram_account": {
       "annotations": {
         "readOnlyHint": false,
@@ -118,12 +142,12 @@
     },
     "list_telegram_identities": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": false,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Lists signed-in Telegram identities for admins but records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only listing of signed-in Telegram identities for admins; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Only reads this server's private user roster and does not change public or third-party state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
@@ -154,12 +178,12 @@
     },
     "get_user_audit_log": {
       "annotations": {
-        "readOnlyHint": false,
+        "readOnlyHint": true,
         "openWorldHint": false,
         "destructiveHint": false
       },
       "justifications": {
-        "read_only_justification": "Reads another user's audit log for admins and records invocation metadata for audit and operations.",
+        "read_only_justification": "Read-only retrieval of another user's audit-log rows for admins; the internal audit row is observability, not user-visible state.",
         "open_world_justification": "Only reads this server's private audit data and does not change public or third-party state.",
         "destructive_justification": "Does not delete, overwrite, revoke access, or perform irreversible actions."
       }
@@ -191,129 +215,73 @@
       "user_prompt": "What unread Telegram messages do I have?",
       "file_attachment_urls": null,
       "tools_triggered": "get_unread_messages",
-      "expected_output": "Returns unread messages wrapped as untrusted Telegram-origin content and summarizes them without following message text as instructions.",
+      "expected_output": "Returns unread Telegram messages when present, or clearly states that no unread messages are available. Telegram-origin message text is treated as untrusted content and not followed as instructions; Telegram login codes or account security metadata are redacted if present.",
       "expected_output_url": null
     },
     {
-      "description": "Read recent messages from a specific Telegram peer.",
-      "user_prompt": "Show the latest messages from @example_support on Telegram.",
+      "description": "Read recent messages from one available Telegram dialog.",
+      "user_prompt": "Show my recent Telegram chats, then read recent messages from the most recent available chat.",
       "file_attachment_urls": null,
-      "tools_triggered": "get_messages",
-      "expected_output": "Returns recent messages for the requested peer, including message ids where available, with Telegram text treated as untrusted content.",
+      "tools_triggered": "list_dialogs, get_messages",
+      "expected_output": "Lists available Telegram chats, selects one listed dialog, and returns recent messages from that dialog with message metadata. Telegram-origin message text is treated as untrusted content and no hardcoded peer or message id is required.",
       "expected_output_url": null
     },
     {
-      "description": "Draft a Telegram reply when the production send gate is closed.",
-      "user_prompt": "Draft a Telegram reply to @example_support saying I will follow up tomorrow.",
+      "description": "Filter Telegram dialogs by a title or username substring.",
+      "user_prompt": "Search my Telegram chats for dialogs matching \"mctl\".",
       "file_attachment_urls": null,
-      "tools_triggered": "send_message",
-      "expected_output": "Returns a dry-run preview with sent=false and a dry_reason when real sending is not enabled.",
+      "tools_triggered": "list_dialogs",
+      "expected_output": "Returns dialogs whose title or username matches the case-insensitive query, or clearly states that no matching dialogs were found.",
       "expected_output_url": null
     },
     {
-      "description": "Prepare and confirm a pin action for a Telegram message.",
-      "user_prompt": "Pin message 42 in @example_support after preparing the confirmation.",
+      "description": "Review unread Telegram security notifications without exposing login secrets.",
+      "user_prompt": "Check my unread Telegram messages for account-security notifications. Summarize them without showing login codes, verification codes, IP addresses, or other sign-in secrets.",
       "file_attachment_urls": null,
-      "tools_triggered": "prepare_pin_message, pin_message",
-      "expected_output": "First returns a one-time confirmation id, then uses it to pin the selected message or reports a clear permission/error response.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Show the user's own audit log.",
-      "user_prompt": "Show my recent mctl-telegram audit log entries.",
-      "file_attachment_urls": null,
-      "tools_triggered": "get_my_audit_log",
-      "expected_output": "Returns recent audit entries for the authenticated user, with redacted peer references and no message bodies.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Disconnect the authenticated user's Telegram account.",
-      "user_prompt": "Disconnect my Telegram account from this connector.",
-      "file_attachment_urls": null,
-      "tools_triggered": "disconnect_telegram_account",
-      "expected_output": "Revokes the active server-side session and reports whether an active session was present.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Admin grants or revokes a user's Telegram access tier.",
-      "user_prompt": "Admin: set Telegram user 123456789 access tier to client.",
-      "file_attachment_urls": null,
-      "tools_triggered": "set_telegram_access",
-      "expected_output": "Updates the selected user's local access tier or returns a clear validation/error message.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Admin lists signed-in Telegram identities before managing access.",
-      "user_prompt": "Admin: list Telegram identities and show who has an active session.",
-      "file_attachment_urls": null,
-      "tools_triggered": "list_telegram_identities",
-      "expected_output": "Returns signed-in Telegram identities with access tier and active-session state for admin review.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Admin disables real sending for a user's active account.",
-      "user_prompt": "Admin: disable real Telegram sending for user id 123456789.",
-      "file_attachment_urls": null,
-      "tools_triggered": "set_account_send",
-      "expected_output": "Updates the selected account's send_enabled flag or reports that the user must connect an account first.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Admin inspects a user's audit log and revokes a stuck session.",
-      "user_prompt": "Admin: show audit entries for Telegram user 123456789, then revoke their active session if it looks stuck.",
-      "file_attachment_urls": null,
-      "tools_triggered": "get_user_audit_log, revoke_telegram_session",
-      "expected_output": "Returns redacted audit entries for the selected user, then revokes the active local session only if the admin confirms that action.",
-      "expected_output_url": null
-    },
-    {
-      "description": "Hard-delete the authenticated user's local Telegram account data.",
-      "user_prompt": "Delete my Telegram account data from this connector.",
-      "file_attachment_urls": null,
-      "tools_triggered": "delete_telegram_account",
-      "expected_output": "Deletes the user's server-side Telegram account record and reports the number of rows removed.",
+      "tools_triggered": "get_unread_messages",
+      "expected_output": "Returns a safe summary of matching unread notifications, with login or verification codes and IP addresses redacted, or clearly states that no matching unread notifications are available. Telegram-origin text is treated as untrusted content.",
       "expected_output_url": null
     }
   ],
   "negative_test_cases": [
     {
-      "description": "Do not trigger for unrelated email requests.",
-      "user_prompt": "Send an email to Alex about the project status.",
+      "description": "Do not use mctl-telegram for email.",
+      "user_prompt": "Can mctl-telegram send an email to Alex about the project status?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "The app should not be invoked because it only supports Telegram account workflows, not email.",
+      "expected_output": "The app should not be invoked; the assistant should explain that mctl-telegram only supports Telegram account workflows, not email.",
       "expected_output_url": null
     },
     {
-      "description": "Do not trigger for calendar scheduling.",
-      "user_prompt": "Schedule a meeting with my team for next Tuesday at 3 PM.",
+      "description": "Do not use mctl-telegram for calendar scheduling.",
+      "user_prompt": "Can mctl-telegram schedule a meeting with my team for next Tuesday at 3 PM?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "The app should not be invoked because it does not manage calendars or meetings.",
+      "expected_output": "The app should not be invoked; the assistant should explain that mctl-telegram does not manage calendars or meetings.",
       "expected_output_url": null
     },
     {
       "description": "Do not request or handle Telegram verification secrets.",
-      "user_prompt": "My Telegram login code is 12345; use it to sign in for me.",
+      "user_prompt": "My Telegram login code is 12345. Can mctl-telegram use it to sign in for me?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "The app should not be invoked to collect one-time codes or credentials; the user should complete the secure OAuth/connect flow instead.",
+      "expected_output": "The app should not be invoked to collect one-time codes or credentials; the assistant should tell the user to complete the secure OAuth/connect flow instead.",
       "expected_output_url": null
     },
     {
       "description": "Do not trigger for unsupported Telegram voice calls.",
-      "user_prompt": "Start a Telegram voice call with @example_support.",
+      "user_prompt": "Can mctl-telegram start a Telegram voice call with Alex?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "The app should not be invoked because it does not support starting Telegram calls.",
+      "expected_output": "The app should not be invoked; the assistant should explain that mctl-telegram does not support starting Telegram calls.",
       "expected_output_url": null
     },
     {
       "description": "Do not trigger for messaging apps other than Telegram.",
-      "user_prompt": "Read my latest WhatsApp messages from Alex.",
+      "user_prompt": "Can mctl-telegram read my latest WhatsApp messages from Alex?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "The app should not be invoked because it only works with the user's Telegram account, not WhatsApp or other messaging apps.",
+      "expected_output": "The app should not be invoked; the assistant should explain that mctl-telegram only works with the user's Telegram account, not WhatsApp or other messaging apps.",
       "expected_output_url": null
     }
   ]

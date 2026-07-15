@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.43.0](https://github.com/mctlhq/mctl-telegram/compare/0.42.0...0.43.0) (2026-07-14)
+
+
+### Features
+
+* **telegram:** add before_id pagination to get_messages with a raw-page cursor ([#280](https://github.com/mctlhq/mctl-telegram/issues/280)) ([1f1dcad](https://github.com/mctlhq/mctl-telegram/commit/1f1dcadaff1efc7ff80ee4d4e70f183c6e7385c4))
+* **telegram:** surface media metadata and add prepare_get_media/get_media tools ([#279](https://github.com/mctlhq/mctl-telegram/issues/279)) ([3470292](https://github.com/mctlhq/mctl-telegram/commit/34702923bb8e51c6ccf997a13b3ef47e66e85b61))
+
+
+### Bug Fixes
+
+* **ci:** detect claude-review SDK failure the outcome field misses ([9452f1a](https://github.com/mctlhq/mctl-telegram/commit/9452f1ae404985a49d985d49077b1b1d00061779))
+* **ci:** detect claude-review SDK failure the outcome field misses ([982098c](https://github.com/mctlhq/mctl-telegram/commit/982098ce6b374454957c48306e54d4d659f079b5))
+* **ci:** upgrade Go toolchain to 1.26.5 ([fae73e3](https://github.com/mctlhq/mctl-telegram/commit/fae73e3ba2af998e4e15d1b21ad677c75cbbaa51))
+* **docs:** address submission accuracy review ([1717631](https://github.com/mctlhq/mctl-telegram/commit/1717631d3aae06153e1d4ca0e22ac1a15765fe1f))
+
+## [0.42.0](https://github.com/mctlhq/mctl-telegram/compare/0.41.2...0.42.0) (2026-07-03)
+
+
+### Features
+
+* **web:** refresh demo walkthrough ([4071b55](https://github.com/mctlhq/mctl-telegram/commit/4071b555d7d6e8a9270949837ff38fe0b264aa6a))
+* **web:** refresh demo walkthrough ([95df6f3](https://github.com/mctlhq/mctl-telegram/commit/95df6f3213ef852ce1b44e79b4f8c3748d01fa12))
+
+
+### Bug Fixes
+
+* **mcp:** mark admin tool telegram_id/tier params as required ([#272](https://github.com/mctlhq/mctl-telegram/issues/272)) ([0166fca](https://github.com/mctlhq/mctl-telegram/commit/0166fcab3068028c88f550d99251e74e1fad2a24))
+* **mcp:** redact telegram login secrets ([98912ab](https://github.com/mctlhq/mctl-telegram/commit/98912abe44b193f307d0e1c167b5904fadba852f))
+* **mcp:** redact telegram login secrets ([343cd77](https://github.com/mctlhq/mctl-telegram/commit/343cd770541eb0e5e08d97834d52e1e218b6687b))
+
+## [0.41.2](https://github.com/mctlhq/mctl-telegram/compare/0.41.1...0.41.2) (2026-06-04)
+
+
+### Bug Fixes
+
+* **mcp:** block disconnect/delete for demo reviewer identity ([#260](https://github.com/mctlhq/mctl-telegram/issues/260)) ([a5a4c3d](https://github.com/mctlhq/mctl-telegram/commit/a5a4c3df86120d8b5a20648ac77184d6a0419ef7))
+
+## [0.41.1](https://github.com/mctlhq/mctl-telegram/compare/0.41.0...0.41.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **telegram:** skip min peers when seeding peer cache ([#254](https://github.com/mctlhq/mctl-telegram/issues/254)) ([70e44e2](https://github.com/mctlhq/mctl-telegram/commit/70e44e2383903286595938ad3e54f9a38e5e8573))
+
+## [0.41.0](https://github.com/mctlhq/mctl-telegram/compare/0.40.0...0.41.0) (2026-05-30)
+
+
+### Features
+
+* add fileutil.Allowed path sandbox guard ([5fed725](https://github.com/mctlhq/mctl-telegram/commit/5fed7253620e3b4f8639c66a50e32a48f61e7f2c))
+* add MCP_TOOL_FILTER env var to expose only read-only tools ([2cc30c7](https://github.com/mctlhq/mctl-telegram/commit/2cc30c71fde551afd108127dc0314a5e4657cffd))
+* add QR code login to cmd/login via --qr flag ([1e4af94](https://github.com/mctlhq/mctl-telegram/commit/1e4af947c837167d3b3e55c529d14ac3c9b7df3f))
+* **mcp:** add connected_via to list_telegram_identities ([3de32fd](https://github.com/mctlhq/mctl-telegram/commit/3de32fd4faeaa5879a68c1b53e696d484e2ff5e4))
+* **mcp:** add Origin-header validation and Claude connector submission prep ([b687bfd](https://github.com/mctlhq/mctl-telegram/commit/b687bfdd422998b4afb13adf6be94bbebe796e03))
+* **mcp:** mark user read tools readOnly for Claude auto-permissions ([4b707d4](https://github.com/mctlhq/mctl-telegram/commit/4b707d4d02d3b1d404f03f10a8b40c8022032571))
+* sanitize Telegram message content before MCP wrapping ([606b762](https://github.com/mctlhq/mctl-telegram/commit/606b762f529545b351293fea980a14b1bb4c181c))
+* **telegram:** add api_id-wide rate limit and login floodwait ([f341f6f](https://github.com/mctlhq/mctl-telegram/commit/f341f6f8742cc89ab17926eeb5bce560bf46325d))
+* **ui:** polish frontend — SVG icons, hero glow, entrance animations ([6036d97](https://github.com/mctlhq/mctl-telegram/commit/6036d97f92d124d4f7ac9706b2fd1516b0c3104e))
+
+
+### Bug Fixes
+
+* **auth:** remove telegram:bot_access scope from OIDC login ([6d38cd9](https://github.com/mctlhq/mctl-telegram/commit/6d38cd913ff5a8132725eea13253f60306037c5b))
+* **config:** address P3 review nits on OriginGuard ([6401be0](https://github.com/mctlhq/mctl-telegram/commit/6401be0db237a343fa5f798f00af7d320010aae3))
+* **db:** add migration for oauth_refresh_tokens.client_name; test revoked token ([5ae4f72](https://github.com/mctlhq/mctl-telegram/commit/5ae4f72d810bcb71b109a6a3841162b9c166c225))
+* **db:** denormalize client_name onto oauth_refresh_tokens; add connected_via test ([3cb136e](https://github.com/mctlhq/mctl-telegram/commit/3cb136ee18f2d77a3954e0ae27cdb53cd1b94c04))
+* **fileutil:** deny broken symlinks in Allowed path sandbox ([182abeb](https://github.com/mctlhq/mctl-telegram/commit/182abeb99536be22c9078bb41a80ee374968515f))
+* **fileutil:** deny intermediate broken symlinks in realPath parent-walk loop ([41b4f82](https://github.com/mctlhq/mctl-telegram/commit/41b4f82c1f33a30d0a81ff97ee78e9537f938ac1))
+* **fileutil:** skip empty-string roots to prevent silent CWD expansion ([d2f6388](https://github.com/mctlhq/mctl-telegram/commit/d2f638893b19ef9ee996c117591549b8878d17d0))
+* **login:** wire Migrate callback and reject --phone+--qr combination ([bc70eaf](https://github.com/mctlhq/mctl-telegram/commit/bc70eaf01c7aa9b0703e55d564cfec23d3c700e0))
+* **mcp:** guard From and PeerTitle against [empty] sentinel in wrapMessages ([4b572d1](https://github.com/mctlhq/mctl-telegram/commit/4b572d192e403a7464291e97585c4cfb8f0b4920))
+* **mcp:** mark admin read tools readOnly; sync submission artifacts ([#251](https://github.com/mctlhq/mctl-telegram/issues/251)) ([1eb6884](https://github.com/mctlhq/mctl-telegram/commit/1eb68846bbf189fd1fba2402b6f3a8461c74fa78))
+* **mcp:** preserve empty text for media-only messages in wrapMessages ([8a8104d](https://github.com/mctlhq/mctl-telegram/commit/8a8104da44c179f964016131fed69e3fc718bf36))
+* **metrics:** forward WriteHeader only once to avoid superfluous call ([f8caac9](https://github.com/mctlhq/mctl-telegram/commit/f8caac9f9e44853ee86a2c6805567f812926eaeb))
+* **oauth:** show success interstitial after connect instead of bare 302 ([00e228d](https://github.com/mctlhq/mctl-telegram/commit/00e228d09693221c98376dd2f3d29a218f24b65c))
+* **oauth:** tighten connect app-name host match + log issuer parse failure ([8918824](https://github.com/mctlhq/mctl-telegram/commit/891882437c39e6f4ef988090c884b168b8fb1b56))
+* **telegram:** seed peer cache from dialogs to fix get_messages PEER_ID_INVALID ([e6eaa59](https://github.com/mctlhq/mctl-telegram/commit/e6eaa593d0516b2dab0e48ed256e74d068c57cd2))
+* **telegram:** skip zero-AccessHash entities when seeding peer cache ([b8c873d](https://github.com/mctlhq/mctl-telegram/commit/b8c873d181ebde7aa17ce7b6ee39af8487688c3d))
+* **ui:** add prefers-reduced-motion guard for entrance animations ([273fd3a](https://github.com/mctlhq/mctl-telegram/commit/273fd3aba090eec4be4ea0aad2548cf2e18cee0f))
+
 ## [0.40.0](https://github.com/mctlhq/mctl-telegram/compare/0.39.0...0.40.0) (2026-05-26)
 
 

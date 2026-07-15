@@ -1437,10 +1437,15 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
 		return
 	}
+	var clientName string
+	if reg, regErr := s.store.GetClientReg(r.Context(), clientID); regErr == nil {
+		clientName = reg.ClientName
+	}
 	refreshTok, err := s.issueRefreshToken(r.Context(), db.RefreshToken{
 		FamilyID:         randomToken(16),
 		UserID:           uid,
 		ClientID:         clientID,
+		ClientName:       clientName,
 		TelegramID:       entry.TelegramID,
 		TelegramUsername: entry.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
@@ -1516,6 +1521,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		FamilyID:         rt.FamilyID,
 		UserID:           rt.UserID,
 		ClientID:         rt.ClientID,
+		ClientName:       rt.ClientName,
 		TelegramID:       rt.TelegramID,
 		TelegramUsername: rt.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
