@@ -750,6 +750,12 @@ func TestIntSliceArg(t *testing.T) {
 			want:   []int{},
 			wantOK: true,
 		},
+		{
+			name:   "mixed numeric and non-numeric elements",
+			args:   map[string]any{"ids": []any{float64(123), "not-a-number"}},
+			key:    "ids",
+			wantOK: false,
+		},
 	}
 
 	for _, c := range cases {

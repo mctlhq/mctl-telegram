@@ -92,3 +92,49 @@ func TestAllowPeer_RefillOverWindow(t *testing.T) {
 		t.Fatal("only one refill should be available at the half-window mark")
 	}
 }
+
+func TestAllowPeerN_DebitsBatchCostNotOne(t *testing.T) {
+	r := NewRateLimiter(0)
+	id := &auth.Identity{GitHubLogin: "alice"}
+	base := time.Now()
+	r.now = func() time.Time { return base }
+
+	// 20-token cap (matches PeerSendCap); a single batch of 15 should debit
+	// 15, not 1 — leaving only 5 for a subsequent call.
+	if !r.AllowPeerN(id, "peerA", 15, 20, time.Hour) {
+		t.Fatal("first batch of 15 should be allowed under a cap of 20")
+	}
+	if r.AllowPeerN(id, "peerA", 10, 20, time.Hour) {
+		t.Fatal("second batch of 10 should be denied — only 5 tokens remain")
+	}
+	if !r.AllowPeerN(id, "peerA", 5, 20, time.Hour) {
+		t.Fatal("batch of exactly the remaining 5 tokens should be allowed")
+	}
+}
+
+func TestAllowPeerN_OversizedBatchDeniedWithoutPartialDebit(t *testing.T) {
+	r := NewRateLimiter(0)
+	id := &auth.Identity{GitHubLogin: "alice"}
+	base := time.Now()
+	r.now = func() time.Time { return base }
+
+	// A batch larger than the whole cap must be denied outright, and must
+	// not silently consume whatever tokens happen to be available.
+	if r.AllowPeerN(id, "peerA", 25, 20, time.Hour) {
+		t.Fatal("batch of 25 must be denied against a cap of 20")
+	}
+	if !r.AllowPeerN(id, "peerA", 20, 20, time.Hour) {
+		t.Fatal("the full cap should still be available — the oversized attempt must not have debited anything")
+	}
+}
+
+func TestAllowPeerN_NonPositiveCostTreatedAsOne(t *testing.T) {
+	r := NewRateLimiter(0)
+	id := &auth.Identity{GitHubLogin: "alice"}
+	if !r.AllowPeerN(id, "peerA", 0, 1, time.Hour) {
+		t.Fatal("cost=0 should behave like cost=1 and be allowed against a fresh bucket")
+	}
+	if r.AllowPeerN(id, "peerA", 0, 1, time.Hour) {
+		t.Fatal("cost=0 treated as 1 should have exhausted a cap-1 bucket")
+	}
+}

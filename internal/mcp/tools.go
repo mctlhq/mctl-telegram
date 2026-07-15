@@ -1079,8 +1079,16 @@ func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, a
 }
 
 func evaluateDirectSendLimiter(limiter *audit.RateLimiter, id *auth.Identity, peerRedacted string) (blocked bool, reason string) {
-	if limiter != nil && !limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-		return true, "per-peer send rate limit reached (20/hour to one peer) — wait or pick a different recipient"
+	return evaluateDirectSendLimiterN(limiter, id, peerRedacted, 1)
+}
+
+// evaluateDirectSendLimiterN is evaluateDirectSendLimiter but debits cost
+// tokens instead of 1 — for batch sends (e.g. forwarding N messages in a
+// single forward_messages call) so the per-peer budget tracks message volume,
+// not call count.
+func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, peerRedacted string, cost int) (blocked bool, reason string) {
+	if limiter != nil && !limiter.AllowPeerN(id, peerRedacted, cost, audit.PeerSendCap, audit.PeerWindow) {
+		return true, "per-peer send rate limit reached (20/hour to one peer) — wait, pick a different recipient, or send fewer messages per call"
 	}
 	return false, ""
 }
@@ -1296,8 +1304,9 @@ func intArg(args map[string]any, key string, def int) int {
 
 // intSliceArg extracts a JSON number array from args[key].
 // JSON numbers unmarshal as float64 in map[string]any, so each element is
-// cast from float64. Returns nil when the key is absent or the value is not
-// a []any.
+// cast from float64. Returns ok=false when the key is absent, the value is
+// not a []any, or any element is not a recognized numeric type — a mixed
+// array like [123, "not-a-number"] must not silently become [123].
 func intSliceArg(args map[string]any, key string) ([]int, bool) {
 	v, ok := args[key]
 	if !ok {
@@ -1316,6 +1325,8 @@ func intSliceArg(args map[string]any, key string) ([]int, bool) {
 			out = append(out, n)
 		case int64:
 			out = append(out, int(n))
+		default:
+			return nil, false
 		}
 	}
 	return out, true
@@ -1499,9 +1510,11 @@ Inputs (required):
 		if !canSend {
 			return mcplib.NewToolResultError("forward blocked: " + dryReason), nil
 		}
-		// Rate-limit on the destination peer (outbound message target).
+		// Rate-limit on the destination peer (outbound message target), costed
+		// by batch size — forwarding N messages spends N of the 20/hour budget,
+		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
-		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, toPeerRedacted); blocked {
+		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeerRedacted, len(messageIDs)); blocked {
 			s.audit(ctx, id, "forward_messages:rate_limited", toPeerRedacted, nil, startedAt)
 			return mcplib.NewToolResultError(r), nil
 		}

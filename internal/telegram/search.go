@@ -17,8 +17,10 @@ func SearchMessages(ctx context.Context, c *gotdtelegram.Client, peerSpec, query
 	if query == "" {
 		return nil, fmt.Errorf("query must not be empty")
 	}
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 20
+	} else if limit > 100 {
+		limit = 100
 	}
 	api := c.API()
 

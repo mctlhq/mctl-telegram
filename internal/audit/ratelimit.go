@@ -91,8 +91,21 @@ const PeerWindow = time.Hour
 // limiter. A user can issue many reads per minute but only N writes per
 // peer per hour.
 func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, window time.Duration) bool {
+	return r.AllowPeerN(id, peerHash, 1, max, window)
+}
+
+// AllowPeerN is AllowPeer but debits cost tokens atomically instead of 1 —
+// for calls whose single invocation covers a batch (e.g. forward_messages
+// forwarding N messages in one call), so the bucket reflects actual message
+// volume rather than call count. cost <= 0 is treated as 1. Denies (without
+// debiting) when fewer than cost tokens are available, even if some tokens
+// remain — a batch either fits within the budget or is rejected outright.
+func (r *RateLimiter) AllowPeerN(id *auth.Identity, peerHash string, cost, max int, window time.Duration) bool {
 	if max <= 0 || window <= 0 {
 		return true
+	}
+	if cost <= 0 {
+		cost = 1
 	}
 	key := identityKey(id) + ":peer:" + peerHash
 	r.mu.Lock()
@@ -109,10 +122,10 @@ func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, win
 		b.tokens = float64(max)
 	}
 	b.lastFill = now
-	if b.tokens < 1 {
+	if b.tokens < float64(cost) {
 		return false
 	}
-	b.tokens--
+	b.tokens -= float64(cost)
 	return true
 }
 
