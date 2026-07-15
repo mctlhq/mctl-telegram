@@ -8,7 +8,7 @@ import (
 
 func TestSecurity_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	Security("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -43,7 +43,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 
 func TestPrivacy_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -71,7 +71,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 
 func TestTerms_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Terms("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/terms", nil))
+	Terms("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/terms", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -99,7 +99,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 
 func TestLanding_HasTransparencySections(t *testing.T) {
 	w := httptest.NewRecorder()
-	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -128,7 +128,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 
 func TestDocs_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -155,7 +155,7 @@ func TestDocs_ServesHTML(t *testing.T) {
 
 func TestPrivacy_HasSupportContact(t *testing.T) {
 	w := httptest.NewRecorder()
-	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	body := w.Body.String()
 	if !strings.Contains(body, "support@mctl.ai") {
 		t.Fatal("/privacy missing support@mctl.ai")
@@ -167,7 +167,7 @@ func TestPrivacy_HasSupportContact(t *testing.T) {
 
 func TestSecurity_MentionsChatGPTOrMCPClients(t *testing.T) {
 	w := httptest.NewRecorder()
-	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	Security("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "Claude.ai →") {
 		t.Fatal("/security still uses Claude-only inbound boundary label")
@@ -179,7 +179,7 @@ func TestSecurity_MentionsChatGPTOrMCPClients(t *testing.T) {
 
 func TestSecurity_NoStaleAuthModel(t *testing.T) {
 	w := httptest.NewRecorder()
-	Security("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	Security("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "api.mctl.ai, verified via shared HMAC") {
 		t.Fatal("/security still contains stale trust boundary description: \"api.mctl.ai, verified via shared HMAC\"")
@@ -188,12 +188,30 @@ func TestSecurity_NoStaleAuthModel(t *testing.T) {
 
 func TestPrivacy_NoStaleAuthModel(t *testing.T) {
 	w := httptest.NewRecorder()
-	Privacy("https://tg.mctl.ai").ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "GitHub OAuth login proxied through") {
 		t.Fatal("/privacy still contains stale GitHub OAuth reference: \"GitHub OAuth login proxied through\"")
 	}
 	if strings.Contains(body, "api.mctl.ai") {
 		t.Fatal("/privacy still references api.mctl.ai as identity provider")
+	}
+}
+
+// TestLanding_ManageLinkGatedByShowManage confirms the "manage" nav/footer
+// link only renders when showManage is true — /telegram/connect/manage is
+// only mounted in local-jwt mode, so a shared-hmac deployment must not link
+// to a route that 404s.
+func TestLanding_ManageLinkGatedByShowManage(t *testing.T) {
+	w := httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(w.Body.String(), `/telegram/connect/manage`) {
+		t.Fatal("showManage=true should render the manage link")
+	}
+
+	w = httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", false).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if strings.Contains(w.Body.String(), `/telegram/connect/manage`) {
+		t.Fatal("showManage=false must not render a link to the unmounted manage route")
 	}
 }

@@ -42,7 +42,7 @@ func TestClassifyDemoVideo(t *testing.T) {
 
 func TestDemo_Placeholder(t *testing.T) {
 	w := httptest.NewRecorder()
-	Demo("https://tg.mctl.ai", "").ServeHTTP(w, httptest.NewRequest("GET", "/demo", nil))
+	Demo("https://tg.mctl.ai", "", true).ServeHTTP(w, httptest.NewRequest("GET", "/demo", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -71,7 +71,7 @@ func TestDemoWalkthrough(t *testing.T) {
 
 func TestDemo_YouTubeEmbed(t *testing.T) {
 	w := httptest.NewRecorder()
-	Demo("https://tg.mctl.ai", "https://youtu.be/dQw4w9WgXcQ").ServeHTTP(w, httptest.NewRequest("GET", "/demo", nil))
+	Demo("https://tg.mctl.ai", "https://youtu.be/dQw4w9WgXcQ", true).ServeHTTP(w, httptest.NewRequest("GET", "/demo", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
