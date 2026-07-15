@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -273,7 +274,16 @@ type localMediaEntry struct {
 	info      tg.MediaInfo
 	loc       tg.MediaFileLocation
 	expiresAt time.Time
+	inFlight  bool
 }
+
+// errLocalMediaNotFound collapses unknown/expired/mismatched-pair confirmations
+// into one error, mirroring the hosted server's ErrConfirmationNotFound.
+var errLocalMediaNotFound = errors.New("confirmation_id not found, expired, already used, or issued for a different (peer, message_id)")
+
+// errLocalMediaInFlight means a download for this confirmation_id is already
+// running, mirroring the hosted server's ErrConfirmationInFlight.
+var errLocalMediaInFlight = errors.New("download already in progress for this confirmation_id")
 
 const localMediaTTL = 10 * time.Minute
 
@@ -287,10 +297,14 @@ func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Opportunistically drop expired entries so abandoned prepares don't
-	// accumulate for the daemon's lifetime.
+	// accumulate for the daemon's lifetime. Never sweep an in-flight entry:
+	// a download can legitimately outlive its nominal TTL, and deleting it
+	// out from under a running get_media call would make a concurrent
+	// retry see "not found" instead of the in-flight response it's meant
+	// to get.
 	now := time.Now()
 	for k, e := range s.m {
-		if now.After(e.expiresAt) {
+		if !e.inFlight && now.After(e.expiresAt) {
 			delete(s.m, k)
 		}
 	}
@@ -304,20 +318,68 @@ func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc
 	return confID, expiresAt
 }
 
-// pop atomically consumes the confirmation. It fails when the ID is unknown,
-// expired, or bound to a different (peer, message_id) pair.
-func (s *localMediaStore) pop(confID, peer string, messageID int) (localMediaEntry, bool) {
+// claim validates the confirmation and marks it in-flight without deleting
+// it — mirroring the hosted server's ConfirmStore.Claim (internal/mcp/confirm.go).
+// The entry must stay alive for the duration of the download so a client
+// retry (e.g. after its own request timeout) does not race a still-running
+// download for the same confirmation_id and get a spurious "not found".
+//
+// Checks run in the same deliberate order as the hosted store:
+//  1. in-flight is checked first, before anything else — a retry racing a
+//     still-running download must always see errLocalMediaInFlight, even
+//     past the nominal TTL, and can never be invalidated by an unrelated
+//     wrong-pair probe against the same id.
+//  2. Expiry is checked next and deletes the entry: nothing periodically
+//     sweeps this map outside of put()'s opportunistic pass, so leaving an
+//     expired entry in place on access just leaks it until the next prepare.
+//  3. A wrong-pair probe on a not-yet-expired, not-in-flight entry is a
+//     terminal failure: the entry is dropped so a follow-up retry with the
+//     correct pair cannot reuse the same id, matching the pre-Claim
+//     single-shot model.
+func (s *localMediaStore) claim(confID, peer string, messageID int) (localMediaEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.m[confID]
 	if !ok {
-		return localMediaEntry{}, false
+		return localMediaEntry{}, errLocalMediaNotFound
 	}
+	if e.inFlight {
+		return localMediaEntry{}, errLocalMediaInFlight
+	}
+	if time.Now().After(e.expiresAt) {
+		delete(s.m, confID)
+		return localMediaEntry{}, errLocalMediaNotFound
+	}
+	if e.peer != peer || e.messageID != messageID {
+		delete(s.m, confID)
+		return localMediaEntry{}, errLocalMediaNotFound
+	}
+	e.inFlight = true
+	s.m[confID] = e
+	return e, nil
+}
+
+// finalize removes the confirmation entry unconditionally. Called via defer
+// after the download terminates (success or error) to release the in-flight
+// hold, mirroring the hosted server's ConfirmStore.Finalize.
+func (s *localMediaStore) finalize(confID string) {
+	s.mu.Lock()
 	delete(s.m, confID)
-	if time.Now().After(e.expiresAt) || e.peer != peer || e.messageID != messageID {
-		return localMediaEntry{}, false
+	s.mu.Unlock()
+}
+
+// unclaim releases the in-flight hold without deleting the entry, letting a
+// retry successfully claim it again — mirroring the hosted server's
+// ConfirmStore.Unclaim. Used when a download attempt was aborted by context
+// cancellation/timeout rather than terminating (success or a real error).
+// No-op if the id is missing or already finalized.
+func (s *localMediaStore) unclaim(confID string) {
+	s.mu.Lock()
+	if e, ok := s.m[confID]; ok {
+		e.inFlight = false
+		s.m[confID] = e
 	}
-	return e, true
+	s.mu.Unlock()
 }
 
 func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
@@ -474,16 +536,31 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		if args.ConfirmationID == "" {
 			return bridge.EncodeError(env.ID, "get_media: confirmation_id required — call prepare_get_media first")
 		}
-		entry, ok := localMedia.pop(args.ConfirmationID, args.Peer, args.MessageID)
-		if !ok {
-			return bridge.EncodeError(env.ID, "get_media: confirmation_id not found, expired, already used, or issued for a different (peer, message_id)")
+		entry, claimErr := localMedia.claim(args.ConfirmationID, args.Peer, args.MessageID)
+		if claimErr != nil {
+			if errors.Is(claimErr, errLocalMediaInFlight) {
+				return bridge.EncodeError(env.ID, "get_media: download already in progress for this confirmation_id — retry shortly")
+			}
+			return bridge.EncodeError(env.ID, claimErr.Error())
 		}
 		var buf []byte
-		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+		dlErr := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
 			buf, err = tg.DownloadMedia(ctx, c, entry.loc, tg.DefaultMediaDownloadMaxBytes)
 			return err
 		})
+		if dlErr != nil && (errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded)) {
+			// Aborted by cancellation/timeout, not a terminal failure of the
+			// operation itself — release the in-flight hold but keep the
+			// entry alive so a retry with the same confirmation_id can pick
+			// the download back up instead of getting "not found".
+			localMedia.unclaim(args.ConfirmationID)
+			return bridge.EncodeError(env.ID, "get_media: download did not complete in time — retry with the same confirmation_id")
+		}
+		// Every other outcome (success or a real error) releases the entry
+		// for good.
+		localMedia.finalize(args.ConfirmationID)
+		dispErr = dlErr
 		if dispErr == nil {
 			result, dispErr = json.Marshal(map[string]any{
 				"media_type": entry.info.MediaType,

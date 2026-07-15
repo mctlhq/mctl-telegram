@@ -135,7 +135,7 @@ func (s *Server) toolGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDescription(`Download media bytes for a Telegram message identified by (peer, message_id).
 
 Requires a confirmation_id from prepare_get_media for the same (peer, message_id) pair.
-The confirmation is single-shot and expires in 10 minutes.
+The confirmation becomes in-flight on first use and is released when the download completes. Concurrent retries receive an 'in progress' response.
 
 Returns the raw bytes encoded as standard base64 in the "data" field. Maximum download
 size is controlled by MEDIA_DOWNLOAD_MAX_BYTES (default 20 MiB).
@@ -180,19 +180,41 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 			}
 		}
 
-		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
+		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
 			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt)
+			if !errors.Is(cerr, ErrConfirmationInFlight) {
+				// Claim already dropped (or never held) the ConfirmStore entry
+				// for every other failure mode — drop the matching MediaStore
+				// ref too so an expired or invalid probe doesn't leak it
+				// indefinitely. Never touch it on ErrConfirmationInFlight: that
+				// means a concurrent download legitimately owns this id.
+				s.MediaStore.Delete(confID)
+			}
 			switch {
 			case errors.Is(cerr, ErrConfirmationMismatch):
 				return mcplib.NewToolResultError("confirmation_id was issued for a different (peer, message_id) — re-run prepare_get_media"), nil
 			case errors.Is(cerr, ErrConfirmationWrongUser):
 				return mcplib.NewToolResultError("confirmation_id belongs to another identity"), nil
+			case errors.Is(cerr, ErrConfirmationInFlight):
+				return mcplib.NewToolResultError("download already in progress for this confirmation_id — retry shortly"), nil
 			default:
 				return mcplib.NewToolResultError("confirmation_id not found, expired, or already used"), nil
 			}
 		}
+		// Release the confirmation and media ref once we're done with them.
+		// released tracks whether that already happened via the cancellation
+		// branch below so the defer doesn't double-release; on every other
+		// path (missing/oversized ref, real download error, success) the
+		// defer's Finalize+Delete is what actually cleans up.
+		released := false
+		defer func() {
+			if !released {
+				s.Confirms.Finalize(confID)
+				s.MediaStore.Delete(confID)
+			}
+		}()
 
-		ref := s.MediaStore.Pop(confID)
+		ref := s.MediaStore.Get(confID)
 		if ref == nil {
 			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt)
 			return toolErr("media reference expired or missing — re-run prepare_get_media"), nil
@@ -214,6 +236,18 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		})
 		s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), dlErr, startedAt)
 		if dlErr != nil {
+			if errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded) {
+				// The download was aborted by cancellation (client disconnect
+				// or the caller's own transport-level timeout) or by our own
+				// 60s cap — not a terminal failure of the operation itself.
+				// Release the in-flight hold but keep the confirmation and
+				// media ref alive so a retry with the same confirmation_id
+				// can pick the download back up instead of being told
+				// "not found".
+				s.Confirms.Unclaim(confID)
+				released = true
+				return mcplib.NewToolResultError("download did not complete in time — retry with the same confirmation_id"), nil
+			}
 			if errors.Is(dlErr, telegram.ErrPoolFull) {
 				return mcplib.NewToolResultError("server at session capacity — try again later"), nil
 			}

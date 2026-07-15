@@ -62,6 +62,31 @@ func (ms *MediaStore) Pop(key string) *MediaDownloadRef {
 	return ref
 }
 
+// Get returns the ref without removing it from the store. Returns nil when key is
+// absent or the entry has expired. Used by get_media alongside Claim/Finalize so the
+// ref persists until the download completes.
+func (ms *MediaStore) Get(key string) *MediaDownloadRef {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ref, ok := ms.m[key]
+	if !ok {
+		return nil
+	}
+	if ms.now().After(ref.ExpiresAt) {
+		return nil
+	}
+	return ref
+}
+
+// Delete removes the entry for key unconditionally. No-op if the key is absent.
+// Called via defer in toolGetMedia alongside Finalize to release the media ref after
+// the download terminates.
+func (ms *MediaStore) Delete(key string) {
+	ms.mu.Lock()
+	delete(ms.m, key)
+	ms.mu.Unlock()
+}
+
 // Sweep removes expired entries.
 func (ms *MediaStore) Sweep() int {
 	ms.mu.Lock()
