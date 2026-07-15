@@ -87,8 +87,63 @@ func TestLocalMediaStore_Claim_WrongPair(t *testing.T) {
 	if _, err := s.claim(confID, "peer:2", 10); !errors.Is(err, errLocalMediaNotFound) {
 		t.Fatalf("wrong peer must return errLocalMediaNotFound, got %v", err)
 	}
+	// A wrong-pair probe is a terminal failure — the entry must be dropped so
+	// a follow-up retry with the correct pair cannot observe the same id.
+	s.mu.Lock()
+	_, stillPresent := s.m[confID]
+	s.mu.Unlock()
+	if stillPresent {
+		t.Fatal("claim must delete the entry on a wrong-pair probe")
+	}
+}
+
+func TestLocalMediaStore_Claim_WrongMessageID(t *testing.T) {
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+
 	if _, err := s.claim(confID, "peer:1", 99); !errors.Is(err, errLocalMediaNotFound) {
 		t.Fatalf("wrong message_id must return errLocalMediaNotFound, got %v", err)
+	}
+}
+
+func TestLocalMediaStore_Claim_InFlightBeatsExpiry(t *testing.T) {
+	// The retry race this mechanism exists to fix: a download starts just
+	// before the TTL, runs long, and a retry lands after the nominal
+	// expiresAt but while the original claim is still in flight. It must see
+	// errLocalMediaInFlight, not a false "not found/expired".
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.mu.Lock()
+	e := s.m[confID]
+	e.expiresAt = time.Now().Add(-time.Minute)
+	s.m[confID] = e
+	s.mu.Unlock()
+
+	if _, err := s.claim(confID, "peer:1", 10); !errors.Is(err, errLocalMediaInFlight) {
+		t.Fatalf("retry after nominal expiry but while in-flight must return errLocalMediaInFlight, got %v", err)
+	}
+}
+
+func TestLocalMediaStore_Claim_InFlightBeatsWrongPair(t *testing.T) {
+	// An in-flight entry must not be invalidated by an unrelated wrong-pair
+	// probe against the same id — that would let a stray/buggy call kill a
+	// legitimate in-flight download.
+	s := &localMediaStore{m: map[string]localMediaEntry{}}
+	confID, _ := s.put("peer:1", 10, tg.MediaInfo{}, tg.MediaFileLocation{})
+	if _, err := s.claim(confID, "peer:1", 10); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := s.claim(confID, "peer:2", 99); !errors.Is(err, errLocalMediaInFlight) {
+		t.Fatalf("wrong-pair probe against an in-flight entry must return errLocalMediaInFlight, got %v", err)
+	}
+	s.mu.Lock()
+	_, stillPresent := s.m[confID]
+	s.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("in-flight entry must survive an unrelated wrong-pair probe")
 	}
 }
 

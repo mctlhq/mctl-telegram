@@ -188,6 +188,14 @@ func TestConfirmStore_Claim_WrongUser(t *testing.T) {
 	if _, err := s.Claim(c.ID, 2, hash); !errors.Is(err, ErrConfirmationWrongUser) {
 		t.Fatalf("wrong-user Claim must return ErrConfirmationWrongUser, got %v", err)
 	}
+	// A wrong-user probe is a terminal failure — the entry must be dropped so
+	// a follow-up retry with the correct user cannot observe the same id.
+	s.mu.Lock()
+	_, stillPresent := s.m[c.ID]
+	s.mu.Unlock()
+	if stillPresent {
+		t.Fatal("Claim must delete the entry on a wrong-user probe")
+	}
 }
 
 func TestConfirmStore_Claim_MismatchedPayload(t *testing.T) {
@@ -197,6 +205,53 @@ func TestConfirmStore_Claim_MismatchedPayload(t *testing.T) {
 	wrong := HashMediaPayload("@y", 99)
 	if _, err := s.Claim(c.ID, 1, wrong); !errors.Is(err, ErrConfirmationMismatch) {
 		t.Fatalf("mismatched-payload Claim must return ErrConfirmationMismatch, got %v", err)
+	}
+	// Same terminal-failure invariant as the wrong-user probe.
+	s.mu.Lock()
+	_, stillPresent := s.m[c.ID]
+	s.mu.Unlock()
+	if stillPresent {
+		t.Fatal("Claim must delete the entry on a mismatched-payload probe")
+	}
+}
+
+func TestConfirmStore_Claim_InFlightBeatsExpiry(t *testing.T) {
+	// The retry race this whole mechanism exists to fix: a download starts
+	// just before the TTL, runs long, and a retry lands after the nominal
+	// ExpiresAt but while the original claim is still in flight. It must see
+	// ErrConfirmationInFlight, not a false "not found/expired".
+	s := NewConfirmStore()
+	hash := HashMediaPayload("@x", 42)
+	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return fixed }
+	c, _ := s.Issue(1, "media", hash)
+	if _, err := s.Claim(c.ID, 1, hash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	s.now = func() time.Time { return fixed.Add(ConfirmationTTL + time.Second) }
+	if _, err := s.Claim(c.ID, 1, hash); !errors.Is(err, ErrConfirmationInFlight) {
+		t.Fatalf("retry after nominal expiry but while in-flight must return ErrConfirmationInFlight, got %v", err)
+	}
+}
+
+func TestConfirmStore_Claim_InFlightBeatsWrongUser(t *testing.T) {
+	// An in-flight entry must not be invalidated by an unrelated wrong-user
+	// or mismatched-payload probe against the same id — that would let a
+	// stray/buggy call kill someone else's legitimate in-flight download.
+	s := NewConfirmStore()
+	hash := HashMediaPayload("@x", 42)
+	c, _ := s.Issue(1, "media", hash)
+	if _, err := s.Claim(c.ID, 1, hash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := s.Claim(c.ID, 2, hash); !errors.Is(err, ErrConfirmationInFlight) {
+		t.Fatalf("wrong-user probe against an in-flight entry must return ErrConfirmationInFlight, got %v", err)
+	}
+	s.mu.Lock()
+	_, stillPresent := s.m[c.ID]
+	s.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("in-flight entry must survive an unrelated wrong-user probe")
 	}
 }
 

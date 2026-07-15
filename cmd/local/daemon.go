@@ -319,8 +319,17 @@ func (s *localMediaStore) put(peer string, messageID int, info tg.MediaInfo, loc
 // The entry must stay alive for the duration of the download so a client
 // retry (e.g. after its own request timeout) does not race a still-running
 // download for the same confirmation_id and get a spurious "not found".
-// Fails when the ID is unknown, expired, bound to a different
-// (peer, message_id) pair, or already claimed by a concurrent download.
+//
+// Checks run in the same deliberate order as the hosted store:
+//  1. in-flight is checked first, before the (peer, message_id) pair or
+//     expiry — a retry racing a still-running download must always see
+//     errLocalMediaInFlight, even past the nominal TTL, and can never be
+//     invalidated by an unrelated wrong-pair probe against the same id.
+//  2. A wrong-pair probe on a not-yet-claimed entry is a terminal failure:
+//     the entry is dropped so a follow-up retry with the correct pair
+//     cannot reuse the same id, matching the pre-Claim single-shot model.
+//  3. Expiry is checked last and does not delete the entry — the opportunistic
+//     sweep in put() handles that.
 func (s *localMediaStore) claim(confID, peer string, messageID int) (localMediaEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -328,11 +337,15 @@ func (s *localMediaStore) claim(confID, peer string, messageID int) (localMediaE
 	if !ok {
 		return localMediaEntry{}, errLocalMediaNotFound
 	}
-	if time.Now().After(e.expiresAt) || e.peer != peer || e.messageID != messageID {
-		return localMediaEntry{}, errLocalMediaNotFound
-	}
 	if e.inFlight {
 		return localMediaEntry{}, errLocalMediaInFlight
+	}
+	if e.peer != peer || e.messageID != messageID {
+		delete(s.m, confID)
+		return localMediaEntry{}, errLocalMediaNotFound
+	}
+	if time.Now().After(e.expiresAt) {
+		return localMediaEntry{}, errLocalMediaNotFound
 	}
 	e.inFlight = true
 	s.m[confID] = e

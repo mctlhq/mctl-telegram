@@ -107,7 +107,20 @@ func (s *ConfirmStore) Consume(id string, userID int64, payloadHash string) (*Co
 // Claim validates a confirmation and marks it as in-flight without deleting it.
 // Used by get_media to hold the entry open during a potentially long download.
 // Returns ErrConfirmationInFlight if the entry is already claimed by a concurrent download.
-// Unlike Consume, Claim does NOT delete the entry on expiry — the Sweep backstop handles that.
+//
+// Checks run in a deliberate order:
+//  1. InFlight is checked first, before expiry/identity/payload — a retry
+//     racing a still-running download must always see ErrConfirmationInFlight,
+//     even if the nominal TTL has ticked over while the download (which can
+//     legitimately outlive it) is still executing. This also means an
+//     in-flight entry can never be invalidated by a wrong-user or
+//     mismatched-payload probe against the same id.
+//  2. WrongUser and PayloadHash mismatch are terminal failures once we know
+//     the entry is not in-flight: the row is dropped so a follow-up retry
+//     cannot observe the same id with a corrected pair, matching Consume's
+//     single-shot-on-any-failure model.
+//  3. Expiry is checked last and, unlike the above, does NOT delete the
+//     entry — the Sweep backstop handles that.
 func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Confirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,17 +128,19 @@ func (s *ConfirmStore) Claim(id string, userID int64, payloadHash string) (*Conf
 	if !ok {
 		return nil, ErrConfirmationNotFound
 	}
-	if s.now().After(c.ExpiresAt) {
-		return nil, ErrConfirmationNotFound
+	if c.InFlight {
+		return nil, ErrConfirmationInFlight
 	}
 	if c.UserID != userID {
+		delete(s.m, id)
 		return nil, ErrConfirmationWrongUser
 	}
 	if c.PayloadHash != payloadHash {
+		delete(s.m, id)
 		return nil, ErrConfirmationMismatch
 	}
-	if c.InFlight {
-		return nil, ErrConfirmationInFlight
+	if s.now().After(c.ExpiresAt) {
+		return nil, ErrConfirmationNotFound
 	}
 	c.InFlight = true
 	return c, nil
