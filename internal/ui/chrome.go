@@ -157,10 +157,12 @@ var (
 // ComponentsCSS. The step indicator is .flow-steps (not the shared numbered
 // ol.steps) to avoid clashing with the component CSS inlined alongside it.
 const AuthCSS = `
-  .auth-main { max-width: 520px; margin: 48px auto; }
+  .auth-main { max-width: 520px; margin: 56px auto; }
   .card {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-lg); padding: 28px 26px;
+    border-top: 2px solid var(--accent);
+    border-radius: var(--mctl-radius-lg); padding: 32px 28px;
+    box-shadow: 0 4px 28px color-mix(in srgb, var(--accent) 5%, transparent);
   }
   .card h1 { font-family: var(--font-display), system-ui, sans-serif; font-size: 22px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
   .card p { margin: 8px 0; }
@@ -170,7 +172,7 @@ const AuthCSS = `
     font-size: 15px; font-weight: 600; padding: 11px 16px; border: 0; cursor: pointer;
     border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; text-decoration: none;
   }
-  .btn:hover { filter: brightness(.92); }
+  .btn:hover { filter: brightness(.92); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .btn-secondary {
     display: inline-block; box-sizing: border-box; text-align: center; cursor: pointer;
     font-family: var(--font-display), system-ui, sans-serif; font-size: 14px; font-weight: 600;
@@ -185,8 +187,8 @@ const AuthCSS = `
     border: 1px solid var(--border-strong); border-radius: var(--mctl-radius-md);
   }
   label { display: block; margin-top: 14px; font-size: 13px; color: var(--text-dim); }
-  .flow-steps { display: flex; list-style: none; padding: 0; margin: 0 0 22px; gap: 0; }
-  .flow-steps li { flex: 1; text-align: center; font-size: 12px; padding: 8px 4px; border-bottom: 2px solid var(--border); color: var(--muted); }
+  .flow-steps { display: flex; list-style: none; padding: 0; margin: 0 0 26px; gap: 0; }
+  .flow-steps li { flex: 1; text-align: center; font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 10px 4px; border-bottom: 2px solid var(--border); color: var(--muted); transition: color .15s, border-color .15s; }
   .flow-steps li.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
   .error { background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); border-radius: var(--mctl-radius-md); padding: 10px 12px; font-size: 13px; color: var(--danger); margin: 12px 0; }
   .meta { font-size: 13px; color: var(--muted); margin-top: 18px; }

@@ -45,6 +45,29 @@ const DeadlinePingPong = 30 * time.Second
 // before timing out an in-flight tool call.
 const DeadlineCall = 30 * time.Second
 
+// DeadlineMediaCall is the per-call deadline for get_media: the daemon
+// streams up to MaxMediaFrameBytes from Telegram over the user's own
+// connection, and 30 s does not cover a 20 MiB file on a typical
+// residential link (~5 Mbps ≈ 32 s for the download alone).
+const DeadlineMediaCall = 180 * time.Second
+
+// MaxMediaFrameBytes bounds a single websocket frame between daemon and
+// relay. coder/websocket defaults to a 32 KiB read limit, which rejects any
+// non-trivial get_media response (20 MiB of media ≈ 27 MiB of base64 JSON).
+// 32 MiB leaves headroom over the base64-encoded MEDIA_DOWNLOAD_MAX_BYTES
+// default plus envelope overhead.
+const MaxMediaFrameBytes = 32 << 20
+
+// DeadlineFor returns the response deadline for a tool call routed over the
+// bridge. get_media is the only long-running call; everything else keeps the
+// tight default so a stuck daemon is detected quickly.
+func DeadlineFor(tool string) time.Duration {
+	if tool == "get_media" {
+		return DeadlineMediaCall
+	}
+	return DeadlineCall
+}
+
 // Envelope is the JSON frame written to and read from the websocket.
 // Fields are split by type:
 //

@@ -38,10 +38,7 @@ const DefaultIssuerURL = "https://oauth.telegram.org"
 const clockSkew = 2 * time.Minute
 
 // scopes are requested from Telegram on every authorization request.
-// `telegram:bot_access` preserves the legacy widget's data-request-access=write
-// capability (the login bot may message the user); it must be enabled for the
-// OIDC client in BotFather or Telegram rejects the authorization request.
-var scopes = []string{oidc.ScopeOpenID, "profile", "telegram:bot_access"}
+var scopes = []string{oidc.ScopeOpenID, "profile"}
 
 // Identity is the authenticated Telegram user extracted from a verified
 // id_token. TelegramID is the numeric Telegram user id — the value the legacy

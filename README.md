@@ -1,8 +1,10 @@
 # mctl-telegram
 
-Go remote MCP server exposing Telegram user-account access (via `gotd/td` MTProto) as MCP tools — `list_dialogs`, `get_unread_messages`, `get_messages`, `send_message`, `pin_message`, and account controls — for Claude.ai and any MCP-compatible client.
+Go remote MCP server exposing user-authorized Telegram account access (via `gotd/td` MTProto) as MCP tools — dialogs, messages, preview-gated sends, pin controls, audit logs, and account/admin controls — for ChatGPT Apps, Claude.ai, and any MCP-compatible client.
 
-Status: **Apps SDK readiness track** (v0.x). Seven tools, OAuth-protected, draft-by-default send gate, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-operator and persisted encrypted. APIs and tool schemas may change before v1.0.
+Status: **Apps SDK readiness track** (v0.x). Fourteen MCP tools, OAuth-protected, preview-only sending by default, reviewer/demo login mode, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-user and persisted encrypted. APIs and tool schemas may change before v1.0.
+
+mctl-telegram is an independent project, not an official Telegram app or Telegram API partner. It operates only on the Telegram account that the user explicitly connects and controls; users remain responsible for complying with Telegram's terms.
 
 ## Security and privacy model
 
@@ -22,15 +24,22 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 
 ## MCP tools
 
-| Tool                          | Annotations       | Notes |
-|-------------------------------|-------------------|-------|
-| `list_dialogs`                | `readOnly`        | Inputs: `limit` (≤200, default 50), optional `query`. Peer id format: `user:<id>` / `chat:<id>` / `channel:<id>`. |
-| `get_unread_messages`         | `readOnly`        | Inputs: optional `peer`, `limit` (≤200). Returns only unread messages. |
-| `get_messages`                | `readOnly`        | Full message history for a specific peer, not just unread. |
-| `send_message`                | `destructive`     | Inputs: `peer`, `text`. Draft-by-default: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`). Otherwise returns a dry-run preview (`sent=false`) with `dry_reason` — nothing is sent. The result's `sent` field indicates which happened. |
-| `pin_message`                 | `destructive`     | Inputs: `peer`, `message_id`, `unpin` (bool). |
-| `disconnect_telegram_account` | `destructive`     | Soft-revokes your session — marks it revoked and tears down the in-memory MTProto client. |
-| `delete_telegram_account`     | `destructive`     | Hard-deletes the encrypted session blob and all per-account metadata from the server. |
+| Tool                          | MCP annotations | Notes |
+|-------------------------------|----------------------|-------|
+| `list_dialogs`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads Telegram dialogs (audit row is internal observability). Inputs: `limit` (≤200, default 50), optional `query`. |
+| `get_unread_messages`         | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads unread Telegram messages (audit row is internal observability). Inputs: optional `peer`, `limit` (≤200). |
+| `get_messages`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads recent message history for a specific peer (audit row is internal observability). |
+| `send_message`                | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `text`. Preview-only by default: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`). Otherwise returns `sent=false` with `dry_reason`; no message is delivered. |
+| `prepare_pin_message`         | `readOnly=false`, `destructive=false`, `openWorld=false` | Creates a local one-shot confirmation record for a later `pin_message` call. |
+| `pin_message`                 | `readOnly=false`, `destructive=true`, `openWorld=true` | Pins or unpins a Telegram message after a matching confirmation id. |
+| `get_my_audit_log`            | `readOnly=true`, `destructive=false`, `openWorld=false` | Returns the authenticated user's own audit rows. |
+| `disconnect_telegram_account` | `readOnly=false`, `destructive=true`, `openWorld=false` | Soft-revokes your session and tears down the in-memory MTProto client. |
+| `delete_telegram_account`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Hard-deletes the encrypted session blob and per-account metadata from this server. |
+| `list_telegram_identities`    | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: lists signed-in Telegram identities and access state, with audit metadata. |
+| `set_telegram_access`         | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: grants or revokes the local client access tier for a Telegram user. |
+| `set_account_send`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: enables or disables the per-account real-send gate. |
+| `get_user_audit_log`          | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
+| `revoke_telegram_session`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: revokes a user's active MTProto session on this server. |
 
 ## Quick start (local dev)
 
@@ -89,6 +98,7 @@ Key variables:
 | `DATABASE_URL`                | `postgres://...` or `file:./mctl-telegram.db?_pragma=journal_mode(WAL)`     |
 | `ALLOW_SEND`                  | `false` by default; set `true` only after validating the send gate          |
 | `PUBLIC_BASE_URL`             | External HTTPS base URL, e.g. `https://tg.example.com`                     |
+| `ALLOWED_ORIGINS`             | optional; comma-separated Origin allowlist for `/mcp` (DNS-rebinding protection). No-Origin requests always pass; defaults to the `PUBLIC_BASE_URL` origin |
 | `OAUTH_ACCESS_TOKEN_TTL`      | optional, default `1h`                                                      |
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
 

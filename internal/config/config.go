@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -10,9 +11,17 @@ import (
 )
 
 type Config struct {
-	Addr               string
-	PublicBaseURL      string
-	MCPPath            string
+	Addr          string
+	PublicBaseURL string
+	MCPPath       string
+	// AllowedOrigins is the Origin-header allowlist for the /mcp endpoint
+	// (DNS-rebinding protection). Requests with no Origin header are always
+	// allowed — server-to-server MCP clients (claude.ai, MCP Inspector, curl)
+	// send none, and an over-strict check would break them. A present Origin
+	// must match one of these entries (scheme://host[:port]) or the request is
+	// rejected with 403. Set via ALLOWED_ORIGINS (comma-separated); defaults to
+	// the PUBLIC_BASE_URL origin.
+	AllowedOrigins     []string
 	AuthMode           string
 	AuthRequired       bool
 	OperatorLogin      string
@@ -53,6 +62,18 @@ type Config struct {
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
+	// TGAPIRatePerSec is the api_id-wide MTProto RPC ceiling shared across every
+	// live client (the pool plus the short-lived login client), expressed in
+	// requests per second. All sessions authenticate under one TG_API_ID, so a
+	// burst across many user accounts can get the *app credentials* flood-banned
+	// even though each account's own per-account budget is fine. This bounds the
+	// aggregate. 0 (default) disables the limiter — non-breaking. Set via
+	// TG_API_RATE_PER_SEC.
+	TGAPIRatePerSec float64
+	// TGAPIRateBurst is the token-bucket burst size for the api_id-wide limiter.
+	// Ignored when TGAPIRatePerSec <= 0. 0 falls back to ceil(TGAPIRatePerSec)
+	// (at least 1). Set via TG_API_RATE_BURST.
+	TGAPIRateBurst int
 	// DBMaxOpenConns caps the Postgres connection pool. 0 means keep the
 	// prior default of 10. Set via DB_MAX_OPEN_CONNS.
 	DBMaxOpenConns int
@@ -80,6 +101,13 @@ type Config struct {
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
 	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
+	// ToolFilter restricts which MCP tools are registered at startup.
+	// "all" (default) registers every tool; "read-only" registers only tools
+	// annotated with ReadOnlyHint=true. Set via MCP_TOOL_FILTER.
+	ToolFilter string // MCP_TOOL_FILTER
+	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
+	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
+	MediaDownloadMaxBytes int64 // MEDIA_DOWNLOAD_MAX_BYTES
 }
 
 func Load() (*Config, error) {
@@ -115,6 +143,8 @@ func Load() (*Config, error) {
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
+	c.TGAPIRatePerSec = envFloat("TG_API_RATE_PER_SEC", 0)
+	c.TGAPIRateBurst = envInt("TG_API_RATE_BURST", 0)
 	c.DBMaxOpenConns = envInt("DB_MAX_OPEN_CONNS", 0)
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
@@ -132,6 +162,21 @@ func Load() (*Config, error) {
 	if c.DemoReviewerEnabled {
 		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
+		}
+	}
+	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
+	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
+		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
+	}
+	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
+	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
+	if len(c.AllowedOrigins) == 0 {
+		if origin := originOf(c.PublicBaseURL); origin != "" {
+			c.AllowedOrigins = []string{origin}
+		} else {
+			slog.Warn("ALLOWED_ORIGINS is empty and PUBLIC_BASE_URL has no parseable origin; "+
+				"the /mcp Origin guard is disabled (all origins allowed)",
+				"public_base_url", c.PublicBaseURL)
 		}
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
@@ -230,6 +275,18 @@ func envInt(key string, def int) int {
 	return n
 }
 
+func envFloat(key string, def float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
+
 func envDuration(key string, def time.Duration) time.Duration {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
@@ -279,8 +336,18 @@ func parseInt64CSV(s string) []int64 {
 	return parts
 }
 
+// originOf returns the scheme://host[:port] origin of a base URL, matching the
+// shape of a browser Origin header. Returns "" if rawURL has no scheme/host.
+func originOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // parseStringCSV splits a comma-separated list, trimming whitespace and
-// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS.
+// dropping empty entries. Used for TELEGRAM_OIDC_SIGNING_ALGS and ALLOWED_ORIGINS.
 func parseStringCSV(s string) []string {
 	if s == "" {
 		return nil

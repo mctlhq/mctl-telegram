@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gotd/contrib/middleware/ratelimit"
+	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -33,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/time/rate"
 )
 
 func main() {
@@ -52,6 +56,7 @@ func main() {
 		"allow_send", cfg.AllowSend,
 		"mcp_path", cfg.MCPPath,
 		"addr", cfg.Addr,
+		"allowed_origins", cfg.AllowedOrigins,
 		"telegram_configured", cfg.TGAPIID != 0 && cfg.TGAPIHash != "",
 	)
 
@@ -81,8 +86,29 @@ func main() {
 	m := metrics.New()
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+
+	// api_id-wide MTProto rate limiter. One instance shared by the pool and the
+	// interactive login client (via oauth.WithLoginConfig) so all sessions —
+	// across every user account — throttle against one TG_API_ID budget. This
+	// caps the aggregate that could otherwise get the shared app credentials
+	// flood-banned. nil (TG_API_RATE_PER_SEC<=0) leaves throughput unchanged.
+	var globalTGLimiter gotdtelegram.Middleware
+	if cfg.TGAPIRatePerSec > 0 {
+		burst := cfg.TGAPIRateBurst
+		if burst <= 0 {
+			burst = int(math.Ceil(cfg.TGAPIRatePerSec))
+		}
+		if burst < 1 {
+			burst = 1
+		}
+		globalTGLimiter = ratelimit.New(rate.Limit(cfg.TGAPIRatePerSec), burst)
+		slog.Info("api_id-wide MTProto rate limit configured",
+			"rate_per_sec", cfg.TGAPIRatePerSec, "burst", burst)
+	}
+
 	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).
 		WithMaxSessions(cfg.TelegramMaxSessions).
+		WithGlobalMiddleware(globalTGLimiter).
 		WithMetrics(m)
 	defer pool.Shutdown()
 
@@ -181,6 +207,10 @@ func main() {
 			slog.Error("oauth init failed; refusing to start", "err", err)
 			os.Exit(1)
 		}
+		// Share the api_id-wide limiter with the interactive login client so a
+		// first-time connect (auth.sendCode) — the most flood-sensitive call on
+		// the shared TG_API_ID — throttles against the same budget as the pool.
+		oauthSrv.WithLoginConfig(telegram.LoginConfig{GlobalMiddleware: globalTGLimiter})
 		// Browser-based Telegram account onboarding. Only meaningful when the
 		// OAuth issuer is active (local-jwt mode); returns 404 otherwise.
 		connectSrv := web.NewConnectServer(web.ConnectConfig{
@@ -242,7 +272,8 @@ func main() {
 		}
 	}()
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
+	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	// Force the reviewer/demo account's sends to dry-run previews. Only armed
 	// when reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
 	// silently gag a real account once the review feature is turned off.
@@ -281,7 +312,12 @@ func main() {
 	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
-	mux.Mount(cfg.MCPPath, web.BrowserRedirect(mcpHandler, "/"))
+	// OriginGuard runs before auth: a present browser Origin must be on the
+	// allowlist (DNS-rebinding protection); no-Origin server-to-server clients
+	// pass through. BrowserRedirect stays outermost so human GETs still land on
+	// the instructions page.
+	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
+	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

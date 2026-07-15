@@ -15,6 +15,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	_ "modernc.org/sqlite"
 )
 
@@ -102,6 +103,7 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -130,6 +132,7 @@ func stubLoginWrongAccount() LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -239,15 +242,12 @@ func TestEnableAccess_HappyPath_NoTwoFA(t *testing.T) {
 		t.Fatalf("start did not render code screen: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Code → 302 back to the client with an authorization code.
+	// Code → success interstitial back to the client with an authorization code.
 	rec = postForm(t, mux, "/oauth/telegram/enable_access/code",
 		url.Values{"es": {es}, "code": {"12345"}})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("code step = %d (want 302); body=%s", rec.Code, rec.Body.String())
-	}
-	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil || loc.Host != "claude.ai" || loc.Query().Get("code") == "" {
-		t.Fatalf("bad redirect: %v %v", rec.Header().Get("Location"), err)
+	loc := authCodeRedirect(t, rec)
+	if loc.Host != "claude.ai" || loc.Query().Get("code") == "" {
+		t.Fatalf("bad redirect: %s", loc)
 	}
 	if loc.Query().Get("state") != "client-state-xyz" {
 		t.Errorf("state echo = %q", loc.Query().Get("state"))
@@ -281,12 +281,10 @@ func TestEnableAccess_TwoFA(t *testing.T) {
 		t.Fatalf("code did not render 2FA screen: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Password → 302.
+	// Password → success interstitial.
 	rec = postForm(t, mux, "/oauth/telegram/enable_access/password",
 		url.Values{"es": {es}, "password": {"hunter2"}})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("password step = %d (want 302); body=%s", rec.Code, rec.Body.String())
-	}
+	authCodeRedirect(t, rec)
 	_ = srv
 }
 
@@ -322,10 +320,8 @@ func TestEnableAccess_SendOptIn_SetsFlag(t *testing.T) {
 		url.Values{"es": {es}, "phone": {"+14155551234"}, "send_optin": {"on"}}); rec.Code != http.StatusOK {
 		t.Fatalf("start: %d", rec.Code)
 	}
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusFound {
-		t.Fatalf("code step = %d", rec.Code)
-	}
+	authCodeRedirect(t, postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}))
 	ctx := context.Background()
 	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
 	on, err := srv.store.IsSendEnabled(ctx, uid)
@@ -469,10 +465,8 @@ func TestEnableAccess_DuplicateCodeAfterAdvance_KeepsPasswordStep(t *testing.T) 
 	}
 
 	// The real user's password submission must still succeed.
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
-		url.Values{"es": {es}, "password": {"hunter2"}}); rec.Code != http.StatusFound {
-		t.Fatalf("password after duplicate code = %d (want 302)", rec.Code)
-	}
+	authCodeRedirect(t, postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}}))
 }
 
 // TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch covers the P1
@@ -507,10 +501,8 @@ func TestEnableAccess_DuplicateStartAfterAdvance_DoesNotRelaunch(t *testing.T) {
 	}
 
 	// The original code submission still succeeds against the un-cancelled flow.
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusFound {
-		t.Fatalf("code after duplicate start = %d (want 302)", rec.Code)
-	}
+	authCodeRedirect(t, postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}))
 }
 
 // telegramCallbackFor drives /oauth/authorize then the Telegram OIDC callback
@@ -529,8 +521,9 @@ func telegramCallbackFor(t *testing.T, srv *Server, mux *chi.Mux, tgID int64) *h
 func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
 	rec := telegramCallbackFor(t, srv, mux, 999000111) // in no allowlist
-	if rec.Code != http.StatusFound {
-		t.Fatalf("unknown-user callback = %d (want 302 straight to code); body=%s", rec.Code, rec.Body.String())
+	// External client → success interstitial carrying the code (not the phone screen).
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("unknown-user callback did not issue a code straight away: %s", loc)
 	}
 }
 

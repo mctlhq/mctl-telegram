@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/sanitize"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -39,13 +40,26 @@ func WrapUntrustedContent(text, peerRedacted string) string {
 	)
 }
 
-// wrapMessages returns a copy of msgs with each Text field run through
-// WrapUntrustedContent, keyed by the message's redacted peer. We copy
-// rather than mutating in-place so a future caller cannot accidentally
-// observe a "wrapped" Message via a different code path.
+// wrapMessages returns a copy of msgs with user-controlled string fields
+// sanitized (control chars, invisible chars, excessive newlines) and then
+// wrapped in WrapUntrustedContent. We copy rather than mutating in-place so
+// a future caller cannot accidentally observe a modified Message.
 func wrapMessages(msgs []telegram.Message) []telegram.Message {
 	out := make([]telegram.Message, len(msgs))
 	for i, m := range msgs {
+		// Only sanitize non-empty fields. Empty text (media-only messages),
+		// empty From (anonymous channel posts), and empty PeerTitle must stay
+		// empty so the "[empty]" sentinel does not leak into MCP output.
+		if m.Text != "" {
+			m.Text = sanitize.UserContent(m.Text, 4096)
+			m.Text = sanitize.SensitiveTelegramContent(m.Text)
+		}
+		if m.From != "" {
+			m.From = sanitize.Name(m.From, 100)
+		}
+		if m.PeerTitle != "" {
+			m.PeerTitle = sanitize.Name(m.PeerTitle, 100)
+		}
 		peerRedacted := telegram.RedactPeer(m.Peer)
 		m.Text = WrapUntrustedContent(m.Text, peerRedacted)
 		out[i] = m

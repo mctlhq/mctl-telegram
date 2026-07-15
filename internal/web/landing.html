@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 {{template "ui_head" .}}
-<meta name="description" content="Connect your Telegram account to ChatGPT, Claude, and other MCP clients. OAuth-authenticated MCP server with encrypted sessions, read tools, and opt-in send controls.">
+<meta name="description" content="Manage your own Telegram account from ChatGPT, Claude, and other MCP clients after explicit authorization. OAuth-authenticated MCP server with encrypted sessions, read tools, and preview-only send controls.">
 <style>
   /* CTA buttons */
   .cta-btn {
@@ -61,13 +61,33 @@
     border-top: 3px solid var(--accent);
     border-radius: var(--mctl-radius-lg);
     padding: 20px;
-    transition: border-color .15s;
+    transition: border-color .2s, transform .2s, box-shadow .2s;
   }
-  .use-card:hover { border-color: var(--accent); }
+  .use-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 7%, transparent);
+  }
   .use-card .card-icon {
-    font-size: 24px;
-    margin-bottom: 10px;
-    display: block;
+    width: 36px; height: 36px;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border-radius: var(--mctl-radius-md);
+    color: var(--accent);
+    transition: background .2s, border-color .2s;
+    flex-shrink: 0;
+  }
+  .use-card:hover .card-icon {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .use-card .card-icon svg {
+    width: 18px; height: 18px;
+    stroke-width: 1.75;
   }
   .use-card h3 {
     font-family: var(--font-display), system-ui, sans-serif;
@@ -113,11 +133,11 @@
     margin-top: 4px;
   }
   .flow-arrow {
-    font-family: var(--font-mono);
     color: var(--accent);
-    font-size: 20px;
-    padding: 0 8px;
+    padding: 0 4px;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
   }
 
   /* Trust section */
@@ -170,6 +190,10 @@
     border-top: 1px solid var(--border);
   }
 
+  /* Landing entrance animations */
+  .cta-row   { animation: fadeUp .5s  cubic-bezier(.22,.68,0,1.2) .32s both; }
+  .hero .muted { animation: fadeUp .45s cubic-bezier(.22,.68,0,1.2) .40s both; }
+
   /* Responsive — landing-specific only; shared breakpoints live in components.css */
   @media (max-width: 640px) {
     .card-grid { grid-template-columns: 1fr; }
@@ -191,9 +215,9 @@
       <span class="status-dot" aria-hidden="true"></span>
       <span>ChatGPT App · MCP Server · tg.mctl.ai</span>
     </div>
-    <h1>Your Telegram,<br><span class="accent">inside your AI assistant</span></h1>
+    <h1>Your authorized Telegram account,<br><span class="accent">inside your AI assistant</span></h1>
     <p class="lead">
-      Install from the ChatGPT App Directory or connect via Settings &#8594; Apps. Summarise chats, search messages, and draft replies from ChatGPT, Claude, or any MCP client — with OAuth sign-in to your own Telegram account.
+      Install from the ChatGPT App Directory or connect via Settings &#8594; Apps. Summarise chats, search messages, and draft replies from ChatGPT, Claude, or any MCP client — after OAuth sign-in to the Telegram account you own and control.
     </p>
     <div class="cta-row">
       <a class="cta-btn" href="#chatgpt">Install in ChatGPT</a>
@@ -214,32 +238,32 @@
     </div>
     <div class="card-grid">
       <div class="use-card">
-        <span class="card-icon">[~]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
         <h3>Summarise unread chats</h3>
         <p>Ask your assistant what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
       </div>
       <div class="use-card">
-        <span class="card-icon">[&gt;]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
         <h3>Draft and review messages</h3>
         <p>Let your assistant write or check a reply before you send. Review tone, catch errors, or translate — then send when ready.</p>
       </div>
       <div class="use-card">
-        <span class="card-icon">[?]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <h3>Search across conversations</h3>
         <p>Find anything you said or received, instantly. Search by topic, person, or date across your full history.</p>
       </div>
       <div class="use-card">
-        <span class="card-icon">[#]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><polyline points="4 6 5 7 7 5"/><polyline points="4 12 5 13 7 11"/><polyline points="4 18 5 19 7 17"/></svg></span>
         <h3>Triage your inbox</h3>
         <p>List every chat and surface what still needs a reply, so you can clear a backlog of unread conversations in one pass.</p>
       </div>
       <div class="use-card">
-        <span class="card-icon">[Aa]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
         <h3>Translate on the fly</h3>
         <p>Read foreign-language chats in your own language, or draft a reply in theirs — without leaving the conversation.</p>
       </div>
       <div class="use-card">
-        <span class="card-icon">[*]</span>
+        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17z"/></svg></span>
         <h3>Pin what matters</h3>
         <p>Ask your assistant to pin a key message in a chat (requires admin rights in groups) so the important thing stays at the top where everyone sees it.</p>
       </div>
@@ -256,12 +280,12 @@
         <span class="node-name">Your AI client</span>
         <span class="node-label">Claude, ChatGPT…</span>
       </div>
-      <span class="flow-arrow">--&gt;</span>
+      <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <div class="flow-node">
         <span class="node-name">mctl-telegram</span>
         <span class="node-label">MCP server</span>
       </div>
-      <span class="flow-arrow">--&gt;</span>
+      <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <div class="flow-node">
         <span class="node-name">Telegram</span>
         <span class="node-label">MTProto API</span>
@@ -351,6 +375,10 @@
       <div class="faq-item">
         <dt>Which AI assistants does this work with?</dt>
         <dd>Any client that supports remote MCP connectors — Claude, ChatGPT, Cursor, Windsurf, and others. It is a standard OAuth-authenticated MCP server, so it is not tied to a single vendor.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Is this an official Telegram app?</dt>
+        <dd>No. mctl-telegram is an independent project, not affiliated with or endorsed by Telegram or OpenAI. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
