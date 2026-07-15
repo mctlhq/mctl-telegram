@@ -61,13 +61,14 @@ type demoData struct {
 // Demo serves the public review walkthrough page at /demo. Anonymous-accessible
 // like Privacy/Security/Terms — there is nothing user-specific here. The video
 // source comes from DEMO_VIDEO_URL; empty renders a "coming soon" placeholder.
-func Demo(publicBaseURL, demoVideoURL string) http.HandlerFunc {
+func Demo(publicBaseURL, demoVideoURL string, showManage bool) http.HandlerFunc {
 	kind, embed := classifyDemoVideo(demoVideoURL)
 	data := demoData{
 		Data: ui.Data{
 			Title:         "MCTL Telegram Demo",
 			NavActive:     "demo",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+			ShowManage:    showManage,
 		},
 		VideoKind: kind,
 		EmbedURL:  template.URL(embed),

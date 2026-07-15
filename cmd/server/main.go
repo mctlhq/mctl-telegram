@@ -180,6 +180,10 @@ func main() {
 	// issuer. The legacy shared-hmac-legacy path keeps pointing at
 	// api.mctl.ai.
 	authServer := selectAuthServer(cfg)
+	// /telegram/connect/manage is only mounted below in local-jwt mode; every
+	// chrome-rendered page needs to know this up front so it can hide the
+	// "manage" nav/footer link rather than link to a 404 in shared-hmac mode.
+	showManage := strings.EqualFold(cfg.AuthMode, "local-jwt")
 
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
@@ -188,13 +192,14 @@ func main() {
 	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
-	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer))
-	mux.Get("/security", web.Security(cfg.PublicBaseURL))
-	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL))
-	mux.Get("/terms", web.Terms(cfg.PublicBaseURL))
-	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL))
+	mux.Get("/og.png", web.OGImage())
+	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
+	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
+	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
+	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
+	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL, showManage))
 	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())
-	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer))
+	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,

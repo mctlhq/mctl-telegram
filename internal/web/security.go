@@ -45,30 +45,35 @@ var (
 // rendering markdown at request time would pull in goldmark for ~one page,
 // which isn't worth the binary-size cost. Anonymous-accessible — there is
 // nothing user-specific here, only the deployment-wide security policy.
-func Security(publicBaseURL string) http.HandlerFunc {
+func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(securityTmpl, "security", ui.Data{
 		Title:         "mctl-telegram — security model",
+		Description:   "How mctl-telegram protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
 		NavActive:     "security",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		ShowManage:    showManage,
 	})
 }
 
 // Privacy serves the data-inventory and retention policy at /privacy. Same
 // rationale as Security() above.
-func Privacy(publicBaseURL string) http.HandlerFunc {
+func Privacy(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(privacyTmpl, "privacy", ui.Data{
 		Title:         "mctl-telegram — privacy",
+		Description:   "What mctl-telegram stores and for how long: only an encrypted session blob per account, no message text, and one-click disconnect or full deletion any time.",
 		NavActive:     "privacy",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		ShowManage:    showManage,
 	})
 }
 
 // Terms serves the terms of service at /terms. Same rationale as Security()
 // above — a hand-authored static page, anonymous-accessible.
-func Terms(publicBaseURL string) http.HandlerFunc {
+func Terms(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(termsTmpl, "terms", ui.Data{
 		Title:         "mctl-telegram — terms of service",
 		NavActive:     "terms",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		ShowManage:    showManage,
 	})
 }
