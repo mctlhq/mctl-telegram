@@ -106,6 +106,16 @@ func TestEnsureConversation_UpsertAndTurnCounters(t *testing.T) {
 		t.Fatalf("username not refreshed: %q", c2.PeerUsername)
 	}
 
+	// A later call with empty metadata (listener saw only a numeric peer)
+	// must NOT erase the stored handle/name.
+	c3, err := s.EnsureConversation(ctx, uid, 555, "", "")
+	if err != nil {
+		t.Fatalf("ensure 3: %v", err)
+	}
+	if c3.PeerUsername != "anna_hr_new" || c3.PeerDisplayName != "Anna R." {
+		t.Fatalf("empty-metadata call erased peer info: %+v", c3)
+	}
+
 	if err := s.IncrementAutonomousTurns(ctx, uid, c1.ID); err != nil {
 		t.Fatalf("increment: %v", err)
 	}

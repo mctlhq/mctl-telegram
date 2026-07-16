@@ -132,13 +132,30 @@ func TestSweepAgentMessageBodies_DeletesOldRowsOnly(t *testing.T) {
 		t.Fatalf("sweep: %v", err)
 	}
 	if rows != 1 {
-		t.Fatalf("sweep removed %d rows, want 1", rows)
+		t.Fatalf("sweep cleared %d bodies, want 1", rows)
 	}
-	if _, err := s.GetIncomingEvent(ctx, uid, "evt:v1:1:100:8"); err != ErrIncomingEventNotFound {
-		t.Fatalf("old event still readable: err = %v", err)
+	// The aged event survives as a tombstone (dedup key preserved) but its
+	// body is cleared; a redelivery must still collide on event_id.
+	old, err := s.GetIncomingEvent(ctx, uid, "evt:v1:1:100:8")
+	if err != nil {
+		t.Fatalf("tombstone gone: %v", err)
 	}
-	if _, err := s.GetIncomingEvent(ctx, uid, "evt:v1:1:100:9"); err != nil {
+	if old.Body != "" {
+		t.Fatalf("tombstone body not cleared: %q", old.Body)
+	}
+	if _, inserted, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+		EventID: "evt:v1:1:100:8", UserID: uid, Kind: EventKindPrivateMessage,
+		ChatTGID: 100, SenderTGID: 100, MessageID: 8, Body: "redelivered",
+	}); err != nil || inserted {
+		t.Fatalf("redelivery after tombstone: inserted=%v err=%v, want false", inserted, err)
+	}
+	// The fresh event keeps its body.
+	fresh, err := s.GetIncomingEvent(ctx, uid, "evt:v1:1:100:9")
+	if err != nil {
 		t.Fatalf("fresh event gone: %v", err)
+	}
+	if fresh.Body != "fresh" {
+		t.Fatalf("fresh event body = %q, want fresh", fresh.Body)
 	}
 
 	// retention <= 0 means keep forever — must be a no-op.

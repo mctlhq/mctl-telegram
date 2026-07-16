@@ -118,13 +118,17 @@ func (s *Store) GetIncomingEvent(ctx context.Context, userID int64, eventID stri
 	return &ev, nil
 }
 
-// SweepAgentMessageBodies hard-deletes incoming_events and
-// conversation_messages rows older than retention. Unlike audit rows these
-// carry (encrypted) third-party message content, so bounded retention is a
-// privacy requirement, not just table hygiene. Conversations themselves are
-// kept — only their message bodies age out. retention <= 0 means keep
-// forever (no-op), matching the audit sweeper convention. Returns the total
-// number of rows removed.
+// SweepAgentMessageBodies removes aged (encrypted) third-party message
+// content from incoming_events and conversation_messages. Unlike audit rows
+// this is a privacy requirement, not just table hygiene. retention <= 0 means
+// keep forever (no-op), matching the audit sweeper convention. Returns the
+// number of rows whose body was cleared.
+//
+// incoming_events rows are NOT deleted — the row is kept as a tombstone with
+// body_encrypted nulled, because event_id is the exactly-once dedup key: a
+// gotd redelivery after a long outage must still collide with the tombstone
+// rather than be re-ingested. conversation_messages carry no dedup key and
+// are hard-deleted.
 func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Duration) (int64, error) {
 	if retention <= 0 {
 		return 0, nil
@@ -132,7 +136,8 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 	cutoff := time.Now().UTC().Add(-retention)
 	var total int64
 	res, err := s.DB.ExecContext(ctx,
-		`DELETE FROM incoming_events WHERE created_at < $1`, cutoff,
+		`UPDATE incoming_events SET body_encrypted = NULL
+		  WHERE created_at < $1 AND body_encrypted IS NOT NULL`, cutoff,
 	)
 	if err != nil {
 		return total, fmt.Errorf("sweep incoming events: %w", err)

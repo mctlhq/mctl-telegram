@@ -197,12 +197,15 @@ func (s *Store) EnsureConversation(ctx context.Context, userID, peerTGID int64, 
 	if userID <= 0 || peerTGID == 0 {
 		return nil, errors.New("user id and peer id required")
 	}
+	// COALESCE keeps a previously stored handle/name when this call arrives
+	// with empty metadata (e.g. the listener saw only a numeric peer): a
+	// later richer update fills them, but an emptier one must not erase them.
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO conversations(user_id, peer_tg_id, peer_username, peer_display_name)
 		 VALUES($1,$2,$3,$4)
 		 ON CONFLICT (user_id, peer_tg_id) DO UPDATE SET
-		   peer_username = EXCLUDED.peer_username,
-		   peer_display_name = EXCLUDED.peer_display_name,
+		   peer_username = COALESCE(EXCLUDED.peer_username, conversations.peer_username),
+		   peer_display_name = COALESCE(EXCLUDED.peer_display_name, conversations.peer_display_name),
 		   updated_at = $5`,
 		userID, peerTGID, nullable(username), nullable(displayName), time.Now().UTC(),
 	); err != nil {
