@@ -95,8 +95,10 @@ func TestTGChannelState_PtsAndAccessHash(t *testing.T) {
 		t.Fatalf("access hash = %d found=%v err=%v", hash, found, err)
 	}
 
-	// ForEachTGChannel iterates every row for the user (777 plus the 888/889
-	// rows created above); verify 777's pts and that all three are visited.
+	// ForEachTGChannel yields only channels whose pts was actually initialized:
+	// 777 (pts 43) and 888 (pts 42). Channel 889 exists only because an access
+	// hash was stored for it (pts still 0), so it must be skipped — reporting
+	// it would make gotd start channel-difference recovery from zero.
 	seen := map[int64]int{}
 	if err := s.ForEachTGChannel(ctx, uid, func(ctx context.Context, channelID int64, pts int) error {
 		seen[channelID] = pts
@@ -104,10 +106,39 @@ func TestTGChannelState_PtsAndAccessHash(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("foreach: %v", err)
 	}
-	if seen[777] != 43 {
-		t.Fatalf("iterated 777 pts=%d, want 43", seen[777])
+	if seen[777] != 43 || seen[888] != 42 {
+		t.Fatalf("iterated pts 777=%d 888=%d, want 43/42", seen[777], seen[888])
 	}
-	if len(seen) != 3 {
-		t.Fatalf("iterated %d channels, want 3", len(seen))
+	if _, ok := seen[889]; ok {
+		t.Fatal("hash-only channel (pts=0) must not be reported as initialized")
+	}
+	if len(seen) != 2 {
+		t.Fatalf("iterated %d channels, want 2", len(seen))
+	}
+}
+
+func TestSetTGUpdateState_ResetsChannelState(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	if err := s.SetTGUpdateState(ctx, uid, TGUpdateState{Pts: 1}); err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+	if err := s.SetTGChannelPts(ctx, uid, 777, 42); err != nil {
+		t.Fatalf("set channel pts: %v", err)
+	}
+
+	// A full state (re)initialization must drop stale channel rows, matching
+	// gotd's reference storage, so recovery does not resume from stale pts.
+	if err := s.SetTGUpdateState(ctx, uid, TGUpdateState{Pts: 999}); err != nil {
+		t.Fatalf("reset state: %v", err)
+	}
+	if _, found, err := s.GetTGChannelPts(ctx, uid, 777); err != nil || found {
+		t.Fatalf("channel state survived reset: found=%v err=%v", found, err)
+	}
+	st, found, err := s.GetTGUpdateState(ctx, uid)
+	if err != nil || !found || st.Pts != 999 {
+		t.Fatalf("watermark after reset = %+v found=%v err=%v", st, found, err)
 	}
 }

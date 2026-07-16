@@ -37,9 +37,23 @@ func (s *Store) GetTGUpdateState(ctx context.Context, userID int64) (state TGUpd
 	return state, true, nil
 }
 
-// SetTGUpdateState upserts the full watermark.
+// SetTGUpdateState upserts the full watermark and drops the account's stored
+// channel state.
+//
+// gotd calls SetState only when it (re)initializes the whole update state —
+// e.g. Manager.Run with AuthOptions.Forget, or after the main state row is
+// recreated — and its reference storage resets the user's channel map on that
+// path, immediately reloading channels via ForEachChannels. Leaving the old
+// tg_channel_state rows behind would seed recovery from stale pts / access
+// hashes instead of the freshly fetched remote state, so the reset is done
+// atomically with the watermark write.
 func (s *Store) SetTGUpdateState(ctx context.Context, userID int64, st TGUpdateState) error {
-	if _, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin set tg update state: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO tg_update_state(user_id, pts, qts, date, seq)
 		 VALUES($1,$2,$3,$4,$5)
 		 ON CONFLICT (user_id) DO UPDATE SET
@@ -48,6 +62,14 @@ func (s *Store) SetTGUpdateState(ctx context.Context, userID int64, st TGUpdateS
 		userID, st.Pts, st.Qts, st.Date, st.Seq,
 	); err != nil {
 		return fmt.Errorf("set tg update state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM tg_channel_state WHERE user_id = $1`, userID,
+	); err != nil {
+		return fmt.Errorf("reset tg channel state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit set tg update state: %w", err)
 	}
 	return nil
 }
@@ -132,27 +154,51 @@ func (s *Store) SetTGChannelPts(ctx context.Context, userID, channelID int64, pt
 	return nil
 }
 
-// ForEachTGChannel iterates the account's stored channels.
+// ForEachTGChannel iterates the account's initialized channels.
+//
+// The rows are fully materialized and the cursor closed BEFORE any callback
+// runs. gotd's Manager.Run calls GetChannelAccessHash from inside this
+// callback, and on SQLite db.Open pins the pool to a single connection
+// (MaxOpenConns(1)) — invoking the callback while the cursor still held that
+// connection would deadlock the nested query until the context was cancelled,
+// hanging listener startup for any account with a stored channel row.
+//
+// Rows with pts = 0 are skipped: they were created by SetTGChannelAccessHash
+// (which leaves pts at its default) and represent a channel whose pts was
+// never initialized. Reporting them would make gotd start channel-difference
+// recovery from zero. See GetTGChannelPts for the same sentinel rule.
 func (s *Store) ForEachTGChannel(ctx context.Context, userID int64, f func(ctx context.Context, channelID int64, pts int) error) error {
-	rows, err := s.DB.QueryContext(ctx,
-		`SELECT channel_id, pts FROM tg_channel_state WHERE user_id = $1`,
-		userID,
-	)
-	if err != nil {
-		return fmt.Errorf("list tg channels: %w", err)
+	type channelState struct {
+		id  int64
+		pts int
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var channelID int64
-		var pts int
-		if err := rows.Scan(&channelID, &pts); err != nil {
-			return fmt.Errorf("scan tg channel: %w", err)
+	var states []channelState
+	if err := func() error {
+		rows, err := s.DB.QueryContext(ctx,
+			`SELECT channel_id, pts FROM tg_channel_state WHERE user_id = $1 AND pts <> 0`,
+			userID,
+		)
+		if err != nil {
+			return fmt.Errorf("list tg channels: %w", err)
 		}
-		if err := f(ctx, channelID, pts); err != nil {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var cs channelState
+			if err := rows.Scan(&cs.id, &cs.pts); err != nil {
+				return fmt.Errorf("scan tg channel: %w", err)
+			}
+			states = append(states, cs)
+		}
+		return rows.Err()
+	}(); err != nil {
+		return err
+	}
+	for _, cs := range states {
+		if err := f(ctx, cs.id, cs.pts); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 // SetTGChannelAccessHash upserts a channel access hash (keeps pts when the

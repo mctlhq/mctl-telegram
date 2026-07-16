@@ -51,6 +51,74 @@ func TestPinUnpin(t *testing.T) {
 	}
 }
 
+func TestPin_EvictsUnwiredEntrySoListenerGetsRebuilt(t *testing.T) {
+	rt := &fakeRuntime{enabled: 42, ranFor: make(chan int64, 1)}
+	p := NewClientPool(1, "h", time.Minute, nil)
+
+	// Simulate a client built BEFORE the agent runtime was wired: no runFn.
+	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	close(e.ready)
+	p.mu.Lock()
+	p.entries[42] = e
+	p.mu.Unlock()
+
+	// Pinning must evict it so the next Borrow rebuilds it with the handler;
+	// otherwise GC (which now skips pinned ids) would keep the deaf client
+	// alive forever.
+	p.WithAgentRuntime(rt).Pin(42)
+	p.mu.Lock()
+	_, present := p.entries[42]
+	p.mu.Unlock()
+	if present {
+		t.Fatal("Pin must evict an entry that has no update handler")
+	}
+
+	// Pinning again when there is no entry, or when the entry is already
+	// wired, must be a no-op (the supervisor Pins on every tick).
+	p.Pin(42)
+	wired := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{}),
+		runFn: func(context.Context) error { return nil }}
+	close(wired.ready)
+	p.mu.Lock()
+	p.entries[42] = wired
+	p.mu.Unlock()
+	p.Pin(42)
+	p.mu.Lock()
+	_, stillThere := p.entries[42]
+	p.mu.Unlock()
+	if !stillThere {
+		t.Fatal("Pin must not churn an already-wired listener entry")
+	}
+}
+
+func TestUnpin_StopsRunningListener(t *testing.T) {
+	p := NewClientPool(1, "h", time.Minute, nil)
+	cancelled := make(chan struct{})
+	e := &entry{
+		lastUsed: time.Now(),
+		cancel:   func() { close(cancelled) },
+		ready:    make(chan struct{}),
+		runFn:    func(context.Context) error { return nil },
+	}
+	close(e.ready)
+	p.mu.Lock()
+	p.entries[42] = e
+	p.pinned[42] = struct{}{}
+	p.mu.Unlock()
+
+	// A disabled listener must stop consuming updates immediately, not linger
+	// until IdleTimeout.
+	p.Unpin(42)
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Unpin did not cancel the running listener client")
+	}
+	if p.isPinned(42) {
+		t.Fatal("Unpin must clear the pin")
+	}
+}
+
 func TestAcquire_AgentRuntimeWiring(t *testing.T) {
 	rt := &fakeRuntime{enabled: 42, ranFor: make(chan int64, 1)}
 	p := NewClientPool(1, "h", time.Minute, nil).WithAgentRuntime(rt)

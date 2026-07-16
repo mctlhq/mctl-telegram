@@ -365,6 +365,15 @@ func (p *ClientPool) gc(userID int64, e *entry) {
 		if p.isPinned(userID) {
 			// Listener clients stay connected regardless of Borrow traffic;
 			// their lifecycle is owned by the agent supervisor.
+			//
+			// A pinned listener only consumes updates, so it never calls
+			// Borrow and nothing else refreshes telegram_accounts.last_used_at.
+			// sweeper.Sessions would then revoke a perfectly healthy listener's
+			// session once the idle TTL elapsed. Heartbeat the row here so the
+			// idle clock tracks the client actually being alive.
+			if p.Store != nil {
+				p.Store.MarkLastUsed(context.Background(), userID)
+			}
 			continue
 		}
 		if idle >= p.IdleTimeout {
