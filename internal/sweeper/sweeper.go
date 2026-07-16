@@ -125,3 +125,38 @@ func refreshTokenSweepOnce(ctx context.Context, store *db.Store) {
 		slog.Info("refresh token sweep", "deleted_rows", rows)
 	}
 }
+
+// AgentRetentionSweeperInterval is how often AgentRetention() wakes up. Daily
+// matches the other retention sweeps; the window is measured in days.
+const AgentRetentionSweeperInterval = 24 * time.Hour
+
+// AgentRetention runs Store.SweepAgentMessageBodies on an interval until ctx
+// is cancelled, deleting incoming_events and conversation_messages rows older
+// than retention. Unlike the other sweepers this one is a privacy control,
+// not just table hygiene: the rows carry (encrypted) third-party message
+// content that must not accumulate indefinitely. retention <= 0 keeps rows
+// forever, matching the audit sweeper convention.
+func AgentRetention(ctx context.Context, store *db.Store, retention time.Duration) {
+	ticker := time.NewTicker(AgentRetentionSweeperInterval)
+	defer ticker.Stop()
+	agentRetentionSweepOnce(ctx, store, retention)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			agentRetentionSweepOnce(ctx, store, retention)
+		}
+	}
+}
+
+func agentRetentionSweepOnce(ctx context.Context, store *db.Store, retention time.Duration) {
+	rows, err := store.SweepAgentMessageBodies(ctx, retention)
+	if err != nil {
+		slog.Warn("agent retention sweep failed", "err", err)
+		return
+	}
+	if rows > 0 {
+		slog.Info("agent retention sweep", "deleted_rows", rows, "retention", retention)
+	}
+}

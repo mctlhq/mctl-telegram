@@ -1,0 +1,235 @@
+package db
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestAgentAction_LifecycleCAS(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	const proposed = "Здравствуйте! Я AI-помощник. Подскажите, пожалуйста, компанию и роль?"
+	id, err := s.InsertAgentAction(ctx, AgentAction{
+		ApprovalCode:   "a1b2",
+		ConversationID: conv.ID,
+		UserID:         uid,
+		ActionType:     ActionTypeReply,
+		Intent:         "request_company",
+		Payload:        proposed,
+		PolicyDecision: PolicyRequireApproval,
+		Status:         ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Payload must round-trip decrypted and never sit in plaintext.
+	var blob []byte
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT payload_encrypted FROM agent_actions WHERE id = $1`, id,
+	).Scan(&blob); err != nil {
+		t.Fatalf("select blob: %v", err)
+	}
+	if string(blob) == proposed {
+		t.Fatal("payload stored in plaintext")
+	}
+	got, err := s.GetAgentActionByCode(ctx, uid, "a1b2")
+	if err != nil {
+		t.Fatalf("get by code: %v", err)
+	}
+	if got.ID != id || got.Payload != proposed {
+		t.Fatalf("get by code = %+v", got)
+	}
+
+	// CAS transition: pending_approval → approved succeeds once.
+	ok, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionApproved)
+	if err != nil || !ok {
+		t.Fatalf("approve: ok=%v err=%v", ok, err)
+	}
+	// A second decision on the same action must lose the race.
+	ok, err = s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionRejected)
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if ok {
+		t.Fatal("double decision succeeded; CAS must reject")
+	}
+
+	// approved → executing → executed with the sent message id.
+	if ok, _ = s.UpdateAgentActionStatus(ctx, uid, id, ActionApproved, ActionExecuting); !ok {
+		t.Fatal("executing transition failed")
+	}
+	if ok, err = s.SetAgentActionExecuted(ctx, uid, id, 777); err != nil || !ok {
+		t.Fatalf("executed: ok=%v err=%v", ok, err)
+	}
+	got, _ = s.GetAgentAction(ctx, uid, id)
+	if got.Status != ActionExecuted || got.ExecutedTGMessageID != 777 {
+		t.Fatalf("final action = %+v", got)
+	}
+	// SetAgentActionExecuted must be a no-op when not executing (crash replay).
+	if ok, _ = s.SetAgentActionExecuted(ctx, uid, id, 888); ok {
+		t.Fatal("double executed succeeded")
+	}
+
+	// Cross-user scoping.
+	other := seedAgentUser(t, s, "other")
+	if _, err := s.GetAgentAction(ctx, other, id); err != ErrAgentActionNotFound {
+		t.Fatalf("cross-user get err = %v, want ErrAgentActionNotFound", err)
+	}
+}
+
+func TestExpireStaleAgentActions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	stale, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert stale: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET created_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-48*time.Hour), stale,
+	); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	fresh, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert fresh: %v", err)
+	}
+
+	n, err := s.ExpireStaleAgentActions(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expired %d rows, want 1", n)
+	}
+	got, _ := s.GetAgentAction(ctx, uid, stale)
+	if got.Status != ActionExpired {
+		t.Fatalf("stale status = %q, want expired", got.Status)
+	}
+	got, _ = s.GetAgentAction(ctx, uid, fresh)
+	if got.Status != ActionPendingApproval {
+		t.Fatalf("fresh status = %q, want pending_approval", got.Status)
+	}
+}
+
+func TestUpsertJobLead_PartialMerge(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	id1, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, Role: "Senior Python Engineer",
+	})
+	if err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+	// Second partial save fills company but omits role — role must survive.
+	id2, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, Company: "Acme",
+		Detail: `{"stack":["python","django"]}`,
+	})
+	if err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	if id2 != id1 {
+		t.Fatalf("upsert created new row: %d != %d", id2, id1)
+	}
+	got, err := s.GetJobLeadByConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Role != "Senior Python Engineer" || got.Company != "Acme" {
+		t.Fatalf("merged lead = %+v", got)
+	}
+	if got.Detail != `{"stack":["python","django"]}` {
+		t.Fatalf("detail = %q", got.Detail)
+	}
+
+	leads, err := s.ListJobLeads(ctx, uid, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(leads) != 1 || leads[0].ID != id1 {
+		t.Fatalf("list = %+v", leads)
+	}
+	if _, err := s.GetJobLead(ctx, uid+999, id1); err != ErrJobLeadNotFound {
+		t.Fatalf("cross-user get err = %v, want ErrJobLeadNotFound", err)
+	}
+}
+
+func TestOwnerNotifications_Lifecycle(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	const body = "Новая вакансия: Acme / Senior Backend Engineer"
+	id, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: body,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	var blob []byte
+	var status string
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT body_encrypted, status FROM owner_notifications WHERE id = $1`, id,
+	).Scan(&blob, &status); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if string(blob) == body {
+		t.Fatal("notification body stored in plaintext")
+	}
+	if status != NotificationPending {
+		t.Fatalf("status = %q, want pending", status)
+	}
+
+	if err := s.MarkOwnerNotificationSent(ctx, uid, id, 901); err != nil {
+		t.Fatalf("mark sent: %v", err)
+	}
+	var tgID int64
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT tg_message_id FROM owner_notifications WHERE id = $1 AND status = $2`,
+		id, NotificationSent,
+	).Scan(&tgID); err != nil {
+		t.Fatalf("select sent: %v", err)
+	}
+	if tgID != 901 {
+		t.Fatalf("tg_message_id = %d, want 901", tgID)
+	}
+
+	id2, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationApproval, Body: "draft",
+	})
+	if err != nil {
+		t.Fatalf("insert 2: %v", err)
+	}
+	if err := s.MarkOwnerNotificationFailed(ctx, uid, id2); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM owner_notifications WHERE id = $1 AND status = $2`,
+		id2, NotificationFailed,
+	).Scan(new(int64)); err != nil {
+		t.Fatalf("failed row not found: %v", err)
+	}
+}
