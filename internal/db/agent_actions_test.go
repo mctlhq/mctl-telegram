@@ -103,6 +103,31 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentActionStatus_RejectsIllegalTransition(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	id, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	// pending_approval -> executed skips approval + execution: illegal.
+	if _, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionExecuted); err == nil {
+		t.Fatal("illegal transition accepted")
+	}
+	// A transition out of a terminal state is illegal (terminal not in the map).
+	if _, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionExecuted, ActionApproved); err == nil {
+		t.Fatal("transition out of terminal state accepted")
+	}
+	// The legitimate step still works.
+	if ok, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionApproved); err != nil || !ok {
+		t.Fatalf("legal transition: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestInsertAgentAction_RejectsForeignConversation(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
@@ -150,8 +175,10 @@ func TestExpireStaleAgentActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert stale: %v", err)
 	}
+	// Expiry is measured from updated_at (approval-request time), so backdate
+	// that, not created_at.
 	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET created_at = $1 WHERE id = $2`,
+		`UPDATE agent_actions SET updated_at = $1 WHERE id = $2`,
 		time.Now().UTC().Add(-48*time.Hour), stale,
 	); err != nil {
 		t.Fatalf("backdate: %v", err)

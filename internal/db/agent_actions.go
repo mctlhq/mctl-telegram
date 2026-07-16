@@ -196,12 +196,35 @@ func isTerminalActionStatus(s string) bool {
 	return ok
 }
 
+// allowedActionTransitions is the state machine enforced by
+// UpdateAgentActionStatus. It intentionally covers only the transitions driven
+// through that method; executing→executed and pending_approval→expired have
+// dedicated methods (SetAgentActionExecuted, ExpireStaleAgentActions) with
+// their own preconditions. A caller passing a (from, to) pair not listed here
+// is a programming error, reported as ErrInvalidActionTransition rather than
+// silently applied.
+var allowedActionTransitions = map[string]map[string]struct{}{
+	ActionProposed:        {ActionPendingApproval: {}, ActionDenied: {}, ActionApproved: {}},
+	ActionPendingApproval: {ActionApproved: {}, ActionRejected: {}},
+	ActionApproved:        {ActionExecuting: {}},
+}
+
+// ErrInvalidActionTransition is returned by UpdateAgentActionStatus when the
+// (from, to) pair is not a permitted step in the action state machine.
+var ErrInvalidActionTransition = errors.New("invalid agent action state transition")
+
 // UpdateAgentActionStatus transitions an action from one status to another
 // atomically (compare-and-set). Returns false when the row was not in `from` —
 // a lost race (e.g. owner approved and rejected in quick succession) that the
 // caller must treat as "someone else already decided". Transitioning into a
-// terminal status releases the approval code.
+// terminal status releases the approval code. Returns
+// ErrInvalidActionTransition for a (from, to) pair outside the state machine.
 func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, from, to string) (bool, error) {
+	if tos, ok := allowedActionTransitions[from]; !ok {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, to)
+	} else if _, ok := tos[to]; !ok {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, to)
+	}
 	var res sql.Result
 	var err error
 	if isTerminalActionStatus(to) {
@@ -242,8 +265,13 @@ func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessag
 }
 
 // ExpireStaleAgentActions moves pending_approval rows older than ttl to
-// expired. Returns the number of rows flipped so the sweeper can log and the
-// notifier can tell owners their drafts lapsed.
+// expired. The age is measured from updated_at, not created_at: an action can
+// be inserted as `proposed` and only later transition to pending_approval, so
+// created_at would start the clock before the owner was ever asked. updated_at
+// on a pending_approval row is stamped by the transition into that state (or
+// the direct insert), i.e. the approval-request time. Returns the number of
+// rows flipped so the sweeper can log and the notifier can tell owners their
+// drafts lapsed.
 func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) (int64, error) {
 	if ttl <= 0 {
 		return 0, nil
@@ -251,7 +279,7 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
-		  WHERE status = $3 AND created_at < $4`,
+		  WHERE status = $3 AND updated_at < $4`,
 		ActionExpired, time.Now().UTC(), ActionPendingApproval, cutoff,
 	)
 	if err != nil {
