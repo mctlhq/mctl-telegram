@@ -15,6 +15,10 @@ var ErrAgentActionNotFound = errors.New("agent action not found")
 // ErrJobLeadNotFound is returned by GetJobLead when no row matches.
 var ErrJobLeadNotFound = errors.New("job lead not found")
 
+// ErrOwnerNotificationNotFound is returned by the notification status setters
+// when no (id, user) row matches.
+var ErrOwnerNotificationNotFound = errors.New("owner notification not found")
+
 // Agent action types.
 const (
 	ActionTypeReply         = "propose_reply"
@@ -247,7 +251,13 @@ type JobLead struct {
 
 // UpsertJobLead inserts or updates the lead for a conversation and returns its
 // id. Only non-empty incoming fields overwrite existing values so the agent
-// can save partial extractions incrementally without erasing earlier answers.
+// can save partial extractions incrementally without erasing earlier answers —
+// including Status: an empty status means "leave as is" ("new" on first
+// insert), so a metadata-only save can never reset a progressed lead.
+//
+// The conversation must belong to l.UserID (verified upfront, and belt-and-
+// braces re-checked by the DO UPDATE's WHERE guard) so a caller can never
+// write into another user's lead row via a foreign conversation id.
 func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if l.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -255,32 +265,40 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if l.ConversationID <= 0 {
 		return 0, errors.New("conversation id required")
 	}
-	if l.Status == "" {
-		l.Status = "new"
+	if _, err := s.GetConversation(ctx, l.UserID, l.ConversationID); err != nil {
+		return 0, err
 	}
 	if l.Detail == "" {
 		l.Detail = "{}"
 	}
 	var id int64
-	if err := s.DB.QueryRowContext(ctx,
+	err := s.DB.QueryRowContext(ctx,
 		`INSERT INTO job_leads
 		   (user_id, conversation_id, company, role, recruiter_name, recruiter_tg_id,
 		    compensation, status, detail, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'new'),$9,$10)
 		 ON CONFLICT (conversation_id) DO UPDATE SET
 		   company = CASE WHEN EXCLUDED.company IS NOT NULL THEN EXCLUDED.company ELSE job_leads.company END,
 		   role = CASE WHEN EXCLUDED.role IS NOT NULL THEN EXCLUDED.role ELSE job_leads.role END,
 		   recruiter_name = CASE WHEN EXCLUDED.recruiter_name IS NOT NULL THEN EXCLUDED.recruiter_name ELSE job_leads.recruiter_name END,
 		   recruiter_tg_id = CASE WHEN EXCLUDED.recruiter_tg_id IS NOT NULL THEN EXCLUDED.recruiter_tg_id ELSE job_leads.recruiter_tg_id END,
 		   compensation = CASE WHEN EXCLUDED.compensation IS NOT NULL THEN EXCLUDED.compensation ELSE job_leads.compensation END,
-		   status = EXCLUDED.status,
+		   status = COALESCE($8, job_leads.status),
 		   detail = CASE WHEN EXCLUDED.detail <> '{}' THEN EXCLUDED.detail ELSE job_leads.detail END,
 		   updated_at = EXCLUDED.updated_at
+		 WHERE job_leads.user_id = EXCLUDED.user_id
 		 RETURNING id`,
 		l.UserID, l.ConversationID, nullable(l.Company), nullable(l.Role),
 		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
-		nullable(l.Compensation), l.Status, l.Detail, time.Now().UTC(),
-	).Scan(&id); err != nil {
+		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The WHERE guard rejected the update: the conflicting lead row is
+		// owned by a different user. Should be unreachable given the upfront
+		// ownership check, but must not silently succeed.
+		return 0, ErrJobLeadNotFound
+	}
+	if err != nil {
 		return 0, fmt.Errorf("upsert job lead: %w", err)
 	}
 	return id, nil
@@ -421,12 +439,16 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 
 // MarkOwnerNotificationSent records a successful Saved Messages delivery.
 func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMessageID int64) error {
-	if _, err := s.DB.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`UPDATE owner_notifications SET status = $1, tg_message_id = $2, sent_at = $3
 		  WHERE id = $4 AND user_id = $5`,
 		NotificationSent, tgMessageID, time.Now().UTC(), id, userID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("mark notification sent: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrOwnerNotificationNotFound
 	}
 	return nil
 }
@@ -434,11 +456,15 @@ func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMes
 // MarkOwnerNotificationFailed records a delivery failure so the control plane
 // can surface undelivered drafts (e.g. when the owner's session is revoked).
 func (s *Store) MarkOwnerNotificationFailed(ctx context.Context, userID, id int64) error {
-	if _, err := s.DB.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`UPDATE owner_notifications SET status = $1 WHERE id = $2 AND user_id = $3`,
 		NotificationFailed, id, userID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("mark notification failed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrOwnerNotificationNotFound
 	}
 	return nil
 }

@@ -177,6 +177,75 @@ func TestUpsertJobLead_PartialMerge(t *testing.T) {
 	}
 }
 
+func TestUpsertJobLead_StatusPreservedOnMetadataOnlySave(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	// Empty status on first insert defaults to "new".
+	if _, err := s.UpsertJobLead(ctx, JobLead{UserID: uid, ConversationID: conv.ID}); err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+	got, _ := s.GetJobLeadByConversation(ctx, uid, conv.ID)
+	if got.Status != "new" {
+		t.Fatalf("initial status = %q, want new", got.Status)
+	}
+
+	// Progress the lead, then perform a metadata-only save (empty status).
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, Status: "contacted",
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, Company: "Acme",
+	}); err != nil {
+		t.Fatalf("upsert 3: %v", err)
+	}
+	got, _ = s.GetJobLeadByConversation(ctx, uid, conv.ID)
+	if got.Status != "contacted" {
+		t.Fatalf("status reset to %q by metadata-only save, want contacted", got.Status)
+	}
+	if got.Company != "Acme" {
+		t.Fatalf("company = %q", got.Company)
+	}
+}
+
+func TestUpsertJobLead_RejectsForeignConversation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+	conv, err := s.EnsureConversation(ctx, owner, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: owner, ConversationID: conv.ID, Role: "Senior Python Engineer",
+	}); err != nil {
+		t.Fatalf("owner upsert: %v", err)
+	}
+
+	// A different user passing the owner's conversation id must be rejected
+	// and must not corrupt the owner's lead.
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: other, ConversationID: conv.ID, Role: "Junior PHP Developer",
+	}); err != ErrConversationNotFound {
+		t.Fatalf("foreign upsert err = %v, want ErrConversationNotFound", err)
+	}
+	got, err := s.GetJobLeadByConversation(ctx, owner, conv.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Role != "Senior Python Engineer" {
+		t.Fatalf("owner lead corrupted: role = %q", got.Role)
+	}
+}
+
 func TestOwnerNotifications_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
@@ -231,5 +300,13 @@ func TestOwnerNotifications_Lifecycle(t *testing.T) {
 		id2, NotificationFailed,
 	).Scan(new(int64)); err != nil {
 		t.Fatalf("failed row not found: %v", err)
+	}
+
+	// Wrong id / wrong user must surface, not silently no-op.
+	if err := s.MarkOwnerNotificationSent(ctx, uid, id2+999, 1); err != ErrOwnerNotificationNotFound {
+		t.Fatalf("mark sent missing err = %v, want ErrOwnerNotificationNotFound", err)
+	}
+	if err := s.MarkOwnerNotificationFailed(ctx, uid+999, id2); err != ErrOwnerNotificationNotFound {
+		t.Fatalf("mark failed cross-user err = %v, want ErrOwnerNotificationNotFound", err)
 	}
 }
