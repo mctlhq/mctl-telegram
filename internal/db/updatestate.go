@@ -96,6 +96,12 @@ func (s *Store) SetTGDateSeq(ctx context.Context, userID int64, date, seq int) e
 }
 
 // GetTGChannelPts returns the stored pts for one channel.
+//
+// A tg_channel_state row can be created by SetTGChannelAccessHash with pts
+// left at its default 0 (the two setters share the row). Since a channel's pts
+// is a positive sequence counter that is never legitimately 0, a stored 0
+// means "pts was never set" — report found=false so gotd fetches the current
+// state instead of resuming from a bogus 0.
 func (s *Store) GetTGChannelPts(ctx context.Context, userID, channelID int64) (pts int, found bool, err error) {
 	err = s.DB.QueryRowContext(ctx,
 		`SELECT pts FROM tg_channel_state WHERE user_id = $1 AND channel_id = $2`,
@@ -106,6 +112,9 @@ func (s *Store) GetTGChannelPts(ctx context.Context, userID, channelID int64) (p
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("get tg channel pts: %w", err)
+	}
+	if pts == 0 {
+		return 0, false, nil
 	}
 	return pts, true, nil
 }
@@ -161,6 +170,11 @@ func (s *Store) SetTGChannelAccessHash(ctx context.Context, userID, channelID, a
 }
 
 // GetTGChannelAccessHash returns a stored channel access hash.
+//
+// The row may have been created by SetTGChannelPts with access_hash left at
+// its default 0. A Telegram access hash is never legitimately 0, so a stored 0
+// means "access hash was never set" — report found=false so gotd re-resolves
+// the channel rather than using a bogus 0 hash (which would fail every call).
 func (s *Store) GetTGChannelAccessHash(ctx context.Context, userID, channelID int64) (accessHash int64, found bool, err error) {
 	err = s.DB.QueryRowContext(ctx,
 		`SELECT access_hash FROM tg_channel_state WHERE user_id = $1 AND channel_id = $2`,
@@ -171,6 +185,9 @@ func (s *Store) GetTGChannelAccessHash(ctx context.Context, userID, channelID in
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("get tg channel access hash: %w", err)
+	}
+	if accessHash == 0 {
+		return 0, false, nil
 	}
 	return accessHash, true, nil
 }

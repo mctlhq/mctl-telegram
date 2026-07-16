@@ -59,6 +59,22 @@ func TestTGChannelState_PtsAndAccessHash(t *testing.T) {
 	if _, found, err := s.GetTGChannelPts(ctx, uid, 777); err != nil || found {
 		t.Fatalf("empty channel pts: found=%v err=%v", found, err)
 	}
+
+	// Setting ONLY pts must not make GetTGChannelAccessHash report a stored
+	// (default-0) hash, and vice versa — the two setters share the row.
+	if err := s.SetTGChannelPts(ctx, uid, 888, 42); err != nil {
+		t.Fatalf("set channel pts only: %v", err)
+	}
+	if _, found, err := s.GetTGChannelAccessHash(ctx, uid, 888); err != nil || found {
+		t.Fatalf("access hash after pts-only set: found=%v err=%v, want not found", found, err)
+	}
+	if err := s.SetTGChannelAccessHash(ctx, uid, 889, 555); err != nil {
+		t.Fatalf("set access hash only: %v", err)
+	}
+	if _, found, err := s.GetTGChannelPts(ctx, uid, 889); err != nil || found {
+		t.Fatalf("pts after access-hash-only set: found=%v err=%v, want not found", found, err)
+	}
+
 	if err := s.SetTGChannelPts(ctx, uid, 777, 42); err != nil {
 		t.Fatalf("set channel pts: %v", err)
 	}
@@ -79,17 +95,19 @@ func TestTGChannelState_PtsAndAccessHash(t *testing.T) {
 		t.Fatalf("access hash = %d found=%v err=%v", hash, found, err)
 	}
 
-	var seen int
+	// ForEachTGChannel iterates every row for the user (777 plus the 888/889
+	// rows created above); verify 777's pts and that all three are visited.
+	seen := map[int64]int{}
 	if err := s.ForEachTGChannel(ctx, uid, func(ctx context.Context, channelID int64, pts int) error {
-		seen++
-		if channelID != 777 || pts != 43 {
-			t.Fatalf("iterated channel=%d pts=%d", channelID, pts)
-		}
+		seen[channelID] = pts
 		return nil
 	}); err != nil {
 		t.Fatalf("foreach: %v", err)
 	}
-	if seen != 1 {
-		t.Fatalf("iterated %d channels, want 1", seen)
+	if seen[777] != 43 {
+		t.Fatalf("iterated 777 pts=%d, want 43", seen[777])
+	}
+	if len(seen) != 3 {
+		t.Fatalf("iterated %d channels, want 3", len(seen))
 	}
 }
