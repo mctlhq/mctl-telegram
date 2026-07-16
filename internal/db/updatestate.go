@@ -54,7 +54,7 @@ func (s *Store) SetTGUpdateState(ctx context.Context, userID int64, st TGUpdateS
 
 // setTGUpdateField updates a single watermark column; ErrTGUpdateStateNotFound
 // when no row exists (gotd contract for the partial setters).
-func (s *Store) setTGUpdateField(ctx context.Context, userID int64, query string, args ...any) error {
+func (s *Store) setTGUpdateField(ctx context.Context, query string, args ...any) error {
 	res, err := s.DB.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("set tg update field: %w", err)
@@ -68,31 +68,31 @@ func (s *Store) setTGUpdateField(ctx context.Context, userID int64, query string
 // SetTGPts updates the general pts.
 func (s *Store) SetTGPts(ctx context.Context, userID int64, pts int) error {
 	return s.setTGUpdateField(ctx,
-		userID, `UPDATE tg_update_state SET pts = $1 WHERE user_id = $2`, pts, userID)
+		`UPDATE tg_update_state SET pts = $1 WHERE user_id = $2`, pts, userID)
 }
 
 // SetTGQts updates the qts.
 func (s *Store) SetTGQts(ctx context.Context, userID int64, qts int) error {
 	return s.setTGUpdateField(ctx,
-		userID, `UPDATE tg_update_state SET qts = $1 WHERE user_id = $2`, qts, userID)
+		`UPDATE tg_update_state SET qts = $1 WHERE user_id = $2`, qts, userID)
 }
 
 // SetTGDate updates the date.
 func (s *Store) SetTGDate(ctx context.Context, userID int64, date int) error {
 	return s.setTGUpdateField(ctx,
-		userID, `UPDATE tg_update_state SET date = $1 WHERE user_id = $2`, date, userID)
+		`UPDATE tg_update_state SET date = $1 WHERE user_id = $2`, date, userID)
 }
 
 // SetTGSeq updates the seq.
 func (s *Store) SetTGSeq(ctx context.Context, userID int64, seq int) error {
 	return s.setTGUpdateField(ctx,
-		userID, `UPDATE tg_update_state SET seq = $1 WHERE user_id = $2`, seq, userID)
+		`UPDATE tg_update_state SET seq = $1 WHERE user_id = $2`, seq, userID)
 }
 
 // SetTGDateSeq updates date and seq together.
 func (s *Store) SetTGDateSeq(ctx context.Context, userID int64, date, seq int) error {
 	return s.setTGUpdateField(ctx,
-		userID, `UPDATE tg_update_state SET date = $1, seq = $2 WHERE user_id = $3`, date, seq, userID)
+		`UPDATE tg_update_state SET date = $1, seq = $2 WHERE user_id = $3`, date, seq, userID)
 }
 
 // GetTGChannelPts returns the stored pts for one channel.

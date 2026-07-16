@@ -28,6 +28,10 @@ func SendToInputPeer(ctx context.Context, c *telegram.Client, peer tg.InputPeerC
 		Peer:     peer,
 		Message:  text,
 		RandomID: randomID,
+		// Suppress link-preview expansion, matching SendMessage in send.go.
+		// Owner notifications and agent replies are plain text; an unfurled
+		// preview of a URL in the body is noise and a minor SSRF surface.
+		NoWebpage: true,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
