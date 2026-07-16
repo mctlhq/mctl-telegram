@@ -93,6 +93,14 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 	if a.Status == "" {
 		a.Status = ActionProposed
 	}
+	// A non-zero conversation must belong to the same user — otherwise an
+	// action for one account could reference (and later act on) another
+	// account's conversation.
+	if a.ConversationID != 0 {
+		if _, err := s.GetConversation(ctx, a.UserID, a.ConversationID); err != nil {
+			return 0, err
+		}
+	}
 	var payload []byte
 	if a.Payload != "" {
 		var err error
@@ -175,16 +183,40 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	return &a, nil
 }
 
+// terminalActionStatuses are the end states of the action lifecycle. Reaching
+// one releases the approval code (nulled) so its short string can be reused by
+// a future action without colliding on the (user_id, approval_code) unique
+// index.
+var terminalActionStatuses = map[string]struct{}{
+	ActionExecuted: {}, ActionRejected: {}, ActionExpired: {}, ActionDenied: {},
+}
+
+func isTerminalActionStatus(s string) bool {
+	_, ok := terminalActionStatuses[s]
+	return ok
+}
+
 // UpdateAgentActionStatus transitions an action from one status to another
 // atomically (compare-and-set). Returns false when the row was not in `from` —
 // a lost race (e.g. owner approved and rejected in quick succession) that the
-// caller must treat as "someone else already decided".
+// caller must treat as "someone else already decided". Transitioning into a
+// terminal status releases the approval code.
 func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, from, to string) (bool, error) {
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = $1, updated_at = $2
-		  WHERE id = $3 AND user_id = $4 AND status = $5`,
-		to, time.Now().UTC(), id, userID, from,
-	)
+	var res sql.Result
+	var err error
+	if isTerminalActionStatus(to) {
+		res, err = s.DB.ExecContext(ctx,
+			`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
+			  WHERE id = $3 AND user_id = $4 AND status = $5`,
+			to, time.Now().UTC(), id, userID, from,
+		)
+	} else {
+		res, err = s.DB.ExecContext(ctx,
+			`UPDATE agent_actions SET status = $1, updated_at = $2
+			  WHERE id = $3 AND user_id = $4 AND status = $5`,
+			to, time.Now().UTC(), id, userID, from,
+		)
+	}
 	if err != nil {
 		return false, fmt.Errorf("update action status: %w", err)
 	}
@@ -198,7 +230,7 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessageID int64) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
-		    SET status = $1, executed_tg_message_id = $2, updated_at = $3
+		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL, updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
 		ActionExecuted, tgMessageID, time.Now().UTC(), id, userID, ActionExecuting,
 	)
@@ -218,7 +250,7 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	}
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = $1, updated_at = $2
+		`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
 		  WHERE status = $3 AND created_at < $4`,
 		ActionExpired, time.Now().UTC(), ActionPendingApproval, cutoff,
 	)
@@ -412,6 +444,13 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 	}
 	if n.Kind == "" {
 		return 0, errors.New("notification kind required")
+	}
+	// A non-zero action must belong to the same user, so a notification can
+	// never be linked to another account's action.
+	if n.ActionID != 0 {
+		if _, err := s.GetAgentAction(ctx, n.UserID, n.ActionID); err != nil {
+			return 0, err
+		}
 	}
 	var body []byte
 	if n.Body != "" {

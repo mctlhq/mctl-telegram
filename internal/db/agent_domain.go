@@ -143,6 +143,55 @@ func (s *Store) SetAgentAutopilotPaused(ctx context.Context, userID int64, pause
 	return nil
 }
 
+// purgeAgentData deletes every communication-agent row owned by a user within
+// the caller's transaction. Called by HardDeleteAccount so account deletion
+// takes the agent's stored (encrypted) recruiter data with it. Order respects
+// FKs: children before parents, though ON DELETE CASCADE on conversations
+// would also cover messages/leads — the explicit deletes keep it robust to
+// schema changes and readable. tg_update_state / tg_channel_state and
+// agent_profiles cascade on users(id), but the users row survives account
+// deletion, so they are purged here too.
+func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
+	stmts := []string{
+		`DELETE FROM owner_notifications WHERE user_id = $1`,
+		`DELETE FROM agent_actions WHERE user_id = $1`,
+		`DELETE FROM job_leads WHERE user_id = $1`,
+		`DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)`,
+		`DELETE FROM conversations WHERE user_id = $1`,
+		`DELETE FROM incoming_events WHERE user_id = $1`,
+		`DELETE FROM tg_channel_state WHERE user_id = $1`,
+		`DELETE FROM tg_update_state WHERE user_id = $1`,
+		`DELETE FROM agent_profiles WHERE user_id = $1`,
+	}
+	for _, q := range stmts {
+		if _, err := ex.ExecContext(ctx, q, userID); err != nil {
+			return fmt.Errorf("purge agent data: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetTelegramID returns the account's active Telegram user id, or 0 when the
+// account has no finalised session yet (telegram_user_id NULL / all sessions
+// revoked). The listener supervisor uses it to namespace event ids and detect
+// the self peer; 0 means "skip pinning until the session establishes".
+func (s *Store) GetTelegramID(ctx context.Context, userID int64) (int64, error) {
+	var tgID sql.NullInt64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT telegram_user_id FROM telegram_accounts
+		  WHERE user_id = $1 AND revoked_at IS NULL AND telegram_user_id IS NOT NULL
+		  ORDER BY connected_at DESC LIMIT 1`,
+		userID,
+	).Scan(&tgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get telegram id: %w", err)
+	}
+	return tgID.Int64, nil
+}
+
 // ListListenerEnabledProfiles returns every profile with listener_enabled set.
 // The listener supervisor polls this to know which accounts need a pinned,
 // update-handling MTProto client.

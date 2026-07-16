@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -82,6 +83,58 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 	other := seedAgentUser(t, s, "other")
 	if _, err := s.GetAgentAction(ctx, other, id); err != ErrAgentActionNotFound {
 		t.Fatalf("cross-user get err = %v, want ErrAgentActionNotFound", err)
+	}
+
+	// Reaching a terminal state releases the approval code so it can be reused.
+	var code sql.NullString
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT approval_code FROM agent_actions WHERE id = $1`, id,
+	).Scan(&code); err != nil {
+		t.Fatalf("select code: %v", err)
+	}
+	if code.Valid {
+		t.Fatalf("approval code not released after executed: %q", code.String)
+	}
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		ApprovalCode: "a1b2", UserID: uid, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	}); err != nil {
+		t.Fatalf("reuse released code: %v", err)
+	}
+}
+
+func TestInsertAgentAction_RejectsForeignConversation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+	conv, err := s.EnsureConversation(ctx, owner, 555, "anna", "Anna")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: other, ConversationID: conv.ID, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyRequireApproval,
+	}); err != ErrConversationNotFound {
+		t.Fatalf("foreign conversation err = %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestInsertOwnerNotification_RejectsForeignAction(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: owner, ActionType: ActionTypeReply, PolicyDecision: PolicyRequireApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if _, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: other, Kind: NotificationApproval, ActionID: actionID,
+	}); err != ErrAgentActionNotFound {
+		t.Fatalf("foreign action err = %v, want ErrAgentActionNotFound", err)
 	}
 }
 

@@ -152,5 +152,26 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 	}
 	n, _ = res.RowsAffected()
 	total += n
+	// Action payloads (proposed reply text) and owner-notification bodies are
+	// also message-derived third-party content. Null their ciphertext past
+	// retention; the rows themselves are kept for audit/lifecycle history.
+	res, err = s.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET payload_encrypted = NULL
+		  WHERE created_at < $1 AND payload_encrypted IS NOT NULL`, cutoff,
+	)
+	if err != nil {
+		return total, fmt.Errorf("sweep action payloads: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
+	res, err = s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET body_encrypted = NULL
+		  WHERE created_at < $1 AND body_encrypted IS NOT NULL`, cutoff,
+	)
+	if err != nil {
+		return total, fmt.Errorf("sweep notification bodies: %w", err)
+	}
+	n, _ = res.RowsAffected()
+	total += n
 	return total, nil
 }
