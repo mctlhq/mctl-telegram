@@ -389,4 +389,15 @@ func TestOwnerNotifications_Lifecycle(t *testing.T) {
 	if err := s.MarkOwnerNotificationFailed(ctx, uid+999, id2); err != ErrOwnerNotificationNotFound {
 		t.Fatalf("mark failed cross-user err = %v, want ErrOwnerNotificationNotFound", err)
 	}
+
+	// A sent notification must never be flipped to failed by a racing/late
+	// failure report — the CAS guard rejects the transition.
+	if err := s.MarkOwnerNotificationFailed(ctx, uid, id); err != ErrOwnerNotificationNotFound {
+		t.Fatalf("failed-after-sent err = %v, want ErrOwnerNotificationNotFound", err)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM owner_notifications WHERE id = $1 AND status = $2`, id, NotificationSent,
+	).Scan(new(int64)); err != nil {
+		t.Fatalf("sent notification was overwritten: %v", err)
+	}
 }

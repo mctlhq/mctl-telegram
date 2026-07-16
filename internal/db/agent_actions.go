@@ -505,11 +505,16 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 }
 
 // MarkOwnerNotificationSent records a successful Saved Messages delivery.
+// Compare-and-set from pending: a notification is delivered at most once, so
+// only a still-pending row transitions. Returns ErrOwnerNotificationNotFound
+// when no pending (id, user) row matches — including the case where a
+// concurrent attempt already marked it sent or failed, so a late/duplicate
+// call can never overwrite a terminal delivery state.
 func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMessageID int64) error {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE owner_notifications SET status = $1, tg_message_id = $2, sent_at = $3
-		  WHERE id = $4 AND user_id = $5`,
-		NotificationSent, tgMessageID, time.Now().UTC(), id, userID,
+		  WHERE id = $4 AND user_id = $5 AND status = $6`,
+		NotificationSent, tgMessageID, time.Now().UTC(), id, userID, NotificationPending,
 	)
 	if err != nil {
 		return fmt.Errorf("mark notification sent: %w", err)
@@ -522,10 +527,13 @@ func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMes
 
 // MarkOwnerNotificationFailed records a delivery failure so the control plane
 // can surface undelivered drafts (e.g. when the owner's session is revoked).
+// Compare-and-set from pending, matching MarkOwnerNotificationSent: a row that
+// another attempt already marked sent must NOT be flipped to failed by a
+// racing/late failure report.
 func (s *Store) MarkOwnerNotificationFailed(ctx context.Context, userID, id int64) error {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE owner_notifications SET status = $1 WHERE id = $2 AND user_id = $3`,
-		NotificationFailed, id, userID,
+		`UPDATE owner_notifications SET status = $1 WHERE id = $2 AND user_id = $3 AND status = $4`,
+		NotificationFailed, id, userID, NotificationPending,
 	)
 	if err != nil {
 		return fmt.Errorf("mark notification failed: %w", err)
