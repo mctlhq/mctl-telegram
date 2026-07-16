@@ -31,6 +31,7 @@ var sensitiveKeys = map[string]struct{}{
 	"text":                        {},
 	"body":                        {},
 	"proposed_text":               {},
+	"payload":                     {},
 	"password":                    {},
 	"phone":                       {},
 	"code":                        {},
