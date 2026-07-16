@@ -68,23 +68,22 @@ func (s *Store) InsertIncomingEvent(ctx context.Context, ev IncomingEvent) (id i
 	if meta == "" {
 		meta = "{}"
 	}
-	res, err := s.DB.ExecContext(ctx,
+	// ON CONFLICT DO NOTHING ... RETURNING yields an empty result set on a
+	// duplicate (sql.ErrNoRows) — one round-trip, no TOCTOU window between
+	// insert and id fetch. Supported by both Postgres and SQLite >= 3.35.
+	err = s.DB.QueryRowContext(ctx,
 		`INSERT INTO incoming_events
 		   (event_id, user_id, kind, chat_tg_id, sender_tg_id, message_id, body_encrypted, meta)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-		 ON CONFLICT (event_id) DO NOTHING`,
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING id`,
 		ev.EventID, ev.UserID, ev.Kind, ev.ChatTGID, ev.SenderTGID, ev.MessageID, body, meta,
-	)
-	if err != nil {
-		return 0, false, fmt.Errorf("insert incoming event: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
-	if err := s.DB.QueryRowContext(ctx,
-		`SELECT id FROM incoming_events WHERE event_id = $1`, ev.EventID,
-	).Scan(&id); err != nil {
-		return 0, false, fmt.Errorf("select inserted event: %w", err)
+	if err != nil {
+		return 0, false, fmt.Errorf("insert incoming event: %w", err)
 	}
 	return id, true, nil
 }

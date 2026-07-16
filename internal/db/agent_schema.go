@@ -141,7 +141,7 @@ func agentSchemaSQLite() []string {
 			seq INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS tg_channel_state (
-			user_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			channel_id INTEGER NOT NULL,
 			pts INTEGER NOT NULL DEFAULT 0,
 			access_hash INTEGER NOT NULL DEFAULT 0,
@@ -257,7 +257,7 @@ func agentSchemaPG() []string {
 			seq INT NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS tg_channel_state (
-			user_id BIGINT NOT NULL,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			channel_id BIGINT NOT NULL,
 			pts INT NOT NULL DEFAULT 0,
 			access_hash BIGINT NOT NULL DEFAULT 0,

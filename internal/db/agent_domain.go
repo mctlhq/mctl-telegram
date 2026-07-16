@@ -203,8 +203,8 @@ func (s *Store) EnsureConversation(ctx context.Context, userID, peerTGID int64, 
 		 ON CONFLICT (user_id, peer_tg_id) DO UPDATE SET
 		   peer_username = EXCLUDED.peer_username,
 		   peer_display_name = EXCLUDED.peer_display_name,
-		   updated_at = CURRENT_TIMESTAMP`,
-		userID, peerTGID, nullable(username), nullable(displayName),
+		   updated_at = $5`,
+		userID, peerTGID, nullable(username), nullable(displayName), time.Now().UTC(),
 	); err != nil {
 		return nil, fmt.Errorf("ensure conversation: %w", err)
 	}
@@ -305,11 +305,15 @@ func (s *Store) ResetAutonomousTurns(ctx context.Context, userID, id int64) erro
 // TouchConversationIncoming stamps last_incoming_at. Called by the listener
 // for every persisted incoming event on the conversation.
 func (s *Store) TouchConversationIncoming(ctx context.Context, userID, id int64) error {
-	if _, err := s.DB.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`UPDATE conversations SET last_incoming_at = $1, updated_at = $1 WHERE id = $2 AND user_id = $3`,
 		time.Now().UTC(), id, userID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("touch conversation: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrConversationNotFound
 	}
 	return nil
 }
