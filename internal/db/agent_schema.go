@@ -133,6 +133,33 @@ func agentSchemaSQLite() []string {
 			sent_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 5,
+			next_run_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			claimed_by TEXT,
+			claimed_at DATETIME,
+			last_error TEXT,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			attempt INTEGER NOT NULL,
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME,
+			status TEXT NOT NULL DEFAULT 'running',
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INTEGER NOT NULL DEFAULT 0,
@@ -249,6 +276,33 @@ func agentSchemaPG() []string {
 			sent_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_jobs (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INT NOT NULL DEFAULT 0,
+			max_attempts INT NOT NULL DEFAULT 5,
+			next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			claimed_by TEXT,
+			claimed_at TIMESTAMPTZ,
+			last_error TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
+			id BIGSERIAL PRIMARY KEY,
+			job_id BIGINT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			attempt INT NOT NULL,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ,
+			status TEXT NOT NULL DEFAULT 'running',
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INT NOT NULL DEFAULT 0,

@@ -114,6 +114,13 @@ type Config struct {
 	// message content, so the default is deliberately short. 0 keeps rows
 	// forever. Set via AGENT_RETENTION_DAYS.
 	AgentRetentionDays int // AGENT_RETENTION_DAYS, default 30
+	// AgentJobVisibility is how long a claimed (processing) agent job may sit
+	// before the sweeper assumes the worker died and requeues it. Must exceed
+	// the worst-case model round-trip for one job. Set via AGENT_JOB_VISIBILITY.
+	AgentJobVisibility time.Duration // AGENT_JOB_VISIBILITY, default 5m
+	// AgentApprovalTTL is how long an agent action waits in pending_approval
+	// before expiring. Set via AGENT_APPROVAL_TTL.
+	AgentApprovalTTL time.Duration // AGENT_APPROVAL_TTL, default 24h
 }
 
 func Load() (*Config, error) {
@@ -135,6 +142,8 @@ func Load() (*Config, error) {
 		RateLimitPerUser:         envInt("RATE_LIMIT_PER_USER", 30),
 		AuditRetentionDays:       envInt("AUDIT_RETENTION_DAYS", 90),
 		AgentRetentionDays:       envInt("AGENT_RETENTION_DAYS", 30),
+		AgentJobVisibility:       envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
+		AgentApprovalTTL:         envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),

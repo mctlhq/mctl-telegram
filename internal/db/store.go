@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
@@ -18,6 +19,11 @@ type Store struct {
 	DB      *sql.DB
 	Crypt   *crypto.AESGCM
 	metrics *metrics.Registry
+
+	// Cached dialect probe (see isPostgres in agent_jobs.go). Only the job
+	// claim query needs the distinction (FOR UPDATE SKIP LOCKED).
+	pgOnce sync.Once
+	pgFlag bool
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,

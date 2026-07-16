@@ -1,0 +1,251 @@
+package db
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestAgentJobBackoff_Schedule(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, 30 * time.Second}, // clamped to 1
+		{1, 30 * time.Second},
+		{2, time.Minute},
+		{3, 2 * time.Minute},
+		{4, 4 * time.Minute},
+		{5, 8 * time.Minute},
+		{6, 16 * time.Minute},
+		{7, 30 * time.Minute}, // capped
+		{20, 30 * time.Minute},
+	}
+	for _, c := range cases {
+		if got := AgentJobBackoff(c.attempts); got != c.want {
+			t.Errorf("AgentJobBackoff(%d) = %v, want %v", c.attempts, got, c.want)
+		}
+	}
+}
+
+// seedJob inserts an event + job pair and returns the job id.
+func seedJob(t *testing.T, s *Store, uid int64, eventID string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+		EventID: eventID, UserID: uid, Kind: EventKindPrivateMessage,
+		ChatTGID: 1, SenderTGID: 1, MessageID: 1,
+	}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	id, enqueued, err := s.EnqueueAgentJob(ctx, eventID, uid, 0)
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue: id=%d enqueued=%v err=%v", id, enqueued, err)
+	}
+	return id
+}
+
+func TestEnqueueAgentJob_IdempotentByEvent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	seedJob(t, s, uid, "evt:v1:1:1:1")
+
+	id, enqueued, err := s.EnqueueAgentJob(ctx, "evt:v1:1:1:1", uid, 0)
+	if err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+	if enqueued || id != 0 {
+		t.Fatalf("re-enqueue: id=%d enqueued=%v, want 0/false", id, enqueued)
+	}
+}
+
+func TestClaimAgentJobs_ClaimsDueInOrderAndOpensAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	j1 := seedJob(t, s, uid, "evt:v1:1:1:1")
+	j2 := seedJob(t, s, uid, "evt:v1:1:1:2")
+	// A job scheduled for the future must not be claimable.
+	j3 := seedJob(t, s, uid, "evt:v1:1:1:3")
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(time.Hour), j3,
+	); err != nil {
+		t.Fatalf("defer j3: %v", err)
+	}
+
+	jobs, err := s.ClaimAgentJobs(ctx, "replica-a", 5)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != j1 || jobs[1].ID != j2 {
+		t.Fatalf("claimed %+v, want [%d %d]", jobs, j1, j2)
+	}
+	for _, j := range jobs {
+		if j.Status != JobProcessing || j.Attempts != 1 || j.ClaimedBy != "replica-a" {
+			t.Fatalf("claimed job = %+v", j)
+		}
+	}
+
+	// Second claim must find nothing (all due jobs already processing).
+	jobs, err = s.ClaimAgentJobs(ctx, "replica-b", 5)
+	if err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("second claim got %+v, want none", jobs)
+	}
+
+	// Each claim opened an attempt row.
+	var n int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE finished_at IS NULL`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("open attempts = %d, want 2", n)
+	}
+}
+
+func TestCompleteAgentJob_CASFromProcessing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+
+	// Completing a pending (unclaimed) job must fail the CAS.
+	if err := s.CompleteAgentJob(ctx, jid, JobCompleted, ""); err != ErrAgentJobNotFound {
+		t.Fatalf("complete unclaimed err = %v, want ErrAgentJobNotFound", err)
+	}
+	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := s.CompleteAgentJob(ctx, jid, "sideways", ""); err == nil {
+		t.Fatal("invalid terminal status accepted")
+	}
+	if err := s.CompleteAgentJob(ctx, jid, JobCompleted, "done"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	got, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != JobCompleted {
+		t.Fatalf("status = %q", got.Status)
+	}
+	// Attempt row closed.
+	var open int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND finished_at IS NULL`, jid,
+	).Scan(&open); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if open != 0 {
+		t.Fatalf("open attempts = %d, want 0", open)
+	}
+}
+
+func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET max_attempts = 2 WHERE id = $1`, jid,
+	); err != nil {
+		t.Fatalf("set max_attempts: %v", err)
+	}
+
+	// Attempt 1: claim + retry → pending with future next_run_at.
+	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
+		t.Fatalf("claim 1: %v", err)
+	}
+	status, err := s.RetryAgentJob(ctx, jid, "model timeout")
+	if err != nil {
+		t.Fatalf("retry 1: %v", err)
+	}
+	if status != JobPending {
+		t.Fatalf("retry 1 status = %q, want pending", status)
+	}
+	got, _ := s.GetAgentJob(ctx, uid, jid)
+	if !got.NextRunAt.After(time.Now().UTC().Add(20 * time.Second)) {
+		t.Fatalf("next_run_at %v not backed off", got.NextRunAt)
+	}
+	if got.LastError != "model timeout" {
+		t.Fatalf("last_error = %q", got.LastError)
+	}
+
+	// Make it due again, claim (attempts=2=max), retry → dead_letter.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC().Add(-time.Second), jid,
+	); err != nil {
+		t.Fatalf("re-arm: %v", err)
+	}
+	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+	status, err = s.RetryAgentJob(ctx, jid, "model timeout again")
+	if err != nil {
+		t.Fatalf("retry 2: %v", err)
+	}
+	if status != JobDeadLetter {
+		t.Fatalf("retry 2 status = %q, want dead_letter", status)
+	}
+
+	// Retrying a non-processing job loses the CAS.
+	if _, err := s.RetryAgentJob(ctx, jid, "x"); err != ErrAgentJobNotFound {
+		t.Fatalf("retry dead job err = %v, want ErrAgentJobNotFound", err)
+	}
+}
+
+func TestRequeueStaleAgentJobs(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	fresh := seedJob(t, s, uid, "evt:v1:1:1:1")
+	stale := seedJob(t, s, uid, "evt:v1:1:1:2")
+	exhausted := seedJob(t, s, uid, "evt:v1:1:1:3")
+
+	if _, err := s.ClaimAgentJobs(ctx, "r", 3); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// Backdate two claims past the visibility window; exhaust one of them.
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET claimed_at = $1 WHERE id IN ($2, $3)`, old, stale, exhausted,
+	); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET attempts = max_attempts WHERE id = $1`, exhausted,
+	); err != nil {
+		t.Fatalf("exhaust: %v", err)
+	}
+
+	requeued, dead, err := s.RequeueStaleAgentJobs(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	if requeued != 1 || dead != 1 {
+		t.Fatalf("requeued=%d dead=%d, want 1/1", requeued, dead)
+	}
+	for id, want := range map[int64]string{fresh: JobProcessing, stale: JobPending, exhausted: JobDeadLetter} {
+		got, err := s.GetAgentJob(ctx, uid, id)
+		if err != nil {
+			t.Fatalf("get %d: %v", id, err)
+		}
+		if got.Status != want {
+			t.Fatalf("job %d status = %q, want %q", id, got.Status, want)
+		}
+	}
+
+	counts, err := s.CountAgentJobs(ctx)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts[JobProcessing] != 1 || counts[JobPending] != 1 || counts[JobDeadLetter] != 1 {
+		t.Fatalf("counts = %v", counts)
+	}
+}

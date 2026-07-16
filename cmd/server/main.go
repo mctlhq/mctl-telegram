@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gotd/contrib/middleware/ratelimit"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -148,6 +149,11 @@ func main() {
 	// Privacy control, not just hygiene — these rows carry third-party
 	// message content. AGENT_RETENTION_DAYS=0 keeps rows forever.
 	go sweeper.AgentRetention(ctx, store, time.Duration(cfg.AgentRetentionDays)*24*time.Hour)
+	// Communication-agent queue maintenance: requeues jobs whose claim
+	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
+	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.
+	agentQueue := queue.New(store, cfg.ReplicaID, m)
+	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL)
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)
