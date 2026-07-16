@@ -29,6 +29,9 @@ func ScrubText(s string) string {
 // Values for matching keys are replaced with `[redacted len=N]`.
 var sensitiveKeys = map[string]struct{}{
 	"text":                        {},
+	"body":                        {},
+	"proposed_text":               {},
+	"payload":                     {},
 	"password":                    {},
 	"phone":                       {},
 	"code":                        {},

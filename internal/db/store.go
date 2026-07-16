@@ -487,6 +487,15 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	}
 	rows, _ := res.RowsAffected()
 
+	// Purge communication-agent data in the same transaction. The agent
+	// tables cascade on users(id), but account deletion removes only the
+	// telegram_accounts row (the users identity row survives), so the agent
+	// rows must be deleted explicitly or a deleted account's recruiter
+	// conversations, events, leads, actions, and notifications would persist.
+	if err := purgeAgentData(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delete account: commit: %w", err)
 	}

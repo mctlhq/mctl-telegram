@@ -143,6 +143,11 @@ func main() {
 	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
 	// the table stays bounded. LookupRefreshToken is the authoritative gate.
 	go sweeper.RefreshTokens(ctx, store)
+	// Communication-agent message retention: deletes stored incoming_events /
+	// conversation_messages older than AGENT_RETENTION_DAYS (default 30).
+	// Privacy control, not just hygiene — these rows carry third-party
+	// message content. AGENT_RETENTION_DAYS=0 keeps rows forever.
+	go sweeper.AgentRetention(ctx, store, time.Duration(cfg.AgentRetentionDays)*24*time.Hour)
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)

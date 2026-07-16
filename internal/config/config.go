@@ -108,6 +108,12 @@ type Config struct {
 	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
 	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
 	MediaDownloadMaxBytes int64 // MEDIA_DOWNLOAD_MAX_BYTES
+	// AgentRetentionDays bounds how long the communication agent's stored
+	// message content (incoming_events, conversation_messages) is kept before
+	// the retention sweeper deletes it. Unlike audit rows this is third-party
+	// message content, so the default is deliberately short. 0 keeps rows
+	// forever. Set via AGENT_RETENTION_DAYS.
+	AgentRetentionDays int // AGENT_RETENTION_DAYS, default 30
 }
 
 func Load() (*Config, error) {
@@ -128,6 +134,7 @@ func Load() (*Config, error) {
 		IdleClientTimeout:        envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
 		RateLimitPerUser:         envInt("RATE_LIMIT_PER_USER", 30),
 		AuditRetentionDays:       envInt("AUDIT_RETENTION_DAYS", 90),
+		AgentRetentionDays:       envInt("AGENT_RETENTION_DAYS", 30),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),

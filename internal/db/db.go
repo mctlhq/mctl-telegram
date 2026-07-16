@@ -200,6 +200,11 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 			return fmt.Errorf("backfill: %w\nstmt: %s", err, s)
 		}
 	}
+	// Communication-agent domain tables (M6). Kept in a separate file so the
+	// agent schema evolves without touching the core auth/session tables.
+	if err := migrateAgent(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return nil
 }
 
