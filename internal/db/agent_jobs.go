@@ -106,6 +106,14 @@ func (s *Store) EnqueueAgentJob(ctx context.Context, eventID string, userID, con
 	if userID <= 0 {
 		return 0, false, errors.New("user id required")
 	}
+	// A non-zero conversation must belong to the enqueuing user, matching the
+	// guards on InsertAgentAction / InsertConversationMessage. Without it a job
+	// could be claimed as one user but tied to another user's conversation.
+	if conversationID != 0 {
+		if _, err := s.GetConversation(ctx, userID, conversationID); err != nil {
+			return 0, false, err
+		}
+	}
 	var convID any
 	if conversationID != 0 {
 		convID = conversationID
@@ -122,6 +130,94 @@ func (s *Store) EnqueueAgentJob(ctx context.Context, eventID string, userID, con
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("enqueue agent job: %w", err)
+	}
+	return jobID, true, nil
+}
+
+// InsertEventAndEnqueueJob persists an incoming event and its job in ONE
+// transaction, returning enqueued=false when the event was already ingested.
+//
+// This is the listener's ingestion primitive and exists because the two writes
+// must not be separable: InsertIncomingEvent's dedup contract says a duplicate
+// event must not be re-enqueued, so a crash after the event commit but before a
+// separate enqueue would strand that event with no job — every gotd redelivery
+// would then dedup and the message would never reach the agent. Committing both
+// together makes ingestion all-or-nothing, so a redelivery either finds the
+// complete pair or recreates it.
+func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, conversationID int64) (jobID int64, enqueued bool, err error) {
+	if ev.EventID == "" {
+		return 0, false, errors.New("event id required")
+	}
+	if ev.UserID <= 0 {
+		return 0, false, errors.New("user id required")
+	}
+	if ev.Kind == "" {
+		return 0, false, errors.New("event kind required")
+	}
+	if conversationID != 0 {
+		if _, err := s.GetConversation(ctx, ev.UserID, conversationID); err != nil {
+			return 0, false, err
+		}
+	}
+	var body []byte
+	if ev.Body != "" {
+		body, err = s.Crypt.SealForUser([]byte(ev.Body), ev.UserID)
+		if err != nil {
+			return 0, false, fmt.Errorf("seal event body: %w", err)
+		}
+	}
+	meta := ev.Meta
+	if meta == "" {
+		meta = "{}"
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin ingest tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var eventRowID int64
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO incoming_events
+		   (event_id, user_id, kind, chat_tg_id, sender_tg_id, message_id, body_encrypted, meta)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING id`,
+		ev.EventID, ev.UserID, ev.Kind, ev.ChatTGID, ev.SenderTGID, ev.MessageID, body, meta,
+	).Scan(&eventRowID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil // already ingested (with its job) — nothing to do
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("insert incoming event: %w", err)
+	}
+
+	var convID any
+	if conversationID != 0 {
+		convID = conversationID
+	}
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO agent_jobs(event_id, user_id, conversation_id)
+		 VALUES($1,$2,$3)
+		 ON CONFLICT (event_id) DO NOTHING
+		 RETURNING id`,
+		ev.EventID, ev.UserID, convID,
+	).Scan(&jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// An orphan job already exists for this event id (only reachable if a
+		// prior partial write is being repaired); the event row is now present,
+		// so treat the pair as complete.
+		if err := tx.Commit(); err != nil {
+			return 0, false, fmt.Errorf("commit ingest tx: %w", err)
+		}
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("enqueue agent job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("commit ingest tx: %w", err)
 	}
 	return jobID, true, nil
 }
@@ -235,10 +331,14 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 
 // CompleteAgentJob closes a processing job with a terminal status
 // (completed, failed, or ignored) and finishes its open attempt row.
-// Compare-and-set from processing: returns ErrAgentJobNotFound when the job
-// is not currently processing (e.g. the stale-requeue sweeper already took it
-// back), so a slow worker cannot overwrite a requeued job's state.
-func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, status, note string) error {
+//
+// attempt is the claim identity: the Attempts value the caller received from
+// ClaimAgentJobs. The compare-and-set matches on it as well as the status, so
+// a worker whose claim has since been requeued by the stale-claim sweeper (and
+// re-claimed by another worker, incrementing attempts) cannot overwrite the
+// newer claim's outcome. Returns ErrAgentJobNotFound when the job is not
+// processing under that exact claim.
+func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, attempt int, status, note string) error {
 	if status != JobCompleted && status != JobFailed && status != JobIgnored {
 		return fmt.Errorf("invalid terminal job status %q", status)
 	}
@@ -250,8 +350,8 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, status, note 
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
-		  WHERE id = $4 AND status = $5`,
-		status, nullable(note), now, jobID, JobProcessing,
+		  WHERE id = $4 AND status = $5 AND attempts = $6`,
+		status, nullable(note), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {
 		return fmt.Errorf("complete agent job: %w", err)
@@ -273,7 +373,7 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, status, note 
 // dead_letter instead; otherwise it becomes pending with next_run_at pushed
 // out by the exponential backoff for its attempt count. Returns the resulting
 // status so the caller can count dead-letters.
-func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, errMsg string) (string, error) {
+func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
 	now := time.Now().UTC()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -283,8 +383,9 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, errMsg string) (
 
 	var attempts, maxAttempts int
 	err = tx.QueryRowContext(ctx,
-		`SELECT attempts, max_attempts FROM agent_jobs WHERE id = $1 AND status = $2`,
-		jobID, JobProcessing,
+		`SELECT attempts, max_attempts FROM agent_jobs
+		  WHERE id = $1 AND status = $2 AND attempts = $3`,
+		jobID, JobProcessing, attempt,
 	).Scan(&attempts, &maxAttempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrAgentJobNotFound
@@ -308,8 +409,8 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, errMsg string) (
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $4
-		  WHERE id = $5 AND status = $6`,
-		status, nextRun, nullable(errMsg), now, jobID, JobProcessing,
+		  WHERE id = $5 AND status = $6 AND attempts = $7`,
+		status, nextRun, nullable(errMsg), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {
 		return "", fmt.Errorf("retry agent job: %w", err)
@@ -352,7 +453,29 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	}
 	now := time.Now().UTC()
 	cutoff := now.Add(-visibility)
-	res, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin requeue tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Close the attempt rows of the claims we are about to abandon, before the
+	// status flips. Otherwise the timed-out attempt stays open forever: the next
+	// claim opens another running attempt and finishOpenAttempt only ever closes
+	// the newest one, corrupting attempt history and any open-attempt monitoring.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_job_attempts
+		    SET finished_at = $1, status = $2, error = $3
+		  WHERE finished_at IS NULL
+		    AND job_id IN (
+		        SELECT id FROM agent_jobs WHERE status = $4 AND claimed_at < $5
+		    )`,
+		now, JobFailed, "visibility timeout", JobProcessing, cutoff,
+	); err != nil {
+		return 0, 0, fmt.Errorf("close stale attempts: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3
 		  WHERE status = $4 AND claimed_at < $5 AND attempts >= max_attempts`,
@@ -362,7 +485,7 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 		return 0, 0, fmt.Errorf("dead-letter stale jobs: %w", err)
 	}
 	dead, _ := res.RowsAffected()
-	res, err = s.DB.ExecContext(ctx,
+	res, err = tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $2
 		  WHERE status = $4 AND claimed_at < $5`,
@@ -372,6 +495,9 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 		return 0, 0, fmt.Errorf("requeue stale jobs: %w", err)
 	}
 	requeued, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit requeue tx: %w", err)
+	}
 	return requeued, dead, nil
 }
 

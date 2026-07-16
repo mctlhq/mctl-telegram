@@ -116,16 +116,16 @@ func TestCompleteAgentJob_CASFromProcessing(t *testing.T) {
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
 
 	// Completing a pending (unclaimed) job must fail the CAS.
-	if err := s.CompleteAgentJob(ctx, jid, JobCompleted, ""); err != ErrAgentJobNotFound {
+	if err := s.CompleteAgentJob(ctx, jid, 1, JobCompleted, ""); err != ErrAgentJobNotFound {
 		t.Fatalf("complete unclaimed err = %v, want ErrAgentJobNotFound", err)
 	}
 	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := s.CompleteAgentJob(ctx, jid, "sideways", ""); err == nil {
+	if err := s.CompleteAgentJob(ctx, jid, 1, "sideways", ""); err == nil {
 		t.Fatal("invalid terminal status accepted")
 	}
-	if err := s.CompleteAgentJob(ctx, jid, JobCompleted, "done"); err != nil {
+	if err := s.CompleteAgentJob(ctx, jid, 1, JobCompleted, "done"); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	got, err := s.GetAgentJob(ctx, uid, jid)
@@ -162,7 +162,7 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
 		t.Fatalf("claim 1: %v", err)
 	}
-	status, err := s.RetryAgentJob(ctx, jid, "model timeout")
+	status, err := s.RetryAgentJob(ctx, jid, 1, "model timeout")
 	if err != nil {
 		t.Fatalf("retry 1: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
 		t.Fatalf("claim 2: %v", err)
 	}
-	status, err = s.RetryAgentJob(ctx, jid, "model timeout again")
+	status, err = s.RetryAgentJob(ctx, jid, 2, "model timeout again")
 	if err != nil {
 		t.Fatalf("retry 2: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	}
 
 	// Retrying a non-processing job loses the CAS.
-	if _, err := s.RetryAgentJob(ctx, jid, "x"); err != ErrAgentJobNotFound {
+	if _, err := s.RetryAgentJob(ctx, jid, 2, "x"); err != ErrAgentJobNotFound {
 		t.Fatalf("retry dead job err = %v, want ErrAgentJobNotFound", err)
 	}
 }
@@ -215,7 +215,7 @@ func TestRetryAgentJob_LostRaceReturnsNotFound(t *testing.T) {
 	); err != nil {
 		t.Fatalf("external requeue: %v", err)
 	}
-	if _, err := s.RetryAgentJob(ctx, jid, "boom"); err != ErrAgentJobNotFound {
+	if _, err := s.RetryAgentJob(ctx, jid, 1, "boom"); err != ErrAgentJobNotFound {
 		t.Fatalf("lost-race retry err = %v, want ErrAgentJobNotFound", err)
 	}
 	// No spurious attempt row should have been committed.
@@ -228,6 +228,139 @@ func TestRetryAgentJob_LostRaceReturnsNotFound(t *testing.T) {
 	}
 	if attempts != 0 {
 		t.Fatalf("failed-attempt rows = %d, want 0 (rolled back)", attempts)
+	}
+}
+
+func TestStaleClaimCannotCompleteReclaimedJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+
+	// Worker A claims (attempts=1), then stalls past the visibility timeout.
+	first, err := s.ClaimAgentJobs(ctx, "worker-a", 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("claim a: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET claimed_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-10*time.Minute), jid,
+	); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, _, err := s.RequeueStaleAgentJobs(ctx, 5*time.Minute); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	// Worker B re-claims (attempts=2).
+	second, err := s.ClaimAgentJobs(ctx, "worker-b", 1)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("claim b: %v", err)
+	}
+	if second[0].Attempts != 2 {
+		t.Fatalf("second claim attempts = %d, want 2", second[0].Attempts)
+	}
+
+	// Worker A finally finishes: its claim identity (attempt 1) is stale, so it
+	// must NOT overwrite worker B's in-flight claim.
+	if err := s.CompleteAgentJob(ctx, jid, first[0].Attempts, JobCompleted, "late"); err != ErrAgentJobNotFound {
+		t.Fatalf("stale complete err = %v, want ErrAgentJobNotFound", err)
+	}
+	if _, err := s.RetryAgentJob(ctx, jid, first[0].Attempts, "late"); err != ErrAgentJobNotFound {
+		t.Fatalf("stale retry err = %v, want ErrAgentJobNotFound", err)
+	}
+	got, _ := s.GetAgentJob(ctx, uid, jid)
+	if got.Status != JobProcessing {
+		t.Fatalf("job status = %q, want processing (still owned by worker B)", got.Status)
+	}
+	// Worker B's own claim identity still works.
+	if err := s.CompleteAgentJob(ctx, jid, second[0].Attempts, JobCompleted, "done"); err != nil {
+		t.Fatalf("current claim complete: %v", err)
+	}
+}
+
+func TestRequeueStaleAgentJobs_ClosesOpenAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET claimed_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-10*time.Minute), jid,
+	); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, _, err := s.RequeueStaleAgentJobs(ctx, 5*time.Minute); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	// The abandoned claim's attempt row must be closed, not left open forever.
+	var open int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND finished_at IS NULL`, jid,
+	).Scan(&open); err != nil {
+		t.Fatalf("count open: %v", err)
+	}
+	if open != 0 {
+		t.Fatalf("open attempts after requeue = %d, want 0", open)
+	}
+}
+
+func TestInsertEventAndEnqueueJob_Atomic(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	ev := IncomingEvent{
+		EventID: "evt:v1:1:555:1", UserID: uid, Kind: EventKindPrivateMessage,
+		ChatTGID: 555, SenderTGID: 555, MessageID: 1, Body: "hi",
+	}
+	jobID, enqueued, err := s.InsertEventAndEnqueueJob(ctx, ev, conv.ID)
+	if err != nil || !enqueued || jobID == 0 {
+		t.Fatalf("ingest: job=%d enqueued=%v err=%v", jobID, enqueued, err)
+	}
+	// Event and job both exist.
+	if _, err := s.GetIncomingEvent(ctx, uid, ev.EventID); err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if _, err := s.GetAgentJob(ctx, uid, jobID); err != nil {
+		t.Fatalf("job missing: %v", err)
+	}
+	// Redelivery is a no-op.
+	if _, enqueued, err := s.InsertEventAndEnqueueJob(ctx, ev, conv.ID); err != nil || enqueued {
+		t.Fatalf("redelivery: enqueued=%v err=%v, want false/nil", enqueued, err)
+	}
+	// A foreign conversation is rejected.
+	other := seedAgentUser(t, s, "other")
+	ev2 := ev
+	ev2.EventID = "evt:v1:1:555:2"
+	ev2.UserID = other
+	if _, _, err := s.InsertEventAndEnqueueJob(ctx, ev2, conv.ID); err != ErrConversationNotFound {
+		t.Fatalf("foreign conversation err = %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestEnqueueAgentJob_RejectsForeignConversation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+	conv, err := s.EnsureConversation(ctx, owner, 555, "anna", "Anna")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if _, _, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+		EventID: "evt:x", UserID: other, Kind: EventKindPrivateMessage,
+		ChatTGID: 1, SenderTGID: 1, MessageID: 1,
+	}); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if _, _, err := s.EnqueueAgentJob(ctx, "evt:x", other, conv.ID); err != ErrConversationNotFound {
+		t.Fatalf("foreign conversation err = %v, want ErrConversationNotFound", err)
 	}
 }
 

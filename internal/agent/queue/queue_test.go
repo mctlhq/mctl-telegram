@@ -60,7 +60,7 @@ func TestQueue_TransitionsCountMetrics(t *testing.T) {
 		t.Fatalf("processing count = %v, want 1", got)
 	}
 
-	if err := q.Complete(ctx, jobs[0].ID, db.JobCompleted, ""); err != nil {
+	if err := q.Complete(ctx, jobs[0].ID, jobs[0].Attempts, db.JobCompleted, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if got := testutil.ToFloat64(m.AgentJobsTotal.WithLabelValues(db.JobCompleted)); got != 1 {

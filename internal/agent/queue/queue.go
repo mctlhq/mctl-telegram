@@ -54,9 +54,11 @@ func (q *Queue) Claim(ctx context.Context, limit int) ([]db.AgentJob, error) {
 	return jobs, err
 }
 
-// Complete closes a processing job with a terminal status.
-func (q *Queue) Complete(ctx context.Context, jobID int64, status, note string) error {
-	err := q.Store.CompleteAgentJob(ctx, jobID, status, note)
+// Complete closes a processing job with a terminal status. attempt is the
+// claim identity from Claim, so a worker whose claim was requeued cannot
+// overwrite the newer claim's outcome.
+func (q *Queue) Complete(ctx context.Context, jobID int64, attempt int, status, note string) error {
+	err := q.Store.CompleteAgentJob(ctx, jobID, attempt, status, note)
 	if err == nil {
 		q.count(status, 1)
 	}
@@ -64,9 +66,9 @@ func (q *Queue) Complete(ctx context.Context, jobID int64, status, note string) 
 }
 
 // Retry returns a processing job to the queue with backoff, or dead-letters
-// it when attempts are exhausted.
-func (q *Queue) Retry(ctx context.Context, jobID int64, errMsg string) (string, error) {
-	status, err := q.Store.RetryAgentJob(ctx, jobID, errMsg)
+// it when attempts are exhausted. attempt is the claim identity from Claim.
+func (q *Queue) Retry(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	status, err := q.Store.RetryAgentJob(ctx, jobID, attempt, errMsg)
 	if err == nil {
 		q.count(status, 1)
 	}
