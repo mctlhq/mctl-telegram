@@ -67,14 +67,32 @@ func AgentJobBackoff(attempts int) time.Duration {
 // isPostgres reports (and caches) whether the underlying connection is
 // Postgres, using the same pg_catalog probe as Migrate. The claim query is
 // the one place the two dialects genuinely diverge (FOR UPDATE SKIP LOCKED).
+//
+// The result is cached only once the probe returns a DEFINITIVE answer:
+// nil error (the pg_catalog table exists ⇒ Postgres) or a genuine
+// "relation does not exist" from SQLite (⇒ not Postgres). A transient error —
+// a cancelled/timed-out context, a dropped connection — is NOT cached, so a
+// probe that fails for a reason unrelated to the dialect re-probes next call
+// instead of permanently poisoning every future claim onto the wrong path.
 func (s *Store) isPostgres(ctx context.Context) bool {
-	s.pgOnce.Do(func() {
-		if err := s.DB.QueryRowContext(ctx,
-			"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
-		).Scan(new(int)); err == nil {
-			s.pgFlag = true
-		}
-	})
+	s.pgMu.Lock()
+	defer s.pgMu.Unlock()
+	if s.pgResolved {
+		return s.pgFlag
+	}
+	err := s.DB.QueryRowContext(ctx,
+		"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
+	).Scan(new(int))
+	switch {
+	case err == nil:
+		s.pgFlag, s.pgResolved = true, true
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Transient — do not cache; re-probe on the next call.
+	default:
+		// The query itself was rejected (SQLite has no pg_catalog.pg_database):
+		// a definitive "not Postgres".
+		s.pgFlag, s.pgResolved = false, true
+	}
 	return s.pgFlag
 }
 
@@ -281,13 +299,23 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, errMsg string) (
 		status = JobDeadLetter
 		nextRun = now
 	}
-	if _, err := tx.ExecContext(ctx,
+	// The SELECT above took no row lock, so between it and this UPDATE another
+	// transaction (e.g. the stale-claim sweeper) may have moved the row out of
+	// processing. Guard on status again and check RowsAffected: a zero count
+	// means we lost that race, so roll back (the deferred Rollback discards the
+	// spurious attempt row too) and report it rather than returning a status we
+	// never actually wrote.
+	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $4
 		  WHERE id = $5 AND status = $6`,
 		status, nextRun, nullable(errMsg), now, jobID, JobProcessing,
-	); err != nil {
+	)
+	if err != nil {
 		return "", fmt.Errorf("retry agent job: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", ErrAgentJobNotFound
 	}
 	if err := finishOpenAttempt(ctx, tx, jobID, JobFailed, errMsg, now); err != nil {
 		return "", err

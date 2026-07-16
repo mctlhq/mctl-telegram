@@ -200,6 +200,37 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	}
 }
 
+func TestRetryAgentJob_LostRaceReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.ClaimAgentJobs(ctx, "r", 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// Simulate another transaction (the stale-claim sweeper) moving the row
+	// out of processing between the retry's SELECT and its UPDATE.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET status = $1 WHERE id = $2`, JobPending, jid,
+	); err != nil {
+		t.Fatalf("external requeue: %v", err)
+	}
+	if _, err := s.RetryAgentJob(ctx, jid, "boom"); err != ErrAgentJobNotFound {
+		t.Fatalf("lost-race retry err = %v, want ErrAgentJobNotFound", err)
+	}
+	// No spurious attempt row should have been committed.
+	var attempts int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND status = $2`,
+		jid, JobFailed,
+	).Scan(&attempts); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if attempts != 0 {
+		t.Fatalf("failed-attempt rows = %d, want 0 (rolled back)", attempts)
+	}
+}
+
 func TestRequeueStaleAgentJobs(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
