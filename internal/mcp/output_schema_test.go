@@ -32,6 +32,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"set_telegram_access", first(s.toolSetAccess())},
 		{"set_account_send", first(s.toolSetAccountSend())},
 		{"send_message", first(s.toolSendMessage())},
+		{"send_media", first(s.toolSendMedia())},
 		{"pin_message", first(s.toolPinMessage())},
 		{"edit_message", first(s.toolEditMessage())},
 		{"delete_messages", first(s.toolDeleteMessages())},

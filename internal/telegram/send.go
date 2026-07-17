@@ -49,10 +49,6 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		}, nil
 	}
 
-	inputPeer, err := ResolvePeerCached(ctx, c, peer, cache, userID)
-	if err != nil {
-		return nil, err
-	}
 	var randomID int64
 	{
 		var b [8]byte
@@ -61,45 +57,51 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		}
 		randomID = int64(binary.LittleEndian.Uint64(b[:]))
 	}
-	updates, sendErr := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-		Peer:     inputPeer,
-		Message:  text,
-		RandomID: randomID,
+	updates, err := sendWithPeerRetry(ctx, c, peer, cache, userID, func(inputPeer tg.InputPeerClass) (tg.UpdatesClass, error) {
+		return c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     inputPeer,
+			Message:  text,
+			RandomID: randomID,
+		})
 	})
-	if sendErr != nil {
-		var rpcErr *tgerr.Error
-		if errors.As(sendErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
-			// Evict the stale entry and retry once. PEER_ID_INVALID guarantees
-			// MessagesSendMessage did NOT deliver the message, so a single retry
-			// after fresh resolution carries no double-send risk.
-			cache.Evict(userID, peer)
-			if inputPeer2, err2 := ResolvePeerCached(ctx, c, peer, cache, userID); err2 == nil {
-				updates2, sendErr2 := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-					Peer:     inputPeer2,
-					Message:  text,
-					RandomID: randomID,
-				})
-				if sendErr2 == nil {
-					return &SendResult{
-						Sent:      true,
-						Mode:      "send",
-						PeerInput: peer,
-						Text:      text,
-						MessageID: extractMessageID(updates2),
-					}, nil
-				}
-			}
-		}
-		return nil, fmt.Errorf("send: %w", sendErr)
+	if err != nil {
+		return nil, err
 	}
-	msgID := extractMessageID(updates)
 	return &SendResult{
 		Sent:      true,
 		Mode:      "send",
 		PeerInput: peer,
 		Text:      text,
-		MessageID: msgID,
+		MessageID: extractMessageID(updates),
 	}, nil
+}
+
+// sendWithPeerRetry resolves peer via ResolvePeerCached and invokes send once
+// with the resolved InputPeerClass. If send fails with PEER_ID_INVALID (and a
+// cache is configured), it evicts the stale cache entry, re-resolves once,
+// and retries send exactly once with the fresh peer. PEER_ID_INVALID
+// guarantees the prior RPC did NOT deliver anything, so this single retry
+// carries no double-send risk. Shared by SendMessage and SendMedia so the
+// retry dance lives in exactly one place.
+func sendWithPeerRetry(ctx context.Context, c *telegram.Client, peer string, cache *PeerCache, userID int64, send func(tg.InputPeerClass) (tg.UpdatesClass, error)) (tg.UpdatesClass, error) {
+	inputPeer, err := ResolvePeerCached(ctx, c, peer, cache, userID)
+	if err != nil {
+		return nil, err
+	}
+	updates, sendErr := send(inputPeer)
+	if sendErr != nil {
+		var rpcErr *tgerr.Error
+		if errors.As(sendErr, &rpcErr) && rpcErr.Message == "PEER_ID_INVALID" && cache != nil {
+			cache.Evict(userID, peer)
+			if inputPeer2, err2 := ResolvePeerCached(ctx, c, peer, cache, userID); err2 == nil {
+				if updates2, sendErr2 := send(inputPeer2); sendErr2 == nil {
+					return updates2, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("send: %w", sendErr)
+	}
+	return updates, nil
 }
 
 func extractMessageID(u tg.UpdatesClass) int {

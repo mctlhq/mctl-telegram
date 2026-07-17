@@ -101,6 +101,64 @@ func TestLoadAPIRateLimitEnvVars(t *testing.T) {
 	}
 }
 
+// TestLoadMediaUploadMaxBytes mirrors the download cap's coverage: default
+// value and an env override, plus independence from MEDIA_DOWNLOAD_MAX_BYTES
+// (the two caps must not accidentally share one knob).
+func TestLoadMediaUploadMaxBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want int64
+	}{
+		{
+			name: "default is 20 MiB",
+			env:  map[string]string{},
+			want: 20971520,
+		},
+		{
+			name: "env override",
+			env:  map[string]string{"MEDIA_UPLOAD_MAX_BYTES": "1048576"},
+			want: 1048576,
+		},
+		{
+			name: "garbage value falls back to default",
+			env:  map[string]string{"MEDIA_UPLOAD_MAX_BYTES": "notanumber"},
+			want: 20971520,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.MediaUploadMaxBytes != tc.want {
+				t.Errorf("MediaUploadMaxBytes = %d, want %d", cfg.MediaUploadMaxBytes, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap guards against the
+// two caps being accidentally collapsed into one env var — see design.md's
+// "Alternatives" section for why they are deliberately independent.
+func TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap(t *testing.T) {
+	t.Setenv("MEDIA_DOWNLOAD_MAX_BYTES", "5000000")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.MediaDownloadMaxBytes != 5000000 {
+		t.Errorf("MediaDownloadMaxBytes = %d, want 5000000", cfg.MediaDownloadMaxBytes)
+	}
+	if cfg.MediaUploadMaxBytes != 20971520 {
+		t.Errorf("MediaUploadMaxBytes = %d, want unaffected default 20971520, got %d", cfg.MediaUploadMaxBytes, cfg.MediaUploadMaxBytes)
+	}
+}
+
 func TestLoadToolFilter(t *testing.T) {
 	tests := []struct {
 		name    string

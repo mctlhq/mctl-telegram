@@ -48,6 +48,9 @@ type Server struct {
 	// MediaDownloadMaxBytes is the maximum number of bytes allowed per get_media
 	// download. 0 means no cap.
 	MediaDownloadMaxBytes int64
+	// MediaUploadMaxBytes is the maximum number of bytes allowed per send_media
+	// upload (file_url fetch or file_base64 decode). 0 means no cap.
+	MediaUploadMaxBytes int64
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -138,6 +141,7 @@ func (s *Server) HTTPHandler() http.Handler {
 	{t, h := s.toolPinMessage(); s.addTool(srv, t, h)}
 	{t, h := s.toolPrepareGetMedia(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetMedia(); s.addTool(srv, t, h)}
+	{t, h := s.toolSendMedia(); s.addTool(srv, t, h)}
 	{t, h := s.toolDisconnectAccount(); s.addTool(srv, t, h)}
 	{t, h := s.toolDeleteAccount(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetMyAuditLog(); s.addTool(srv, t, h)}
