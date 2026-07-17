@@ -526,6 +526,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 				if int64(len(data)) > tg.DefaultMediaUploadMaxBytes {
 					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_base64 decodes to %d bytes, exceeding the %d-byte upload cap", len(data), tg.DefaultMediaUploadMaxBytes))
 				}
+				mimeType = http.DetectContentType(data[:min(512, len(data))])
 			case args.FileURL != "":
 				var err error
 				data, mimeType, err = tg.FetchGuardedURL(ctx, args.FileURL, tg.DefaultMediaUploadMaxBytes, 60*time.Second)

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -428,7 +429,7 @@ func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 str
 		if s.MediaUploadMaxBytes > 0 && int64(len(data)) > s.MediaUploadMaxBytes {
 			return nil, "", fmt.Errorf("file_base64 decodes to %d bytes, exceeding the %d-byte upload cap", len(data), s.MediaUploadMaxBytes)
 		}
-		return data, "", nil
+		return data, http.DetectContentType(data[:min(512, len(data))]), nil
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, sendMediaFetchTimeout)
 	defer cancel()
