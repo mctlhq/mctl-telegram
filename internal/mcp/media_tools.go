@@ -35,6 +35,16 @@ type getMediaResult struct {
 	Data      string `json:"data"` // standard base64
 }
 
+// sendMediaFetchTimeout bounds a send_media file_url fetch, mirroring the
+// 60s cap toolGetMedia uses for downloads.
+const sendMediaFetchTimeout = 60 * time.Second
+
+// maxCaptionLen mirrors Telegram's documented media-caption limit (1024
+// characters — shorter than the 4096-character plain message-text limit
+// send_message operates under). Applied defensively client-side, rather than
+// relying on Telegram's own MEDIA_CAPTION_TOO_LONG error.
+const maxCaptionLen = 1024
+
 func (s *Server) toolPrepareGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("prepare_get_media",
 		mcplib.WithTitleAnnotation("Prepare a media download"),
@@ -262,4 +272,169 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		})
 	}
 	return tool, handler
+}
+
+func (s *Server) toolSendMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("send_media",
+		mcplib.WithTitleAnnotation("Send Telegram Media"),
+		// Annotations describe the worst-case real behavior, same rationale as
+		// send_message: the server-side gate, not the annotation, is what keeps
+		// tg.mctl.ai in dry-run by default.
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(true),
+		mcplib.WithOutputSchema[telegram.SendMediaResult](),
+		mcplib.WithDescription(`Send a photo, video, document, or animation (gif) to a Telegram peer, with an optional caption.
+
+Draft-by-default: like send_message, media is sent for real only when the server send gate
+is fully open (ALLOW_SEND=true, the telegram:messages:send scope, and per-account
+send_enabled=true). Otherwise this returns a dry-run preview (sent=false) with a dry_reason —
+nothing is fetched, decoded, or sent. The result's "sent" field tells you which happened.
+
+Inputs (required):
+  peer       — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
+  media_type — one of "photo", "video", "document", "animation". animation (gif) is sent as
+               a distinct type from video and is never relabeled as a plain video.
+  Exactly one of:
+    file_url    — an HTTPS URL this server fetches and re-uploads. Must resolve to a public
+                  address; loopback, link-local, and private-range addresses are refused.
+    file_base64 — standard base64-encoded file bytes.
+
+Inputs (optional):
+  caption   — text attached to the media (truncated to Telegram's ~1024-char caption limit).
+  file_name — REQUIRED when media_type="document" and file_base64 is the source; optional
+              display name for the other media types.
+
+Both the file_url fetch and the file_base64 decode are capped by MEDIA_UPLOAD_MAX_BYTES
+(default 20 MiB) and are only ever performed on the real-send path — a draft or gate-denied
+call never fetches a URL or decodes base64.`),
+		mcplib.WithString("peer",
+			mcplib.Required(),
+			mcplib.Description("Peer to send to."),
+		),
+		mcplib.WithString("media_type",
+			mcplib.Required(),
+			mcplib.Description(`One of "photo", "video", "document", "animation".`),
+		),
+		mcplib.WithString("file_url",
+			mcplib.Description("HTTPS URL to fetch and send. Exactly one of file_url/file_base64 is required."),
+		),
+		mcplib.WithString("file_base64",
+			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64 is required."),
+		),
+		mcplib.WithString("caption",
+			mcplib.Description("Optional caption text for the media."),
+		),
+		mcplib.WithString("file_name",
+			mcplib.Description(`Required when media_type="document" and file_base64 is used; optional display name otherwise.`),
+		),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		// Checked eagerly, ahead of gate evaluation and any I/O — a deliberate
+		// strengthening over send_message's pattern (which only checks the
+		// scope deep inside evaluateSendGate). send_media has an extra
+		// externally-triggerable I/O step (file_url) send_message doesn't, so a
+		// caller lacking the scope must never reach it.
+		if err := requireScope(id, "telegram:messages:send"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		peer := stringArg(args, "peer", "")
+		mediaType := stringArg(args, "media_type", "")
+		fileURL := stringArg(args, "file_url", "")
+		fileB64 := stringArg(args, "file_base64", "")
+		caption := truncate(stringArg(args, "caption", ""), maxCaptionLen)
+		fileName := stringArg(args, "file_name", "")
+
+		if peer == "" {
+			return mcplib.NewToolResultError("peer is required"), nil
+		}
+		if !telegram.ValidMediaTypes[mediaType] {
+			return mcplib.NewToolResultError(`media_type must be one of "photo", "video", "document", "animation"`), nil
+		}
+		if (fileURL == "") == (fileB64 == "") {
+			return mcplib.NewToolResultError("exactly one of file_url and file_base64 is required"), nil
+		}
+		if mediaType == "document" && fileB64 != "" && fileName == "" {
+			return mcplib.NewToolResultError(`file_name is required when media_type is "document" and file_base64 is used`), nil
+		}
+
+		peerRedacted := telegram.RedactPeer(peer)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		if canSend {
+			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+				canSend = false
+				dryReason = r
+			}
+		}
+		if !canSend {
+			// Draft-by-default: when the gate denies, return a successful
+			// dry-run preview (not an error) without fetching file_url or
+			// decoding file_base64 — a denied call must perform no meaningful
+			// I/O. Resolving the byte source only happens in the real-send
+			// branch below.
+			s.audit(ctx, id, "send_media:draft", peerRedacted, nil, startedAt)
+			result, _ := telegram.SendMedia(ctx, nil, peer, mediaType, nil, fileName, "", caption, false, dryReason, nil, 0)
+			return jsonResult(result)
+		}
+
+		if s.Hub != nil {
+			accountMode, modeErr := s.Store.GetAccountMode(ctx, id.UserID)
+			if modeErr == nil && accountMode == "local" {
+				// Gates passed server-side; signal the daemon to really send —
+				// same mode-injection contract send_message relies on.
+				args["mode"] = "send"
+				res, err2 := s.bridgeCall(ctx, id, "send_media", args)
+				s.audit(ctx, id, "send_media:via-bridge", peerRedacted, bridgeResultErr(res), startedAt, "local")
+				return res, err2
+			}
+		}
+
+		// Hosted mode, real send: this is the ONLY branch that fetches
+		// file_url or decodes file_base64.
+		data, mimeType, resolveErr := s.resolveSendMediaBytes(ctx, fileURL, fileB64)
+		if resolveErr != nil {
+			s.audit(ctx, id, "send_media:sent", peerRedacted, resolveErr, startedAt)
+			return toolErr("send_media: %v", resolveErr), nil
+		}
+
+		var result *telegram.SendMediaResult
+		err := s.borrowWithRetry(ctx, "send_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			var inner error
+			result, inner = telegram.SendMedia(ctx, c, peer, mediaType, data, fileName, mimeType, caption, true, "", s.PeerCache, id.UserID)
+			return inner
+		})
+		s.audit(ctx, id, "send_media:sent", peerRedacted, err, startedAt)
+		if err != nil {
+			return borrowErrResult("send_media", err), nil
+		}
+		return jsonResult(result)
+	}
+	return tool, handler
+}
+
+// resolveSendMediaBytes decodes file_base64 or fetches file_url (SSRF-guarded),
+// enforcing s.MediaUploadMaxBytes before returning. Exactly one of fileURL/
+// fileB64 is non-empty — the caller has already validated that. Only ever
+// called from send_media's real-send branch.
+func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 string) ([]byte, string, error) {
+	if fileB64 != "" {
+		data, err := base64.StdEncoding.DecodeString(fileB64)
+		if err != nil {
+			return nil, "", fmt.Errorf("file_base64: invalid base64: %w", err)
+		}
+		if s.MediaUploadMaxBytes > 0 && int64(len(data)) > s.MediaUploadMaxBytes {
+			return nil, "", fmt.Errorf("file_base64 decodes to %d bytes, exceeding the %d-byte upload cap", len(data), s.MediaUploadMaxBytes)
+		}
+		return data, "", nil
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, sendMediaFetchTimeout)
+	defer cancel()
+	data, mimeType, err := telegram.FetchGuardedURL(fetchCtx, fileURL, s.MediaUploadMaxBytes, sendMediaFetchTimeout)
+	if err != nil {
+		return nil, "", fmt.Errorf("file_url: %w", err)
+	}
+	return data, mimeType, nil
 }
