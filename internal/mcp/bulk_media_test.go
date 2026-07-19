@@ -38,20 +38,33 @@ func newNonDownloadableMessage(id int) (*tg.Message, telegram.Message) {
 }
 
 // stubDownloader swaps the package-level mediaDownloader for the duration of
-// the test, restoring the original afterward.
-func stubDownloader(t *testing.T, fn func(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error)) {
+// the test, restoring the original afterward. The stub's bool return mirrors
+// mediaDownloader's "did the download callback actually run" signal — most
+// tests want true (simulating a real download attempt); tests covering the
+// pre-borrow-failure path pass false.
+func stubDownloader(t *testing.T, fn func(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool)) {
 	t.Helper()
 	orig := mediaDownloader
-	mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error) {
+	mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
 		return fn(ctx, userID, loc, maxBytes)
 	}
 	t.Cleanup(func() { mediaDownloader = orig })
 }
 
+// withBulkMediaByteCap temporarily overrides BulkMediaByteCap for a test,
+// restoring the original afterward, so aggregate-cap tests don't need to
+// allocate megabytes of fixture data.
+func withBulkMediaByteCap(t *testing.T, n int64) {
+	t.Helper()
+	orig := BulkMediaByteCap
+	BulkMediaByteCap = n
+	t.Cleanup(func() { BulkMediaByteCap = orig })
+}
+
 func TestFetchMediaInline_AllNonDownloadable(t *testing.T) {
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		t.Fatal("downloader must not be called for non-downloadable items")
-		return nil, nil
+		return nil, nil, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -80,9 +93,9 @@ func TestFetchMediaInline_AllNonDownloadable(t *testing.T) {
 }
 
 func TestFetchMediaInline_NoMediaNotCountedAsSkipped(t *testing.T) {
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		t.Fatal("downloader must not be called for a plain text message")
-		return nil, nil
+		return nil, nil, true
 	})
 	rawMsgs := []*tg.Message{{ID: 1}} // no Media at all: plain text
 	msgs := []telegram.Message{{ID: 1}}
@@ -98,8 +111,8 @@ func TestFetchMediaInline_NoMediaNotCountedAsSkipped(t *testing.T) {
 }
 
 func TestFetchMediaInline_UnderCap(t *testing.T) {
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
-		return []byte("data"), nil
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		return []byte("data"), nil, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -125,8 +138,8 @@ func TestFetchMediaInline_UnderCap(t *testing.T) {
 }
 
 func TestFetchMediaInline_OverCap(t *testing.T) {
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
-		return []byte("data"), nil
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		return []byte("data"), nil, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -156,9 +169,9 @@ func TestFetchMediaInline_OverCap(t *testing.T) {
 
 func TestFetchMediaInline_SizeExceeded(t *testing.T) {
 	called := false
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		called = true
-		return []byte("data"), nil
+		return []byte("data"), nil, true
 	})
 	raw, decoded := newDownloadableMessage(1, 5000)
 	s := &Server{MediaDownloadMaxBytes: 1000}
@@ -176,8 +189,8 @@ func TestFetchMediaInline_SizeExceeded(t *testing.T) {
 }
 
 func TestFetchMediaInline_DownloadError(t *testing.T) {
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
-		return nil, errors.New("boom")
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		return nil, errors.New("boom"), true
 	})
 	raw, decoded := newDownloadableMessage(1, 100)
 	rawMsgs := []*tg.Message{raw}
@@ -203,12 +216,12 @@ func TestFetchMediaInline_DownloadError(t *testing.T) {
 // instead of stopping after five.
 func TestFetchMediaInline_CapBoundsAttempts(t *testing.T) {
 	calls := 0
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		calls++
 		if calls <= 2 {
-			return nil, errors.New("transient boom")
+			return nil, errors.New("transient boom"), true
 		}
-		return []byte("data"), nil
+		return []byte("data"), nil, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -239,9 +252,9 @@ func TestFetchMediaInline_CapBoundsAttempts(t *testing.T) {
 // propagate to the caller instead of being silently folded into Skipped.
 func TestFetchMediaInline_SystemicErrorAbortsLoop(t *testing.T) {
 	calls := 0
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		calls++
-		return nil, db.ErrSessionRevoked
+		return nil, db.ErrSessionRevoked, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -270,9 +283,9 @@ func TestFetchMediaInline_SystemicErrorAbortsLoop(t *testing.T) {
 // let both handlers audit a canceled invocation as successful).
 func TestFetchMediaInline_ContextCanceledAbortsLoop(t *testing.T) {
 	calls := 0
-	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		calls++
-		return nil, context.Canceled
+		return nil, context.Canceled, true
 	})
 	var rawMsgs []*tg.Message
 	var msgs []telegram.Message
@@ -291,5 +304,92 @@ func TestFetchMediaInline_ContextCanceledAbortsLoop(t *testing.T) {
 	}
 	if summary.Fetched != 0 || summary.Skipped != 0 {
 		t.Errorf("summary = %+v, want Fetched=0 Skipped=0 (a canceled download is not a per-item skip)", summary)
+	}
+}
+
+// TestFetchMediaInline_AggregateByteCap locks in the fix for Codex's P1
+// ("Enforce an aggregate encoded-response cap"): even with each item well
+// under BulkMediaFetchCap and the per-file size limit, the running total
+// must stop growing once BulkMediaByteCap is reached. A declared-size item
+// that no longer fits the remaining budget is skipped outright (same
+// pre-check the per-file size limit already uses), not partially
+// downloaded — so calls to the downloader stop as soon as the budget can no
+// longer fit another full item.
+func TestFetchMediaInline_AggregateByteCap(t *testing.T) {
+	withBulkMediaByteCap(t, 250) // room for exactly 2 items at 100 bytes each
+	calls := 0
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		calls++
+		return make([]byte, 100), nil, true
+	})
+	var rawMsgs []*tg.Message
+	var msgs []telegram.Message
+	for i := 1; i <= 5; i++ {
+		raw, decoded := newDownloadableMessage(i, 100)
+		rawMsgs = append(rawMsgs, raw)
+		msgs = append(msgs, decoded)
+	}
+	s := &Server{MediaDownloadMaxBytes: 1000} // per-file cap is not the binding constraint here
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Item 1: fits (remaining 250 >= 100), total 100. Item 2: fits
+	// (remaining 150 >= 100), total 200. Item 3: declared size 100 exceeds
+	// the remaining budget (50), so it — and every item after it, since the
+	// budget never grows back — is skipped without ever reaching the
+	// downloader.
+	if calls != 2 {
+		t.Errorf("downloader called %d times, want 2 — the aggregate cap must stop new downloads once the remaining budget can't fit another item", calls)
+	}
+	if summary.Fetched != 2 {
+		t.Errorf("summary.Fetched = %d, want 2", summary.Fetched)
+	}
+	if summary.Skipped != 3 {
+		t.Errorf("summary.Skipped = %d, want 3", summary.Skipped)
+	}
+	for i, m := range msgs {
+		if i < 2 && m.MediaData == nil {
+			t.Errorf("msgs[%d] should have been fetched (within the byte budget)", i)
+		}
+		if i >= 2 && m.MediaData != nil {
+			t.Errorf("msgs[%d] should have been skipped (byte budget exhausted)", i)
+		}
+	}
+}
+
+// TestFetchMediaInline_UnclassifiedBorrowFailureAbortsLoop locks in the fix
+// for Codex's P2 ("Propagate unclassified pool failures"): an error from a
+// download whose callback never ran (Borrow failed in its own
+// preflight/acquire/startup path — e.g. a transient CheckSessionValid
+// database error) is systemic even though it matches none of
+// isSystemicPoolErr's known sentinels, and must abort the loop rather than
+// being folded into Skipped.
+func TestFetchMediaInline_UnclassifiedBorrowFailureAbortsLoop(t *testing.T) {
+	calls := 0
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		calls++
+		// attempted=false: Borrow failed before the download callback ran,
+		// same shape as a CheckSessionValid DB error or client-startup
+		// failure — isSystemicPoolErr would not recognize this error type.
+		return nil, errors.New("db: connection reset"), false
+	})
+	var rawMsgs []*tg.Message
+	var msgs []telegram.Message
+	for i := 1; i <= 3; i++ {
+		raw, decoded := newDownloadableMessage(i, 100)
+		rawMsgs = append(rawMsgs, raw)
+		msgs = append(msgs, decoded)
+	}
+	s := &Server{MediaDownloadMaxBytes: 1000}
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if err == nil {
+		t.Fatal("expected the unclassified borrow failure to propagate, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("downloader called %d times, want 1 — a pre-callback borrow failure must abort the loop immediately", calls)
+	}
+	if summary.Fetched != 0 || summary.Skipped != 0 {
+		t.Errorf("summary = %+v, want Fetched=0 Skipped=0 (not a per-item skip)", summary)
 	}
 }

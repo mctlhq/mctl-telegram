@@ -17,6 +17,18 @@ import (
 // history page is dense with large files.
 const BulkMediaFetchCap = 5
 
+// BulkMediaByteCap bounds the total raw bytes fetchMediaInline may pull
+// across ALL items in one bulk fetch call, independent of the per-file
+// MEDIA_DOWNLOAD_MAX_BYTES setting. Without it, BulkMediaFetchCap successful
+// downloads near the per-file default (20 MiB) could balloon a single
+// response past 100 MiB raw — more once base64-encoded and duplicated into
+// both the text and structured MCP response fields by jsonResult — and
+// MEDIA_DOWNLOAD_MAX_BYTES=0 (documented as uncapped for a single get_media
+// call) would remove the per-file half of that bound entirely. A package
+// variable, not a const, so tests can shrink it instead of allocating
+// megabytes of fixture data.
+var BulkMediaByteCap int64 = telegram.DefaultMediaDownloadMaxBytes
+
 // FetchMediaSummary is attached to messagesResult whenever fetch_media=true
 // was requested (even when Fetched is 0), so callers can distinguish "nothing
 // downloadable on this page" from "fetch_media wasn't set".
@@ -30,22 +42,29 @@ type FetchMediaSummary struct {
 // tests can exercise the cap/skip/error bookkeeping without a live Telegram
 // connection. Production code always calls through to
 // (*Server).downloadMediaViaPool; tests that reassign this package variable
-// must restore the original via t.Cleanup.
-var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error) {
+// must restore the original via t.Cleanup. The third return value reports
+// whether the download callback itself ran — false means Borrow failed in
+// its own preflight/acquire/client-startup path (session check, pool
+// capacity, connection setup) before ever reaching the callback, which
+// fetchMediaInline treats as systemic regardless of the error's type.
+var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
 	return s.downloadMediaViaPool(ctx, userID, loc, maxBytes)
 }
 
 // downloadMediaViaPool borrows a pooled client and downloads loc's bytes,
 // mirroring the pattern toolGetMedia uses for the two-step flow
-// (s.borrowWithRetry + telegram.DownloadMedia).
-func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error) {
+// (s.borrowWithRetry + telegram.DownloadMedia). The bool return reports
+// whether the download callback was actually invoked — see mediaDownloader.
+func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
 	var buf []byte
+	attempted := false
 	err := s.borrowWithRetry(ctx, "fetch_media", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		attempted = true
 		var derr error
 		buf, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
 		return derr
 	})
-	return buf, err
+	return buf, err, attempted
 }
 
 // isSystemicPoolErr reports whether err represents a call-wide failure that
@@ -56,6 +75,14 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 // message), or the caller's context being canceled/deadline-exceeded (the
 // client disconnected or the request timed out — continuing to attempt
 // further downloads, or auditing the call as successful, would be wrong).
+//
+// This covers every *known* systemic error, but ClientPool.Borrow's own
+// preflight (CheckSessionValid), acquire, and client-startup paths can also
+// surface arbitrary unclassified errors (a transient database error, a
+// generic connection failure) that match none of these sentinels. Callers
+// should treat any error from a download that never reached the callback
+// (see mediaDownloader's attempted return) as systemic too, regardless of
+// whether isSystemicPoolErr recognizes it.
 func isSystemicPoolErr(err error) bool {
 	return sessionErrText(err) != "" ||
 		errors.Is(err, telegram.ErrPoolFull) ||
@@ -66,21 +93,25 @@ func isSystemicPoolErr(err error) bool {
 // fetchMediaInline attempts to download media bytes for each message in
 // rawMsgs/msgs (parallel slices: same length, same order, one raw wire
 // message per decoded Message), initiating at most BulkMediaFetchCap
-// downloads. It mutates MediaData on each message it successfully
-// downloads; items left un-fetched due to the cap, the size limit, a
-// non-downloadable media type, protected content, or a per-item download
-// error are left with MediaData == nil and counted in the returned
-// summary's Skipped field (messages with no media at all are not counted —
-// there was nothing to skip).
+// downloads and never pulling more than BulkMediaByteCap raw bytes in
+// total across the whole call. It mutates MediaData on each message it
+// successfully downloads; items left un-fetched due to either cap, the
+// per-item size limit, a non-downloadable media type, protected content, or
+// a per-item download error are left with MediaData == nil and counted in
+// the returned summary's Skipped field (messages with no media at all are
+// not counted — there was nothing to skip).
 //
-// Returns a non-nil error only for a systemic failure (see
-// isSystemicPoolErr) encountered mid-loop — e.g. the session was revoked
-// while paging through history, or the caller's context was canceled or hit
-// its deadline. That aborts the loop immediately; the caller should treat
-// it the same as the initial fetch's error (via borrowErrResult) rather
-// than folding it into Skipped or auditing the call as successful. All
-// other per-item failures keep the loop going and are logged at DEBUG
-// level.
+// Returns a non-nil error for a systemic failure (see isSystemicPoolErr) or
+// for any error from a download whose callback never ran (Borrow failed in
+// its own preflight/acquire/startup path with an error isSystemicPoolErr
+// doesn't recognize) encountered mid-loop — e.g. the session was revoked
+// while paging through history, the caller's context was canceled or hit
+// its deadline, or a transient database error rejected the borrow before
+// any bytes were requested. That aborts the loop immediately; the caller
+// should treat it the same as the initial fetch's error (via
+// borrowErrResult) rather than folding it into Skipped or auditing the call
+// as successful. All other per-item failures keep the loop going and are
+// logged at DEBUG level.
 func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*tg.Message, msgs []telegram.Message) (FetchMediaSummary, error) {
 	summary := FetchMediaSummary{Cap: BulkMediaFetchCap}
 	n := len(rawMsgs)
@@ -88,6 +119,7 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 		n = len(msgs)
 	}
 	attempted := 0
+	var totalBytes int64
 	for i := 0; i < n; i++ {
 		loc, err := telegram.ExtractMediaLocation(rawMsgs[i])
 		if err != nil || loc == nil {
@@ -101,24 +133,39 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 			// was never anything to skip.
 			continue
 		}
-		if info := msgs[i].MediaInfo; info != nil && info.Size > 0 && s.MediaDownloadMaxBytes > 0 && info.Size > s.MediaDownloadMaxBytes {
-			summary.Skipped++
-			continue
-		}
 		if attempted >= BulkMediaFetchCap {
 			summary.Skipped++
 			continue
 		}
+		remaining := BulkMediaByteCap - totalBytes
+		if remaining <= 0 {
+			summary.Skipped++
+			continue
+		}
+		// The effective per-item cap is the smaller of what remains of the
+		// aggregate budget and the configured per-file limit (0 =
+		// unbounded), so a page of several near-cap files — or files at all
+		// when MEDIA_DOWNLOAD_MAX_BYTES=0 — can't multiply past
+		// BulkMediaByteCap raw bytes for the whole call.
+		perItemCap := remaining
+		if s.MediaDownloadMaxBytes > 0 && s.MediaDownloadMaxBytes < perItemCap {
+			perItemCap = s.MediaDownloadMaxBytes
+		}
+		if info := msgs[i].MediaInfo; info != nil && info.Size > 0 && info.Size > perItemCap {
+			summary.Skipped++
+			continue
+		}
 		attempted++
-		data, dlErr := mediaDownloader(s, ctx, userID, *loc, s.MediaDownloadMaxBytes)
+		data, dlErr, attemptedFn := mediaDownloader(s, ctx, userID, *loc, perItemCap)
 		if dlErr != nil {
-			if isSystemicPoolErr(dlErr) {
+			if isSystemicPoolErr(dlErr) || !attemptedFn {
 				return summary, dlErr
 			}
 			summary.Skipped++
 			slog.Debug("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
 			continue
 		}
+		totalBytes += int64(len(data))
 		encoded := base64.StdEncoding.EncodeToString(data)
 		msgs[i].MediaData = &encoded
 		summary.Fetched++
