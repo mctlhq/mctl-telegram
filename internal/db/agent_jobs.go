@@ -273,14 +273,29 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int)
 	// probe is unresolved) it is what makes a concurrent double-select safe:
 	// the loser blocks on the row lock, re-evaluates the predicate against the
 	// winner's committed row, sees processing, and skips it.
+	//
+	// The NOT EXISTS clause serializes each conversation: a job is claimable
+	// only when no earlier job (by id — arrival order) of the same
+	// conversation is still pending or in flight. Without it, two replicas
+	// could claim messages 1 and 2 of one dialog concurrently (SKIP LOCKED
+	// happily skips past a locked older row) and answer message 2 first —
+	// e.g. replying after an owner takeover that message 1 would have
+	// recorded. Head-of-line blocking per conversation is intentional:
+	// message order beats throughput inside a dialog. Jobs without a
+	// conversation are unconstrained (the NULL comparison never matches).
 	rows, err := tx.QueryContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, attempts = attempts + 1,
 		        claimed_by = $2, claimed_at = $3, updated_at = $3
 		  WHERE status = $4 AND id IN (
-		        SELECT id FROM agent_jobs
-		         WHERE status = $4 AND next_run_at <= $3
-		         ORDER BY next_run_at, id
+		        SELECT j.id FROM agent_jobs j
+		         WHERE j.status = $4 AND j.next_run_at <= $3
+		           AND NOT EXISTS (
+		               SELECT 1 FROM agent_jobs p
+		                WHERE p.conversation_id = j.conversation_id
+		                  AND (p.status = $1 OR (p.status = $4 AND p.id < j.id))
+		           )
+		         ORDER BY j.next_run_at, j.id
 		         LIMIT $5`+lock+`
 		  )
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
@@ -441,9 +456,8 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	// The SELECT above took no row lock, so between it and this UPDATE another
 	// transaction (e.g. the stale-claim sweeper) may have moved the row out of
 	// processing. Guard on status again and check RowsAffected: a zero count
-	// means we lost that race, so roll back (the deferred Rollback discards the
-	// spurious attempt row too) and report it rather than returning a status we
-	// never actually wrote.
+	// means we lost that race, so roll back and report it rather than
+	// returning a status we never actually wrote.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $4
@@ -570,6 +584,13 @@ func requeueTransition(ctx context.Context, tx *sql.Tx, query string, args ...an
 // base list.
 func purgeAgentJobs(ctx context.Context, ex execer, userID int64) error {
 	stmts := []string{
+		// Take the job row locks FIRST, matching the worker's lock order
+		// (agent_jobs → agent_job_attempts). Deleting attempts before locking
+		// the jobs would take the two tables in the opposite order and could
+		// deadlock on Postgres against CompleteAgentJob/RetryAgentJob running
+		// for the same user's processing job. The self-assignment is a no-op
+		// write whose only purpose is acquiring those locks.
+		`UPDATE agent_jobs SET updated_at = updated_at WHERE user_id = $1`,
 		`DELETE FROM agent_job_attempts WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = $1)`,
 		`DELETE FROM agent_jobs WHERE user_id = $1`,
 	}

@@ -107,6 +107,13 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
+		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
+		// minute on every replica: WHERE status = 'pending_approval' AND
+		// updated_at < cutoff. The (user_id, status) index above cannot serve
+		// it — its leading column is absent from the predicate — so without
+		// this index the sweep degrades to a full-table scan as terminal
+		// action rows accumulate.
+		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -250,6 +257,13 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
+		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
+		// minute on every replica: WHERE status = 'pending_approval' AND
+		// updated_at < cutoff. The (user_id, status) index above cannot serve
+		// it — its leading column is absent from the predicate — so without
+		// this index the sweep degrades to a full-table scan as terminal
+		// action rows accumulate.
+		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

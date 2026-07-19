@@ -45,6 +45,23 @@ func (q *Queue) Enqueue(ctx context.Context, eventID string, userID, conversatio
 	return id, enqueued, err
 }
 
+// Ingest persists an incoming event and enqueues its job in one transaction —
+// the listener's crash-safe primitive (see Store.InsertEventAndEnqueueJob) —
+// and counts BOTH the received event and the pending job. This is the path
+// that increments AgentEventsReceivedTotal: counting at ingestion (post-dedup,
+// post-commit) keeps the metric equal to rows actually persisted. Duplicate
+// deliveries return enqueued=false and count nothing.
+func (q *Queue) Ingest(ctx context.Context, ev db.IncomingEvent, conversationID int64) (int64, bool, error) {
+	id, enqueued, err := q.Store.InsertEventAndEnqueueJob(ctx, ev, conversationID)
+	if err == nil && enqueued {
+		if q.m != nil {
+			q.m.AgentEventsReceivedTotal.WithLabelValues(ev.Kind).Inc()
+		}
+		q.count(db.JobPending, 1)
+	}
+	return id, enqueued, err
+}
+
 // Claim atomically claims up to limit due jobs for this replica.
 func (q *Queue) Claim(ctx context.Context, limit int) ([]db.AgentJob, error) {
 	jobs, err := q.Store.ClaimAgentJobs(ctx, q.ReplicaID, limit)

@@ -364,6 +364,58 @@ func TestEnqueueAgentJob_RejectsForeignConversation(t *testing.T) {
 	}
 }
 
+func TestClaimAgentJobs_SerializesPerConversation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna", "Anna")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	seedEvent := func(eventID string) {
+		t.Helper()
+		if _, _, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+			EventID: eventID, UserID: uid, Kind: EventKindPrivateMessage,
+			ChatTGID: 555, SenderTGID: 555, MessageID: 1,
+		}); err != nil {
+			t.Fatalf("event %s: %v", eventID, err)
+		}
+	}
+	enqueue := func(eventID string, convID int64) int64 {
+		t.Helper()
+		seedEvent(eventID)
+		id, enqueued, err := s.EnqueueAgentJob(ctx, eventID, uid, convID)
+		if err != nil || !enqueued {
+			t.Fatalf("enqueue %s: id=%d enqueued=%v err=%v", eventID, id, enqueued, err)
+		}
+		return id
+	}
+	first := enqueue("evt:conv:1", conv.ID)
+	second := enqueue("evt:conv:2", conv.ID)
+	loose := enqueue("evt:free:1", 0) // no conversation — unconstrained
+
+	// Only the conversation's OLDEST job plus the unassociated one may be
+	// claimed; message 2 must wait for message 1 even though it is due.
+	jobs, err := s.ClaimAgentJobs(ctx, "r1", 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != first || jobs[1].ID != loose {
+		t.Fatalf("claimed %+v, want [%d %d]", jobs, first, loose)
+	}
+	// While message 1 is processing the conversation stays blocked.
+	if jobs, err = s.ClaimAgentJobs(ctx, "r2", 10); err != nil || len(jobs) != 0 {
+		t.Fatalf("claim while in flight = %+v err=%v, want none", jobs, err)
+	}
+	// Completing message 1 releases message 2.
+	if err := s.CompleteAgentJob(ctx, first, 1, JobCompleted, ""); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if jobs, err = s.ClaimAgentJobs(ctx, "r2", 10); err != nil || len(jobs) != 1 || jobs[0].ID != second {
+		t.Fatalf("claim after complete = %+v err=%v, want [%d]", jobs, err, second)
+	}
+}
+
 func TestEnqueueAgentJob_RejectsUnknownEvent(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
