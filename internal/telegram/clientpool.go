@@ -71,9 +71,16 @@ type ClientPool struct {
 	// metrics is optional; when non-nil, pool size and error counters are
 	// maintained.
 	metrics *metrics.Registry
+	// agentRT is optional; when non-nil, acquire() asks it for a per-user
+	// UpdateHandler and run callback (communication-agent listener). See
+	// agentruntime.go.
+	agentRT AgentRuntime
 
 	mu      sync.Mutex
 	entries map[int64]*entry
+	// pinned holds user ids whose entries are exempt from idle GC (listener
+	// clients that must stay connected without Borrow traffic).
+	pinned map[int64]struct{}
 }
 
 type entry struct {
@@ -83,6 +90,9 @@ type entry struct {
 	ready    chan struct{}
 	runErr   error
 	stopped  bool
+	// runFn, when non-nil, replaces the default block-until-cancelled run
+	// callback (agent listener entries run updates.Manager here).
+	runFn func(ctx context.Context) error
 }
 
 func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Store) *ClientPool {
@@ -92,6 +102,7 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 		IdleTimeout: idle,
 		Store:       store,
 		entries:     make(map[int64]*entry),
+		pinned:      make(map[int64]struct{}),
 	}
 }
 
@@ -274,13 +285,30 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	if p.globalMW != nil {
 		opts.Middlewares = []telegram.Middleware{p.globalMW}
 	}
+	// Agent-enabled users get an UpdateHandler and a custom run callback so
+	// incoming updates flow through the listener instead of being dropped.
+	var handler telegram.UpdateHandler
+	if p.agentRT != nil {
+		handler = p.agentRT.HandlerFor(userID)
+	}
+	if handler != nil {
+		opts.UpdateHandler = handler
+	}
 	client := telegram.NewClient(p.APIID, p.APIHash, opts)
+	var runFn func(ctx context.Context) error
+	if handler != nil {
+		rt := p.agentRT
+		runFn = func(ctx context.Context) error {
+			return rt.RunFor(ctx, userID, client)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &entry{
 		client:   client,
 		lastUsed: time.Now(),
 		cancel:   cancel,
 		ready:    make(chan struct{}),
+		runFn:    runFn,
 	}
 	p.entries[userID] = e
 	if p.metrics != nil {
@@ -295,6 +323,9 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 	err := e.client.Run(ctx, func(ctx context.Context) error {
 		close(e.ready)
+		if e.runFn != nil {
+			return e.runFn(ctx)
+		}
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -330,6 +361,20 @@ func (p *ClientPool) gc(userID int64, e *entry) {
 		p.mu.Unlock()
 		if stopped {
 			return
+		}
+		if p.isPinned(userID) {
+			// Listener clients stay connected regardless of Borrow traffic;
+			// their lifecycle is owned by the agent supervisor.
+			//
+			// A pinned listener only consumes updates, so it never calls
+			// Borrow and nothing else refreshes telegram_accounts.last_used_at.
+			// sweeper.Sessions would then revoke a perfectly healthy listener's
+			// session once the idle TTL elapsed. Heartbeat the row here so the
+			// idle clock tracks the client actually being alive.
+			if p.Store != nil {
+				p.Store.MarkLastUsed(context.Background(), userID)
+			}
+			continue
 		}
 		if idle >= p.IdleTimeout {
 			slog.Info("idle telegram client, closing", "user_id", userID, "idle", idle)
