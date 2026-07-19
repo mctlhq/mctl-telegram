@@ -80,6 +80,14 @@ type AgentAction struct {
 
 // InsertAgentAction persists a proposed action and returns its id. The payload
 // is encrypted with the owner's derived key before storage.
+//
+// Idempotent per (job_id, action_type): the queue is at-least-once, so a
+// worker that persisted an action and crashed before completing its job will
+// re-run the job and propose again. The unique index makes the second insert
+// a no-op and the EXISTING row's id is returned — critically keeping the
+// original approval_code, so a redelivered job cannot mint a second live
+// approval for the same reply. Actions without a job (JobID == 0) are
+// exempt.
 func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, error) {
 	if a.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -117,15 +125,28 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 		convID = a.ConversationID
 	}
 	var id int64
-	if err := s.DB.QueryRowContext(ctx,
+	err := s.DB.QueryRowContext(ctx,
 		`INSERT INTO agent_actions
 		   (approval_code, job_id, conversation_id, user_id, action_type, intent,
 		    payload_encrypted, policy_decision, policy_reasons, status)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
 		 RETURNING id`,
 		nullable(a.ApprovalCode), jobID, convID, a.UserID, a.ActionType, a.Intent,
 		payload, a.PolicyDecision, a.PolicyReasons, a.Status,
-	).Scan(&id); err != nil {
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Redelivery: the action already exists — return it (user-scoped).
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT id FROM agent_actions
+			  WHERE job_id = $1 AND action_type = $2 AND user_id = $3`,
+			a.JobID, a.ActionType, a.UserID,
+		).Scan(&id); err != nil {
+			return 0, fmt.Errorf("load existing agent action: %w", err)
+		}
+		return id, nil
+	}
+	if err != nil {
 		return 0, fmt.Errorf("insert agent action: %w", err)
 	}
 	return id, nil

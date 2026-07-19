@@ -416,6 +416,91 @@ func TestClaimAgentJobs_SerializesPerConversation(t *testing.T) {
 	}
 }
 
+func TestInsertAgentAction_IdempotentPerJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+
+	first, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: jid, ActionType: ActionTypeReply,
+		PolicyDecision: "require_approval", ApprovalCode: "AB12",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	// A redelivered job proposing again must land on the SAME row — same id,
+	// and crucially the original approval code, not a second live one.
+	second, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: jid, ActionType: ActionTypeReply,
+		PolicyDecision: "require_approval", ApprovalCode: "ZZ99",
+	})
+	if err != nil {
+		t.Fatalf("re-insert: %v", err)
+	}
+	if second != first {
+		t.Fatalf("re-insert id = %d, want %d", second, first)
+	}
+	a, err := s.GetAgentActionByCode(ctx, uid, "AB12")
+	if err != nil || a.ID != first {
+		t.Fatalf("original code lookup: %+v err=%v", a, err)
+	}
+	if _, err := s.GetAgentActionByCode(ctx, uid, "ZZ99"); err == nil {
+		t.Fatal("second approval code must not exist")
+	}
+	// A different action type for the same job is a separate row.
+	if third, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: jid, ActionType: ActionTypeOwnerSummary,
+		PolicyDecision: "allow",
+	}); err != nil || third == first {
+		t.Fatalf("other type: id=%d err=%v", third, err)
+	}
+}
+
+func TestSweepAgentMessageBodies_ExpiresPendingJobs(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	// Jobs whose events carry a BODY: the sweep must close the stale one —
+	// events without a body are deliberately left alone (their jobs don't
+	// depend on the swept payload).
+	seedBodyJob := func(eventID string) int64 {
+		t.Helper()
+		if _, _, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+			EventID: eventID, UserID: uid, Kind: EventKindPrivateMessage,
+			ChatTGID: 1, SenderTGID: 1, MessageID: 1, Body: "hello",
+		}); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+		id, enqueued, err := s.EnqueueAgentJob(ctx, eventID, uid, 0)
+		if err != nil || !enqueued {
+			t.Fatalf("enqueue: %v", err)
+		}
+		return id
+	}
+	oldJob := seedBodyJob("evt:old")
+	freshJob := seedBodyJob("evt:fresh")
+	// Age the first event past the retention window.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE incoming_events SET created_at = $1 WHERE event_id = $2`,
+		time.Now().UTC().Add(-48*time.Hour), "evt:old",
+	); err != nil {
+		t.Fatalf("age event: %v", err)
+	}
+	if _, err := s.SweepAgentMessageBodies(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	// The stale event's pending job is closed — a later claim would find an
+	// empty payload; the fresh job is untouched.
+	got, err := s.GetAgentJob(ctx, uid, oldJob)
+	if err != nil || got.Status != JobIgnored {
+		t.Fatalf("old job = %+v err=%v, want ignored", got, err)
+	}
+	if got, err = s.GetAgentJob(ctx, uid, freshJob); err != nil || got.Status != JobPending {
+		t.Fatalf("fresh job = %+v err=%v, want pending", got, err)
+	}
+}
+
 func TestEnqueueAgentJob_RejectsUnknownEvent(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

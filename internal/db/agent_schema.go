@@ -106,6 +106,10 @@ func agentSchemaSQLite() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
+		// The queue is at-least-once: a redelivered job proposing again must
+		// dedupe onto its existing action row (keeping the original
+		// approval_code) instead of minting a second live approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_job_type ON agent_actions(job_id, action_type) WHERE job_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
 		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
 		// minute on every replica: WHERE status = 'pending_approval' AND
@@ -157,6 +161,10 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		// Serves the claim's correlated NOT EXISTS (per-conversation
+		// predecessor lookup): without a conversation_id-leading index every
+		// claim candidate would scan the queue.
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id, status, id)`,
 		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id INTEGER NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
@@ -256,6 +264,10 @@ func agentSchemaPG() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
+		// The queue is at-least-once: a redelivered job proposing again must
+		// dedupe onto its existing action row (keeping the original
+		// approval_code) instead of minting a second live approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_job_type ON agent_actions(job_id, action_type) WHERE job_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
 		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
 		// minute on every replica: WHERE status = 'pending_approval' AND
@@ -307,6 +319,10 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		// Serves the claim's correlated NOT EXISTS (per-conversation
+		// predecessor lookup): without a conversation_id-leading index every
+		// claim candidate would scan the queue.
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id, status, id)`,
 		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
 			id BIGSERIAL PRIMARY KEY,
 			job_id BIGINT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
