@@ -108,6 +108,12 @@ type Config struct {
 	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
 	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
 	MediaDownloadMaxBytes int64 // MEDIA_DOWNLOAD_MAX_BYTES
+	// MediaUploadMaxBytes caps send_media uploads (both the file_url fetch and
+	// the file_base64 decode). 0 means no cap (use with care). Default 20 MiB,
+	// independently configurable from MediaDownloadMaxBytes since upload and
+	// download are different trust/cost boundaries. Set via
+	// MEDIA_UPLOAD_MAX_BYTES.
+	MediaUploadMaxBytes int64 // MEDIA_UPLOAD_MAX_BYTES
 	// AgentRetentionDays bounds how long the communication agent's stored
 	// message content (incoming_events, conversation_messages) is kept before
 	// the retention sweeper deletes it. Unlike audit rows this is third-party
@@ -185,6 +191,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
+	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
