@@ -296,7 +296,11 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 		if fetchMedia {
 			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
 			if fmErr != nil {
-				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				// ctx may already be canceled/deadline-exceeded here (that's
+				// exactly the fmErr case fetchMediaInline propagates) — audit
+				// with a cancellation-stripped context so LogToolCall's
+				// BeginTx doesn't fail before the row is ever written.
+				s.audit(context.WithoutCancel(ctx), id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
 				return borrowErrResult("get_unread_messages", fmErr), nil
 			}
 			fetchSummary = &summary
@@ -509,7 +513,11 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 		if fetchMedia {
 			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
 			if fmErr != nil {
-				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				// See the matching comment in get_unread_messages: ctx may
+				// already be canceled/deadline-exceeded, so audit with a
+				// cancellation-stripped context to avoid BeginTx failing
+				// before the row is written.
+				s.audit(context.WithoutCancel(ctx), id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
 				return borrowErrResult("get_messages", fmErr), nil
 			}
 			fetchSummary = &summary

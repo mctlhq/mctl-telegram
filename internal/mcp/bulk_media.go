@@ -151,6 +151,9 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 		if s.MediaDownloadMaxBytes > 0 && s.MediaDownloadMaxBytes < perItemCap {
 			perItemCap = s.MediaDownloadMaxBytes
 		}
+		// info.Size is 0 for photos (MTProto does not expose a declared byte size
+		// for photos); they always proceed to the downloader, where cappedBuffer
+		// enforces perItemCap mid-stream and an abort is counted as Skipped.
 		if info := msgs[i].MediaInfo; info != nil && info.Size > 0 && info.Size > perItemCap {
 			summary.Skipped++
 			continue
@@ -162,7 +165,7 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 				return summary, dlErr
 			}
 			summary.Skipped++
-			slog.Debug("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
+			slog.Warn("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
 			continue
 		}
 		totalBytes += int64(len(data))
