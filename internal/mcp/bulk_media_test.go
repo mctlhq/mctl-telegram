@@ -262,3 +262,34 @@ func TestFetchMediaInline_SystemicErrorAbortsLoop(t *testing.T) {
 		t.Errorf("summary = %+v, want Fetched=0 Skipped=0 (the failing item is not a per-item skip)", summary)
 	}
 }
+
+// TestFetchMediaInline_ContextCanceledAbortsLoop covers the same abort path
+// as TestFetchMediaInline_SystemicErrorAbortsLoop for a client disconnect /
+// request deadline: a canceled context surfaced from a download must abort
+// the loop immediately rather than being folded into Skipped (which would
+// let both handlers audit a canceled invocation as successful).
+func TestFetchMediaInline_ContextCanceledAbortsLoop(t *testing.T) {
+	calls := 0
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error) {
+		calls++
+		return nil, context.Canceled
+	})
+	var rawMsgs []*tg.Message
+	var msgs []telegram.Message
+	for i := 1; i <= 3; i++ {
+		raw, decoded := newDownloadableMessage(i, 100)
+		rawMsgs = append(rawMsgs, raw)
+		msgs = append(msgs, decoded)
+	}
+	s := &Server{MediaDownloadMaxBytes: 1000}
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Errorf("downloader called %d times, want 1 — a canceled context must abort the loop immediately", calls)
+	}
+	if summary.Fetched != 0 || summary.Skipped != 0 {
+		t.Errorf("summary = %+v, want Fetched=0 Skipped=0 (a canceled download is not a per-item skip)", summary)
+	}
+}

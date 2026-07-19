@@ -48,13 +48,19 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 	return buf, err
 }
 
-// isSystemicPoolErr reports whether err represents a call-wide Pool.Borrow
-// failure — a revoked/expired/unauthorized session, no active session, or
-// the pool at capacity — as opposed to a transient error scoped to one
-// item's download. sessionErrText/telegram.ErrPoolFull are the same
-// sentinels borrowErrResult uses to render the actionable reconnect message.
+// isSystemicPoolErr reports whether err represents a call-wide failure that
+// should abort fetchMediaInline's loop rather than being folded into the
+// per-item Skipped count: a revoked/expired/unauthorized session, no active
+// session, the pool at capacity (sessionErrText/telegram.ErrPoolFull — the
+// same sentinels borrowErrResult uses to render the actionable reconnect
+// message), or the caller's context being canceled/deadline-exceeded (the
+// client disconnected or the request timed out — continuing to attempt
+// further downloads, or auditing the call as successful, would be wrong).
 func isSystemicPoolErr(err error) bool {
-	return sessionErrText(err) != "" || errors.Is(err, telegram.ErrPoolFull)
+	return sessionErrText(err) != "" ||
+		errors.Is(err, telegram.ErrPoolFull) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // fetchMediaInline attempts to download media bytes for each message in
@@ -67,12 +73,14 @@ func isSystemicPoolErr(err error) bool {
 // summary's Skipped field (messages with no media at all are not counted —
 // there was nothing to skip).
 //
-// Returns a non-nil error only for a systemic Pool.Borrow failure (see
+// Returns a non-nil error only for a systemic failure (see
 // isSystemicPoolErr) encountered mid-loop — e.g. the session was revoked
-// while paging through history. That aborts the loop immediately; the
-// caller should treat it the same as the initial fetch's error (via
-// borrowErrResult) rather than folding it into Skipped. All other per-item
-// failures keep the loop going and are logged at DEBUG level.
+// while paging through history, or the caller's context was canceled or hit
+// its deadline. That aborts the loop immediately; the caller should treat
+// it the same as the initial fetch's error (via borrowErrResult) rather
+// than folding it into Skipped or auditing the call as successful. All
+// other per-item failures keep the loop going and are logged at DEBUG
+// level.
 func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*tg.Message, msgs []telegram.Message) (FetchMediaSummary, error) {
 	summary := FetchMediaSummary{Cap: BulkMediaFetchCap}
 	n := len(rawMsgs)
