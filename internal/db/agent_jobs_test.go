@@ -364,6 +364,28 @@ func TestEnqueueAgentJob_RejectsForeignConversation(t *testing.T) {
 	}
 }
 
+func TestEnqueueAgentJob_RejectsUnknownEvent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	// No incoming_events row for this id: enqueueing must fail loudly instead
+	// of creating a poison job that can never load its payload.
+	if _, _, err := s.EnqueueAgentJob(ctx, "evt:ghost", uid, 0); err != ErrIncomingEventNotFound {
+		t.Fatalf("unknown event err = %v, want ErrIncomingEventNotFound", err)
+	}
+	// An event owned by another user must not satisfy the pair check either.
+	other := seedAgentUser(t, s, "other")
+	if _, _, err := s.InsertIncomingEvent(ctx, IncomingEvent{
+		EventID: "evt:foreign", UserID: other, Kind: EventKindPrivateMessage,
+		ChatTGID: 1, SenderTGID: 1, MessageID: 1,
+	}); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if _, _, err := s.EnqueueAgentJob(ctx, "evt:foreign", uid, 0); err != ErrIncomingEventNotFound {
+		t.Fatalf("foreign event err = %v, want ErrIncomingEventNotFound", err)
+	}
+}
+
 func TestRequeueStaleAgentJobs(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

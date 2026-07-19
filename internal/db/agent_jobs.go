@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -69,11 +71,13 @@ func AgentJobBackoff(attempts int) time.Duration {
 // the one place the two dialects genuinely diverge (FOR UPDATE SKIP LOCKED).
 //
 // The result is cached only once the probe returns a DEFINITIVE answer:
-// nil error (the pg_catalog table exists ⇒ Postgres) or a genuine
-// "relation does not exist" from SQLite (⇒ not Postgres). A transient error —
-// a cancelled/timed-out context, a dropped connection — is NOT cached, so a
-// probe that fails for a reason unrelated to the dialect re-probes next call
-// instead of permanently poisoning every future claim onto the wrong path.
+// nil error (the pg_catalog table exists ⇒ Postgres) or SQLite's
+// "no such table" (⇒ not Postgres). Any other error — a cancelled/timed-out
+// context, a dropped connection — is NOT cached, so a probe that fails for a
+// reason unrelated to the dialect re-probes next call instead of permanently
+// poisoning every future claim onto the wrong path. An unresolved probe
+// returns false, which is safe (ClaimAgentJobs guards the outer UPDATE on
+// status) but slower; the next call re-probes.
 func (s *Store) isPostgres(ctx context.Context) bool {
 	s.pgMu.Lock()
 	defer s.pgMu.Unlock()
@@ -86,11 +90,12 @@ func (s *Store) isPostgres(ctx context.Context) bool {
 	switch {
 	case err == nil:
 		s.pgFlag, s.pgResolved = true, true
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// Transient — do not cache; re-probe on the next call.
-	default:
-		// The query itself was rejected (SQLite has no pg_catalog.pg_database):
-		// a definitive "not Postgres".
+	case strings.Contains(err.Error(), "no such table"):
+		// SQLite rejecting the pg_catalog reference — a definitive "not
+		// Postgres". Every other failure (cancelled context, dropped
+		// connection, server restart) says nothing about the dialect, so it
+		// must not be cached: a Postgres store that hit a startup hiccup would
+		// otherwise be stuck on the non-SKIP-LOCKED claim path forever.
 		s.pgFlag, s.pgResolved = false, true
 	}
 	return s.pgFlag
@@ -118,14 +123,33 @@ func (s *Store) EnqueueAgentJob(ctx context.Context, eventID string, userID, con
 	if conversationID != 0 {
 		convID = conversationID
 	}
+	// Source the insert from incoming_events: a job whose event row does not
+	// exist for this user is a poison pill — the worker loads the payload via
+	// GetIncomingEvent(user_id, event_id), fails every attempt, and
+	// dead-letters. Requiring the pair here turns that runtime failure loop
+	// into an immediate ErrEventNotFound for the caller.
 	err = s.DB.QueryRowContext(ctx,
 		`INSERT INTO agent_jobs(event_id, user_id, conversation_id)
-		 VALUES($1,$2,$3)
+		 SELECT $1, $2, $3 FROM incoming_events
+		  WHERE event_id = $1 AND user_id = $2
 		 ON CONFLICT (event_id) DO NOTHING
 		 RETURNING id`,
 		eventID, userID, convID,
 	).Scan(&jobID)
 	if errors.Is(err, sql.ErrNoRows) {
+		// Either the job already exists (idempotent success) or the event row
+		// is missing (caller bug). Distinguish so the bad call surfaces.
+		var one int
+		probeErr := s.DB.QueryRowContext(ctx,
+			`SELECT 1 FROM incoming_events WHERE event_id = $1 AND user_id = $2`,
+			eventID, userID,
+		).Scan(&one)
+		if errors.Is(probeErr, sql.ErrNoRows) {
+			return 0, false, ErrIncomingEventNotFound
+		}
+		if probeErr != nil {
+			return 0, false, fmt.Errorf("enqueue agent job: %w", probeErr)
+		}
 		return 0, false, nil
 	}
 	if err != nil {
@@ -244,11 +268,16 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The outer UPDATE re-checks status = pending. With SKIP LOCKED this is
+	// redundant; without it (SQLite, or a Postgres claim while the dialect
+	// probe is unresolved) it is what makes a concurrent double-select safe:
+	// the loser blocks on the row lock, re-evaluates the predicate against the
+	// winner's committed row, sees processing, and skips it.
 	rows, err := tx.QueryContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, attempts = attempts + 1,
 		        claimed_by = $2, claimed_at = $3, updated_at = $3
-		  WHERE id IN (
+		  WHERE status = $4 AND id IN (
 		        SELECT id FROM agent_jobs
 		         WHERE status = $4 AND next_run_at <= $3
 		         ORDER BY next_run_at, id
@@ -266,6 +295,15 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int)
 	if err != nil {
 		return nil, err
 	}
+	// UPDATE ... RETURNING makes no ordering promise, so re-establish the
+	// subquery's oldest-first order before handing the batch to the worker —
+	// messages in one conversation must be processed in arrival order.
+	sort.Slice(jobs, func(i, k int) bool {
+		if !jobs[i].NextRunAt.Equal(jobs[k].NextRunAt) {
+			return jobs[i].NextRunAt.Before(jobs[k].NextRunAt)
+		}
+		return jobs[i].ID < jobs[k].ID
+	})
 	for _, j := range jobs {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO agent_job_attempts(job_id, attempt, started_at) VALUES($1,$2,$3)`,
@@ -459,46 +497,70 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Close the attempt rows of the claims we are about to abandon, before the
-	// status flips. Otherwise the timed-out attempt stays open forever: the next
-	// claim opens another running attempt and finishOpenAttempt only ever closes
-	// the newest one, corrupting attempt history and any open-attempt monitoring.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE agent_job_attempts
-		    SET finished_at = $1, status = $2, error = $3
-		  WHERE finished_at IS NULL
-		    AND job_id IN (
-		        SELECT id FROM agent_jobs WHERE status = $4 AND claimed_at < $5
-		    )`,
-		now, JobFailed, "visibility timeout", JobProcessing, cutoff,
-	); err != nil {
-		return 0, 0, fmt.Errorf("close stale attempts: %w", err)
-	}
-
-	res, err := tx.ExecContext(ctx,
+	// Lock order matters: workers (CompleteAgentJob / RetryAgentJob) update
+	// agent_jobs first and agent_job_attempts second, so the sweep must do the
+	// same — transition the stale jobs first, collect the ids it actually
+	// moved, then close those jobs' attempt rows. Touching attempts first
+	// would take the two tables' locks in the opposite order and deadlock on
+	// Postgres against a still-alive worker finishing the same job.
+	deadIDs, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3
-		  WHERE status = $4 AND claimed_at < $5 AND attempts >= max_attempts`,
+		  WHERE status = $4 AND claimed_at < $5 AND attempts >= max_attempts
+		 RETURNING id`,
 		JobDeadLetter, "visibility timeout, attempts exhausted", now, JobProcessing, cutoff,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("dead-letter stale jobs: %w", err)
 	}
-	dead, _ := res.RowsAffected()
-	res, err = tx.ExecContext(ctx,
+	requeuedIDs, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $2
-		  WHERE status = $4 AND claimed_at < $5`,
+		  WHERE status = $4 AND claimed_at < $5
+		 RETURNING id`,
 		JobPending, now, "visibility timeout, requeued", JobProcessing, cutoff,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("requeue stale jobs: %w", err)
 	}
-	requeued, _ := res.RowsAffected()
+
+	// Close the abandoned attempt rows of exactly the jobs transitioned above.
+	// Otherwise the timed-out attempt stays open forever: the next claim opens
+	// another running attempt and finishOpenAttempt only ever closes the
+	// newest one, corrupting attempt history and any open-attempt monitoring.
+	for _, id := range append(append([]int64{}, deadIDs...), requeuedIDs...) {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_job_attempts
+			    SET finished_at = $1, status = $2, error = $3
+			  WHERE job_id = $4 AND finished_at IS NULL`,
+			now, JobFailed, "visibility timeout", id,
+		); err != nil {
+			return 0, 0, fmt.Errorf("close stale attempts: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit requeue tx: %w", err)
 	}
-	return requeued, dead, nil
+	return int64(len(requeuedIDs)), int64(len(deadIDs)), nil
+}
+
+// requeueTransition runs one stale-claim UPDATE ... RETURNING id and collects
+// the ids of the rows it transitioned.
+func requeueTransition(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // purgeAgentJobs deletes a user's queue rows within the caller's transaction.
