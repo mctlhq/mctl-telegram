@@ -489,6 +489,62 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 			result, dispErr = json.Marshal(sendResult)
 		}
 
+	case "send_media":
+		var args struct {
+			Peer       string `json:"peer"`
+			MediaType  string `json:"media_type"`
+			FileURL    string `json:"file_url"`
+			FileBase64 string `json:"file_base64"`
+			Caption    string `json:"caption"`
+			FileName   string `json:"file_name"`
+			Mode       string `json:"mode"`
+			DryReason  string `json:"dry_reason"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: bad args: %v", err))
+		}
+		realSend := args.Mode == "send"
+		dryReason := args.DryReason
+		if !realSend && dryReason == "" {
+			dryReason = "mode=draft"
+		}
+		var data []byte
+		var mimeType string
+		if realSend {
+			// The Local Bridge daemon runs on the user's own machine, so a
+			// file_url fetch happens from there, not from the hosted server —
+			// this sidesteps most of the SSRF blast radius for local-mode
+			// accounts, but the guarded fetcher is still applied for defense in
+			// depth (and file_base64 still gets the same size-cap treatment).
+			switch {
+			case args.FileBase64 != "":
+				var err error
+				data, err = base64.StdEncoding.DecodeString(args.FileBase64)
+				if err != nil {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_base64: invalid base64: %v", err))
+				}
+				if int64(len(data)) > tg.DefaultMediaUploadMaxBytes {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_base64 decodes to %d bytes, exceeding the %d-byte upload cap", len(data), tg.DefaultMediaUploadMaxBytes))
+				}
+				mimeType = http.DetectContentType(data[:min(512, len(data))])
+			case args.FileURL != "":
+				var err error
+				data, mimeType, err = tg.FetchGuardedURL(ctx, args.FileURL, tg.DefaultMediaUploadMaxBytes, 60*time.Second)
+				if err != nil {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_url: %v", err))
+				}
+			}
+		}
+		var sendResult *tg.SendMediaResult
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			sendResult, err = tg.SendMedia(ctx, c, args.Peer, args.MediaType, data, args.FileName, mimeType, args.Caption, realSend, dryReason, nil, 0)
+			return err
+		})
+		if dispErr == nil {
+			result, dispErr = json.Marshal(sendResult)
+		}
+
 	case "prepare_get_media":
 		var args struct {
 			Peer      string `json:"peer"`
