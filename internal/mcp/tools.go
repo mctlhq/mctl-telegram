@@ -288,18 +288,26 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 				return err
 			})
 		}
-		s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
+			s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err, startedAt)
 			return borrowErrResult("get_unread_messages", err), nil
 		}
 		var fetchSummary *FetchMediaSummary
 		if fetchMedia {
-			summary, _ := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
+			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
+			if fmErr != nil {
+				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				return borrowErrResult("get_unread_messages", fmErr), nil
+			}
 			fetchSummary = &summary
 			if summary.Fetched > 0 {
 				slog.Info("get_unread_messages fetch_media summary", "user_id", id.UserID, "fetch_media_fetched", summary.Fetched)
 			}
 		}
+		// Audit after inline fetching (not right after the initial page
+		// fetch) so the recorded duration/outcome covers the full tool
+		// invocation, including any media downloads.
+		s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), nil, startedAt)
 		return jsonResult(messagesResult{
 			Messages:          wrapMessages(msgs),
 			Notice:            untrustedContentNotice,
@@ -493,18 +501,26 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 				return err
 			})
 		}
-		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
+			s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
 			return borrowErrResult("get_messages", err), nil
 		}
 		var fetchSummary *FetchMediaSummary
 		if fetchMedia {
-			summary, _ := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
+			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
+			if fmErr != nil {
+				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				return borrowErrResult("get_messages", fmErr), nil
+			}
 			fetchSummary = &summary
 			if summary.Fetched > 0 {
 				slog.Info("get_messages fetch_media summary", "user_id", id.UserID, "fetch_media_fetched", summary.Fetched)
 			}
 		}
+		// Audit after inline fetching (not right after the initial page
+		// fetch) so the recorded duration/outcome covers the full tool
+		// invocation, including any media downloads.
+		s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), nil, startedAt)
 		result := messagesResult{
 			Messages:          wrapMessages(msgs),
 			Notice:            untrustedContentNotice,
