@@ -11,6 +11,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -706,6 +707,149 @@ func TestToolSetReaction_SendGateBlocked(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected error when AllowSend=false")
+	}
+}
+
+// seedAccountWithMode creates a user with one active telegram_accounts row
+// carrying the given mode ("hosted" or "local"), returning the internal
+// user id. Used to exercise the Local Bridge routing branch of
+// toolGetMessages/toolGetUnreadMessages without a live daemon connection.
+func seedAccountWithMode(t *testing.T, store *db.Store, tgID int64, mode string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, tgID, "seed", "Seed User")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, send_enabled, mode) VALUES($1, $2, $3, $4)`,
+		uid, []byte("blob"), true, mode,
+	); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	return uid
+}
+
+// TestToolGetMessages_FetchMediaLocalBridgeBlocked proves fetch_media=true on
+// a Local Bridge (mode="local") account is refused with a clear error instead
+// of being silently forwarded to the daemon or attempted over the (absent)
+// hosted pool.
+func TestToolGetMessages_FetchMediaLocalBridgeBlocked(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const tgID int64 = 12345
+	uid := seedAccountWithMode(t, store, tgID, "local")
+	srv := &Server{Store: store, Hub: bridge.NewHub()}
+	id := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolGetMessages()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "get_messages",
+		Arguments: map[string]any{
+			"peer":        "user:1",
+			"fetch_media": true,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error for fetch_media=true on a Local Bridge account")
+	}
+	if got := contentText(res); !strings.Contains(got, "Local Bridge mode") {
+		t.Fatalf("expected error mentioning Local Bridge mode, got %q", got)
+	}
+}
+
+// TestToolGetMessages_FetchMediaFalse_LocalBridgeStillRoutesToDaemon proves
+// the pre-existing Local Bridge routing for fetch_media=false (or absent) is
+// untouched: no daemon is connected, so the call fails with the expected
+// "daemon not connected" tool error rather than the fetch_media guard error.
+func TestToolGetMessages_FetchMediaFalse_LocalBridgeStillRoutesToDaemon(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const tgID int64 = 12346
+	uid := seedAccountWithMode(t, store, tgID, "local")
+	srv := &Server{Store: store, Hub: bridge.NewHub()}
+	id := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolGetMessages()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "get_messages",
+		Arguments: map[string]any{"peer": "user:1"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error since no daemon is connected")
+	}
+	if got := contentText(res); strings.Contains(got, "Local Bridge mode") {
+		t.Fatalf("fetch_media=false must not surface the fetch_media guard error, got %q", got)
+	}
+}
+
+// TestToolGetUnreadMessages_FetchMediaLocalBridgeBlocked mirrors
+// TestToolGetMessages_FetchMediaLocalBridgeBlocked for get_unread_messages.
+func TestToolGetUnreadMessages_FetchMediaLocalBridgeBlocked(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const tgID int64 = 12347
+	uid := seedAccountWithMode(t, store, tgID, "local")
+	srv := &Server{Store: store, Hub: bridge.NewHub()}
+	id := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolGetUnreadMessages()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "get_unread_messages",
+		Arguments: map[string]any{"fetch_media": true},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error for fetch_media=true on a Local Bridge account")
+	}
+	if got := contentText(res); !strings.Contains(got, "Local Bridge mode") {
+		t.Fatalf("expected error mentioning Local Bridge mode, got %q", got)
+	}
+}
+
+// TestToolGetMessages_FetchMediaTrue_HostedModeUsesRawPath proves fetch_media=
+// true on a hosted-mode (no Hub) account routes through the borrow-based
+// GetMessagesRaw path without panicking: with no Telegram API credentials
+// configured on the pool, Borrow fails fast with the same "not configured"
+// error regardless of fetch_media, so this is a light regression guard that
+// the new code path is wired correctly end-to-end up to the pool boundary.
+// A full happy-path assertion (messages actually downloaded) would require a
+// live/mocked MTProto connection, which this repo's test suite does not
+// provide for any tool (get_media/prepare_get_media have the same gap).
+func TestToolGetMessages_FetchMediaTrue_HostedModeUsesRawPath(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+
+	_, handler := srv.toolGetMessages()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "get_messages",
+		Arguments: map[string]any{
+			"peer":        "user:1",
+			"fetch_media": true,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error (no Telegram API credentials configured)")
+	}
+	if got := contentText(res); !strings.Contains(got, "not configured") {
+		t.Fatalf("expected the pool's not-configured error, got %q", got)
 	}
 }
 

@@ -113,13 +113,43 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 	}
 	// Content protection: the chat owner marked this content non-savable
 	// (Telegram clients disable saving/forwarding). Refuse to mint a
-	// download ref rather than silently bypassing the restriction.
-	if msg.Noforwards {
-		return nil, nil, fmt.Errorf("message %d is protected content (owner disabled saving/forwarding)", messageID)
+	// download ref rather than silently bypassing the restriction. Checked
+	// via ExtractMediaLocation, ahead of the "no downloadable media" check
+	// below, to preserve the exact original error-precedence order.
+	loc, err := ExtractMediaLocation(msg)
+	if err != nil {
+		return nil, nil, err
 	}
 	info := DecodeMediaInfo(msg.Media)
 	if info == nil {
 		return nil, nil, fmt.Errorf("message %d has no downloadable media", messageID)
+	}
+	if loc == nil {
+		return nil, nil, fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, info.MediaType)
+	}
+	return info, loc, nil
+}
+
+// ExtractMediaLocation extracts the file location from an already-fetched
+// tg.Message without making an additional Telegram API call. It mirrors the
+// location-extraction logic PrepareMediaRef used to run inline before this
+// helper was factored out; PrepareMediaRef now calls this function instead of
+// duplicating the switch, so both call sites share one behavior.
+//
+// Returns (nil, nil) when the message carries no media, or media of a type
+// that has no file to download (web_page, contact, location, poll,
+// unsupported) — this is not an error, callers that want to skip such
+// messages silently can treat a nil location as "nothing to fetch".
+//
+// Returns a non-nil error when the message is protected content (Noforwards
+// set): the chat owner disabled saving/forwarding, so no location is minted
+// even though the media itself may otherwise be downloadable.
+func ExtractMediaLocation(msg *tg.Message) (*MediaFileLocation, error) {
+	if msg == nil {
+		return nil, nil
+	}
+	if msg.Noforwards {
+		return nil, fmt.Errorf("message %d is protected content (owner disabled saving/forwarding)", msg.ID)
 	}
 	loc := &MediaFileLocation{}
 	switch m := msg.Media.(type) {
@@ -139,9 +169,9 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 		}
 	}
 	if !loc.IsDocument && loc.PhotoID == 0 {
-		return nil, nil, fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, info.MediaType)
+		return nil, nil
 	}
-	return info, loc, nil
+	return loc, nil
 }
 
 // messageBelongsToPeer reports whether msg's owning dialog matches the
