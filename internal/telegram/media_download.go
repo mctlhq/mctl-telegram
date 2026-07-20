@@ -274,19 +274,31 @@ const downloaderPartSize = 512 * 1024
 
 // downloaderReadAheadBlocks upper-bounds how many blocks gotd's downloader
 // may have already pulled fully over the wire but not yet handed to our
-// io.Writer by the time cappedBuffer rejects a block. gotd v0.144.0's
-// stream() pipeline (telegram/downloader/stream.go) runs the network-fetch
-// loop and the write loop concurrently over `toWrite := make(chan block,
-// 1)` — a channel with exactly one slot of buffering. At the moment Write is
-// called with the current (about to be rejected) block, the fetch loop can
-// already have ANOTHER block sitting in that channel slot (sent once the
-// write loop dequeued the previous one) AND have fully fetched a THIRD block
-// that it's now blocked trying to send into the still-full channel — two
-// blocks fetched-but-undelivered, not just one. Both are silently discarded
-// when Stream() returns the cap-exceeded error, invisible to cappedBuffer.
-// This is a best-effort upper bound on a third-party library's internal
-// buffering/scheduling, not a guaranteed exact count — revisit if gotd's
-// part size or channel depth changes.
+// io.Writer by the time cappedBuffer rejects a FULL-SIZED block. gotd
+// v0.144.0's stream() pipeline (telegram/downloader/stream.go) runs the
+// network-fetch loop and the write loop concurrently over `toWrite :=
+// make(chan block, 1)` — a channel with exactly one slot of buffering. At
+// the moment Write is called with the current (about to be rejected) block,
+// the fetch loop can already have ANOTHER block sitting in that channel
+// slot (sent once the write loop dequeued the previous one) AND have fully
+// fetched a THIRD block that it's now blocked trying to send into the
+// still-full channel — two blocks fetched-but-undelivered, not just one.
+// Both are silently discarded when Stream() returns the cap-exceeded error,
+// invisible to cappedBuffer. This is a best-effort upper bound on a
+// third-party library's internal buffering/scheduling, not a guaranteed
+// exact count — revisit if gotd's part size or channel depth changes.
+//
+// This margin does NOT apply when the rejected block is short
+// (len(p) < downloaderPartSize): gotd's reader.block.last()
+// (telegram/downloader/reader.go) uses that exact same condition to decide
+// a block is the file's final one, and stream()'s fetch loop stops fetching
+// immediately after sending a last block rather than continuing to the next
+// one (telegram/downloader/stream.go — `if b.last() { stop(...); return nil
+// }`, right after the channel send). A short rejected block therefore means
+// the fetch loop had already finished producing for this file by the time
+// Write saw it — there is no further block in flight to account for, and
+// charging the margin anyway would inflate the aggregate budget with bytes
+// that were never transferred, wrongly starving later legitimate items.
 const downloaderReadAheadBlocks = 2
 
 // cappedBuffer accumulates downloaded bytes, failing the stream as soon as
@@ -295,9 +307,9 @@ const downloaderReadAheadBlocks = 2
 // should charge against an aggregate transfer budget — every Write call's
 // len(p) (the block itself was already fully fetched over the wire before
 // Write is even called), plus downloaderReadAheadBlocks*downloaderPartSize
-// on the specific call that rejects a block (see downloaderReadAheadBlocks'
-// doc for why up to two more blocks may already be in flight, invisible to
-// buf).
+// on a rejecting call whose block is full-sized (see
+// downloaderReadAheadBlocks' doc for why a short/final rejected block gets
+// no such margin).
 type cappedBuffer struct {
 	buf      []byte
 	cap      int64
@@ -306,7 +318,13 @@ type cappedBuffer struct {
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
-		w.consumed += int64(len(p)) + int64(downloaderReadAheadBlocks*downloaderPartSize)
+		w.consumed += int64(len(p))
+		if len(p) >= downloaderPartSize {
+			// A full-sized block means this was NOT the file's final chunk
+			// (see downloaderReadAheadBlocks' doc) — gotd's fetch loop would
+			// have kept going, so charge the read-ahead margin.
+			w.consumed += int64(downloaderReadAheadBlocks * downloaderPartSize)
+		}
 		return 0, fmt.Errorf("download exceeded %d-byte cap mid-stream", w.cap)
 	}
 	w.buf = append(w.buf, p...)
