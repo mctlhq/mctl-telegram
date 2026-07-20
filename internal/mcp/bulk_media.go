@@ -54,7 +54,12 @@ var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc tel
 // downloadMediaViaPool borrows a pooled client and downloads loc's bytes,
 // mirroring the pattern toolGetMedia uses for the two-step flow
 // (s.borrowWithRetry + telegram.DownloadMedia). The bool return reports
-// whether the download callback was actually invoked — see mediaDownloader.
+// whether the download callback actually ran during the attempt that
+// produced the returned error — see mediaDownloader. attempted is reset
+// before every retry attempt (via borrowWithRetry's beforeAttempt hook) so a
+// flood-wait retry whose first try called the callback but whose later
+// Borrow call then fails in its own preflight/acquire path (never reaching
+// the callback again) doesn't leave a stale true from the earlier attempt.
 func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
 	var buf []byte
 	attempted := false
@@ -63,7 +68,7 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 		var derr error
 		buf, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
 		return derr
-	})
+	}, func() { attempted = false })
 	return buf, err, attempted
 }
 

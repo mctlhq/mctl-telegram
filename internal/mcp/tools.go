@@ -47,14 +47,27 @@ func retryPolicy(err error) (bool, int) {
 // at maxFloodWaitSleep. Context cancellation during a sleep causes an immediate
 // return with ctx.Err(). The flood-wait counter is incremented on every
 // observed transient error (including the one on the final attempt).
+//
+// beforeAttempt, if given, runs immediately before every Pool.Borrow call
+// (including the first). Callers that need to know whether fn actually ran
+// during the specific attempt that produced the returned error — as
+// downloadMediaViaPool does — pass a hook that resets their own tracking
+// state each attempt; otherwise a flood-wait retry can leave a stale "fn ran"
+// signal from an earlier attempt even though the later attempt that produced
+// the final error failed in Borrow's own preflight/acquire path without ever
+// calling fn.
 func (s *Server) borrowWithRetry(
 	ctx context.Context,
 	tool string,
 	userID int64,
 	fn func(context.Context, *gotdtelegram.Client) error,
+	beforeAttempt ...func(),
 ) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxFloodWaitRetries; attempt++ {
+		for _, hook := range beforeAttempt {
+			hook()
+		}
 		lastErr = s.Pool.Borrow(ctx, userID, fn)
 		shouldRetry, wait := retryPolicy(lastErr)
 		if !shouldRetry {
