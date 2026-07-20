@@ -2,6 +2,7 @@ package listener
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -47,8 +48,12 @@ func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
 	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
 
-	l.onMessage(ctx, acct, entities, msg, false)
-	l.onMessage(ctx, acct, entities, msg, false)
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("duplicate onMessage: %v", err)
+	}
 
 	var events, jobs int
 	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM incoming_events WHERE event_id=$1`, "evt:v1:100:555:42").Scan(&events); err != nil {
@@ -74,10 +79,9 @@ func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	}
 }
 
-func TestPersist_IngestRollsBackEventWhenJobInsertFails(t *testing.T) {
-	ctx := context.Background()
-	l, store, acct := newTestListener(t, nil)
-	if _, err := store.DB.ExecContext(ctx, `
+func installFailingJobTrigger(t *testing.T, store *db.Store) {
+	t.Helper()
+	if _, err := store.DB.ExecContext(context.Background(), `
 		CREATE TRIGGER fail_agent_job_insert
 		BEFORE INSERT ON agent_jobs
 		BEGIN
@@ -85,6 +89,12 @@ func TestPersist_IngestRollsBackEventWhenJobInsertFails(t *testing.T) {
 		END`); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
+}
+
+func TestPersist_IngestRollsBackEventWhenJobInsertFails(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	installFailingJobTrigger(t, store)
 
 	ex := Extracted{Event: db.IncomingEvent{
 		EventID: "evt:v1:100:555:99", UserID: acct.userID,
@@ -104,6 +114,16 @@ func TestPersist_IngestRollsBackEventWhenJobInsertFails(t *testing.T) {
 	}
 	if events != 0 || jobs != 0 {
 		t.Fatalf("partial ingestion left events/jobs = %d/%d", events, jobs)
+	}
+}
+
+func TestOnMessage_PropagatesPersistenceFailure(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	installFailingJobTrigger(t, store)
+	msg := &tg.Message{ID: 77, PeerID: &tg.PeerUser{UserID: recruit}, Message: "retry me"}
+	if err := l.onMessage(ctx, acct, ents(), msg, false); err == nil {
+		t.Fatal("onMessage swallowed persistence failure")
 	}
 }
 
@@ -128,28 +148,36 @@ func TestPersist_OwnerOutgoingTakesOverConversation(t *testing.T) {
 	if conv.State != db.ConversationTakenOver {
 		t.Fatalf("state = %q", conv.State)
 	}
+	if err := l.persist(ctx, acct, ex); err != nil {
+		t.Fatalf("duplicate owner event: %v", err)
+	}
 }
 
 type recordingRouter struct {
 	calls int
 	text  string
+	err   error
 }
 
 func (r *recordingRouter) HandleSavedText(_ context.Context, _ int64, text string) error {
 	r.calls++
 	r.text = text
-	return nil
+	return r.err
+}
+
+func savedCommand(acct *account, eventID string) Extracted {
+	return Extracted{Event: db.IncomingEvent{
+		EventID: eventID, UserID: acct.userID,
+		Kind: db.EventKindSavedCommand, ChatTGID: acct.tgID,
+		SenderTGID: acct.tgID, MessageID: 101, Body: "/mctl status",
+	}, SavedCommandText: "/mctl status"}
 }
 
 func TestPersist_SavedCommandRoutesOnceAndNilRouterIsSafe(t *testing.T) {
 	ctx := context.Background()
 	router := &recordingRouter{}
 	l, _, acct := newTestListener(t, router)
-	ex := Extracted{Event: db.IncomingEvent{
-		EventID: "evt:v1:100:100:101", UserID: acct.userID,
-		Kind: db.EventKindSavedCommand, ChatTGID: acct.tgID,
-		SenderTGID: acct.tgID, MessageID: 101, Body: "/mctl status",
-	}, SavedCommandText: "/mctl status"}
+	ex := savedCommand(acct, "evt:v1:100:100:101")
 	if err := l.persist(ctx, acct, ex); err != nil {
 		t.Fatalf("persist saved command: %v", err)
 	}
@@ -161,10 +189,42 @@ func TestPersist_SavedCommandRoutesOnceAndNilRouterIsSafe(t *testing.T) {
 	}
 
 	nilListener, _, nilAcct := newTestListener(t, nil)
-	nilEvent := ex
-	nilEvent.Event.EventID = "evt:v1:100:100:102"
-	nilEvent.Event.UserID = nilAcct.userID
-	if err := nilListener.persist(ctx, nilAcct, nilEvent); err != nil {
+	if err := nilListener.persist(ctx, nilAcct, savedCommand(nilAcct, "evt:v1:100:100:102")); err != nil {
 		t.Fatalf("nil router: %v", err)
+	}
+}
+
+func TestPersist_SavedCommandRouterFailureIsRetriedWithoutAuditDedup(t *testing.T) {
+	ctx := context.Background()
+	router := &recordingRouter{err: errors.New("control plane unavailable")}
+	l, store, acct := newTestListener(t, router)
+	ex := savedCommand(acct, "evt:v1:100:100:103")
+
+	if err := l.persist(ctx, acct, ex); err == nil {
+		t.Fatal("router failure was swallowed")
+	}
+	var events int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM incoming_events WHERE event_id=$1`, ex.Event.EventID).Scan(&events); err != nil {
+		t.Fatalf("count failed command events: %v", err)
+	}
+	if events != 0 {
+		t.Fatalf("failed command was audit-deduped before routing: events=%d", events)
+	}
+
+	router.err = nil
+	if err := l.persist(ctx, acct, ex); err != nil {
+		t.Fatalf("retry command: %v", err)
+	}
+	if err := l.persist(ctx, acct, ex); err != nil {
+		t.Fatalf("duplicate command: %v", err)
+	}
+	if router.calls != 2 {
+		t.Fatalf("router calls = %d, want failure + one retry", router.calls)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM incoming_events WHERE event_id=$1`, ex.Event.EventID).Scan(&events); err != nil {
+		t.Fatalf("count successful command events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("successful command audit rows = %d, want 1", events)
 	}
 }
