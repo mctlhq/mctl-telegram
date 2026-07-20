@@ -10,6 +10,8 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+const supervisorBorrowTimeout = 10 * time.Second
+
 type Pool interface {
 	Pin(userID int64)
 	Unpin(userID int64)
@@ -69,7 +71,13 @@ func reconcile(ctx context.Context, l *Listener, pool Pool, res AccountResolver)
 			continue
 		}
 		pool.Pin(p.UserID)
-		if err := pool.Borrow(ctx, p.UserID, func(context.Context, *gotdtelegram.Client) error { return nil }); err != nil {
+		// A broken Telegram connection must not block reconciliation for every
+		// later account. Bound each liveness probe independently; the next tick
+		// retries the account while the loop continues serving the rest.
+		borrowCtx, cancel := context.WithTimeout(ctx, supervisorBorrowTimeout)
+		err = pool.Borrow(borrowCtx, p.UserID, func(context.Context, *gotdtelegram.Client) error { return nil })
+		cancel()
+		if err != nil {
 			slog.Warn("agent supervisor: borrow failed", "user_id", p.UserID, "err", err)
 		}
 	}
