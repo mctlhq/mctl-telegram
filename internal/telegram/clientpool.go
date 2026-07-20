@@ -194,7 +194,14 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 					if p.metrics != nil {
 						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
 					}
-					return fmt.Errorf("revoke rejected session: %w", rErr)
+					// Still wrap sentinel: Telegram DID reject the session —
+					// that fact doesn't change because persisting the revoke
+					// failed. Losing the sentinel here would make this
+					// call-wide session failure errors.Is-invisible to every
+					// caller that classifies pool errors via sessionErrText
+					// (borrowErrResult's friendly message, isSystemicPoolErr's
+					// systemic-abort check), degrading it to a generic error.
+					return fmt.Errorf("revoke rejected session: %w: %w", sentinel, rErr)
 				}
 				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
 				if p.metrics != nil {
@@ -231,7 +238,12 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			if p.metrics != nil {
 				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
 			}
-			return fmt.Errorf("revoke rejected session: %w", rErr)
+			// Still wrap sentinel — see the matching comment in the
+			// startup-path branch above. Without it, a fetch_media call
+			// whose download callback already ran (attempted=true) would
+			// have this call-wide session/DB failure folded into the
+			// per-item Skipped count instead of aborting the loop.
+			return fmt.Errorf("revoke rejected session: %w: %w", sentinel, rErr)
 		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
 		if p.metrics != nil {

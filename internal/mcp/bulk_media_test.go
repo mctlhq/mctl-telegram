@@ -393,3 +393,40 @@ func TestFetchMediaInline_UnclassifiedBorrowFailureAbortsLoop(t *testing.T) {
 		t.Errorf("summary = %+v, want Fetched=0 Skipped=0 (not a per-item skip)", summary)
 	}
 }
+
+// TestFetchMediaInline_FailedDownloadChargesByteBudget locks in the fix for
+// Codex's P2 ("Charge failed downloads against the aggregate byte budget"):
+// a per-item download failure whose callback ran (attemptedFn=true, an
+// ordinary skip) may have already streamed close to perItemCap bytes before
+// erroring — e.g. cappedBuffer aborting an oversized undeclared-size photo
+// mid-stream. Without charging that against totalBytes, every subsequent
+// item would see the same near-full remaining budget, letting a page of
+// failing items multiply well past BulkMediaByteCap in actual wire transfer.
+func TestFetchMediaInline_FailedDownloadChargesByteBudget(t *testing.T) {
+	withBulkMediaByteCap(t, 150) // room for one item's perItemCap, no more
+	calls := 0
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		calls++
+		return nil, errors.New("boom"), true
+	})
+	raw1, decoded1 := newDownloadableMessage(1, 100)
+	raw2, decoded2 := newDownloadableMessage(2, 100)
+	rawMsgs := []*tg.Message{raw1, raw2}
+	msgs := []telegram.Message{decoded1, decoded2}
+	s := &Server{MediaDownloadMaxBytes: 1000} // per-file cap is not the binding constraint here
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Item 1: fits (remaining 150 >= 100), perItemCap=150, downloader called
+	// and fails — charges the full perItemCap (150) against totalBytes even
+	// though nothing was actually returned. Item 2: remaining is now 0, so it
+	// is skipped without ever reaching the downloader.
+	if calls != 1 {
+		t.Errorf("downloader called %d times, want 1 — the failed download's charged budget must starve item 2 before it reaches the downloader", calls)
+	}
+	want := FetchMediaSummary{Fetched: 0, Skipped: 2, Cap: BulkMediaFetchCap}
+	if summary != want {
+		t.Errorf("summary = %+v, want %+v", summary, want)
+	}
+}

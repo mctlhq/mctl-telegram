@@ -169,6 +169,16 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 			if isSystemicPoolErr(dlErr) || !attemptedFn {
 				return summary, dlErr
 			}
+			// A failed download whose callback ran may still have streamed
+			// close to perItemCap bytes before erroring — e.g. cappedBuffer
+			// aborting an oversized undeclared-size photo mid-stream. That
+			// data never reaches data/len(data) below, so without charging
+			// it here totalBytes wouldn't reflect it and every subsequent
+			// item would see the same near-full remaining budget, letting a
+			// page of oversized items multiply well past BulkMediaByteCap in
+			// actual wire transfer. Charge the conservative worst case
+			// (perItemCap) since the real byte count isn't available here.
+			totalBytes += perItemCap
 			summary.Skipped++
 			slog.Warn("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
 			continue

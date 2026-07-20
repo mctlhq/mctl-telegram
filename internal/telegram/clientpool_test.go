@@ -307,6 +307,56 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 	})
 }
 
+// TestBorrow_RevokePersistFailurePreservesSentinel locks in a fix for a
+// Codex P2 ("Propagate post-download session revoke failures"): when
+// Telegram rejects the session inside fn AND persisting that revoke to the
+// DB then fails, the returned error must still satisfy errors.Is against the
+// session sentinel (db.ErrSessionRevoked here) — not just wrap the raw DB
+// error. Callers up the stack (sessionErrText/isSystemicPoolErr in
+// internal/mcp) classify pool errors via errors.Is; losing the sentinel here
+// would make a genuine call-wide session failure indistinguishable from an
+// ordinary per-item error, e.g. fetchMediaInline folding it into Skipped
+// instead of aborting the loop.
+func TestBorrow_RevokePersistFailurePreservesSentinel(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "revoke-fail-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), now, now.Add(60*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	p := NewClientPool(1, "hash", time.Minute, store)
+	// Inject a synthetic ready entry so acquire() returns it without dialing
+	// Telegram — mirrors TestPoolFull / the error/pool_full subtest above.
+	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	close(e.ready)
+	p.mu.Lock()
+	p.entries[uid] = e
+	p.mu.Unlock()
+
+	borErr := p.Borrow(ctx, uid, func(context.Context, *telegram.Client) error {
+		// Close the DB now, inside fn — CheckSessionValid already ran (it
+		// happens before acquire()/fn), so this only breaks the *later*
+		// revokeRejected -> RevokeActiveSession write, simulating a DB that
+		// goes unavailable mid-call.
+		_ = store.DB.Close()
+		return tgerr.New(401, "SESSION_REVOKED")
+	})
+	if borErr == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	if !errors.Is(borErr, db.ErrSessionRevoked) {
+		t.Errorf("Borrow() error = %v, want errors.Is(_, db.ErrSessionRevoked) — the sentinel must survive even when persisting the revoke fails", borErr)
+	}
+}
+
 // TestPoolFull verifies that a pool with MaxSessions=2 returns ErrPoolFull on
 // the third acquire when two entries are already live. It does NOT attempt to
 // dial Telegram — the pool is seeded with hand-injected entries so no actual
