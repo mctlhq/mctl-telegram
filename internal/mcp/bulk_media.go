@@ -42,34 +42,51 @@ type FetchMediaSummary struct {
 // tests can exercise the cap/skip/error bookkeeping without a live Telegram
 // connection. Production code always calls through to
 // (*Server).downloadMediaViaPool; tests that reassign this package variable
-// must restore the original via t.Cleanup. The third return value reports
-// whether the download callback itself ran — false means Borrow failed in
-// its own preflight/acquire/client-startup path (session check, pool
-// capacity, connection setup) before ever reaching the callback, which
-// fetchMediaInline treats as systemic regardless of the error's type.
-var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
+// must restore the original via t.Cleanup. consumed is the total raw bytes
+// transferred across every retry attempt (see downloadMediaViaPool) —
+// fetchMediaInline charges this, not len(data), against BulkMediaByteCap.
+// The bool return reports whether the download callback itself ran — false
+// means Borrow failed in its own preflight/acquire/client-startup path
+// (session check, pool capacity, connection setup) before ever reaching the
+// callback, which fetchMediaInline treats as systemic regardless of the
+// error's type.
+var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) (data []byte, consumed int64, err error, attemptedFn bool) {
 	return s.downloadMediaViaPool(ctx, userID, loc, maxBytes)
 }
 
 // downloadMediaViaPool borrows a pooled client and downloads loc's bytes,
 // mirroring the pattern toolGetMedia uses for the two-step flow
-// (s.borrowWithRetry + telegram.DownloadMedia). The bool return reports
-// whether the download callback actually ran during the attempt that
-// produced the returned error — see mediaDownloader. attempted is reset
-// before every retry attempt (via borrowWithRetry's beforeAttempt hook) so a
-// flood-wait retry whose first try called the callback but whose later
-// Borrow call then fails in its own preflight/acquire path (never reaching
-// the callback again) doesn't leave a stale true from the earlier attempt.
-func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, error, bool) {
+// (s.borrowWithRetry + telegram.DownloadMedia).
+//
+// consumed accumulates len(buf) from EVERY callback invocation, not just the
+// last: a flood-wait retry reruns telegram.DownloadMedia from scratch (a
+// fresh cappedBuffer each time — gotd's downloader has no resume-by-offset
+// here), so an earlier attempt that streamed most of a large file before
+// hitting FLOOD_WAIT mid-download has those bytes silently overwritten in
+// buf once the retry starts over. Without accumulating separately, only the
+// final attempt's byte count would ever reach fetchMediaInline's aggregate
+// charge, letting a single item's retries transfer several times
+// BulkMediaByteCap in real wire traffic while reporting far less.
+//
+// The bool return reports whether the download callback actually ran during
+// the attempt that produced the returned error — see mediaDownloader.
+// attempted is reset before every retry attempt (via borrowWithRetry's
+// beforeAttempt hook) so a flood-wait retry whose first try called the
+// callback but whose later Borrow call then fails in its own
+// preflight/acquire path (never reaching the callback again) doesn't leave a
+// stale true from the earlier attempt.
+func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, int64, error, bool) {
 	var buf []byte
+	var consumed int64
 	attempted := false
 	err := s.borrowWithRetry(ctx, "fetch_media", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		attempted = true
 		var derr error
 		buf, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
+		consumed += int64(len(buf))
 		return derr
 	}, func() { attempted = false })
-	return buf, err, attempted
+	return buf, consumed, err, attempted
 }
 
 // isSystemicPoolErr reports whether err represents a call-wide failure that
@@ -174,27 +191,31 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 			continue
 		}
 		attempted++
-		data, dlErr, attemptedFn := mediaDownloader(s, ctx, userID, *loc, perItemCap)
+		data, consumed, dlErr, attemptedFn := mediaDownloader(s, ctx, userID, *loc, perItemCap)
 		if dlErr != nil {
 			if isSystemicPoolErr(dlErr) || !attemptedFn {
 				return summary, dlErr
 			}
 			// A failed download whose callback ran may still have streamed
 			// some bytes before erroring — e.g. cappedBuffer aborting an
-			// oversized undeclared-size photo mid-stream. mediaDownloader
-			// returns whatever was accumulated even on error (see
-			// telegram.DownloadMedia), so charge that actual amount rather
-			// than the full perItemCap: charging the worst case here would
-			// let one instant, zero-byte per-item failure (a fast RPC error
-			// before any chunk arrived) exhaust the entire remaining budget
-			// and wrongly starve every later item, defeating the documented
-			// "per-item failures keep the loop going" contract.
-			totalBytes += int64(len(data))
+			// oversized undeclared-size photo mid-stream, or a flood-wait
+			// retry that reran the whole download after an earlier attempt
+			// already streamed part of it. consumed reflects the real total
+			// across every attempt (see downloadMediaViaPool), so charge
+			// that rather than the full perItemCap: charging the worst case
+			// here would let one instant, zero-byte per-item failure (a fast
+			// RPC error before any chunk arrived) exhaust the entire
+			// remaining budget and wrongly starve every later item,
+			// defeating the documented "per-item failures keep the loop
+			// going" contract.
+			totalBytes += consumed
 			summary.Skipped++
 			slog.Warn("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
 			continue
 		}
-		totalBytes += int64(len(data))
+		// consumed already includes this successful attempt's len(data) plus
+		// any bytes streamed by earlier attempts a flood-wait retry discarded.
+		totalBytes += consumed
 		encoded := base64.StdEncoding.EncodeToString(data)
 		msgs[i].MediaData = &encoded
 		summary.Fetched++
