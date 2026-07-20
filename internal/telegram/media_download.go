@@ -313,15 +313,23 @@ const downloaderReadAheadBlocks = 2
 // that rejection, so DownloadMedia can tell "Stream() failed because of our
 // own cap check (margin already charged in Write)" apart from "Stream()
 // failed for some other reason (fetch/RPC/context — margin not yet
-// charged)" — see DownloadMedia's doc.
+// charged)" — see DownloadMedia's doc. wrote records whether Write was ever
+// called at all: gotd's write loop only calls Write once a block has
+// actually been fetched over the wire and handed across the toWrite
+// channel, so wrote==false means that channel was still empty when Stream()
+// failed — e.g. the very first RPC fetching block one failed before
+// producing anything — and there is no possibly-stranded block to charge a
+// read-ahead margin for.
 type cappedBuffer struct {
 	buf      []byte
 	cap      int64
 	consumed int64
 	rejected bool
+	wrote    bool
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
+	w.wrote = true
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
 		w.rejected = true
 		w.consumed += int64(len(p))
@@ -364,13 +372,18 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // cappedBuffer has no visibility into that case at all (Write is simply
 // never called with it), so DownloadMedia itself charges one
 // downloaderReadAheadBlocks*downloaderPartSize margin here instead — but
-// only when w.rejected is false, since a genuine cap rejection already
-// charged its own margin inside Write and charging twice would double-count.
+// only when w.rejected is false (a genuine cap rejection already charged
+// its own margin inside Write; charging twice would double-count) AND
+// w.wrote is true. w.wrote guards the case where the very first RPC fails
+// before delivering any block at all: gotd's toWrite channel is then
+// necessarily still empty, so there is nothing that could have been
+// stranded, and charging the margin would overcharge a call that
+// transferred zero bytes.
 func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
 	w := &cappedBuffer{cap: maxBytes}
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
-		if !w.rejected {
+		if !w.rejected && w.wrote {
 			w.consumed += int64(downloaderReadAheadBlocks * downloaderPartSize)
 		}
 		return w.buf, w.consumed, fmt.Errorf("download: %w", err)

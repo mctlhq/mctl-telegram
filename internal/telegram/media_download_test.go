@@ -223,6 +223,9 @@ func TestCappedBuffer_Write_OverCap_FullSizedBlock(t *testing.T) {
 	if !w.rejected {
 		t.Error("rejected = false, want true after a cap-exceeded Write")
 	}
+	if !w.wrote {
+		t.Error("wrote = false, want true after at least one Write call")
+	}
 }
 
 // TestCappedBuffer_Write_OverCap_ShortFinalBlock locks in the fix for
@@ -257,6 +260,28 @@ func TestCappedBuffer_Write_OverCap_ShortFinalBlock(t *testing.T) {
 	if !w.rejected {
 		t.Error("rejected = false, want true after a cap-exceeded Write")
 	}
+	if !w.wrote {
+		t.Error("wrote = false, want true after at least one Write call")
+	}
+}
+
+// TestCappedBuffer_NoWrite_NotWrote locks in the fix for Codex's P2 ("Do not
+// charge read-ahead before any chunk arrives"): a cappedBuffer that Stream()
+// never called Write on at all — e.g. the very first RPC fetching block one
+// failed before gotd's downloader produced anything — must report wrote ==
+// false. DownloadMedia uses this to skip the read-ahead margin entirely in
+// that case: gotd's toWrite channel is necessarily still empty, so there is
+// no fetched-but-undelivered block to account for, and charging a margin
+// against zero actually-transferred bytes would overcharge the aggregate
+// budget and wrongly skip later legitimate items.
+func TestCappedBuffer_NoWrite_NotWrote(t *testing.T) {
+	w := &cappedBuffer{cap: 100}
+	if w.wrote {
+		t.Error("wrote = true, want false when Write was never called")
+	}
+	if w.consumed != 0 {
+		t.Errorf("consumed = %d, want 0 when Write was never called", w.consumed)
+	}
 }
 
 // TestCappedBuffer_Write_UnderCap_NotRejected guards the flip side of
@@ -273,5 +298,8 @@ func TestCappedBuffer_Write_UnderCap_NotRejected(t *testing.T) {
 	}
 	if w.rejected {
 		t.Error("rejected = true, want false after a Write that stayed under cap")
+	}
+	if !w.wrote {
+		t.Error("wrote = false, want true after a successful Write call")
 	}
 }
