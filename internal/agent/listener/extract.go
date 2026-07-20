@@ -7,7 +7,9 @@
 package listener
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -27,29 +29,29 @@ type Extracted struct {
 }
 
 // eventIDForMessage builds the deterministic dedup key for a message-bearing
-// update. edit>0 appends the edit timestamp so a later edit of the same
-// message yields a distinct event while a redelivery of the same edit dedups.
-func eventIDForMessage(accountTGID, chatID, messageID int64, editDate int) string {
+// update. Edits include both Telegram's second-resolution edit timestamp and a
+// short content hash: two distinct edits within one second remain distinct,
+// while redelivery of the same edit still deduplicates.
+func eventIDForMessage(accountTGID, chatID, messageID int64, editDate int, body string) string {
 	base := "evt:v1:" + strconv.FormatInt(accountTGID, 10) + ":" +
 		strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(messageID, 10)
 	if editDate > 0 {
-		base += ":e" + strconv.Itoa(editDate)
+		sum := sha256.Sum256([]byte(body))
+		base += ":e" + strconv.Itoa(editDate) + ":" + fmt.Sprintf("%x", sum[:6])
 	}
 	return base
 }
 
 // ExtractMessage maps one *tg.Message (from a new or edit update) to an
 // IncomingEvent for the given account. ok=false means the message is not
-// agent-relevant (non-user peer, empty service message, a bot sender, …) and
-// must be skipped. selfTGID is the account's own Telegram id; accountUserID is
-// the internal users.id that owns the row.
-//
-// Pure and side-effect free so the full routing matrix is table-testable
-// against hand-built tg structs, matching send_test.go / seedpeer_test.go.
+// agent-relevant (non-user peer, empty inbound/service message, a bot sender,
+// etc.). Owner outgoing messages are kept even without text: a photo, sticker,
+// voice note, or other media-only reply is still a human takeover signal.
 func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Entities, isEdit bool) (Extracted, bool) {
-	if msg == nil || strings.TrimSpace(msg.Message) == "" {
+	if msg == nil {
 		return Extracted{}, false
 	}
+	text := strings.TrimSpace(msg.Message)
 
 	// Owner's own outgoing message.
 	if msg.Out {
@@ -58,8 +60,13 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			return Extracted{}, false
 		}
 		if peerUser.UserID == selfTGID {
+			// Saved Messages only carries control commands in v1. A media-only
+			// self-message has nothing for the command parser.
+			if text == "" {
+				return Extracted{}, false
+			}
 			ev := db.IncomingEvent{
-				EventID:    eventIDForMessage(selfTGID, selfTGID, int64(msg.ID), editDate(msg, isEdit)),
+				EventID:    eventIDForMessage(selfTGID, selfTGID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
 				UserID:     accountUserID,
 				Kind:       db.EventKindSavedCommand,
 				ChatTGID:   selfTGID,
@@ -69,8 +76,10 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			}
 			return Extracted{Event: ev, SavedCommandText: msg.Message}, true
 		}
+		// Do not require text here: any visible owner intervention in a private
+		// chat (including media without caption) must stop autonomous replies.
 		ev := db.IncomingEvent{
-			EventID:    eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit)),
+			EventID:    eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
 			UserID:     accountUserID,
 			Kind:       db.EventKindOwnerOutgoing,
 			ChatTGID:   peerUser.UserID,
@@ -81,6 +90,9 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		return Extracted{Event: ev}, true
 	}
 
+	if text == "" {
+		return Extracted{}, false
+	}
 	peerUser, ok := msg.PeerID.(*tg.PeerUser)
 	if !ok {
 		return Extracted{}, false
@@ -98,7 +110,7 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		kind = db.EventKindMessageEdit
 	}
 	ev := db.IncomingEvent{
-		EventID:    eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit)),
+		EventID:    eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
 		UserID:     accountUserID,
 		Kind:       kind,
 		ChatTGID:   peerUser.UserID,
