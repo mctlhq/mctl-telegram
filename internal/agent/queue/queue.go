@@ -8,7 +8,6 @@ package queue
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -46,31 +45,19 @@ func (q *Queue) Enqueue(ctx context.Context, eventID string, userID, conversatio
 	return id, enqueued, err
 }
 
-// Ingest persists an incoming event and enqueues its job in one transaction —
-// the listener's crash-safe primitive (see Store.InsertEventAndEnqueueJob) —
-// and counts BOTH the received event and the pending job. This is the path
-// that increments AgentEventsReceivedTotal: counting at ingestion (post-dedup,
-// post-commit) keeps the metric equal to rows actually persisted. Duplicate
-// deliveries return enqueued=false and count nothing. The conversation
-// timestamp is touched only for a first-seen event, so a stale gotd redelivery
-// cannot make an old conversation appear newly active.
+// Ingest persists an actionable incoming event, enqueues its job, and updates
+// the conversation's last-incoming timestamp in one transaction. It counts both
+// the received event and pending job only after commit. Duplicate deliveries are
+// a complete no-op and count nothing.
 func (q *Queue) Ingest(ctx context.Context, ev db.IncomingEvent, conversationID int64) (int64, bool, error) {
-	id, enqueued, err := q.Store.InsertEventAndEnqueueJob(ctx, ev, conversationID)
-	if err != nil {
-		return id, enqueued, err
-	}
-	if enqueued && conversationID != 0 {
-		if err := q.Store.TouchConversationIncoming(ctx, ev.UserID, conversationID); err != nil {
-			return id, true, fmt.Errorf("touch conversation after ingest: %w", err)
-		}
-	}
-	if enqueued {
+	id, enqueued, err := q.Store.InsertEventEnqueueJobAndTouch(ctx, ev, conversationID)
+	if err == nil && enqueued {
 		if q.m != nil {
 			q.m.AgentEventsReceivedTotal.WithLabelValues(ev.Kind).Inc()
 		}
 		q.count(db.JobPending, 1)
 	}
-	return id, enqueued, nil
+	return id, enqueued, err
 }
 
 // Claim atomically claims up to limit due jobs for this replica.
