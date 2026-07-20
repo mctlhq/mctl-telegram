@@ -242,7 +242,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		defer cancel()
 		dlErr := s.borrowWithRetry(downloadCtx, "get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
-			buf, err = telegram.DownloadMedia(ctx, c, ref.Location, s.MediaDownloadMaxBytes)
+			buf, _, err = telegram.DownloadMedia(ctx, c, ref.Location, s.MediaDownloadMaxBytes)
 			return err
 		})
 		s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), dlErr, startedAt)

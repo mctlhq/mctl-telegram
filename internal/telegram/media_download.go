@@ -266,19 +266,43 @@ func largestPhotoSizeType(sizes []tg.PhotoSizeClass) string {
 	return best
 }
 
+// downloaderReadAheadBytes upper-bounds the extra bytes gotd's downloader may
+// have already pulled over the wire but not yet handed to our io.Writer by
+// the time cappedBuffer rejects a block. gotd v0.144.0's stream() pipeline
+// (telegram/downloader/stream.go) runs the network-fetch loop and the write
+// loop concurrently over `toWrite := make(chan block, 1)` — a channel with
+// one slot of buffering — so while the write loop is calling Write with the
+// current block, the fetch loop can already be blocked trying to send the
+// NEXT block (fetched using defaultPartSize, telegram/downloader/downloader.go,
+// currently 512 KiB) into that channel. That block is fully transferred
+// before Write ever sees it, and is silently discarded when Stream() returns
+// the cap-exceeded error, invisible to cappedBuffer. This is a best-effort
+// upper bound on a third-party library's internal buffering, not a
+// guaranteed exact count — revisit if gotd's part size or channel depth
+// changes.
+const downloaderReadAheadBytes = 512 * 1024
+
 // cappedBuffer accumulates downloaded bytes, failing the stream as soon as
 // the cap is exceeded so oversized files abort mid-download instead of
-// filling memory.
+// filling memory. consumed tracks the real bytes DownloadMedia's caller
+// should charge against an aggregate transfer budget — every Write call's
+// len(p) (the block itself was already fully fetched over the wire before
+// Write is even called), plus downloaderReadAheadBytes on the specific call
+// that rejects a block (see its doc for why one more block may already be
+// in flight, invisible to buf).
 type cappedBuffer struct {
-	buf []byte
-	cap int64
+	buf      []byte
+	cap      int64
+	consumed int64
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
+		w.consumed += int64(len(p)) + downloaderReadAheadBytes
 		return 0, fmt.Errorf("download exceeded %d-byte cap mid-stream", w.cap)
 	}
 	w.buf = append(w.buf, p...)
+	w.consumed += int64(len(p))
 	return len(p), nil
 }
 
@@ -292,15 +316,16 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 //
 // On error the returned slice is whatever cappedBuffer had accumulated
 // before the failure (possibly empty, e.g. an immediate RPC error before any
-// chunk arrived) rather than always nil — callers that bound an aggregate
-// transfer budget across multiple downloads (fetchMediaInline) need the
-// actual bytes consumed, not just success/failure, to charge a failed
-// attempt accurately.
-func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, error) {
+// chunk arrived) rather than always nil. consumed is the real total bytes
+// transferred over the wire for this call — which on a cap-exceeded error
+// can exceed len(data), see cappedBuffer's doc — and is what callers that
+// bound an aggregate transfer budget across multiple downloads
+// (fetchMediaInline) should charge, not len(data).
+func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
 	w := &cappedBuffer{cap: maxBytes}
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
-		return w.buf, fmt.Errorf("download: %w", err)
+		return w.buf, w.consumed, fmt.Errorf("download: %w", err)
 	}
-	return w.buf, nil
+	return w.buf, w.consumed, nil
 }

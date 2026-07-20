@@ -82,8 +82,9 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 	err := s.borrowWithRetry(ctx, "fetch_media", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		attempted = true
 		var derr error
-		buf, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
-		consumed += int64(len(buf))
+		var thisConsumed int64
+		buf, thisConsumed, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
+		consumed += thisConsumed
 		return derr
 	}, func() { attempted = false })
 	return buf, consumed, err, attempted

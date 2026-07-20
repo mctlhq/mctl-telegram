@@ -164,3 +164,54 @@ func TestSanitizeFileName(t *testing.T) {
 		t.Errorf("all-invisible name should become empty, got %q", got)
 	}
 }
+
+// TestCappedBuffer_Write_UnderCap verifies the ordinary case: writes below
+// cap succeed, and consumed tracks exactly the bytes written (no rejection,
+// so no downloaderReadAheadBytes margin applies).
+func TestCappedBuffer_Write_UnderCap(t *testing.T) {
+	w := &cappedBuffer{cap: 100}
+	n, err := w.Write(make([]byte, 40))
+	if err != nil || n != 40 {
+		t.Fatalf("Write(40) = (%d, %v), want (40, nil)", n, err)
+	}
+	n, err = w.Write(make([]byte, 40))
+	if err != nil || n != 40 {
+		t.Fatalf("Write(40) = (%d, %v), want (40, nil)", n, err)
+	}
+	if len(w.buf) != 80 {
+		t.Errorf("len(buf) = %d, want 80", len(w.buf))
+	}
+	if w.consumed != 80 {
+		t.Errorf("consumed = %d, want 80", w.consumed)
+	}
+}
+
+// TestCappedBuffer_Write_OverCap locks in the fix for Codex's P2 ("Count
+// discarded download chunks against the budget"): when a block is rejected
+// for exceeding cap, that block was already fully fetched over the wire
+// before Write was even called, and gotd's stream() pipeline (buffer-1
+// channel between its fetch and write loops) may already have the NEXT
+// block in flight too. consumed must charge the rejected block's own size
+// on top of what's already buffered, plus the downloaderReadAheadBytes
+// margin for that possible in-flight next block — not just len(buf).
+func TestCappedBuffer_Write_OverCap(t *testing.T) {
+	w := &cappedBuffer{cap: 50}
+	n, err := w.Write(make([]byte, 40)) // fits: 0+40 <= 50
+	if err != nil || n != 40 {
+		t.Fatalf("Write(40) = (%d, %v), want (40, nil)", n, err)
+	}
+	n, err = w.Write(make([]byte, 30)) // rejected: 40+30 > 50
+	if err == nil {
+		t.Fatal("expected an error for a write that exceeds cap")
+	}
+	if n != 0 {
+		t.Errorf("Write() n = %d, want 0 on rejection", n)
+	}
+	if len(w.buf) != 40 {
+		t.Errorf("len(buf) = %d, want 40 (the rejected block must not be appended)", len(w.buf))
+	}
+	wantConsumed := int64(40+30) + downloaderReadAheadBytes
+	if w.consumed != wantConsumed {
+		t.Errorf("consumed = %d, want %d (buffered 40 + rejected 30 + %d read-ahead margin)", w.consumed, wantConsumed, downloaderReadAheadBytes)
+	}
+}
