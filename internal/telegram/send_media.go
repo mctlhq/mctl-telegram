@@ -110,6 +110,11 @@ func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, 
 	if err != nil {
 		return nil, err
 	}
+	messageID := extractMessageID(updates)
+	// Media sends are echoed through the same user session as outgoing
+	// messages. Mark the server-assigned id before returning so the agent
+	// listener does not interpret that echo as a manual owner takeover.
+	notifyAgentSent(userID, int64(messageID))
 	return &SendMediaResult{
 		Sent:      true,
 		Mode:      "send",
@@ -118,7 +123,7 @@ func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, 
 		MimeType:  mimeType,
 		FileName:  fileName,
 		Caption:   caption,
-		MessageID: extractMessageID(updates),
+		MessageID: messageID,
 	}, nil
 }
 

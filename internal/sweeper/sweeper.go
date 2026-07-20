@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -158,5 +159,46 @@ func agentRetentionSweepOnce(ctx context.Context, store *db.Store, retention tim
 	}
 	if rows > 0 {
 		slog.Info("agent retention sweep", "deleted_rows", rows, "retention", retention)
+	}
+}
+
+// AgentJobsSweeperInterval is how often AgentJobs() wakes up. One minute keeps
+// crash-recovery latency (visibility timeout -> requeue) tight without
+// meaningful DB load — the requeue query touches an indexed status column.
+const AgentJobsSweeperInterval = time.Minute
+
+// AgentJobs runs queue maintenance until ctx is cancelled: stale processing
+// claims return to pending (crash recovery for a worker that died mid-job;
+// dead_letter once attempts are exhausted), and pending_approval actions past
+// their TTL expire. Like the other sweepers it is best-effort — the queue's
+// compare-and-set transitions are the authoritative gates, so a missed sweep
+// only delays recovery by a tick.
+func AgentJobs(ctx context.Context, q *queue.Queue, visibility, approvalTTL time.Duration) {
+	ticker := time.NewTicker(AgentJobsSweeperInterval)
+	defer ticker.Stop()
+	agentJobsSweepOnce(ctx, q, visibility, approvalTTL)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			agentJobsSweepOnce(ctx, q, visibility, approvalTTL)
+		}
+	}
+}
+
+func agentJobsSweepOnce(ctx context.Context, q *queue.Queue, visibility, approvalTTL time.Duration) {
+	requeued, dead, err := q.RequeueStale(ctx, visibility)
+	if err != nil {
+		slog.Warn("agent job requeue sweep failed", "err", err)
+	} else if requeued > 0 || dead > 0 {
+		slog.Info("agent job sweep", "requeued", requeued, "dead_lettered", dead, "visibility", visibility)
+	}
+
+	expired, err := q.Store.ExpireStaleAgentActions(ctx, approvalTTL)
+	if err != nil {
+		slog.Warn("agent action expiry sweep failed", "err", err)
+	} else if expired > 0 {
+		slog.Info("agent action sweep", "expired_approvals", expired, "ttl", approvalTTL)
 	}
 }

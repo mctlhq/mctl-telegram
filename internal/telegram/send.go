@@ -67,12 +67,18 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 	if err != nil {
 		return nil, err
 	}
+	messageID := extractMessageID(updates)
+	// Mark the server-assigned id before returning to the MCP tool. Telegram
+	// subsequently echoes the same outgoing message through updates.Manager;
+	// the communication listener consumes this marker and does not interpret
+	// the programmatic send as a manual owner takeover.
+	notifyAgentSent(userID, int64(messageID))
 	return &SendResult{
 		Sent:      true,
 		Mode:      "send",
 		PeerInput: peer,
 		Text:      text,
-		MessageID: extractMessageID(updates),
+		MessageID: messageID,
 	}, nil
 }
 

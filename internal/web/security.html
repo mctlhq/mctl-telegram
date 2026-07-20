@@ -48,16 +48,11 @@
       <span>Security model</span>
     </div>
     <h1>Security <span class="accent">model</span></h1>
-    <p class="lead">Threat model, cryptographic invariants, and known coupling for this deployment.</p>
+    <p class="lead">Threat model, cryptographic invariants, Communication Agent controls, and known limitations for this deployment.</p>
   </section>
 
   <div class="warn">
-    <strong>Not zero-knowledge (hosted mode).</strong> In the default hosted mode,
-    mctl-telegram makes outbound MTProto calls to Telegram on your behalf, so the
-    server process necessarily handles plaintext Telegram data while serving your
-    request. You are trusting both the operator of this deployment and the integrity
-    of this code. For a stronger trust model, see the <strong>Local Bridge mode</strong>
-    section below.
+    <strong>Not zero-knowledge (hosted mode).</strong> mctl-telegram makes outbound MTProto calls to Telegram on your behalf. The running server handles plaintext Telegram data while processing requests and, when Communication Agent is enabled, decrypts encrypted agent message state for listener/queue processing. You are trusting both the deployment operator and the integrity of this code. For a stronger session-storage model, see <strong>Local Bridge mode</strong> below.
   </div>
 
   <h2>Reporting vulnerabilities</h2>
@@ -67,106 +62,130 @@
   <p>For product help (setup, disconnect, billing questions): email <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Do not use the security address for general support.</p>
 
   <h2>Trust boundaries</h2>
-  <p>Per user, the service brokers two trust relationships:</p>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Boundary</th><th>Trusted credential</th><th>Lives</th></tr></thead>
+    <thead><tr><th>Boundary</th><th>Trusted credential / state</th><th>Lives</th></tr></thead>
     <tbody>
       <tr>
         <td>Inbound HTTP (ChatGPT / Claude / MCP clients &#8594; <code>/mcp</code>)</td>
-        <td>OAuth JWT issued and verified by this server (local-jwt mode); shared-hmac-legacy mode uses <code>api.mctl.ai</code></td>
-        <td>Bearer header, per-request</td>
+        <td>OAuth JWT issued and verified by this server; legacy mode may use <code>api.mctl.ai</code></td>
+        <td>Bearer header, per request</td>
       </tr>
       <tr>
-        <td>Outbound MTProto (<code>gotd/td</code> → Telegram)</td>
-        <td>Encrypted session blob</td>
-        <td>Postgres <code>telegram_accounts.session_encrypted</code></td>
+        <td>Outbound MTProto (<code>gotd/td</code> &#8594; Telegram)</td>
+        <td>Encrypted per-user session blob</td>
+        <td><code>telegram_accounts.session_encrypted</code></td>
+      </tr>
+      <tr>
+        <td>Communication Agent listener and queue</td>
+        <td>Per-user listener profile, encrypted message/event rows, queue jobs, conversation and policy state</td>
+        <td>User-scoped Postgres agent tables; active only for listener-enabled profiles</td>
       </tr>
     </tbody>
   </table>
   </div>
-  <p>Compromise of either boundary compromises only the affected operator's account — not other users — provided the per-user session key derivation is intact (see <em>Cryptographic invariants</em> below).</p>
+  <p>Every database lookup for user content is intended to be scoped to the owning user. Compromise of one account should not expose another account unless the service, key derivation, or deployment boundary itself is compromised.</p>
 
   <h2>What the server sees</h2>
   <ul>
-    <li><strong>Plaintext MTProto traffic for the duration of one tool call.</strong> The server must decrypt the session blob and exchange MTProto messages with Telegram in memory.</li>
-    <li><strong>Tool-call metadata, persisted.</strong> Tool name, redacted peer reference, status, and (if any) error string. Persisted to <code>audit_logs</code> with the redaction policy below.</li>
+    <li><strong>Plaintext MTProto traffic and tool content in memory.</strong> The service must decrypt the session and message/action fields while processing them.</li>
+    <li><strong>Encrypted Communication Agent content at rest.</strong> When the listener is enabled, relevant message bodies and proposed action payloads are durably stored for queue recovery, policy evaluation, approval, and conversation context.</li>
+    <li><strong>Audit metadata, persisted separately.</strong> Tool/action name, redacted peer reference, status, and redacted error text. Audit rows do not contain Telegram message bodies.</li>
+  </ul>
+
+  <h2>Communication Agent safety boundary</h2>
+  <p>The model prompt and model output are not trusted as a security boundary. The server-side listener, state machine, policy engine, approval flow, and Telegram send gate remain authoritative.</p>
+  <ul>
+    <li><strong>Explicit enablement.</strong> Only profiles with the listener enabled receive durable Telegram updates. Disabling a profile removes the listener account and immediately stops its pinned Telegram client.</li>
+    <li><strong>Crash-safe ingestion.</strong> Incoming event, queue job, and conversation activity timestamp are committed in one transaction. Database failures are returned to Telegram's update manager so the update watermark is not acknowledged and gap recovery can retry.</li>
+    <li><strong>Saved Messages privacy.</strong> Only an explicit first-token <code>/mctl</code> command is stored and routed. Ordinary notes in Saved Messages are ignored.</li>
+    <li><strong>Human takeover.</strong> A genuine owner reply, including a media-only reply, moves the conversation to <code>taken_over</code>. Programmatic text/media sends are correlated by their Telegram message ID so their echo is not mistaken for a human reply.</li>
+    <li><strong>Fail-closed policy.</strong> Unknown modes, states, and action types are denied. The global kill switch, off/paused profiles, blocked senders, peer mismatch, missing disclosure, unsafe links/credentials/phone-like content, and invalid structural limits deny an action.</li>
+    <li><strong>Approval modes.</strong> <code>observe</code> mode requires owner approval for replies. <code>guarded</code> mode can allow only allowlisted replies that satisfy every server-side policy, turn budget, and rate constraint; other actions require approval or are denied.</li>
+    <li><strong>No blind retry after a possible send.</strong> The action lifecycle uses compare-and-set transitions. If a process crashes after entering <code>executing</code>, that action is not automatically retried, avoiding duplicate messages.</li>
+  </ul>
+  <p>Enabling the listener does not bypass the existing <code>ALLOW_SEND</code>, scope, per-account, and per-peer send gates.</p>
+
+  <h2>Communication Agent storage and retention</h2>
+  <ul>
+    <li><code>incoming_events</code> and <code>conversation_messages</code> may contain third-party Telegram message bodies.</li>
+    <li><code>agent_actions</code> may contain proposed reply payloads and approval/policy metadata.</li>
+    <li>Message bodies and action payloads are AES-256-GCM sealed with the owner's derived key before database storage.</li>
+    <li>A daily sweeper deletes stored agent message content older than <code>AGENT_RETENTION_DAYS</code>; default is <strong>30 days</strong>. Setting it to <code>0</code> keeps rows indefinitely.</li>
+    <li>Audit retention is separate: <code>AUDIT_RETENTION_DAYS</code> defaults to 90 days and audit rows contain no message body.</li>
   </ul>
 
   <h2>Local Bridge mode</h2>
-  <p>When your account is set to <code>mode='local'</code>, the security guarantees change significantly:</p>
+  <p>When an account is set to <code>mode='local'</code>, its MTProto session lives on the user's machine instead of the hosted server:</p>
   <ul>
-    <li><strong>Session bytes are never stored on the server.</strong> The <code>session_encrypted</code> column is NULL for local-mode accounts. The MTProto session lives entirely on your local machine, encrypted at rest by the daemon.</li>
-    <li><strong>Tool arguments and responses pass through relay memory per call only.</strong> The relay must forward MCP JSON-RPC payloads to your daemon and route responses back. This data exists in server memory for the duration of one call and is not persisted.</li>
-    <li><strong>The relay does not log message content.</strong> The same audit-log schema applies: only tool name, redacted peer reference, status, and (if any) error string are persisted. The <code>call_path</code> column is set to <code>'local'</code> so you can distinguish relay-forwarded calls from hosted calls in your audit log.</li>
-    <li><strong>Limit of relay visibility.</strong> For genuine end-to-end secrecy from the relay, the MCP client would need to encrypt payloads with your daemon's public key. That requires client-side support which is not available today — the relay sees the plaintext tool arguments and results for the duration of routing.</li>
+    <li><strong>Session bytes are not stored on the server.</strong> <code>session_encrypted</code> is NULL for local-mode accounts.</li>
+    <li><strong>Tool arguments and responses still pass through relay memory.</strong> The relay can see plaintext while routing the call and does not provide end-to-end encryption from the MCP client to the daemon.</li>
+    <li><strong>Audit content remains metadata-only.</strong> The <code>call_path</code> marks local relay calls, while message bodies are excluded from audit rows and stdout.</li>
+    <li><strong>Communication Agent limitation.</strong> A hosted listener requires an active server-side Telegram client. Do not assume Local Bridge automatically provides the same always-on listener semantics without an explicitly deployed local listener path.</li>
   </ul>
 
-  <h2>What the server NEVER persists</h2>
-  <p>The slog redaction handler scrubs every log line, and the audit-log schema does not contain columns for any of the following:</p>
+  <h2>What logs and audit rows never persist</h2>
   <ul>
-    <li>The full text of a sent or received message</li>
-    <li>The user's phone number or 2FA password (only seen during interactive login, never stored)</li>
-    <li>The raw MTProto session bytes (only the AES-GCM ciphertext lives in Postgres)</li>
-    <li>The OAuth JWT secret, the encryption master key, or any derived per-user subkey</li>
-    <li>The contents of <code>Authorization: Bearer</code> headers</li>
+    <li>Telegram message bodies or proposed reply payloads</li>
+    <li>Phone numbers, login codes, or 2FA passwords</li>
+    <li>Raw MTProto session bytes</li>
+    <li>OAuth signing secrets, encryption keys, or derived per-user keys</li>
+    <li><code>Authorization: Bearer</code> header contents</li>
   </ul>
+  <p>This guarantee applies to logs and audit rows. Communication Agent message/action tables intentionally store encrypted content as described above.</p>
 
   <h2>Known coupling: shared-hmac-legacy mode</h2>
-  <p>The <code>AUTH_MODE=shared-hmac-legacy</code> auth mode validates JWTs by re-implementing mctl-api's HMAC-SHA256 verifier and reading the <strong>same</strong> <code>OAUTH_JWT_SECRET</code> from Vault (<code>secret/platform/oauth-jwt-secret</code>). This applies only to the legacy mode, not to the default <code>local-jwt</code> mode.</p>
+  <p><code>AUTH_MODE=shared-hmac-legacy</code> validates JWTs using secret material shared with an external authorization service. This coupling does not apply to the default <code>local-jwt</code> mode.</p>
   <ul>
-    <li><strong>Impact:</strong> compromise of the mctl-telegram pod's secret material is equivalent to compromise of mctl-api's — an attacker can mint valid platform tokens.</li>
-    <li><strong>Mitigation today:</strong> rotate <code>OAUTH_JWT_SECRET</code> for both services in the same change. Failing to do so will lock out users on whichever side is stale.</li>
-    <li><strong>Audience binding:</strong> tokens carry an <code>aud</code> claim that is checked against the resource server's expected audience, so a JWT minted for a sibling service cannot be replayed against tg-mcp once both sides have rolled out aud emission and enforcement.</li>
-    <li><strong>Long-term fix (planned):</strong> add RS256 + <code>/oauth/jwks</code> to mctl-api; switch mctl-telegram to JWKS verification.</li>
+    <li><strong>Impact:</strong> compromise of either service's shared secret can affect both trust domains.</li>
+    <li><strong>Mitigation:</strong> rotate the shared secret for both services in the same change and prefer <code>local-jwt</code> for new deployments.</li>
   </ul>
 
   <h2>Cryptographic invariants</h2>
   <ul>
-    <li><code>ENCRYPTION_KEY</code> is expected to be 32 random bytes, hex-encoded (64 chars). The service refuses to start with any other length. Production deployments MUST set it; leaving it unset is allowed for local-dev only and emits a startup warning that session bytes will land on disk in cleartext.</li>
-    <li>MTProto session blobs are AES-256-GCM sealed with a per-user subkey derived via HKDF-SHA256: <code>subkey = HKDF(master, salt=user_id_be64, info="mctl-telegram-session-v2", L=32)</code>. Each row has cryptographically independent keys.</li>
-    <li>Legacy v1 blobs (single global key) are migrated to v2 in-place on first read. Cleanup of the legacy decrypt path is tracked for ~90 days after rollout.</li>
-    <li>Audit log NEVER contains: message <code>text</code>, decoded phone digits, 2FA password, MTProto session bytes, JWT secret, or encryption keys. The slog redaction handler strips these keys before any line reaches stdout.</li>
+    <li><code>ENCRYPTION_KEY</code> must be 32 random bytes, hex-encoded as 64 characters. Production must set it.</li>
+    <li>MTProto session blobs, agent message bodies, and action payloads are AES-256-GCM sealed with per-user HKDF-derived keys.</li>
+    <li>Legacy single-key session blobs are migrated to the per-user format when read.</li>
+    <li>The deployment operator or an attacker controlling the running pod and key material can decrypt user data. Hosted mode is not zero-knowledge.</li>
   </ul>
 
-  <h2>Send-gate (defense in depth)</h2>
-  <p>On production tg.mctl.ai, <code>ALLOW_SEND=false</code> is the default — every <code>send_message</code> call returns a dry-run preview. <code>send_message</code> takes no mode argument; the gate alone decides. Real Telegram sends require <strong>all</strong> of:</p>
+  <h2>Send gate (defense in depth)</h2>
+  <p>On production <code>tg.mctl.ai</code>, <code>ALLOW_SEND=false</code> is the safe default. Real Telegram sends through <code>send_message</code> or <code>send_media</code> require <strong>all</strong> of:</p>
   <ol>
-    <li>Server flag <code>ALLOW_SEND=true</code> (Helm values).</li>
-    <li>Identity has <code>telegram:messages:send</code> scope (group &#8594; scope map).</li>
+    <li>Server flag <code>ALLOW_SEND=true</code>.</li>
+    <li>Identity has <code>telegram:messages:send</code> scope.</li>
     <li><code>telegram_accounts.send_enabled = true</code> for that operator.</li>
-    <li>Per-peer send rate limit not exhausted.</li>
+    <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
-  <p>Any condition false &#8594; response is a dry-run preview (<code>sent=false</code>) containing the proposed text and the failing-condition reason in <code>dry_reason</code>; nothing reaches the Telegram API.</p>
+  <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; no send RPC reaches Telegram. A denied media call does not fetch its URL or decode its base64 payload.</p>
 
   <h2>Authentication-required mode</h2>
   <ul>
-    <li><code>AUTH_REQUIRED=false</code> is for local development only. The deployed pod MUST set <code>AUTH_REQUIRED=true</code> and <code>AUTH_MODE=local-jwt</code>.</li>
-    <li><code>local-dev</code> provider returns a fixed identity with platform-admin scopes and is gated by <code>AUTH_MODE=local-dev</code>. It MUST NOT be reachable from any non-localhost interface in production.</li>
+    <li><code>AUTH_REQUIRED=false</code> is for local development only. Production must use authenticated OAuth mode.</li>
+    <li><code>AUTH_MODE=local-dev</code> returns a fixed platform-admin identity and must not be reachable from a public production interface.</li>
   </ul>
 
   <h2>Rate limiting</h2>
-  <p>Per-identity token bucket, default 30 requests/minute, capped at the same burst. <code>send_message</code> (direct) and <code>prepare_pin_message</code> also consume a per-(identity, peer) bucket — 20 actions per peer per hour — so a single bad actor cannot fan a payload at one recipient up to the global ceiling. Anonymous traffic to <code>/healthz</code>, <code>/readyz</code>, <code>/.well-known/*</code>, <code>/</code>, <code>/security</code>, and <code>/privacy</code> is exempt and limited only at the ingress level.</p>
+  <p>The default per-identity token bucket is 30 requests/minute with the same burst. Write paths additionally use per-peer limits so one recipient cannot be targeted up to the global ceiling. Public and well-known endpoints are limited at the ingress layer.</p>
 
   <h2>Session TTL</h2>
-  <p>Each MTProto session carries two expiry knobs, enforced by the request path and a background sweeper:</p>
   <ul>
-    <li><strong>Idle TTL — 30 days.</strong> <code>last_used_at</code> older than 30 days revokes the row on next Borrow.</li>
-    <li><strong>Absolute TTL — 90 days.</strong> <code>expires_at</code> (stamped on insert) in the past revokes the row.</li>
-    <li>An hourly sweeper applies the same predicate to abandoned rows so they don't sit live in storage between requests.</li>
+    <li><strong>Idle TTL — 30 days.</strong> A session not used within the idle window is revoked.</li>
+    <li><strong>Absolute TTL — 90 days.</strong> A session past <code>expires_at</code> is revoked.</li>
+    <li>An hourly sweeper applies the same predicate to abandoned rows.</li>
   </ul>
 
   <h2>Tamper-evident audit log</h2>
-  <p>Every <code>audit_logs</code> row gains <code>prev_hash</code> + <code>entry_hash</code> columns. Each entry is anchored by the SHA-256 of the previous entry's hash plus a canonical encoding of the current row. You can ask the server to recompute and verify your chain at any time:</p>
+  <p>Audit rows form a SHA-256 hash chain using <code>prev_hash</code> and <code>entry_hash</code>. You can ask the server to verify the chain:</p>
   <pre>GET /api/account/audit/verify
 {
   "ok": true,
   "verified": 42
 }</pre>
-  <p>A non-OK response includes <code>first_bad_id</code> and a human-readable <code>reason</code>. Pre-M3.1 legacy rows are skipped (they pre-date the chain).</p>
+  <p>A non-OK response includes <code>first_bad_id</code> and a reason. Rows created before hash chaining are skipped.</p>
 
   <h2>Prompt-injection content boundary</h2>
-  <p>Read tools (<code>get_unread_messages</code>, <code>get_messages</code>) wrap every Telegram message body in <code>&lt;telegram-content origin="telegram" peer="<i>redacted</i>" untrusted="true"&gt;…&lt;/telegram-content&gt;</code>. A top-level <code>notice</code> field repeats the same guidance in prose. Adversarial closing-tag literals inside a message body are escaped to the underscore form so a sender cannot break out of the untrusted block. The wrapping is best-effort signalling — clients are free to ignore it — but it gives an LLM a clear data-vs-instructions boundary that prompt-injection text cannot remove on its own.</p>
+  <p>Read tools wrap Telegram message bodies in <code>&lt;telegram-content origin="telegram" peer="redacted" untrusted="true"&gt;…&lt;/telegram-content&gt;</code> and escape literal closing tags inside message text. This is a signalling boundary for the MCP client, not a substitute for the server-side Communication Agent policy engine.</p>
 
   {{template "ui_footer" .}}
 

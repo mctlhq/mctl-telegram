@@ -18,6 +18,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gotd/contrib/middleware/ratelimit"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
+	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -86,6 +88,8 @@ func main() {
 	m := metrics.New()
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	agentQueue := queue.New(store, cfg.ReplicaID, m)
+	agentListener := listener.New(store, agentQueue, nil, m)
 
 	// api_id-wide MTProto rate limiter. One instance shared by the pool and the
 	// interactive login client (via oauth.WithLoginConfig) so all sessions —
@@ -109,8 +113,10 @@ func main() {
 	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).
 		WithMaxSessions(cfg.TelegramMaxSessions).
 		WithGlobalMiddleware(globalTGLimiter).
-		WithMetrics(m)
+		WithMetrics(m).
+		WithAgentRuntime(agentListener)
 	defer pool.Shutdown()
+	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
 	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
 	// pool_size / pool_capacity correctly indicates "no cap" (-1) vs a real value.
@@ -148,6 +154,10 @@ func main() {
 	// Privacy control, not just hygiene — these rows carry third-party
 	// message content. AGENT_RETENTION_DAYS=0 keeps rows forever.
 	go sweeper.AgentRetention(ctx, store, time.Duration(cfg.AgentRetentionDays)*24*time.Hour)
+	// Communication-agent queue maintenance: requeues jobs whose claim
+	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
+	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.
+	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL)
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)

@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/gotd/td/telegram"
 )
@@ -27,11 +28,44 @@ type AgentRuntime interface {
 	RunFor(ctx context.Context, userID int64, c *telegram.Client) error
 }
 
+// AgentSentMarker is an optional capability implemented by an AgentRuntime.
+// SendMessage notifies it as soon as Telegram returns the server message id,
+// before the send helper returns to its caller. The listener consumes the id
+// when Telegram echoes the outgoing message and therefore does not mistake a
+// programmatic agent send for a human takeover.
+type AgentSentMarker interface {
+	MarkSent(userID, messageID int64)
+}
+
+var processAgentMarker struct {
+	sync.RWMutex
+	marker AgentSentMarker
+}
+
+func setProcessAgentMarker(rt AgentRuntime) {
+	processAgentMarker.Lock()
+	defer processAgentMarker.Unlock()
+	processAgentMarker.marker, _ = rt.(AgentSentMarker)
+}
+
+func notifyAgentSent(userID, messageID int64) {
+	if userID <= 0 || messageID <= 0 {
+		return
+	}
+	processAgentMarker.RLock()
+	marker := processAgentMarker.marker
+	processAgentMarker.RUnlock()
+	if marker != nil {
+		marker.MarkSent(userID, messageID)
+	}
+}
+
 // WithAgentRuntime wires an AgentRuntime into the pool. Must be called before
 // the first Borrow (wiring happens in main.go, ahead of any traffic).
 // Returns the receiver for chaining.
 func (p *ClientPool) WithAgentRuntime(rt AgentRuntime) *ClientPool {
 	p.agentRT = rt
+	setProcessAgentMarker(rt)
 	return p
 }
 

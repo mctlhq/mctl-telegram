@@ -24,6 +24,11 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"support@mctl.ai",
 		"End-user support",
 		"ChatGPT / Claude / MCP clients",
+		"Communication Agent safety boundary",
+		"Crash-safe ingestion",
+		"Saved Messages privacy",
+		"Human takeover",
+		"AGENT_RETENTION_DAYS",
 		"ALLOW_SEND=false",
 		"Tamper-evident audit log",
 		"Prompt-injection content boundary",
@@ -49,10 +54,16 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
-		"ChatGPT Apps users",
+		"ChatGPT Apps and MCP users",
 		"Data inventory",
-		"What is NOT stored",
+		"Communication Agent controls",
+		"incoming_events",
+		"conversation_messages",
+		"agent_actions",
+		"AGENT_RETENTION_DAYS",
+		"What is NOT stored in logs or audit history",
 		"Self-service controls",
+		"A human reply marks the conversation",
 		"audit/verify",
 		"privacy@mctl.ai",
 		"support@mctl.ai",
@@ -160,8 +171,8 @@ func TestPrivacy_HasSupportContact(t *testing.T) {
 	if !strings.Contains(body, "support@mctl.ai") {
 		t.Fatal("/privacy missing support@mctl.ai")
 	}
-	if !strings.Contains(body, "ChatGPT Apps users") {
-		t.Fatal("/privacy missing ChatGPT Apps users section")
+	if !strings.Contains(body, "ChatGPT Apps and MCP users") {
+		t.Fatal("/privacy missing MCP users section")
 	}
 }
 
@@ -182,7 +193,7 @@ func TestSecurity_NoStaleAuthModel(t *testing.T) {
 	Security("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "api.mctl.ai, verified via shared HMAC") {
-		t.Fatal("/security still contains stale trust boundary description: \"api.mctl.ai, verified via shared HMAC\"")
+		t.Fatal("/security still contains stale trust boundary description")
 	}
 }
 
@@ -191,10 +202,49 @@ func TestPrivacy_NoStaleAuthModel(t *testing.T) {
 	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
 	body := w.Body.String()
 	if strings.Contains(body, "GitHub OAuth login proxied through") {
-		t.Fatal("/privacy still contains stale GitHub OAuth reference: \"GitHub OAuth login proxied through\"")
+		t.Fatal("/privacy still contains stale GitHub OAuth reference")
 	}
 	if strings.Contains(body, "api.mctl.ai") {
 		t.Fatal("/privacy still references api.mctl.ai as identity provider")
+	}
+}
+
+func TestAgentPrivacyClaimsDoNotPromiseNoDiskStorage(t *testing.T) {
+	w := httptest.NewRecorder()
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	body := w.Body.String()
+	for _, stale := range []string{
+		"The plaintext of any message you send or receive",
+		"Freed when the goroutine returns; never written to disk",
+	} {
+		if strings.Contains(body, stale) {
+			t.Fatalf("/privacy contains stale no-storage claim %q", stale)
+		}
+	}
+	for _, must := range []string{
+		"message content is stored in encrypted agent tables",
+		"default 30 days",
+	} {
+		if !strings.Contains(body, must) {
+			t.Fatalf("/privacy missing agent storage disclosure %q", must)
+		}
+	}
+}
+
+func TestSecuritySeparatesAuditFromAgentContent(t *testing.T) {
+	w := httptest.NewRecorder()
+	Security("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/security", nil))
+	body := w.Body.String()
+	for _, must := range []string{
+		"Audit rows do not contain Telegram message bodies",
+		"Communication Agent message/action tables intentionally store encrypted content",
+		"observe",
+		"guarded",
+		"global kill switch",
+	} {
+		if !strings.Contains(body, must) {
+			t.Fatalf("/security missing safety disclosure %q", must)
+		}
 	}
 }
 

@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.44.1](https://github.com/mctlhq/mctl-telegram/compare/0.44.0...0.44.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **web:** align landing privacy claims with agent storage ([#301](https://github.com/mctlhq/mctl-telegram/issues/301)) ([e7662e1](https://github.com/mctlhq/mctl-telegram/commit/e7662e13680c64a80a2c56442755426060359a03))
+
+## [0.44.0](https://github.com/mctlhq/mctl-telegram/compare/0.43.0...0.44.0) (2026-07-20)
+
+
+### Features
+
+* add edit, delete, forward, search, and react message tools ([cf6ba2d](https://github.com/mctlhq/mctl-telegram/commit/cf6ba2d5dd392f6376fcddc0045e01c883e0436a))
+* **agent:** add server-side policy engine ([#290](https://github.com/mctlhq/mctl-telegram/issues/290)) ([edbf4aa](https://github.com/mctlhq/mctl-telegram/commit/edbf4aa0cc4f4b0e70bfe1c580a7e6be115c6cd1))
+* **agent:** incoming update listener ([#299](https://github.com/mctlhq/mctl-telegram/issues/299)) ([c48559f](https://github.com/mctlhq/mctl-telegram/commit/c48559f9b55fdb838a0479d3a95f7e3f65982575))
+* **agents:** issue-282-get-media-single-shot-confirmation-consu ([af7a024](https://github.com/mctlhq/mctl-telegram/commit/af7a024522f23896735be98cdc91a76aad8718ff))
+* **agents:** issue-287-add-send-media-mcp-tool-for-photo-video ([#293](https://github.com/mctlhq/mctl-telegram/issues/293)) ([c8ce74e](https://github.com/mctlhq/mctl-telegram/commit/c8ce74ed7db76149e57a1c5b871665ab53d4b50d))
+* **db:** agent domain schema and repos for the communication agent ([#286](https://github.com/mctlhq/mctl-telegram/issues/286)) ([4d574ec](https://github.com/mctlhq/mctl-telegram/commit/4d574ecdb05069bb41bd0fd22e2d4fb9485bafa4))
+* **db:** durable agent job queue with claim, retry, and dead-letter ([#288](https://github.com/mctlhq/mctl-telegram/issues/288)) ([d124c00](https://github.com/mctlhq/mctl-telegram/commit/d124c00dbfdca9eef9af9f17f625f241ec21bec7))
+* **telegram:** pinned pool entries with agent update handlers ([#289](https://github.com/mctlhq/mctl-telegram/issues/289)) ([4b01a56](https://github.com/mctlhq/mctl-telegram/commit/4b01a5623838b971333e753f79bd86273eb0b6c1))
+* **web:** reorient landing for non-technical users ([cde493f](https://github.com/mctlhq/mctl-telegram/commit/cde493fb99c397f7fafbe81f450e82b67fbb18f2))
+
+
+### Bug Fixes
+
+* **local-bridge:** defer get_media confirmation teardown until download completes ([6b27897](https://github.com/mctlhq/mctl-telegram/commit/6b27897f990590a273ca69dfe2f04da71959753f))
+* **mcp:** collapse expired-identity leak, skip in-flight in sweep, delete stale media refs ([d697c19](https://github.com/mctlhq/mctl-telegram/commit/d697c19d9ed9f9602023d086d2aed341a293ded7))
+* **mcp:** defer get_media confirmation teardown until download completes ([b72a88b](https://github.com/mctlhq/mctl-telegram/commit/b72a88bd3db846a1ffdb63f68ce1564a1213727f))
+* **mcp:** make Claim's in-flight check win over expiry, burn token on wrong-user/mismatch ([4bda81e](https://github.com/mctlhq/mctl-telegram/commit/4bda81ee83f31dec7142274297a7e3ed3872b60a))
+* **mcp:** survive cancellation on get_media, classify wrong-user during in-flight ([fbdbbbe](https://github.com/mctlhq/mctl-telegram/commit/fbdbbbe4b1ed22fce01a49c60c490ff9d3def3a1))
+* **mcp:** verify peer ownership before non-channel delete, cost forward rate-limit by batch size ([60b6422](https://github.com/mctlhq/mctl-telegram/commit/60b6422ff938e37aa880bfd2a3d452c302f072bb))
+* **oauth:** auto-persist tier=client to DB on sign-in when AUTO_APPROVE_CLIENTS=true ([0083bea](https://github.com/mctlhq/mctl-telegram/commit/0083beab909f3a6b9968a11cb4615f0949878b9b))
+* **oauth:** make GetAccessTier best-effort, add DB materialization tests ([01d0338](https://github.com/mctlhq/mctl-telegram/commit/01d03387ea5357c2b18f894cc89aabd580276551))
+
 ## [0.43.0](https://github.com/mctlhq/mctl-telegram/compare/0.42.0...0.43.0) (2026-07-14)
 
 
