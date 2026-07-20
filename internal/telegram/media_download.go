@@ -266,30 +266,38 @@ func largestPhotoSizeType(sizes []tg.PhotoSizeClass) string {
 	return best
 }
 
-// downloaderReadAheadBytes upper-bounds the extra bytes gotd's downloader may
-// have already pulled over the wire but not yet handed to our io.Writer by
-// the time cappedBuffer rejects a block. gotd v0.144.0's stream() pipeline
-// (telegram/downloader/stream.go) runs the network-fetch loop and the write
-// loop concurrently over `toWrite := make(chan block, 1)` — a channel with
-// one slot of buffering — so while the write loop is calling Write with the
-// current block, the fetch loop can already be blocked trying to send the
-// NEXT block (fetched using defaultPartSize, telegram/downloader/downloader.go,
-// currently 512 KiB) into that channel. That block is fully transferred
-// before Write ever sees it, and is silently discarded when Stream() returns
-// the cap-exceeded error, invisible to cappedBuffer. This is a best-effort
-// upper bound on a third-party library's internal buffering, not a
-// guaranteed exact count — revisit if gotd's part size or channel depth
-// changes.
-const downloaderReadAheadBytes = 512 * 1024
+// downloaderPartSize mirrors gotd's defaultPartSize
+// (telegram/downloader/downloader.go, currently 512 KiB) — the size of each
+// block NewDownloader() fetches per RPC round-trip. We don't call
+// WithPartSize, so this is what our Downloader actually uses.
+const downloaderPartSize = 512 * 1024
+
+// downloaderReadAheadBlocks upper-bounds how many blocks gotd's downloader
+// may have already pulled fully over the wire but not yet handed to our
+// io.Writer by the time cappedBuffer rejects a block. gotd v0.144.0's
+// stream() pipeline (telegram/downloader/stream.go) runs the network-fetch
+// loop and the write loop concurrently over `toWrite := make(chan block,
+// 1)` — a channel with exactly one slot of buffering. At the moment Write is
+// called with the current (about to be rejected) block, the fetch loop can
+// already have ANOTHER block sitting in that channel slot (sent once the
+// write loop dequeued the previous one) AND have fully fetched a THIRD block
+// that it's now blocked trying to send into the still-full channel — two
+// blocks fetched-but-undelivered, not just one. Both are silently discarded
+// when Stream() returns the cap-exceeded error, invisible to cappedBuffer.
+// This is a best-effort upper bound on a third-party library's internal
+// buffering/scheduling, not a guaranteed exact count — revisit if gotd's
+// part size or channel depth changes.
+const downloaderReadAheadBlocks = 2
 
 // cappedBuffer accumulates downloaded bytes, failing the stream as soon as
 // the cap is exceeded so oversized files abort mid-download instead of
 // filling memory. consumed tracks the real bytes DownloadMedia's caller
 // should charge against an aggregate transfer budget — every Write call's
 // len(p) (the block itself was already fully fetched over the wire before
-// Write is even called), plus downloaderReadAheadBytes on the specific call
-// that rejects a block (see its doc for why one more block may already be
-// in flight, invisible to buf).
+// Write is even called), plus downloaderReadAheadBlocks*downloaderPartSize
+// on the specific call that rejects a block (see downloaderReadAheadBlocks'
+// doc for why up to two more blocks may already be in flight, invisible to
+// buf).
 type cappedBuffer struct {
 	buf      []byte
 	cap      int64
@@ -298,7 +306,7 @@ type cappedBuffer struct {
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
-		w.consumed += int64(len(p)) + downloaderReadAheadBytes
+		w.consumed += int64(len(p)) + int64(downloaderReadAheadBlocks*downloaderPartSize)
 		return 0, fmt.Errorf("download exceeded %d-byte cap mid-stream", w.cap)
 	}
 	w.buf = append(w.buf, p...)

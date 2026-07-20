@@ -167,7 +167,7 @@ func TestSanitizeFileName(t *testing.T) {
 
 // TestCappedBuffer_Write_UnderCap verifies the ordinary case: writes below
 // cap succeed, and consumed tracks exactly the bytes written (no rejection,
-// so no downloaderReadAheadBytes margin applies).
+// so no read-ahead margin applies).
 func TestCappedBuffer_Write_UnderCap(t *testing.T) {
 	w := &cappedBuffer{cap: 100}
 	n, err := w.Write(make([]byte, 40))
@@ -186,14 +186,15 @@ func TestCappedBuffer_Write_UnderCap(t *testing.T) {
 	}
 }
 
-// TestCappedBuffer_Write_OverCap locks in the fix for Codex's P2 ("Count
-// discarded download chunks against the budget"): when a block is rejected
-// for exceeding cap, that block was already fully fetched over the wire
-// before Write was even called, and gotd's stream() pipeline (buffer-1
-// channel between its fetch and write loops) may already have the NEXT
-// block in flight too. consumed must charge the rejected block's own size
-// on top of what's already buffered, plus the downloaderReadAheadBytes
-// margin for that possible in-flight next block — not just len(buf).
+// TestCappedBuffer_Write_OverCap locks in the fix for Codex's P2 ("Account
+// for both prefetched downloader chunks"): when a block is rejected for
+// exceeding cap, that block was already fully fetched over the wire before
+// Write was even called, and gotd's stream() pipeline (buffer-1 channel
+// between its fetch and write loops) may already have up to two more blocks
+// in flight — one sitting in the channel, one fetched but blocked trying to
+// enqueue. consumed must charge the rejected block's own size on top of
+// what's already buffered, plus the full downloaderReadAheadBlocks margin —
+// not just len(buf), and not just one extra block.
 func TestCappedBuffer_Write_OverCap(t *testing.T) {
 	w := &cappedBuffer{cap: 50}
 	n, err := w.Write(make([]byte, 40)) // fits: 0+40 <= 50
@@ -210,8 +211,8 @@ func TestCappedBuffer_Write_OverCap(t *testing.T) {
 	if len(w.buf) != 40 {
 		t.Errorf("len(buf) = %d, want 40 (the rejected block must not be appended)", len(w.buf))
 	}
-	wantConsumed := int64(40+30) + downloaderReadAheadBytes
+	wantConsumed := int64(40+30) + int64(downloaderReadAheadBlocks*downloaderPartSize)
 	if w.consumed != wantConsumed {
-		t.Errorf("consumed = %d, want %d (buffered 40 + rejected 30 + %d read-ahead margin)", w.consumed, wantConsumed, downloaderReadAheadBytes)
+		t.Errorf("consumed = %d, want %d (buffered 40 + rejected 30 + %d-block read-ahead margin)", w.consumed, wantConsumed, downloaderReadAheadBlocks)
 	}
 }
