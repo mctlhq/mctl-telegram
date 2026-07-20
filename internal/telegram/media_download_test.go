@@ -220,6 +220,9 @@ func TestCappedBuffer_Write_OverCap_FullSizedBlock(t *testing.T) {
 	if w.consumed != wantConsumed {
 		t.Errorf("consumed = %d, want %d (buffered 40 + rejected full block + %d-block read-ahead margin)", w.consumed, wantConsumed, downloaderReadAheadBlocks)
 	}
+	if !w.rejected {
+		t.Error("rejected = false, want true after a cap-exceeded Write")
+	}
 }
 
 // TestCappedBuffer_Write_OverCap_ShortFinalBlock locks in the fix for
@@ -250,5 +253,25 @@ func TestCappedBuffer_Write_OverCap_ShortFinalBlock(t *testing.T) {
 	wantConsumed := int64(40 + 30) // no read-ahead margin: this was a short/final block
 	if w.consumed != wantConsumed {
 		t.Errorf("consumed = %d, want %d (buffered 40 + rejected 30, NO read-ahead margin for a short/final block)", w.consumed, wantConsumed)
+	}
+	if !w.rejected {
+		t.Error("rejected = false, want true after a cap-exceeded Write")
+	}
+}
+
+// TestCappedBuffer_Write_UnderCap_NotRejected guards the flip side of
+// rejected: a cappedBuffer that never hit its cap must report rejected ==
+// false, since DownloadMedia uses that to decide whether a later Stream()
+// error already had its read-ahead margin charged inside Write (rejected)
+// or still needs DownloadMedia to charge it (not rejected — e.g. a
+// network/RPC failure or context cancellation stranding a block gotd's
+// write loop never delivered to Write at all).
+func TestCappedBuffer_Write_UnderCap_NotRejected(t *testing.T) {
+	w := &cappedBuffer{cap: 100}
+	if _, err := w.Write(make([]byte, 40)); err != nil {
+		t.Fatalf("Write(40) = %v, want nil", err)
+	}
+	if w.rejected {
+		t.Error("rejected = true, want false after a Write that stayed under cap")
 	}
 }

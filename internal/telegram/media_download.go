@@ -309,15 +309,21 @@ const downloaderReadAheadBlocks = 2
 // Write is even called), plus downloaderReadAheadBlocks*downloaderPartSize
 // on a rejecting call whose block is full-sized (see
 // downloaderReadAheadBlocks' doc for why a short/final rejected block gets
-// no such margin).
+// no such margin). rejected records whether THIS cappedBuffer ever triggered
+// that rejection, so DownloadMedia can tell "Stream() failed because of our
+// own cap check (margin already charged in Write)" apart from "Stream()
+// failed for some other reason (fetch/RPC/context — margin not yet
+// charged)" — see DownloadMedia's doc.
 type cappedBuffer struct {
 	buf      []byte
 	cap      int64
 	consumed int64
+	rejected bool
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
+		w.rejected = true
 		w.consumed += int64(len(p))
 		if len(p) >= downloaderPartSize {
 			// A full-sized block means this was NOT the file's final chunk
@@ -347,10 +353,26 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // can exceed len(data), see cappedBuffer's doc — and is what callers that
 // bound an aggregate transfer budget across multiple downloads
 // (fetchMediaInline) should charge, not len(data).
+//
+// A Stream() error NOT caused by our own cap rejection (w.rejected == false
+// — e.g. a network/RPC failure fetching the next block, or the context
+// being canceled) can still leave a block stranded in gotd's internal
+// buffer-1 channel: the fetch loop's error return cancels the shared group,
+// and the write loop's `case <-ctx.Done(): return ctx.Err()` can win the
+// select over `case part := <-toWrite`, abandoning an already-fully-fetched
+// block that was sitting in the channel without ever calling our Write.
+// cappedBuffer has no visibility into that case at all (Write is simply
+// never called with it), so DownloadMedia itself charges one
+// downloaderReadAheadBlocks*downloaderPartSize margin here instead — but
+// only when w.rejected is false, since a genuine cap rejection already
+// charged its own margin inside Write and charging twice would double-count.
 func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
 	w := &cappedBuffer{cap: maxBytes}
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
+		if !w.rejected {
+			w.consumed += int64(downloaderReadAheadBlocks * downloaderPartSize)
+		}
 		return w.buf, w.consumed, fmt.Errorf("download: %w", err)
 	}
 	return w.buf, w.consumed, nil
