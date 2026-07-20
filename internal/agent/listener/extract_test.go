@@ -72,7 +72,15 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 	if !ok || got.Event.Kind != db.EventKindSavedCommand || got.SavedCommandText != saved.Message {
 		t.Fatalf("saved = %#v, ok=%v", got, ok)
 	}
-	out := &tg.Message{ID: 11, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "I'll take it"}
+	upper := &tg.Message{ID: 10, Out: true, PeerID: &tg.PeerUser{UserID: selfTG}, Message: "  /MCTL pause  "}
+	if got, ok := ExtractMessage(ownerUID, selfTG, upper, ents(), false); !ok || got.Event.Kind != db.EventKindSavedCommand {
+		t.Fatalf("case-insensitive command = %#v, ok=%v", got, ok)
+	}
+	ordinary := &tg.Message{ID: 11, Out: true, PeerID: &tg.PeerUser{UserID: selfTG}, Message: "passport number and private note"}
+	if _, ok := ExtractMessage(ownerUID, selfTG, ordinary, ents(), false); ok {
+		t.Fatal("ordinary Saved Messages note must not be retained")
+	}
+	out := &tg.Message{ID: 12, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "I'll take it"}
 	got, ok = ExtractMessage(ownerUID, selfTG, out, ents(), false)
 	if !ok || got.Event.Kind != db.EventKindOwnerOutgoing || got.SavedCommandText != "" {
 		t.Fatalf("owner outgoing = %#v, ok=%v", got, ok)
@@ -80,12 +88,12 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 }
 
 func TestExtractMessage_MediaOnlyOwnerMessageIsTakeover(t *testing.T) {
-	out := &tg.Message{ID: 12, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: ""}
+	out := &tg.Message{ID: 13, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: ""}
 	got, ok := ExtractMessage(ownerUID, selfTG, out, ents(), false)
 	if !ok || got.Event.Kind != db.EventKindOwnerOutgoing || got.Event.Body != "" {
 		t.Fatalf("media-only takeover = %#v, ok=%v", got, ok)
 	}
-	self := &tg.Message{ID: 13, Out: true, PeerID: &tg.PeerUser{UserID: selfTG}, Message: ""}
+	self := &tg.Message{ID: 14, Out: true, PeerID: &tg.PeerUser{UserID: selfTG}, Message: ""}
 	if _, ok := ExtractMessage(ownerUID, selfTG, self, ents(), false); ok {
 		t.Fatal("blank Saved Messages item should not become a command")
 	}
