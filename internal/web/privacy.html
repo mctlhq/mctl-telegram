@@ -50,7 +50,7 @@
     <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram, OpenAI, or Anthropic.</li>
     <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
     <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log.</li>
-    <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Their sensitive body/payload fields are encrypted at rest with your derived key and are subject to the separate agent-content retention policy below.</li>
+    <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Sensitive body/payload fields are encrypted at rest with your derived key. Message/event rows use the agent retention window below; action payloads follow the action/account lifecycle unless a separate cleanup policy is added.</li>
     <li><strong>Revoke access:</strong> call <code>disconnect_telegram_account</code> or <code>delete_telegram_account</code> via MCP, use the HTTP endpoints below, or remove the app/connector from your client settings.</li>
   </ul>
 
@@ -81,7 +81,7 @@
         <td><code>agent_actions</code></td>
         <td>Proposed reply/action payloads, policy decision and reasons, approval state, and execution metadata. Sensitive payload text is encrypted at rest.</td>
         <td>Server-side policy enforcement, human approval, and exactly-once-oriented execution bookkeeping</td>
-        <td>Subject to the Communication Agent lifecycle and account deletion; message-content cleanup follows the agent retention policy where applicable</td>
+        <td>Until the action/account lifecycle removes it. <code>AGENT_RETENTION_DAYS</code> currently applies to message/event tables, not to <code>agent_actions</code>.</td>
       </tr>
       <tr>
         <td><code>audit_logs</code> table</td>
