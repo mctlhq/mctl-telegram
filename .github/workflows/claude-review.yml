@@ -83,7 +83,7 @@ jobs:
 
           # Count added/removed lines (exclude diff headers)
           lines=$(gh pr diff "$PR" --repo ${{ github.repository }} 2>/dev/null \
-            | grep -c '^[+-][^+-]' || echo 0)
+            | grep -c '^[+-][^+-]' || true)
 
           # Score: 3=opus, 2=sonnet, 1=haiku
           score=1
