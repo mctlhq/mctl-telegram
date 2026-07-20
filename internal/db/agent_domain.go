@@ -151,7 +151,18 @@ func (s *Store) SetAgentAutopilotPaused(ctx context.Context, userID int64, pause
 // schema changes and readable. tg_update_state / tg_channel_state and
 // agent_profiles cascade on users(id), but the users row survives account
 // deletion, so they are purged here too.
+//
+// purgeAgentJobsHook is set by the queue package's init (agent_jobs.go) to
+// also drop the queue tables, which are introduced in a later change than
+// this base schema; nil until that code is present.
+var purgeAgentJobsHook func(ctx context.Context, ex execer, userID int64) error
+
 func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
+	if purgeAgentJobsHook != nil {
+		if err := purgeAgentJobsHook(ctx, ex, userID); err != nil {
+			return err
+		}
+	}
 	stmts := []string{
 		`DELETE FROM owner_notifications WHERE user_id = $1`,
 		`DELETE FROM agent_actions WHERE user_id = $1`,

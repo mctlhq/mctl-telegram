@@ -106,7 +106,18 @@ func agentSchemaSQLite() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
+		// The queue is at-least-once: a redelivered job proposing again must
+		// dedupe onto its existing action row (keeping the original
+		// approval_code) instead of minting a second live approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_job_type ON agent_actions(job_id, action_type) WHERE job_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
+		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
+		// minute on every replica: WHERE status = 'pending_approval' AND
+		// updated_at < cutoff. The (user_id, status) index above cannot serve
+		// it — its leading column is absent from the predicate — so without
+		// this index the sweep degrades to a full-table scan as terminal
+		// action rows accumulate.
+		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -133,6 +144,37 @@ func agentSchemaSQLite() []string {
 			sent_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 5,
+			next_run_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			claimed_by TEXT,
+			claimed_at DATETIME,
+			last_error TEXT,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		// Serves the claim's correlated NOT EXISTS (per-conversation
+		// predecessor lookup): without a conversation_id-leading index every
+		// claim candidate would scan the queue.
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id, status, id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			attempt INTEGER NOT NULL,
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME,
+			status TEXT NOT NULL DEFAULT 'running',
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INTEGER NOT NULL DEFAULT 0,
@@ -222,7 +264,18 @@ func agentSchemaPG() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
+		// The queue is at-least-once: a redelivered job proposing again must
+		// dedupe onto its existing action row (keeping the original
+		// approval_code) instead of minting a second live approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_job_type ON agent_actions(job_id, action_type) WHERE job_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_user_status ON agent_actions(user_id, status)`,
+		// The approval-expiry sweep runs a GLOBAL (tenant-less) scan every
+		// minute on every replica: WHERE status = 'pending_approval' AND
+		// updated_at < cutoff. The (user_id, status) index above cannot serve
+		// it — its leading column is absent from the predicate — so without
+		// this index the sweep degrades to a full-table scan as terminal
+		// action rows accumulate.
+		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -249,6 +302,37 @@ func agentSchemaPG() []string {
 			sent_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_jobs (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INT NOT NULL DEFAULT 0,
+			max_attempts INT NOT NULL DEFAULT 5,
+			next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			claimed_by TEXT,
+			claimed_at TIMESTAMPTZ,
+			last_error TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_event ON agent_jobs(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_claim ON agent_jobs(status, next_run_at)`,
+		// Serves the claim's correlated NOT EXISTS (per-conversation
+		// predecessor lookup): without a conversation_id-leading index every
+		// claim candidate would scan the queue.
+		`CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id, status, id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_attempts (
+			id BIGSERIAL PRIMARY KEY,
+			job_id BIGINT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			attempt INT NOT NULL,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			finished_at TIMESTAMPTZ,
+			status TEXT NOT NULL DEFAULT 'running',
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INT NOT NULL DEFAULT 0,

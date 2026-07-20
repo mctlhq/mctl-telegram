@@ -135,6 +135,22 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 	}
 	cutoff := time.Now().UTC().Add(-retention)
 	var total int64
+	// Close still-pending jobs for the events whose bodies are about to be
+	// tombstoned: a claim after the null would load an empty payload, fail
+	// every attempt, and dead-letter. Only pending jobs — a processing job's
+	// worker already holds the payload, and its crash-recovery path (retry /
+	// visibility requeue) handles the rest. This runs before the null so no
+	// new claim can slip between the two statements.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
+		  WHERE status = $4 AND event_id IN (
+		        SELECT event_id FROM incoming_events
+		         WHERE created_at < $5 AND body_encrypted IS NOT NULL
+		  )`,
+		JobIgnored, "payload expired by retention sweep", time.Now().UTC(), JobPending, cutoff,
+	); err != nil {
+		return total, fmt.Errorf("expire jobs for swept events: %w", err)
+	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE incoming_events SET body_encrypted = NULL
 		  WHERE created_at < $1 AND body_encrypted IS NOT NULL`, cutoff,

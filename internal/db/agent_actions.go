@@ -80,6 +80,19 @@ type AgentAction struct {
 
 // InsertAgentAction persists a proposed action and returns its id. The payload
 // is encrypted with the owner's derived key before storage.
+//
+// Idempotent per (job_id, action_type): the queue is at-least-once, so a
+// worker that persisted an action and crashed before completing its job will
+// re-run the job and propose again. The unique index makes the second insert
+// a no-op and the EXISTING row's id is returned — critically keeping the
+// original approval_code, so a redelivered job cannot mint a second live
+// approval for the same reply. Actions without a job (JobID == 0) are
+// exempt.
+//
+// A job-tied action also requires its job to still exist (returns
+// ErrAgentJobNotFound otherwise), which keeps a racing worker from recreating
+// encrypted action data after HardDeleteAccount's purge — see the insert
+// statement's comment.
 func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, error) {
 	if a.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -109,23 +122,70 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			return 0, fmt.Errorf("seal action payload: %w", err)
 		}
 	}
-	var jobID, convID any
-	if a.JobID != 0 {
-		jobID = a.JobID
-	}
+	var convID any
 	if a.ConversationID != 0 {
 		convID = a.ConversationID
 	}
 	var id int64
-	if err := s.DB.QueryRowContext(ctx,
-		`INSERT INTO agent_actions
-		   (approval_code, job_id, conversation_id, user_id, action_type, intent,
-		    payload_encrypted, policy_decision, policy_reasons, status)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		 RETURNING id`,
-		nullable(a.ApprovalCode), jobID, convID, a.UserID, a.ActionType, a.Intent,
-		payload, a.PolicyDecision, a.PolicyReasons, a.Status,
-	).Scan(&id); err != nil {
+	var err error
+	if a.JobID != 0 {
+		// Source the insert from the job row so a job-tied action can only be
+		// created while its job still exists. This closes a purge race:
+		// HardDeleteAccount's purge locks the user's job rows first
+		// (purgeAgentJobs' no-op UPDATE) and only then deletes agent_actions,
+		// so a worker that claimed the job before the purge began must not be
+		// able to slip a fresh (encrypted) action row in after that DELETE. On
+		// Postgres FOR SHARE makes this statement block on the purge's row
+		// lock and re-evaluate once it commits: the job is gone, the SELECT is
+		// empty, nothing is inserted. SQLite has no FOR SHARE, but its
+		// single-writer transactions serialize the two paths anyway — the
+		// action either lands before the purge (and is deleted by it) or the
+		// job is already gone and the SELECT is empty.
+		lock := ""
+		if s.isPostgres(ctx) {
+			lock = " FOR SHARE"
+		}
+		err = s.DB.QueryRowContext(ctx,
+			`INSERT INTO agent_actions
+			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
+			    payload_encrypted, policy_decision, policy_reasons, status)
+			 SELECT $1, j.id, $3, $4, $5, $6, $7, $8, $9, $10
+			   FROM agent_jobs j WHERE j.id = $2 AND j.user_id = $4`+lock+`
+			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
+			 RETURNING id`,
+			nullable(a.ApprovalCode), a.JobID, convID, a.UserID, a.ActionType, a.Intent,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+		).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Two ways to land here: a redelivery hit the (job_id, action_type)
+			// unique index — the action exists, return it with its ORIGINAL
+			// approval_code — or the source SELECT found no job (purged account
+			// or foreign/bogus id) and the job must be reported gone.
+			lookupErr := s.DB.QueryRowContext(ctx,
+				`SELECT id FROM agent_actions
+				  WHERE job_id = $1 AND action_type = $2 AND user_id = $3`,
+				a.JobID, a.ActionType, a.UserID,
+			).Scan(&id)
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				return 0, ErrAgentJobNotFound
+			}
+			if lookupErr != nil {
+				return 0, fmt.Errorf("load existing agent action: %w", lookupErr)
+			}
+			return id, nil
+		}
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			`INSERT INTO agent_actions
+			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
+			    payload_encrypted, policy_decision, policy_reasons, status)
+			 VALUES($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9)
+			 RETURNING id`,
+			nullable(a.ApprovalCode), convID, a.UserID, a.ActionType, a.Intent,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+		).Scan(&id)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("insert agent action: %w", err)
 	}
 	return id, nil

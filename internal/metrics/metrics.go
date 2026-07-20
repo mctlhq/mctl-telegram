@@ -79,6 +79,20 @@ type Registry struct {
 	// BridgeCallsTotal counts hub round-trips, labeled by tool and status
 	// ("ok" or "error"). Incremented by bridgeCall() in the MCP layer.
 	BridgeCallsTotal *prometheus.CounterVec
+
+	// Communication agent (M6).
+	// AgentEventsReceivedTotal counts incoming Telegram events persisted by
+	// the agent listener (post-dedup), labeled by kind.
+	AgentEventsReceivedTotal *prometheus.CounterVec
+	// AgentJobsTotal counts agent job state transitions, labeled by the
+	// resulting status (pending, processing, completed, failed, ignored,
+	// dead_letter). Enqueue increments "pending", a claim increments
+	// "processing", and so on — the rate per status is the queue's flow.
+	AgentJobsTotal *prometheus.CounterVec
+	// AgentDeadLetterTotal counts jobs that exhausted their attempts. Also
+	// counted in AgentJobsTotal{status="dead_letter"}; kept as a dedicated
+	// counter because it is the primary alerting signal.
+	AgentDeadLetterTotal prometheus.Counter
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -219,6 +233,21 @@ func New() *Registry {
 		Help: "Total Local Bridge hub round-trips, labeled by tool name and status (ok or error).",
 	}, []string{"tool", "status"})
 
+	r.AgentEventsReceivedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_events_received_total",
+		Help: "Total incoming Telegram events persisted by the communication-agent listener (after dedup), labeled by event kind.",
+	}, []string{"kind"})
+
+	r.AgentJobsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_jobs_total",
+		Help: "Total communication-agent job state transitions, labeled by the resulting status.",
+	}, []string{"status"})
+
+	r.AgentDeadLetterTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_agent_dead_letter_total",
+		Help: "Total communication-agent jobs moved to dead_letter after exhausting their attempts.",
+	})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
@@ -241,6 +270,9 @@ func New() *Registry {
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,
 		r.BridgeCallsTotal,
+		r.AgentEventsReceivedTotal,
+		r.AgentJobsTotal,
+		r.AgentDeadLetterTotal,
 	)
 	return r
 }
