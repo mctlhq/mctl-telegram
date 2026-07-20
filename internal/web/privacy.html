@@ -44,13 +44,14 @@
     <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
   </section>
 
-  <h2>ChatGPT Apps users</h2>
-  <p>When you install mctl-telegram as a ChatGPT App, the following data flows apply:</p>
+  <h2>ChatGPT Apps and MCP users</h2>
+  <p>When you connect mctl-telegram to ChatGPT, Claude, or another MCP client, the following data flows apply:</p>
   <ul>
-    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram or OpenAI.</li>
-    <li><strong>Through ChatGPT:</strong> your conversation prompts, MCP tool arguments (e.g. peer identifiers, draft message text), and tool results returned by this server. That traffic is processed by OpenAI under their privacy policy.</li>
-    <li><strong>Stored by this server:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are transient — fetched for the request and not written to disk.</li>
-    <li><strong>Revoke access:</strong> call <code>disconnect_telegram_account</code> or <code>delete_telegram_account</code> via MCP, use the HTTP endpoints below, or remove the app from ChatGPT settings.</li>
+    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram, OpenAI, or Anthropic.</li>
+    <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
+    <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log.</li>
+    <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Their sensitive body/payload fields are encrypted at rest with your derived key and are subject to the separate agent-content retention policy below.</li>
+    <li><strong>Revoke access:</strong> call <code>disconnect_telegram_account</code> or <code>delete_telegram_account</code> via MCP, use the HTTP endpoints below, or remove the app/connector from your client settings.</li>
   </ul>
 
   <h2>Data inventory</h2>
@@ -60,31 +61,43 @@
     <tbody>
       <tr>
         <td><code>users</code> table</td>
-        <td>Telegram user id (subject from your sign-in), Telegram display name and username</td>
+        <td>Telegram user id, display name, and username</td>
         <td>Resolves your identity for per-user storage isolation</td>
-        <td>Until you call <code>delete_telegram_account</code> — cascades to remove your row</td>
+        <td>Until account deletion; related user-scoped rows are removed by database cascade where configured</td>
       </tr>
       <tr>
         <td><code>telegram_accounts</code> table</td>
-        <td>AES-256-GCM ciphertext of your MTProto session blob (per-user HKDF-derived key), plus non-sensitive display name / Telegram username if Telegram returned them</td>
+        <td>AES-256-GCM ciphertext of your MTProto session blob using a per-user derived key, plus account metadata and feature/send flags</td>
         <td>Required to make Telegram API calls on your behalf</td>
-        <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed)</td>
+        <td>Until disconnect/revocation or deletion; session TTLs and sweepers may revoke it earlier</td>
+      </tr>
+      <tr>
+        <td><code>incoming_events</code> and <code>conversation_messages</code></td>
+        <td>Communication Agent event metadata and third-party Telegram message bodies. Message bodies are AES-256-GCM encrypted before storage.</td>
+        <td>Durable ingestion, deduplication, queue recovery, conversation context, and owner takeover handling</td>
+        <td><code>AGENT_RETENTION_DAYS</code>, default 30 days. Setting it to 0 keeps rows indefinitely.</td>
+      </tr>
+      <tr>
+        <td><code>agent_actions</code></td>
+        <td>Proposed reply/action payloads, policy decision and reasons, approval state, and execution metadata. Sensitive payload text is encrypted at rest.</td>
+        <td>Server-side policy enforcement, human approval, and exactly-once-oriented execution bookkeeping</td>
+        <td>Subject to the Communication Agent lifecycle and account deletion; message-content cleanup follows the agent retention policy where applicable</td>
       </tr>
       <tr>
         <td><code>audit_logs</code> table</td>
-        <td>Tool name, redacted peer reference (truncated/hashed), status, and a redacted error string. <strong>No message text, no phone numbers, no session bytes.</strong></td>
-        <td>Operational visibility, abuse detection, and to power the <code>get_my_audit_log</code> tool</td>
-        <td>Retained for 90 days, then removed by the audit-log sweeper (window configurable via <code>AUDIT_RETENTION_DAYS</code>; set to 0 to keep indefinitely).</td>
+        <td>Tool/action name, redacted peer reference, status, and a redacted error string. <strong>No message body, phone number, bearer token, or session bytes.</strong></td>
+        <td>Operational visibility, abuse detection, and user-visible audit history</td>
+        <td>Default 90 days via <code>AUDIT_RETENTION_DAYS</code>; 0 keeps rows indefinitely</td>
       </tr>
       <tr>
         <td>Process memory</td>
-        <td>Plaintext MTProto messages for the duration of one tool call (the server must decrypt them to talk to Telegram)</td>
-        <td>Required to fulfil the request</td>
-        <td>Freed when the goroutine returns; never written to disk</td>
+        <td>Plaintext Telegram messages, decrypted agent content, tool arguments, and tool results while a request, listener update, policy evaluation, or queue job is being processed</td>
+        <td>Required to fulfil the request or agent workflow</td>
+        <td>Released after processing; the running process/operator can access it while present</td>
       </tr>
       <tr>
         <td>Process stdout (Loki)</td>
-        <td>Structured JSON log lines from <code>slog</code>, with sensitive keys redacted by the audit handler</td>
+        <td>Structured JSON log lines from <code>slog</code>, with message/body/payload and credential keys redacted</td>
         <td>Operator debugging</td>
         <td>Per the platform's Loki retention (typically 14–30 days)</td>
       </tr>
@@ -92,41 +105,52 @@
   </table>
   </div>
 
-  <h2>What is NOT stored</h2>
+  <h2>What is NOT stored in logs or audit history</h2>
   <ul>
-    <li>The plaintext of any message you send or receive</li>
-    <li>Your phone number (only seen during interactive login, never persisted)</li>
+    <li>Plaintext Telegram message bodies or proposed reply payloads in <code>audit_logs</code> or process stdout</li>
+    <li>Your phone number after interactive login</li>
     <li>Your Telegram cloud password / 2FA digits</li>
-    <li>Raw MTProto session bytes (only the AES-GCM ciphertext lives in Postgres)</li>
+    <li>Raw MTProto session bytes (hosted mode stores only AES-GCM ciphertext)</li>
     <li>The contents of <code>Authorization: Bearer</code> headers</li>
-    <li>Your IP address beyond what the platform ingress logs at L4/L7 (not persisted by this service)</li>
+    <li>Your IP address in the service database (the platform ingress may keep normal L4/L7 access logs)</li>
+  </ul>
+  <p><strong>Important:</strong> when Communication Agent is enabled, message content is stored in encrypted agent tables as described above. The previous “message text is never written to disk” guarantee applies only to ordinary read-tool responses and audit/logging paths, not to the durable agent workflow.</p>
+
+  <h2>Communication Agent controls</h2>
+  <ul>
+    <li>The listener is active only for profiles explicitly marked as listener-enabled.</li>
+    <li>Only explicit <code>/mctl ...</code> commands from Saved Messages are retained as control commands; ordinary personal notes are ignored.</li>
+    <li>Disabling the listener removes the runtime account and immediately stops its pinned Telegram client.</li>
+    <li>A human reply marks the conversation as <code>taken_over</code>, preventing autonomous continuation under the server-side policy.</li>
+    <li><code>observe</code> mode requires approval for replies; <code>guarded</code> mode remains subject to server-side policy, limits, blocked senders, disclosure checks, and the global kill switch.</li>
   </ul>
 
   <h2>Self-service controls</h2>
-  <p>You can remove your data and inspect what was recorded at any time without operator involvement:</p>
-  <pre>POST   /api/account/disconnect   # mark session revoked (keeps row, no Telegram access)
-DELETE /api/account              # remove the encrypted session blob and row entirely
-GET    /api/account              # connection status + per-account send_enabled flag
+  <p>You can remove account access and inspect what was recorded without operator involvement:</p>
+  <pre>POST   /api/account/disconnect   # mark session revoked and stop Telegram access
+DELETE /api/account              # delete the account/session row and related user-scoped data
+GET    /api/account              # connection status + feature/send flags
 GET    /api/account/audit        # newest-first audit rows (limit, before)
-GET    /api/account/audit/verify # recompute the hash chain and prove audit was not tampered with</pre>
-  <p>Equivalent MCP tools: <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, <code>get_my_audit_log</code>. Disconnect and delete tear down the in-memory MTProto client atomically with the DB write so a concurrent request cannot piggyback on the doomed session.</p>
+GET    /api/account/audit/verify # recompute the audit hash chain</pre>
+  <p>Equivalent MCP tools include <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, and <code>get_my_audit_log</code>. Disconnect/delete also tear down the in-memory MTProto client so a concurrent request cannot continue using a revoked session.</p>
 
   <h2>Who can access your data</h2>
   <ul>
-    <li><strong>You</strong>, via the MCP tools and HTTP endpoints listed above.</li>
-    <li><strong>The deployment operator</strong>, who has Kubernetes/database access to the running service. There is no in-service admin tool that exposes another user's session in plaintext, but an operator with SQL access could read the encrypted blob; without the <code>ENCRYPTION_KEY</code> they cannot decrypt it.</li>
-    <li><strong>Anyone who compromises the running pod</strong> could read every session in memory while requests are in flight (this is true of any server-side MTProto host; mitigations are available via <em>Local Bridge</em> mode (beta, self-hosted), which keeps the session off the server entirely).</li>
+    <li><strong>You</strong>, through authenticated MCP tools and account endpoints.</li>
+    <li><strong>Your MCP client provider</strong>, for prompts, tool arguments, and tool results that pass through that client.</li>
+    <li><strong>The deployment operator</strong>, who has infrastructure and database access. Sensitive database columns are encrypted, but an operator who also controls the running service and encryption key can decrypt them.</li>
+    <li><strong>Anyone who compromises the running pod</strong> could read sessions and message content in memory or use the service's decryption capabilities. Hosted mode is not zero-knowledge.</li>
   </ul>
 
   <h2>Third parties</h2>
   <ul>
-    <li><strong>Telegram</strong> (transport) — your MTProto session is, by definition, used to talk to Telegram. They see the same traffic any Telegram client would generate.</li>
-    <li><strong>Telegram</strong> (identity) — your identity comes from a Telegram sign-in flow handled directly by this server.</li>
-    <li>No analytics, advertising, or third-party tracking is injected by this service. The OAuth-flow pages (connect, session management) serve inline CSS only under a strict Content-Security-Policy and contact no external hosts; the public content pages (home, docs, security, privacy) load the mctl design system stylesheet and web fonts from a CDN for presentation.</li>
+    <li><strong>Telegram</strong> (transport and identity) — the connected account uses Telegram MTProto, and sign-in uses Telegram OIDC.</li>
+    <li><strong>Your MCP client provider</strong> — for example OpenAI or Anthropic — processes the conversation and tool traffic you send through that product.</li>
+    <li>No advertising or third-party analytics is injected by this service. OAuth/session-management pages use strict CSP; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 
   <h2>Contact</h2>
-  <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Privacy inquiries: <strong><a href="mailto:privacy@mctl.ai">privacy@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>; audit it yourself.</p>
+  <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Privacy inquiries: <strong><a href="mailto:privacy@mctl.ai">privacy@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
 
   {{template "ui_footer" .}}
 
