@@ -97,6 +97,11 @@ func (l *Listener) RunFor(ctx context.Context, userID int64, c *gotdtelegram.Cli
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	// updates.Manager retains its internal state after Run exits and rejects a
+	// second Run as "already authorized". Pool reconnects invoke RunFor again on
+	// the same account, so clear only the in-memory runtime state first; the DB
+	// watermark remains intact and is reloaded by Run for gap recovery.
+	a.mgr.Reset()
 	return a.mgr.Run(ctx, c.API(), a.tgID, updates.AuthOptions{})
 }
 
