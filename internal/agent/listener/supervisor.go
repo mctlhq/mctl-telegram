@@ -2,6 +2,9 @@ package listener
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -21,6 +24,34 @@ type Pool interface {
 type AccountResolver interface {
 	ListListenerEnabledProfiles(ctx context.Context) ([]db.AgentProfile, error)
 	GetTelegramID(ctx context.Context, userID int64) (int64, error)
+}
+
+// StoreResolver adapts the shared db.Store to the supervisor without adding
+// listener-specific methods to the core store API. Only active hosted Telegram
+// accounts with a known Telegram user id are eligible for a live listener.
+type StoreResolver struct{ Store *db.Store }
+
+func (r StoreResolver) ListListenerEnabledProfiles(ctx context.Context) ([]db.AgentProfile, error) {
+	return r.Store.ListListenerEnabledProfiles(ctx)
+}
+
+func (r StoreResolver) GetTelegramID(ctx context.Context, userID int64) (int64, error) {
+	var tgID sql.NullInt64
+	err := r.Store.DB.QueryRowContext(ctx,
+		`SELECT telegram_user_id
+		   FROM telegram_accounts
+		  WHERE user_id = $1 AND revoked_at IS NULL AND mode = 'hosted'
+		  ORDER BY connected_at DESC
+		  LIMIT 1`,
+		userID,
+	).Scan(&tgID)
+	if errors.Is(err, sql.ErrNoRows) || !tgID.Valid || tgID.Int64 == 0 {
+		return 0, fmt.Errorf("active hosted Telegram account not found for user %d", userID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve Telegram id for user %d: %w", userID, err)
+	}
+	return tgID.Int64, nil
 }
 
 func RunSupervisor(ctx context.Context, l *Listener, pool Pool, res AccountResolver, interval time.Duration) {
