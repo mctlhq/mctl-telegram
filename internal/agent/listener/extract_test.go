@@ -2,6 +2,7 @@ package listener
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -41,8 +42,27 @@ func TestExtractMessage_EditGetsDistinctEventID(t *testing.T) {
 	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "v2", Date: 1000}
 	edited.SetEditDate(2000)
 	got, ok := ExtractMessage(ownerUID, selfTG, edited, ents(), true)
-	if !ok || got.Event.Kind != db.EventKindMessageEdit || got.Event.EventID == fresh.Event.EventID || got.Event.EventID != "evt:v1:100:555:42:e2000" {
+	if !ok || got.Event.Kind != db.EventKindMessageEdit || got.Event.EventID == fresh.Event.EventID {
 		t.Fatalf("edit = %#v, ok=%v", got.Event, ok)
+	}
+	if !strings.HasPrefix(got.Event.EventID, "evt:v1:100:555:42:e2000:") {
+		t.Fatalf("edit event id = %q", got.Event.EventID)
+	}
+}
+
+func TestExtractMessage_TwoEditsInSameSecondStayDistinct(t *testing.T) {
+	first := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "first edit", Date: 1000}
+	first.SetEditDate(2000)
+	second := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "second edit", Date: 1000}
+	second.SetEditDate(2000)
+	a, _ := ExtractMessage(ownerUID, selfTG, first, ents(), true)
+	b, _ := ExtractMessage(ownerUID, selfTG, second, ents(), true)
+	if a.Event.EventID == b.Event.EventID {
+		t.Fatalf("same-second edits collided: %q", a.Event.EventID)
+	}
+	redelivery, _ := ExtractMessage(ownerUID, selfTG, first, ents(), true)
+	if redelivery.Event.EventID != a.Event.EventID {
+		t.Fatalf("same edit redelivery changed id: %q vs %q", redelivery.Event.EventID, a.Event.EventID)
 	}
 }
 
@@ -56,6 +76,18 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 	got, ok = ExtractMessage(ownerUID, selfTG, out, ents(), false)
 	if !ok || got.Event.Kind != db.EventKindOwnerOutgoing || got.SavedCommandText != "" {
 		t.Fatalf("owner outgoing = %#v, ok=%v", got, ok)
+	}
+}
+
+func TestExtractMessage_MediaOnlyOwnerMessageIsTakeover(t *testing.T) {
+	out := &tg.Message{ID: 12, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: ""}
+	got, ok := ExtractMessage(ownerUID, selfTG, out, ents(), false)
+	if !ok || got.Event.Kind != db.EventKindOwnerOutgoing || got.Event.Body != "" {
+		t.Fatalf("media-only takeover = %#v, ok=%v", got, ok)
+	}
+	self := &tg.Message{ID: 13, Out: true, PeerID: &tg.PeerUser{UserID: selfTG}, Message: ""}
+	if _, ok := ExtractMessage(ownerUID, selfTG, self, ents(), false); ok {
+		t.Fatal("blank Saved Messages item should not become a command")
 	}
 }
 
