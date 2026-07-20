@@ -10,6 +10,7 @@ import (
 func baseInput() Input {
 	return Input{
 		Profile: db.AgentProfile{
+			UserID:             7,
 			Mode:               db.AgentModeGuarded,
 			DisclosureText:     "I am an AI assistant.",
 			MaxAutonomousTurns: 6,
@@ -17,7 +18,7 @@ func baseInput() Input {
 			MaxReplyChars:      1200,
 			IntentAllowlist:    "greet,request_company,request_salary_range",
 		},
-		Conversation: db.Conversation{PeerTGID: 555, State: db.ConversationActive},
+		Conversation: db.Conversation{UserID: 7, PeerTGID: 555, State: db.ConversationActive},
 		Action:       Action{Type: db.ActionTypeReply, Intent: "request_company", Text: "Could you tell me the company name?", PeerTGID: 555},
 		Now:          time.Now(),
 	}
@@ -82,6 +83,12 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"phone uk landline", func(in *Input) { in.Action.Text = "reach me at 020 7946 0958" }},
 		{"phone uk mobile", func(in *Input) { in.Action.Text = "reach me at 07700 900123" }},
 		{"phone french", func(in *Input) { in.Action.Text = "reach me at 01 23 45 67 89" }},
+		{"phone nanp compact no trunk", func(in *Input) { in.Action.Text = "reach me at 4155551212" }},
+
+		{"url generic tld jobs", func(in *Input) { in.Action.Text = "apply at careers.company.jobs" }},
+		{"url generic tld agency", func(in *Input) { in.Action.Text = "see recruiter.agency for openings" }},
+
+		{"profile conversation user mismatch", func(in *Input) { in.Conversation.UserID = in.Profile.UserID + 1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +120,8 @@ func TestEvaluate_NoFalsePositivesOnOrdinaryReplies(t *testing.T) {
 		"We had a phone screen on 2024-05-06.",
 		"The release identifier is 2026.7.20.1.",
 		"Kubernetes v1.29.3.0 is our baseline version.",
+		"The service returned error code 4040.",
+		"The salary range is 80 000 - 90 000 RUB.",
 	}
 	for _, text := range ordinary {
 		in := baseInput()
