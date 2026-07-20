@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.1](https://github.com/mctlhq/mctl-telegram/compare/0.44.0...0.44.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **web:** align landing privacy claims with agent storage ([#301](https://github.com/mctlhq/mctl-telegram/issues/301)) ([e7662e1](https://github.com/mctlhq/mctl-telegram/commit/e7662e13680c64a80a2c56442755426060359a03))
+
 ## [0.44.0](https://github.com/mctlhq/mctl-telegram/compare/0.43.0...0.44.0) (2026-07-20)
 
 
