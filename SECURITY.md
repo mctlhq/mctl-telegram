@@ -12,70 +12,101 @@ When reporting, please **do not include** Telegram session strings, OAuth tokens
 
 ## Threat model
 
-`mctl-telegram` brokers two trust relationships per user:
+`mctl-telegram` brokers the following trust relationships per user:
 
-| Boundary | Trusted credential | Lives |
+| Boundary | Trusted credential / state | Lives |
 |---|---|---|
-| Inbound HTTP (Claude.ai → `/mcp`) | OAuth JWT issued by `mctl-telegram` (`AUTH_MODE=local-jwt`) or `api.mctl.ai` (`AUTH_MODE=shared-hmac-legacy`) | Bearer header, per-request |
-| OAuth identity (Claude.ai → `/oauth/authorize`) | Telegram OIDC `id_token` (JWKS-validated, Authorization Code + PKCE) | Server-to-server token exchange, single-use |
+| Inbound HTTP (ChatGPT / Claude / MCP client → `/mcp`) | OAuth JWT issued by `mctl-telegram` (`AUTH_MODE=local-jwt`) or `api.mctl.ai` (`AUTH_MODE=shared-hmac-legacy`) | Bearer header, per-request |
+| OAuth identity (client → `/oauth/authorize`) | Telegram OIDC `id_token` (JWKS-validated, Authorization Code + PKCE) | Server-to-server token exchange, single-use |
 | Outbound MTProto (`gotd/td` → Telegram) | Encrypted session blob | Postgres `telegram_accounts.session_encrypted` |
+| Communication Agent ingestion | Per-user listener state, encrypted message/event rows, queue jobs, and policy state | Postgres agent tables; only for profiles with the listener enabled |
 
-Compromise of any one compromises only the affected operator's account — not other users — provided the per-user session encryption key is unique. There is no inter-user data sharing path inside the service.
+Compromise of any one user's credentials or session should compromise only that user's account, not another user's, provided the per-user key derivation and user-scoped database predicates remain intact. There is no intended cross-user data-sharing path inside the service.
+
+## Communication Agent safety boundary
+
+The Communication Agent extends the service beyond request/response MCP calls. For accounts where the listener is explicitly enabled, the server keeps a Telegram update listener connected and can durably ingest relevant private-message updates.
+
+The safety boundary is **server-side code and persisted state, not the model prompt or model output**:
+
+* The listener maps supported Telegram updates into deterministic event IDs and atomically commits the event, queue job, and conversation activity timestamp. A partial event-without-job commit is not accepted.
+* Persistence or command-routing failures are returned to `gotd`'s update manager. The stored Telegram watermark is not advanced, allowing reconnect and gap recovery to retry the update.
+* Ordinary Saved Messages notes are ignored. Only explicit `/mctl ...` control commands are retained and routed.
+* A genuine owner reply, including a media-only reply, moves the conversation to `taken_over`. A taken-over, paused, closed, blocked, or otherwise invalid conversation is denied by policy.
+* Programmatic `send_message` and `send_media` calls record the Telegram-assigned message ID so their outgoing update echo is not mistaken for a human takeover.
+* Disabling the listener removes the runtime account and unpins/stops its Telegram client rather than waiting for idle garbage collection.
+* The server-side policy engine fails closed for unknown modes, states, or action types. It denies when the global kill switch is active, the agent is off/paused, the sender is blocked, the peer mismatches, required disclosure is missing, or proposed content violates structural safety checks.
+* `observe` mode requires owner approval for replies. `guarded` mode may allow only allowlisted actions that pass every policy check and budget/rate constraint; otherwise approval is required or the action is denied.
+* Approval actions use compare-and-set state transitions. An action that reached `executing` is not automatically retried after a crash, because a duplicate Telegram message is considered worse than a missed send.
+
+The listener itself receives and queues updates; enabling the listener alone does not bypass the existing Telegram send gate.
+
+## Communication Agent data at rest and retention
+
+Unlike read-only MCP tool results, Communication Agent processing requires durable message state:
+
+* `incoming_events` and `conversation_messages` can contain third-party Telegram message bodies.
+* `agent_actions` can contain proposed reply payloads and policy metadata.
+* Message bodies and action payloads are AES-256-GCM sealed with the owning user's derived key before storage.
+* Agent content is user-scoped in every repository getter.
+* The daily retention sweeper removes stored agent message content older than `AGENT_RETENTION_DAYS` (default **30 days**). Setting the value to `0` keeps rows indefinitely and should be treated as an explicit privacy trade-off.
+* Audit rows use their separate `AUDIT_RETENTION_DAYS` policy (default 90 days) and do not contain message bodies.
 
 ## Telegram-native OAuth (`AUTH_MODE=local-jwt`, the default)
 
-The Claude.ai connector authenticates via a self-hosted OAuth 2.1 authorization server. The user-facing identity provider is [Telegram's OpenID Connect provider](https://oauth.telegram.org): `/oauth/authorize` redirects the browser to `oauth.telegram.org` with an Authorization Code + PKCE request, and `/oauth/telegram/callback` exchanges the returned code for an `id_token` validated against Telegram's JWKS (signature, `iss`, `aud`, `nonce`, expiry). mctl-telegram is thus an OIDC federation broker — an OAuth 2.1 Authorization Server to Claude.ai, and an OIDC Relying Party to Telegram. Once the `id_token` verifies, mctl-telegram mints its own HS256 JWT signed by `OAUTH_JWT_SIGNING_KEY` and returns it to Claude.ai via the authorization-code grant.
+The connector authenticates via a self-hosted OAuth 2.1 authorization server. The user-facing identity provider is [Telegram's OpenID Connect provider](https://oauth.telegram.org): `/oauth/authorize` redirects the browser to `oauth.telegram.org` with an Authorization Code + PKCE request, and `/oauth/telegram/callback` exchanges the returned code for an `id_token` validated against Telegram's JWKS (signature, `iss`, `aud`, `nonce`, expiry). mctl-telegram is thus an OIDC federation broker — an OAuth 2.1 Authorization Server to the MCP client, and an OIDC Relying Party to Telegram. Once the `id_token` verifies, mctl-telegram mints its own HS256 JWT signed by `OAUTH_JWT_SIGNING_KEY` and returns it via the authorization-code grant.
 
 Notes:
 
 * `OAUTH_JWT_SIGNING_KEY` is a dedicated per-deployment signing key — there is no cross-service coupling. The deprecated `OAUTH_JWT_SECRET` is still accepted as a fallback but logs a startup warning. The key must persist across restarts: if it changes, every previously issued token fails signature verification.
-* PKCE-S256 is mandatory on the MCP-client leg. Plain or missing `code_challenge` is rejected at `/oauth/authorize`. The broker runs a *second*, independent PKCE pair plus a `nonce` on the Telegram (Relying-Party) leg; the two legs share no secrets and are bound to distinct fields of the pending-authorization record.
+* PKCE-S256 is mandatory on the MCP-client leg. Plain or missing `code_challenge` is rejected at `/oauth/authorize`. The broker runs a second, independent PKCE pair plus a `nonce` on the Telegram leg; the two legs share no secrets and are bound to distinct fields of the pending-authorization record.
 * Authorization codes are single-use, 10-minute TTL, and bound to (`client_id`, `redirect_uri`, `code_challenge`). The `/oauth/token` endpoint deletes the code on first redemption.
-* Access tokens are short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default 1h). Clients renew them with the `refresh_token` grant — see "Refresh tokens" below.
-* Implicit (unregistered) client_ids are accepted only when the `redirect_uri` host appears in `AllowedImplicitHosts` (default: `claude.ai`, `claude.com`, `localhost`, `127.0.0.1`) and the scheme is `https://` (or `http://` for loopback per RFC 8252 §7.3). This prevents the OAuth flow from being abused as an open redirector.
-* Scope assignment is identity-based: Telegram ids in `TG_LOGIN_ADMINS` are granted full `platform-admins` scopes; everyone else authenticates but receives an empty scope set, failing every per-tool gate.
-* `TELEGRAM_OIDC_CLIENT_SECRET` is the credential mctl-telegram presents as an OIDC Relying Party at Telegram's token endpoint. It is sensitive on the same tier as `OAUTH_JWT_SIGNING_KEY` — redacted in audit logs and never logged. `TELEGRAM_LOGIN_BOT_TOKEN` is no longer load-bearing for authentication; it now only sends the daily new-client digest.
+* Access tokens are short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default 1h). Clients renew them with the `refresh_token` grant.
+* Implicit client IDs are accepted only when the `redirect_uri` host appears in `AllowedImplicitHosts` and the scheme is `https://` (or loopback `http://` per RFC 8252). This prevents the OAuth flow from being abused as an open redirector.
+* Scope assignment is identity-based: Telegram IDs in `TG_LOGIN_ADMINS` are granted platform-admin scopes; other identities receive only their configured access tier.
+* `TELEGRAM_OIDC_CLIENT_SECRET` is sensitive on the same tier as `OAUTH_JWT_SIGNING_KEY` and is never logged.
 
 ### Refresh tokens
 
-The `/oauth/token` endpoint supports `grant_type=refresh_token` so a client can renew an expired access token without re-running the Telegram OIDC sign-in flow. Refresh-token handling is hardened as follows:
+The `/oauth/token` endpoint supports `grant_type=refresh_token` so a client can renew an expired access token without repeating Telegram sign-in.
 
-* **Opaque, not JWT.** A refresh token is 256 bits of CSPRNG output — it carries no claims and is meaningless without the server-side row.
-* **Stored hashed.** Only the SHA-256 digest is persisted (`oauth_refresh_tokens.token_hash`); the plaintext never reaches the database.
-* **Rotated on every use.** Each refresh issues a new refresh token and revokes the presented one. Tokens are bound to (`client_id`, `user_id`, `telegram_id`); a `client_id` mismatch is rejected.
-* **Reuse detection.** Every token in a rotation lineage shares a `family_id`. Presenting an already-rotated token revokes the entire family — a stolen-token replay cannot outlive the legitimate client's next refresh.
+* **Opaque, not JWT.** A refresh token is 256 bits of CSPRNG output.
+* **Stored hashed.** Only its SHA-256 digest is persisted.
+* **Rotated on every use.** Each refresh revokes the presented token and issues a replacement.
+* **Reuse detection.** Replaying an already-rotated token revokes the entire token family.
 * **Bounded lifetime.** Absolute expiry is `OAUTH_REFRESH_TOKEN_TTL` (default 30 days); a background sweeper deletes expired rows.
 
 ## Legacy mode: `AUTH_MODE=shared-hmac-legacy`
 
-The legacy `shared-hmac` (alias `shared-hmac-legacy`) auth mode validates JWTs signed by an external authorization server using a shared `OAUTH_JWT_SECRET`. It exists for backwards compatibility when mctl-telegram is deployed alongside another service that issues the tokens.
+The legacy mode validates JWTs signed by an external authorization server using a shared `OAUTH_JWT_SECRET`.
 
-* **Impact**: the two services share secret material — compromise of either one allows minting valid tokens for both.
-* **Mitigation**: rotate `OAUTH_JWT_SECRET` for both services simultaneously. Use `AUTH_MODE=local-jwt` for new deployments.
-* **Plan**: `shared-hmac-legacy` will be removed in a future minor release.
+* **Impact:** the services share secret material; compromise of either may allow minting tokens for both.
+* **Mitigation:** rotate the shared secret for both services simultaneously. Use `AUTH_MODE=local-jwt` for new deployments.
+* **Plan:** `shared-hmac-legacy` will be removed in a future minor release.
 
-## Cryptographic invariants
+## Cryptographic and logging invariants
 
-* `ENCRYPTION_KEY` MUST be 32 random bytes, hex-encoded (64 chars). Refuses to start with any other length.
-* MTProto session blobs are AES-256-GCM sealed (nonce = `gcm.NonceSize()` random bytes per session) before reaching disk.
-* Audit log NEVER contains: full `text` of sent messages, decoded phone digits, 2FA password, MTProto session bytes, JWT secret, or encryption key. Slog-handler redaction strips these keys before any line reaches stdout.
+* `ENCRYPTION_KEY` MUST be 32 random bytes, hex-encoded (64 chars). Production refuses an invalid length.
+* MTProto session blobs, Communication Agent message bodies, and action payloads are AES-256-GCM sealed before reaching disk, using a per-user derived key.
+* Audit logs and process logs NEVER contain full message bodies, decoded phone digits, 2FA passwords, MTProto session bytes, bearer tokens, JWT secrets, or encryption keys. The slog redaction handler strips sensitive keys before a line reaches stdout.
+* The deployment operator and anyone who compromises the running pod can access plaintext while the service processes or decrypts user data. Hosted mode is not zero-knowledge.
 
-## Send-gate (defense in depth)
+## Send gate (defense in depth)
 
-Real Telegram sends require **all** of:
+Real Telegram sends through `send_message` or `send_media` require **all** of:
 
-1. Server flag `ALLOW_SEND=true` (Helm values).
-2. Identity has `telegram:messages:send` scope (group → scope map in `internal/auth/sharedhmac/verifier.go`).
-3. `telegram_accounts.send_enabled = true` for that operator (set out-of-band).
+1. Server flag `ALLOW_SEND=true`.
+2. Identity has `telegram:messages:send` scope.
+3. `telegram_accounts.send_enabled = true` for that operator.
 4. Per-peer send rate limit not exhausted.
 
-`send_message` takes no mode argument — the gate alone decides. Any condition false → response is a dry-run preview (`sent=false`) containing the proposed text and the failing-condition reason in `dry_reason`; nothing reaches the Telegram API.
+The tool exposes no trusted client-controlled bypass for these gates. Any condition false returns a dry-run result (`sent=false`) with a `dry_reason`; no send RPC reaches Telegram. Media dry-runs do not fetch a URL or decode base64 content.
 
 ## Authentication-required mode
 
-* `AUTH_REQUIRED=false` is for local development only. The deployed pod MUST set `AUTH_REQUIRED=true` and `AUTH_MODE=local-jwt` (or the legacy `shared-hmac-legacy`).
-* `local-dev` provider returns a fixed `Identity` with platform-admin scopes and is gated by `AUTH_MODE=local-dev`. It MUST NOT be reachable from any non-localhost interface in production.
+* `AUTH_REQUIRED=false` is for local development only. A deployed pod MUST set `AUTH_REQUIRED=true` and a production auth mode.
+* `local-dev` returns a fixed platform-admin identity and MUST NOT be reachable from a non-localhost production interface.
 
 ## Rate limiting
 
-Per-identity token bucket, default 30 requests/minute, capped at the same burst. Anonymous traffic (`/healthz`, `/readyz`, `/.well-known/*`) is exempt and rate-limited only at the ingress level.
+The default per-identity token bucket is 30 requests/minute with the same burst. Write paths also apply per-peer limits. Anonymous health, readiness, public content, and well-known endpoints are limited at the ingress layer.
