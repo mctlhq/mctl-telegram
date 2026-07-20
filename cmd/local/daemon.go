@@ -602,7 +602,7 @@ func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env br
 		var buf []byte
 		dlErr := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			buf, err = tg.DownloadMedia(ctx, c, entry.loc, tg.DefaultMediaDownloadMaxBytes)
+			buf, _, err = tg.DownloadMedia(ctx, c, entry.loc, tg.DefaultMediaDownloadMaxBytes)
 			return err
 		})
 		if dlErr != nil && (errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded)) {
