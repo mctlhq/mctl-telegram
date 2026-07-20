@@ -45,14 +45,12 @@ func (q *Queue) Enqueue(ctx context.Context, eventID string, userID, conversatio
 	return id, enqueued, err
 }
 
-// Ingest persists an incoming event and enqueues its job in one transaction —
-// the listener's crash-safe primitive (see Store.InsertEventAndEnqueueJob) —
-// and counts BOTH the received event and the pending job. This is the path
-// that increments AgentEventsReceivedTotal: counting at ingestion (post-dedup,
-// post-commit) keeps the metric equal to rows actually persisted. Duplicate
-// deliveries return enqueued=false and count nothing.
+// Ingest persists an actionable incoming event, enqueues its job, and updates
+// the conversation's last-incoming timestamp in one transaction. It counts both
+// the received event and pending job only after commit. Duplicate deliveries are
+// a complete no-op and count nothing.
 func (q *Queue) Ingest(ctx context.Context, ev db.IncomingEvent, conversationID int64) (int64, bool, error) {
-	id, enqueued, err := q.Store.InsertEventAndEnqueueJob(ctx, ev, conversationID)
+	id, enqueued, err := q.Store.InsertEventEnqueueJobAndTouch(ctx, ev, conversationID)
 	if err == nil && enqueued {
 		if q.m != nil {
 			q.m.AgentEventsReceivedTotal.WithLabelValues(ev.Kind).Inc()
