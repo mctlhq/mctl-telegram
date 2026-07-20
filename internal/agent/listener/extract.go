@@ -23,8 +23,8 @@ import (
 type Extracted struct {
 	Event db.IncomingEvent
 	// SavedCommandText is non-empty when the update is the owner's own
-	// outgoing message in Saved Messages — the raw text for the /mctl command
-	// parser. The event is still persisted (kind saved_command) for audit.
+	// outgoing /mctl command in Saved Messages. Ordinary Saved Messages notes
+	// are never retained by the agent listener.
 	SavedCommandText string
 }
 
@@ -40,6 +40,11 @@ func eventIDForMessage(accountTGID, chatID, messageID int64, editDate int, body 
 		base += ":e" + strconv.Itoa(editDate) + ":" + fmt.Sprintf("%x", sum[:6])
 	}
 	return base
+}
+
+func isMCTLCommand(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) > 0 && strings.EqualFold(fields[0], "/mctl")
 }
 
 // ExtractMessage maps one *tg.Message (from a new or edit update) to an
@@ -60,9 +65,10 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			return Extracted{}, false
 		}
 		if peerUser.UserID == selfTGID {
-			// Saved Messages only carries control commands in v1. A media-only
-			// self-message has nothing for the command parser.
-			if text == "" {
+			// Saved Messages is private scratch space. Retain only explicit /mctl
+			// control commands; ordinary personal notes must never enter agent
+			// retention or reach the command router.
+			if !isMCTLCommand(text) {
 				return Extracted{}, false
 			}
 			ev := db.IncomingEvent{
