@@ -7,11 +7,10 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// TestToolAnnotations locks the MCP tool annotation hints that the ChatGPT App
-// submission depends on. mcp-go's NewTool defaults are
-// readOnly=false, destructive=true, openWorld=true, so any tool that does not
-// explicitly override a hint silently ships the default — these assertions fail
-// if that drift is reintroduced.
+// TestToolAnnotations is a regression guard: it asserts that every MCP tool
+// carries explicit readOnly/destructive/openWorld annotation hints so no tool
+// silently ships the mcp-go defaults (readOnly=false, destructive=true,
+// openWorld=true).
 func TestToolAnnotations(t *testing.T) {
 	s := &Server{}
 
