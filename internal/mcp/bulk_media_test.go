@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -32,6 +33,17 @@ func newDownloadableMessage(id int, size int64) (*tg.Message, telegram.Message) 
 // nil location, so it must never reach the downloader.
 func newNonDownloadableMessage(id int) (*tg.Message, telegram.Message) {
 	media := &tg.MessageMediaPoll{}
+	raw := &tg.Message{ID: id, Media: media}
+	decoded := telegram.Message{ID: id, MediaInfo: telegram.DecodeMediaInfo(media)}
+	return raw, decoded
+}
+
+// newEmptyMediaConstructorMessage builds a paired message carrying Telegram's
+// explicit MessageMediaEmpty constructor: raw.Media is non-nil (it holds a
+// concrete *tg.MessageMediaEmpty), but DecodeMediaInfo — correctly — treats
+// it as no media at all (MediaInfo == nil), same as a plain text message.
+func newEmptyMediaConstructorMessage(id int) (*tg.Message, telegram.Message) {
+	media := &tg.MessageMediaEmpty{}
 	raw := &tg.Message{ID: id, Media: media}
 	decoded := telegram.Message{ID: id, MediaInfo: telegram.DecodeMediaInfo(media)}
 	return raw, decoded
@@ -107,6 +119,31 @@ func TestFetchMediaInline_NoMediaNotCountedAsSkipped(t *testing.T) {
 	want := FetchMediaSummary{Fetched: 0, Skipped: 0, Cap: BulkMediaFetchCap}
 	if summary != want {
 		t.Errorf("summary = %+v, want %+v (a message with no media at all is not \"skipped\")", summary, want)
+	}
+}
+
+// TestFetchMediaInline_EmptyMediaConstructorNotCountedAsSkipped locks in the
+// fix for Codex's P2 ("Exclude empty-media constructors from skipped"):
+// Telegram's explicit MessageMediaEmpty constructor makes raw.Media non-nil,
+// but DecodeMediaInfo correctly treats it as no media — the old check keyed
+// off rawMsgs[i].Media != nil and over-counted it as skipped, contradicting
+// the documented contract that a message with no media at all isn't skipped.
+func TestFetchMediaInline_EmptyMediaConstructorNotCountedAsSkipped(t *testing.T) {
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		t.Fatal("downloader must not be called for an empty-media message")
+		return nil, nil, true
+	})
+	raw, decoded := newEmptyMediaConstructorMessage(1)
+	rawMsgs := []*tg.Message{raw}
+	msgs := []telegram.Message{decoded}
+	s := &Server{MediaDownloadMaxBytes: 1000}
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := FetchMediaSummary{Fetched: 0, Skipped: 0, Cap: BulkMediaFetchCap}
+	if summary != want {
+		t.Errorf("summary = %+v, want %+v (MessageMediaEmpty is not \"skipped\" — DecodeMediaInfo already treats it as no media)", summary, want)
 	}
 }
 
@@ -394,20 +431,23 @@ func TestFetchMediaInline_UnclassifiedBorrowFailureAbortsLoop(t *testing.T) {
 	}
 }
 
-// TestFetchMediaInline_FailedDownloadChargesByteBudget locks in the fix for
-// Codex's P2 ("Charge failed downloads against the aggregate byte budget"):
-// a per-item download failure whose callback ran (attemptedFn=true, an
-// ordinary skip) may have already streamed close to perItemCap bytes before
-// erroring — e.g. cappedBuffer aborting an oversized undeclared-size photo
-// mid-stream. Without charging that against totalBytes, every subsequent
-// item would see the same near-full remaining budget, letting a page of
-// failing items multiply well past BulkMediaByteCap in actual wire transfer.
-func TestFetchMediaInline_FailedDownloadChargesByteBudget(t *testing.T) {
-	withBulkMediaByteCap(t, 150) // room for one item's perItemCap, no more
+// TestFetchMediaInline_FailedDownloadChargesActualBytes locks in the fix for
+// Codex's P2 ("Charge only bytes consumed by failed downloads"): a per-item
+// download failure whose callback ran (attemptedFn=true, an ordinary skip)
+// may have already streamed some bytes before erroring — e.g. cappedBuffer
+// aborting an oversized undeclared-size photo mid-stream. mediaDownloader
+// reports that partial amount even on failure, and fetchMediaInline must
+// charge exactly that against totalBytes — not the full perItemCap, and not
+// zero — so the aggregate budget reflects real wire transfer without
+// over-penalizing a failure that consumed little or nothing.
+func TestFetchMediaInline_FailedDownloadChargesActualBytes(t *testing.T) {
+	withBulkMediaByteCap(t, 150) // room for item 1's 90 partial bytes + item 2's 100, not both fully
 	calls := 0
 	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
 		calls++
-		return nil, errors.New("boom"), true
+		// Simulate cappedBuffer having buffered 90 bytes before the item
+		// aborted mid-stream — well under perItemCap (150) but nonzero.
+		return make([]byte, 90), errors.New("boom"), true
 	})
 	raw1, decoded1 := newDownloadableMessage(1, 100)
 	raw2, decoded2 := newDownloadableMessage(2, 100)
@@ -418,15 +458,64 @@ func TestFetchMediaInline_FailedDownloadChargesByteBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Item 1: fits (remaining 150 >= 100), perItemCap=150, downloader called
-	// and fails — charges the full perItemCap (150) against totalBytes even
-	// though nothing was actually returned. Item 2: remaining is now 0, so it
-	// is skipped without ever reaching the downloader.
+	// Item 1: fits (remaining 150 >= 100), downloader called and fails after
+	// streaming 90 bytes — charges 90, not the full 150 perItemCap. Item 2:
+	// remaining is now 60 < its declared size 100, so it's skipped by the
+	// size pre-check without ever reaching the downloader.
 	if calls != 1 {
-		t.Errorf("downloader called %d times, want 1 — the failed download's charged budget must starve item 2 before it reaches the downloader", calls)
+		t.Errorf("downloader called %d times, want 1 — item 2 must be rejected by the size pre-check, not attempted", calls)
 	}
 	want := FetchMediaSummary{Fetched: 0, Skipped: 2, Cap: BulkMediaFetchCap}
 	if summary != want {
 		t.Errorf("summary = %+v, want %+v", summary, want)
+	}
+}
+
+// TestFetchMediaInline_ZeroByteFailureDoesNotStarveBudget is the direct
+// regression test for the bug Codex flagged in the fix this replaces:
+// charging the worst-case perItemCap (which, for the first item, equals the
+// entire remaining aggregate budget) on ANY failure — including an instant,
+// zero-byte one like a fast RPC error before any chunk arrived — would wrongly
+// exhaust the whole budget after a single failure and starve every later
+// item, contradicting fetchMediaInline's documented "per-item failures keep
+// the loop going" contract.
+func TestFetchMediaInline_ZeroByteFailureDoesNotStarveBudget(t *testing.T) {
+	withBulkMediaByteCap(t, 1000) // one item's perItemCap would exhaust this if wrongly worst-case-charged
+	calls := 0
+	stubDownloader(t, func(context.Context, int64, telegram.MediaFileLocation, int64) ([]byte, error, bool) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("immediate RPC error, zero bytes transferred"), true
+		}
+		return make([]byte, 100), nil, true
+	})
+	raw1, decoded1 := newDownloadableMessage(1, 100)
+	raw2, decoded2 := newDownloadableMessage(2, 100)
+	rawMsgs := []*tg.Message{raw1, raw2}
+	msgs := []telegram.Message{decoded1, decoded2}
+	s := &Server{MediaDownloadMaxBytes: 1000}
+	summary, err := s.fetchMediaInline(context.Background(), 1, rawMsgs, msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("downloader called %d times, want 2 — a zero-byte failure must not consume the budget item 2 needs", calls)
+	}
+	want := FetchMediaSummary{Fetched: 1, Skipped: 1, Cap: BulkMediaFetchCap}
+	if summary != want {
+		t.Errorf("summary = %+v, want %+v", summary, want)
+	}
+}
+
+// TestIsSystemicPoolErr_SessionRevokePersistFailed verifies
+// isSystemicPoolErr recognizes telegram.ErrSessionRevokePersistFailed —
+// added alongside the fix that deliberately keeps this marker out of
+// sessionErrText's sentinels (see TestBorrow_RevokePersistFailureMarksSystemicNotSentinel
+// in internal/telegram), so fetchMediaInline must check for it separately
+// from sessionErrText to still abort the loop on this call-wide failure.
+func TestIsSystemicPoolErr_SessionRevokePersistFailed(t *testing.T) {
+	err := fmt.Errorf("revoke rejected session: %w: %w", telegram.ErrSessionRevokePersistFailed, errors.New("db closed"))
+	if !isSystemicPoolErr(err) {
+		t.Errorf("isSystemicPoolErr(%v) = false, want true", err)
 	}
 }

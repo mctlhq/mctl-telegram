@@ -307,17 +307,22 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 	})
 }
 
-// TestBorrow_RevokePersistFailurePreservesSentinel locks in a fix for a
-// Codex P2 ("Propagate post-download session revoke failures"): when
+// TestBorrow_RevokePersistFailureMarksSystemicNotSentinel locks in the fix
+// for a Codex P2 ("Keep failed revocations out of session sentinels"): when
 // Telegram rejects the session inside fn AND persisting that revoke to the
-// DB then fails, the returned error must still satisfy errors.Is against the
-// session sentinel (db.ErrSessionRevoked here) — not just wrap the raw DB
-// error. Callers up the stack (sessionErrText/isSystemicPoolErr in
-// internal/mcp) classify pool errors via errors.Is; losing the sentinel here
-// would make a genuine call-wide session failure indistinguishable from an
-// ordinary per-item error, e.g. fetchMediaInline folding it into Skipped
-// instead of aborting the loop.
-func TestBorrow_RevokePersistFailurePreservesSentinel(t *testing.T) {
+// DB then fails, the returned error must
+//  1. satisfy errors.Is against telegram.ErrSessionRevokePersistFailed, so
+//     callers that need to know "is this call-wide, should I abort" (e.g.
+//     isSystemicPoolErr) can still recognize it, but
+//  2. NOT satisfy errors.Is against the user-facing session sentinel
+//     (db.ErrSessionRevoked) — the DB write never completed, so telling the
+//     user "reconnect and you're set" (sessionErrText's message) would be
+//     misleading; the dead row may still be loadable.
+//
+// An earlier fix wrapped the sentinel directly to solve (1), which satisfied
+// isSystemicPoolErr but broke (2) — Codex caught the regression on the very
+// next review round.
+func TestBorrow_RevokePersistFailureMarksSystemicNotSentinel(t *testing.T) {
 	ctx := context.Background()
 	store := newBorrowTestStore(t)
 	uid, err := store.EnsureUser(ctx, "revoke-fail-user", "", "test")
@@ -352,8 +357,11 @@ func TestBorrow_RevokePersistFailurePreservesSentinel(t *testing.T) {
 	if borErr == nil {
 		t.Fatal("expected a non-nil error")
 	}
-	if !errors.Is(borErr, db.ErrSessionRevoked) {
-		t.Errorf("Borrow() error = %v, want errors.Is(_, db.ErrSessionRevoked) — the sentinel must survive even when persisting the revoke fails", borErr)
+	if !errors.Is(borErr, ErrSessionRevokePersistFailed) {
+		t.Errorf("Borrow() error = %v, want errors.Is(_, ErrSessionRevokePersistFailed)", borErr)
+	}
+	if errors.Is(borErr, db.ErrSessionRevoked) {
+		t.Errorf("Borrow() error = %v, must NOT satisfy errors.Is(_, db.ErrSessionRevoked) — the revoke never persisted, so sessionErrText must not render the misleading \"reconnect and you're set\" message", borErr)
 	}
 }
 

@@ -289,11 +289,18 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // whose size is not 4KB-aligned) and follows upload.fileCdnRedirect for
 // CDN-served popular media, which a bare *tg.UploadFile type assertion would
 // reject.
+//
+// On error the returned slice is whatever cappedBuffer had accumulated
+// before the failure (possibly empty, e.g. an immediate RPC error before any
+// chunk arrived) rather than always nil — callers that bound an aggregate
+// transfer budget across multiple downloads (fetchMediaInline) need the
+// actual bytes consumed, not just success/failure, to charge a failed
+// attempt accurately.
 func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, error) {
 	w := &cappedBuffer{cap: maxBytes}
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		return w.buf, fmt.Errorf("download: %w", err)
 	}
 	return w.buf, nil
 }

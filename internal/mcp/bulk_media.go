@@ -77,9 +77,13 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 // per-item Skipped count: a revoked/expired/unauthorized session, no active
 // session, the pool at capacity (sessionErrText/telegram.ErrPoolFull — the
 // same sentinels borrowErrResult uses to render the actionable reconnect
-// message), or the caller's context being canceled/deadline-exceeded (the
-// client disconnected or the request timed out — continuing to attempt
-// further downloads, or auditing the call as successful, would be wrong).
+// message), a session Telegram rejected whose DB revoke then failed to
+// persist (telegram.ErrSessionRevokePersistFailed — call-wide like the
+// others, but intentionally NOT one of sessionErrText's sentinels since we
+// can't promise the "reconnect and you're set" recovery those imply), or the
+// caller's context being canceled/deadline-exceeded (the client disconnected
+// or the request timed out — continuing to attempt further downloads, or
+// auditing the call as successful, would be wrong).
 //
 // This covers every *known* systemic error, but ClientPool.Borrow's own
 // preflight (CheckSessionValid), acquire, and client-startup paths can also
@@ -91,6 +95,7 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 func isSystemicPoolErr(err error) bool {
 	return sessionErrText(err) != "" ||
 		errors.Is(err, telegram.ErrPoolFull) ||
+		errors.Is(err, telegram.ErrSessionRevokePersistFailed) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
@@ -128,10 +133,15 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 	for i := 0; i < n; i++ {
 		loc, err := telegram.ExtractMediaLocation(rawMsgs[i])
 		if err != nil || loc == nil {
-			if rawMsgs[i].Media != nil {
+			if msgs[i].MediaInfo != nil {
 				// Non-downloadable type (web_page, contact, location, poll,
 				// unsupported) or protected content (Noforwards): the page
 				// had media here, it just isn't fetchable — count it.
+				// rawMsgs[i].Media != nil is NOT the right test here: Telegram
+				// sometimes sends an explicit MessageMediaEmpty constructor —
+				// a non-nil Media value that DecodeMediaInfo (correctly)
+				// treats as no media at all (MediaInfo == nil). Keying off
+				// MediaInfo instead avoids over-counting those as skipped.
 				summary.Skipped++
 			}
 			// Plain messages with no media at all are not counted; there
@@ -170,15 +180,16 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 				return summary, dlErr
 			}
 			// A failed download whose callback ran may still have streamed
-			// close to perItemCap bytes before erroring — e.g. cappedBuffer
-			// aborting an oversized undeclared-size photo mid-stream. That
-			// data never reaches data/len(data) below, so without charging
-			// it here totalBytes wouldn't reflect it and every subsequent
-			// item would see the same near-full remaining budget, letting a
-			// page of oversized items multiply well past BulkMediaByteCap in
-			// actual wire transfer. Charge the conservative worst case
-			// (perItemCap) since the real byte count isn't available here.
-			totalBytes += perItemCap
+			// some bytes before erroring — e.g. cappedBuffer aborting an
+			// oversized undeclared-size photo mid-stream. mediaDownloader
+			// returns whatever was accumulated even on error (see
+			// telegram.DownloadMedia), so charge that actual amount rather
+			// than the full perItemCap: charging the worst case here would
+			// let one instant, zero-byte per-item failure (a fast RPC error
+			// before any chunk arrived) exhaust the entire remaining budget
+			// and wrongly starve every later item, defeating the documented
+			// "per-item failures keep the loop going" contract.
+			totalBytes += int64(len(data))
 			summary.Skipped++
 			slog.Warn("fetch_media: item download failed, skipping", "message_id", rawMsgs[i].ID, "err", dlErr)
 			continue
