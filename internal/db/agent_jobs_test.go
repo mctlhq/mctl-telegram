@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -454,6 +455,51 @@ func TestInsertAgentAction_IdempotentPerJob(t *testing.T) {
 		PolicyDecision: "allow",
 	}); err != nil || third == first {
 		t.Fatalf("other type: id=%d err=%v", third, err)
+	}
+}
+
+// TestInsertAgentAction_RequiresLiveJob guards the purge race: a worker still
+// holding a claimed job must not be able to insert an action row once the
+// job is gone — most importantly after HardDeleteAccount deleted the user's
+// agent data, when a late insert would resurrect encrypted private content.
+func TestInsertAgentAction_RequiresLiveJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	// Nonexistent job id.
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: 99999, ActionType: ActionTypeReply, PolicyDecision: "deny",
+	}); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("bogus job err = %v, want ErrAgentJobNotFound", err)
+	}
+
+	// Another user's job must be invisible.
+	other := seedAgentUser(t, s, "other")
+	foreign := seedJob(t, s, other, "evt:v1:9:9:9")
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: foreign, ActionType: ActionTypeReply, PolicyDecision: "deny",
+	}); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("foreign job err = %v, want ErrAgentJobNotFound", err)
+	}
+
+	// After the account purge the job is deleted; the late insert must fail
+	// rather than leave an orphaned encrypted payload behind.
+	jid := seedJob(t, s, uid, "evt:v1:1:1:2")
+	if err := purgeAgentData(ctx, s.DB, uid); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, JobID: jid, ActionType: ActionTypeReply,
+		PolicyDecision: "require_approval", Payload: "secret draft",
+	}); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("post-purge err = %v, want ErrAgentJobNotFound", err)
+	}
+	var n int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_actions WHERE user_id = $1`, uid,
+	).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("post-purge action rows = %d err=%v, want 0", n, err)
 	}
 }
 
