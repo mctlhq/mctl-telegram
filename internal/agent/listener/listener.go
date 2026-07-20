@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/updates"
@@ -17,10 +18,17 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
+const sentMarkerTTL = 2 * time.Minute
+
 type account struct {
 	userID int64
 	tgID   int64
 	mgr    *updates.Manager
+}
+
+type sentMessageKey struct {
+	userID    int64
+	messageID int64
 }
 
 type CommandRouter interface {
@@ -35,10 +43,34 @@ type Listener struct {
 
 	mu       sync.Mutex
 	accounts map[int64]*account
+	// sentMessages correlates server-assigned Telegram message ids returned by
+	// programmatic sends with their outgoing update echoes. Entries are consumed
+	// once and expire defensively so a missed echo cannot suppress a future
+	// human message if Telegram eventually reuses an id after a session reset.
+	sentMessages sync.Map // sentMessageKey -> time.Time
 }
 
 func New(store *db.Store, q *queue.Queue, router CommandRouter, m *metrics.Registry) *Listener {
 	return &Listener{Store: store, Queue: q, Router: router, Metrics: m, accounts: make(map[int64]*account)}
+}
+
+// MarkSent implements telegram.AgentSentMarker. SendMessage calls it after
+// Telegram assigns the message id and before returning to the tool handler.
+func (l *Listener) MarkSent(userID, messageID int64) {
+	if userID <= 0 || messageID <= 0 {
+		return
+	}
+	l.sentMessages.Store(sentMessageKey{userID: userID, messageID: messageID}, time.Now())
+}
+
+func (l *Listener) consumeSent(userID, messageID int64) bool {
+	key := sentMessageKey{userID: userID, messageID: messageID}
+	v, ok := l.sentMessages.LoadAndDelete(key)
+	if !ok {
+		return false
+	}
+	markedAt, ok := v.(time.Time)
+	return ok && time.Since(markedAt) <= sentMarkerTTL
 }
 
 func (l *Listener) SetAccount(userID, tgID int64) bool {
@@ -125,6 +157,12 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 	if !ok {
 		return nil
 	}
+	// Programmatic sends made through telegram.SendMessage are echoed back as
+	// ordinary Out messages on the same user session. Consume their marker before
+	// extraction so only a genuinely human outgoing message triggers takeover.
+	if msg.Out && l.consumeSent(acct.userID, int64(msg.ID)) {
+		return nil
+	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
 	if !ok {
 		return nil
@@ -144,14 +182,11 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		if err != nil {
 			return fmt.Errorf("ensure conversation: %w", err)
 		}
-		// Queue.Ingest commits event + job together. If the touch below fails,
-		// returning an error causes redelivery; the duplicate ingest is a no-op
-		// and the touch is retried, repairing the timestamp.
+		// Queue.Ingest atomically commits the event, job, and conversation's
+		// last_incoming_at timestamp. Duplicate gotd redeliveries are a no-op and
+		// therefore cannot make an old conversation look newly active.
 		if _, _, err := l.Queue.Ingest(ctx, ex.Event, conv.ID); err != nil {
 			return fmt.Errorf("ingest event and job: %w", err)
-		}
-		if err := l.Store.TouchConversationIncoming(ctx, acct.userID, conv.ID); err != nil {
-			return fmt.Errorf("touch conversation: %w", err)
 		}
 		return nil
 
