@@ -311,9 +311,10 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			if fmErr != nil {
 				// ctx may already be canceled/deadline-exceeded here (that's
 				// exactly the fmErr case fetchMediaInline propagates) — audit
-				// with a cancellation-stripped context so LogToolCall's
-				// BeginTx doesn't fail before the row is ever written.
-				s.audit(context.WithoutCancel(ctx), id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				// with a detached, bounded context so LogToolCall's BeginTx
+				// doesn't fail before the row is written but also can't
+				// block forever on a stalled audit DB.
+				s.auditDetached(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
 				return borrowErrResult("get_unread_messages", fmErr), nil
 			}
 			fetchSummary = &summary
@@ -528,9 +529,8 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			if fmErr != nil {
 				// See the matching comment in get_unread_messages: ctx may
 				// already be canceled/deadline-exceeded, so audit with a
-				// cancellation-stripped context to avoid BeginTx failing
-				// before the row is written.
-				s.audit(context.WithoutCancel(ctx), id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
+				// detached, bounded context.
+				s.auditDetached(ctx, id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
 				return borrowErrResult("get_messages", fmErr), nil
 			}
 			fetchSummary = &summary
@@ -1376,6 +1376,26 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	} else {
 		slog.Info("mcp tool call", attrs...)
 	}
+}
+
+// auditWriteTimeout bounds a detached audit write (see auditDetached).
+// Without a bound, an unavailable, locked, or exhausted audit database could
+// block the goroutine indefinitely even though the original client — whose
+// canceled/deadline-exceeded ctx triggered the detached write in the first
+// place — has already disconnected.
+const auditWriteTimeout = 5 * time.Second
+
+// auditDetached records an audit row using a context with the caller's
+// cancellation/deadline stripped, bounded by auditWriteTimeout. Use this
+// instead of audit when ctx may already be canceled or past its deadline
+// (e.g. auditing a fetch_media call after fetchMediaInline propagated
+// context.Canceled/DeadlineExceeded) — passing ctx as-is would fail
+// LogToolCall's BeginTx immediately and silently drop the row, but stripping
+// cancellation with no bound at all risks stalling on a dead audit DB.
+func (s *Server) auditDetached(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, callPath ...string) {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	s.audit(detached, id, tool, peer, err, startedAt, callPath...)
 }
 
 func stringArg(args map[string]any, key, def string) string {
