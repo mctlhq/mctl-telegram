@@ -63,7 +63,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"AGENT_RETENTION_DAYS",
 		"What is NOT stored in logs or audit history",
 		"Self-service controls",
-		"a human reply marks the conversation",
+		"A human reply marks the conversation",
 		"audit/verify",
 		"privacy@mctl.ai",
 		"support@mctl.ai",
