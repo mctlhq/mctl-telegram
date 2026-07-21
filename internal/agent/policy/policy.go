@@ -154,7 +154,7 @@ var credentialPatterns = []*regexp.Regexp{
 	// A verification/security-qualified "code" is unambiguous real-world OTP
 	// delivery copy even without a connector ("Your verification code
 	// 483920"), unlike bare "error code 4040" software prose.
-	regexp.MustCompile(`(?i)\b(?:verification|security|confirmation|authentication|access)\s+code\s+\d{4,8}\b`),
+	regexp.MustCompile(`(?i)\b(?:verification|security|confirmation|authentication|access|2fa|two-factor)\s+code\s+\d{4,8}\b`),
 	// Seed phrases/mnemonics require an explicit value, not just the topic.
 	regexp.MustCompile(`(?i)\b(seed\s*phrase|mnemonic)\b\s*(?:is|:|=|—|-)\s*[\p{L}]+(?:\s+[\p{L}]+){1,23}`),
 	// Password/private-key labels require an actual value or numeric secret.
@@ -284,8 +284,12 @@ func Evaluate(in Input) Result {
 	// A worker that accidentally pairs one user's AgentProfile with another
 	// user's Conversation must not authorize a reply under the wrong
 	// allowlist/blocklist/mode/rate-limit. Both rows carry UserID; fail
-	// closed unless they agree.
-	if in.Profile.UserID == 0 || in.Conversation.UserID == 0 || in.Profile.UserID != in.Conversation.UserID {
+	// closed unless they agree. Scoped to ActionTypeReply: owner-facing
+	// actions (summary/approval) are not conversation-scoped authorization
+	// decisions the same way, and a caller may legitimately have no
+	// Conversation row for them at all.
+	if in.Action.Type == db.ActionTypeReply &&
+		(in.Profile.UserID == 0 || in.Conversation.UserID == 0 || in.Profile.UserID != in.Conversation.UserID) {
 		return deny("profile and conversation belong to different users")
 	}
 	switch in.Profile.Mode {

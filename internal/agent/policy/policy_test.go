@@ -76,6 +76,7 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"github token", func(in *Input) { in.Action.Text = "use ghp_16C7e42F292c6912E7710c838347Ae178B4a" }},
 		{"otp verification code no connector", func(in *Input) { in.Action.Text = "Your verification code 483920" }},
 		{"otp security code no connector", func(in *Input) { in.Action.Text = "Security code 293847 expires soon" }},
+		{"otp 2fa code no connector", func(in *Input) { in.Action.Text = "Your 2FA code 483920" }},
 		{"otp code with connector still denied", func(in *Input) { in.Action.Text = "code: 293847" }},
 
 		{"phone international", func(in *Input) { in.Action.Text = "reach me at +1 415 555 1212" }},
@@ -222,6 +223,18 @@ func TestEvaluate_OwnerActionsAndPeerZero(t *testing.T) {
 	in.Action.PeerTGID = 0
 	if got := Evaluate(in); got.Decision != Allow {
 		t.Fatalf("zero echoed peer = %s", got.Decision)
+	}
+
+	// Owner-facing actions are not conversation-scoped: a caller notifying
+	// the owner may have no per-recruiter Conversation row at all. The
+	// cross-user Profile/Conversation guard must not fire for these, only
+	// for ActionTypeReply. (Conversation.State is set to Active only to
+	// isolate this from the unrelated conversation-state gate.)
+	in = baseInput()
+	in.Action.Type = db.ActionTypeOwnerApproval
+	in.Conversation = db.Conversation{State: db.ConversationActive}
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("owner action with zero-value conversation = %s (%v)", got.Decision, got.Reasons)
 	}
 }
 
