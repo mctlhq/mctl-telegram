@@ -231,7 +231,7 @@ func TestEvaluate_OwnerActionsAndPeerZero(t *testing.T) {
 	// for ActionTypeReply. (Conversation.State is set to Active only to
 	// isolate this from the unrelated conversation-state gate.)
 	in = baseInput()
-	in.Action.Type = db.ActionTypeOwnerApproval
+	in.Action.Type = db.ActionTypeOwnerSummary
 	in.Conversation = db.Conversation{State: db.ConversationActive}
 	if got := Evaluate(in); got.Decision != Allow {
 		t.Fatalf("owner action with zero-value conversation = %s (%v)", got.Decision, got.Reasons)
