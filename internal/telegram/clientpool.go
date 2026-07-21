@@ -53,6 +53,19 @@ func sessionErrorFor(err error) error {
 // TELEGRAM_MAX_SESSIONS limit and cannot allocate a new client entry.
 var ErrPoolFull = errors.New("telegram: session pool at capacity")
 
+// ErrSessionRevokePersistFailed marks a call-wide Borrow failure where
+// Telegram rejected the session AND persisting that revoke to the DB itself
+// failed. It deliberately does NOT wrap one of the user-facing session
+// sentinels (db.ErrSessionRevoked etc.): those tell the caller "reconnect
+// and you're set", which would be misleading here — the DB write never
+// completed, so the dead row may still be loadable and we cannot promise a
+// clean recovery. Callers that only need to know "is this call-wide, should
+// I abort/stop retrying" (e.g. fetchMediaInline's isSystemicPoolErr) should
+// check this alongside the session sentinels; callers rendering a
+// user-facing message (sessionErrText) must NOT treat it the same as a
+// clean revoke.
+var ErrSessionRevokePersistFailed = errors.New("telegram: session rejected but revoke could not be persisted")
+
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
 // after IdleTimeout of inactivity. Tool handlers call Borrow() to either
@@ -194,7 +207,13 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 					if p.metrics != nil {
 						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
 					}
-					return fmt.Errorf("revoke rejected session: %w", rErr)
+					// Wrap ErrSessionRevokePersistFailed, NOT sentinel: the
+					// revoke never completed, so the caller must not be told
+					// "reconnect and you're set" (sessionErrText's message
+					// for db.ErrSessionRevoked etc.) — the dead row may still
+					// be loadable. This still marks the failure as call-wide
+					// for isSystemicPoolErr without claiming a clean revoke.
+					return fmt.Errorf("revoke rejected session: %w: %w", ErrSessionRevokePersistFailed, rErr)
 				}
 				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
 				if p.metrics != nil {
@@ -231,7 +250,13 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			if p.metrics != nil {
 				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
 			}
-			return fmt.Errorf("revoke rejected session: %w", rErr)
+			// Wrap ErrSessionRevokePersistFailed, NOT sentinel — see the
+			// matching comment in the startup-path branch above. This still
+			// marks the failure as call-wide (isSystemicPoolErr) — a
+			// fetch_media call whose download callback already ran
+			// (attempted=true) must abort rather than fold this into
+			// Skipped — without claiming a clean revoke to the user.
+			return fmt.Errorf("revoke rejected session: %w: %w", ErrSessionRevokePersistFailed, rErr)
 		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
 		if p.metrics != nil {

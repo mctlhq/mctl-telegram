@@ -221,6 +221,65 @@ func TestDecodeMediaInfo_Empty(t *testing.T) {
 	}
 }
 
+// TestDecodeMessagesRaw_MatchesDecoded proves the raw []*tg.Message slice
+// GetMessagesRaw/GetUnreadMessagesRaw expose to fetch_media stays in lockstep
+// with the decoded []Message slice: same length, same order, same IDs, and
+// service messages dropped from both.
+func TestDecodeMessagesRaw_MatchesDecoded(t *testing.T) {
+	raw := &tg.MessagesMessagesSlice{
+		Messages: []tg.MessageClass{
+			&tg.Message{ID: 300, Message: "c"},
+			&tg.MessageService{ID: 250},
+			&tg.Message{ID: 200, Message: "b"},
+			&tg.Message{ID: 100, Message: "a"},
+		},
+	}
+	hint := &Dialog{ID: "user:1", Title: "Test"}
+	decoded, rawMsgs := decodeMessagesRaw(raw, hint, nil, nil, 10)
+	if len(decoded) != 3 {
+		t.Fatalf("expected 3 decoded messages (service message dropped), got %d", len(decoded))
+	}
+	if len(decoded) != len(rawMsgs) {
+		t.Fatalf("decoded len %d != raw len %d", len(decoded), len(rawMsgs))
+	}
+	for i := range decoded {
+		if decoded[i].ID != rawMsgs[i].ID {
+			t.Errorf("index %d: decoded ID %d != raw ID %d", i, decoded[i].ID, rawMsgs[i].ID)
+		}
+	}
+	// decodeMessages (used by GetMessages/GetUnreadMessages) must produce the
+	// exact same decoded slice as decodeMessagesRaw's first return value.
+	plain := decodeMessages(raw, hint, nil, nil, 10)
+	if len(plain) != len(decoded) {
+		t.Fatalf("decodeMessages len %d != decodeMessagesRaw decoded len %d", len(plain), len(decoded))
+	}
+	for i := range plain {
+		if plain[i].ID != decoded[i].ID {
+			t.Errorf("index %d: decodeMessages ID %d != decodeMessagesRaw ID %d", i, plain[i].ID, decoded[i].ID)
+		}
+	}
+}
+
+// TestDecodeMessagesRaw_RespectsMax proves the raw slice is truncated to max
+// in lockstep with the decoded slice.
+func TestDecodeMessagesRaw_RespectsMax(t *testing.T) {
+	raw := &tg.MessagesMessagesSlice{
+		Messages: []tg.MessageClass{
+			&tg.Message{ID: 3, Message: "c"},
+			&tg.Message{ID: 2, Message: "b"},
+			&tg.Message{ID: 1, Message: "a"},
+		},
+	}
+	hint := &Dialog{ID: "user:1", Title: "Test"}
+	decoded, rawMsgs := decodeMessagesRaw(raw, hint, nil, nil, 2)
+	if len(decoded) != 2 || len(rawMsgs) != 2 {
+		t.Fatalf("expected max=2 truncation, got decoded=%d raw=%d", len(decoded), len(rawMsgs))
+	}
+	if decoded[1].ID != rawMsgs[1].ID {
+		t.Errorf("decoded[1].ID = %d, rawMsgs[1].ID = %d, want equal", decoded[1].ID, rawMsgs[1].ID)
+	}
+}
+
 func TestMatchUsername(t *testing.T) {
 	cases := []struct {
 		have, want string

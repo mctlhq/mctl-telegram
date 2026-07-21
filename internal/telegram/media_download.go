@@ -113,13 +113,43 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 	}
 	// Content protection: the chat owner marked this content non-savable
 	// (Telegram clients disable saving/forwarding). Refuse to mint a
-	// download ref rather than silently bypassing the restriction.
-	if msg.Noforwards {
-		return nil, nil, fmt.Errorf("message %d is protected content (owner disabled saving/forwarding)", messageID)
+	// download ref rather than silently bypassing the restriction. Checked
+	// via ExtractMediaLocation, ahead of the "no downloadable media" check
+	// below, to preserve the exact original error-precedence order.
+	loc, err := ExtractMediaLocation(msg)
+	if err != nil {
+		return nil, nil, err
 	}
 	info := DecodeMediaInfo(msg.Media)
 	if info == nil {
 		return nil, nil, fmt.Errorf("message %d has no downloadable media", messageID)
+	}
+	if loc == nil {
+		return nil, nil, fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, info.MediaType)
+	}
+	return info, loc, nil
+}
+
+// ExtractMediaLocation extracts the file location from an already-fetched
+// tg.Message without making an additional Telegram API call. It mirrors the
+// location-extraction logic PrepareMediaRef used to run inline before this
+// helper was factored out; PrepareMediaRef now calls this function instead of
+// duplicating the switch, so both call sites share one behavior.
+//
+// Returns (nil, nil) when the message carries no media, or media of a type
+// that has no file to download (web_page, contact, location, poll,
+// unsupported) — this is not an error, callers that want to skip such
+// messages silently can treat a nil location as "nothing to fetch".
+//
+// Returns a non-nil error when the message is protected content (Noforwards
+// set): the chat owner disabled saving/forwarding, so no location is minted
+// even though the media itself may otherwise be downloadable.
+func ExtractMediaLocation(msg *tg.Message) (*MediaFileLocation, error) {
+	if msg == nil {
+		return nil, nil
+	}
+	if msg.Noforwards {
+		return nil, fmt.Errorf("message %d is protected content (owner disabled saving/forwarding)", msg.ID)
 	}
 	loc := &MediaFileLocation{}
 	switch m := msg.Media.(type) {
@@ -139,9 +169,9 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 		}
 	}
 	if !loc.IsDocument && loc.PhotoID == 0 {
-		return nil, nil, fmt.Errorf("message %d has media type %q, which is not downloadable", messageID, info.MediaType)
+		return nil, nil
 	}
-	return info, loc, nil
+	return loc, nil
 }
 
 // messageBelongsToPeer reports whether msg's owning dialog matches the
@@ -236,19 +266,83 @@ func largestPhotoSizeType(sizes []tg.PhotoSizeClass) string {
 	return best
 }
 
+// downloaderPartSize mirrors gotd's defaultPartSize
+// (telegram/downloader/downloader.go, currently 512 KiB) — the size of each
+// block NewDownloader() fetches per RPC round-trip. We don't call
+// WithPartSize, so this is what our Downloader actually uses.
+const downloaderPartSize = 512 * 1024
+
+// downloaderReadAheadBlocks upper-bounds how many blocks gotd's downloader
+// may have already pulled fully over the wire but not yet handed to our
+// io.Writer by the time cappedBuffer rejects a FULL-SIZED block. gotd
+// v0.144.0's stream() pipeline (telegram/downloader/stream.go) runs the
+// network-fetch loop and the write loop concurrently over `toWrite :=
+// make(chan block, 1)` — a channel with exactly one slot of buffering. At
+// the moment Write is called with the current (about to be rejected) block,
+// the fetch loop can already have ANOTHER block sitting in that channel
+// slot (sent once the write loop dequeued the previous one) AND have fully
+// fetched a THIRD block that it's now blocked trying to send into the
+// still-full channel — two blocks fetched-but-undelivered, not just one.
+// Both are silently discarded when Stream() returns the cap-exceeded error,
+// invisible to cappedBuffer. This is a best-effort upper bound on a
+// third-party library's internal buffering/scheduling, not a guaranteed
+// exact count — revisit if gotd's part size or channel depth changes.
+//
+// This margin does NOT apply when the rejected block is short
+// (len(p) < downloaderPartSize): gotd's reader.block.last()
+// (telegram/downloader/reader.go) uses that exact same condition to decide
+// a block is the file's final one, and stream()'s fetch loop stops fetching
+// immediately after sending a last block rather than continuing to the next
+// one (telegram/downloader/stream.go — `if b.last() { stop(...); return nil
+// }`, right after the channel send). A short rejected block therefore means
+// the fetch loop had already finished producing for this file by the time
+// Write saw it — there is no further block in flight to account for, and
+// charging the margin anyway would inflate the aggregate budget with bytes
+// that were never transferred, wrongly starving later legitimate items.
+const downloaderReadAheadBlocks = 2
+
 // cappedBuffer accumulates downloaded bytes, failing the stream as soon as
 // the cap is exceeded so oversized files abort mid-download instead of
-// filling memory.
+// filling memory. consumed tracks the real bytes DownloadMedia's caller
+// should charge against an aggregate transfer budget — every Write call's
+// len(p) (the block itself was already fully fetched over the wire before
+// Write is even called), plus downloaderReadAheadBlocks*downloaderPartSize
+// on a rejecting call whose block is full-sized (see
+// downloaderReadAheadBlocks' doc for why a short/final rejected block gets
+// no such margin). rejected records whether THIS cappedBuffer ever triggered
+// that rejection, so DownloadMedia can tell "Stream() failed because of our
+// own cap check (margin already charged in Write)" apart from "Stream()
+// failed for some other reason (fetch/RPC/context — margin not yet
+// charged)" — see DownloadMedia's doc. wrote records whether Write was ever
+// called at all: gotd's write loop only calls Write once a block has
+// actually been fetched over the wire and handed across the toWrite
+// channel, so wrote==false means that channel was still empty when Stream()
+// failed — e.g. the very first RPC fetching block one failed before
+// producing anything — and there is no possibly-stranded block to charge a
+// read-ahead margin for.
 type cappedBuffer struct {
-	buf []byte
-	cap int64
+	buf      []byte
+	cap      int64
+	consumed int64
+	rejected bool
+	wrote    bool
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
+	w.wrote = true
 	if w.cap > 0 && int64(len(w.buf))+int64(len(p)) > w.cap {
+		w.rejected = true
+		w.consumed += int64(len(p))
+		if len(p) >= downloaderPartSize {
+			// A full-sized block means this was NOT the file's final chunk
+			// (see downloaderReadAheadBlocks' doc) — gotd's fetch loop would
+			// have kept going, so charge the read-ahead margin.
+			w.consumed += int64(downloaderReadAheadBlocks * downloaderPartSize)
+		}
 		return 0, fmt.Errorf("download exceeded %d-byte cap mid-stream", w.cap)
 	}
 	w.buf = append(w.buf, p...)
+	w.consumed += int64(len(p))
 	return len(p), nil
 }
 
@@ -259,11 +353,40 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // whose size is not 4KB-aligned) and follows upload.fileCdnRedirect for
 // CDN-served popular media, which a bare *tg.UploadFile type assertion would
 // reject.
-func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, error) {
+//
+// On error the returned slice is whatever cappedBuffer had accumulated
+// before the failure (possibly empty, e.g. an immediate RPC error before any
+// chunk arrived) rather than always nil. consumed is the real total bytes
+// transferred over the wire for this call — which on a cap-exceeded error
+// can exceed len(data), see cappedBuffer's doc — and is what callers that
+// bound an aggregate transfer budget across multiple downloads
+// (fetchMediaInline) should charge, not len(data).
+//
+// A Stream() error NOT caused by our own cap rejection (w.rejected == false
+// — e.g. a network/RPC failure fetching the next block, or the context
+// being canceled) can still leave a block stranded in gotd's internal
+// buffer-1 channel: the fetch loop's error return cancels the shared group,
+// and the write loop's `case <-ctx.Done(): return ctx.Err()` can win the
+// select over `case part := <-toWrite`, abandoning an already-fully-fetched
+// block that was sitting in the channel without ever calling our Write.
+// cappedBuffer has no visibility into that case at all (Write is simply
+// never called with it), so DownloadMedia itself charges one
+// downloaderReadAheadBlocks*downloaderPartSize margin here instead — but
+// only when w.rejected is false (a genuine cap rejection already charged
+// its own margin inside Write; charging twice would double-count) AND
+// w.wrote is true. w.wrote guards the case where the very first RPC fails
+// before delivering any block at all: gotd's toWrite channel is then
+// necessarily still empty, so there is nothing that could have been
+// stranded, and charging the margin would overcharge a call that
+// transferred zero bytes.
+func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
 	w := &cappedBuffer{cap: maxBytes}
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		if !w.rejected && w.wrote {
+			w.consumed += int64(downloaderReadAheadBlocks * downloaderPartSize)
+		}
+		return w.buf, w.consumed, fmt.Errorf("download: %w", err)
 	}
-	return w.buf, nil
+	return w.buf, w.consumed, nil
 }

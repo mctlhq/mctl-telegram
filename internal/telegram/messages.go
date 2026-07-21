@@ -36,6 +36,13 @@ type Message struct {
 	Text      string     `json:"text"`
 	Date      time.Time  `json:"date"`
 	MediaInfo *MediaInfo `json:"media_info,omitempty"`
+	// MediaData holds the raw bytes of the message's media as a
+	// standard-base64 string. It is non-nil only when the caller requested
+	// inline bulk media fetch (get_messages/get_unread_messages
+	// fetch_media=true) and the item was successfully downloaded within the
+	// per-call cap and size limits. GetMessages and GetUnreadMessages never
+	// populate this field; it stays nil for those callers.
+	MediaData *string `json:"media_data,omitempty"`
 }
 
 // DecodeMediaInfo inspects a message's media field and returns a *MediaInfo
@@ -175,6 +182,16 @@ func sanitizeFileName(name string) string {
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
 // `limit` total unread messages, scoped to one peer if provided.
 func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
+	msgs, _, err := GetUnreadMessagesRaw(ctx, c, peerSpec, limit)
+	return msgs, err
+}
+
+// GetUnreadMessagesRaw is GetUnreadMessages plus the raw *tg.Message slice
+// backing the decoded messages (same order, service messages excluded) —
+// needed by the fetch_media=true bulk-download path so it can extract file
+// locations without a second Telegram API round-trip. GetUnreadMessages is a
+// thin wrapper that discards the raw slice.
+func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, []*tg.Message, error) {
 	limit = clampLimit(limit)
 	api := c.API()
 
@@ -183,7 +200,7 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+		return nil, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 
@@ -226,12 +243,13 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 	// Peer found with zero unread messages → correct result is an empty slice.
 	if peerSpec != "" && len(targets) == 0 {
 		if !peerFound {
-			return nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
+			return nil, nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
 		}
-		return []Message{}, nil
+		return []Message{}, nil, nil
 	}
 
 	out := make([]Message, 0, limit)
+	rawOut := make([]*tg.Message, 0, limit)
 	for _, t := range targets {
 		if len(out) >= limit {
 			break
@@ -250,9 +268,11 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 		if err != nil {
 			continue
 		}
-		out = append(out, decodeMessages(hist, t.hint, users, chats, take)...)
+		decoded, raw := decodeMessagesRaw(hist, t.hint, users, chats, take)
+		out = append(out, decoded...)
+		rawOut = append(rawOut, raw...)
 	}
-	return out, nil
+	return out, rawOut, nil
 }
 
 func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) tg.InputPeerClass {
@@ -320,7 +340,20 @@ func seedPeerCache(cache *PeerCache, userID int64, users map[int64]*tg.User, cha
 	}
 }
 
+// decodeMessages decodes a messages.getHistory-shaped response into
+// []Message, dropping service messages (joins, pins) and truncating to max.
 func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int) []Message {
+	out, _ := decodeMessagesRaw(r, hint, users, chats, max)
+	return out
+}
+
+// decodeMessagesRaw is decodeMessages but also returns the underlying
+// []*tg.Message slice backing the decoded messages, in the same order and
+// with the same max-truncation and service-message filtering applied. Used
+// by GetMessagesRaw/GetUnreadMessagesRaw so the fetch_media=true bulk-download
+// path can extract file locations from the already-fetched wire messages
+// without a second Telegram API round-trip.
+func decodeMessagesRaw(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int) ([]Message, []*tg.Message) {
 	var raw []tg.MessageClass
 	switch v := r.(type) {
 	case *tg.MessagesMessages:
@@ -331,6 +364,7 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*t
 		raw = v.Messages
 	}
 	out := make([]Message, 0, len(raw))
+	rawOut := make([]*tg.Message, 0, len(raw))
 	for _, m := range raw {
 		msg, ok := m.(*tg.Message)
 		if !ok {
@@ -345,11 +379,12 @@ func decodeMessages(r tg.MessagesMessagesClass, hint *Dialog, users map[int64]*t
 			Date:      time.Unix(int64(msg.Date), 0).UTC(),
 			MediaInfo: DecodeMediaInfo(msg.Media),
 		})
+		rawOut = append(rawOut, msg)
 		if len(out) >= max {
 			break
 		}
 	}
-	return out
+	return out, rawOut
 }
 
 // historyCursor computes the backward-pagination cursor for a
@@ -430,8 +465,18 @@ func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]
 //
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
 func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, int, error) {
+	msgs, _, cursor, err := GetMessagesRaw(ctx, c, peerSpec, limit, beforeID, cache, userID)
+	return msgs, cursor, err
+}
+
+// GetMessagesRaw is GetMessages plus the raw []*tg.Message slice backing the
+// decoded page (same order, service messages excluded) — needed by the
+// fetch_media=true bulk-download path so it can extract file locations
+// without a second Telegram API round-trip. GetMessages is a thin wrapper
+// that discards the raw slice.
+func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, []*tg.Message, int, error) {
 	if peerSpec == "" {
-		return nil, 0, fmt.Errorf("peer is required")
+		return nil, nil, 0, fmt.Errorf("peer is required")
 	}
 	limit = clampLimit(limit)
 	api := c.API()
@@ -441,7 +486,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("MessagesGetDialogs: %w", err)
+		return nil, nil, 0, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 	// Seed the shared peer cache so a later get_messages/send_message for any of
@@ -463,7 +508,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
 		if input == nil {
-			return nil, 0, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
+			return nil, nil, 0, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
 		}
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:     input,
@@ -471,16 +516,17 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 			OffsetID: beforeID,
 		})
 		if err != nil {
-			return nil, 0, fmt.Errorf("MessagesGetHistory: %w", err)
+			return nil, nil, 0, fmt.Errorf("MessagesGetHistory: %w", err)
 		}
-		return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist), nil
+		decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
+		return decoded, raw, historyCursor(hist), nil
 	}
 
 	// Fallback: peer not in dialog list — resolve directly.
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
 	input, resolveErr := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	if resolveErr != nil {
-		return nil, 0, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
+		return nil, nil, 0, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
 			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -501,20 +547,22 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 						Limit:    limit,
 						OffsetID: beforeID,
 					}); err3 == nil {
-						return decodeMessages(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit), historyCursor(hist2), nil
+						decoded, raw := decodeMessagesRaw(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit)
+						return decoded, raw, historyCursor(hist2), nil
 					}
 				}
 			}
 			// A bare numeric "user:<id>"/"channel:<id>" carries no access_hash, so
 			// Telegram cannot identify the peer. Tell the caller how to recover
 			// instead of surfacing a raw RPC error that invites a retry loop.
-			return nil, 0, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
+			return nil, nil, 0, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
 				"call list_dialogs and use an id exactly as returned there", peerSpec, rpcErr.Message)
 		}
-		return nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
+		return nil, nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}
 	hint := &Dialog{ID: peerSpec, Title: peerSpec}
-	return decodeMessages(hist, hint, users, chats, limit), historyCursor(hist), nil
+	decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
+	return decoded, raw, historyCursor(hist), nil
 }
 
 func matchUsername(have, want string) bool {
