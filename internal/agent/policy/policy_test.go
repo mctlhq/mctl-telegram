@@ -10,6 +10,7 @@ import (
 func baseInput() Input {
 	return Input{
 		Profile: db.AgentProfile{
+			UserID:             7,
 			Mode:               db.AgentModeGuarded,
 			DisclosureText:     "I am an AI assistant.",
 			MaxAutonomousTurns: 6,
@@ -17,7 +18,7 @@ func baseInput() Input {
 			MaxReplyChars:      1200,
 			IntentAllowlist:    "greet,request_company,request_salary_range",
 		},
-		Conversation: db.Conversation{PeerTGID: 555, State: db.ConversationActive},
+		Conversation: db.Conversation{UserID: 7, PeerTGID: 555, State: db.ConversationActive},
 		Action:       Action{Type: db.ActionTypeReply, Intent: "request_company", Text: "Could you tell me the company name?", PeerTGID: 555},
 		Now:          time.Now(),
 	}
@@ -73,6 +74,10 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"seed phrase value", func(in *Input) { in.Action.Text = "seed phrase is witch collapse practice feed" }},
 		{"api key", func(in *Input) { in.Action.Text = "API key: sk-proj-Ab12Cd34Ef56Gh78" }},
 		{"github token", func(in *Input) { in.Action.Text = "use ghp_16C7e42F292c6912E7710c838347Ae178B4a" }},
+		{"otp verification code no connector", func(in *Input) { in.Action.Text = "Your verification code 483920" }},
+		{"otp security code no connector", func(in *Input) { in.Action.Text = "Security code 293847 expires soon" }},
+		{"otp 2fa code no connector", func(in *Input) { in.Action.Text = "Your 2FA code 483920" }},
+		{"otp code with connector still denied", func(in *Input) { in.Action.Text = "code: 293847" }},
 
 		{"phone international", func(in *Input) { in.Action.Text = "reach me at +1 415 555 1212" }},
 		{"phone nanp", func(in *Input) { in.Action.Text = "reach me at 415-555-1212" }},
@@ -82,6 +87,12 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"phone uk landline", func(in *Input) { in.Action.Text = "reach me at 020 7946 0958" }},
 		{"phone uk mobile", func(in *Input) { in.Action.Text = "reach me at 07700 900123" }},
 		{"phone french", func(in *Input) { in.Action.Text = "reach me at 01 23 45 67 89" }},
+		{"phone nanp compact no trunk", func(in *Input) { in.Action.Text = "reach me at 4155551212" }},
+
+		{"url curated tld jobs", func(in *Input) { in.Action.Text = "apply at careers.company.jobs" }},
+		{"url curated tld agency", func(in *Input) { in.Action.Text = "see recruiter.agency for openings" }},
+
+		{"profile conversation user mismatch", func(in *Input) { in.Conversation.UserID = in.Profile.UserID + 1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,6 +124,11 @@ func TestEvaluate_NoFalsePositivesOnOrdinaryReplies(t *testing.T) {
 		"We had a phone screen on 2024-05-06.",
 		"The release identifier is 2026.7.20.1.",
 		"Kubernetes v1.29.3.0 is our baseline version.",
+		"The service returned error code 4040.",
+		"The salary range is 80 000 - 90 000 RUB.",
+		"I mainly use http.Client and context.Context in Go.",
+		"I use sync.Mutex, time.Duration, and io.Reader a lot.",
+		"I attached my resume.pdf, let me know if you need cv.docx too.",
 	}
 	for _, text := range ordinary {
 		in := baseInput()
@@ -207,6 +223,18 @@ func TestEvaluate_OwnerActionsAndPeerZero(t *testing.T) {
 	in.Action.PeerTGID = 0
 	if got := Evaluate(in); got.Decision != Allow {
 		t.Fatalf("zero echoed peer = %s", got.Decision)
+	}
+
+	// Owner-facing actions are not conversation-scoped: a caller notifying
+	// the owner may have no per-recruiter Conversation row at all. The
+	// cross-user Profile/Conversation guard must not fire for these, only
+	// for ActionTypeReply. (Conversation.State is set to Active only to
+	// isolate this from the unrelated conversation-state gate.)
+	in = baseInput()
+	in.Action.Type = db.ActionTypeOwnerSummary
+	in.Conversation = db.Conversation{State: db.ConversationActive}
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("owner action with zero-value conversation = %s (%v)", got.Decision, got.Reasons)
 	}
 }
 

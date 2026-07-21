@@ -119,6 +119,54 @@ func TestUnpin_StopsRunningListener(t *testing.T) {
 	}
 }
 
+// markingRuntime implements both AgentRuntime and AgentSentMarker so
+// WithAgentRuntime registers it as the process-wide sent-id marker.
+type markingRuntime struct {
+	fakeRuntime
+	marked chan [2]int64
+}
+
+func (m *markingRuntime) MarkSent(userID, messageID int64) {
+	select {
+	case m.marked <- [2]int64{userID, messageID}:
+	default:
+	}
+}
+
+// TestNotifyAgentSent_ReachesRegisteredMarker pins down the exact bug class
+// Codex found twice in review: a send helper calling notifyAgentSent is a
+// silent no-op unless (a) WithAgentRuntime was called with a runtime that
+// implements AgentSentMarker and (b) every send path — SendMessage,
+// SendMedia, and SendToInputPeer/SendToSelf — actually calls it.
+func TestNotifyAgentSent_ReachesRegisteredMarker(t *testing.T) {
+	rt := &markingRuntime{fakeRuntime: fakeRuntime{enabled: 42, ranFor: make(chan int64, 1)}, marked: make(chan [2]int64, 1)}
+	p := NewClientPool(1, "h", time.Minute, nil)
+	defer setProcessAgentMarker(nil) // do not leak into other tests in this package
+	p.WithAgentRuntime(rt)
+
+	notifyAgentSent(42, 99)
+	select {
+	case got := <-rt.marked:
+		if got != [2]int64{42, 99} {
+			t.Fatalf("marked = %v, want [42 99]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notifyAgentSent did not reach the registered AgentSentMarker")
+	}
+}
+
+// TestNotifyAgentSent_RuntimeWithoutMarkerIsSafeNoOp guards the case this
+// package cannot construct a real *listener.Listener for: a runtime that
+// implements AgentRuntime but not AgentSentMarker (or WithAgentRuntime never
+// called) must not panic.
+func TestNotifyAgentSent_RuntimeWithoutMarkerIsSafeNoOp(t *testing.T) {
+	rt := &fakeRuntime{enabled: 42, ranFor: make(chan int64, 1)}
+	p := NewClientPool(1, "h", time.Minute, nil)
+	defer setProcessAgentMarker(nil)
+	p.WithAgentRuntime(rt)
+	notifyAgentSent(42, 99) // must not panic
+}
+
 func TestAcquire_AgentRuntimeWiring(t *testing.T) {
 	rt := &fakeRuntime{enabled: 42, ranFor: make(chan int64, 1)}
 	p := NewClientPool(1, "h", time.Minute, nil).WithAgentRuntime(rt)

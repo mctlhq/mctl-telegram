@@ -15,7 +15,7 @@ import (
 // InputPeerClass directly — the communication agent's executor derives the
 // peer from the conversation row (never from model output), and the owner
 // notifier targets InputPeerSelf, so neither has a peer string to resolve.
-func SendToInputPeer(ctx context.Context, c *telegram.Client, peer tg.InputPeerClass, text string) (int, error) {
+func SendToInputPeer(ctx context.Context, c *telegram.Client, userID int64, peer tg.InputPeerClass, text string) (int, error) {
 	if text == "" {
 		return 0, fmt.Errorf("text required")
 	}
@@ -36,12 +36,22 @@ func SendToInputPeer(ctx context.Context, c *telegram.Client, peer tg.InputPeerC
 	if err != nil {
 		return 0, fmt.Errorf("send: %w", err)
 	}
-	return extractMessageID(updates), nil
+	messageID := extractMessageID(updates)
+	// Mark the server-assigned id before returning, matching SendMessage in
+	// send.go: the communication listener consumes this marker when Telegram
+	// echoes the outgoing message, so an executor reply sent to a recruiter
+	// through this path is not misread as a manual owner takeover.
+	notifyAgentSent(userID, int64(messageID))
+	return messageID, nil
 }
 
 // SendToSelf sends a message to the account's own Saved Messages. This is the
 // owner-notification path: a bot token cannot post into Saved Messages, so
 // summaries and approval requests go through the owner's own MTProto session.
-func SendToSelf(ctx context.Context, c *telegram.Client, text string) (int, error) {
-	return SendToInputPeer(ctx, c, &tg.InputPeerSelf{}, text)
+// It also marks its message id via notifyAgentSent like any other agent
+// send; the listener only ever consumes marks for the peer whose echo it is
+// actually watching, so a Saved Messages mark is simply never looked up —
+// harmless, and keeping one code path avoids a userID==0 special case here.
+func SendToSelf(ctx context.Context, c *telegram.Client, userID int64, text string) (int, error) {
+	return SendToInputPeer(ctx, c, userID, &tg.InputPeerSelf{}, text)
 }
