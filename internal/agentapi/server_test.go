@@ -1,0 +1,431 @@
+package agentapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
+	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
+	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/crypto"
+	"github.com/mctlhq/mctl-telegram/internal/db"
+)
+
+// testCryptKey is a fixed 32-byte key so encrypted columns (event bodies,
+// action payloads, notification bodies) round-trip in tests instead of
+// panicking on a nil crypto.Crypter — several handlers under test touch
+// these columns.
+func testCryptKey() []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = byte(i)
+	}
+	return out
+}
+
+// testHarness bundles a Server mounted on a real chi.Router (so {param}
+// routes are exercised exactly as in production) plus the underlying store
+// and a ready-made identity for the seeded user.
+type testHarness struct {
+	t      *testing.T
+	srv    *Server
+	store  *db.Store
+	router *chi.Mux
+	userID int64
+	id     *auth.Identity
+}
+
+func newHarness(t *testing.T) *testHarness {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Open(ctx, "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	crypt, err := crypto.New(testCryptKey())
+	if err != nil {
+		t.Fatalf("crypto: %v", err)
+	}
+	store := db.NewStore(conn, crypt)
+	uid, err := store.EnsureUser(ctx, "owner", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	q := queue.New(store, "test-replica", nil)
+	srv := New(store, q, time.Minute, nil).WithLongPollTimeout(150 * time.Millisecond)
+
+	router := chi.NewRouter()
+	srv.Register(router)
+
+	return &testHarness{
+		t: t, srv: srv, store: store, router: router, userID: uid,
+		id: &auth.Identity{UserID: uid, Subject: "tg:1", TelegramID: 1},
+	}
+}
+
+// do performs an authenticated request (the harness's identity is seeded
+// into the context, bypassing auth.Middleware — this package's handlers only
+// ever read auth.From(ctx), matching internal/bridge/tokenhandler_test.go's
+// pattern) and returns the recorder.
+func (h *testHarness) do(method, path string, body any) *httptest.ResponseRecorder {
+	h.t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			h.t.Fatalf("encode body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req = req.WithContext(auth.With(req.Context(), h.id))
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (h *testHarness) doAnon(method, path string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func (h *testHarness) seedProfile(mode string) {
+	h.t.Helper()
+	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
+		UserID: h.userID, Mode: mode, DisclosureText: "I'm an AI assistant.",
+	}); err != nil {
+		h.t.Fatalf("seed profile: %v", err)
+	}
+}
+
+func (h *testHarness) seedConversation(peerTGID int64) *db.Conversation {
+	h.t.Helper()
+	conv, err := h.store.EnsureConversation(context.Background(), h.userID, peerTGID, "peer", "Peer")
+	if err != nil {
+		h.t.Fatalf("seed conversation: %v", err)
+	}
+	return conv
+}
+
+func (h *testHarness) seedJob(eventID string, convID int64) int64 {
+	h.t.Helper()
+	ctx := context.Background()
+	if _, _, err := h.store.InsertIncomingEvent(ctx, db.IncomingEvent{
+		EventID: eventID, UserID: h.userID, Kind: db.EventKindPrivateMessage,
+		ChatTGID: 1, SenderTGID: 1, MessageID: 1, Body: "hello",
+	}); err != nil {
+		h.t.Fatalf("insert event: %v", err)
+	}
+	jobID, enqueued, err := h.store.EnqueueAgentJob(ctx, eventID, h.userID, convID)
+	if err != nil || !enqueued {
+		h.t.Fatalf("enqueue: id=%d enqueued=%v err=%v", jobID, enqueued, err)
+	}
+	return jobID
+}
+
+func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
+	t.Helper()
+	if err := json.NewDecoder(rec.Body).Decode(dst); err != nil {
+		t.Fatalf("decode response body %q: %v", rec.Body.String(), err)
+	}
+}
+
+func TestHandlers_RequireAuth(t *testing.T) {
+	h := newHarness(t)
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{"GET", "/events"},
+		{"GET", "/policy"},
+		{"GET", "/leads/1"},
+		{"POST", "/leads"},
+		{"POST", "/actions/propose_reply"},
+	} {
+		rec := h.doAnon(tc.method, tc.path)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want 401", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestHandleEvents_TimesOutEmpty(t *testing.T) {
+	h := newHarness(t)
+	rec := h.do("GET", "/events", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec, &body)
+	if len(body.Jobs) != 0 {
+		t.Fatalf("jobs = %v, want empty", body.Jobs)
+	}
+}
+
+func TestHandleEvents_ClaimsQueuedJob(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:1", conv.ID)
+
+	rec := h.do("GET", "/events", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec, &body)
+	if len(body.Jobs) != 1 || body.Jobs[0].JobID != jobID {
+		t.Fatalf("jobs = %+v, want one job with id %d", body.Jobs, jobID)
+	}
+	if body.Jobs[0].Attempt != 1 {
+		t.Fatalf("attempt = %d, want 1", body.Jobs[0].Attempt)
+	}
+
+	// A second poll must not re-claim the same (now-processing) job.
+	rec2 := h.do("GET", "/events", nil)
+	var body2 struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec2, &body2)
+	if len(body2.Jobs) != 0 {
+		t.Fatalf("second poll jobs = %v, want empty (already claimed)", body2.Jobs)
+	}
+}
+
+func TestHandleGetEvent(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	h.seedJob("evt:v1:1:555:1", conv.ID)
+
+	rec := h.do("GET", "/event/evt:v1:1:555:1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var ev eventResponse
+	decodeBody(t, rec, &ev)
+	if ev.Body != "hello" {
+		t.Fatalf("body = %q, want %q", ev.Body, "hello")
+	}
+
+	rec404 := h.do("GET", "/event/evt:does-not-exist", nil)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec404.Code)
+	}
+}
+
+func TestHandleProposeReply_NoProfile(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, Text: "hi",
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleProposeReply_ObserveModeRequiresApproval(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, Intent: "discovery", Text: "Thanks for reaching out!",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != string(policy.RequireApproval) {
+		t.Fatalf("decision = %q, want require_approval", resp.Decision)
+	}
+	if resp.Status != db.ActionPendingApproval {
+		t.Fatalf("status = %q, want pending_approval", resp.Status)
+	}
+	if len(resp.ApprovalCode) != 6 {
+		t.Fatalf("approval code = %q, want 6 chars", resp.ApprovalCode)
+	}
+
+	action, err := h.store.GetAgentActionByCode(context.Background(), h.userID, resp.ApprovalCode)
+	if err != nil {
+		t.Fatalf("lookup by code: %v", err)
+	}
+	if action.ID != resp.ActionID {
+		t.Fatalf("action id = %d, want %d", action.ID, resp.ActionID)
+	}
+}
+
+func TestHandleProposeReply_DeniesURLInReply(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, Text: "Check out https://example.com for details",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", resp.Decision)
+	}
+	if resp.ApprovalCode != "" {
+		t.Fatalf("approval code = %q, want empty on deny", resp.ApprovalCode)
+	}
+}
+
+func TestHandleProposeReply_UnknownConversation(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: 999999, Text: "hi",
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:2", conv.ID)
+	// Claim it first, like a real worker would via GET /events.
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: 1, Status: db.JobCompleted,
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (no action persisted yet), body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Now propose a reply (persists an action tied to the job), then complete
+	// should succeed.
+	proposeRec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Text: "Thanks!",
+	})
+	if proposeRec.Code != http.StatusOK {
+		t.Fatalf("propose status = %d, body=%s", proposeRec.Code, proposeRec.Body.String())
+	}
+
+	rec2 := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: 1, Status: db.JobCompleted,
+	})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestHandleJobComplete_FailedNeedsNoAction(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:3", conv.ID)
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: 1, Status: db.JobFailed, Note: "model error",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleAutopilotPause_TogglesBothWays(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeGuarded)
+
+	rec := h.do("POST", "/autopilot/pause", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]bool
+	decodeBody(t, rec, &body)
+	if !body["autopilot_paused"] {
+		t.Fatalf("expected paused=true by default")
+	}
+
+	rec2 := h.do("POST", "/autopilot/pause", autopilotPauseRequest{Paused: boolPtr(false)})
+	decodeBody(t, rec2, &body)
+	if body["autopilot_paused"] {
+		t.Fatalf("expected paused=false after explicit resume")
+	}
+}
+
+func TestHandlePolicy_NoProfile404(t *testing.T) {
+	h := newHarness(t)
+	rec := h.do("GET", "/policy", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleRecruiterProfile_NotConfigured(t *testing.T) {
+	h := newHarness(t)
+	rec := h.do("GET", "/recruiters/555", nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Code)
+	}
+}
+
+func TestHandleSaveLead_RoundTrip(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	rec := h.do("POST", "/leads", saveLeadRequest{
+		ConversationID: conv.ID, Company: "Acme", Role: "Backend Engineer",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]int64
+	decodeBody(t, rec, &body)
+
+	rec2 := h.do("GET", "/leads/"+itoaTest(body["lead_id"]), nil)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec2.Code)
+	}
+	var lead leadDTO
+	decodeBody(t, rec2, &lead)
+	if lead.Company != "Acme" {
+		t.Fatalf("company = %q, want Acme", lead.Company)
+	}
+}
+
+func TestHandleRequestOwnerApproval_AlwaysAllowed(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	rec := h.do("POST", "/actions/request_owner_approval", ownerNotifyRequest{
+		Text: "Should I mention my current salary?",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// itoaTest formats an int64 for URL path construction in tests.
+func itoaTest(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
