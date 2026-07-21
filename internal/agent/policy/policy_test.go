@@ -74,6 +74,9 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"seed phrase value", func(in *Input) { in.Action.Text = "seed phrase is witch collapse practice feed" }},
 		{"api key", func(in *Input) { in.Action.Text = "API key: sk-proj-Ab12Cd34Ef56Gh78" }},
 		{"github token", func(in *Input) { in.Action.Text = "use ghp_16C7e42F292c6912E7710c838347Ae178B4a" }},
+		{"otp verification code no connector", func(in *Input) { in.Action.Text = "Your verification code 483920" }},
+		{"otp security code no connector", func(in *Input) { in.Action.Text = "Security code 293847 expires soon" }},
+		{"otp code with connector still denied", func(in *Input) { in.Action.Text = "code: 293847" }},
 
 		{"phone international", func(in *Input) { in.Action.Text = "reach me at +1 415 555 1212" }},
 		{"phone nanp", func(in *Input) { in.Action.Text = "reach me at 415-555-1212" }},
@@ -85,8 +88,8 @@ func TestEvaluate_DenyRules(t *testing.T) {
 		{"phone french", func(in *Input) { in.Action.Text = "reach me at 01 23 45 67 89" }},
 		{"phone nanp compact no trunk", func(in *Input) { in.Action.Text = "reach me at 4155551212" }},
 
-		{"url generic tld jobs", func(in *Input) { in.Action.Text = "apply at careers.company.jobs" }},
-		{"url generic tld agency", func(in *Input) { in.Action.Text = "see recruiter.agency for openings" }},
+		{"url curated tld jobs", func(in *Input) { in.Action.Text = "apply at careers.company.jobs" }},
+		{"url curated tld agency", func(in *Input) { in.Action.Text = "see recruiter.agency for openings" }},
 
 		{"profile conversation user mismatch", func(in *Input) { in.Conversation.UserID = in.Profile.UserID + 1 }},
 	}
@@ -122,6 +125,9 @@ func TestEvaluate_NoFalsePositivesOnOrdinaryReplies(t *testing.T) {
 		"Kubernetes v1.29.3.0 is our baseline version.",
 		"The service returned error code 4040.",
 		"The salary range is 80 000 - 90 000 RUB.",
+		"I mainly use http.Client and context.Context in Go.",
+		"I use sync.Mutex, time.Duration, and io.Reader a lot.",
+		"I attached my resume.pdf, let me know if you need cv.docx too.",
 	}
 	for _, text := range ordinary {
 		in := baseInput()

@@ -55,19 +55,20 @@ type Result struct {
 
 func deny(reasons ...string) Result { return Result{Decision: Deny, Reasons: reasons} }
 
-const riskyTLD = `com|net|org|io|ru|me|dev|co|ai|app|xyz|zip|link|click|top|info|biz|site|online|live|shop|store|cloud|tech|space|website|fun|icu|cc|tv|ly|sh|to|gg|fm|gl|be|us|uk|de|fr|es|it|nl|pl|cz|eu|in|id|ua|by|kz|tr|cn|jp|br|mx|ca|au|nz`
+const riskyTLD = `com|net|org|io|ru|me|dev|co|ai|app|xyz|zip|link|click|top|info|biz|site|online|live|shop|store|cloud|tech|space|website|fun|icu|cc|tv|ly|sh|to|gg|fm|gl|be|us|uk|de|fr|es|it|nl|pl|cz|eu|in|id|ua|by|kz|tr|cn|jp|br|mx|ca|au|nz|jobs|agency|careers|career|work|works|team|company|group|consulting|solutions|network|community|recruiting|staffing|hr`
 
 var (
 	// Explicit schemes and www hosts are always links.
 	explicitURLPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+|\bwww\.\S+`)
 	// ASCII and internationalized bare domains. The punctuation after an IDN
 	// is included in the match and trimmed before tech-name comparison.
-	// TLDs are matched two ways: the curated list (covers common 2-letter
-	// ccTLDs and short generic TLDs, which are too collision-prone with
-	// ordinary abbreviations like "M.Sc" to accept generically) plus any
-	// 3+ letter final label (covers real-world recruiting-site TLDs such as
-	// .jobs/.agency/.careers without maintaining an ever-growing list).
-	bareDomainPattern = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*\.(` + riskyTLD + `|[a-z]{3,24})\b|[\p{L}\p{N}][\p{L}\p{N}-]*(\.[\p{L}\p{N}-]+)*\.(xn--[a-z0-9-]{2,}|рф|укр|бел|срб|мкд|ею|бг|қаз|мон|` + riskyTLD + `|[\p{L}]{3,24})(?:$|[^\p{L}\p{N}])`)
+	// TLDs are a curated list rather than a generic "any 3+ letter suffix"
+	// match: a generic match treats any dotted identifier whose final
+	// component is 3-24 letters as a domain, which fires on ordinary Go
+	// prose (http.Client, context.Context, resume.pdf) far more often than
+	// on real links. The list includes recruiting-site TLDs (.jobs,
+	// .agency, .careers, ...) alongside the common ccTLD/generic set.
+	bareDomainPattern = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*\.(` + riskyTLD + `)\b|[\p{L}\p{N}][\p{L}\p{N}-]*(\.[\p{L}\p{N}-]+)*\.(xn--[a-z0-9-]{2,}|рф|укр|бел|срб|мкд|ею|бг|қаз|мон|` + riskyTLD + `)(?:$|[^\p{L}\p{N}])`)
 	// Numeric hosts are denied only when they have an unambiguous URL suffix
 	// (port or path). This avoids treating four-part versions as links.
 	ipv4LinkPattern = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5}|/\S+)`)
@@ -141,10 +142,19 @@ var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b\d{4,8}\s*(?:-|—|:)?\s*(?:is\s+|are\s+|это\s+)?(?:the\s+|your\s+|my\s+)?(code|otp|pin|password|passcode|пароль|код)` + rbound),
 	// Digits after an unambiguous label, including across one line break.
 	regexp.MustCompile(`(?i)` + lbound + `(otp|pin|password|passcode|пароль)[^\p{L}\p{N}][^.!?]{0,19}?\d{4,8}\b`),
-	// Bare code/код needs a tight, REQUIRED connector so software prose like
-	// "error code 4040" (no punctuation between the label and the number)
+	// Bare "код" (Russian) keeps its connector optional. Russian software-
+	// error phrasing puts the qualifier before the noun ("код ошибки 4040"),
+	// so there is no "код 4040" prose collision to guard against the way
+	// English "error code 4040" collides with bare "code".
+	regexp.MustCompile(`(?i)` + lbound + `код(?:\s+доступа|\s+подтверждения)?\s*(?:is|:|=|—|-)?\s*\d{4,8}\b`),
+	// Bare "code" (English) needs a REQUIRED connector so software prose like
+	// "error code 4040" (just whitespace between the label and the number)
 	// is not treated as a disclosed OTP.
-	regexp.MustCompile(`(?i)(?:\bcode|` + lbound + `код(?:\s+доступа|\s+подтверждения)?)\s*(?:is|:|=|—|-)\s*\d{4,8}\b`),
+	regexp.MustCompile(`(?i)\bcode\s*(?:is|:|=|—|-)\s*\d{4,8}\b`),
+	// A verification/security-qualified "code" is unambiguous real-world OTP
+	// delivery copy even without a connector ("Your verification code
+	// 483920"), unlike bare "error code 4040" software prose.
+	regexp.MustCompile(`(?i)\b(?:verification|security|confirmation|authentication|access)\s+code\s+\d{4,8}\b`),
 	// Seed phrases/mnemonics require an explicit value, not just the topic.
 	regexp.MustCompile(`(?i)\b(seed\s*phrase|mnemonic)\b\s*(?:is|:|=|—|-)\s*[\p{L}]+(?:\s+[\p{L}]+){1,23}`),
 	// Password/private-key labels require an actual value or numeric secret.

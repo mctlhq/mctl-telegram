@@ -48,6 +48,10 @@ func SendToInputPeer(ctx context.Context, c *telegram.Client, userID int64, peer
 // SendToSelf sends a message to the account's own Saved Messages. This is the
 // owner-notification path: a bot token cannot post into Saved Messages, so
 // summaries and approval requests go through the owner's own MTProto session.
+// It also marks its message id via notifyAgentSent like any other agent
+// send; the listener only ever consumes marks for the peer whose echo it is
+// actually watching, so a Saved Messages mark is simply never looked up —
+// harmless, and keeping one code path avoids a userID==0 special case here.
 func SendToSelf(ctx context.Context, c *telegram.Client, userID int64, text string) (int, error) {
 	return SendToInputPeer(ctx, c, userID, &tg.InputPeerSelf{}, text)
 }
