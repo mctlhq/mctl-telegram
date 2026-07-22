@@ -127,6 +127,18 @@ type Config struct {
 	// AgentApprovalTTL is how long an agent action waits in pending_approval
 	// before expiring. Set via AGENT_APPROVAL_TTL.
 	AgentApprovalTTL time.Duration // AGENT_APPROVAL_TTL, default 24h
+	// AgentEnabled gates whether the agent-facing HTTP surface (/api/agent/v1,
+	// POST /api/agent/token) is mounted at all. Off by default like every other
+	// communication-agent PR — the underlying tables/queue/listener can be
+	// present in a deployment without exposing the surface an external worker
+	// talks to. Set via AGENT_ENABLED.
+	AgentEnabled bool
+	// AgentKillSwitch is the global, env-only kill switch the policy engine
+	// checks on every evaluated action. Deliberately not a DB row (like
+	// AgentProfile.AutopilotPaused) so an operator can cut the agent off by
+	// redeploying config even if the database is unreachable or compromised.
+	// Set via AGENT_KILL_SWITCH.
+	AgentKillSwitch bool
 }
 
 func Load() (*Config, error) {
@@ -150,6 +162,8 @@ func Load() (*Config, error) {
 		AgentRetentionDays:       envInt("AGENT_RETENTION_DAYS", 30),
 		AgentJobVisibility:       envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
 		AgentApprovalTTL:         envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
+		AgentEnabled:             envBool("AGENT_ENABLED", false),
+		AgentKillSwitch:          envBool("AGENT_KILL_SWITCH", false),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),

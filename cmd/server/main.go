@@ -20,6 +20,7 @@ import (
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
+	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -321,6 +322,25 @@ func main() {
 	hub := bridge.NewHub().WithMetrics(m)
 	bridgeProvider := selectBridgeProvider(cfg, store)
 	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
+
+	// Communication-agent HTTP surface: off by default like every other
+	// agent PR (AGENT_ENABLED). Two auth boundaries, same shape as the
+	// bridge pair above: an admin-scoped mint endpoint under the regular MCP
+	// provider, and the agent surface itself under a provider that only
+	// accepts aud=agent tokens.
+	if cfg.AgentEnabled {
+		if secret := cfg.OAUTHJWTSecret; secret != "" {
+			mux.With(auth.Middleware(provider, true, m)).Post("/api/agent/token",
+				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg)))
+		}
+		agentProvider := selectAgentProvider(cfg, store)
+		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
+		agentSrv.GlobalKill = cfg.AgentKillSwitch
+		agentMux := chi.NewRouter()
+		agentSrv.Register(agentMux)
+		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m)(agentMux))
+		slog.Info("communication agent HTTP surface enabled", "path", "/api/agent/v1", "kill_switch", cfg.AgentKillSwitch)
+	}
 
 	// Wire the hub into the MCP server so tool calls for local-mode users
 	// are forwarded to their daemon instead of the hosted MTProto pool.
@@ -642,6 +662,68 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 		// selectProvider, so this branch only runs in developer-bypass mode.
 		// Using localdev on /bridge as well keeps the local CLI workflow
 		// functional without re-introducing a production fail-open.
+		return localdev.New(store, cfg.OperatorLogin)
+	}
+}
+
+// selectAgentIssuer returns the iss value for tokens minted at POST
+// /api/agent/token. Mirrors selectBridgeIssuer — must stay in lockstep with
+// selectAgentProvider's ExpectedIssuer or every minted agent token is
+// rejected as "unexpected JWT issuer".
+func selectAgentIssuer(cfg *config.Config) string {
+	switch strings.ToLower(cfg.AuthMode) {
+	case "shared-hmac", "shared-hmac-legacy":
+		return "https://api.mctl.ai"
+	default:
+		return strings.TrimRight(cfg.PublicBaseURL, "/")
+	}
+}
+
+// selectAgentProvider builds an auth.Provider for /api/agent/v1/*. Behaves
+// like selectBridgeProvider but enforces ExpectedAudience="agent" so only
+// tokens issued by NewAgentTokenHandler are accepted — a bridge token or a
+// regular MCP token must not authenticate against the agent surface, and
+// vice versa. Same fail-closed posture as selectBridgeProvider: a JWT-based
+// AUTH_MODE with no signing secret returns rejectAllProvider rather than
+// silently downgrading to localdev.
+func selectAgentProvider(cfg *config.Config, store *db.Store) auth.Provider {
+	mode := strings.ToLower(cfg.AuthMode)
+	switch mode {
+	case "local-jwt":
+		if cfg.OAUTHJWTSecret == "" {
+			slog.Error("agent: OAUTH_JWT_SECRET not set in local-jwt mode; /api/agent/v1 will fail closed")
+			return rejectAllProvider("agent auth: OAUTH_JWT_SECRET not configured")
+		}
+		p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
+			ExpectedAudience: "agent",
+			AudienceRequired: true,
+		})
+		if err != nil {
+			slog.Error("agent: local-jwt init failed; agent endpoint disabled", "err", err)
+			os.Exit(1)
+		}
+		return p
+	case "shared-hmac", "shared-hmac-legacy":
+		if cfg.OAUTHJWTSecret == "" {
+			slog.Error("agent: OAUTH_JWT_SECRET not set in shared-hmac mode; /api/agent/v1 will fail closed")
+			return rejectAllProvider("agent auth: OAUTH_JWT_SECRET not configured")
+		}
+		p, err := sharedhmac.New(store, sharedhmac.Config{
+			Secret:           []byte(cfg.OAUTHJWTSecret),
+			ExpectedIssuer:   "https://api.mctl.ai",
+			ExpectedAudience: "agent",
+			AudienceRequired: true,
+		})
+		if err != nil {
+			slog.Error("agent: shared-hmac init failed; agent endpoint disabled", "err", err)
+			os.Exit(1)
+		}
+		return p
+	default:
+		// AUTH_MODE=local-dev. Same developer-bypass rationale as
+		// selectBridgeProvider.
 		return localdev.New(store, cfg.OperatorLogin)
 	}
 }

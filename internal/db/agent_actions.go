@@ -349,6 +349,41 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	return n, nil
 }
 
+// HasAgentActionForJob reports whether at least one agent_actions row exists
+// for the given job, scoped to the owning user. Used by the agent API's
+// POST /jobs/{id}/complete to enforce that a job can only be marked
+// completed once its result has actually been persisted — completion is not
+// a bare acknowledgement from the worker's local invocation.
+func (s *Store) HasAgentActionForJob(ctx context.Context, userID, jobID int64) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM agent_actions WHERE job_id = $1 AND user_id = $2)`,
+		jobID, userID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check agent action for job: %w", err)
+	}
+	return exists, nil
+}
+
+// HasJobLeadForJob reports whether a job_leads row is tagged with the given
+// job, scoped to the owning user — the job_leads-side counterpart to
+// HasAgentActionForJob. A job whose only durable output was a lead save
+// (rather than a proposed reply or owner notification) must still be
+// completable; POST /jobs/{id}/complete checks both before accepting
+// status=completed.
+func (s *Store) HasJobLeadForJob(ctx context.Context, userID, jobID int64) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM job_leads WHERE job_id = $1 AND user_id = $2)`,
+		jobID, userID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check job lead for job: %w", err)
+	}
+	return exists, nil
+}
+
 // JobLead is the structured vacancy record the agent extracts from a
 // recruiter conversation. Detail is a free-form JSON blob for fields that do
 // not warrant their own column (stack, interview process, remote policy, …);
@@ -358,6 +393,7 @@ type JobLead struct {
 	ID             int64
 	UserID         int64
 	ConversationID int64
+	JobID          int64 // 0 ⇒ not tied to a specific queue job (e.g. a manual/backfilled save)
 	Company        string
 	Role           string
 	RecruiterName  string
@@ -394,21 +430,22 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	var id int64
 	err := s.DB.QueryRowContext(ctx,
 		`INSERT INTO job_leads
-		   (user_id, conversation_id, company, role, recruiter_name, recruiter_tg_id,
+		   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
 		    compensation, status, detail, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8,'new'),$9,$10)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)
 		 ON CONFLICT (conversation_id) DO UPDATE SET
+		   job_id = CASE WHEN EXCLUDED.job_id IS NOT NULL THEN EXCLUDED.job_id ELSE job_leads.job_id END,
 		   company = CASE WHEN EXCLUDED.company IS NOT NULL THEN EXCLUDED.company ELSE job_leads.company END,
 		   role = CASE WHEN EXCLUDED.role IS NOT NULL THEN EXCLUDED.role ELSE job_leads.role END,
 		   recruiter_name = CASE WHEN EXCLUDED.recruiter_name IS NOT NULL THEN EXCLUDED.recruiter_name ELSE job_leads.recruiter_name END,
 		   recruiter_tg_id = CASE WHEN EXCLUDED.recruiter_tg_id IS NOT NULL THEN EXCLUDED.recruiter_tg_id ELSE job_leads.recruiter_tg_id END,
 		   compensation = CASE WHEN EXCLUDED.compensation IS NOT NULL THEN EXCLUDED.compensation ELSE job_leads.compensation END,
-		   status = COALESCE($8, job_leads.status),
+		   status = COALESCE($9, job_leads.status),
 		   detail = CASE WHEN EXCLUDED.detail <> '{}' THEN EXCLUDED.detail ELSE job_leads.detail END,
 		   updated_at = EXCLUDED.updated_at
 		 WHERE job_leads.user_id = EXCLUDED.user_id
 		 RETURNING id`,
-		l.UserID, l.ConversationID, nullable(l.Company), nullable(l.Role),
+		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
 		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
 		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
 	).Scan(&id)
@@ -525,7 +562,15 @@ type OwnerNotification struct {
 	CreatedAt   time.Time
 }
 
-// InsertOwnerNotification persists a pending notification and returns its id.
+// InsertOwnerNotification persists a pending notification and returns its
+// id. Idempotent per action_id (when non-zero): a job that redelivers after
+// its action insert already resolved via the (job_id, action_type)
+// idempotency conflict must not queue a second copy of the same owner
+// summary/approval on this call too — the unique partial index on
+// (action_id) WHERE action_id IS NOT NULL makes the second insert a no-op
+// that returns the EXISTING row's id, mirroring InsertAgentAction's own
+// (job_id, action_type) conflict handling. Standalone notifications
+// (ActionID == 0) are unaffected — they always insert a new row.
 func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification) (int64, error) {
 	if n.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -553,12 +598,29 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 		actionID = n.ActionID
 	}
 	var id int64
-	if err := s.DB.QueryRowContext(ctx,
+	err := s.DB.QueryRowContext(ctx,
 		`INSERT INTO owner_notifications(user_id, kind, action_id, body_encrypted, status)
 		 VALUES($1,$2,$3,$4,$5)
+		 ON CONFLICT (action_id) WHERE action_id IS NOT NULL DO NOTHING
 		 RETURNING id`,
 		n.UserID, n.Kind, actionID, body, NotificationPending,
-	).Scan(&id); err != nil {
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		if n.ActionID == 0 {
+			// Should be unreachable (no index on NULL action_id to conflict
+			// against), but never silently swallow an unexpected empty result.
+			return 0, fmt.Errorf("insert owner notification: unexpected empty result for standalone notification")
+		}
+		lookupErr := s.DB.QueryRowContext(ctx,
+			`SELECT id FROM owner_notifications WHERE user_id = $1 AND action_id = $2`,
+			n.UserID, n.ActionID,
+		).Scan(&id)
+		if lookupErr != nil {
+			return 0, fmt.Errorf("load existing owner notification: %w", lookupErr)
+		}
+		return id, nil
+	}
+	if err != nil {
 		return 0, fmt.Errorf("insert owner notification: %w", err)
 	}
 	return id, nil

@@ -401,3 +401,43 @@ func TestOwnerNotifications_Lifecycle(t *testing.T) {
 		t.Fatalf("sent notification was overwritten: %v", err)
 	}
 }
+
+func TestHasAgentActionForJob(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jobID := seedJob(t, s, uid, "evt:v1:1:1:has-action")
+
+	has, err := s.HasAgentActionForJob(ctx, uid, jobID)
+	if err != nil {
+		t.Fatalf("has (before insert): %v", err)
+	}
+	if has {
+		t.Fatalf("has = true before any action exists, want false")
+	}
+
+	if _, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: jobID, UserID: uid, ActionType: ActionTypeReply,
+		PolicyDecision: PolicyAllow, Status: ActionApproved,
+	}); err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+
+	has, err = s.HasAgentActionForJob(ctx, uid, jobID)
+	if err != nil {
+		t.Fatalf("has (after insert): %v", err)
+	}
+	if !has {
+		t.Fatalf("has = false after inserting an action, want true")
+	}
+
+	// Scoped to the owning user: a different user must not see it.
+	otherUID := seedAgentUser(t, s, "other")
+	has, err = s.HasAgentActionForJob(ctx, otherUID, jobID)
+	if err != nil {
+		t.Fatalf("has (other user): %v", err)
+	}
+	if has {
+		t.Fatalf("has = true for a different user's job, want false")
+	}
+}

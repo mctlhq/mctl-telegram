@@ -247,13 +247,25 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 }
 
 // ClaimAgentJobs atomically claims up to limit due pending jobs for this
-// replica: flips them to processing, increments attempts, stamps
-// claimed_by/claimed_at, and opens an agent_job_attempts row per claim.
+// replica, scoped to userID: flips them to processing, increments attempts,
+// stamps claimed_by/claimed_at, and opens an agent_job_attempts row per
+// claim.
+//
+// The user_id filter is load-bearing, not an optimization: the agent API's
+// GET /events is called with a specific caller's aud=agent token, and
+// without this filter a worker authenticated for one account could claim —
+// and thereby leak the event_id/conversation_id of, and starve — another
+// account's jobs. userID must be > 0; callers outside a per-user request
+// context (none currently exist) would need a separate cross-account
+// entrypoint, not a userID<=0 escape hatch here.
 //
 // On Postgres the inner SELECT uses FOR UPDATE SKIP LOCKED so concurrent
 // replicas never claim the same row. SQLite runs with a single connection
 // (Open sets SetMaxOpenConns(1)), so the plain form is race-free there.
-func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int) ([]AgentJob, error) {
+func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
+	if userID <= 0 {
+		return nil, errors.New("user id required")
+	}
 	if limit <= 0 {
 		limit = 1
 	}
@@ -289,7 +301,7 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int)
 		        claimed_by = $2, claimed_at = $3, updated_at = $3
 		  WHERE status = $4 AND id IN (
 		        SELECT j.id FROM agent_jobs j
-		         WHERE j.status = $4 AND j.next_run_at <= $3
+		         WHERE j.status = $4 AND j.next_run_at <= $3 AND j.user_id = $6
 		           AND NOT EXISTS (
 		               SELECT 1 FROM agent_jobs p
 		                WHERE p.conversation_id = j.conversation_id
@@ -301,7 +313,7 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, limit int)
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		           created_at, updated_at`,
-		JobProcessing, replicaID, now, JobPending, limit,
+		JobProcessing, replicaID, now, JobPending, limit, userID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("claim agent jobs: %w", err)
