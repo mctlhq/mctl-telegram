@@ -60,9 +60,10 @@ func (q *Queue) Ingest(ctx context.Context, ev db.IncomingEvent, conversationID 
 	return id, enqueued, err
 }
 
-// Claim atomically claims up to limit due jobs for this replica.
-func (q *Queue) Claim(ctx context.Context, limit int) ([]db.AgentJob, error) {
-	jobs, err := q.Store.ClaimAgentJobs(ctx, q.ReplicaID, limit)
+// Claim atomically claims up to limit due jobs for this replica, scoped to
+// userID — see Store.ClaimAgentJobs for why the scoping is load-bearing.
+func (q *Queue) Claim(ctx context.Context, userID int64, limit int) ([]db.AgentJob, error) {
+	jobs, err := q.Store.ClaimAgentJobs(ctx, q.ReplicaID, userID, limit)
 	if err == nil {
 		q.count(db.JobProcessing, len(jobs))
 	}

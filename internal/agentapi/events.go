@@ -57,7 +57,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	tick := time.NewTicker(eventsPollInterval)
 	defer tick.Stop()
 	for {
-		jobs, err := s.Queue.Claim(ctx, limit)
+		jobs, err := s.Queue.Claim(ctx, id.UserID, limit)
 		if err != nil {
 			// A client disconnect mid-Claim surfaces here as context.Canceled
 			// (the ctx.Done() case below only catches cancellation *between*

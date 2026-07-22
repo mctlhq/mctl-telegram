@@ -84,6 +84,20 @@ func (s *Server) insertActionWithApprovalCode(ctx context.Context, a db.AgentAct
 		a.ApprovalCode = code
 		id, err := s.Store.InsertAgentAction(ctx, a)
 		if err == nil {
+			if a.JobID != 0 {
+				// Job-tied inserts are idempotent on (job_id, action_type): a
+				// redelivered job (worker crashed after propose_reply but
+				// before completing it) hits that conflict and InsertAgentAction
+				// silently returns the PRE-EXISTING row's id — with its
+				// ORIGINAL approval_code, not the fresh `code` generated above.
+				// Returning `code` here would tell the owner to type a string
+				// that was never actually written to the row.
+				existing, err := s.Store.GetAgentAction(ctx, a.UserID, id)
+				if err != nil {
+					return 0, "", err
+				}
+				return id, existing.ApprovalCode, nil
+			}
 			return id, code, nil
 		}
 		if isApprovalCodeCollision(err) {

@@ -52,7 +52,7 @@ func TestQueue_TransitionsCountMetrics(t *testing.T) {
 		t.Fatalf("pending count = %v, want 1", got)
 	}
 
-	jobs, err := q.Claim(ctx, 1)
+	jobs, err := q.Claim(ctx, uid, 1)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim: jobs=%v err=%v", jobs, err)
 	}

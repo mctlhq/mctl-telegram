@@ -102,6 +102,23 @@ func (h *testHarness) doAnon(method, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// doAs is like do but authenticates as an arbitrary identity rather than the
+// harness's default seeded user — used for cross-user isolation tests.
+func (h *testHarness) doAs(id *auth.Identity, method, path string, body any) *httptest.ResponseRecorder {
+	h.t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			h.t.Fatalf("encode body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req = req.WithContext(auth.With(req.Context(), id))
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
 func (h *testHarness) seedProfile(mode string) {
 	h.t.Helper()
 	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
@@ -214,6 +231,52 @@ func TestHandleEvents_ClaimsQueuedJob(t *testing.T) {
 	}
 }
 
+// TestHandleEvents_ScopedToCaller guards against the P1 found in review: a
+// worker authenticated for one account must never be able to claim, and
+// thereby see the event_id/conversation_id of, another account's job.
+func TestHandleEvents_ScopedToCaller(t *testing.T) {
+	h := newHarness(t)
+	otherUID, err := h.store.EnsureUser(context.Background(), "other-owner", "", "test")
+	if err != nil {
+		t.Fatalf("ensure second user: %v", err)
+	}
+	otherConv, err := h.store.EnsureConversation(context.Background(), otherUID, 999, "other-peer", "Other")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	if _, _, err := h.store.InsertIncomingEvent(context.Background(), db.IncomingEvent{
+		EventID: "evt:v1:2:999:1", UserID: otherUID, Kind: db.EventKindPrivateMessage,
+		ChatTGID: 999, SenderTGID: 999, MessageID: 1, Body: "someone else's message",
+	}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if _, enq, err := h.store.EnqueueAgentJob(context.Background(), "evt:v1:2:999:1", otherUID, otherConv.ID); err != nil || !enq {
+		t.Fatalf("enqueue: enq=%v err=%v", enq, err)
+	}
+
+	// The harness's default identity (a DIFFERENT user) must see nothing —
+	// not even a hint that another account has a pending job.
+	rec := h.do("GET", "/events", nil)
+	var body struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec, &body)
+	if len(body.Jobs) != 0 {
+		t.Fatalf("cross-user claim leaked jobs = %+v, want empty", body.Jobs)
+	}
+
+	// The actual owner CAN claim it.
+	otherID := &auth.Identity{UserID: otherUID, Subject: "tg:2", TelegramID: 2}
+	rec2 := h.doAs(otherID, "GET", "/events", nil)
+	var body2 struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec2, &body2)
+	if len(body2.Jobs) != 1 {
+		t.Fatalf("owner's own claim = %+v, want exactly one job", body2.Jobs)
+	}
+}
+
 func TestHandleGetEvent(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
@@ -278,6 +341,56 @@ func TestHandleProposeReply_ObserveModeRequiresApproval(t *testing.T) {
 	}
 }
 
+// TestHandleProposeReply_RedeliveryReturnsSameApprovalCode guards against
+// the P1 found in review: InsertAgentAction is idempotent per
+// (job_id, action_type), so a redelivered job (worker crashed after
+// propose_reply but before completing the job, sweeper requeues it, worker
+// calls propose_reply again) must get back the code ACTUALLY stored on the
+// row — not a fresh one the DB never saw, which would send the owner a code
+// that /mctl approve can never match.
+func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:redelivery", conv.ID)
+
+	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Text: "Thanks for reaching out!"}
+
+	rec1 := h.do("POST", "/actions/propose_reply", req)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first propose status = %d, body=%s", rec1.Code, rec1.Body.String())
+	}
+	var resp1 actionResponse
+	decodeBody(t, rec1, &resp1)
+
+	// Simulate redelivery: same job_id, same action_type, called again
+	// without the first call ever reaching /jobs/{id}/complete.
+	rec2 := h.do("POST", "/actions/propose_reply", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second propose status = %d, body=%s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 actionResponse
+	decodeBody(t, rec2, &resp2)
+
+	if resp2.ActionID != resp1.ActionID {
+		t.Fatalf("redelivery action id = %d, want the original %d", resp2.ActionID, resp1.ActionID)
+	}
+	if resp2.ApprovalCode != resp1.ApprovalCode {
+		t.Fatalf("redelivery approval code = %q, want the original %q (must match what's actually stored)",
+			resp2.ApprovalCode, resp1.ApprovalCode)
+	}
+
+	// The code the caller was told about must be the one actually looked up
+	// by /mctl approve <code> — this is the real assertion the P1 was about.
+	action, err := h.store.GetAgentActionByCode(context.Background(), h.userID, resp2.ApprovalCode)
+	if err != nil {
+		t.Fatalf("lookup by returned code: %v", err)
+	}
+	if action.ID != resp1.ActionID {
+		t.Fatalf("code resolves to action %d, want %d", action.ID, resp1.ActionID)
+	}
+}
+
 func TestHandleProposeReply_DeniesURLInReply(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeObserve)
@@ -316,7 +429,7 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:2", conv.ID)
 	// Claim it first, like a real worker would via GET /events.
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", 1); err != nil {
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -348,7 +461,7 @@ func TestHandleJobComplete_FailedNeedsNoAction(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:3", conv.ID)
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", 1); err != nil {
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
