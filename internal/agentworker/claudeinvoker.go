@@ -10,6 +10,35 @@ import (
 	"strings"
 )
 
+// mcpConfigTempFile writes cfg to a 0600 temp file and returns its path.
+// --mcp-config accepts either an inline JSON string or a file path — using a
+// file keeps AGENT_API_TOKEN (embedded in the MCP server's env block) out of
+// the claude process's argv, which every other process on the host can read
+// via /proc/<pid>/cmdline or `ps auxww`.
+func mcpConfigTempFile(cfg mcpConfig) (path string, cleanup func(), err error) {
+	f, err := os.CreateTemp("", "agent-worker-mcp-*.json")
+	if err != nil {
+		return "", nil, fmt.Errorf("create mcp config temp file: %w", err)
+	}
+	cleanup = func() { _ = os.Remove(f.Name()) }
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("chmod mcp config temp file: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	encErr := enc.Encode(cfg)
+	closeErr := f.Close()
+	if encErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("write mcp config temp file: %w", encErr)
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close mcp config temp file: %w", closeErr)
+	}
+	return f.Name(), cleanup, nil
+}
+
 // allowedTools is the exact and complete set of MCP tools a spawned `claude`
 // invocation may use — no Bash, Read, Write, WebFetch, or any other
 // built-in tool is ever allowed, so the model's only way to affect anything
@@ -80,15 +109,23 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 			},
 		},
 	}}
-	cfgJSON, err := json.Marshal(cfg)
+	cfgPath, cleanup, err := mcpConfigTempFile(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
+		return fmt.Errorf("write mcp config: %w", err)
 	}
+	defer cleanup()
 
 	args := []string{
 		"-p", jobPrompt(job),
-		"--mcp-config", string(cfgJSON),
+		"--mcp-config", cfgPath,
 		"--strict-mcp-config",
+		// --allowedTools only grants permission for the listed tools — it
+		// does not remove Claude's built-in tools (Bash, Read, Write, ...)
+		// from the available set. --tools "" disables every built-in tool
+		// so the model's ONLY way to affect anything is the 11 MCP tools
+		// this package exposes — the restriction allowedTools's own doc
+		// comment already claimed but didn't actually enforce.
+		"--tools", "",
 		"--allowedTools", strings.Join(qualifiedToolNames(), ","),
 		"--output-format", "json",
 	}
@@ -111,11 +148,19 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 
 	runErr := cmd.Run()
 	if runErr != nil {
-		return fmt.Errorf("claude -p exited: %w (stderr: %s)", runErr, truncate(stderr.String(), 2000))
+		// Deliberately excludes stderr content from the returned error:
+		// worker.Loop logs this error verbatim (slog.Warn), and stderr can
+		// carry the model's own output — which can itself carry the
+		// fetched Telegram message body it was reasoning about, on a
+		// malformed-output or prompt-injection path. The redaction layer
+		// operates on structured attribute keys, not free-form error
+		// values, so embedding raw content here would bypass it. Length is
+		// still useful for triage without the content.
+		return fmt.Errorf("claude -p exited: %w (stderr: %d bytes, see run logs)", runErr, stderr.Len())
 	}
 	res, parseErr := ParseClaudeResult(stdout.Bytes())
 	if parseErr != nil {
-		return fmt.Errorf("job %d: %w (stdout: %s)", job.JobID, parseErr, truncate(stdout.String(), 2000))
+		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
 	return CheckResult(res)
 }
@@ -155,11 +200,4 @@ func minimalEnv() []string {
 		}
 	}
 	return out
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "...(truncated)"
 }

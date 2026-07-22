@@ -30,6 +30,10 @@ type fakeAPI struct {
 	}
 	pauseAutopilotCalls []bool
 
+	// leadToReturn is served back on GetConversationContext's Lead field —
+	// getLead resolves through that call now, not a standalone GetLead API.
+	leadToReturn *LeadDTO
+
 	err error
 }
 
@@ -49,7 +53,7 @@ func (f *fakeAPI) GetConversationContext(ctx context.Context, conversationID int
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &ConversationContext{Conversation: ConversationDTO{ID: conversationID}}, nil
+	return &ConversationContext{Conversation: ConversationDTO{ID: conversationID}, Lead: f.leadToReturn}, nil
 }
 
 func (f *fakeAPI) GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error) {
@@ -57,13 +61,6 @@ func (f *fakeAPI) GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[
 		return nil, f.err
 	}
 	return map[string]any{"name": "Owner"}, nil
-}
-
-func (f *fakeAPI) GetLead(ctx context.Context, leadID int64) (*LeadDTO, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &LeadDTO{ID: leadID}, nil
 }
 
 func (f *fakeAPI) GetPolicy(ctx context.Context) (*PolicyDTO, error) {
@@ -240,5 +237,138 @@ func TestNewMCPServer_RegistersAllElevenTools(t *testing.T) {
 	srv := NewMCPServer(&fakeAPI{}, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1"})
 	if srv == nil {
 		t.Fatal("expected non-nil server")
+	}
+	got := srv.ListTools()
+	if len(got) != 11 {
+		t.Fatalf("registered %d tools, want 11: %v", len(got), toolNames(got))
+	}
+	for _, name := range allowedTools {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("tool %q not registered: %v", name, toolNames(got))
+		}
+	}
+}
+
+func toolNames(m map[string]*mcpserver.ServerTool) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	return names
+}
+
+// TestGetLead_ScopedToJobsOwnConversation guards against the P1 finding
+// that a model-supplied lead_id let a prompt-injected message fetch a
+// different conversation's lead through this job's own token — get_lead now
+// takes no lead_id argument at all and only ever resolves this job's own
+// conversation, via the same call get_conversation_context uses.
+func TestGetLead_ScopedToJobsOwnConversation(t *testing.T) {
+	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 7, Company: "Acme"}}
+	b := &toolBuilder{api: api, job: JobContext{ConversationID: 9}}
+	tool, handler := b.getLead()
+	// Even if a caller tried to pass a lead_id, the tool schema has no such
+	// parameter — confirm the underlying lookup used the job's own
+	// conversation, not any attacker-supplied id.
+	res := callTool(t, tool, handler, map[string]any{"lead_id": float64(999)})
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %#v", res)
+	}
+	if len(api.getConversationContextCalls) != 1 || api.getConversationContextCalls[0].convID != 9 {
+		t.Fatalf("getConversationContextCalls = %#v", api.getConversationContextCalls)
+	}
+}
+
+func TestGetLead_NoLeadYetIsAToolError(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{ConversationID: 9}}
+	tool, handler := b.getLead()
+	res := callTool(t, tool, handler, map[string]any{})
+	if !res.IsError {
+		t.Fatal("expected a tool error when no lead exists yet")
+	}
+}
+
+// TestPauseAutopilot_AlwaysPausesRegardlessOfArgument guards against the P1
+// finding that a paused=false argument let a prompt-injected message clear
+// the owner's own /mctl pause gate — the tool takes no argument at all now
+// and always pauses.
+func TestPauseAutopilot_AlwaysPausesRegardlessOfArgument(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{}}
+	tool, handler := b.pauseAutopilot()
+	callTool(t, tool, handler, map[string]any{"paused": false})
+	if len(api.pauseAutopilotCalls) != 1 || api.pauseAutopilotCalls[0] != true {
+		t.Fatalf("pauseAutopilotCalls = %#v, want [true] regardless of the paused=false argument", api.pauseAutopilotCalls)
+	}
+}
+
+// TestSaveJobLead_AllEmptyFieldsIsRejectedLocally guards against the P2
+// finding that an all-empty save_job_lead call still created a lead row
+// satisfying complete_agent_job's durable-result guard, letting a job close
+// with no reply, no real lead data, and no owner notification.
+func TestSaveJobLead_AllEmptyFieldsIsRejectedLocally(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 1, ConversationID: 9}}
+	tool, handler := b.saveJobLead()
+	res := callTool(t, tool, handler, map[string]any{})
+	if !res.IsError {
+		t.Fatal("expected a tool error for an all-empty save")
+	}
+	if len(api.saveLeadCalls) != 0 {
+		t.Fatalf("should not have called the API: %#v", api.saveLeadCalls)
+	}
+}
+
+// TestToolsRejectFurtherCallsAfterJobCompletes guards against the P1
+// finding that the MCP server process stays alive and every other handler
+// remains callable after complete_agent_job succeeds — nothing on the
+// server side knows this MCP session is "done", so the local guard is what
+// actually stops it.
+func TestToolsRejectFurtherCallsAfterJobCompletes(t *testing.T) {
+	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 1}}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 1, Attempt: 1, ConversationID: 9}}
+
+	completeTool, completeHandler := b.completeAgentJob()
+	res := callTool(t, completeTool, completeHandler, map[string]any{"status": "ignored"})
+	if res.IsError {
+		t.Fatalf("first complete_agent_job call should succeed: %#v", res)
+	}
+	if len(api.completeJobCalls) != 1 {
+		t.Fatalf("completeJobCalls = %#v", api.completeJobCalls)
+	}
+
+	cases := []struct {
+		name    string
+		call    func() *mcplib.CallToolResult
+		apiHits func() int
+	}{
+		{"propose_reply", func() *mcplib.CallToolResult {
+			tool, handler := b.proposeReply()
+			return callTool(t, tool, handler, map[string]any{"text": "hi"})
+		}, func() int { return len(api.proposeReplyCalls) }},
+		{"save_job_lead", func() *mcplib.CallToolResult {
+			tool, handler := b.saveJobLead()
+			return callTool(t, tool, handler, map[string]any{"company": "Acme"})
+		}, func() int { return len(api.saveLeadCalls) }},
+		{"pause_autopilot", func() *mcplib.CallToolResult {
+			tool, handler := b.pauseAutopilot()
+			return callTool(t, tool, handler, map[string]any{})
+		}, func() int { return len(api.pauseAutopilotCalls) }},
+		{"complete_agent_job again", func() *mcplib.CallToolResult {
+			tool, handler := b.completeAgentJob()
+			return callTool(t, tool, handler, map[string]any{"status": "completed"})
+		}, func() int { return len(api.completeJobCalls) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before := c.apiHits()
+			res := c.call()
+			if !res.IsError {
+				t.Fatalf("%s: expected a tool error after job completion", c.name)
+			}
+			if after := c.apiHits(); after != before {
+				t.Fatalf("%s: API was called (before=%d after=%d) despite the job already being complete", c.name, before, after)
+			}
+		})
 	}
 }

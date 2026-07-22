@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
     CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-s -w -X main.version=${APP_VERSION}" -o /mctl-telegram-canary ./cmd/canary && \
     CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-s -w" -o /mctl-telegram-agent-worker ./cmd/agent-worker
+    go build -ldflags="-s -w -X main.version=${APP_VERSION}" -o /mctl-telegram-agent-worker ./cmd/agent-worker
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 

@@ -2,6 +2,8 @@ package agentworker
 
 import (
 	"context"
+	"errors"
+	"sync"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -13,7 +15,6 @@ type agentAPI interface {
 	GetEvent(ctx context.Context, eventID string) (*EventDTO, error)
 	GetConversationContext(ctx context.Context, conversationID int64, limit int) (*ConversationContext, error)
 	GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error)
-	GetLead(ctx context.Context, leadID int64) (*LeadDTO, error)
 	GetPolicy(ctx context.Context) (*PolicyDTO, error)
 	ProposeReply(ctx context.Context, conversationID, jobID int64, intent, text string) (*ActionResult, error)
 	SaveLead(ctx context.Context, req SaveLeadRequest) (int64, error)
@@ -68,6 +69,34 @@ func NewMCPServer(api agentAPI, job JobContext) *mcpserver.MCPServer {
 type toolBuilder struct {
 	api agentAPI
 	job JobContext
+
+	// mu guards completed. The MCP server process handles exactly one job
+	// (see JobContext's doc comment), but nothing stops the model from
+	// calling more state-changing tools in the same session after it has
+	// already called complete_agent_job — the underlying API has no notion
+	// of "this MCP session is done" to reject them itself. Guarding here
+	// closes that gap: once complete_agent_job succeeds, every other
+	// state-changing tool (and a second complete_agent_job call) is
+	// rejected locally without another round trip to the server.
+	mu        sync.Mutex
+	completed bool
+}
+
+var errJobAlreadyCompleted = errors.New("this job was already marked complete — no further actions are allowed")
+
+func (b *toolBuilder) rejectIfCompleted() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.completed {
+		return errJobAlreadyCompleted
+	}
+	return nil
+}
+
+func (b *toolBuilder) markCompleted() {
+	b.mu.Lock()
+	b.completed = true
+	b.mu.Unlock()
 }
 
 func (b *toolBuilder) getEvent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
@@ -124,22 +153,29 @@ func (b *toolBuilder) getRecruiterProfile() (mcplib.Tool, mcpserver.ToolHandlerF
 	return tool, handler
 }
 
+// getLead deliberately takes NO lead_id argument. GET /leads/{id} on the
+// server side only checks the caller's account (id.UserID), not which
+// conversation a lead belongs to — accepting a model-supplied lead_id would
+// let a prompt-injected message from one recruiter fetch another
+// conversation's lead details (company, compensation, recruiter identity)
+// through this account's own token. Always resolving via this job's own
+// conversation (the same lookup get_conversation_context already exposes)
+// keeps the tool scoped to data this job is actually allowed to see, the
+// same "server derives it, caller can't override" shape as JobContext's
+// other pinned fields.
 func (b *toolBuilder) getLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_lead",
-		mcplib.WithDescription("Fetch a previously saved job lead by id."),
-		mcplib.WithNumber("lead_id", mcplib.Required(), mcplib.Description("Lead id, from a prior save_job_lead call or get_conversation_context's lead field.")),
+		mcplib.WithDescription("Fetch the job lead saved for this job's own conversation, if one exists. Equivalent to get_conversation_context's lead field, offered separately for a quick standalone lookup."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		leadID := int64(intArg(args, "lead_id", 0))
-		if leadID <= 0 {
-			return mcplib.NewToolResultError("lead_id is required"), nil
-		}
-		out, err := b.api.GetLead(ctx, leadID)
+		convCtx, err := b.api.GetConversationContext(ctx, b.job.ConversationID, 0)
 		if err != nil {
 			return toolErr(err), nil
 		}
-		return jsonResult(out)
+		if convCtx.Lead == nil {
+			return mcplib.NewToolResultError("no lead saved yet for this conversation"), nil
+		}
+		return jsonResult(convCtx.Lead)
 	}
 	return tool, handler
 }
@@ -165,6 +201,9 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Proposed reply text.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
 		args := req.GetArguments()
 		intent := stringArg(args, "intent", "")
 		text := stringArg(args, "text", "")
@@ -192,8 +231,11 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithString("detail", mcplib.Description("Any other relevant free-text detail.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
 		args := req.GetArguments()
-		leadID, err := b.api.SaveLead(ctx, SaveLeadRequest{
+		lead := SaveLeadRequest{
 			ConversationID: b.job.ConversationID,
 			JobID:          b.job.JobID,
 			Company:        stringArg(args, "company", ""),
@@ -203,7 +245,17 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			Compensation:   stringArg(args, "compensation", ""),
 			Status:         stringArg(args, "status", ""),
 			Detail:         stringArg(args, "detail", ""),
-		})
+		}
+		// An all-empty call would still create (or re-bind) a lead row on
+		// the server, which is enough to satisfy complete_agent_job's
+		// "durable result exists" guard — letting a confused or injected
+		// turn close a job with no reply, no real lead data, and no owner
+		// notification. Require at least one real field before forwarding.
+		if lead.Company == "" && lead.Role == "" && lead.RecruiterName == "" && lead.RecruiterTGID == 0 &&
+			lead.Compensation == "" && lead.Status == "" && lead.Detail == "" {
+			return mcplib.NewToolResultError("at least one field is required — nothing to save"), nil
+		}
+		leadID, err := b.api.SaveLead(ctx, lead)
 		if err != nil {
 			return toolErr(err), nil
 		}
@@ -219,6 +271,9 @@ func (b *toolBuilder) requestOwnerApproval() (mcplib.Tool, mcpserver.ToolHandler
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("What to ask the owner.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
 		args := req.GetArguments()
 		text := stringArg(args, "text", "")
 		if text == "" {
@@ -240,6 +295,9 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Summary text for the owner.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
 		args := req.GetArguments()
 		text := stringArg(args, "text", "")
 		if text == "" {
@@ -254,15 +312,25 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 	return tool, handler
 }
 
+// pauseAutopilot is pause-only by construction — it takes no arguments and
+// always pauses, never resumes. Resuming is a deliberate, standing-down
+// decision only the owner should make, via the authenticated /mctl continue
+// slash-command path (internal/agent/control), not a model call. An earlier
+// version accepted a paused=false argument: since every action's policy
+// check reads the same AutopilotPaused flag, a prompt-injected incoming
+// message could otherwise call this tool with paused=false and silently
+// clear an owner's own /mctl pause before the worker went on to send a
+// reply — undoing the one safety gate the owner has for "stop the agent
+// from replying on its own."
 func (b *toolBuilder) pauseAutopilot() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pause_autopilot",
-		mcplib.WithDescription("Pause (or resume) autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own."),
-		mcplib.WithBoolean("paused", mcplib.Description("true to pause (default), false to resume.")),
+		mcplib.WithDescription("Pause autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own. Pause-only — resuming is a deliberate owner decision made via /mctl continue, not something this tool can do."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		args := req.GetArguments()
-		paused := boolArg(args, "paused", true)
-		out, err := b.api.PauseAutopilot(ctx, paused)
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
+		out, err := b.api.PauseAutopilot(ctx, true)
 		if err != nil {
 			return toolErr(err), nil
 		}
@@ -278,6 +346,9 @@ func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithString("note", mcplib.Description("Optional short note about the outcome, for operator logs.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := b.rejectIfCompleted(); err != nil {
+			return toolErr(err), nil
+		}
 		args := req.GetArguments()
 		status := stringArg(args, "status", "")
 		if status == "" {
@@ -286,6 +357,7 @@ func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		if err := b.api.CompleteJob(ctx, b.job.JobID, b.job.Attempt, status, stringArg(args, "note", "")); err != nil {
 			return toolErr(err), nil
 		}
+		b.markCompleted()
 		return jsonResult(map[string]any{"completed": true})
 	}
 	return tool, handler

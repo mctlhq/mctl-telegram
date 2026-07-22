@@ -117,14 +117,24 @@ func (j JobEnvelope) ParsedDeadline(fallback time.Duration) time.Time {
 	return time.Now().Add(fallback)
 }
 
-// PollEvents is GET /events?limit=N — a long-poll claim of due jobs. The
-// server itself bounds the hold time (defaultLongPollTimeout, currently
-// 20s); ctx should still carry a reasonable deadline so a network stall
-// doesn't hang the poll loop forever.
+// pollEventsDeadline bounds one PollEvents call. The server itself holds
+// the connection for up to ~20s (agentapi's defaultLongPollTimeout) before
+// responding with an empty result — this is deliberately longer than that,
+// not shorter, so it never races the server's own timeout. Without it, a
+// network partition that accepts the TCP connection but never sends bytes
+// would hang the call (and the worker's whole poll loop) indefinitely: the
+// caller's own lifetime context (signal.NotifyContext with no deadline, see
+// cmd/agent-worker) never expires on its own, and http.DefaultClient has no
+// request timeout either.
+const pollEventsDeadline = 30 * time.Second
+
+// PollEvents is GET /events?limit=N — a long-poll claim of due jobs.
 func (c *Client) PollEvents(ctx context.Context, limit int) ([]JobEnvelope, error) {
 	if limit <= 0 {
 		limit = 1
 	}
+	ctx, cancel := context.WithTimeout(ctx, pollEventsDeadline)
+	defer cancel()
 	var out struct {
 		Jobs []JobEnvelope `json:"jobs"`
 	}

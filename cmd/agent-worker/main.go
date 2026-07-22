@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -28,6 +29,10 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
 )
+
+// version is set via -ldflags "-X main.version=..." at build time (see
+// Dockerfile), matching every other binary in this repo.
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--mcp-serve" {
@@ -59,6 +64,11 @@ func run() error {
 		return fmt.Errorf("resolve own executable path: %w", err)
 	}
 
+	maxBudgetUSD, err := envFloat("AGENT_MAX_BUDGET_USD", 0)
+	if err != nil {
+		return err
+	}
+
 	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
 	invoker := &agentworker.ClaudeInvoker{
 		ClaudeBin:    os.Getenv("AGENT_CLAUDE_BIN"),
@@ -66,13 +76,13 @@ func run() error {
 		APIBaseURL:   apiBaseURL,
 		APIToken:     apiToken,
 		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
-		MaxBudgetUSD: envFloat("AGENT_MAX_BUDGET_USD", 0),
+		MaxBudgetUSD: maxBudgetUSD,
 	}
 	worker := agentworker.NewWorker(client, invoker)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	slog.Info("agent-worker: starting poll loop", "api_base_url", apiBaseURL)
+	slog.Info("agent-worker: starting poll loop", "version", version, "api_base_url", apiBaseURL)
 	worker.Loop(ctx)
 	slog.Info("agent-worker: stopped")
 	return nil
@@ -108,7 +118,13 @@ func runMCPServe() error {
 	if err != nil {
 		return fmt.Errorf("parse AGENT_JOB_ATTEMPT: %w", err)
 	}
-	conversationID, _ := strconv.ParseInt(os.Getenv("AGENT_JOB_CONV_ID"), 10, 64)
+	var conversationID int64
+	if raw := os.Getenv("AGENT_JOB_CONV_ID"); raw != "" {
+		conversationID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse AGENT_JOB_CONV_ID: %w", err)
+		}
+	}
 
 	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
 	job := agentworker.JobContext{
@@ -129,14 +145,23 @@ func requireEnv(key string) (string, error) {
 	return v, nil
 }
 
-func envFloat(key string, def float64) float64 {
+// envFloat fails loudly on a set-but-unparseable value rather than silently
+// falling back to def — an operator who set AGENT_MAX_BUDGET_USD to enforce
+// a spending cap and mistyped it would otherwise get an uncapped worker with
+// no indication anything was wrong.
+func envFloat(key string, def float64) (float64, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
-		return def
+		return def, nil
 	}
 	f, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
-		return def
+		return 0, fmt.Errorf("parse %s: %w", key, err)
 	}
-	return f
+	// strconv.ParseFloat accepts "NaN"/"Inf" as valid IEEE754 values — none
+	// of which mean anything as a dollar budget.
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("parse %s: %q is not a finite number", key, raw)
+	}
+	return f, nil
 }

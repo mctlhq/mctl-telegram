@@ -106,7 +106,11 @@ func TestWorker_Loop_BacksOffAndRecoversOnPollError(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// minPollBackoff (2s) is most of this budget on its own; give it a wide
+	// margin above that rather than the bare minimum — a loaded CI runner
+	// regularly ate the previous 5s deadline's ~3s of slack, tripping this
+	// assertion before cancel() ever got scheduled.
+	deadline := time.Now().Add(15 * time.Second)
 	for atomic.LoadInt32(&runner.ran) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
