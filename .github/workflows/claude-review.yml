@@ -93,7 +93,9 @@ jobs:
         id: pr-ref
         run: |
           ref=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
+          sha=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefOid -q .headRefOid)
           echo "ref=$ref" >> $GITHUB_OUTPUT
+          echo "sha=$sha" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -159,9 +161,22 @@ jobs:
       # already reviewing — cancel-in-progress then kills the newer,
       # correct review and lets the stale one proceed, checking out and
       # reviewing outdated code while posting a verdict that reads as
-      # covering the PR's current head. Reject here if the commit actually
-      # on disk no longer matches the PR's live head — a stale run
-      # self-cancels instead of silently reviewing the wrong commit.
+      # covering the PR's current head. Reject here if the SHA this run was
+      # actually triggered for no longer matches the PR's live head.
+      #
+      # Deliberately does NOT use `git rev-parse HEAD` after checkout: for
+      # pull_request events, actions/checkout with no explicit `ref:` (the
+      # Checkout step above only sets one for issue_comment) checks out
+      # `github.sha`, which for that event type is a synthetic MERGE commit
+      # GitHub generates on the fly — never equal to the branch's own head
+      # SHA even when this run is perfectly current. Comparing that against
+      # a live headRefOid made EVERY pull_request-triggered run self-report
+      # as stale — caught immediately when this very fix's own PR (#309)
+      # opened and its own auto-triggered review silently skipped itself.
+      # Using github.event.pull_request.head.sha (the real branch head at
+      # trigger time) for that path, and the sha resolve-PR-branch already
+      # captured for the issue_comment path, avoids checkout ref semantics
+      # entirely.
       - name: Reject if this run's commit is no longer the PR's current head
         if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         id: staleness
@@ -170,9 +185,9 @@ jobs:
         run: |
           pr="${{ github.event.pull_request.number || github.event.issue.number }}"
           current_head=$(gh pr view "$pr" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
-          checked_out=$(git rev-parse HEAD)
-          if [ "$checked_out" != "$current_head" ]; then
-            echo "::notice::stale run — checked out $checked_out but PR head is now $current_head; skipping"
+          triggered_for="${{ github.event.pull_request.head.sha || steps.pr-ref.outputs.sha }}"
+          if [ "$triggered_for" != "$current_head" ]; then
+            echo "::notice::stale run — triggered for $triggered_for but PR head is now $current_head; skipping"
             echo "stale=true" >> "$GITHUB_OUTPUT"
           else
             echo "stale=false" >> "$GITHUB_OUTPUT"
