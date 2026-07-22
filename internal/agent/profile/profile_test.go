@@ -206,6 +206,29 @@ func TestMatchRestricted_FindsValueInText(t *testing.T) {
 	}
 }
 
+// TestMatchRestricted_FindsNumericValueInText covers the Codex-flagged gap
+// on #307: a non-string restricted value (current_salary: 145000) used to be
+// skipped by MatchRestricted entirely — verbatim string values were the only
+// ones ever enforced, and nothing else in the codebase called RestrictedField
+// to enforce numeric ones by key.
+func TestMatchRestricted_FindsNumericValueInText(t *testing.T) {
+	path := writeTestProfile(t, testYAML)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	key, _, approvalRequired, matched := p.MatchRestricted("My current comp is 145000 base")
+	if !matched {
+		t.Fatal("expected a match on the numeric current_salary restricted field")
+	}
+	if key != "current_salary" {
+		t.Fatalf("key = %q, want current_salary", key)
+	}
+	if !approvalRequired {
+		t.Fatal("approval_required = false, want true for current_salary")
+	}
+}
+
 func TestMatchRestricted_NoMatchOnUnrelatedText(t *testing.T) {
 	path := writeTestProfile(t, testYAML)
 	p, err := Load(path)

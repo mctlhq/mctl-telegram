@@ -179,6 +179,7 @@ func (r *Router) handleTakeover(ctx context.Context, userID int64, arg string) e
 }
 
 func (r *Router) handleApprove(ctx context.Context, userID int64, code string) error {
+	code = normalizeApprovalCode(code)
 	err := r.Executor.Approve(ctx, userID, code)
 	switch {
 	case err == nil:
@@ -195,10 +196,21 @@ func (r *Router) handleApprove(ctx context.Context, userID int64, code string) e
 }
 
 func (r *Router) handleReject(ctx context.Context, userID int64, code string) error {
+	code = normalizeApprovalCode(code)
 	if err := r.Executor.Reject(ctx, userID, code); err != nil {
 		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Could not reject %s: %s", code, approverErrText(err)))
 	}
 	return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Rejected %s.", code))
+}
+
+// normalizeApprovalCode uppercases and trims an owner-typed approval code.
+// GetAgentActionByCode documents case-sensitive matching and expects the
+// caller to normalize — codes are generated uppercase-only (see
+// agentapi.newApprovalCode's alphabet), so a phone keyboard autocorrecting
+// "/mctl approve AB12CD" to "Ab12cd" would otherwise get a confusing "code
+// not found" reply for a code that is actually live (Codex finding, #307).
+func normalizeApprovalCode(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
 }
 
 // approverErrText renders an executor error as owner-facing text without

@@ -116,6 +116,30 @@ func TestRouter_Approve_DelegatesToExecutorWithCode(t *testing.T) {
 	}
 }
 
+// TestRouter_Approve_NormalizesCodeCase guards against a Codex finding on
+// #307: approval codes are generated uppercase-only, and GetAgentActionByCode
+// matches case-sensitively — a lowercased/autocorrected code typed by the
+// owner must still resolve.
+func TestRouter_Approve_NormalizesCodeCase(t *testing.T) {
+	router, approver, _, _, uid := newTestRouter(t)
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve ab12cd"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(approver.approveCalls) != 1 || approver.approveCalls[0] != "AB12CD" {
+		t.Fatalf("approve calls = %v, want [AB12CD]", approver.approveCalls)
+	}
+}
+
+func TestRouter_Reject_NormalizesCodeCase(t *testing.T) {
+	router, approver, _, _, uid := newTestRouter(t)
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl reject  ab12cd  "); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(approver.rejectCalls) != 1 || approver.rejectCalls[0] != "AB12CD" {
+		t.Fatalf("reject calls = %v, want [AB12CD]", approver.rejectCalls)
+	}
+}
+
 func TestRouter_Approve_SurfacesErrorFromExecutor(t *testing.T) {
 	router, approver, sender, _, uid := newTestRouter(t)
 	approver.approveErr = executor.ErrApprovalCodeNotFound

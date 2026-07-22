@@ -129,18 +129,30 @@ func normalizeValue(v any) any {
 // MatchRestricted reports the first restricted-section entry (if any) whose
 // value appears verbatim in text — the executor's send-time gate for
 // never_auto_send/approval_required, since the DB-backed policy engine
-// (internal/agent/policy) has no notion of this YAML-only concept. Only
-// string-valued restricted fields can match; a numeric or structured value
-// (e.g. current_salary: 145000) never appears character-for-character in a
-// natural-language draft the same way, so matching would be unreliable at
-// best — such fields still gate through RestrictedField for any caller that
-// checks by key rather than by content.
+// (internal/agent/policy) has no notion of this YAML-only concept.
+//
+// Non-string values (e.g. current_salary: 145000) are matched against their
+// default string representation (fmt.Sprint) — this only catches the exact
+// numeric literal, not every way a draft might phrase it ("$145k" won't
+// match "145000"), but that's strictly better than the field never being
+// enforced at all. A prior version of this function skipped non-string
+// values outright on the reasoning that formatted matching would be
+// "unreliable" and deferred enforcement to "any caller that checks by key" —
+// no such caller existed anywhere in this codebase, which a Codex finding on
+// #307 caught: it meant every non-string restricted field was silently
+// unenforced, full stop, not deferred to some other gate.
 func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for k, f := range p.data.Restricted {
+		if f.Value == nil {
+			continue
+		}
 		s, ok := f.Value.(string)
-		if !ok || s == "" || !strings.Contains(text, s) {
+		if !ok {
+			s = fmt.Sprint(f.Value)
+		}
+		if s == "" || !strings.Contains(text, s) {
 			continue
 		}
 		return k, f.NeverAutoSend, f.ApprovalRequired, true
