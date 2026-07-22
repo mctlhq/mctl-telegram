@@ -1,0 +1,165 @@
+package agentworker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// allowedTools is the exact and complete set of MCP tools a spawned `claude`
+// invocation may use — no Bash, Read, Write, WebFetch, or any other
+// built-in tool is ever allowed, so the model's only way to affect anything
+// is through this package's 11 API-proxying tools. See NewMCPServer's doc
+// comment for why job identity is pinned server-side rather than accepted
+// as a tool argument.
+var allowedTools = []string{
+	"get_event", "get_conversation_context", "get_recruiter_profile", "get_lead", "get_policy",
+	"propose_reply", "save_job_lead", "request_owner_approval", "send_owner_summary",
+	"pause_autopilot", "complete_agent_job",
+}
+
+func qualifiedToolNames() []string {
+	out := make([]string, len(allowedTools))
+	for i, name := range allowedTools {
+		out[i] = fmt.Sprintf("mcp__%s__%s", ServerName, name)
+	}
+	return out
+}
+
+// ClaudeInvoker is the concrete Runner that shells out to the `claude` CLI
+// binary (see cmd/agent-worker for the self-invocation `--mcp-serve` mode
+// that becomes the MCP server's command). Self is the absolute path to this
+// same worker binary (os.Executable()) — the spawned `claude` process
+// re-execs it as the MCP server so the tool implementations run in-process
+// with this worker's own AGENT_API_TOKEN, never handed to Claude itself.
+type ClaudeInvoker struct {
+	ClaudeBin    string
+	Self         string
+	APIBaseURL   string
+	APIToken     string
+	SystemPrompt string
+	// MaxBudgetUSD, if > 0, is passed as --max-budget-usd so a single job
+	// cannot spend past this even if the model loops.
+	MaxBudgetUSD float64
+}
+
+// mcpConfig is the JSON shape `claude --mcp-config` expects for an inline
+// (non-file) server definition.
+type mcpConfig struct {
+	MCPServers map[string]mcpServerConfig `json:"mcpServers"`
+}
+
+type mcpServerConfig struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+}
+
+// Run builds and executes one `claude -p` invocation for job, per the
+// contract described in NewMCPServer/Worker.Loop's doc comments: the model
+// does all of its work through the 11 MCP tools; this method only reports
+// whether the process itself ran successfully, not what the model did with
+// it (see ErrClaudeReportedError for the one CLI-level exception this method
+// does check).
+func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
+	cfg := mcpConfig{MCPServers: map[string]mcpServerConfig{
+		ServerName: {
+			Command: c.Self,
+			Args:    []string{"--mcp-serve"},
+			Env: map[string]string{
+				"AGENT_API_BASE_URL": c.APIBaseURL,
+				"AGENT_API_TOKEN":    c.APIToken,
+				"AGENT_JOB_ID":       fmt.Sprintf("%d", job.JobID),
+				"AGENT_JOB_ATTEMPT":  fmt.Sprintf("%d", job.Attempt),
+				"AGENT_JOB_EVENT_ID": job.EventID,
+				"AGENT_JOB_CONV_ID":  fmt.Sprintf("%d", job.ConversationID),
+			},
+		},
+	}}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	args := []string{
+		"-p", jobPrompt(job),
+		"--mcp-config", string(cfgJSON),
+		"--strict-mcp-config",
+		"--allowedTools", strings.Join(qualifiedToolNames(), ","),
+		"--output-format", "json",
+	}
+	if c.SystemPrompt != "" {
+		args = append(args, "--system-prompt", c.SystemPrompt)
+	}
+	if c.MaxBudgetUSD > 0 {
+		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", c.MaxBudgetUSD))
+	}
+
+	claudeBin := c.ClaudeBin
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
+	cmd.Env = minimalEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+	if runErr != nil {
+		return fmt.Errorf("claude -p exited: %w (stderr: %s)", runErr, truncate(stderr.String(), 2000))
+	}
+	res, parseErr := ParseClaudeResult(stdout.Bytes())
+	if parseErr != nil {
+		return fmt.Errorf("job %d: %w (stdout: %s)", job.JobID, parseErr, truncate(stdout.String(), 2000))
+	}
+	return CheckResult(res)
+}
+
+// jobPrompt is deliberately minimal: the model has get_event and
+// get_conversation_context tools to pull its own context, so the prompt
+// only needs to point it at this turn's job rather than duplicate data it
+// can fetch itself.
+func jobPrompt(job JobEnvelope) string {
+	return fmt.Sprintf(
+		"A new Telegram message arrived (event %s). Use get_event and get_conversation_context to see it and the conversation so far, decide what to do, and call complete_agent_job exactly once when you are done.",
+		job.EventID,
+	)
+}
+
+// minimalEnv passes through only what the `claude` subprocess needs to
+// authenticate and run (HOME for credential/config lookup, PATH to find its
+// own dependencies, and any CLAUDE_CODE_*/ANTHROPIC_* auth vars already in
+// this process's environment) rather than the worker's full environment —
+// AGENT_API_TOKEN in particular must never leak into the model's own
+// process env since it is set only on the MCP server subprocess's env
+// (see Run's mcpServerConfig.Env), not this one.
+func minimalEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch {
+		case key == "HOME", key == "PATH", key == "USER":
+			out = append(out, kv)
+		case strings.HasPrefix(key, "CLAUDE_"):
+			out = append(out, kv)
+		case strings.HasPrefix(key, "ANTHROPIC_"):
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated)"
+}

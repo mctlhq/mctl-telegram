@@ -1,0 +1,142 @@
+// Command agent-worker is the production (Option C) headless transport for
+// the communication agent: it long-polls mctl-telegram's
+// /api/agent/v1/events for due jobs and, for each one, invokes `claude -p`
+// with a restricted MCP tool surface (internal/agentworker.NewMCPServer)
+// that proxies 1:1 onto the same API. See mctlhq/mctl-telegram#298 and the
+// transport decision in the Communication Agent plan for why this replaced
+// the originally-scoped Claude Code Channels bridge as the production path.
+//
+// This binary runs in two modes, selected by --mcp-serve:
+//   - default: the poll loop (see run()). Spawns `claude` as a subprocess
+//     per job.
+//   - --mcp-serve: a stdio MCP server exposing the 11 agent tools, scoped to
+//     exactly one job via AGENT_JOB_* env vars. `claude` spawns this mode
+//     itself (as configured by the default mode's --mcp-config), so an
+//     operator never invokes it directly.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-telegram/internal/agentworker"
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--mcp-serve" {
+		if err := runMCPServe(); err != nil {
+			slog.Error("agent-worker: mcp-serve failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(); err != nil {
+		slog.Error("agent-worker: fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run is the default (poll-loop) mode.
+func run() error {
+	apiBaseURL, err := requireEnv("AGENT_API_BASE_URL")
+	if err != nil {
+		return err
+	}
+	apiToken, err := requireEnv("AGENT_API_TOKEN")
+	if err != nil {
+		return err
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve own executable path: %w", err)
+	}
+
+	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
+	invoker := &agentworker.ClaudeInvoker{
+		ClaudeBin:    os.Getenv("AGENT_CLAUDE_BIN"),
+		Self:         self,
+		APIBaseURL:   apiBaseURL,
+		APIToken:     apiToken,
+		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
+		MaxBudgetUSD: envFloat("AGENT_MAX_BUDGET_USD", 0),
+	}
+	worker := agentworker.NewWorker(client, invoker)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	slog.Info("agent-worker: starting poll loop", "api_base_url", apiBaseURL)
+	worker.Loop(ctx)
+	slog.Info("agent-worker: stopped")
+	return nil
+}
+
+// runMCPServe is the stdio MCP server mode. It reads its job-scoped identity
+// entirely from env vars set by the ClaudeInvoker that spawned it (see
+// claudeinvoker.go's mcpServerConfig.Env) — never from argv or the model,
+// matching JobContext's doc comment on why job identity can't be
+// model-supplied.
+func runMCPServe() error {
+	apiBaseURL, err := requireEnv("AGENT_API_BASE_URL")
+	if err != nil {
+		return err
+	}
+	apiToken, err := requireEnv("AGENT_API_TOKEN")
+	if err != nil {
+		return err
+	}
+	rawJobID, err := requireEnv("AGENT_JOB_ID")
+	if err != nil {
+		return err
+	}
+	jobID, err := strconv.ParseInt(rawJobID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse AGENT_JOB_ID: %w", err)
+	}
+	rawAttempt, err := requireEnv("AGENT_JOB_ATTEMPT")
+	if err != nil {
+		return err
+	}
+	attempt, err := strconv.Atoi(rawAttempt)
+	if err != nil {
+		return fmt.Errorf("parse AGENT_JOB_ATTEMPT: %w", err)
+	}
+	conversationID, _ := strconv.ParseInt(os.Getenv("AGENT_JOB_CONV_ID"), 10, 64)
+
+	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
+	job := agentworker.JobContext{
+		JobID:          jobID,
+		Attempt:        attempt,
+		EventID:        os.Getenv("AGENT_JOB_EVENT_ID"),
+		ConversationID: conversationID,
+	}
+	srv := agentworker.NewMCPServer(client, job)
+	return mcpserver.ServeStdio(srv)
+}
+
+func requireEnv(key string) (string, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return "", errors.New(key + " is required")
+	}
+	return v, nil
+}
+
+func envFloat(key string, def float64) float64 {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
