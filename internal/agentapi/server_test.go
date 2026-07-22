@@ -149,10 +149,17 @@ func TestHandlers_RequireAuth(t *testing.T) {
 		method, path string
 	}{
 		{"GET", "/events"},
-		{"GET", "/policy"},
+		{"GET", "/event/evt:1"},
+		{"GET", "/conversations/1/context"},
+		{"GET", "/recruiters/555"},
 		{"GET", "/leads/1"},
+		{"GET", "/policy"},
 		{"POST", "/leads"},
 		{"POST", "/actions/propose_reply"},
+		{"POST", "/actions/request_owner_approval"},
+		{"POST", "/notify/summary"},
+		{"POST", "/autopilot/pause"},
+		{"POST", "/jobs/1/complete"},
 	} {
 		rec := h.doAnon(tc.method, tc.path)
 		if rec.Code != http.StatusUnauthorized {
@@ -420,6 +427,82 @@ func TestHandleRequestOwnerApproval_AlwaysAllowed(t *testing.T) {
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleNotifySummary(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+
+	rec := h.do("POST", "/notify/summary", ownerNotifyRequest{
+		Text: "Recruiter from Acme reached out about a Backend role.",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]int64
+	decodeBody(t, rec, &body)
+	if body["action_id"] == 0 || body["notification_id"] == 0 {
+		t.Fatalf("body = %v, want non-zero action_id and notification_id", body)
+	}
+
+	action, err := h.store.GetAgentAction(context.Background(), h.userID, body["action_id"])
+	if err != nil {
+		t.Fatalf("lookup action: %v", err)
+	}
+	if action.ActionType != db.ActionTypeOwnerSummary {
+		t.Fatalf("action type = %q, want %q", action.ActionType, db.ActionTypeOwnerSummary)
+	}
+
+	rec2 := h.do("POST", "/notify/summary", ownerNotifyRequest{Text: ""})
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("empty text status = %d, want 400", rec2.Code)
+	}
+}
+
+func TestHandleConversationContext(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+
+	// No lead yet: "lead" must be null, not an error.
+	rec := h.do("GET", "/conversations/"+itoaTest(conv.ID)+"/context", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Conversation conversationDTO          `json:"conversation"`
+		Messages     []conversationMessageDTO `json:"messages"`
+		Lead         *leadDTO                 `json:"lead"`
+	}
+	decodeBody(t, rec, &body)
+	if body.Conversation.ID != conv.ID {
+		t.Fatalf("conversation id = %d, want %d", body.Conversation.ID, conv.ID)
+	}
+	if body.Lead != nil {
+		t.Fatalf("lead = %+v, want nil before any lead is saved", body.Lead)
+	}
+
+	// Save a lead, then the context response must surface it.
+	if _, err := h.store.UpsertJobLead(context.Background(), db.JobLead{
+		UserID: h.userID, ConversationID: conv.ID, Company: "Acme",
+	}); err != nil {
+		t.Fatalf("upsert lead: %v", err)
+	}
+	rec2 := h.do("GET", "/conversations/"+itoaTest(conv.ID)+"/context", nil)
+	decodeBody(t, rec2, &body)
+	if body.Lead == nil || body.Lead.Company != "Acme" {
+		t.Fatalf("lead = %+v, want company Acme", body.Lead)
+	}
+
+	// limit query param is honored and bounded.
+	rec3 := h.do("GET", "/conversations/"+itoaTest(conv.ID)+"/context?limit=abc", nil)
+	if rec3.Code != http.StatusBadRequest {
+		t.Fatalf("bad limit status = %d, want 400", rec3.Code)
+	}
+
+	rec404 := h.do("GET", "/conversations/999999/context", nil)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec404.Code)
 	}
 }
 

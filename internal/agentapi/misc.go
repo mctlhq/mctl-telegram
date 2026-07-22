@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -87,11 +88,14 @@ func (s *Server) handleAutopilotPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req autopilotPauseRequest
-	if r.ContentLength != 0 {
-		if err := decodeStrict(r, &req); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
-			return
-		}
+	// Decode unconditionally rather than gating on r.ContentLength (which is
+	// -1, not 0, for chunked Transfer-Encoding — a length check would
+	// silently skip a real {"paused":false} chunked body and default to
+	// pause=true). An empty body decodes to io.EOF, which is the expected
+	// "no fields provided" case, not a client error.
+	if err := decodeStrict(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
 	paused := true
 	if req.Paused != nil {

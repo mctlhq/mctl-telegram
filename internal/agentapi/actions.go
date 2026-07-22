@@ -58,6 +58,20 @@ func (s *Server) recentAgentSends(ctx context.Context, userID, conversationID in
 	return out, nil
 }
 
+// isApprovalCodeCollision reports whether err looks like a violation of the
+// (user_id, approval_code) unique index specifically — narrower than a bare
+// "unique" substring match, which would also match the unrelated
+// (job_id, action_type) index on the same table and mask its real error
+// behind three pointless retries. Matches by driver-reported name rather
+// than an errors.As type check against pgx/modernc so this package does not
+// need to import either driver: Postgres names the index itself
+// ("idx_agent_actions_code") in its error text; SQLite instead lists the
+// column pair ("agent_actions.approval_code").
+func isApprovalCodeCollision(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "idx_agent_actions_code") || strings.Contains(msg, "approval_code")
+}
+
 // insertActionWithApprovalCode wraps InsertAgentAction with the approval-code
 // retry loop, used only for the pending_approval path (the other statuses
 // carry no code).
@@ -72,10 +86,7 @@ func (s *Server) insertActionWithApprovalCode(ctx context.Context, a db.AgentAct
 		if err == nil {
 			return id, code, nil
 		}
-		// A unique-violation on (user_id, approval_code) is the only expected
-		// failure mode worth retrying; every other error (bad job id, DB down,
-		// …) should surface immediately rather than spin three times first.
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+		if isApprovalCodeCollision(err) {
 			continue
 		}
 		return 0, "", err

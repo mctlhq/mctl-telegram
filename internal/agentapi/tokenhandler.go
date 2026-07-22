@@ -1,7 +1,6 @@
 package agentapi
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -65,7 +64,7 @@ func NewAgentTokenHandler(secret []byte, issuer string, adminTGIDs map[int64]boo
 			return
 		}
 		var req mintAgentTokenRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeStrict(r, &req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}

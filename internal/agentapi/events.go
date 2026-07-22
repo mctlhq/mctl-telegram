@@ -54,9 +54,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	deadline := time.Now().Add(s.longPollTimeout)
+	tick := time.NewTicker(eventsPollInterval)
+	defer tick.Stop()
 	for {
 		jobs, err := s.Queue.Claim(ctx, limit)
 		if err != nil {
+			// A client disconnect mid-Claim surfaces here as context.Canceled
+			// (the ctx.Done() case below only catches cancellation *between*
+			// poll iterations, not one already in flight inside Claim). That is
+			// an ordinary hang-up, not a server error: logging it and
+			// returning 500 would misreport every normal long-poll disconnect
+			// as a failure.
+			if ctx.Err() != nil {
+				writeJSON(w, http.StatusOK, map[string]any{"jobs": []jobEnvelope{}})
+				return
+			}
 			logHandlerErr("get_events", err)
 			writeJSONError(w, http.StatusInternalServerError, "claim failed")
 			return
@@ -80,7 +92,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			writeJSON(w, http.StatusOK, map[string]any{"jobs": []jobEnvelope{}})
 			return
-		case <-time.After(eventsPollInterval):
+		case <-tick.C:
 			if time.Now().After(deadline) {
 				writeJSON(w, http.StatusOK, map[string]any{"jobs": []jobEnvelope{}})
 				return
