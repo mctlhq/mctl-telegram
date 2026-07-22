@@ -48,14 +48,29 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 			DryReason: dryReason,
 		}, nil
 	}
+	randomID, err := newRandomID()
+	if err != nil {
+		return nil, err
+	}
+	return SendMessageWithRandomID(ctx, c, peer, text, randomID, cache, userID)
+}
 
-	var randomID int64
-	{
-		var b [8]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			return nil, err
-		}
-		randomID = int64(binary.LittleEndian.Uint64(b[:]))
+// SendMessageWithRandomID is SendMessage's always-real-send path with a
+// caller-supplied random_id instead of one generated internally. Exists for
+// the communication agent's executor (internal/agent/executor): it persists
+// a random_id on the action row BEFORE calling this, so a crash-recovery
+// retry can call it again with that SAME id and rely on MTProto's
+// server-side random_id dedup to make the retry a safe no-op if the
+// original send already landed. Ordinary callers (SendMessage, SendMedia)
+// have no crash-recovery story and generate a fresh id per call — do not
+// reuse a random_id across logically different sends, only across retries
+// of the identical one.
+func SendMessageWithRandomID(ctx context.Context, c *telegram.Client, peer string, text string, randomID int64, cache *PeerCache, userID int64) (*SendResult, error) {
+	if text == "" {
+		return nil, fmt.Errorf("text required")
+	}
+	if randomID == 0 {
+		return nil, fmt.Errorf("random id required")
 	}
 	updates, err := sendWithPeerRetry(ctx, c, peer, cache, userID, func(inputPeer tg.InputPeerClass) (tg.UpdatesClass, error) {
 		return c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -68,7 +83,7 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		return nil, err
 	}
 	messageID := extractMessageID(updates)
-	// Mark the server-assigned id before returning to the MCP tool. Telegram
+	// Mark the server-assigned id before returning to the caller. Telegram
 	// subsequently echoes the same outgoing message through updates.Manager;
 	// the communication listener consumes this marker and does not interpret
 	// the programmatic send as a manual owner takeover.
@@ -80,6 +95,15 @@ func SendMessage(ctx context.Context, c *telegram.Client, peer string, text stri
 		Text:      text,
 		MessageID: messageID,
 	}, nil
+}
+
+// newRandomID draws a fresh Telegram RPC random_id from crypto/rand.
+func newRandomID() (int64, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, err
+	}
+	return int64(binary.LittleEndian.Uint64(b[:])), nil
 }
 
 // sendWithPeerRetry resolves peer via ResolvePeerCached and invokes send once

@@ -139,6 +139,12 @@ type Config struct {
 	// redeploying config even if the database is unreachable or compromised.
 	// Set via AGENT_KILL_SWITCH.
 	AgentKillSwitch bool
+	// AgentProfilePath points at the owner's YAML profile (identity, public
+	// bio, skills, preferences, restricted section) mounted into the
+	// container. Optional even with AGENT_ENABLED=true — see its call site
+	// in cmd/server/main.go for what happens when it's unset. Set via
+	// AGENT_PROFILE_PATH.
+	AgentProfilePath string
 }
 
 func Load() (*Config, error) {
@@ -164,6 +170,7 @@ func Load() (*Config, error) {
 		AgentApprovalTTL:         envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
 		AgentEnabled:             envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:          envBool("AGENT_KILL_SWITCH", false),
+		AgentProfilePath:         os.Getenv("AGENT_PROFILE_PATH"),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),

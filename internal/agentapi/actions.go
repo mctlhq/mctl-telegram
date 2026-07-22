@@ -3,6 +3,7 @@ package agentapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -228,6 +229,22 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		logHandlerErr("propose_reply", err)
 		writeJSONError(w, http.StatusInternalServerError, "propose failed")
 		return
+	}
+	if base.Status == db.ActionPendingApproval {
+		// Idempotent per action_id (see InsertOwnerNotification's doc
+		// comment) — a redelivered job that lands on the same existing
+		// action via InsertAgentAction's (job_id, action_type) conflict
+		// must not queue a second approval-request notification.
+		// internal/agent/control.Notifier (A-PR7) delivers this to Saved
+		// Messages; best-effort here — a delivery failure must not fail the
+		// propose_reply call itself, the action is already durably
+		// persisted and the owner can still `/mctl leads`/`/mctl show` to
+		// find it even if this particular ping is lost.
+		if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+			UserID: id.UserID, Kind: db.NotificationApproval, ActionID: actionID, Body: req.Text,
+		}); nerr != nil {
+			logHandlerErr("propose_reply", fmt.Errorf("queue approval notification: %w", nerr))
+		}
 	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
 	writeJSON(w, http.StatusOK, actionResponse{

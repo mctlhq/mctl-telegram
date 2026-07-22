@@ -18,7 +18,10 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gotd/contrib/middleware/ratelimit"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
+	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
+	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
@@ -119,6 +122,17 @@ func main() {
 	defer pool.Shutdown()
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
+	// Communication-agent control plane: the executor sends approved replies
+	// (crash-safely — see internal/agent/executor's package doc), the
+	// notifier delivers summaries/approval requests to Saved Messages, and
+	// the router turns the owner's /mctl commands into calls on both. Built
+	// here (not above, alongside agentListener) because all three need
+	// `pool` to actually reach Telegram — hence agentListener.Router is
+	// assigned after construction rather than passed into listener.New.
+	agentExecutor := executor.New(store, &poolSender{pool: pool}, func() bool { return cfg.AgentKillSwitch }, m)
+	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
+	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
+
 	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
 	// pool_size / pool_capacity correctly indicates "no cap" (-1) vs a real value.
 	if cfg.TelegramMaxSessions > 0 {
@@ -159,6 +173,13 @@ func main() {
 	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
 	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.
 	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL)
+	// Communication-agent executor: retries sends stuck in `executing` past
+	// their grace window (crash recovery) and sends guarded-mode actions
+	// that landed as `approved` with no owner to type /mctl approve.
+	go sweeper.AgentExecutor(ctx, agentExecutor)
+	// Communication-agent notifier: delivers pending owner_notifications
+	// (summaries, approval requests) to Saved Messages.
+	go sweeper.AgentNotifier(ctx, agentNotifier)
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -336,6 +357,20 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
+		// AGENT_PROFILE_PATH is optional even with AGENT_ENABLED=true: without
+		// it, GET /recruiters/{peer} returns 501 (see agentapi.Server.Profile's
+		// nil-safe doc comment) rather than failing startup — a deployment
+		// that hasn't finished onboarding the owner's profile yet should not
+		// be blocked from running everything else.
+		if path := cfg.AgentProfilePath; path != "" {
+			profileProvider, err := profile.Load(path)
+			if err != nil {
+				slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
+				os.Exit(1)
+			}
+			agentSrv.WithProfile(profileProvider)
+			slog.Info("agent owner profile loaded", "path", path)
+		}
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
 		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m)(agentMux))

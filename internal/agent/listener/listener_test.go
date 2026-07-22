@@ -228,3 +228,99 @@ func TestPersist_SavedCommandRouterFailureIsRetriedWithoutAuditDedup(t *testing.
 		t.Fatalf("successful command audit rows = %d, want 1", events)
 	}
 }
+
+// TestPersist_MessageEditDeniesPendingAction is A-PR7's crash-recovery
+// spec's "edit invalidates the draft" requirement: a pending_approval (or
+// proposed/approved) action for a conversation must be denied when the
+// sender edits the message the draft was built from, so a stale draft
+// answering pre-edit text can never go out unchanged.
+func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft answering the original text", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "EDIT01",
+	})
+	if err != nil {
+		t.Fatalf("seed pending action: %v", err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("action status = %q, want denied after the source message was edited", action.Status)
+	}
+
+	// The edit itself still enqueues its own job under a distinct event id,
+	// so a fresh proposal can be produced from the current text.
+	var jobCount int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs WHERE conversation_id=$1`, conv.ID).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 2 {
+		t.Fatalf("job count = %d, want 2 (original + edit)", jobCount)
+	}
+}
+
+// TestPersist_MessageEditLeavesExecutingActionAlone confirms an action
+// already `executing` (a send may be in flight) is NOT denied by an edit
+// racing it — DenyPendingActionsForConversation deliberately excludes that
+// status, see its doc comment.
+func TestPersist_MessageEditLeavesExecutingActionAlone(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft mid-send", PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, acct.userID, actionID, 999); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionExecuting {
+		t.Fatalf("action status = %q, want still executing (in-flight sends are not recalled)", action.Status)
+	}
+}

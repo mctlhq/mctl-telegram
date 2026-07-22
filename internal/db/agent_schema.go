@@ -102,6 +102,15 @@ func agentSchemaSQLite() []string {
 			policy_reasons TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'proposed',
 			executed_tg_message_id INTEGER,
+			-- send_random_id is generated and persisted BEFORE the executor issues
+			-- the MTProto send RPC (approved -> executing), not after. A crash
+			-- between the persist and the RPC, or between the RPC and recording
+			-- executed, is recovered by retrying messages.sendMessage with this
+			-- SAME random_id: Telegram dedups on it server-side, so the retry is a
+			-- safe no-op if the original send actually landed. This is what makes
+			-- the executing status a self-healing transient state instead of the
+			-- original design's permanent crash trap.
+			send_random_id INTEGER,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -271,6 +280,9 @@ func agentSchemaPG() []string {
 			policy_reasons TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'proposed',
 			executed_tg_message_id BIGINT,
+			-- see the SQLite copy of this table for send_random_id's role in
+			-- crash-safe recovery of the executing state.
+			send_random_id BIGINT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

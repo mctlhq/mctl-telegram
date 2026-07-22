@@ -188,6 +188,19 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		if _, _, err := l.Queue.Ingest(ctx, ex.Event, conv.ID); err != nil {
 			return fmt.Errorf("ingest event and job: %w", err)
 		}
+		if ex.Event.Kind == db.EventKindMessageEdit {
+			// A draft the agent already proposed from the pre-edit text must not
+			// go out unchanged — deny it and let the new job (enqueued above,
+			// carrying the edited event under its own :e<ts> event id) produce a
+			// fresh proposal from the current text. Actions already `executing`
+			// are left alone by design (see DenyPendingActionsForConversation) —
+			// deliberately not treated as an error here: a message edit racing an
+			// in-flight send is expected, not exceptional.
+			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID,
+				"source message edited"); err != nil {
+				return fmt.Errorf("deny actions for edited message: %w", err)
+			}
+		}
 		return nil
 
 	case db.EventKindOwnerOutgoing:

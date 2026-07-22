@@ -30,14 +30,18 @@ const (
 // UpdateAgentActionStatus's compare-and-set:
 //
 //	proposed → pending_approval → approved → executing → executed
-//	                            ↘ rejected            ↘ (stuck: manual retry only)
+//	                            ↘ rejected            ↘ (self-heals — see below)
 //	proposed → denied | executed (guarded-mode auto-send)
 //	pending_approval → expired (approval TTL sweep)
 //
-// `executing` is deliberately a trap state on crash: the executor moves a row
-// to executing *before* the Telegram send and to executed after it, and
-// nothing auto-retries from executing — double-messaging a human is worse
-// than not sending.
+// `executing` was originally a permanent crash trap (nothing auto-retried out
+// of it — double-messaging a human seemed worse than not sending). Revised in
+// A-PR7 (mctlhq/mctl-telegram#297): the executor now persists a Telegram
+// send_random_id on the row BEFORE issuing the RPC, so a crash-recovery sweep
+// can safely retry the SAME send with the SAME random_id — MTProto dedups on
+// it server-side, so the retry is a no-op if the original send actually
+// landed and a real (idempotent) send if it didn't. See
+// Store.ListStuckExecutingActions and internal/agent/executor.
 const (
 	ActionProposed        = "proposed"
 	ActionPendingApproval = "pending_approval"
@@ -74,6 +78,7 @@ type AgentAction struct {
 	PolicyReasons       string
 	Status              string
 	ExecutedTGMessageID int64
+	SendRandomID        int64 // 0 ⇒ not yet allocated; persisted before the send RPC, see BeginExecutingAgentAction
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -212,17 +217,18 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 		code          sql.NullString
 		jobID, convID sql.NullInt64
 		execMsgID     sql.NullInt64
+		sendRandomID  sql.NullInt64
 		payload       []byte
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, created_at, updated_at
+		        executed_tg_message_id, send_random_id, created_at, updated_at
 		   FROM agent_actions WHERE `+where,
 		args...,
 	).Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-		&execMsgID, &a.CreatedAt, &a.UpdatedAt)
+		&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentActionNotFound
 	}
@@ -233,6 +239,7 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	a.JobID = jobID.Int64
 	a.ConversationID = convID.Int64
 	a.ExecutedTGMessageID = execMsgID.Int64
+	a.SendRandomID = sendRandomID.Int64
 	if len(payload) > 0 {
 		pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 		if err != nil {
@@ -266,7 +273,13 @@ func isTerminalActionStatus(s string) bool {
 var allowedActionTransitions = map[string]map[string]struct{}{
 	ActionProposed:        {ActionPendingApproval: {}, ActionDenied: {}, ActionApproved: {}},
 	ActionPendingApproval: {ActionApproved: {}, ActionRejected: {}},
-	ActionApproved:        {ActionExecuting: {}},
+	// approved -> denied (added in A-PR7, internal/agent/executor): approval
+	// and send are not atomic, and policy is re-checked immediately before
+	// the send RPC fires (owner takeover, autopilot pause, kill switch flip,
+	// or a rate limit newly exceeded since approval). A stale approval must
+	// not bypass a deny condition that has since become true — this is the
+	// state that re-check lands on instead of proceeding to executing.
+	ActionApproved: {ActionExecuting: {}, ActionDenied: {}},
 }
 
 // ErrInvalidActionTransition is returned by UpdateAgentActionStatus when the
@@ -302,6 +315,30 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 	}
 	if err != nil {
 		return false, fmt.Errorf("update action status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// BeginExecutingAgentAction transitions an action from approved to executing
+// and persists the Telegram send_random_id in the SAME atomic UPDATE, before
+// the executor issues the actual send RPC — never after. That ordering is
+// what makes crash recovery safe: if the process dies between this call and
+// the RPC, or between the RPC and SetAgentActionExecuted, the row is left in
+// executing WITH a random_id already on it, so ListStuckExecutingActions +
+// a retry of the same send is always possible. Returns false on a lost CAS
+// race (concurrent reject, or a second executor goroutine).
+func (s *Store) BeginExecutingAgentAction(ctx context.Context, userID, id, randomID int64) (bool, error) {
+	if randomID == 0 {
+		return false, errors.New("send random id required")
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET status = $1, send_random_id = $2, updated_at = $3
+		  WHERE id = $4 AND user_id = $5 AND status = $6`,
+		ActionExecuting, randomID, time.Now().UTC(), id, userID, ActionApproved,
+	)
+	if err != nil {
+		return false, fmt.Errorf("begin executing agent action: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
@@ -347,6 +384,131 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// ListStuckExecutingActions returns actions stuck in executing whose
+// updated_at is older than grace, for the executor's crash-recovery sweep.
+// System-wide (no user scoping) and unordered beyond updated_at, matching
+// RequeueStaleAgentJobs' sweep pattern — grace exists so the sweep never
+// races a send that is still genuinely in flight in the current process
+// (BeginExecutingAgentAction stamps updated_at right before the RPC).
+func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Duration) ([]AgentAction, error) {
+	cutoff := time.Now().UTC().Add(-grace)
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
+		        payload_encrypted, policy_decision, policy_reasons, status,
+		        executed_tg_message_id, send_random_id, created_at, updated_at
+		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
+		ActionExecuting, cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list stuck executing actions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AgentAction
+	for rows.Next() {
+		var (
+			a             AgentAction
+			code          sql.NullString
+			jobID, convID sql.NullInt64
+			execMsgID     sql.NullInt64
+			sendRandomID  sql.NullInt64
+			payload       []byte
+		)
+		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
+			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
+			&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan stuck action: %w", err)
+		}
+		a.ApprovalCode = code.String
+		a.JobID = jobID.Int64
+		a.ConversationID = convID.Int64
+		a.ExecutedTGMessageID = execMsgID.Int64
+		a.SendRandomID = sendRandomID.Int64
+		if len(payload) > 0 {
+			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
+			if err != nil {
+				return nil, fmt.Errorf("open stuck action payload: %w", err)
+			}
+			a.Payload = string(pt)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DenyPendingActionsForConversation transitions every non-terminal,
+// non-executing action of a conversation to denied. Used when the source
+// message an action was derived from is edited — a draft built from text the
+// sender has since changed must not go out unchanged. Actions already
+// `executing` are deliberately left alone: the send may already be in
+// flight and cannot be safely recalled. Returns the number of rows flipped.
+func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, conversationID int64, reason string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+		  WHERE user_id = $4 AND conversation_id = $5
+		    AND status IN ($6, $7, $8)`,
+		ActionDenied, reason, time.Now().UTC(), userID, conversationID,
+		ActionProposed, ActionPendingApproval, ActionApproved,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("deny pending actions for conversation: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ListActionsByStatus returns up to limit actions in the given status,
+// oldest first, system-wide (no user scoping) — the executor's
+// ProcessApproved sweep uses it to pick up guarded-mode auto-approved
+// actions the same way RequeueStaleAgentJobs/ExpireStaleAgentActions sweep
+// other tables.
+func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit int) ([]AgentAction, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
+		        payload_encrypted, policy_decision, policy_reasons, status,
+		        executed_tg_message_id, send_random_id, created_at, updated_at
+		   FROM agent_actions WHERE status = $1 ORDER BY updated_at LIMIT $2`,
+		status, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list actions by status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AgentAction
+	for rows.Next() {
+		var (
+			a             AgentAction
+			code          sql.NullString
+			jobID, convID sql.NullInt64
+			execMsgID     sql.NullInt64
+			sendRandomID  sql.NullInt64
+			payload       []byte
+		)
+		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
+			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
+			&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan action: %w", err)
+		}
+		a.ApprovalCode = code.String
+		a.JobID = jobID.Int64
+		a.ConversationID = convID.Int64
+		a.ExecutedTGMessageID = execMsgID.Int64
+		a.SendRandomID = sendRandomID.Int64
+		if len(payload) > 0 {
+			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
+			if err != nil {
+				return nil, fmt.Errorf("open action payload: %w", err)
+			}
+			a.Payload = string(pt)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // HasAgentActionForJob reports whether at least one agent_actions row exists
@@ -560,6 +722,54 @@ type OwnerNotification struct {
 	TGMessageID int64
 	SentAt      time.Time // zero value ⇒ not sent
 	CreatedAt   time.Time
+}
+
+// ListPendingOwnerNotifications returns up to limit pending notifications,
+// oldest first, system-wide (no user scoping) — the control.Notifier's
+// delivery sweep uses it the same way other background loops in this
+// codebase scan across accounts (RequeueStaleAgentJobs,
+// ExpireStaleAgentActions), since the caller already has to resolve a
+// per-user Telegram client to actually deliver each one regardless.
+func (s *Store) ListPendingOwnerNotifications(ctx context.Context, limit int) ([]OwnerNotification, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT id, user_id, kind, action_id, body_encrypted, status, tg_message_id, sent_at, created_at
+		   FROM owner_notifications WHERE status = $1 ORDER BY created_at LIMIT $2`,
+		NotificationPending, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list pending owner notifications: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []OwnerNotification
+	for rows.Next() {
+		var (
+			n           OwnerNotification
+			actionID    sql.NullInt64
+			body        []byte
+			tgMessageID sql.NullInt64
+			sentAt      sql.NullTime
+		)
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Kind, &actionID, &body, &n.Status, &tgMessageID, &sentAt, &n.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan owner notification: %w", err)
+		}
+		n.ActionID = actionID.Int64
+		n.TGMessageID = tgMessageID.Int64
+		if sentAt.Valid {
+			n.SentAt = sentAt.Time
+		}
+		if len(body) > 0 {
+			pt, err := s.Crypt.OpenForUser(body, n.UserID)
+			if err != nil {
+				return nil, fmt.Errorf("open notification body: %w", err)
+			}
+			n.Body = string(pt)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // InsertOwnerNotification persists a pending notification and returns its
