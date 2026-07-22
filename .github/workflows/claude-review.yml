@@ -50,6 +50,7 @@ jobs:
     # than as steps inside `review` itself.
     outputs:
       ref: ${{ steps.pr-ref.outputs.ref }}
+      sha: ${{ github.event.pull_request.head.sha || steps.pr-ref.outputs.sha }}
       stale: ${{ steps.staleness.outputs.stale }}
     steps:
       # author_association alone is too coarse (MEMBER = any org member,
@@ -126,8 +127,24 @@ jobs:
     # posted right after the auto-triggered run already finished) into a
     # near-zero-cost early exit instead. Only entered after `gate` succeeds —
     # see the job-split comment above for why.
+    #
+    # Scoped to the SHA, not just the PR number — a Codex finding caught
+    # that a PR-wide group still let an OLDER commit's run cancel a NEWER
+    # commit's run: gate's staleness check is only a point-in-time snapshot,
+    # and there's an unavoidable gap between gate finishing and review
+    # actually entering the group, during which a fresh push can land and
+    # make an already-"fresh" cached result stale by the time it matters.
+    # GitHub's concurrency cancellation has no notion of "older vs newer" —
+    # it only knows "who was already in the group when a second entrant
+    # arrived" — so a PR-wide group can cancel a legitimately newer run
+    # regardless of gate's own check. Keying the group by SHA instead means
+    # two DIFFERENT commits' reviews never share a group and can never
+    # cancel each other at all; cancel-in-progress then only ever fires
+    # between two triggers for the IDENTICAL commit (the actual redundant-
+    # trigger case this was meant to solve — push immediately followed by
+    # a manual @claude review comment on that same push).
     concurrency:
-      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ needs.gate.outputs.sha }}
       cancel-in-progress: true
     permissions:
       contents: read
