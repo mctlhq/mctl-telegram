@@ -28,6 +28,18 @@ jobs:
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
+    # Bounds mid-flight duplication: pull_request (auto, on every push) and a
+    # manual '@claude review' comment on the same commit are two independent
+    # triggers for the workflow, and nothing before this stopped both runs
+    # completing in parallel. cancel-in-progress only stops the SECOND of two
+    # overlapping runs (the first may already have spent tokens/posted inline
+    # comments before cancellation lands) — paired with the "already
+    # reviewed" preflight check below, which turns the common case (comment
+    # posted right after the auto-triggered run already finished) into a
+    # near-zero-cost early exit instead.
+    concurrency:
+      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
@@ -64,7 +76,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # A push already auto-triggers a review for its own commit via the
+      # pull_request/synchronize path — a manual '@claude review' comment
+      # posted right after is only ever redundant with that, never with
+      # itself, so this check only runs on the issue_comment path. Looks for
+      # a prior COMPLETED run of this workflow against the exact same head
+      # SHA (excluding this run) — cancel-in-progress above only handles two
+      # runs racing at the same time, not a comment arriving after the
+      # auto-triggered run already finished, which was the actual pattern
+      # observed burning duplicate sessions in practice (2026-07-22).
+      - name: Skip if this commit was already reviewed
+        if: github.event_name == 'issue_comment'
+        id: dedup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head_sha=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
+          already=$(gh run list --repo "${{ github.repository }}" --workflow claude-review.yml \
+            --json headSha,conclusion,status,databaseId --limit 20 \
+            --jq '[.[] | select(.headSha == "'"$head_sha"'" and .databaseId != ${{ github.run_id }} and .status == "completed" and (.conclusion == "success" or .conclusion == "failure"))] | length > 0')
+          echo "already_reviewed=$already" >> "$GITHUB_OUTPUT"
+          if [ "$already" = "true" ]; then
+            gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" \
+              --body "Skipping — this commit ($head_sha) was already reviewed by the automatic push-triggered run. Push a new commit or re-request review if you specifically need a fresh pass."
+          fi
+
       - name: Checkout
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 1
@@ -72,6 +110,7 @@ jobs:
 
       - name: Classify PR complexity and pick model
         id: classify
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -111,19 +150,9 @@ jobs:
           echo "lines=$lines"   >> $GITHUB_OUTPUT
           echo "PR #$PR: model=$model score=$score lines=$lines"
 
-      - name: Check fallback token availability
-        id: token-check
-        run: |
-          if [ -n "$TOKEN2" ]; then
-            echo "has_fallback=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_fallback=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          TOKEN2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
-
       - name: Claude review
         id: review
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
         with:
@@ -178,9 +207,9 @@ jobs:
       - name: Check primary review actually succeeded
         # The action can report GH Actions outcome=success while the
         # underlying SDK call itself errored (e.g. instant quota-exhaustion
-        # failure) — outcome alone silently skips the fallback path below.
-        # Read the raw execution output the action always writes to confirm
-        # the run really finished cleanly.
+        # failure) — outcome alone would silently miss that. Read the raw
+        # execution output the action always writes to confirm the run
+        # really finished cleanly.
         id: review-check
         if: always()
         run: |
@@ -198,58 +227,19 @@ jobs:
             echo "failed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Reset git state before fallback
-        if: steps.review-check.outputs.failed == 'true' && steps.token-check.outputs.has_fallback == 'true'
-        run: git checkout . && git clean -fd
-
-      - name: Claude review (fallback token)
-        if: steps.review-check.outputs.failed == 'true' && steps.token-check.outputs.has_fallback == 'true'
-        uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
-          # The mctl-agents pipeline pushes review-fix commits to same-repo
-          # feat/agents-* branches as this GitHub App; without the allowlist
-          # entry the action hard-fails the whole review run on the
-          # synchronize event ("Workflow initiated by non-human actor").
-          allowed_bots: "mctl-claude-remote"
-          track_progress: true
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-
-            You are the automated code reviewer for this pull request. Review
-            the PR diff thoroughly.
-
-            Focus on:
-            - Correctness and logic errors; edge cases the change misses.
-            - Security: injection, authentication/authorization, secret
-              handling, unsafe input.
-            - Concurrency: data races, deadlocks, goroutine leaks.
-            - Error handling: ignored errors, missing context, panics.
-            - Test coverage: behaviour changed without a corresponding test.
-
-            Follow the conventions in this repository's CLAUDE.md (Go style,
-            conventional commits, English only, no emoji).
-
-            If the diff is trivial — only config/values YAML (hostname, env
-            var, image tag, resource limits, replica count), a dependency bump
-            with no logic change, docs/comments, or a one-line typo — approve
-            the PR with a one-line reason and nothing else:
-            `gh pr review ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} --approve --body "<reason>"`.
-
-            Otherwise, post each finding as an inline comment using the
-            mcp__github_inline_comment__create_inline_comment tool, prefixed
-            with a severity tag:
-            - P1 — must fix before merge (bug, security hole, data loss).
-            - P2 — should fix before merge (likely bug, missing test, unsafe
-              pattern).
-            - P3 — nice to have (style, minor nit); does not block merge.
-
-            Finish by submitting a single PR review verdict (this is the merge
-            gate — `main` requires one approving review). Include the P1/P2/P3
-            counts in the body; be concise and do not restate the diff:
-            - No P1/P2 findings (P3 nits are fine): approve —
-              `gh pr review ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} --approve --body "No P1/P2 findings (<n> P3). Good to merge."`
-            - One or more P1/P2 findings: request changes —
-              `gh pr review ${{ github.event.pull_request.number || github.event.issue.number }} --repo ${{ github.repository }} --request-changes --body "Has P1/P2 findings, changes requested: <summary>"`
-          claude_args: '--model ${{ steps.classify.outputs.model }} --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
+      # No automatic fallback-token retry: CLAUDE_CODE_OAUTH_TOKEN and
+      # CLAUDE_CODE_OAUTH_TOKEN_2 were directly observed (2026-07-22) to fail
+      # identically on the same run with "You've hit your org's monthly
+      # usage limit" ~16s apart — consistent with both drawing on the same
+      # org-wide quota, which would make an automatic second full session
+      # guaranteed to fail the same way while still burning real tokens
+      # first. Post a status comment instead and let a human decide whether
+      # to re-trigger (e.g. once the underlying cause is confirmed to be
+      # token-specific rather than quota exhaustion).
+      - name: Notify on primary review failure
+        if: steps.review-check.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number || github.event.issue.number }}" --repo "${{ github.repository }}" \
+            --body "Claude review failed to complete (see the [run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})). Not auto-retrying — re-trigger manually with \`@claude review\` once the underlying issue is resolved."
