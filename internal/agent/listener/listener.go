@@ -182,6 +182,13 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		if err != nil {
 			return fmt.Errorf("ensure conversation: %w", err)
 		}
+		// A no-op when ex.SenderAccessHash is 0 (see the method's doc
+		// comment) — every inbound message from a peer we can still resolve
+		// carries a usable hash, so this reaches a working value within one
+		// exchange even for a conversation that predates this fix.
+		if err := l.Store.SetConversationPeerAccessHash(ctx, acct.userID, ex.Event.ChatTGID, ex.SenderAccessHash); err != nil {
+			return fmt.Errorf("set conversation peer access hash: %w", err)
+		}
 		if ex.Event.Kind == db.EventKindMessageEdit {
 			// Must run BEFORE Queue.Ingest below, not after: Ingest publishes
 			// the new job as immediately claimable, and Ingest/this deny are

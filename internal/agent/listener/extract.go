@@ -26,6 +26,14 @@ type Extracted struct {
 	// outgoing /mctl command in Saved Messages. Ordinary Saved Messages notes
 	// are never retained by the agent listener.
 	SavedCommandText string
+	// SenderAccessHash is the sender's MTProto access_hash, captured from
+	// the update's entity data (ents.Users), when this is an inbound private
+	// message or edit. 0 when unknown or unusable — see the guard in
+	// ExtractMessage. The listener persists it onto the conversation row
+	// (Store.SetConversationPeerAccessHash) so the executor can build a
+	// working InputPeerUser later: messages.* RPCs reject a zero-access-hash
+	// peer with PEER_ID_INVALID.
+	SenderAccessHash int64
 }
 
 // eventIDForMessage builds the deterministic dedup key for a message-bearing
@@ -107,7 +115,8 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 	if from, ok := msg.FromID.(*tg.PeerUser); ok {
 		senderID = from.UserID
 	}
-	if u, ok := ents.Users[senderID]; ok && u.Bot {
+	senderUser, hasSenderUser := ents.Users[senderID]
+	if hasSenderUser && senderUser.Bot {
 		return Extracted{}, false
 	}
 
@@ -123,9 +132,23 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		SenderTGID: senderID,
 		MessageID:  int64(msg.ID),
 		Body:       msg.Message,
-		Meta:       senderMeta(ents.Users[senderID]),
+		Meta:       senderMeta(senderUser),
 	}
-	return Extracted{Event: ev}, true
+	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser)}, true
+}
+
+// senderAccessHash extracts a usable access_hash from the sender's entity,
+// or 0 if there is none. Matches internal/telegram/messages.go's
+// seedPeerCache guard: a "min" user's access_hash
+// (https://core.telegram.org/api/min) is valid only for limited contexts
+// (e.g. profile photos), never for messages.* RPCs, which still return
+// PEER_ID_INVALID for one — so a min user's hash is treated the same as no
+// hash at all, rather than persisted and later trusted.
+func senderAccessHash(u *tg.User, ok bool) int64 {
+	if !ok || u == nil || u.Min {
+		return 0
+	}
+	return u.AccessHash
 }
 
 func editDate(msg *tg.Message, isEdit bool) int {

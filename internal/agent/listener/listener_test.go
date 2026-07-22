@@ -79,6 +79,31 @@ func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	}
 }
 
+// TestOnMessage_PersistsPeerAccessHash guards against the P1 found in
+// round-4 review: without this, the executor's send path always built a
+// zero-access-hash InputPeerUser and every reply failed with
+// PEER_ID_INVALID. An incoming message's entity data is the only place this
+// hash is ever available, so the listener must capture and persist it onto
+// the conversation row.
+func TestOnMessage_PersistsPeerAccessHash(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", AccessHash: 555111333})
+
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.PeerAccessHash != 555111333 {
+		t.Fatalf("PeerAccessHash = %d, want 555111333", conv.PeerAccessHash)
+	}
+}
+
 func installFailingJobTrigger(t *testing.T, store *db.Store) {
 	t.Helper()
 	if _, err := store.DB.ExecContext(context.Background(), `

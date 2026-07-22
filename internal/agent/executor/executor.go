@@ -36,16 +36,21 @@ var ErrApprovalCodeNotFound = errors.New("approval code not found")
 var ErrLostRace = errors.New("action state changed concurrently")
 
 // Sender is the narrow interface the executor needs to actually deliver a
-// reply. Implemented in cmd/server/main.go over telegram.ClientPool +
-// telegram.SendMessageWithRandomID; kept as an interface here so this
+// reply. Implemented in cmd/server/agentwiring.go over telegram.ClientPool +
+// telegram.SendToInputPeerWithRandomID; kept as an interface here so this
 // package never imports internal/telegram directly and stays trivially
 // testable with a fake.
 type Sender interface {
 	// SendWithRandomID delivers text to peerTGID on behalf of userID using
 	// EXACTLY randomID as the MTProto random_id (never generated internally
 	// — see the package doc for why that matters for crash recovery).
+	// peerAccessHash is the conversation's stored Conversation.PeerAccessHash
+	// — messages.* RPCs reject an InputPeerUser carrying a zero access_hash
+	// with PEER_ID_INVALID, so a Sender implementation must build the peer
+	// directly from this value rather than re-resolving the bare peerTGID
+	// through a lookup that has no way to recover a hash it was never given.
 	// Returns the server-assigned Telegram message id.
-	SendWithRandomID(ctx context.Context, userID, peerTGID, randomID int64, text string) (int64, error)
+	SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error)
 }
 
 // RandomIDSource abstracts random_id generation so tests can supply
@@ -237,7 +242,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
 		text = text + sep + profile.DisclosureText
 	}
-	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, randomID, text)
+	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, randomID, text)
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
 		// will retry the identical send once the grace window elapses. Do NOT
@@ -369,7 +374,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if profile.DisclosureText != "" {
 		text = text + policy.DisclosureSep + profile.DisclosureText
 	}
-	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, action.SendRandomID, text)
+	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, action.SendRandomID, text)
 	if err != nil {
 		return fmt.Errorf("retry send: %w", err)
 	}

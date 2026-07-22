@@ -3,31 +3,37 @@ package main
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // poolSender adapts telegram.ClientPool to executor.Sender: borrow the
-// account's pooled MTProto client, resolve the conversation's peer by
-// Telegram id, and send with the caller-supplied random_id (crash-recovery
-// dedup — see internal/agent/executor's package doc). Peers are addressed
-// as "user:<id>" — communication-agent conversations are private-user chats
-// only, matching internal/telegram.ResolvePeer's supported forms.
+// account's pooled MTProto client and send with the caller-supplied
+// peerAccessHash and random_id (crash-recovery dedup — see
+// internal/agent/executor's package doc). Builds the InputPeerUser directly
+// from (peerTGID, peerAccessHash) rather than going through
+// telegram.ResolvePeer's string-based path: ResolvePeer has no way to
+// recover an access_hash for a bare "user:<id>" spec (it returns a
+// zero-hash peer, which MTProto's messages.* RPCs reject with
+// PEER_ID_INVALID), whereas the conversation row already carries a real one
+// captured by the listener from the peer's own incoming messages — see
+// db.Store.SetConversationPeerAccessHash.
 type poolSender struct {
 	pool *telegram.ClientPool
 }
 
-func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, randomID int64, text string) (int64, error) {
+func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error) {
 	var messageID int
 	err := s.pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
-		res, err := telegram.SendMessageWithRandomID(ctx, c, "user:"+strconv.FormatInt(peerTGID, 10), text, randomID, nil, userID)
+		peer := &tg.InputPeerUser{UserID: peerTGID, AccessHash: peerAccessHash}
+		id, err := telegram.SendToInputPeerWithRandomID(ctx, c, userID, peer, text, randomID)
 		if err != nil {
 			return err
 		}
-		messageID = res.MessageID
+		messageID = id
 		return nil
 	})
 	if err != nil {

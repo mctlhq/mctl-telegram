@@ -16,14 +16,26 @@ import (
 // peer from the conversation row (never from model output), and the owner
 // notifier targets InputPeerSelf, so neither has a peer string to resolve.
 func SendToInputPeer(ctx context.Context, c *telegram.Client, userID int64, peer tg.InputPeerClass, text string) (int, error) {
-	if text == "" {
-		return 0, fmt.Errorf("text required")
-	}
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return 0, err
 	}
 	randomID := int64(binary.LittleEndian.Uint64(b[:]))
+	return SendToInputPeerWithRandomID(ctx, c, userID, peer, text, randomID)
+}
+
+// SendToInputPeerWithRandomID is SendToInputPeer's always-real-send path with
+// a caller-supplied random_id instead of one generated internally — the
+// executor's crash-recovery counterpart to SendMessageWithRandomID in
+// send.go (same rationale: persist random_id before the RPC, retry with the
+// identical id after a crash, rely on MTProto's server-side dedup).
+func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID int64, peer tg.InputPeerClass, text string, randomID int64) (int, error) {
+	if text == "" {
+		return 0, fmt.Errorf("text required")
+	}
+	if randomID == 0 {
+		return 0, fmt.Errorf("random id required")
+	}
 	updates, err := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  text,

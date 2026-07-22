@@ -235,9 +235,15 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 // independent of Telegram's own dialog list. The (user_id, peer_tg_id) pair is
 // unique; peers are only ever private users in v1.
 type Conversation struct {
-	UserID           int64
-	ID               int64
-	PeerTGID         int64
+	UserID   int64
+	ID       int64
+	PeerTGID int64
+	// PeerAccessHash is the MTProto access_hash Telegram returned for this
+	// peer, captured from an incoming update's entity data (see
+	// SetConversationPeerAccessHash). 0 ⇒ unknown — messages.* RPCs reject a
+	// zero-access-hash InputPeerUser with PEER_ID_INVALID, so the executor
+	// must have a nonzero value here before it can send at all.
+	PeerAccessHash   int64
 	PeerUsername     string
 	PeerDisplayName  string
 	State            string
@@ -291,11 +297,11 @@ func (s *Store) getConversation(ctx context.Context, where string, args ...any) 
 		lastIn, lastOut   sql.NullTime
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, state,
+		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
 		        autonomous_turns, last_incoming_at, last_agent_reply_at, created_at, updated_at
 		   FROM conversations WHERE `+where,
 		args...,
-	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.State,
+	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
 		&c.AutonomousTurns, &lastIn, &lastOut, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConversationNotFound
@@ -312,6 +318,29 @@ func (s *Store) getConversation(ctx context.Context, where string, args ...any) 
 		c.LastAgentReplyAt = lastOut.Time
 	}
 	return &c, nil
+}
+
+// SetConversationPeerAccessHash persists the MTProto access_hash Telegram
+// returned for this peer, captured from an incoming update's entity data
+// (internal/agent/listener.ExtractMessage). messages.* RPCs reject an
+// InputPeerUser carrying a zero access_hash with PEER_ID_INVALID — see
+// internal/telegram/messages.go's seedPeerCache doc comment for the
+// underlying MTProto rule — so the executor cannot send at all until this
+// has run at least once for a conversation. accessHash == 0 is a no-op: the
+// listener does not always have a usable one (e.g. a Telegram "min" user's
+// hash works only for limited contexts, never for messages.*), and a zero
+// value must never overwrite an already-known good hash.
+func (s *Store) SetConversationPeerAccessHash(ctx context.Context, userID, peerTGID, accessHash int64) error {
+	if accessHash == 0 {
+		return nil
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE conversations SET peer_access_hash = $1, updated_at = $2 WHERE user_id = $3 AND peer_tg_id = $4`,
+		accessHash, time.Now().UTC(), userID, peerTGID,
+	); err != nil {
+		return fmt.Errorf("set conversation peer access hash: %w", err)
+	}
+	return nil
 }
 
 // SetConversationState transitions a conversation to the given state.

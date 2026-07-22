@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // Agent domain schema (communication agent, M6). These tables back the
@@ -26,22 +27,42 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	} else {
 		stmts = agentSchemaSQLite()
 	}
+	// Three phases, not one straight loop: CREATE TABLE, then the
+	// addColumnIfMissing ALTER patches below, then every CREATE INDEX.
+	//
+	// The ALTER patches need their target tables to already exist — a
+	// genuinely fresh database has no tables at all before phase 1 runs —
+	// so they cannot simply run before the whole stmts list. But some of
+	// this file's CREATE INDEX statements reference a column
+	// (job_leads.job_id, in particular) that only exists on a pre-A-PR6
+	// database once its ALTER has actually run: round-4 review caught a
+	// version of this function where CREATE INDEX ON job_leads(job_id) sat
+	// in the same single pass as the CREATE TABLE statements, ahead of the
+	// ALTER that would have added the column on such a database, so it
+	// failed outright on upgrade. Splitting CREATE TABLE from CREATE INDEX
+	// and running the ALTERs in between satisfies both constraints at once.
+	var tableStmts, indexStmts []string
 	for _, s := range stmts {
+		if strings.HasPrefix(strings.TrimSpace(s), "CREATE TABLE") {
+			tableStmts = append(tableStmts, s)
+		} else {
+			indexStmts = append(indexStmts, s)
+		}
+	}
+	for _, s := range tableStmts {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
 		}
 	}
+
 	// Idempotent ALTER passes for columns added after the tables above first
 	// shipped — CREATE TABLE IF NOT EXISTS is a no-op against a deployment
-	// that already has the table (agent_actions and job_leads have both been
-	// live since earlier communication-agent PRs), so a column added later
-	// needs the same addColumnIfMissing treatment db.go's Migrate uses for
-	// the core tables, or it silently never appears on an existing database.
+	// that already has the table, so a column added later needs the same
+	// addColumnIfMissing treatment db.go's Migrate uses for the core
+	// tables, or it silently never appears on an existing database.
 	//
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST /jobs/{id}/complete
-	// can recognize a lead-only result. Missed the ALTER pass in that PR —
-	// closed here rather than in a separate one-line follow-up PR, since it's
-	// the same bug class this comment is already explaining.
+	// can recognize a lead-only result.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
 		return err
 	}
@@ -56,6 +77,19 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	// lease.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "claimed_until", "TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
+	}
+	// conversations.peer_access_hash: added in A-PR7 round-4 review fixes —
+	// see Store.SetConversationPeerAccessHash's doc comment for why the
+	// executor needs it to send at all (MTProto rejects a zero-access-hash
+	// InputPeerUser with PEER_ID_INVALID).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+
+	for _, s := range indexStmts {
+		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
+		}
 	}
 	return nil
 }
@@ -96,6 +130,7 @@ func agentSchemaSQLite() []string {
 			peer_tg_id INTEGER NOT NULL,
 			peer_username TEXT,
 			peer_display_name TEXT,
+			peer_access_hash INTEGER NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT 'active',
 			autonomous_turns INTEGER NOT NULL DEFAULT 0,
 			last_incoming_at DATETIME,
@@ -275,6 +310,7 @@ func agentSchemaPG() []string {
 			peer_tg_id BIGINT NOT NULL,
 			peer_username TEXT,
 			peer_display_name TEXT,
+			peer_access_hash BIGINT NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT 'active',
 			autonomous_turns INT NOT NULL DEFAULT 0,
 			last_incoming_at TIMESTAMPTZ,

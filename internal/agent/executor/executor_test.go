@@ -22,14 +22,14 @@ type fakeSender struct {
 }
 
 type sendCall struct {
-	userID, peerTGID, randomID int64
-	text                       string
+	userID, peerTGID, peerAccessHash, randomID int64
+	text                                       string
 }
 
-func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, randomID int64, text string) (int64, error) {
+func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, sendCall{userID, peerTGID, randomID, text})
+	f.calls = append(f.calls, sendCall{userID, peerTGID, peerAccessHash, randomID, text})
 	if f.failNext > 0 {
 		f.failNext--
 		return 0, errSendFailed
@@ -297,6 +297,32 @@ func (f *fakeRestrictedChecker) MatchRestricted(string) (string, bool, bool, boo
 // found in review: a successful send never called InsertConversationMessage,
 // so recentAgentSends (the rate-limit input in internal/agentapi) always saw
 // zero prior agent sends and max_msgs_per_minute never actually triggered.
+// TestExecutor_Approve_PassesConversationPeerAccessHash guards against the
+// P1 found in round-4 review: PEER_ID_INVALID on every executor send because
+// the send path built a zero-access-hash InputPeerUser instead of using the
+// conversation's stored one. The executor's job is done once it hands the
+// conversation's PeerAccessHash to Sender — the pool/telegram-layer wiring
+// that turns it into an actual InputPeerUser is verified separately in
+// internal/telegram.
+func TestExecutor_Approve_PassesConversationPeerAccessHash(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	if err := store.SetConversationPeerAccessHash(ctx, uid, conv.PeerTGID, 987654321); err != nil {
+		t.Fatalf("set access hash: %v", err)
+	}
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+	if sender.calls[0].peerAccessHash != 987654321 {
+		t.Fatalf("peerAccessHash = %d, want 987654321 (the conversation's stored hash)", sender.calls[0].peerAccessHash)
+	}
+}
+
 func TestExecutor_Approve_RecordsConversationHistory(t *testing.T) {
 	exec, _, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
