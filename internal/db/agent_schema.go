@@ -51,6 +51,12 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_random_id", "BIGINT", "INTEGER"); err != nil {
 		return err
 	}
+	// owner_notifications.claimed_until: added in A-PR7 round-3 review fixes —
+	// see Store.ClaimOwnerNotification's doc comment for why delivery needs a
+	// lease.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "claimed_until", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -178,6 +184,7 @@ func agentSchemaSQLite() []string {
 			status TEXT NOT NULL DEFAULT 'pending',
 			tg_message_id INTEGER,
 			sent_at DATETIME,
+			claimed_until DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		// One notification per action: a redelivered job whose action insert
@@ -350,6 +357,7 @@ func agentSchemaPG() []string {
 			status TEXT NOT NULL DEFAULT 'pending',
 			tg_message_id BIGINT,
 			sent_at TIMESTAMPTZ,
+			claimed_until TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		// One notification per action: a redelivered job whose action insert

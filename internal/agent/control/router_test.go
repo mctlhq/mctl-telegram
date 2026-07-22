@@ -28,12 +28,17 @@ func (f *fakeApprover) Reject(_ context.Context, _ int64, code string) error {
 }
 
 // fakeSelfSender records every Saved Messages reply instead of touching a
-// real MTProto client.
+// real MTProto client. err, when set, makes every SendToSelf call fail
+// instead — notifier_test.go's delivery-failure tests use this.
 type fakeSelfSender struct {
 	sent []string
+	err  error
 }
 
 func (f *fakeSelfSender) SendToSelf(_ context.Context, _ int64, text string) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
 	f.sent = append(f.sent, text)
 	return int64(len(f.sent)), nil
 }

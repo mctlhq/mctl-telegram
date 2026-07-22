@@ -15,6 +15,7 @@ package profile
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v2"
@@ -72,10 +73,79 @@ func (p *Provider) Reload() error {
 	if err := yaml.Unmarshal(raw, &d); err != nil {
 		return fmt.Errorf("parse profile %s: %w", p.path, err)
 	}
+	normalizeData(&d)
 	p.mu.Lock()
 	p.data = d
 	p.mu.Unlock()
 	return nil
+}
+
+// normalizeData recursively converts every map[interface{}]interface{} that
+// yaml.v2 produces for nested YAML objects into map[string]interface{} —
+// encoding/json cannot marshal the former at all, so a profile with any
+// nested object under identity/public_profile/preferences (not just flat
+// key: value pairs) would make GET /recruiters/{peer}'s writeJSON silently
+// emit a truncated body once it hit the unmarshalable value.
+func normalizeData(d *Data) {
+	d.Identity = normalizeMap(d.Identity)
+	d.PublicProfile = normalizeMap(d.PublicProfile)
+	d.Preferences = normalizeMap(d.Preferences)
+	for k, f := range d.Restricted {
+		f.Value = normalizeValue(f.Value)
+		d.Restricted[k] = f
+	}
+}
+
+func normalizeMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	for k, v := range m {
+		m[k] = normalizeValue(v)
+	}
+	return m
+}
+
+func normalizeValue(v any) any {
+	switch vv := v.(type) {
+	case map[interface{}]interface{}:
+		out := make(map[string]any, len(vv))
+		for k, val := range vv {
+			out[fmt.Sprint(k)] = normalizeValue(val)
+		}
+		return out
+	case map[string]interface{}:
+		return normalizeMap(vv)
+	case []interface{}:
+		for i, val := range vv {
+			vv[i] = normalizeValue(val)
+		}
+		return vv
+	default:
+		return v
+	}
+}
+
+// MatchRestricted reports the first restricted-section entry (if any) whose
+// value appears verbatim in text — the executor's send-time gate for
+// never_auto_send/approval_required, since the DB-backed policy engine
+// (internal/agent/policy) has no notion of this YAML-only concept. Only
+// string-valued restricted fields can match; a numeric or structured value
+// (e.g. current_salary: 145000) never appears character-for-character in a
+// natural-language draft the same way, so matching would be unreliable at
+// best — such fields still gate through RestrictedField for any caller that
+// checks by key rather than by content.
+func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for k, f := range p.data.Restricted {
+		s, ok := f.Value.(string)
+		if !ok || s == "" || !strings.Contains(text, s) {
+			continue
+		}
+		return k, f.NeverAutoSend, f.ApprovalRequired, true
+	}
+	return "", false, false, false
 }
 
 // PublicProfile implements agentapi.OwnerProfileProvider. peerTGID is

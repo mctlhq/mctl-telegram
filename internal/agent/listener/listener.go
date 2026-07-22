@@ -182,24 +182,32 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		if err != nil {
 			return fmt.Errorf("ensure conversation: %w", err)
 		}
+		if ex.Event.Kind == db.EventKindMessageEdit {
+			// Must run BEFORE Queue.Ingest below, not after: Ingest publishes
+			// the new job as immediately claimable, and Ingest/this deny are
+			// two separate transactions, not one atomic unit. Denying AFTER
+			// publishing left a window where a poller could claim that job,
+			// propose a fresh (correctly-edited) reply, and have this same
+			// deny call catch that brand-new action too — ordering, not a
+			// synchronization primitive, is what closes the window. A draft
+			// the agent already proposed from the pre-edit text must not go
+			// out unchanged — deny it and let the new job (enqueued below,
+			// carrying the edited event under its own :e<ts> event id)
+			// produce a fresh proposal from the current text. Actions
+			// already `executing` are left alone by design (see
+			// DenyPendingActionsForConversation) — deliberately not treated
+			// as an error here: a message edit racing an in-flight send is
+			// expected, not exceptional.
+			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID,
+				"source message edited"); err != nil {
+				return fmt.Errorf("deny actions for edited message: %w", err)
+			}
+		}
 		// Queue.Ingest atomically commits the event, job, and conversation's
 		// last_incoming_at timestamp. Duplicate gotd redeliveries are a no-op and
 		// therefore cannot make an old conversation look newly active.
 		if _, _, err := l.Queue.Ingest(ctx, ex.Event, conv.ID); err != nil {
 			return fmt.Errorf("ingest event and job: %w", err)
-		}
-		if ex.Event.Kind == db.EventKindMessageEdit {
-			// A draft the agent already proposed from the pre-edit text must not
-			// go out unchanged — deny it and let the new job (enqueued above,
-			// carrying the edited event under its own :e<ts> event id) produce a
-			// fresh proposal from the current text. Actions already `executing`
-			// are left alone by design (see DenyPendingActionsForConversation) —
-			// deliberately not treated as an error here: a message edit racing an
-			// in-flight send is expected, not exceptional.
-			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID,
-				"source message edited"); err != nil {
-				return fmt.Errorf("deny actions for edited message: %w", err)
-			}
 		}
 		return nil
 

@@ -280,6 +280,13 @@ var allowedActionTransitions = map[string]map[string]struct{}{
 	// not bypass a deny condition that has since become true — this is the
 	// state that re-check lands on instead of proceeding to executing.
 	ActionApproved: {ActionExecuting: {}, ActionDenied: {}},
+	// executing -> denied: recoverOne's re-check (added in the same round as
+	// the approved->denied transition above) can find policy now denies a
+	// send that crashed before completing — e.g. the owner took over or hit
+	// the kill switch during the crash-recovery grace window. Recording that
+	// as denied rather than leaving the row stuck in executing forever, or
+	// silently retrying a send policy no longer allows.
+	ActionExecuting: {ActionDenied: {}},
 }
 
 // ErrInvalidActionTransition is returned by UpdateAgentActionStatus when the
@@ -834,6 +841,34 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 		return 0, fmt.Errorf("insert owner notification: %w", err)
 	}
 	return id, nil
+}
+
+// ClaimOwnerNotification atomically leases a pending notification for
+// delivery, so two replicas (or two overlapping sweep ticks in the same
+// process) racing on the same row returned by ListPendingOwnerNotifications
+// cannot both call SendToSelf for it — only the caller whose UPDATE actually
+// matches a row wins the lease and should proceed to send.
+//
+// A lease (claimed_until), not a status transition: a claim that is never
+// released (the process crashes between winning it and calling
+// MarkOwnerNotificationSent/Failed) simply expires and becomes claimable
+// again on a later sweep, rather than leaving the row permanently invisible
+// to every future ListPendingOwnerNotifications scan the way moving it to a
+// dedicated "sending" status would without a separate stuck-row sweep. This
+// mirrors the visibility-timeout pattern ClaimAgentJobs already uses.
+func (s *Store) ClaimOwnerNotification(ctx context.Context, userID, id int64, lease time.Duration) (bool, error) {
+	now := time.Now().UTC()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET claimed_until = $1
+		  WHERE id = $2 AND user_id = $3 AND status = $4
+		    AND (claimed_until IS NULL OR claimed_until < $5)`,
+		now.Add(lease), id, userID, NotificationPending, now,
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim owner notification: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // MarkOwnerNotificationSent records a successful Saved Messages delivery.

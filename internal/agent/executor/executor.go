@@ -52,12 +52,29 @@ type Sender interface {
 // deterministic values without depending on crypto/rand timing.
 type RandomIDSource func() (int64, error)
 
+// RestrictedFieldChecker exposes the owner's YAML-configured restricted
+// fields (never_auto_send / approval_required — see internal/agent/profile)
+// so the executor can refuse to send a payload that echoes one, regardless
+// of what the DB-backed policy engine decided: policy.Evaluate knows nothing
+// about this profile, so this is the ONLY enforcement point for those two
+// markers. An interface here so this package does not import
+// internal/agent/profile, matching Sender's rationale.
+type RestrictedFieldChecker interface {
+	// MatchRestricted reports the first restricted field (if any) whose
+	// value appears verbatim in text.
+	MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool)
+}
+
 // Executor holds the dependencies every method needs.
 type Executor struct {
 	Store       *db.Store
 	Sender      Sender
 	GlobalKill  func() bool // reads config.Config.AgentKillSwitch at call time, not a snapshot
 	NewRandomID RandomIDSource
+	// Profile is optional (nil ⇒ no restricted-field enforcement, matching
+	// AGENT_PROFILE_PATH being optional — see cmd/server/main.go). When set,
+	// every send checks the payload against it before the RPC fires.
+	Profile RestrictedFieldChecker
 	// StuckGrace bounds RecoverStuck's sweep — an action must have sat in
 	// executing with no update for at least this long before it is assumed
 	// crashed rather than genuinely in flight in this same process.
@@ -82,6 +99,11 @@ func New(store *db.Store, sender Sender, globalKill func() bool, m *metrics.Regi
 // takeover, autopilot pause, kill switch, a rate limit newly exceeded) and,
 // if still allowed, sends immediately.
 func (e *Executor) Approve(ctx context.Context, userID int64, code string) error {
+	// GetAgentActionByCode matches case-sensitively and documents that the
+	// caller normalizes (see its doc comment) — codes are always minted
+	// uppercase (approvalcode.go's alphabet), but an owner typing or pasting
+	// one by hand on a phone keyboard may not preserve that case.
+	code = strings.ToUpper(strings.TrimSpace(code))
 	action, err := e.Store.GetAgentActionByCode(ctx, userID, code)
 	if errors.Is(err, db.ErrAgentActionNotFound) {
 		return ErrApprovalCodeNotFound
@@ -100,11 +122,20 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		return ErrLostRace
 	}
 	action.Status = db.ActionApproved
+	// UpdateAgentActionStatus wrote updated_at = now() to the row but has no
+	// return value to hand that timestamp back — refresh the in-memory copy
+	// to match, or send()'s AgentApprovalLatencySeconds observation would
+	// measure from when the row entered pending_approval (however long the
+	// owner took to notice and type /mctl approve) instead of from the
+	// approval itself, wildly overstating approval-to-send latency for any
+	// draft that sat waiting for a while.
+	action.UpdatedAt = time.Now().UTC()
 	return e.send(ctx, *action)
 }
 
 // Reject is called for an owner's `/mctl reject <code>`.
 func (e *Executor) Reject(ctx context.Context, userID int64, code string) error {
+	code = strings.ToUpper(strings.TrimSpace(code))
 	action, err := e.Store.GetAgentActionByCode(ctx, userID, code)
 	if errors.Is(err, db.ErrAgentActionNotFound) {
 		return ErrApprovalCodeNotFound
@@ -183,6 +214,12 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
+	if reason, blocked := e.restrictedFieldBlocks(action); blocked {
+		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+			return fmt.Errorf("deny restricted-field payload: %w", err)
+		}
+		return fmt.Errorf("owner profile blocks send: %s", reason)
+	}
 
 	randomID, err := e.NewRandomID()
 	if err != nil {
@@ -221,13 +258,30 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// side effects below.
 		return nil
 	}
-	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
-		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
-	}
+	e.recordSent(ctx, action, tgMessageID, text)
 	if e.m != nil {
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
+}
+
+// recordSent does the bookkeeping every successful send needs, whether it
+// came from send() or recoverOne(): turn budget, and — added in review —
+// the conversation_messages row itself. Without the latter,
+// recentAgentSends (internal/agentapi's rate-limit input) never sees the
+// agent's own sends, so max_msgs_per_minute silently never triggers; the
+// listener deliberately consumes the Telegram-side echo of this exact send
+// (see notifyAgentSent) so nothing else in this codebase records it.
+func (e *Executor) recordSent(ctx context.Context, action db.AgentAction, tgMessageID int64, sentText string) {
+	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
+		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
+	}
+	if _, err := e.Store.InsertConversationMessage(ctx, action.UserID, db.ConversationMessage{
+		ConversationID: action.ConversationID, Direction: db.DirectionAgentOutgoing,
+		TGMessageID: tgMessageID, Body: sentText,
+	}); err != nil {
+		slog.Warn("executor: record conversation message failed", "action_id", action.ID, "err", err)
+	}
 }
 
 // RecoverStuck retries every action found stuck in executing past
@@ -279,6 +333,38 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
+	// Re-check policy and the restricted-field gate before retrying, exactly
+	// like send() does before its first attempt — the crash that left this
+	// row in executing may have happened BEFORE the original RPC ever
+	// reached Telegram, so this retry can be the first real delivery, not a
+	// dedup no-op. A takeover, autopilot pause, or kill-switch flip during
+	// the grace window must be able to stop that first real delivery the
+	// same way it would have stopped a fresh send. Denying here when the
+	// original attempt actually DID land is a bookkeeping mismatch only —
+	// nothing un-sends a message that already reached the peer — but that
+	// mismatch is strictly safer than skipping the deny check and letting a
+	// vetoed reply out through the recovery path alone.
+	result := policy.Evaluate(policy.Input{
+		Profile:      *profile,
+		Conversation: *conv,
+		Action: policy.Action{
+			Type: action.ActionType, Intent: action.Intent, Text: action.Payload, PeerTGID: conv.PeerTGID,
+		},
+		GlobalKill: e.GlobalKill(),
+		Now:        time.Now(),
+	})
+	if result.Decision == policy.Deny {
+		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+			return fmt.Errorf("deny stale approval during recovery: %w", err)
+		}
+		return fmt.Errorf("policy denies at recovery time: %s", strings.Join(result.Reasons, "; "))
+	}
+	if reason, blocked := e.restrictedFieldBlocks(action); blocked {
+		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
+		}
+		return fmt.Errorf("owner profile blocks recovery send: %s", reason)
+	}
 	text := action.Payload
 	if profile.DisclosureText != "" {
 		text = text + policy.DisclosureSep + profile.DisclosureText
@@ -299,18 +385,42 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		// already recorded.
 		return nil
 	}
-	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
-		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
-	}
+	// A recovery send IS the completion of a previously-approved action — it
+	// should count the same way send()'s does, not be silently excluded.
+	// Crashed sends are exactly the cases whose latency is most likely to be
+	// anomalously high, so omitting them would bias the metric toward
+	// looking healthier than it is.
+	e.recordSent(ctx, action, tgMessageID, text)
 	if e.m != nil {
-		// A recovery send IS the completion of a previously-approved action —
-		// it should count in the same histogram as send()'s observation, not
-		// be silently excluded. Crashed sends are exactly the cases whose
-		// latency is most likely to be anomalously high, so omitting them
-		// would bias the metric toward looking healthier than it is.
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
+}
+
+// restrictedFieldBlocks reports whether action's payload must be blocked by
+// the owner's restricted-field markers (internal/agent/profile), which the
+// DB-backed policy engine has no notion of. never_auto_send always blocks —
+// not even an owner-approved reply may include it verbatim, only the owner
+// typing it themselves satisfies that marker, and this executor never sends
+// anything the owner typed directly. approval_required only blocks when the
+// action never actually went through a human's /mctl approve: PolicyAllow
+// means propose_reply's own policy auto-approved it in guarded mode with no
+// owner ever seeing the draft; PolicyRequireApproval means it did.
+func (e *Executor) restrictedFieldBlocks(action db.AgentAction) (reason string, blocked bool) {
+	if e.Profile == nil {
+		return "", false
+	}
+	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(action.Payload)
+	if !matched {
+		return "", false
+	}
+	if neverAutoSend {
+		return fmt.Sprintf("payload echoes never_auto_send restricted field %q", key), true
+	}
+	if approvalRequired && action.PolicyDecision != db.PolicyRequireApproval {
+		return fmt.Sprintf("payload echoes approval_required restricted field %q without owner review", key), true
+	}
+	return "", false
 }
 
 // defaultRandomID draws a fresh Telegram RPC random_id from crypto/rand.

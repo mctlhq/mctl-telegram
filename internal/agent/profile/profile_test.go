@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +126,94 @@ func TestPublicProfile_EmptySectionsOmitted(t *testing.T) {
 	}
 	if _, ok := out["identity"]; !ok {
 		t.Fatalf("identity section missing: %+v", out)
+	}
+}
+
+// TestPublicProfile_NestedYAMLMapsAreJSONMarshalable guards against the P2
+// found in review: yaml.v2 decodes a nested object into any as
+// map[interface{}]interface{}, which encoding/json cannot marshal at all —
+// GET /recruiters/{peer} would write a 200 status and then silently emit a
+// truncated body the moment its json.Encoder hit that value. A profile with
+// nested objects under identity/public_profile/preferences must produce
+// output that actually round-trips through json.Marshal.
+func TestPublicProfile_NestedYAMLMapsAreJSONMarshalable(t *testing.T) {
+	const nestedYAML = `
+identity:
+  name: "Jane Doe"
+  links:
+    linkedin: "https://linkedin.com/in/janedoe"
+    github: "https://github.com/janedoe"
+preferences:
+  locations:
+    - remote
+    - "Berlin, DE"
+  compensation:
+    currency: USD
+    range:
+      min: 140000
+      max: 180000
+`
+	path := writeTestProfile(t, nestedYAML)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	out, err := p.PublicProfile(0)
+	if err != nil {
+		t.Fatalf("public profile: %v", err)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal public profile: %v (nested YAML maps not normalized)", err)
+	}
+	var roundTripped map[string]any
+	if err := json.Unmarshal(b, &roundTripped); err != nil {
+		t.Fatalf("unmarshal round-trip: %v", err)
+	}
+	identity, ok := roundTripped["identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("identity missing or wrong type after round-trip: %+v", roundTripped)
+	}
+	links, ok := identity["links"].(map[string]any)
+	if !ok || links["github"] != "https://github.com/janedoe" {
+		t.Fatalf("nested links not preserved: %+v", identity)
+	}
+}
+
+// TestMatchRestricted_FindsValueInText and its "no match" counterpart cover
+// the executor's send-time gate: a restricted field's string value appearing
+// verbatim in a proposed reply must be caught regardless of never_auto_send
+// vs approval_required, and an unrelated draft must not false-positive.
+func TestMatchRestricted_FindsValueInText(t *testing.T) {
+	path := writeTestProfile(t, testYAML)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	key, neverAutoSend, approvalRequired, matched := p.MatchRestricted(
+		"Sure, here are my references: available on request, contact via email")
+	if !matched {
+		t.Fatal("expected a match on the references restricted field")
+	}
+	if key != "references" {
+		t.Fatalf("key = %q, want references", key)
+	}
+	if !neverAutoSend {
+		t.Fatal("never_auto_send = false, want true")
+	}
+	if approvalRequired {
+		t.Fatal("approval_required = true, want false for references")
+	}
+}
+
+func TestMatchRestricted_NoMatchOnUnrelatedText(t *testing.T) {
+	path := writeTestProfile(t, testYAML)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, _, _, matched := p.MatchRestricted("Happy to chat about the role!"); matched {
+		t.Fatal("expected no match on unrelated text")
 	}
 }
 

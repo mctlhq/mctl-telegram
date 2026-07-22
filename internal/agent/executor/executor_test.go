@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -277,6 +278,158 @@ func TestExecutor_RecoverStuck_RespectsGraceWindow(t *testing.T) {
 	}
 	if len(sender.calls) != 0 {
 		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+}
+
+// fakeRestrictedChecker lets tests control MatchRestricted's outcome
+// without needing a real profile.Provider/YAML file.
+type fakeRestrictedChecker struct {
+	key                             string
+	neverAutoSend, approvalRequired bool
+	matched                         bool
+}
+
+func (f *fakeRestrictedChecker) MatchRestricted(string) (string, bool, bool, bool) {
+	return f.key, f.neverAutoSend, f.approvalRequired, f.matched
+}
+
+// TestExecutor_Approve_RecordsConversationHistory guards against the P1
+// found in review: a successful send never called InsertConversationMessage,
+// so recentAgentSends (the rate-limit input in internal/agentapi) always saw
+// zero prior agent sends and max_msgs_per_minute never actually triggered.
+func TestExecutor_Approve_RecordsConversationHistory(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	msgs, err := store.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	var found bool
+	for _, m := range msgs {
+		if m.Direction == db.DirectionAgentOutgoing {
+			found = true
+			if m.TGMessageID == 0 {
+				t.Fatalf("recorded message has no tg_message_id: %+v", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no agent_outgoing conversation_messages row recorded after a successful send")
+	}
+}
+
+// TestExecutor_Approve_CodeIsCaseNormalized guards against the P2 found in
+// review: approval codes are always minted uppercase, but GetAgentActionByCode
+// matches case-sensitively — an owner's lowercase-autocapitalized paste must
+// still resolve.
+func TestExecutor_Approve_CodeIsCaseNormalized(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+
+	if err := exec.Approve(ctx, uid, strings.ToLower(code)); err != nil {
+		t.Fatalf("approve with lowercase code: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+}
+
+// TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend guards against
+// the P1 found in review: RestrictedField/MatchRestricted had no production
+// caller, so a never_auto_send value could be auto-sent (guarded mode) or
+// sent after a routine approval, despite the marker's documented meaning
+// that only the owner typing it themselves satisfies it.
+func TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.Profile = &fakeRestrictedChecker{key: "references", neverAutoSend: true, matched: true}
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "here are my references")
+
+	if err := exec.Approve(ctx, uid, code); err == nil {
+		t.Fatal("expected owner-profile-blocks error")
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
+// TestExecutor_ProcessApproved_ApprovalRequiredFieldBlocksAutoSend covers the
+// guarded-mode half of the same restricted-field gate: an approval_required
+// value must not go out through the auto-approved (no human review) path.
+func TestExecutor_ProcessApproved_ApprovalRequiredFieldBlocksAutoSend(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.Profile = &fakeRestrictedChecker{key: "current_salary", approvalRequired: true, matched: true}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "my current salary is 145000", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed approved action: %v", err)
+	}
+
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0 (approval_required field must not auto-send)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
+// TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying is the
+// crash-recovery counterpart of TestExecutor_Approve_KillSwitchDeniesAtSendTime:
+// P1 found in review — recoverOne never re-checked policy, so a kill switch
+// or takeover during the crash grace window did not stop the retry.
+func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 99); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+
+	killed := true
+	exec.GlobalKill = func() bool { return killed }
+	n, err := exec.RecoverStuck(ctx)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("recovered count = %d, want 1", n)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0 (kill switch must stop recovery too)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
 	}
 }
 

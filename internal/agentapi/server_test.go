@@ -509,6 +509,41 @@ func TestHandleRecruiterProfile_NotConfigured(t *testing.T) {
 	}
 }
 
+// fakeOwnerProfileProvider is a minimal OwnerProfileProvider for testing
+// GET /recruiters/{peer} without a real profile.Provider/YAML file.
+type fakeOwnerProfileProvider struct{}
+
+func (fakeOwnerProfileProvider) PublicProfile(int64) (map[string]any, error) {
+	return map[string]any{"identity": map[string]any{"name": "Jane Doe"}}, nil
+}
+
+// TestHandleRecruiterProfile_WrongAccountForbidden guards against the P1
+// found in review: a single process-wide profile provider was returned to
+// ANY caller with a valid aud=agent token, even though POST
+// /api/agent/token can mint one for an arbitrary target account on this
+// multi-tenant service. A worker authenticated as an unrelated account must
+// not be able to read this deployment's mounted owner profile.
+func TestHandleRecruiterProfile_WrongAccountForbidden(t *testing.T) {
+	h := newHarness(t)
+	h.srv.WithProfile(fakeOwnerProfileProvider{}, h.id.TelegramID+1) // profile belongs to a DIFFERENT account
+	rec := h.do("GET", "/recruiters/555", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestHandleRecruiterProfile_CorrectAccountAllowed is the positive
+// counterpart: the account the profile is actually scoped to must still be
+// able to read it.
+func TestHandleRecruiterProfile_CorrectAccountAllowed(t *testing.T) {
+	h := newHarness(t)
+	h.srv.WithProfile(fakeOwnerProfileProvider{}, h.id.TelegramID)
+	rec := h.do("GET", "/recruiters/555", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleSaveLead_RoundTrip(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)

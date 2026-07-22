@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -24,11 +25,33 @@ type SelfSender interface {
 type Notifier struct {
 	Store  *db.Store
 	Sender SelfSender
+	// ClaimLease bounds how long a claimed-for-delivery notification blocks
+	// a concurrent claim attempt (another replica, or an overlapping sweep
+	// tick) before it becomes claimable again — see Store.ClaimOwnerNotification.
+	ClaimLease time.Duration
+	// MaxPendingAge bounds how long a notification may keep failing delivery
+	// before it is retired (MarkOwnerNotificationFailed) instead of being
+	// retried forever. Without this, a permanently undeliverable account
+	// (e.g. a revoked owner session) accumulates enough always-failing rows
+	// in ListPendingOwnerNotifications' oldest-50 batch that the sweep never
+	// reaches a healthy account's newer notifications at all.
+	MaxPendingAge time.Duration
 }
+
+// defaultClaimLease and defaultMaxPendingAge are NewNotifier's defaults.
+// defaultClaimLease matches executor.Executor's default StuckGrace — both
+// bound "how long can one delivery attempt plausibly still be in flight
+// before we assume it died". defaultMaxPendingAge matches the approval TTL
+// default (AgentApprovalTTL) as the codebase's existing convention for "how
+// long is a day-scale undelivered thing acceptable to keep retrying".
+const (
+	defaultClaimLease    = 2 * time.Minute
+	defaultMaxPendingAge = 24 * time.Hour
+)
 
 // NewNotifier constructs a Notifier.
 func NewNotifier(store *db.Store, sender SelfSender) *Notifier {
-	return &Notifier{Store: store, Sender: sender}
+	return &Notifier{Store: store, Sender: sender, ClaimLease: defaultClaimLease, MaxPendingAge: defaultMaxPendingAge}
 }
 
 // Reply sends a short synchronous confirmation for a /mctl command — not
@@ -51,6 +74,18 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		return 0, 0, fmt.Errorf("list pending notifications: %w", err)
 	}
 	for _, notif := range notifs {
+		// Claim before sending: two replicas (or two overlapping sweep
+		// ticks) can both list the same pending row, but only one wins the
+		// lease and should actually call SendToSelf for it. A lost claim is
+		// not a failure — it means another attempt already owns this row.
+		claimed, cerr := n.Store.ClaimOwnerNotification(ctx, notif.UserID, notif.ID, n.claimLease())
+		if cerr != nil {
+			slog.Warn("notifier: claim failed", "notification_id", notif.ID, "err", cerr)
+			continue
+		}
+		if !claimed {
+			continue
+		}
 		text, ferr := n.format(ctx, notif)
 		if ferr != nil {
 			slog.Warn("notifier: format failed, marking failed", "notification_id", notif.ID, "err", ferr)
@@ -62,7 +97,20 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		}
 		msgID, serr := n.Sender.SendToSelf(ctx, notif.UserID, text)
 		if serr != nil {
-			slog.Warn("notifier: send failed, will retry next sweep", "notification_id", notif.ID, "err", serr)
+			if n.MaxPendingAge > 0 && time.Since(notif.CreatedAt) > n.MaxPendingAge {
+				// Permanently undeliverable (e.g. a revoked owner session) —
+				// retire it instead of letting it keep occupying a slot in
+				// the oldest-50 batch and starving newer, healthy accounts'
+				// notifications forever.
+				if merr := n.Store.MarkOwnerNotificationFailed(ctx, notif.UserID, notif.ID); merr != nil {
+					slog.Warn("notifier: mark failed errored", "notification_id", notif.ID, "err", merr)
+				}
+			} else {
+				slog.Warn("notifier: send failed, will retry next sweep", "notification_id", notif.ID, "err", serr)
+				// Left claimed; the lease expires on its own and the row
+				// becomes claimable again next sweep — no explicit release
+				// needed (see Store.ClaimOwnerNotification's doc comment).
+			}
 			failed++
 			continue
 		}
@@ -72,6 +120,13 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+func (n *Notifier) claimLease() time.Duration {
+	if n.ClaimLease > 0 {
+		return n.ClaimLease
+	}
+	return defaultClaimLease
 }
 
 // format renders a notification body for delivery. Approval requests need
@@ -85,6 +140,15 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 	action, err := n.Store.GetAgentAction(ctx, notif.UserID, notif.ActionID)
 	if err != nil {
 		return "", fmt.Errorf("load linked action: %w", err)
+	}
+	if action.ActionType == db.ActionTypeOwnerApproval {
+		// request_owner_approval actions (handleOwnerFacing) are inserted
+		// directly as `executed` with no approval code — they are the agent
+		// asking the owner something, not a reply draft awaiting an
+		// approve/reject code. Formatting this as "Draft reply (already
+		// resolved)" below would be actively misleading: there was never an
+		// approve/reject mechanism to resolve in the first place.
+		return fmt.Sprintf("Owner input requested:\n\n%s", action.Payload), nil
 	}
 	if action.ApprovalCode == "" {
 		// Already decided (approved/rejected/expired) between insert and

@@ -145,6 +145,15 @@ type Config struct {
 	// in cmd/server/main.go for what happens when it's unset. Set via
 	// AGENT_PROFILE_PATH.
 	AgentProfilePath string
+	// AgentProfileOwnerTGID is the Telegram id of the account
+	// AgentProfilePath's profile belongs to. mctl-telegram is multi-tenant
+	// and POST /api/agent/token can mint an aud=agent token for ANY account
+	// it hosts, not just this deployment's intended communication-agent
+	// owner — without this, GET /recruiters/{peer} would hand that owner's
+	// identity/skills/preferences to a worker authenticated as an unrelated
+	// account. Required whenever AgentProfilePath is set; ignored otherwise.
+	// Set via AGENT_PROFILE_OWNER_TG_ID.
+	AgentProfileOwnerTGID int64
 }
 
 func Load() (*Config, error) {
@@ -171,6 +180,7 @@ func Load() (*Config, error) {
 		AgentEnabled:             envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:          envBool("AGENT_KILL_SWITCH", false),
 		AgentProfilePath:         os.Getenv("AGENT_PROFILE_PATH"),
+		AgentProfileOwnerTGID:    envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
@@ -313,6 +323,18 @@ func envInt(key string, def int) int {
 		return def
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func envInt64(key string, def int64) int64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return def
 	}

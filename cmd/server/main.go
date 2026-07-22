@@ -137,6 +137,29 @@ func main() {
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
 
+	// AGENT_PROFILE_PATH is optional even with AGENT_ENABLED=true: without
+	// it, GET /recruiters/{peer} returns 501 (see agentapi.Server.Profile's
+	// nil-safe doc comment) and the executor's restricted-field gate is
+	// simply skipped (Executor.Profile stays nil) rather than failing
+	// startup — a deployment that hasn't finished onboarding the owner's
+	// profile yet should not be blocked from running everything else. Loaded
+	// here (before RunSupervisor/the sweeper goroutines below), not in the
+	// AGENT_ENABLED HTTP-mounting block further down, so agentExecutor.Profile
+	// is assigned before any goroutine that might read it starts.
+	var agentProfileProvider *profile.Provider
+	if cfg.AgentEnabled {
+		if path := cfg.AgentProfilePath; path != "" {
+			var err error
+			agentProfileProvider, err = profile.Load(path)
+			if err != nil {
+				slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
+				os.Exit(1)
+			}
+			agentExecutor.Profile = agentProfileProvider
+			slog.Info("agent owner profile loaded", "path", path)
+		}
+	}
+
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
 	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
@@ -363,19 +386,15 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
-		// AGENT_PROFILE_PATH is optional even with AGENT_ENABLED=true: without
-		// it, GET /recruiters/{peer} returns 501 (see agentapi.Server.Profile's
-		// nil-safe doc comment) rather than failing startup — a deployment
-		// that hasn't finished onboarding the owner's profile yet should not
-		// be blocked from running everything else.
-		if path := cfg.AgentProfilePath; path != "" {
-			profileProvider, err := profile.Load(path)
-			if err != nil {
-				slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
-				os.Exit(1)
-			}
-			agentSrv.WithProfile(profileProvider)
-			slog.Info("agent owner profile loaded", "path", path)
+		// agentProfileProvider was already loaded (or left nil) above,
+		// before RunSupervisor started — reused here rather than loading it
+		// a second time. ProfileOwnerTGID scopes GET /recruiters/{peer} to
+		// the one account this profile actually belongs to (see
+		// agentapi.Server.ProfileOwnerTGID's doc comment); 0 means "not
+		// configured", which handleRecruiterProfile treats as forbidden for
+		// everyone, matching a nil Profile's 501.
+		if agentProfileProvider != nil {
+			agentSrv.WithProfile(agentProfileProvider, cfg.AgentProfileOwnerTGID)
 		}
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
