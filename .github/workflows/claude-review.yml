@@ -44,6 +44,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Consumed by `review` via needs.gate.outputs.* — see the "Resolve PR
+    # ref" and "Staleness check" steps below for why both freshness
+    # validation and (for issue_comment) ref/sha resolution live here rather
+    # than as steps inside `review` itself.
+    outputs:
+      ref: ${{ steps.pr-ref.outputs.ref }}
+      stale: ${{ steps.staleness.outputs.stale }}
     steps:
       # author_association alone is too coarse (MEMBER = any org member,
       # COLLABORATOR includes read-only). Require actual write access, and
@@ -66,8 +73,48 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve PR branch for issue_comment trigger
+        if: github.event_name == 'issue_comment'
+        id: pr-ref
+        run: |
+          ref=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
+          sha=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefOid -q .headRefOid)
+          echo "ref=$ref" >> $GITHUB_OUTPUT
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # Deliberately runs in `gate`, BEFORE `review` ever enters its
+      # canceling concurrency group — a Codex finding on #309 caught that
+      # this check originally lived as a step inside `review`, which means
+      # the job had ALREADY entered the concurrency group (and, with
+      # cancel-in-progress: true, potentially already cancelled a
+      # currently-running newer/correct review) by the time staleness was
+      # even evaluated. The check itself catching "I'm stale" after that
+      # point is too late — the damage (killing the good review) already
+      # happened. Running it here means a stale run fails before it ever
+      # touches the concurrency group at all, exactly like the
+      # write-permission check above it. See the step's own comment for
+      # why `github.event.pull_request.head.sha` / `steps.pr-ref.outputs.sha`
+      # is compared rather than a post-checkout `git rev-parse HEAD`.
+      - name: Reject if this run's commit is no longer the PR's current head
+        id: staleness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ github.event.pull_request.number || github.event.issue.number }}"
+          current_head=$(gh pr view "$pr" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
+          triggered_for="${{ github.event.pull_request.head.sha || steps.pr-ref.outputs.sha }}"
+          if [ "$triggered_for" != "$current_head" ]; then
+            echo "::notice::stale run — triggered for $triggered_for but PR head is now $current_head; skipping"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
   review:
     needs: gate
+    if: needs.gate.outputs.stale != 'true'
     runs-on: ubuntu-latest
     # Bounds mid-flight duplication: pull_request (auto, on every push) and a
     # manual '@claude review' comment on the same commit are two independent
@@ -88,17 +135,6 @@ jobs:
       issues: write
       id-token: write
     steps:
-      - name: Resolve PR branch for issue_comment trigger
-        if: github.event_name == 'issue_comment'
-        id: pr-ref
-        run: |
-          ref=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
-          sha=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefOid -q .headRefOid)
-          echo "ref=$ref" >> $GITHUB_OUTPUT
-          echo "sha=$sha" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       # A push already auto-triggers a review for its own commit via the
       # pull_request/synchronize path — a manual '@claude review' comment
       # posted right after is only ever redundant with that, never with
@@ -151,51 +187,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 1
-          ref: ${{ steps.pr-ref.outputs.ref }}
-
-      # `gate` (above) has no concurrency control and completes
-      # independently per run; only `review` enters the canceling
-      # concurrency group, and GitHub gives no ordering guarantee for who
-      # enters it first. A slower-to-gate run for an OLDER push can
-      # therefore still be entering the group AFTER a NEWER push's run is
-      # already reviewing — cancel-in-progress then kills the newer,
-      # correct review and lets the stale one proceed, checking out and
-      # reviewing outdated code while posting a verdict that reads as
-      # covering the PR's current head. Reject here if the SHA this run was
-      # actually triggered for no longer matches the PR's live head.
-      #
-      # Deliberately does NOT use `git rev-parse HEAD` after checkout: for
-      # pull_request events, actions/checkout with no explicit `ref:` (the
-      # Checkout step above only sets one for issue_comment) checks out
-      # `github.sha`, which for that event type is a synthetic MERGE commit
-      # GitHub generates on the fly — never equal to the branch's own head
-      # SHA even when this run is perfectly current. Comparing that against
-      # a live headRefOid made EVERY pull_request-triggered run self-report
-      # as stale — caught immediately when this very fix's own PR (#309)
-      # opened and its own auto-triggered review silently skipped itself.
-      # Using github.event.pull_request.head.sha (the real branch head at
-      # trigger time) for that path, and the sha resolve-PR-branch already
-      # captured for the issue_comment path, avoids checkout ref semantics
-      # entirely.
-      - name: Reject if this run's commit is no longer the PR's current head
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
-        id: staleness
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          pr="${{ github.event.pull_request.number || github.event.issue.number }}"
-          current_head=$(gh pr view "$pr" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
-          triggered_for="${{ github.event.pull_request.head.sha || steps.pr-ref.outputs.sha }}"
-          if [ "$triggered_for" != "$current_head" ]; then
-            echo "::notice::stale run — triggered for $triggered_for but PR head is now $current_head; skipping"
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "stale=false" >> "$GITHUB_OUTPUT"
-          fi
+          ref: ${{ needs.gate.outputs.ref }}
 
       - name: Classify PR complexity and pick model
         id: classify
-        if: (github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true') && steps.staleness.outputs.stale != 'true'
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -237,7 +233,7 @@ jobs:
 
       - name: Claude review
         id: review
-        if: (github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true') && steps.staleness.outputs.stale != 'true'
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
         with:
