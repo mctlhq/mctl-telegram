@@ -183,13 +183,24 @@ jobs:
       #      session diagnosing #307/#308, which both have far more than 30
       #      review records after several rounds. --paginate aggregates
       #      every page so a recent verdict past page 1 is never missed.
+      #   4. This step originally re-fetched the PR's head SHA fresh here,
+      #      instead of using needs.gate.outputs.sha — the same SHA
+      #      checkout, concurrency, and the verdict-binding prompt are all
+      #      now pinned to. A push landing between gate and this step made
+      #      the two diverge: dedup would check whether the NEW head
+      #      already had a verdict (almost always no, since it just
+      #      arrived), while checkout/review still targeted the OLD,
+      #      already-pinned SHA — so an already-reviewed old commit got
+      #      needlessly re-reviewed, exactly the redundant-session waste
+      #      this check exists to prevent. Querying the same pinned SHA
+      #      everything else uses keeps them consistent.
       - name: Skip if this commit was already reviewed
         if: github.event_name == 'issue_comment'
         id: dedup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          head_sha=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
+          head_sha="${{ needs.gate.outputs.sha }}"
           already=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews" \
             --jq '[.[] | select(.user.login == "claude[bot]" and .commit_id == "'"$head_sha"'" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))] | length' | \
             jq -s 'add > 0')
