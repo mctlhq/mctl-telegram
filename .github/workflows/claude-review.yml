@@ -103,19 +103,31 @@ jobs:
       # itself, so this check only runs on the issue_comment path. Checks
       # this specific PR's own review list (via the GitHub reviews API,
       # which records the exact commit_id each review was submitted
-      # against) for an existing review from claude[bot] on the current head
-      # SHA — NOT workflow-run history, which a Claude review round on #309
-      # correctly flagged twice: (1) a run's job conclusion is "success" even
-      # when the Claude call itself failed (continue-on-error masks it, and
-      # the failure-notify step below doesn't fail the job either), so a
-      # run-history check would wrongly treat a failed attempt as "already
-      # reviewed" and silently block the exact manual retry the failure
-      # comment invites; (2) a bare headSha match isn't scoped to this PR, so
-      # two branches sharing a commit could cross-contaminate. Checking
-      # actual posted reviews for this exact PR number, filtered to the
-      # reviewer bot's own login, avoids both: a failed run never posted a
-      # review, so it never counts as "already reviewed", and the query is
-      # inherently per-PR.
+      # against) for an existing TERMINAL VERDICT from claude[bot] on the
+      # current head SHA — NOT workflow-run history, and not just "any
+      # review record at all". Two rounds of review on this workflow itself
+      # (#309) caught successive gaps here:
+      #   1. A run-history check treated a job whose overall conclusion was
+      #      "success" as "reviewed" even when the underlying Claude call
+      #      failed (continue-on-error masks it) — silently blocking the
+      #      exact manual retry the failure-notify comment invites. Fixed
+      #      by switching to the PR's own posted reviews instead of run
+      #      history, and to a bare headSha match not scoped to this PR.
+      #   2. That fix still matched ANY review record for this commit,
+      #      including bare COMMENTED entries the action posts for each
+      #      inline finding (create_inline_comment) before it ever reaches
+      #      the final `gh pr review --approve|--request-changes` call — a
+      #      run that posted inline findings and then crashed before
+      #      submitting a verdict would still count as "already reviewed",
+      #      again blocking the retry. Filtering state to APPROVED or
+      #      CHANGES_REQUESTED (the only two terminal verdict states this
+      #      workflow's prompt ever submits) requires a REAL verdict, not
+      #      just review activity, to count as done.
+      #   3. The unpaginated API call only returns the first page (30
+      #      items) — directly observed hitting this limit ourselves this
+      #      session diagnosing #307/#308, which both have far more than 30
+      #      review records after several rounds. --paginate aggregates
+      #      every page so a recent verdict past page 1 is never missed.
       - name: Skip if this commit was already reviewed
         if: github.event_name == 'issue_comment'
         id: dedup
@@ -123,8 +135,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           head_sha=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
-          already=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews" \
-            --jq '[.[] | select(.user.login == "claude[bot]" and .commit_id == "'"$head_sha"'")] | length > 0')
+          already=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews" \
+            --jq '[.[] | select(.user.login == "claude[bot]" and .commit_id == "'"$head_sha"'" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))] | length' | \
+            jq -s 'add > 0')
           echo "already_reviewed=$already" >> "$GITHUB_OUTPUT"
           if [ "$already" = "true" ]; then
             gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" \
@@ -138,9 +151,36 @@ jobs:
           fetch-depth: 1
           ref: ${{ steps.pr-ref.outputs.ref }}
 
+      # `gate` (above) has no concurrency control and completes
+      # independently per run; only `review` enters the canceling
+      # concurrency group, and GitHub gives no ordering guarantee for who
+      # enters it first. A slower-to-gate run for an OLDER push can
+      # therefore still be entering the group AFTER a NEWER push's run is
+      # already reviewing — cancel-in-progress then kills the newer,
+      # correct review and lets the stale one proceed, checking out and
+      # reviewing outdated code while posting a verdict that reads as
+      # covering the PR's current head. Reject here if the commit actually
+      # on disk no longer matches the PR's live head — a stale run
+      # self-cancels instead of silently reviewing the wrong commit.
+      - name: Reject if this run's commit is no longer the PR's current head
+        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        id: staleness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ github.event.pull_request.number || github.event.issue.number }}"
+          current_head=$(gh pr view "$pr" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
+          checked_out=$(git rev-parse HEAD)
+          if [ "$checked_out" != "$current_head" ]; then
+            echo "::notice::stale run — checked out $checked_out but PR head is now $current_head; skipping"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Classify PR complexity and pick model
         id: classify
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        if: (github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true') && steps.staleness.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -182,7 +222,7 @@ jobs:
 
       - name: Claude review
         id: review
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        if: (github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true') && steps.staleness.outputs.stale != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
         with:
