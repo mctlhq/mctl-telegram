@@ -82,7 +82,7 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	// see Store.SetConversationPeerAccessHash's doc comment for why the
 	// executor needs it to send at all (MTProto rejects a zero-access-hash
 	// InputPeerUser with PEER_ID_INVALID).
-	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT", "INTEGER"); err != nil {
+	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT DEFAULT 0", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
 
