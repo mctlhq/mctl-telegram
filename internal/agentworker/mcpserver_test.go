@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -33,6 +34,14 @@ type fakeAPI struct {
 	// leadToReturn is served back on GetConversationContext's Lead field —
 	// getLead resolves through that call now, not a standalone GetLead API.
 	leadToReturn *LeadDTO
+
+	// completeJobStarted/completeJobRelease let a test observe and control
+	// exactly when CompleteJob is in flight, to deliberately race a second
+	// state-changing call against it — see
+	// TestToolBuilder_SerializesCompleteAgainstConcurrentStateChange.
+	// Left nil in every other test (both are then no-ops).
+	completeJobStarted chan struct{}
+	completeJobRelease chan struct{}
 
 	err error
 }
@@ -112,6 +121,12 @@ func (f *fakeAPI) PauseAutopilot(ctx context.Context, paused bool) (bool, error)
 }
 
 func (f *fakeAPI) CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string) error {
+	if f.completeJobStarted != nil {
+		close(f.completeJobStarted)
+	}
+	if f.completeJobRelease != nil {
+		<-f.completeJobRelease
+	}
 	f.completeJobCalls = append(f.completeJobCalls, struct {
 		jobID   int64
 		attempt int
@@ -193,6 +208,30 @@ func TestCompleteAgentJob_UsesJobsPinnedIDAndAttempt(t *testing.T) {
 	call := api.completeJobCalls[0]
 	if call.jobID != 42 || call.attempt != 3 || call.status != "completed" {
 		t.Fatalf("call = %#v", call)
+	}
+}
+
+// TestCompleteAgentJob_NoteArgumentIsIgnored guards against a Codex P1: the
+// server stores this field unencrypted in agent_jobs.last_error /
+// agent_job_attempts.error, unlike message bodies and action payloads
+// elsewhere in this codebase — a field literally described as "note about
+// the outcome" is exactly what a confused or prompt-injected turn would
+// fill with quoted Telegram message content. The tool schema no longer
+// accepts it at all; even if a caller supplies one anyway, it must never
+// reach the API call.
+func TestCompleteAgentJob_NoteArgumentIsIgnored(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 1, Attempt: 1}}
+	tool, handler := b.completeAgentJob()
+	res := callTool(t, tool, handler, map[string]any{"status": "completed", "note": "quoted private message content"})
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %#v", res)
+	}
+	if len(api.completeJobCalls) != 1 {
+		t.Fatalf("completeJobCalls = %#v", api.completeJobCalls)
+	}
+	if got := api.completeJobCalls[0].note; got != "" {
+		t.Fatalf("note = %q, want empty (never forwarded)", got)
 	}
 }
 
@@ -324,6 +363,65 @@ func TestSaveJobLead_AllEmptyFieldsIsRejectedLocally(t *testing.T) {
 // remains callable after complete_agent_job succeeds — nothing on the
 // server side knows this MCP session is "done", so the local guard is what
 // actually stops it.
+// TestToolBuilder_SerializesCompleteAgainstConcurrentStateChange guards
+// against a Codex P1: mcp-go's stdio server dispatches queued tool calls to
+// a worker pool, not strictly one at a time, so a model turn that issues
+// several tool calls together can have them execute concurrently. An
+// earlier version of the completed-guard released its lock right after
+// checking the flag, before the actual API call ran — two concurrent calls
+// could both pass that check before either finished, so a state-changing
+// call could still be persisted after complete_agent_job had already
+// succeeded. Deliberately races save_job_lead against a slow
+// complete_agent_job: save_job_lead is only released to run once
+// complete_agent_job's entire handler (API call included) has finished, so
+// it must always observe completed=true and be rejected — proving the two
+// never actually overlapped. Run with -race: if the guard fix regresses to
+// its old release-before-the-API-call shape, the fakeAPI's unsynchronized
+// slice appends racing across goroutines makes that violation directly
+// detectable, not just inferred from timing.
+func TestToolBuilder_SerializesCompleteAgainstConcurrentStateChange(t *testing.T) {
+	api := &fakeAPI{
+		completeJobStarted: make(chan struct{}),
+		completeJobRelease: make(chan struct{}),
+	}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 1, Attempt: 1, ConversationID: 9}}
+
+	completeTool, completeHandler := b.completeAgentJob()
+	completeDone := make(chan *mcplib.CallToolResult, 1)
+	go func() {
+		completeDone <- callTool(t, completeTool, completeHandler, map[string]any{"status": "completed"})
+	}()
+
+	<-api.completeJobStarted // complete_agent_job is now inside its guarded section, lock held
+
+	saveTool, saveHandler := b.saveJobLead()
+	saveDone := make(chan *mcplib.CallToolResult, 1)
+	go func() {
+		saveDone <- callTool(t, saveTool, saveHandler, map[string]any{"company": "Acme"})
+	}()
+
+	// save_job_lead should be blocked waiting on the mutex right now — give
+	// it a moment to (incorrectly) run if the guard is broken, then confirm
+	// it hasn't touched the API yet.
+	time.Sleep(50 * time.Millisecond)
+	if len(api.saveLeadCalls) != 0 {
+		t.Fatal("save_job_lead ran concurrently with complete_agent_job's still-in-flight guarded section")
+	}
+
+	close(api.completeJobRelease) // let complete_agent_job finish and release the lock
+	completeRes := <-completeDone
+	if completeRes.IsError {
+		t.Fatalf("complete_agent_job failed: %#v", completeRes)
+	}
+	saveRes := <-saveDone
+	if !saveRes.IsError {
+		t.Fatal("save_job_lead should have been rejected — it only ran after the job was already complete")
+	}
+	if len(api.saveLeadCalls) != 0 {
+		t.Fatalf("save_job_lead reached the API despite the job already being complete: %#v", api.saveLeadCalls)
+	}
+}
+
 func TestToolsRejectFurtherCallsAfterJobCompletes(t *testing.T) {
 	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 1}}
 	b := &toolBuilder{api: api, job: JobContext{JobID: 1, Attempt: 1, ConversationID: 9}}

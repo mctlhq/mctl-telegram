@@ -122,6 +122,60 @@ func TestWorker_Loop_BacksOffAndRecoversOnPollError(t *testing.T) {
 	}
 }
 
+// TestWorker_Loop_StopsRetryingOnFatalAuthError guards against a Codex
+// finding: AGENT_API_TOKEN is read once at process start with no live
+// credential-reload path, so a 401/403 from an expired or revoked token can
+// never be resolved by retrying — yet the loop previously treated it like
+// any other transient network blip and retried forever, silently
+// accumulating unprocessed jobs while still looking "alive" (just noisy
+// warnings) in logs. The loop must exit instead of retrying, and never call
+// PollEvents again afterward.
+func TestWorker_Loop_StopsRetryingOnFatalAuthError(t *testing.T) {
+	poller := &fakePoller{results: []pollResult{
+		{err: &APIError{StatusCode: 401, Message: "token expired"}},
+	}}
+	runner := &fakeRunner{}
+	w := NewWorker(poller, runner)
+
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		w.Loop(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Loop did not exit promptly on a fatal auth error")
+	}
+
+	if got := poller.callCount(); got != 1 {
+		t.Fatalf("PollEvents called %d times, want exactly 1 (no retry on a fatal auth error)", got)
+	}
+}
+
+func TestIsFatalAuthError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"401", &APIError{StatusCode: 401}, true},
+		{"403", &APIError{StatusCode: 403}, true},
+		{"404", &APIError{StatusCode: 404}, false},
+		{"500", &APIError{StatusCode: 500}, false},
+		{"non-APIError", errors.New("network blip"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isFatalAuthError(c.err); got != c.want {
+				t.Fatalf("isFatalAuthError(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
 func TestWorker_Loop_ExitsPromptlyOnContextCancel(t *testing.T) {
 	poller := &fakePoller{results: []pollResult{{jobs: nil}}}
 	w := NewWorker(poller, &fakeRunner{})

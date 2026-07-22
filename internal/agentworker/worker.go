@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -67,6 +68,20 @@ func (w *Worker) Loop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			if isFatalAuthError(err) {
+				// AGENT_API_TOKEN is read once at process start (see
+				// cmd/agent-worker) — there is no live credential-reload
+				// path, so retrying an expired/revoked token can only ever
+				// repeat the same 401/403 forever. Treating it like an
+				// ordinary transient network blip would let the process
+				// keep running (and looking "alive" in logs, just noisy
+				// warnings) while jobs silently pile up unprocessed with no
+				// operator signal that anything actually needs fixing.
+				// Stopping the loop turns that into a visible process
+				// exit — restart with a fresh token is the only real fix.
+				slog.Error("agent-worker: auth failure is not recoverable by retrying, stopping poll loop", "err", err)
+				return
+			}
 			slog.Warn("agent-worker: poll failed", "err", err, "retry_in", backoff)
 			if !sleepCtx(ctx, backoff) {
 				return
@@ -86,6 +101,18 @@ func (w *Worker) Loop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// isFatalAuthError reports whether err is an APIError carrying a 401 or 403
+// — the two statuses an expired, revoked, or otherwise invalid
+// AGENT_API_TOKEN produces, none of which a same-token retry can ever
+// resolve.
+func isFatalAuthError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden
 }
 
 func nextBackoff(cur time.Duration) time.Duration {

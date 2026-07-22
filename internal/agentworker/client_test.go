@@ -15,6 +15,28 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.S
 	return NewClient(srv.URL, "test-token", srv.Client()), srv
 }
 
+// TestNewClient_TrimsTrailingSlash guards against a Codex finding: every
+// path this package builds already starts with "/", so an operator-supplied
+// base URL ending in "/" (".../v1/", which reads as valid) produced a
+// double slash (".../v1//events") that the mounted chi router never
+// matches — a 404 on every single request, forever, with the worker
+// otherwise looking healthy.
+func TestNewClient_TrimsTrailingSlash(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		writeJSONFixture(w, map[string]any{"jobs": []JobEnvelope{}})
+	}))
+	t.Cleanup(srv.Close)
+	client := NewClient(srv.URL+"/", "test-token", srv.Client())
+	if _, err := client.PollEvents(context.Background(), 1); err != nil {
+		t.Fatalf("PollEvents: %v", err)
+	}
+	if gotPath != "/events" {
+		t.Fatalf("path = %q, want /events (no double slash)", gotPath)
+	}
+}
+
 func TestClient_SendsBearerToken(t *testing.T) {
 	var gotAuth string
 	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {

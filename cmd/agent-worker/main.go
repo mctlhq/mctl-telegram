@@ -163,5 +163,12 @@ func envFloat(key string, def float64) (float64, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, fmt.Errorf("parse %s: %q is not a finite number", key, raw)
 	}
+	// A negative value would silently behave like "unset" — ClaudeInvoker.Run
+	// only adds --max-budget-usd when MaxBudgetUSD > 0 — turning what an
+	// operator intended as a spending cap into an uncapped invocation with
+	// no indication anything was wrong.
+	if f < 0 {
+		return 0, fmt.Errorf("parse %s: %q must not be negative", key, raw)
+	}
 	return f, nil
 }

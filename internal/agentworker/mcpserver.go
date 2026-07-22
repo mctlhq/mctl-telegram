@@ -70,33 +70,36 @@ type toolBuilder struct {
 	api agentAPI
 	job JobContext
 
-	// mu guards completed. The MCP server process handles exactly one job
-	// (see JobContext's doc comment), but nothing stops the model from
-	// calling more state-changing tools in the same session after it has
-	// already called complete_agent_job — the underlying API has no notion
-	// of "this MCP session is done" to reject them itself. Guarding here
-	// closes that gap: once complete_agent_job succeeds, every other
-	// state-changing tool (and a second complete_agent_job call) is
-	// rejected locally without another round trip to the server.
+	// mu guards completed AND serializes every state-changing tool call.
+	// mcp-go's stdio server dispatches queued tool calls to a worker pool,
+	// not strictly one-at-a-time — a model turn that issues several tool
+	// calls together (a lead save alongside complete_agent_job, say) can
+	// have them execute concurrently. An earlier version of this guard only
+	// held the lock across the completed-or-not *check*, releasing it
+	// before the actual API call ran: two concurrent calls could both pass
+	// the check before either finished, so an action could still be
+	// persisted (or a second complete_agent_job could still succeed) after
+	// the job was already terminal. Holding the lock across the whole
+	// handler — check, API call, and (for complete_agent_job) setting
+	// completed — closes that race: only one state-changing tool call is
+	// ever in flight for a given job at a time.
 	mu        sync.Mutex
 	completed bool
 }
 
 var errJobAlreadyCompleted = errors.New("this job was already marked complete — no further actions are allowed")
 
-func (b *toolBuilder) rejectIfCompleted() error {
+// guarded serializes fn against every other guarded call on this
+// toolBuilder and refuses to run it at all once complete_agent_job has
+// succeeded. fn is called WITH the lock held — it must not call back into
+// guarded itself (no handler does).
+func (b *toolBuilder) guarded(fn func() (*mcplib.CallToolResult, error)) (*mcplib.CallToolResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.completed {
-		return errJobAlreadyCompleted
+		return toolErr(errJobAlreadyCompleted), nil
 	}
-	return nil
-}
-
-func (b *toolBuilder) markCompleted() {
-	b.mu.Lock()
-	b.completed = true
-	b.mu.Unlock()
+	return fn()
 }
 
 func (b *toolBuilder) getEvent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
@@ -201,20 +204,19 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Proposed reply text.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		args := req.GetArguments()
-		intent := stringArg(args, "intent", "")
-		text := stringArg(args, "text", "")
-		if text == "" {
-			return mcplib.NewToolResultError("text is required"), nil
-		}
-		out, err := b.api.ProposeReply(ctx, b.job.ConversationID, b.job.JobID, intent, text)
-		if err != nil {
-			return toolErr(err), nil
-		}
-		return jsonResult(out)
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			args := req.GetArguments()
+			intent := stringArg(args, "intent", "")
+			text := stringArg(args, "text", "")
+			if text == "" {
+				return mcplib.NewToolResultError("text is required"), nil
+			}
+			out, err := b.api.ProposeReply(ctx, b.job.ConversationID, b.job.JobID, intent, text)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			return jsonResult(out)
+		})
 	}
 	return tool, handler
 }
@@ -231,35 +233,34 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithString("detail", mcplib.Description("Any other relevant free-text detail.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		args := req.GetArguments()
-		lead := SaveLeadRequest{
-			ConversationID: b.job.ConversationID,
-			JobID:          b.job.JobID,
-			Company:        stringArg(args, "company", ""),
-			Role:           stringArg(args, "role", ""),
-			RecruiterName:  stringArg(args, "recruiter_name", ""),
-			RecruiterTGID:  int64(intArg(args, "recruiter_tg_id", 0)),
-			Compensation:   stringArg(args, "compensation", ""),
-			Status:         stringArg(args, "status", ""),
-			Detail:         stringArg(args, "detail", ""),
-		}
-		// An all-empty call would still create (or re-bind) a lead row on
-		// the server, which is enough to satisfy complete_agent_job's
-		// "durable result exists" guard — letting a confused or injected
-		// turn close a job with no reply, no real lead data, and no owner
-		// notification. Require at least one real field before forwarding.
-		if lead.Company == "" && lead.Role == "" && lead.RecruiterName == "" && lead.RecruiterTGID == 0 &&
-			lead.Compensation == "" && lead.Status == "" && lead.Detail == "" {
-			return mcplib.NewToolResultError("at least one field is required — nothing to save"), nil
-		}
-		leadID, err := b.api.SaveLead(ctx, lead)
-		if err != nil {
-			return toolErr(err), nil
-		}
-		return jsonResult(map[string]any{"lead_id": leadID})
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			args := req.GetArguments()
+			lead := SaveLeadRequest{
+				ConversationID: b.job.ConversationID,
+				JobID:          b.job.JobID,
+				Company:        stringArg(args, "company", ""),
+				Role:           stringArg(args, "role", ""),
+				RecruiterName:  stringArg(args, "recruiter_name", ""),
+				RecruiterTGID:  int64(intArg(args, "recruiter_tg_id", 0)),
+				Compensation:   stringArg(args, "compensation", ""),
+				Status:         stringArg(args, "status", ""),
+				Detail:         stringArg(args, "detail", ""),
+			}
+			// An all-empty call would still create (or re-bind) a lead row on
+			// the server, which is enough to satisfy complete_agent_job's
+			// "durable result exists" guard — letting a confused or injected
+			// turn close a job with no reply, no real lead data, and no owner
+			// notification. Require at least one real field before forwarding.
+			if lead.Company == "" && lead.Role == "" && lead.RecruiterName == "" && lead.RecruiterTGID == 0 &&
+				lead.Compensation == "" && lead.Status == "" && lead.Detail == "" {
+				return mcplib.NewToolResultError("at least one field is required — nothing to save"), nil
+			}
+			leadID, err := b.api.SaveLead(ctx, lead)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			return jsonResult(map[string]any{"lead_id": leadID})
+		})
 	}
 	return tool, handler
 }
@@ -271,19 +272,18 @@ func (b *toolBuilder) requestOwnerApproval() (mcplib.Tool, mcpserver.ToolHandler
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("What to ask the owner.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		args := req.GetArguments()
-		text := stringArg(args, "text", "")
-		if text == "" {
-			return mcplib.NewToolResultError("text is required"), nil
-		}
-		out, err := b.api.RequestOwnerApproval(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
-		if err != nil {
-			return toolErr(err), nil
-		}
-		return jsonResult(out)
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			args := req.GetArguments()
+			text := stringArg(args, "text", "")
+			if text == "" {
+				return mcplib.NewToolResultError("text is required"), nil
+			}
+			out, err := b.api.RequestOwnerApproval(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			return jsonResult(out)
+		})
 	}
 	return tool, handler
 }
@@ -295,19 +295,18 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Summary text for the owner.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		args := req.GetArguments()
-		text := stringArg(args, "text", "")
-		if text == "" {
-			return mcplib.NewToolResultError("text is required"), nil
-		}
-		out, err := b.api.SendOwnerSummary(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
-		if err != nil {
-			return toolErr(err), nil
-		}
-		return jsonResult(out)
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			args := req.GetArguments()
+			text := stringArg(args, "text", "")
+			if text == "" {
+				return mcplib.NewToolResultError("text is required"), nil
+			}
+			out, err := b.api.SendOwnerSummary(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			return jsonResult(out)
+		})
 	}
 	return tool, handler
 }
@@ -327,38 +326,43 @@ func (b *toolBuilder) pauseAutopilot() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 		mcplib.WithDescription("Pause autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own. Pause-only — resuming is a deliberate owner decision made via /mctl continue, not something this tool can do."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		out, err := b.api.PauseAutopilot(ctx, true)
-		if err != nil {
-			return toolErr(err), nil
-		}
-		return jsonResult(map[string]any{"autopilot_paused": out})
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			out, err := b.api.PauseAutopilot(ctx, true)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			return jsonResult(map[string]any{"autopilot_paused": out})
+		})
 	}
 	return tool, handler
 }
 
+// completeAgentJob deliberately has no free-text "note" argument. An earlier
+// version forwarded a model-supplied note straight to CompleteJob, which
+// the server stores unencrypted in agent_jobs.last_error /
+// agent_job_attempts.error — a plaintext column, unlike message bodies and
+// action payloads elsewhere in this codebase. A field literally described
+// as "note about the outcome" is exactly the kind of thing a confused or
+// prompt-injected turn would fill with quoted Telegram message content,
+// bypassing that encryption. status alone is enough signal for operators.
 func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("complete_agent_job",
 		mcplib.WithDescription("Mark this job as finished. Call this exactly once, as the last thing you do, after you have taken every action this turn warrants (a reply proposal, a lead save, an owner notification) or determined none was needed. status=completed requires that you actually persisted a result via one of the other tools first — it will be rejected otherwise. Use status=ignored if this message genuinely needed no action, or status=failed if you could not process it."),
 		mcplib.WithString("status", mcplib.Required(), mcplib.Description("One of: completed, failed, ignored.")),
-		mcplib.WithString("note", mcplib.Description("Optional short note about the outcome, for operator logs.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		if err := b.rejectIfCompleted(); err != nil {
-			return toolErr(err), nil
-		}
-		args := req.GetArguments()
-		status := stringArg(args, "status", "")
-		if status == "" {
-			return mcplib.NewToolResultError("status is required"), nil
-		}
-		if err := b.api.CompleteJob(ctx, b.job.JobID, b.job.Attempt, status, stringArg(args, "note", "")); err != nil {
-			return toolErr(err), nil
-		}
-		b.markCompleted()
-		return jsonResult(map[string]any{"completed": true})
+		return b.guarded(func() (*mcplib.CallToolResult, error) {
+			args := req.GetArguments()
+			status := stringArg(args, "status", "")
+			if status == "" {
+				return mcplib.NewToolResultError("status is required"), nil
+			}
+			if err := b.api.CompleteJob(ctx, b.job.JobID, b.job.Attempt, status, ""); err != nil {
+				return toolErr(err), nil
+			}
+			b.completed = true
+			return jsonResult(map[string]any{"completed": true})
+		})
 	}
 	return tool, handler
 }

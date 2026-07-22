@@ -27,6 +27,18 @@ func TestEnvFloat_FailsLoudlyOnNaNAndInf(t *testing.T) {
 	}
 }
 
+// TestEnvFloat_RejectsNegativeValues guards against a Codex finding:
+// ClaudeInvoker.Run only adds --max-budget-usd when MaxBudgetUSD > 0, so a
+// negative configured value silently behaved exactly like "unset" —
+// turning an intended spending cap into an uncapped invocation with no
+// indication anything was wrong.
+func TestEnvFloat_RejectsNegativeValues(t *testing.T) {
+	t.Setenv("TEST_ENV_FLOAT", "-5")
+	if _, err := envFloat("TEST_ENV_FLOAT", 0); err == nil {
+		t.Fatal("expected an error for a negative value")
+	}
+}
+
 func TestEnvFloat_ReturnsDefaultWhenUnset(t *testing.T) {
 	_ = os.Unsetenv("TEST_ENV_FLOAT")
 	got, err := envFloat("TEST_ENV_FLOAT", 5)

@@ -116,7 +116,7 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	defer cleanup()
 
 	args := []string{
-		"-p", jobPrompt(job),
+		"-p", jobPrompt(),
 		"--mcp-config", cfgPath,
 		"--strict-mcp-config",
 		// --allowedTools only grants permission for the listed tools — it
@@ -128,6 +128,13 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		"--tools", "",
 		"--allowedTools", strings.Join(qualifiedToolNames(), ","),
 		"--output-format", "json",
+		// The transcript for every job otherwise contains plaintext Telegram
+		// message bodies and history (from get_event/get_conversation_context
+		// tool results) written under HOME by Claude Code's own session
+		// persistence — outside this service's encrypted tables and
+		// retention sweeper entirely. --no-session-persistence (documented
+		// for --print mode) stops that write.
+		"--no-session-persistence",
 	}
 	if c.SystemPrompt != "" {
 		args = append(args, "--system-prompt", c.SystemPrompt)
@@ -165,15 +172,17 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	return CheckResult(res)
 }
 
-// jobPrompt is deliberately minimal: the model has get_event and
-// get_conversation_context tools to pull its own context, so the prompt
-// only needs to point it at this turn's job rather than duplicate data it
-// can fetch itself.
-func jobPrompt(job JobEnvelope) string {
-	return fmt.Sprintf(
-		"A new Telegram message arrived (event %s). Use get_event and get_conversation_context to see it and the conversation so far, decide what to do, and call complete_agent_job exactly once when you are done.",
-		job.EventID,
-	)
+// jobPrompt is deliberately minimal AND deliberately job-identity-free: the
+// model has get_event and get_conversation_context tools to pull its own
+// context, resolved server-side from the pinned JobContext (see
+// NewMCPServer's doc comment), so the prompt never needs to name this turn's
+// event. An earlier version embedded job.EventID directly — which encodes
+// the account/chat/message Telegram IDs (see the evt:v1:<acct>:<chat>:<msgid>
+// format) — in this string, and -p places it straight into the claude
+// process's argv, defeating the same /proc/<pid>/cmdline exposure the
+// 0600 mcp-config file was written specifically to avoid for the API token.
+func jobPrompt() string {
+	return "A new Telegram message arrived. Use get_event and get_conversation_context to see it and the conversation so far, decide what to do, and call complete_agent_job exactly once when you are done."
 }
 
 // minimalEnv passes through only what the `claude` subprocess needs to

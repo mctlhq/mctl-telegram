@@ -71,10 +71,18 @@ func TestClaudeInvoker_Run_BuildsExpectedInvocation(t *testing.T) {
 
 	argv := readArgv(t, argvFile)
 	joined := strings.Join(argv, "\x00")
-	for _, want := range []string{"-p", "--strict-mcp-config", "--allowedTools", "--output-format", "json", "--mcp-config", "--tools"} {
+	for _, want := range []string{"-p", "--strict-mcp-config", "--allowedTools", "--output-format", "json", "--mcp-config", "--tools", "--no-session-persistence"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("argv missing %q: %v", want, argv)
 		}
+	}
+	// The prompt must never name this job's event — job.EventID encodes the
+	// account/chat/message Telegram IDs (evt:v1:<acct>:<chat>:<msgid>), and
+	// -p places the prompt directly in argv, which /proc/<pid>/cmdline and
+	// `ps auxww` can read. The model gets the same information through
+	// get_event's own (env-pinned, not argv) job identity instead.
+	if strings.Contains(joined, job.EventID) {
+		t.Fatalf("job event ID leaked into argv: %v", argv)
 	}
 	if !strings.Contains(joined, "mcp__"+ServerName+"__complete_agent_job") {
 		t.Fatalf("allowedTools missing complete_agent_job: %v", argv)

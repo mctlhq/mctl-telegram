@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,12 +45,17 @@ type Client struct {
 
 // NewClient builds a Client. baseURL is the full /api/agent/v1 root (e.g.
 // "https://labs-mctl-telegram.labs.svc:8080/api/agent/v1"); hc may be nil to
-// use http.DefaultClient.
+// use http.DefaultClient. A trailing slash on baseURL is trimmed: every path
+// built in this package already starts with "/", so an untrimmed trailing
+// slash produces a double slash (".../v1//events") that the mounted chi
+// router doesn't match — an operator configuring the otherwise-correct-
+// looking ".../v1/" would see every request 404 forever with no jobs ever
+// processed.
 func NewClient(baseURL, token string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &Client{baseURL: baseURL, token: token, http: hc}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: hc}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
