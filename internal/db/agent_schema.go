@@ -122,6 +122,7 @@ func agentSchemaSQLite() []string {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+			job_id INTEGER,
 			company TEXT,
 			role TEXT,
 			recruiter_name TEXT,
@@ -133,6 +134,12 @@ func agentSchemaSQLite() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
+		// Lets POST /jobs/{id}/complete recognize a lead-save as a valid
+		// durable result too, not just an agent_actions row — see
+		// HasJobLeadForJob. No FK to agent_jobs: job_leads is created before
+		// agent_jobs in this file, matching agent_actions.job_id's existing
+		// no-FK precedent rather than reordering the whole schema.
+		`CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -144,6 +151,10 @@ func agentSchemaSQLite() []string {
 			sent_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// One notification per action: a redelivered job whose action insert
+		// resolved via the (job_id, action_type) idempotency conflict must not
+		// be allowed to queue a second copy of the same owner summary/approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
@@ -280,6 +291,7 @@ func agentSchemaPG() []string {
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+			job_id BIGINT,
 			company TEXT,
 			role TEXT,
 			recruiter_name TEXT,
@@ -291,6 +303,12 @@ func agentSchemaPG() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
+		// Lets POST /jobs/{id}/complete recognize a lead-save as a valid
+		// durable result too, not just an agent_actions row — see
+		// HasJobLeadForJob. No FK to agent_jobs: job_leads is created before
+		// agent_jobs in this file, matching agent_actions.job_id's existing
+		// no-FK precedent rather than reordering the whole schema.
+		`CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -302,6 +320,10 @@ func agentSchemaPG() []string {
 			sent_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// One notification per action: a redelivered job whose action insert
+		// resolved via the (job_id, action_type) idempotency conflict must not
+		// be allowed to queue a second copy of the same owner summary/approval.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id BIGSERIAL PRIMARY KEY,
 			event_id TEXT NOT NULL,

@@ -28,11 +28,22 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// decodeStrict decodes the request body into dst, rejecting unknown fields
-// and trailing data. This is this package's "strict JSON schema validation"
-// (see A-PR6 issue spec) for the shape of the payload — required-field and
-// value-range checks are the caller's job on top of a successful decode.
-func decodeStrict(r *http.Request, dst any) error {
+// maxRequestBodyBytes caps every POST body this package decodes. Without it
+// a compromised long-lived agent token (see tokenhandler.go's TTL — weeks,
+// not hours) could POST an unbounded body to any action endpoint; the
+// notification/action handlers encrypt and persist whatever they're given,
+// so an unbounded body is both a memory-exhaustion and a storage-bloat
+// vector. 1 MiB is comfortably above any legitimate payload here (message
+// text, lead details) with headroom.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+// decodeStrict decodes the request body into dst, rejecting unknown fields,
+// trailing data, and bodies over maxRequestBodyBytes. This is this package's
+// "strict JSON schema validation" (see A-PR6 issue spec) for the shape of the
+// payload — required-field and value-range checks are the caller's job on
+// top of a successful decode.
+func decodeStrict(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)

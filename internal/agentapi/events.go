@@ -171,7 +171,7 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req completeJobRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -192,15 +192,26 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Status == db.JobCompleted {
-		has, err := s.Store.HasAgentActionForJob(ctx, id.UserID, jobID)
+		hasAction, err := s.Store.HasAgentActionForJob(ctx, id.UserID, jobID)
 		if err != nil {
 			logHandlerErr("complete_agent_job", err)
 			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 			return
 		}
-		if !has {
+		// A lead save (POST /leads with this job_id) is also a valid durable
+		// result — not every job produces a reply/notification action row.
+		hasLead := false
+		if !hasAction {
+			hasLead, err = s.Store.HasJobLeadForJob(ctx, id.UserID, jobID)
+			if err != nil {
+				logHandlerErr("complete_agent_job", err)
+				writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+				return
+			}
+		}
+		if !hasAction && !hasLead {
 			writeJSONError(w, http.StatusConflict,
-				"cannot mark job completed without a persisted action result — propose a reply, save a lead, or send a notification first")
+				"cannot mark job completed without a persisted result — propose a reply, request owner approval, send a notification, or save a lead (with this job_id) first")
 			return
 		}
 	}

@@ -16,7 +16,7 @@ const testAgentHMACSecret = "test-hmac-secret-bytes-32!!!!!!!"
 const testAgentIssuerURL = "https://tg.test"
 
 func TestNewAgentTokenHandler_RejectsNonAdmin(t *testing.T) {
-	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL, map[int64]bool{999: true})
+	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL)
 	req := httptest.NewRequest(http.MethodPost, "/api/agent/token",
 		bytes.NewBufferString(`{"telegram_id":42}`))
 	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: 1, TelegramID: 42}))
@@ -28,7 +28,7 @@ func TestNewAgentTokenHandler_RejectsNonAdmin(t *testing.T) {
 }
 
 func TestNewAgentTokenHandler_RejectsAnonymous(t *testing.T) {
-	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL, map[int64]bool{42: true})
+	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL)
 	req := httptest.NewRequest(http.MethodPost, "/api/agent/token", bytes.NewBufferString(`{"telegram_id":42}`))
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -38,13 +38,15 @@ func TestNewAgentTokenHandler_RejectsAnonymous(t *testing.T) {
 }
 
 func TestNewAgentTokenHandler_MintsForTargetUser(t *testing.T) {
-	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL, map[int64]bool{42: true})
+	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL)
 	req := httptest.NewRequest(http.MethodPost, "/api/agent/token",
 		bytes.NewBufferString(`{"telegram_id":777,"ttl_hours":48}`))
 	// The MINTING admin (42) is not the same as the TARGET account (777) the
 	// token authenticates as — this is the load-bearing behavior distinguishing
 	// this endpoint from the bridge's self-mint pattern.
-	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: 1, TelegramID: 42}))
+	req = req.WithContext(auth.With(req.Context(), &auth.Identity{
+		UserID: 1, TelegramID: 42, Scopes: []string{"admin:users"},
+	}))
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -74,10 +76,34 @@ func TestNewAgentTokenHandler_MintsForTargetUser(t *testing.T) {
 	}
 }
 
+// TestNewAgentTokenHandler_AdminUsersScopeAcrossAuthModes guards against the
+// P2 found in review: the old TelegramID-allowlist gate always checked key 0
+// for shared-hmac callers (sharedhmac.Provider never sets Identity.TelegramID
+// at all), so every shared-hmac admin was rejected. The admin:users scope
+// check works identically regardless of how TelegramID is populated.
+func TestNewAgentTokenHandler_AdminUsersScopeAcrossAuthModes(t *testing.T) {
+	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/token",
+		bytes.NewBufferString(`{"telegram_id":777}`))
+	// Simulates a shared-hmac-authenticated admin: TelegramID is zero-value
+	// (never set by sharedhmac.Provider.Authenticate), admin-ness comes
+	// entirely from the platform-admins-derived scope.
+	req = req.WithContext(auth.With(req.Context(), &auth.Identity{
+		UserID: 1, TelegramID: 0, Groups: []string{"platform-admins"}, Scopes: []string{"admin:users"},
+	}))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestNewAgentTokenHandler_RejectsMissingTelegramID(t *testing.T) {
-	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL, map[int64]bool{42: true})
+	h := NewAgentTokenHandler([]byte(testAgentHMACSecret), testAgentIssuerURL)
 	req := httptest.NewRequest(http.MethodPost, "/api/agent/token", bytes.NewBufferString(`{}`))
-	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: 1, TelegramID: 42}))
+	req = req.WithContext(auth.With(req.Context(), &auth.Identity{
+		UserID: 1, TelegramID: 42, Scopes: []string{"admin:users"},
+	}))
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusBadRequest {

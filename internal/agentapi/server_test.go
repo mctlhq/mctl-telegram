@@ -573,6 +573,152 @@ func TestHandleNotifySummary(t *testing.T) {
 	}
 }
 
+// TestHandleOwnerFacing_KillSwitchBlocksNotification guards against the P2
+// found in review: handleOwnerFacing used to ignore policy.Evaluate's
+// verdict entirely, so an engaged AGENT_KILL_SWITCH still let the two
+// owner-messaging endpoints insert an executed action and queue a
+// notification. The kill switch must actually stop them.
+func TestHandleOwnerFacing_KillSwitchBlocksNotification(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	h.srv.GlobalKill = true
+
+	rec := h.do("POST", "/notify/summary", ownerNotifyRequest{Text: "Daily digest"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (denial is a normal response, not an error), body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ActionID       int64  `json:"action_id"`
+		NotificationID int64  `json:"notification_id"`
+		Decision       string `json:"decision"`
+	}
+	decodeBody(t, rec, &body)
+	if body.Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", body.Decision)
+	}
+	if body.NotificationID != 0 {
+		t.Fatalf("notification_id = %d, want 0 (kill switch must block the notification too)", body.NotificationID)
+	}
+	action, err := h.store.GetAgentAction(context.Background(), h.userID, body.ActionID)
+	if err != nil {
+		t.Fatalf("lookup action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("action status = %q, want denied", action.Status)
+	}
+
+	// Confirm no notification row was queued at all, not just that the
+	// response omitted it.
+	notifs, err := h.store.DB.QueryContext(context.Background(),
+		`SELECT COUNT(*) FROM owner_notifications WHERE user_id = $1`, h.userID)
+	if err != nil {
+		t.Fatalf("count notifications: %v", err)
+	}
+	defer notifs.Close()
+	var count int
+	if notifs.Next() {
+		if err := notifs.Scan(&count); err != nil {
+			t.Fatalf("scan count: %v", err)
+		}
+	}
+	if count != 0 {
+		t.Fatalf("owner_notifications count = %d, want 0", count)
+	}
+}
+
+// TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification guards
+// against the P2 found in review: InsertAgentAction is idempotent per
+// (job_id, action_type), but InsertOwnerNotification previously had no such
+// guard, so a redelivered job (worker crashed after notify/summary but
+// before completing it) would queue a second copy of the same notification.
+func TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:notify-redelivery", conv.ID)
+
+	req := ownerNotifyRequest{JobID: jobID, Text: "Recruiter from Acme reached out."}
+
+	rec1 := h.do("POST", "/notify/summary", req)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body=%s", rec1.Code, rec1.Body.String())
+	}
+	var body1 map[string]int64
+	decodeBody(t, rec1, &body1)
+
+	rec2 := h.do("POST", "/notify/summary", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, body=%s", rec2.Code, rec2.Body.String())
+	}
+	var body2 map[string]int64
+	decodeBody(t, rec2, &body2)
+
+	if body2["action_id"] != body1["action_id"] {
+		t.Fatalf("redelivery action_id = %d, want the original %d", body2["action_id"], body1["action_id"])
+	}
+	if body2["notification_id"] != body1["notification_id"] {
+		t.Fatalf("redelivery notification_id = %d, want the original %d (must not queue a duplicate)",
+			body2["notification_id"], body1["notification_id"])
+	}
+
+	var count int
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM owner_notifications WHERE user_id = $1`, h.userID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count notifications: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("owner_notifications count = %d, want exactly 1", count)
+	}
+}
+
+// TestHandleProposeReply_RejectsMismatchedJobConversation guards against the
+// P1-adjacent P2 found in review: a worker must not be able to pair a job
+// tied to one conversation with a different conversation_id in the request
+// body — that would evaluate policy against the wrong conversation while
+// still letting the (unrelated) job complete via HasAgentActionForJob.
+func TestHandleProposeReply_RejectsMismatchedJobConversation(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv1 := h.seedConversation(555)
+	conv2 := h.seedConversation(556)
+	jobID := h.seedJob("evt:v1:1:555:mismatch", conv1.ID) // job tied to conv1
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv2.ID, JobID: jobID, Text: "hi", // but body claims conv2
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleJobComplete_LeadOnlyJobCanComplete guards against the P2 found
+// in review: a job whose only durable result is a saved lead (no reply
+// proposed, no owner notification sent) must still be completable — the
+// 409 invariant is "some durable result exists", not "an agent_actions row
+// exists specifically".
+func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:lead-only", conv.ID)
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	leadRec := h.do("POST", "/leads", saveLeadRequest{ConversationID: conv.ID, JobID: jobID, Company: "Acme"})
+	if leadRec.Code != http.StatusOK {
+		t.Fatalf("save lead status = %d, body=%s", leadRec.Code, leadRec.Body.String())
+	}
+
+	completeRec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: 1, Status: db.JobCompleted,
+	})
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("complete status = %d, want 200 (lead save alone should satisfy the invariant), body=%s",
+			completeRec.Code, completeRec.Body.String())
+	}
+}
+
 func TestHandleConversationContext(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)

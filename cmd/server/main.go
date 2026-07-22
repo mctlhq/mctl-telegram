@@ -329,13 +329,9 @@ func main() {
 	// provider, and the agent surface itself under a provider that only
 	// accepts aud=agent tokens.
 	if cfg.AgentEnabled {
-		admins := map[int64]bool{}
-		for _, id := range cfg.TGLoginAdmins {
-			admins[id] = true
-		}
 		if secret := cfg.OAUTHJWTSecret; secret != "" {
 			mux.With(auth.Middleware(provider, true, m)).Post("/api/agent/token",
-				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg), admins))
+				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg)))
 		}
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)

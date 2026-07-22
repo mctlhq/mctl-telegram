@@ -93,7 +93,7 @@ func (s *Server) handleAutopilotPause(w http.ResponseWriter, r *http.Request) {
 	// silently skip a real {"paused":false} chunked body and default to
 	// pause=true). An empty body decodes to io.EOF, which is the expected
 	// "no fields provided" case, not a client error.
-	if err := decodeStrict(r, &req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeStrict(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

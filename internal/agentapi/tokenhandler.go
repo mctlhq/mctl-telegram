@@ -41,12 +41,18 @@ type agentTokenResponse struct {
 // NewAgentTokenHandler returns the http.HandlerFunc for POST
 // /api/agent/token. Admin-scoped: the caller must be authenticated by the
 // standard MCP auth chain (auth.Middleware(provider, true, m), same as every
-// other admin-only route in this codebase) AND their Telegram id must be in
-// adminTGIDs — the same allowlist that grants platform-admins scopes
-// elsewhere (TG_LOGIN_ADMINS). This endpoint is intentionally NOT reachable
-// by the agent surface itself: an agent worker cannot mint its own
-// replacement or escalate to a different account's token.
-func NewAgentTokenHandler(secret []byte, issuer string, adminTGIDs map[int64]bool) http.HandlerFunc {
+// other admin-only route in this codebase) AND carry the "admin:users" scope.
+// That scope is the one concept that already means "admin" identically
+// across every AUTH_MODE this service supports: in local-jwt mode it is
+// minted onto TG_LOGIN_ADMINS Telegram ids (see oauth.Server), in shared-hmac
+// mode it is derived from the "platform-admins" group
+// (sharedhmac.DefaultGroupScopes). A Telegram-ID allowlist check here (the
+// earlier version of this handler) is local-jwt-only: sharedhmac.Provider
+// never sets Identity.TelegramID at all, so every shared-hmac admin would
+// have been rejected. This endpoint is intentionally NOT reachable by the
+// agent surface itself: an agent worker cannot mint its own replacement or
+// escalate to a different account's token.
+func NewAgentTokenHandler(secret []byte, issuer string) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
@@ -59,12 +65,12 @@ func NewAgentTokenHandler(secret []byte, issuer string, adminTGIDs map[int64]boo
 			writeJSONError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
-		if !adminTGIDs[id.TelegramID] {
+		if !id.HasScope("admin:users") {
 			writeJSONError(w, http.StatusForbidden, "admin scope required")
 			return
 		}
 		var req mintAgentTokenRequest
-		if err := decodeStrict(r, &req); err != nil {
+		if err := decodeStrict(w, r, &req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}

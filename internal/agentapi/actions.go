@@ -133,7 +133,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req proposeReplyRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -160,6 +160,28 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		logHandlerErr("propose_reply", err)
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
+	}
+	if req.JobID != 0 {
+		// The job and the conversation the caller pairs it with must actually
+		// match — otherwise policy evaluates against the wrong conversation's
+		// state/peer while HasAgentActionForJob still lets the (unrelated)
+		// job complete, since the action row it checks is keyed on job_id
+		// alone. GetAgentJob already scopes to id.UserID, so a foreign job_id
+		// is rejected before this check ever runs.
+		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")
+			return
+		}
+		if err != nil {
+			logHandlerErr("propose_reply", err)
+			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		if job.ConversationID != req.ConversationID {
+			writeJSONError(w, http.StatusBadRequest, "job_id does not belong to conversation_id")
+			return
+		}
 	}
 	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().Add(-time.Minute))
 	if err != nil {
@@ -216,6 +238,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 
 type saveLeadRequest struct {
 	ConversationID int64  `json:"conversation_id"`
+	JobID          int64  `json:"job_id,omitempty"`
 	Company        string `json:"company"`
 	Role           string `json:"role"`
 	RecruiterName  string `json:"recruiter_name"`
@@ -234,7 +257,7 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req saveLeadRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -243,7 +266,8 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leadID, err := s.Store.UpsertJobLead(r.Context(), db.JobLead{
-		UserID: id.UserID, ConversationID: req.ConversationID, Company: req.Company, Role: req.Role,
+		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID,
+		Company: req.Company, Role: req.Role,
 		RecruiterName: req.RecruiterName, RecruiterTGID: req.RecruiterTGID, Compensation: req.Compensation,
 		Status: req.Status, Detail: req.Detail,
 	})
@@ -287,7 +311,7 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		return
 	}
 	var req ownerNotifyRequest
-	if err := decodeStrict(r, &req); err != nil {
+	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -301,7 +325,16 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	if !ok {
 		return
 	}
-	var conv db.Conversation
+	// Conversation.State is checked by Evaluate BEFORE the owner-facing
+	// short-circuit (policy.go's switch on in.Conversation.State runs ahead
+	// of the ActionTypeOwnerSummary/OwnerApproval branch), and its default
+	// case denies any unrecognized state — including the empty string a
+	// zero-value Conversation carries. A conversation-less owner-facing call
+	// (req.ConversationID == 0, e.g. a general daily summary) must therefore
+	// still present State: Active so it reaches that short-circuit at all;
+	// policy_test.go's TestEvaluate_OwnerActionsAndPeerZero documents this
+	// exact contract.
+	conv := db.Conversation{State: db.ConversationActive}
 	if req.ConversationID != 0 {
 		c, err := s.Store.GetConversation(ctx, id.UserID, req.ConversationID)
 		if errors.Is(err, db.ErrConversationNotFound) {
@@ -322,11 +355,21 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		GlobalKill: s.globalKill(), Now: time.Now(),
 	})
 
+	// Owner-facing action types short-circuit to Allow inside Evaluate, but
+	// ONLY after the global gates (kill switch, mode==off, autopilot paused)
+	// have already had a chance to deny — see policy.go's ordering. A Deny
+	// here means one of those gates fired, and it must actually stop the
+	// notification from going out: the emergency kill switch exists
+	// precisely to silence every owner-facing message too, not just replies.
+	status := db.ActionExecuted
+	if result.Decision != policy.Allow {
+		status = db.ActionDenied
+	}
 	actionID, err := s.Store.InsertAgentAction(ctx, db.AgentAction{
 		JobID: req.JobID, ConversationID: req.ConversationID, UserID: id.UserID,
 		ActionType: actionType, Intent: req.Intent, Payload: req.Text,
 		PolicyDecision: string(result.Decision), PolicyReasons: strings.Join(result.Reasons, "; "),
-		Status: db.ActionExecuted, // owner-facing actions have no send step of their own to await
+		Status: status,
 	})
 	if errors.Is(err, db.ErrAgentJobNotFound) {
 		writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")
@@ -337,6 +380,17 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		writeJSONError(w, http.StatusInternalServerError, "request failed")
 		return
 	}
+	if status == db.ActionDenied {
+		s.audit(ctx, id.UserID, tool, "denied", strings.Join(result.Reasons, "; "))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"action_id": actionID, "decision": string(result.Decision), "reasons": result.Reasons,
+		})
+		return
+	}
+	// InsertOwnerNotification is idempotent per action_id (see its doc
+	// comment): a redelivered job that reaches this point again after
+	// InsertAgentAction resolved via the (job_id, action_type) conflict must
+	// not queue a second copy of the same summary/approval request.
 	notifID, err := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: id.UserID, Kind: notificationKind, ActionID: actionID, Body: req.Text,
 	})
