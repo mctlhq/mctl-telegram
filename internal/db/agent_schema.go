@@ -31,6 +31,26 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
 		}
 	}
+	// Idempotent ALTER passes for columns added after the tables above first
+	// shipped — CREATE TABLE IF NOT EXISTS is a no-op against a deployment
+	// that already has the table (agent_actions and job_leads have both been
+	// live since earlier communication-agent PRs), so a column added later
+	// needs the same addColumnIfMissing treatment db.go's Migrate uses for
+	// the core tables, or it silently never appears on an existing database.
+	//
+	// job_leads.job_id: added alongside A-PR6 (#296) so POST /jobs/{id}/complete
+	// can recognize a lead-only result. Missed the ALTER pass in that PR —
+	// closed here rather than in a separate one-line follow-up PR, since it's
+	// the same bug class this comment is already explaining.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	// agent_actions.send_random_id: added in A-PR7 (#297) — see
+	// internal/agent/executor's package doc for why the executor needs a
+	// persisted MTProto random_id.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_random_id", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
 	return nil
 }
 

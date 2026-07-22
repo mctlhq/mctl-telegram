@@ -209,8 +209,17 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// dedup guarantee this whole design relies on.
 		return fmt.Errorf("send: %w", err)
 	}
-	if _, err := e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID); err != nil {
+	ok, err = e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID)
+	if err != nil {
 		return fmt.Errorf("record executed: %w", err)
+	}
+	if !ok {
+		// Lost the CAS: another goroutine (a concurrent RecoverStuck sweep
+		// hitting the same row, or an overlapping call) already recorded this
+		// action executed. The Telegram send above is real and already
+		// happened either way — what matters is not double-counting its
+		// side effects below.
+		return nil
 	}
 	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
 		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
@@ -278,8 +287,17 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if err != nil {
 		return fmt.Errorf("retry send: %w", err)
 	}
-	if _, err := e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID); err != nil {
+	ok, err := e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID)
+	if err != nil {
 		return fmt.Errorf("record executed: %w", err)
+	}
+	if !ok {
+		// Lost the CAS: another sweep or an overlapping send() call already
+		// recorded this action executed. The retried send above is a real,
+		// harmless MTProto dedup no-op either way — what matters is not
+		// double-counting turns/latency below for a completion someone else
+		// already recorded.
+		return nil
 	}
 	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
 		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)

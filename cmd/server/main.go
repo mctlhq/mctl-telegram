@@ -120,7 +120,6 @@ func main() {
 		WithMetrics(m).
 		WithAgentRuntime(agentListener)
 	defer pool.Shutdown()
-	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
 	// Communication-agent control plane: the executor sends approved replies
 	// (crash-safely — see internal/agent/executor's package doc), the
@@ -129,9 +128,16 @@ func main() {
 	// here (not above, alongside agentListener) because all three need
 	// `pool` to actually reach Telegram — hence agentListener.Router is
 	// assigned after construction rather than passed into listener.New.
+	// This MUST happen before go listener.RunSupervisor below: the
+	// supervisor goroutine reads agentListener.Router the moment an update
+	// dispatches, so assigning it after the goroutine starts is a data race
+	// (and a window where an early Saved Messages command silently no-ops
+	// against a nil router).
 	agentExecutor := executor.New(store, &poolSender{pool: pool}, func() bool { return cfg.AgentKillSwitch }, m)
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
+
+	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
 	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
 	// pool_size / pool_capacity correctly indicates "no cap" (-1) vs a real value.
