@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
@@ -180,7 +181,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval: %w", err)
 		}
-		return fmt.Errorf("policy denies at send time: %s", result.Reasons)
+		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
 
 	randomID, err := e.NewRandomID()
@@ -282,6 +283,14 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	}
 	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
 		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
+	}
+	if e.m != nil {
+		// A recovery send IS the completion of a previously-approved action —
+		// it should count in the same histogram as send()'s observation, not
+		// be silently excluded. Crashed sends are exactly the cases whose
+		// latency is most likely to be anomalously high, so omitting them
+		// would bias the metric toward looking healthier than it is.
+		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
 }

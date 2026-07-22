@@ -65,7 +65,18 @@ func ParseCommand(text string) (Command, error) {
 	switch sub {
 	case CmdStatus, CmdLeads, CmdPause:
 		return Command{Type: sub}, nil
-	case CmdShow, CmdContinue, CmdTakeover, CmdApprove, CmdReject:
+	case CmdApprove, CmdReject:
+		if arg == "" {
+			return Command{}, fmt.Errorf("%w: /mctl %s <arg>", ErrMissingArg, sub)
+		}
+		// Only the first token is the code. A trailing autocorrected word
+		// ("/mctl approve AB12CD oops") must not get folded into the code
+		// (GetAgentActionByCode would then just fail to find "AB12CD oops"
+		// with a confusing "not found" reply) — codes never legitimately
+		// contain spaces, unlike show/continue/takeover's numeric ids, whose
+		// strconv.ParseInt already rejects trailing garbage on its own.
+		return Command{Type: sub, Arg: fields[2]}, nil
+	case CmdShow, CmdContinue, CmdTakeover:
 		if arg == "" {
 			return Command{}, fmt.Errorf("%w: /mctl %s <arg>", ErrMissingArg, sub)
 		}

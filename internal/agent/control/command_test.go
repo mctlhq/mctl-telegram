@@ -28,7 +28,8 @@ func TestParseCommand_Table(t *testing.T) {
 		{"unknown subcommand", "/mctl frobnicate", Command{}, ErrUnknownCommand},
 		{"show missing arg", "/mctl show", Command{}, ErrMissingArg},
 		{"approve missing arg", "/mctl approve", Command{}, ErrMissingArg},
-		{"approve arg with spaces joins remaining fields", "/mctl approve AB 12", Command{Type: CmdApprove, Arg: "AB 12"}, nil},
+		{"approve arg takes only the first token, ignores trailing words", "/mctl approve AB12CD oops", Command{Type: CmdApprove, Arg: "AB12CD"}, nil},
+		{"show arg still joins remaining fields (numeric parse rejects it anyway)", "/mctl show 42 oops", Command{Type: CmdShow, Arg: "42 oops"}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -96,7 +96,10 @@ func (r *Router) handleLeads(ctx context.Context, userID int64) error {
 	var sb strings.Builder
 	sb.WriteString("Recent leads:\n")
 	for _, l := range leads {
-		fmt.Fprintf(&sb, "#%d — %s / %s (%s)\n", l.ID, orDash(l.Company), orDash(l.Role), l.Status)
+		// l.ConversationID, not l.ID (job_leads.id) — /mctl show takes a
+		// conversation id, and the two are different sequences. Showing the
+		// lead's own id here would send the owner to look up the wrong row.
+		fmt.Fprintf(&sb, "Conv #%d — %s / %s (%s)\n", l.ConversationID, orDash(l.Company), orDash(l.Role), l.Status)
 	}
 	sb.WriteString("\n/mctl show <conversation id> for details")
 	return r.Notifier.Reply(ctx, userID, sb.String())

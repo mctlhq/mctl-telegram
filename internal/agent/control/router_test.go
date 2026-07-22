@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
@@ -181,6 +182,36 @@ func TestRouter_Takeover_SetsStateAndDeniesPending(t *testing.T) {
 	}
 	if action.Status != db.ActionDenied {
 		t.Fatalf("pending action status = %q, want denied", action.Status)
+	}
+}
+
+// TestRouter_Leads_ShowsConversationIDNotLeadID guards against the P2 found
+// in review: the leads list must print the conversation id (what /mctl show
+// actually takes), not job_leads.id — a different sequence entirely. An
+// owner copying the printed number into /mctl show must land on the right
+// conversation.
+func TestRouter_Leads_ShowsConversationIDNotLeadID(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if _, err := store.UpsertJobLead(ctx, db.JobLead{
+		UserID: uid, ConversationID: conv.ID, Company: "Acme", Role: "Engineer",
+	}); err != nil {
+		t.Fatalf("seed lead: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	wantMarker := "Conv #" + strconv.FormatInt(conv.ID, 10)
+	if !strings.Contains(sender.sent[0], wantMarker) {
+		t.Fatalf("leads reply = %q, want it to contain %q (the conversation id, not the lead's own id)", sender.sent[0], wantMarker)
 	}
 }
 
