@@ -9,6 +9,32 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+// maxTelegramMessageLen matches this codebase's established Telegram
+// text-message cap (see internal/sanitize.UserContent's doc comment: "pass
+// 4096 for Telegram message bodies"). Owner notification bodies are built
+// from model-generated summaries and drafts with no length validation
+// upstream — an over-length send fails with MESSAGE_TOO_LONG, which is a
+// PERMANENT error for that exact payload, not a transient one: without
+// truncating first, DeliverPending's retry-until-MaxPendingAge logic would
+// keep retrying the identical oversized text for a full day before finally
+// giving up, and the owner never receives even a partial notification in
+// that entire window.
+const maxTelegramMessageLen = 4096
+
+const truncatedSuffix = "\n\n[truncated]"
+
+func truncateForTelegram(s string) string {
+	r := []rune(s)
+	if len(r) <= maxTelegramMessageLen {
+		return s
+	}
+	cut := maxTelegramMessageLen - len([]rune(truncatedSuffix))
+	if cut < 0 {
+		cut = 0
+	}
+	return string(r[:cut]) + truncatedSuffix
+}
+
 // SelfSender is the narrow capability the Notifier needs: posting into the
 // owner's own Saved Messages. Implemented in cmd/server/main.go over
 // telegram.ClientPool + internal/telegram/sendself.go's SendToSelf; kept as
@@ -88,9 +114,21 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		}
 		text, ferr := n.format(ctx, notif)
 		if ferr != nil {
-			slog.Warn("notifier: format failed, marking failed", "notification_id", notif.ID, "err", ferr)
-			if merr := n.Store.MarkOwnerNotificationFailed(ctx, notif.UserID, notif.ID); merr != nil {
-				slog.Warn("notifier: mark failed errored", "notification_id", notif.ID, "err", merr)
+			// format's only failure mode today is GetAgentAction erroring —
+			// which is far more likely a transient DB blip than a permanent
+			// data problem (a genuinely missing/corrupt linked action would
+			// be a schema bug, not something that self-heals). Retiring the
+			// row on the first such error permanently discards the
+			// notification — the owner never receives it and never even
+			// finds out delivery was attempted. Leave it pending instead,
+			// same as a transient send failure below: the claim lease
+			// expires on its own and the row is retried next sweep, still
+			// subject to MaxPendingAge if it keeps failing.
+			slog.Warn("notifier: format failed, will retry next sweep", "notification_id", notif.ID, "err", ferr)
+			if n.MaxPendingAge > 0 && time.Since(notif.CreatedAt) > n.MaxPendingAge {
+				if merr := n.Store.MarkOwnerNotificationFailed(ctx, notif.UserID, notif.ID); merr != nil {
+					slog.Warn("notifier: mark failed errored", "notification_id", notif.ID, "err", merr)
+				}
 			}
 			failed++
 			continue
@@ -132,10 +170,12 @@ func (n *Notifier) claimLease() time.Duration {
 // format renders a notification body for delivery. Approval requests need
 // the linked action's approval_code and draft text (the notification row
 // itself only carries the raw intent text); every other kind is delivered
-// as-is.
+// as-is. The returned string is always within maxTelegramMessageLen — see
+// truncateForTelegram's doc comment for why that has to happen here rather
+// than left to the send call to fail on.
 func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (string, error) {
 	if notif.Kind != db.NotificationApproval || notif.ActionID == 0 {
-		return notif.Body, nil
+		return truncateForTelegram(notif.Body), nil
 	}
 	action, err := n.Store.GetAgentAction(ctx, notif.UserID, notif.ActionID)
 	if err != nil {
@@ -148,17 +188,36 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 		// approve/reject code. Formatting this as "Draft reply (already
 		// resolved)" below would be actively misleading: there was never an
 		// approve/reject mechanism to resolve in the first place.
-		return fmt.Sprintf("Owner input requested:\n\n%s", action.Payload), nil
+		return truncateForTelegram(fmt.Sprintf("Owner input requested:\n\n%s", action.Payload)), nil
 	}
 	if action.ApprovalCode == "" {
 		// Already decided (approved/rejected/expired) between insert and
 		// delivery — the code was nulled on the terminal transition. Deliver
 		// the draft as an FYI without approve/reject instructions that would
 		// no longer work.
-		return fmt.Sprintf("Draft reply (already resolved, status: %s):\n\n%s", action.Status, action.Payload), nil
+		return truncateForTelegram(fmt.Sprintf("Draft reply (already resolved, status: %s):\n\n%s", action.Status, action.Payload)), nil
 	}
-	return fmt.Sprintf(
-		"Draft reply awaiting approval:\n\n%s\n\n/mctl approve %s\n/mctl reject %s",
-		action.Payload, action.ApprovalCode, action.ApprovalCode,
-	), nil
+	// The /mctl approve|reject lines are the whole point of this message —
+	// truncating the composed string from the end (as every other branch
+	// does) risks cutting them off entirely if the draft payload alone is
+	// already near the limit, leaving the owner with no visible way to act
+	// on it. Truncate only the payload first, reserving room for the
+	// fixed-length prefix/instructions, so the commands always survive
+	// intact.
+	instructions := fmt.Sprintf("\n\n/mctl approve %s\n/mctl reject %s", action.ApprovalCode, action.ApprovalCode)
+	prefix := "Draft reply awaiting approval:\n\n"
+	marker := "[truncated]"
+	budget := maxTelegramMessageLen - len([]rune(prefix)) - len([]rune(instructions))
+	payload := []rune(action.Payload)
+	if budget < 0 {
+		budget = 0
+	}
+	if len(payload) > budget {
+		cut := budget - len([]rune(marker))
+		if cut < 0 {
+			cut = 0
+		}
+		payload = append(payload[:cut], []rune(marker)...)
+	}
+	return prefix + string(payload) + instructions, nil
 }

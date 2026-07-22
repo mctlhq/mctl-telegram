@@ -35,6 +35,15 @@ var ErrApprovalCodeNotFound = errors.New("approval code not found")
 // the TTL sweep) already decided it.
 var ErrLostRace = errors.New("action state changed concurrently")
 
+// ErrSendQueuedForRetry is returned by Approve when the initial Telegram
+// send fails with a transient error. The action is deliberately left in
+// `executing` (not reverted) for RecoverStuck to retry with the same
+// random_id — this is NOT a failed approval, and callers (see
+// control.Router.handleApprove) must not report it to the owner as one: the
+// send is still queued and will very likely go out on its own within the
+// recovery sweep's grace window.
+var ErrSendQueuedForRetry = errors.New("send failed transiently, queued for automatic retry")
+
 // Sender is the narrow interface the executor needs to actually deliver a
 // reply. Implemented in cmd/server/agentwiring.go over telegram.ClientPool +
 // telegram.SendToInputPeerWithRandomID; kept as an interface here so this
@@ -248,8 +257,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// will retry the identical send once the grace window elapses. Do NOT
 		// revert to approved here: a revert could let a second, independent
 		// send race this one with a DIFFERENT random_id, defeating the
-		// dedup guarantee this whole design relies on.
-		return fmt.Errorf("send: %w", err)
+		// dedup guarantee this whole design relies on. Wrapped in
+		// ErrSendQueuedForRetry (not a bare error) so the owner-facing path
+		// (control.Router.handleApprove) can tell "approval failed" apart
+		// from "actually queued, will retry" — this is genuinely the latter.
+		return fmt.Errorf("%w: %w", ErrSendQueuedForRetry, err)
 	}
 	ok, err = e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID)
 	if err != nil {

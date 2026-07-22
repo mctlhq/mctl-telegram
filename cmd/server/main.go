@@ -137,27 +137,34 @@ func main() {
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
 
-	// AGENT_PROFILE_PATH is optional even with AGENT_ENABLED=true: without
-	// it, GET /recruiters/{peer} returns 501 (see agentapi.Server.Profile's
-	// nil-safe doc comment) and the executor's restricted-field gate is
-	// simply skipped (Executor.Profile stays nil) rather than failing
-	// startup — a deployment that hasn't finished onboarding the owner's
-	// profile yet should not be blocked from running everything else. Loaded
-	// here (before RunSupervisor/the sweeper goroutines below), not in the
-	// AGENT_ENABLED HTTP-mounting block further down, so agentExecutor.Profile
-	// is assigned before any goroutine that might read it starts.
+	// AGENT_PROFILE_PATH is optional and loaded independently of
+	// AGENT_ENABLED: without it, GET /recruiters/{peer} returns 501 (see
+	// agentapi.Server.Profile's nil-safe doc comment) and the executor's
+	// restricted-field gate is simply skipped (Executor.Profile stays nil)
+	// rather than failing startup — a deployment that hasn't finished
+	// onboarding the owner's profile yet should not be blocked from running
+	// everything else. Gating this on cfg.AgentEnabled (an earlier version
+	// of this block did) was itself a bug, caught by review: the executor's
+	// sweeper (go sweeper.AgentExecutor below) starts unconditionally, so
+	// with AGENT_ENABLED=false but a profile path already configured — the
+	// exact shape of a staged C1 rollout, see the Communication Agent plan
+	// — any action left ActionApproved from before a redeploy would still
+	// get picked up and sent by the sweeper with restrictedFieldBlocks
+	// treating the nil profile as "allow everything," silently skipping the
+	// approval_required/never_auto_send checks the profile is there to
+	// enforce. Loaded here (before RunSupervisor/the sweeper goroutines
+	// below), so agentExecutor.Profile is assigned before any goroutine
+	// that might read it starts.
 	var agentProfileProvider *profile.Provider
-	if cfg.AgentEnabled {
-		if path := cfg.AgentProfilePath; path != "" {
-			var err error
-			agentProfileProvider, err = profile.Load(path)
-			if err != nil {
-				slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
-				os.Exit(1)
-			}
-			agentExecutor.Profile = agentProfileProvider
-			slog.Info("agent owner profile loaded", "path", path)
+	if path := cfg.AgentProfilePath; path != "" {
+		var err error
+		agentProfileProvider, err = profile.Load(path)
+		if err != nil {
+			slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
+			os.Exit(1)
 		}
+		agentExecutor.Profile = agentProfileProvider
+		slog.Info("agent owner profile loaded", "path", path)
 	}
 
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)

@@ -217,6 +217,138 @@ func TestNotifier_DeliverPending_OwnerApprovalRequestFormattedAsRequest(t *testi
 	}
 }
 
+// TestNotifier_DeliverPending_TruncatesOversizedSummary guards against a
+// Codex finding on #307: an unbounded summary body sent as-is fails with
+// Telegram's MESSAGE_TOO_LONG — a permanent error for that exact payload —
+// yet DeliverPending's send-failure path treats every failure as transient
+// until MaxPendingAge, so the owner would never receive it for a full day.
+func TestNotifier_DeliverPending_TruncatesOversizedSummary(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	huge := strings.Repeat("x", maxTelegramMessageLen+500)
+	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationSummary, Body: huge,
+	}); err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	if _, _, err := notifier.DeliverPending(ctx); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(sender.sent))
+	}
+	if got := len([]rune(sender.sent[0])); got > maxTelegramMessageLen {
+		t.Fatalf("sent body is %d runes, want <= %d", got, maxTelegramMessageLen)
+	}
+}
+
+// TestNotifier_DeliverPending_TruncatesDraftButKeepsApprovalCommands is the
+// approval-specific half of the same fix: truncating the composed string
+// blindly from the end (as the summary path does) risks cutting off the
+// /mctl approve|reject lines entirely if the draft payload alone is already
+// near the limit — leaving the owner with no visible way to act on it.
+func TestNotifier_DeliverPending_TruncatesDraftButKeepsApprovalCommands(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	hugePayload := strings.Repeat("x", maxTelegramMessageLen+500)
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: hugePayload, PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "CODE01",
+	})
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationApproval, ActionID: actionID, Body: "ignored",
+	}); err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	if _, _, err := notifier.DeliverPending(ctx); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(sender.sent))
+	}
+	text := sender.sent[0]
+	if got := len([]rune(text)); got > maxTelegramMessageLen {
+		t.Fatalf("sent body is %d runes, want <= %d", got, maxTelegramMessageLen)
+	}
+	if !strings.Contains(text, "/mctl approve CODE01") || !strings.Contains(text, "/mctl reject CODE01") {
+		t.Fatalf("truncation cut off the approve/reject commands: %q", text)
+	}
+}
+
+// TestNotifier_DeliverPending_TransientFormatErrorStaysPending guards
+// against a Codex finding on #307: format's only failure mode
+// (GetAgentAction erroring) was treated as permanent and retired the row
+// immediately, discarding the notification forever on the first hiccup —
+// the owner never receives it and never finds out delivery was even
+// attempted. An orphaned action_id (simulating GetAgentAction failing —
+// InsertOwnerNotification validates the action exists at insert time, so
+// the row is deleted out from under it afterward) must leave the
+// notification pending for another attempt, same as a transient send
+// failure.
+func TestNotifier_DeliverPending_TransientFormatErrorStaysPending(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "hi", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "CODE02",
+	})
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationApproval, ActionID: actionID, Body: "ignored",
+	})
+	if err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM agent_actions WHERE id = ?`, actionID); err != nil {
+		t.Fatalf("orphan the linked action: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	notifier.MaxPendingAge = time.Hour // comfortably not exceeded yet
+	delivered, failed, err := notifier.DeliverPending(ctx)
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if delivered != 0 || failed != 1 {
+		t.Fatalf("delivered=%d failed=%d, want 0/1", delivered, failed)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %d, want 0 (format failed before any send attempt)", len(sender.sent))
+	}
+	pending, err := store.ListPendingOwnerNotifications(ctx, 50)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	found := false
+	for _, n := range pending {
+		if n.ID == notifID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("notification was retired on a format error before MaxPendingAge elapsed — should still be pending")
+	}
+}
+
 func TestNotifier_DeliverPending_MarksSentAndIsIdempotent(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
 	ctx := context.Background()

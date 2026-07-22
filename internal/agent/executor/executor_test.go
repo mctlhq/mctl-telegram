@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -128,6 +129,28 @@ func TestExecutor_Approve_SendsAndMarksExecuted(t *testing.T) {
 	}
 	if sender.calls[0].peerTGID != conv.PeerTGID {
 		t.Fatalf("sent to peer %d, want %d", sender.calls[0].peerTGID, conv.PeerTGID)
+	}
+}
+
+// TestExecutor_Approve_TransientSendFailureWrapsErrSendQueuedForRetry guards
+// against a Codex finding on #307: the action is deliberately left
+// `executing` for RecoverStuck to retry on a transient send error, so the
+// error Approve returns must be distinguishable from a genuine failure —
+// control.Router.handleApprove relies on errors.Is(err,
+// ErrSendQueuedForRetry) to avoid telling the owner "could not approve" for
+// something that's actually still in flight.
+func TestExecutor_Approve_TransientSendFailureWrapsErrSendQueuedForRetry(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	sender.failNext = 1
+
+	err := exec.Approve(ctx, uid, code)
+	if err == nil {
+		t.Fatal("expected an error from the transient send failure")
+	}
+	if !errors.Is(err, ErrSendQueuedForRetry) {
+		t.Fatalf("err = %v, want it to wrap ErrSendQueuedForRetry", err)
 	}
 }
 

@@ -179,10 +179,19 @@ func (r *Router) handleTakeover(ctx context.Context, userID int64, arg string) e
 }
 
 func (r *Router) handleApprove(ctx context.Context, userID int64, code string) error {
-	if err := r.Executor.Approve(ctx, userID, code); err != nil {
+	err := r.Executor.Approve(ctx, userID, code)
+	switch {
+	case err == nil:
+		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Approved and sent (%s).", code))
+	case errors.Is(err, executor.ErrSendQueuedForRetry):
+		// The action is genuinely approved and left executing for
+		// RecoverStuck to retry — NOT a failed approval. Telling the owner
+		// "could not approve" here would be actively misleading: the
+		// message will very likely still go out on its own shortly after.
+		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Approved (%s) — the send hit a transient error and is queued for automatic retry; it should go out shortly.", code))
+	default:
 		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Could not approve %s: %s", code, approverErrText(err)))
 	}
-	return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Approved and sent (%s).", code))
 }
 
 func (r *Router) handleReject(ctx context.Context, userID int64, code string) error {

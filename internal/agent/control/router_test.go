@@ -130,6 +130,30 @@ func TestRouter_Approve_SurfacesErrorFromExecutor(t *testing.T) {
 	}
 }
 
+// TestRouter_Approve_QueuedRetryIsNotReportedAsFailure guards against a
+// Codex finding on #307: a transient send error leaves the action
+// `executing` for automatic retry (Executor wraps this in
+// ErrSendQueuedForRetry specifically so callers can tell it apart) — the
+// owner must be told it's queued, not that approval failed, since the
+// message will likely still go out shortly after.
+func TestRouter_Approve_QueuedRetryIsNotReportedAsFailure(t *testing.T) {
+	router, approver, sender, _, uid := newTestRouter(t)
+	approver.approveErr = executor.ErrSendQueuedForRetry
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve AB12CD"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if strings.Contains(reply, "Could not approve") {
+		t.Fatalf("reported a queued retry as a failed approval: %q", reply)
+	}
+	if !strings.Contains(reply, "Approved") || !strings.Contains(reply, "queued") {
+		t.Fatalf("reply doesn't reflect the queued-for-retry state: %q", reply)
+	}
+}
+
 func TestRouter_Reject_DelegatesToExecutorWithCode(t *testing.T) {
 	router, approver, _, _, uid := newTestRouter(t)
 	if err := router.HandleSavedText(context.Background(), uid, "/mctl reject XY9988"); err != nil {
