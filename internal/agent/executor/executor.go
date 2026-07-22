@@ -194,13 +194,27 @@ func (e *Executor) ProcessApproved(ctx context.Context) (int, error) {
 // moved to denied instead of sent — a stale approval must not bypass a deny
 // condition that has since become true.
 func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
+	// Every error return between here and BeginExecutingAgentAction's
+	// success leaves the action row untouched at `approved` — no CAS has
+	// run yet to move it anywhere else. That means ProcessApproved's own
+	// periodic sweep (matching status=approved, regardless of whether the
+	// row got there via guarded-mode auto-insert or a manual /mctl
+	// approve's CAS) will pick it up and retry on its own, exactly like
+	// RecoverStuck does for a row already in `executing`. A Codex finding
+	// on #307 caught that only the post-BeginExecutingAgentAction send
+	// failure below was wrapped in ErrSendQueuedForRetry — these earlier
+	// transient failures (profile/conversation load, random ID
+	// generation, the CAS call itself) were left on the generic error
+	// path, so control.Router.handleApprove reported them as "could not
+	// approve" even though they're genuinely the same "queued, will retry"
+	// case.
 	profile, err := e.Store.GetAgentProfile(ctx, action.UserID)
 	if err != nil {
-		return fmt.Errorf("load profile: %w", err)
+		return fmt.Errorf("%w: load profile: %w", ErrSendQueuedForRetry, err)
 	}
 	conv, err := e.Store.GetConversation(ctx, action.UserID, action.ConversationID)
 	if err != nil {
-		return fmt.Errorf("load conversation: %w", err)
+		return fmt.Errorf("%w: load conversation: %w", ErrSendQueuedForRetry, err)
 	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
@@ -237,13 +251,17 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 
 	randomID, err := e.NewRandomID()
 	if err != nil {
-		return fmt.Errorf("generate random id: %w", err)
+		return fmt.Errorf("%w: generate random id: %w", ErrSendQueuedForRetry, err)
 	}
 	ok, err := e.Store.BeginExecutingAgentAction(ctx, action.UserID, action.ID, randomID)
 	if err != nil {
-		return fmt.Errorf("begin executing: %w", err)
+		return fmt.Errorf("%w: begin executing: %w", ErrSendQueuedForRetry, err)
 	}
 	if !ok {
+		// Genuinely terminal, not a retry case: something else (a second
+		// /mctl approve, a takeover, the TTL sweep) already moved this row
+		// off `approved` between Approve()'s own CAS and this one — there
+		// is nothing left to retry, the row is decided.
 		return ErrLostRace
 	}
 

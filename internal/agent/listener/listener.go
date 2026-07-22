@@ -190,6 +190,25 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			return fmt.Errorf("set conversation peer access hash: %w", err)
 		}
 		if ex.Event.Kind == db.EventKindMessageEdit {
+			// gotd delivers updates at least once — the SAME edit can arrive
+			// again later (a reconnect/gap-recovery replay), and Queue.Ingest
+			// already treats that redelivery as a no-op via its unique
+			// event_id constraint. But this deny call has no such dedup of
+			// its own: a Codex finding on #307 caught that a redelivered
+			// edit re-runs DenyPendingActionsForConversation, which would
+			// deny the FRESH, correctly-edited proposal the FIRST delivery's
+			// job already produced — while the redelivered Ingest is a
+			// no-op and creates nothing to replace it, leaving the
+			// conversation with no valid pending action at all. Checking
+			// whether this exact event_id was already ingested — the same
+			// idempotency check EventKindOwnerOutgoing below already uses —
+			// makes the whole block (deny + ingest) a no-op together on a
+			// redelivery, not just the ingest half.
+			if _, err := l.Store.GetIncomingEvent(ctx, acct.userID, ex.Event.EventID); err == nil {
+				return nil
+			} else if !errors.Is(err, db.ErrIncomingEventNotFound) {
+				return fmt.Errorf("check existing edit event: %w", err)
+			}
 			// Must run BEFORE Queue.Ingest below, not after: Ingest publishes
 			// the new job as immediately claimable, and Ingest/this deny are
 			// two separate transactions, not one atomic unit. Denying AFTER

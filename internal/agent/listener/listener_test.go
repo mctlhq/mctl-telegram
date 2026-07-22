@@ -307,6 +307,70 @@ func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
 	}
 }
 
+// TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated guards
+// against a Codex finding on #307: gotd delivers updates at least once, so
+// the SAME edit can arrive again later (a reconnect/gap-recovery replay).
+// Queue.Ingest already treats that redelivery as a no-op via its unique
+// event_id constraint, but the deny call had no such dedup of its own — a
+// redelivered edit would re-deny whatever fresh, correctly-edited proposal
+// the FIRST delivery's job already produced, while the redelivered Ingest
+// creates nothing to replace it. Simulated here by delivering the identical
+// edited message twice, seeding a fresh proposal in between (standing in
+// for what the first delivery's job would have produced).
+func TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit (first delivery): %v", err)
+	}
+
+	// Stands in for the fresh, correctly-edited proposal the edit's own job
+	// would go on to produce.
+	freshActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft answering the EDITED text", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "EDIT02",
+	})
+	if err != nil {
+		t.Fatalf("seed fresh proposal: %v", err)
+	}
+
+	// Redelivery: the identical edited message, same ID/text/edit-date —
+	// gotd would produce the exact same event_id for this.
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit (redelivery): %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, freshActionID)
+	if err != nil {
+		t.Fatalf("get fresh action: %v", err)
+	}
+	if action.Status != db.ActionPendingApproval {
+		t.Fatalf("fresh proposal status = %q, want still pending_approval — a redelivered edit must not deny the response it already produced", action.Status)
+	}
+
+	var jobCount int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs WHERE conversation_id=$1`, conv.ID).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 2 {
+		t.Fatalf("job count = %d, want 2 (original + edit) — the redelivery must not enqueue a third job", jobCount)
+	}
+}
+
 // TestPersist_MessageEditLeavesExecutingActionAlone confirms an action
 // already `executing` (a send may be in flight) is NOT denied by an edit
 // racing it — DenyPendingActionsForConversation deliberately excludes that

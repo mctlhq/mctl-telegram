@@ -154,6 +154,43 @@ func TestExecutor_Approve_TransientSendFailureWrapsErrSendQueuedForRetry(t *test
 	}
 }
 
+// TestExecutor_Approve_PreSendTransientFailureAlsoWrapsErrSendQueuedForRetry
+// guards against a second Codex finding on #307: the first fix only wrapped
+// the send-RPC failure in ErrSendQueuedForRetry, but a transient error
+// loading the profile/conversation, generating the random_id, or the
+// BeginExecutingAgentAction CAS call itself ALSO leaves the action
+// untouched at `approved` — no CAS has run yet — so ProcessApproved's own
+// periodic sweep picks it up and retries it exactly like RecoverStuck does
+// for a row already `executing`. These earlier failures were left on the
+// generic error path, so the owner was told "could not approve" for
+// something that's genuinely the same "queued, will retry" case. Simulated
+// here by deleting the profile row out from under an already-pending
+// approval, forcing GetAgentProfile to fail.
+func TestExecutor_Approve_PreSendTransientFailureAlsoWrapsErrSendQueuedForRetry(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM agent_profiles WHERE user_id = ?`, uid); err != nil {
+		t.Fatalf("orphan the profile: %v", err)
+	}
+
+	err := exec.Approve(ctx, uid, code)
+	if err == nil {
+		t.Fatal("expected an error from the missing profile")
+	}
+	if !errors.Is(err, ErrSendQueuedForRetry) {
+		t.Fatalf("err = %v, want it to wrap ErrSendQueuedForRetry", err)
+	}
+
+	action, err := store.GetAgentActionByCode(ctx, uid, code)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionApproved {
+		t.Fatalf("action status = %q, want still approved (untouched, for ProcessApproved's sweep to retry)", action.Status)
+	}
+}
+
 func TestExecutor_Approve_WrongCodeReturnsNotFound(t *testing.T) {
 	exec, _, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
