@@ -195,18 +195,24 @@ jobs:
       #      this check exists to prevent. Querying the same pinned SHA
       #      everything else uses keeps them consistent.
       - name: Skip if this commit was already reviewed
-        if: github.event_name == 'issue_comment'
+        # Originally issue_comment-only — a Codex finding on #309 caught that
+        # closing+reopening a PR, or draft->ready_for_review, refires
+        # `pull_request` for the SAME head SHA (no new commit) and bypassed
+        # this check entirely, paying for a fully redundant session. Runs
+        # for every trigger type now; the check is cheap (one paginated API
+        # call) relative to a full Claude session either way.
         id: dedup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          pr="${{ github.event.pull_request.number || github.event.issue.number }}"
           head_sha="${{ needs.gate.outputs.sha }}"
-          already=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews" \
+          already=$(gh api --paginate "repos/${{ github.repository }}/pulls/$pr/reviews" \
             --jq '[.[] | select(.user.login == "claude[bot]" and .commit_id == "'"$head_sha"'" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))] | length' | \
             jq -s 'add > 0')
           echo "already_reviewed=$already" >> "$GITHUB_OUTPUT"
           if [ "$already" = "true" ]; then
-            gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" \
+            gh pr comment "$pr" --repo "${{ github.repository }}" \
               --body "Skipping — this commit ($head_sha) already has a Claude review verdict. Push a new commit, or check the run log if you expected a fresh pass and the previous run actually failed."
           fi
 
@@ -221,7 +227,7 @@ jobs:
       # analyzing the identical code instead of one. A SHA is a valid
       # actions/checkout ref, so pinning to it costs nothing.
       - name: Checkout
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        if: steps.dedup.outputs.already_reviewed != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 1
@@ -229,7 +235,7 @@ jobs:
 
       - name: Classify PR complexity and pick model
         id: classify
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        if: steps.dedup.outputs.already_reviewed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -269,9 +275,41 @@ jobs:
           echo "lines=$lines"   >> $GITHUB_OUTPUT
           echo "PR #$PR: model=$model score=$score lines=$lines"
 
+      # gate's staleness check is a point-in-time snapshot; the SHA-scoped
+      # concurrency group deliberately lets this run keep going even after a
+      # newer commit lands (see the group comment above), but that means the
+      # classify step's `gh pr view`/`gh pr diff` calls above, and Claude's
+      # own `gh pr diff`/`gh pr view` tool calls below, all read the PR by
+      # NUMBER — live, current-head data — while checkout and the verdict's
+      # `-f commit_id` stay pinned to the (possibly now superseded)
+      # needs.gate.outputs.sha. A Codex finding on #309 caught that this
+      # lets a run analyze a mixture of the pinned commit's checkout and a
+      # newer commit's live PR data, then bind that mixed analysis to the
+      # old commit_id. Re-checking immediately before the expensive Claude
+      # call — rather than trying to pin every `gh pr` call, which `gh pr
+      # diff` has no flag for — means a run that's gone stale in the gap
+      # since `gate` bails here for near-zero cost instead of reviewing
+      # mismatched content; the newer commit's own correctly-triggered run
+      # (already in flight or about to fire) reviews the current state.
+      - name: Re-check staleness immediately before the review call
+        id: prerun-staleness
+        if: steps.dedup.outputs.already_reviewed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ github.event.pull_request.number || github.event.issue.number }}"
+          current_head=$(gh pr view "$pr" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
+          pinned="${{ needs.gate.outputs.sha }}"
+          if [ "$pinned" != "$current_head" ]; then
+            echo "::notice::stale before Claude call — pinned $pinned but PR head is now $current_head; skipping"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Claude review
         id: review
-        if: github.event_name != 'issue_comment' || steps.dedup.outputs.already_reviewed != 'true'
+        if: steps.dedup.outputs.already_reviewed != 'true' && steps.prerun-staleness.outputs.stale != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
         with:
