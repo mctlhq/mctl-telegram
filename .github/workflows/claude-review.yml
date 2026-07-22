@@ -9,11 +9,20 @@ on:
 permissions: {}
 
 jobs:
-  review:
+  # Split into gate + review (2026-07-22, Claude review round on #309 caught
+  # this): the hard write-permission/fork check must complete BEFORE the job
+  # enters the review job's canceling concurrency group. If both lived in one
+  # job, the coarse author_association pre-filter below is enough for a
+  # read-only collaborator's comment to pass the job-level `if:` and enter
+  # the concurrency group — with cancel-in-progress: true that cancels any
+  # currently-running legitimate review, and only THEN does the (now
+  # pointless) hard permission check fail. Splitting means the unauthorized
+  # run fails in `gate` and never touches the concurrency group at all.
+  gate:
     # pull_request: skip drafts and fork PRs (CLAUDE_CODE_OAUTH_TOKEN unavailable to forks)
     # issue_comment: only fire on PR comments containing '@claude review'
     # from a maintainer (association pre-filter here; hard write-permission +
-    # same-repo check in the first step below) — on a public repo an ungated
+    # same-repo check in the step below) — on a public repo an ungated
     # comment trigger lets any passerby burn review quota or prompt-inject
     # the reviewer.
     if: >
@@ -28,29 +37,19 @@ jobs:
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
-    # Bounds mid-flight duplication: pull_request (auto, on every push) and a
-    # manual '@claude review' comment on the same commit are two independent
-    # triggers for the workflow, and nothing before this stopped both runs
-    # completing in parallel. cancel-in-progress only stops the SECOND of two
-    # overlapping runs (the first may already have spent tokens/posted inline
-    # comments before cancellation lands) — paired with the "already
-    # reviewed" preflight check below, which turns the common case (comment
-    # posted right after the auto-triggered run already finished) into a
-    # near-zero-cost early exit instead.
-    concurrency:
-      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
-      cancel-in-progress: true
+    # Read-only: this job only queries collaborator permission and PR
+    # cross-repo status, both GET calls — it never writes anything, so it
+    # needs no more than read access even though the downstream review job
+    # (gated by needs: gate) has pull-requests: write for posting comments.
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
+      pull-requests: read
     steps:
       # author_association alone is too coarse (MEMBER = any org member,
       # COLLABORATOR includes read-only). Require actual write access, and
-      # refuse comment-triggered runs on fork PRs — the job would check out
-      # refs/pull/N/head, making fork-controlled files the workspace while
-      # the OAuth secret is available.
+      # refuse comment-triggered runs on fork PRs — the review job would
+      # check out refs/pull/N/head, making fork-controlled files the
+      # workspace while the OAuth secret is available.
       - name: Gate comment-triggered runs (write permission + same-repo)
         if: github.event_name == 'issue_comment'
         env:
@@ -67,6 +66,28 @@ jobs:
             exit 1
           fi
 
+  review:
+    needs: gate
+    runs-on: ubuntu-latest
+    # Bounds mid-flight duplication: pull_request (auto, on every push) and a
+    # manual '@claude review' comment on the same commit are two independent
+    # triggers for the workflow, and nothing before this stopped both runs
+    # completing in parallel. cancel-in-progress only stops the SECOND of two
+    # overlapping runs (the first may already have spent tokens/posted inline
+    # comments before cancellation lands) — paired with the "already
+    # reviewed" preflight check below, which turns the common case (comment
+    # posted right after the auto-triggered run already finished) into a
+    # near-zero-cost early exit instead. Only entered after `gate` succeeds —
+    # see the job-split comment above for why.
+    concurrency:
+      group: claude-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
       - name: Resolve PR branch for issue_comment trigger
         if: github.event_name == 'issue_comment'
         id: pr-ref
@@ -79,12 +100,22 @@ jobs:
       # A push already auto-triggers a review for its own commit via the
       # pull_request/synchronize path — a manual '@claude review' comment
       # posted right after is only ever redundant with that, never with
-      # itself, so this check only runs on the issue_comment path. Looks for
-      # a prior COMPLETED run of this workflow against the exact same head
-      # SHA (excluding this run) — cancel-in-progress above only handles two
-      # runs racing at the same time, not a comment arriving after the
-      # auto-triggered run already finished, which was the actual pattern
-      # observed burning duplicate sessions in practice (2026-07-22).
+      # itself, so this check only runs on the issue_comment path. Checks
+      # this specific PR's own review list (via the GitHub reviews API,
+      # which records the exact commit_id each review was submitted
+      # against) for an existing review from claude[bot] on the current head
+      # SHA — NOT workflow-run history, which a Claude review round on #309
+      # correctly flagged twice: (1) a run's job conclusion is "success" even
+      # when the Claude call itself failed (continue-on-error masks it, and
+      # the failure-notify step below doesn't fail the job either), so a
+      # run-history check would wrongly treat a failed attempt as "already
+      # reviewed" and silently block the exact manual retry the failure
+      # comment invites; (2) a bare headSha match isn't scoped to this PR, so
+      # two branches sharing a commit could cross-contaminate. Checking
+      # actual posted reviews for this exact PR number, filtered to the
+      # reviewer bot's own login, avoids both: a failed run never posted a
+      # review, so it never counts as "already reviewed", and the query is
+      # inherently per-PR.
       - name: Skip if this commit was already reviewed
         if: github.event_name == 'issue_comment'
         id: dedup
@@ -92,13 +123,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           head_sha=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefOid -q .headRefOid)
-          already=$(gh run list --repo "${{ github.repository }}" --workflow claude-review.yml \
-            --json headSha,conclusion,status,databaseId --limit 20 \
-            --jq '[.[] | select(.headSha == "'"$head_sha"'" and .databaseId != ${{ github.run_id }} and .status == "completed" and (.conclusion == "success" or .conclusion == "failure"))] | length > 0')
+          already=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/reviews" \
+            --jq '[.[] | select(.user.login == "claude[bot]" and .commit_id == "'"$head_sha"'")] | length > 0')
           echo "already_reviewed=$already" >> "$GITHUB_OUTPUT"
           if [ "$already" = "true" ]; then
             gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" \
-              --body "Skipping — this commit ($head_sha) was already reviewed by the automatic push-triggered run. Push a new commit or re-request review if you specifically need a fresh pass."
+              --body "Skipping — this commit ($head_sha) already has a Claude review verdict. Push a new commit, or check the run log if you expected a fresh pass and the previous run actually failed."
           fi
 
       - name: Checkout
