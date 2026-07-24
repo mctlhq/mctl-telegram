@@ -103,6 +103,122 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 	}
 }
 
+// TestRecordAgentActionSent_AtomicWithTurnAndHistory covers a Codex finding
+// on #307: before RecordAgentActionSent existed, the executor called
+// SetAgentActionExecuted, IncrementAutonomousTurns, and
+// InsertConversationMessage as three separate, independently-committing
+// statements — a crash between the first and the other two left the action
+// terminal (`executed`, so no recovery sweep ever revisits it) while
+// under-counting the turn budget and rate-limit history for a send that
+// genuinely happened. This test proves the all-or-nothing property directly:
+// a lost CAS (row not in `executing`) must leave the conversation's turn
+// counter and message history completely untouched, not partially updated.
+func TestRecordAgentActionSent_AtomicWithTurnAndHistory(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	id, err := s.InsertAgentAction(ctx, AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: ActionTypeReply,
+		Payload: "Thanks!", PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Lost-CAS case: the row is still pending_approval, never reached
+	// executing, so the CAS inside RecordAgentActionSent must fail — and
+	// crucially, NEITHER the turn counter NOR conversation_messages may be
+	// touched even though this call reaches the point where those writes
+	// would otherwise happen.
+	ok, err := s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "should not be recorded")
+	if err != nil {
+		t.Fatalf("record sent (lost CAS): %v", err)
+	}
+	if ok {
+		t.Fatal("RecordAgentActionSent succeeded on a row that was never executing")
+	}
+	gotConv, err := s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 0 {
+		t.Fatalf("autonomous_turns = %d after a lost CAS, want 0 (no partial write)", gotConv.AutonomousTurns)
+	}
+	msgs, err := s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("conversation_messages = %d rows after a lost CAS, want 0 (no partial write)", len(msgs))
+	}
+
+	// Now the real transition: approved -> executing, then a successful
+	// RecordAgentActionSent must flip the action AND increment the turn AND
+	// insert the history row, all together.
+	if ok, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionApproved); err != nil || !ok {
+		t.Fatalf("approve: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.BeginExecutingAgentAction(ctx, uid, id, 42); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+	ok, err = s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "Thanks! I'm an AI assistant.")
+	if err != nil {
+		t.Fatalf("record sent: %v", err)
+	}
+	if !ok {
+		t.Fatal("RecordAgentActionSent failed on a row that was executing")
+	}
+	action, err := s.GetAgentAction(ctx, uid, id)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != ActionExecuted || action.ExecutedTGMessageID != 999 {
+		t.Fatalf("action = %+v, want executed/999", action)
+	}
+	gotConv, err = s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns = %d, want 1", gotConv.AutonomousTurns)
+	}
+	msgs, err = s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Direction != DirectionAgentOutgoing || msgs[0].TGMessageID != 999 {
+		t.Fatalf("conversation messages = %+v, want one agent_outgoing row with tg_message_id=999", msgs)
+	}
+
+	// A second call (crash-recovery double call) must lose the CAS again and
+	// must NOT double-increment the turn counter or insert a second row.
+	ok, err = s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "Thanks! I'm an AI assistant.")
+	if err != nil {
+		t.Fatalf("record sent (double call): %v", err)
+	}
+	if ok {
+		t.Fatal("RecordAgentActionSent succeeded on an already-executed row")
+	}
+	gotConv, err = s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns = %d after a double call, want still 1", gotConv.AutonomousTurns)
+	}
+	msgs, err = s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("conversation_messages = %d rows after a double call, want still 1", len(msgs))
+	}
+}
+
 func TestUpdateAgentActionStatus_RejectsIllegalTransition(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

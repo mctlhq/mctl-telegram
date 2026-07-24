@@ -369,6 +369,80 @@ func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessag
 	return n > 0, nil
 }
 
+// RecordAgentActionSent atomically does everything a successful executor
+// send needs recorded: flips the action executing -> executed (the same CAS
+// SetAgentActionExecuted performs), increments the conversation's
+// autonomous-turn counter, and inserts the outgoing conversation_messages
+// row — all in ONE transaction. Returns ok=false, exactly like
+// SetAgentActionExecuted, when the CAS finds the row already out of
+// `executing` (a concurrent sweep/call already recorded it); in that case
+// no other write in this function happens either, matching the executor's
+// existing "don't double-count a completion someone else already recorded"
+// rule.
+//
+// Before this, the executor called SetAgentActionExecuted,
+// IncrementAutonomousTurns, and InsertConversationMessage as three
+// sequential, independently-committing calls (see recordSent in
+// internal/agent/executor) — a Codex finding on #307 caught that a crash
+// between the first and the other two leaves the action row terminal
+// (`executed`, so no recovery sweep ever revisits it) while under-counting
+// the turn budget and rate-limit history for a send that genuinely
+// happened, silently loosening both safety guards. Wrapping all three in
+// one transaction closes that window: either the whole completion is
+// recorded, or none of it is (and RecoverStuck's next sweep — the row is
+// STILL `executing` in that case — retries the CAS from scratch).
+func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, conversationID, tgMessageID int64, sentText string) (bool, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin record-sent tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL, updated_at = $3
+		  WHERE id = $4 AND user_id = $5 AND status = $6`,
+		ActionExecuted, tgMessageID, time.Now().UTC(), actionID, userID, ActionExecuting,
+	)
+	if err != nil {
+		return false, fmt.Errorf("set action executed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversations
+		    SET autonomous_turns = autonomous_turns + 1,
+		        last_agent_reply_at = $1, updated_at = $1
+		  WHERE id = $2 AND user_id = $3`,
+		now, conversationID, userID,
+	); err != nil {
+		return false, fmt.Errorf("increment autonomous turns: %w", err)
+	}
+
+	var body []byte
+	if sentText != "" {
+		body, err = s.Crypt.SealForUser([]byte(sentText), userID)
+		if err != nil {
+			return false, fmt.Errorf("seal message body: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO conversation_messages(conversation_id, direction, tg_message_id, body_encrypted)
+		 VALUES($1,$2,$3,$4)`,
+		conversationID, DirectionAgentOutgoing, tgMessageID, body,
+	); err != nil {
+		return false, fmt.Errorf("insert conversation message: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit record-sent tx: %w", err)
+	}
+	return true, nil
+}
+
 // ExpireStaleAgentActions moves pending_approval rows older than ttl to
 // expired. The age is measured from updated_at, not created_at: an action can
 // be inserted as `proposed` and only later transition to pending_approval, so

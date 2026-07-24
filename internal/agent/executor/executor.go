@@ -329,7 +329,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// from "actually queued, will retry" — this is genuinely the latter.
 		return fmt.Errorf("%w: %w", ErrSendQueuedForRetry, err)
 	}
-	ok, err = e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID)
+	ok, err = e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, tgMessageID, text)
 	if err != nil {
 		return fmt.Errorf("record executed: %w", err)
 	}
@@ -341,7 +341,6 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// side effects below.
 		return nil
 	}
-	e.recordSent(ctx, action, tgMessageID, text)
 	if e.m != nil && action.PolicyDecision == db.PolicyRequireApproval {
 		// A Codex finding on #307 caught this observation running
 		// unconditionally, including when send() is called from
@@ -374,25 +373,6 @@ func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID 
 		}
 	}
 	return out, nil
-}
-
-// recordSent does the bookkeeping every successful send needs, whether it
-// came from send() or recoverOne(): turn budget, and — added in review —
-// the conversation_messages row itself. Without the latter,
-// recentAgentSends (internal/agentapi's rate-limit input) never sees the
-// agent's own sends, so max_msgs_per_minute silently never triggers; the
-// listener deliberately consumes the Telegram-side echo of this exact send
-// (see notifyAgentSent) so nothing else in this codebase records it.
-func (e *Executor) recordSent(ctx context.Context, action db.AgentAction, tgMessageID int64, sentText string) {
-	if err := e.Store.IncrementAutonomousTurns(ctx, action.UserID, action.ConversationID); err != nil {
-		slog.Warn("executor: increment autonomous turns failed", "action_id", action.ID, "err", err)
-	}
-	if _, err := e.Store.InsertConversationMessage(ctx, action.UserID, db.ConversationMessage{
-		ConversationID: action.ConversationID, Direction: db.DirectionAgentOutgoing,
-		TGMessageID: tgMessageID, Body: sentText,
-	}); err != nil {
-		slog.Warn("executor: record conversation message failed", "action_id", action.ID, "err", err)
-	}
 }
 
 // RecoverStuck retries every action found stuck in executing past
@@ -544,7 +524,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if err != nil {
 		return fmt.Errorf("retry send: %w", err)
 	}
-	ok, err := e.Store.SetAgentActionExecuted(ctx, action.UserID, action.ID, tgMessageID)
+	ok, err := e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, tgMessageID, text)
 	if err != nil {
 		return fmt.Errorf("record executed: %w", err)
 	}
@@ -561,7 +541,6 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// Crashed sends are exactly the cases whose latency is most likely to be
 	// anomalously high, so omitting them would bias the metric toward
 	// looking healthier than it is.
-	e.recordSent(ctx, action, tgMessageID, text)
 	if e.m != nil && action.PolicyDecision == db.PolicyRequireApproval {
 		// Same restriction as send() (a Codex finding on #307): only count
 		// actions that actually went through a human /mctl approve.
