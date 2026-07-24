@@ -571,11 +571,84 @@ func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
 	}
 }
 
+// TestExecutor_ProcessApproved_StopsUnreviewedActionWhenBudgetExhausted
+// covers a Codex finding on #307: send() only ever stopped for a hard Deny,
+// so RequireApproval was silently ignored even for an action NO human ever
+// reviewed (PolicyDecision == PolicyAllow, guarded-mode auto-approval). With
+// a one-turn budget and two such actions queued, the first send exhausts
+// the budget and the second re-evaluation correctly returns
+// RequireApproval — but the old code sent it anyway, bypassing the turn
+// limit it exists to enforce. The second action must be denied, not sent.
+func TestExecutor_ProcessApproved_StopsUnreviewedActionWhenBudgetExhausted(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		MaxAutonomousTurns: 1, IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile with turn budget 1: %v", err)
+	}
+	firstID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Happy to chat about the role.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed first approved action: %v", err)
+	}
+	secondID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Sure, let's set up a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed second approved action: %v", err)
+	}
+
+	n, err := exec.ProcessApproved(ctx)
+	if err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("processed = %d, want 2", n)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want exactly 1 (the second must be denied, not sent, once the turn budget is exhausted)", len(sender.calls))
+	}
+
+	first, err := store.GetAgentAction(ctx, uid, firstID)
+	if err != nil {
+		t.Fatalf("get first action: %v", err)
+	}
+	if first.Status != db.ActionExecuted {
+		t.Fatalf("first status = %q, want executed", first.Status)
+	}
+	second, err := store.GetAgentAction(ctx, uid, secondID)
+	if err != nil {
+		t.Fatalf("get second action: %v", err)
+	}
+	if second.Status != db.ActionDenied {
+		t.Fatalf("second status = %q, want denied (no human ever reviewed it, and the budget is now exhausted)", second.Status)
+	}
+}
+
 func TestExecutor_ProcessApproved_SendsGuardedModeActions(t *testing.T) {
 	exec, sender, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
+	// IntentAllowlist must actually allow this action's Intent: since
+	// requireApprovalBypassesUnreviewedAllow (added alongside a Codex fix
+	// on #307) now re-derives the send-time decision for real instead of
+	// trusting the stored PolicyDecision blindly, the re-evaluation has to
+	// legitimately agree this is Allow, not RequireApproval, for the send to
+	// go through.
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile with intent allowlist: %v", err)
+	}
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
 		Payload: "Happy to chat about the role.", PolicyDecision: db.PolicyAllow,
 		Status: db.ActionApproved,
 	})

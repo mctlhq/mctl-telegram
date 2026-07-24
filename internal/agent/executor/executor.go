@@ -237,20 +237,32 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		GlobalKill: e.GlobalKill(),
 		Now:        time.Now(),
 	})
-	// Only a hard Deny stops the send here — RequireApproval is not a second
-	// vote against a row that is already `approved`. Evaluate has no notion
-	// of "a human already approved this specific action"; it recomputes the
-	// SAME require-approval reasons every time for observe mode / turn
-	// budget / intent-not-allowlisted / rate-limit, none of which should
-	// re-litigate a decision the owner (or guarded-mode auto-approval)
-	// already made. Deny conditions (kill switch, mode off, autopilot
-	// paused, taken over, blocked sender, peer mismatch, disclosure/length/
-	// URL/credential checks) are different: those are hard stops that must
-	// re-fire even on an already-approved row if they turned true since
-	// approval.
-	if result.Decision == policy.Deny {
+	// A hard Deny always stops the send — RequireApproval is more subtle: it
+	// is not a second vote against a row a HUMAN already approved via
+	// /mctl approve (action.PolicyDecision == PolicyRequireApproval when it
+	// was first proposed, meaning a person actually saw and approved this
+	// exact draft), because Evaluate recomputes the SAME require-approval
+	// reasons every time for observe mode / turn budget / intent-not-
+	// allowlisted / rate-limit, none of which should re-litigate a decision
+	// a person already made. But a row that reached `approved` WITHOUT any
+	// human ever reviewing it (action.PolicyDecision == PolicyAllow —
+	// propose_reply's own policy auto-approved it in guarded mode) has no
+	// such decision to defer to: if the CURRENT re-evaluation says
+	// RequireApproval — e.g. an earlier action in the same ProcessApproved
+	// batch just exhausted MaxAutonomousTurns — nothing has actually
+	// approved THIS send, and letting it through anyway is exactly the
+	// guarded-mode bypass a Codex finding on #307 caught: two queued
+	// PolicyAllow actions could both send under a one-turn budget instead of
+	// the second correctly falling back to requiring approval. Treat that
+	// case as a deny (fail closed) rather than inventing a re-queue path
+	// this codebase has no precedent for.
+	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
+	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval: %w", err)
+		}
+		if requireApprovalBypassesUnreviewedAllow {
+			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action: %s", strings.Join(result.Reasons, "; "))
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
