@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 )
 
 // Agent domain schema (communication agent, M6). These tables back the
@@ -27,29 +26,7 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	} else {
 		stmts = agentSchemaSQLite()
 	}
-	// Three phases, not one straight loop: CREATE TABLE, then the
-	// addColumnIfMissing ALTER patches below, then every CREATE INDEX.
-	//
-	// The ALTER patches need their target tables to already exist — a
-	// genuinely fresh database has no tables at all before phase 1 runs —
-	// so they cannot simply run before the whole stmts list. But some of
-	// this file's CREATE INDEX statements reference a column
-	// (job_leads.job_id, in particular) that only exists on a pre-A-PR6
-	// database once its ALTER has actually run: round-4 review caught a
-	// version of this function where CREATE INDEX ON job_leads(job_id) sat
-	// in the same single pass as the CREATE TABLE statements, ahead of the
-	// ALTER that would have added the column on such a database, so it
-	// failed outright on upgrade. Splitting CREATE TABLE from CREATE INDEX
-	// and running the ALTERs in between satisfies both constraints at once.
-	var tableStmts, indexStmts []string
 	for _, s := range stmts {
-		if strings.HasPrefix(strings.TrimSpace(s), "CREATE TABLE") {
-			tableStmts = append(tableStmts, s)
-		} else {
-			indexStmts = append(indexStmts, s)
-		}
-	}
-	for _, s := range tableStmts {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
 		}
@@ -59,13 +36,11 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	// shipped — CREATE TABLE IF NOT EXISTS is a no-op against a deployment
 	// that already has the table, so a column added later needs the same
 	// addColumnIfMissing treatment db.go's Migrate uses for the core
-	// tables, or it silently never appears on an existing database.
+	// tables, or it silently never appears on an existing database. None of
+	// these three have a CREATE INDEX anywhere in this file that references
+	// them, so — unlike job_leads.job_id below — they can safely run after
+	// the whole stmts list above with no ordering dependency.
 	//
-	// job_leads.job_id: added alongside A-PR6 (#296) so POST /jobs/{id}/complete
-	// can recognize a lead-only result.
-	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
-		return err
-	}
 	// agent_actions.send_random_id: added in A-PR7 (#297) — see
 	// internal/agent/executor's package doc for why the executor needs a
 	// persisted MTProto random_id.
@@ -86,22 +61,21 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		return err
 	}
 
-	for _, s := range indexStmts {
-		if _, err := dbConn.ExecContext(ctx, s); err != nil {
-			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
-		}
-	}
-	// job_leads shipped before job_id existed on it; CREATE TABLE IF NOT
-	// EXISTS above is a no-op on deployments that already have the table, so
-	// the column needs its own idempotent ALTER pass before the index below
-	// can reference it.
+	// job_leads.job_id: added alongside A-PR6 (#296) so POST
+	// /jobs/{id}/complete can recognize a lead-only result — see
+	// HasJobLeadForJob. Unlike the three columns above, its index is NOT
+	// inline in the job_leads CREATE TABLE stmts list above (see #310):
+	// on a pre-A-PR6 database, job_leads exists without job_id, and a
+	// CREATE INDEX ... ON job_leads(job_id) run in the same pass as that
+	// CREATE TABLE would fail outright with a missing-column error before
+	// this ALTER ever got a chance to run. Kept as its own ALTER-then-INDEX
+	// pair, strictly after the stmts loop, so the column always exists
+	// first. No FK to agent_jobs: job_leads precedes agent_jobs in the
+	// CREATE TABLE sequence, matching agent_actions.job_id's existing
+	// no-FK precedent rather than reordering the whole schema.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
 		return fmt.Errorf("migrate agent: %w", err)
 	}
-	// Lets POST /jobs/{id}/complete recognize a lead-save as a valid durable
-	// result too, not just an agent_actions row — see HasJobLeadForJob.
-	// No FK to agent_jobs: job_leads precedes agent_jobs in the CREATE TABLE
-	// sequence, matching agent_actions.job_id's existing no-FK precedent.
 	idxStmt := `CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, idxStmt); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, idxStmt)
