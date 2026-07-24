@@ -74,6 +74,45 @@ func TestNotifier_DeliverPending_ApprovalIdentifiesRecipient(t *testing.T) {
 	}
 }
 
+// TestNotifier_DeliverPending_UsesAndPersistsRandomID covers the
+// Notifier-level half of the same #307 finding as
+// TestClaimOwnerNotification_ReusesPersistedRandomIDOnRetry (in
+// internal/db): DeliverPending must actually thread the id
+// ClaimOwnerNotification persisted through to SendToSelfWithRandomID,
+// rather than generating and discarding a candidate.
+func TestNotifier_DeliverPending_UsesAndPersistsRandomID(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
+	})
+	if err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	delivered, failed, err := notifier.DeliverPending(ctx)
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if delivered != 1 || failed != 0 {
+		t.Fatalf("delivered=%d failed=%d, want 1/0", delivered, failed)
+	}
+	if len(sender.randomIDs) != 1 || sender.randomIDs[0] == 0 {
+		t.Fatalf("sender random ids = %v, want exactly one nonzero id", sender.randomIDs)
+	}
+
+	var stored int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT random_id FROM owner_notifications WHERE id = ?`, notifID,
+	).Scan(&stored); err != nil {
+		t.Fatalf("select stored random_id: %v", err)
+	}
+	if stored != sender.randomIDs[0] {
+		t.Fatalf("stored random_id = %d, want it to match what was actually sent (%d)", stored, sender.randomIDs[0])
+	}
+}
+
 func TestNotifier_DeliverPending_FormatsApprovalWithCode(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
 	ctx := context.Background()
@@ -191,7 +230,7 @@ func TestNotifier_DeliverPending_SkipsAlreadyClaimedRow(t *testing.T) {
 		t.Fatalf("seed notification: %v", err)
 	}
 	// A concurrent attempt already holds the lease.
-	claimed, err := store.ClaimOwnerNotification(ctx, uid, notifID, time.Minute)
+	_, claimed, err := store.ClaimOwnerNotification(ctx, uid, notifID, 999, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("pre-claim: claimed=%v err=%v", claimed, err)
 	}
@@ -224,7 +263,7 @@ func TestNotifier_DeliverPending_ClaimExpiresAndBecomesRetryable(t *testing.T) {
 		t.Fatalf("seed notification: %v", err)
 	}
 	// A lease that has already expired (simulating a crash long enough ago).
-	claimed, err := store.ClaimOwnerNotification(ctx, uid, notifID, -time.Minute)
+	_, claimed, err := store.ClaimOwnerNotification(ctx, uid, notifID, 999, -time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("pre-claim: claimed=%v err=%v", claimed, err)
 	}

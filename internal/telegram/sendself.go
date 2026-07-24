@@ -67,3 +67,13 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 func SendToSelf(ctx context.Context, c *telegram.Client, userID int64, text string) (int, error) {
 	return SendToInputPeer(ctx, c, userID, &tg.InputPeerSelf{}, text)
 }
+
+// SendToSelfWithRandomID is SendToSelf's crash-safe counterpart: the caller
+// supplies a random_id it has already persisted (see
+// Store.ClaimOwnerNotification) instead of one generated fresh here, so a
+// retry after a crash between this RPC succeeding and the caller recording
+// it can reuse the SAME id — MTProto dedups on it server-side, exactly like
+// SendToInputPeerWithRandomID's identical rationale for executor sends.
+func SendToSelfWithRandomID(ctx context.Context, c *telegram.Client, userID, randomID int64, text string) (int, error) {
+	return SendToInputPeerWithRandomID(ctx, c, userID, &tg.InputPeerSelf{}, text, randomID)
+}

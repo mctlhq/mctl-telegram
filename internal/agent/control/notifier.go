@@ -2,6 +2,8 @@ package control
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"time"
@@ -37,11 +39,20 @@ func truncateForTelegram(s string) string {
 
 // SelfSender is the narrow capability the Notifier needs: posting into the
 // owner's own Saved Messages. Implemented in cmd/server/main.go over
-// telegram.ClientPool + internal/telegram/sendself.go's SendToSelf; kept as
-// an interface here so this package stays testable without a real MTProto
-// client and does not need to import internal/telegram directly.
+// telegram.ClientPool + internal/telegram/sendself.go; kept as an interface
+// here so this package stays testable without a real MTProto client and
+// does not need to import internal/telegram directly.
 type SelfSender interface {
+	// SendToSelf is used only by Reply — a synchronous /mctl command
+	// confirmation that is never retried, so it has no crash-safety story
+	// (matches internal/telegram.SendToSelf's own doc comment).
 	SendToSelf(ctx context.Context, userID int64, text string) (int64, error)
+	// SendToSelfWithRandomID delivers text using EXACTLY randomID as the
+	// MTProto random_id — DeliverPending's crash-safe path, mirroring
+	// executor.Sender.SendWithRandomID's identical rationale: persist the
+	// id before the RPC (see Store.ClaimOwnerNotification), retry with the
+	// SAME id after a crash, rely on MTProto's server-side dedup.
+	SendToSelfWithRandomID(ctx context.Context, userID, randomID int64, text string) (int64, error)
 }
 
 // Notifier delivers owner_notifications rows (queued by the agent API's
@@ -135,7 +146,18 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		// ticks) can both list the same pending row, but only one wins the
 		// lease and should actually call SendToSelf for it. A lost claim is
 		// not a failure — it means another attempt already owns this row.
-		claimed, cerr := n.Store.ClaimOwnerNotification(ctx, notif.UserID, notif.ID, n.claimLease())
+		//
+		// A fresh candidate id is generated on every attempt but only ever
+		// actually PERSISTED once (ClaimOwnerNotification's COALESCE) — a
+		// retry after a crash gets back that same original value, not this
+		// new candidate, so the eventual SendWithRandomID call always uses
+		// whichever id Telegram may have already seen for this row.
+		candidate, rerr := newSelfRandomID()
+		if rerr != nil {
+			slog.Warn("notifier: random id generation failed", "notification_id", notif.ID, "err", rerr)
+			continue
+		}
+		randomID, claimed, cerr := n.Store.ClaimOwnerNotification(ctx, notif.UserID, notif.ID, candidate, n.claimLease())
 		if cerr != nil {
 			slog.Warn("notifier: claim failed", "notification_id", notif.ID, "err", cerr)
 			continue
@@ -164,7 +186,7 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 			failed++
 			continue
 		}
-		msgID, serr := n.Sender.SendToSelf(ctx, notif.UserID, text)
+		msgID, serr := n.Sender.SendToSelfWithRandomID(ctx, notif.UserID, randomID, text)
 		if serr != nil {
 			if n.MaxPendingAge > 0 && time.Since(notif.CreatedAt) > n.MaxPendingAge {
 				// Permanently undeliverable (e.g. a revoked owner session) —
@@ -189,6 +211,19 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+// newSelfRandomID draws a fresh Telegram RPC random_id from crypto/rand.
+// Deliberately duplicated from internal/telegram's identical helper rather
+// than exported and imported: this package must not depend on
+// internal/telegram (see SelfSender's doc comment), matching
+// executor.defaultRandomID's identical rationale.
+func newSelfRandomID() (int64, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, err
+	}
+	return int64(binary.LittleEndian.Uint64(b[:])), nil
 }
 
 func (n *Notifier) claimLease() time.Duration {

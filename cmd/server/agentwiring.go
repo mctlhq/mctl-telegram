@@ -63,3 +63,19 @@ func (s *poolSelfSender) SendToSelf(ctx context.Context, userID int64, text stri
 	}
 	return int64(messageID), nil
 }
+
+func (s *poolSelfSender) SendToSelfWithRandomID(ctx context.Context, userID, randomID int64, text string) (int64, error) {
+	var messageID int
+	err := s.pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		id, err := telegram.SendToSelfWithRandomID(ctx, c, userID, randomID, text)
+		if err != nil {
+			return err
+		}
+		messageID = id
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("send to self via pool: %w", err)
+	}
+	return int64(messageID), nil
+}

@@ -544,7 +544,7 @@ func TestListPendingOwnerNotifications_ExcludesLeasedRows(t *testing.T) {
 		t.Fatalf("insert healthy: %v", err)
 	}
 
-	claimed, err := s.ClaimOwnerNotification(ctx, uid, leasedID, time.Minute)
+	_, claimed, err := s.ClaimOwnerNotification(ctx, uid, leasedID, 12345, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("claim leased row: claimed=%v err=%v", claimed, err)
 	}
@@ -571,6 +571,63 @@ func TestListPendingOwnerNotifications_ExcludesLeasedRows(t *testing.T) {
 	}
 	if len(pending) != 2 {
 		t.Fatalf("pending after expiry = %d rows, want 2", len(pending))
+	}
+}
+
+// TestClaimOwnerNotification_ReusesPersistedRandomIDOnRetry covers a Codex
+// finding on #307: the claim lease alone only protects against two
+// REPLICAS racing the same row concurrently — it does nothing for a single
+// replica that crashes AFTER SendToSelf reaches Telegram but BEFORE
+// MarkOwnerNotificationSent commits. Without a persisted random_id, the
+// retry (once the lease expires) would call SendToSelf again with a FRESH
+// random_id, and Telegram has no way to dedup that against the first,
+// genuinely-delivered send. The second claim (after the first lease
+// expires without ever completing) must return the SAME random_id as the
+// first, not the new candidate it was offered.
+func TestClaimOwnerNotification_ReusesPersistedRandomIDOnRetry(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	notifID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "hello",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	firstRandomID, claimed, err := s.ClaimOwnerNotification(ctx, uid, notifID, 111, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
+	}
+	if firstRandomID != 111 {
+		t.Fatalf("first claim random id = %d, want the candidate 111 (nothing persisted yet)", firstRandomID)
+	}
+
+	// Simulate a crash: the lease expires without SendToSelf's outcome ever
+	// being recorded (no MarkOwnerNotificationSent/Failed call).
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET claimed_until = $1 WHERE id = $2`,
+		time.Now().Add(-time.Minute).UTC(), notifID,
+	); err != nil {
+		t.Fatalf("force-expire lease: %v", err)
+	}
+
+	secondRandomID, claimed, err := s.ClaimOwnerNotification(ctx, uid, notifID, 222, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("second claim: claimed=%v err=%v", claimed, err)
+	}
+	if secondRandomID != firstRandomID {
+		t.Fatalf("second claim random id = %d, want the original %d reused (not the new candidate 222)", secondRandomID, firstRandomID)
+	}
+
+	var stored sql.NullInt64
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT random_id FROM owner_notifications WHERE id = $1`, notifID,
+	).Scan(&stored); err != nil {
+		t.Fatalf("select stored random_id: %v", err)
+	}
+	if !stored.Valid || stored.Int64 != firstRandomID {
+		t.Fatalf("stored random_id = %+v, want %d", stored, firstRandomID)
 	}
 }
 

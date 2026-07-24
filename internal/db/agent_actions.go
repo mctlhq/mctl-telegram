@@ -959,19 +959,39 @@ func (s *Store) InsertOwnerNotification(ctx context.Context, n OwnerNotification
 // to every future ListPendingOwnerNotifications scan the way moving it to a
 // dedicated "sending" status would without a separate stuck-row sweep. This
 // mirrors the visibility-timeout pattern ClaimAgentJobs already uses.
-func (s *Store) ClaimOwnerNotification(ctx context.Context, userID, id int64, lease time.Duration) (bool, error) {
-	now := time.Now().UTC()
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE owner_notifications SET claimed_until = $1
-		  WHERE id = $2 AND user_id = $3 AND status = $4
-		    AND (claimed_until IS NULL OR claimed_until < $5)`,
-		now.Add(lease), id, userID, NotificationPending, now,
-	)
-	if err != nil {
-		return false, fmt.Errorf("claim owner notification: %w", err)
+//
+// Also persists (or, on a retry, reuses) a Telegram send random_id in the
+// SAME atomic UPDATE, mirroring BeginExecutingAgentAction's crash-safety
+// pattern for executor sends — a Codex finding on #307 caught that the
+// claim lease alone only protects against two REPLICAS racing the same row
+// concurrently; it does nothing for a single replica that crashes AFTER
+// SendToSelf reaches Telegram but BEFORE MarkOwnerNotificationSent commits.
+// Without a persisted id, the retry (once the lease expires) would call
+// SendToSelf again with a FRESH random_id — Telegram has no way to dedup
+// that against the first, genuinely-delivered send. candidateRandomID is a
+// freshly-generated id the caller offers for THIS attempt; COALESCE only
+// applies it when the row has no random_id yet, so a retry that finds one
+// already persisted reuses that exact same value instead.
+func (s *Store) ClaimOwnerNotification(ctx context.Context, userID, id, candidateRandomID int64, lease time.Duration) (randomID int64, claimed bool, err error) {
+	if candidateRandomID == 0 {
+		return 0, false, errors.New("candidate random id required")
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	now := time.Now().UTC()
+	err = s.DB.QueryRowContext(ctx,
+		`UPDATE owner_notifications
+		    SET claimed_until = $1, random_id = COALESCE(random_id, $2)
+		  WHERE id = $3 AND user_id = $4 AND status = $5
+		    AND (claimed_until IS NULL OR claimed_until < $6)
+		RETURNING random_id`,
+		now.Add(lease), candidateRandomID, id, userID, NotificationPending, now,
+	).Scan(&randomID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("claim owner notification: %w", err)
+	}
+	return randomID, true, nil
 }
 
 // MarkOwnerNotificationSent records a successful Saved Messages delivery.

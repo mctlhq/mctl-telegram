@@ -60,6 +60,14 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT DEFAULT 0", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// owner_notifications.random_id: added in a later A-PR7 review round —
+	// see Store.ClaimOwnerNotification's doc comment for why notification
+	// delivery needs the executor's persisted-random-id pattern to be
+	// crash-safe against Telegram-side duplicates, not just claim-safe
+	// against concurrent replicas.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "random_id", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can recognize a lead-only result — see
