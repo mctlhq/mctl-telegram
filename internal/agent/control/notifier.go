@@ -232,7 +232,25 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 	// fixed-length prefix/instructions, so the commands always survive
 	// intact.
 	instructions := fmt.Sprintf("\n\n/mctl approve %s\n/mctl reject %s", action.ApprovalCode, action.ApprovalCode)
+	// A Codex finding on #307 caught that this message carried no recipient
+	// identity at all: with more than one pending draft, the owner had no
+	// way to tell WHO would receive a given approval code's text before
+	// authorizing it — approving is immediate and sends straight to the
+	// action's linked peer. Best-effort: a lookup failure (e.g. the
+	// conversation row was since deleted) degrades to the un-identified
+	// prefix rather than failing the whole notification, since the
+	// approve/reject codes are still the load-bearing part of this message.
 	prefix := "Draft reply awaiting approval:\n\n"
+	if conv, cerr := n.Store.GetConversation(ctx, action.UserID, action.ConversationID); cerr == nil {
+		who := conv.PeerDisplayName
+		if who == "" {
+			who = conv.PeerUsername
+		}
+		if who == "" {
+			who = fmt.Sprintf("peer %d", conv.PeerTGID)
+		}
+		prefix = fmt.Sprintf("Draft reply awaiting approval (to %s, conv #%d):\n\n", who, conv.ID)
+	}
 	marker := "[truncated]"
 	budget := maxTelegramMessageLen - len([]rune(prefix)) - len([]rune(instructions))
 	payload := []rune(action.Payload)

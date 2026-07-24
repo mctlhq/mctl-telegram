@@ -35,6 +35,45 @@ func TestNotifier_Reply_TruncatesOversizedText(t *testing.T) {
 	}
 }
 
+// TestNotifier_DeliverPending_ApprovalIdentifiesRecipient covers a Codex
+// finding on #307: the approval-awaiting message carried no conversation or
+// recruiter identity at all. With more than one pending draft, the owner
+// had no way to tell WHO a given approval code's text would be sent to
+// before authorizing it — approving is immediate and sends straight to the
+// action's linked peer.
+func TestNotifier_DeliverPending_ApprovalIdentifiesRecipient(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer_username", "Jane Recruiter")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "Thanks for reaching out!", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "CODE99",
+	})
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationApproval, ActionID: actionID, Body: "ignored for approval kind",
+	}); err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	if _, _, err := notifier.DeliverPending(ctx); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0], "Jane Recruiter") {
+		t.Fatalf("approval message does not identify the recipient: %q", sender.sent[0])
+	}
+}
+
 func TestNotifier_DeliverPending_FormatsApprovalWithCode(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
 	ctx := context.Background()
