@@ -16,6 +16,11 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+// telegramMaxMessageLen is Telegram's hard per-message character cap — see
+// internal/sanitize.UserContent's doc comment ("pass 4096 for Telegram
+// message bodies") for the same constant used elsewhere in this codebase.
+const telegramMaxMessageLen = 4096
+
 // Decision is the outcome of evaluating a proposed action.
 type Decision string
 
@@ -339,6 +344,16 @@ func Evaluate(in Input) Result {
 	maxChars := in.Profile.MaxReplyChars
 	if maxChars <= 0 {
 		maxChars = 1200
+	}
+	if maxChars > telegramMaxMessageLen {
+		// A misconfigured MAX_REPLY_CHARS above Telegram's own limit would
+		// let this length check pass a payload the send RPC itself then
+		// rejects with the permanent MESSAGE_TOO_LONG — and the executor
+		// treats every send error as transient, so recovery would retry
+		// the identical oversized payload forever (Codex finding on #307).
+		// Clamp so this check is never looser than what can actually be
+		// delivered.
+		maxChars = telegramMaxMessageLen
 	}
 	if len([]rune(text))+len([]rune(DisclosureSep))+len([]rune(in.Profile.DisclosureText)) > maxChars {
 		return deny("reply exceeds max length once the disclosure is appended")

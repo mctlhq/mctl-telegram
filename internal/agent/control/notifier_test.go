@@ -9,6 +9,32 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+// TestNotifier_Reply_TruncatesOversizedText covers a Codex finding on #307:
+// Reply (the synchronous /mctl command response path) bypassed the
+// truncation DeliverPending already applies to queued notifications, so a
+// long enough /mctl leads/show response could exceed Telegram's
+// 4096-character limit, fail with the permanent MESSAGE_TOO_LONG, and — since
+// the command is only marked audited after a successful Reply — replay the
+// identical oversized text on every redelivery.
+func TestNotifier_Reply_TruncatesOversizedText(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	notifier := NewNotifier(store, sender)
+
+	oversized := strings.Repeat("x", maxTelegramMessageLen+500)
+	if err := notifier.Reply(context.Background(), uid, oversized); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(sender.sent))
+	}
+	if got := len([]rune(sender.sent[0])); got > maxTelegramMessageLen {
+		t.Fatalf("sent text length = %d, want <= %d", got, maxTelegramMessageLen)
+	}
+	if !strings.HasSuffix(sender.sent[0], truncatedSuffix) {
+		t.Fatalf("sent text missing truncation marker: %q", sender.sent[0][len(sender.sent[0])-30:])
+	}
+}
+
 func TestNotifier_DeliverPending_FormatsApprovalWithCode(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
 	ctx := context.Background()

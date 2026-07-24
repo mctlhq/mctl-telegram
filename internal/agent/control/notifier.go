@@ -93,8 +93,18 @@ func NewNotifier(store *db.Store, sender SelfSender) *Notifier {
 // Reply sends a short synchronous confirmation for a /mctl command — not
 // queued through owner_notifications, since it is a direct response to
 // something the owner just typed, not a background summary.
+//
+// Truncated the same way DeliverPending's queued notifications are (a
+// Codex finding on #307 caught this path bypassing that truncation
+// entirely): /mctl leads/show compose their reply from model-supplied
+// company/role/lead text with no length bound, so a long enough response
+// can exceed Telegram's 4096-character limit. SendToSelf would then fail
+// with the permanent MESSAGE_TOO_LONG, and — because HandleSavedText's
+// caller only persists the audit dedup row after a successful Reply — the
+// command is left unaudited and replays the identical oversized response
+// on every redelivery.
 func (n *Notifier) Reply(ctx context.Context, userID int64, text string) error {
-	_, err := n.Sender.SendToSelf(ctx, userID, text)
+	_, err := n.Sender.SendToSelf(ctx, userID, truncateForTelegram(text))
 	return err
 }
 

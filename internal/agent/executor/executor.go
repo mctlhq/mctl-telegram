@@ -228,14 +228,27 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	if err != nil {
 		return fmt.Errorf("%w: load conversation: %w", ErrSendQueuedForRetry, err)
 	}
+	// A Codex finding on #307 caught that this call never passed
+	// RecentAgentSends at all, so overRate's slice was always empty and
+	// MaxMsgsPerMinute was silently unenforced at send time — only
+	// propose_reply's initial policy check (internal/agentapi) ever saw real
+	// send history. Two guarded actions approved back-to-back before either
+	// delivered could both send within the same minute even with
+	// MaxMsgsPerMinute=1, since each one's own evaluation still saw zero
+	// prior sends.
+	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().Add(-time.Minute))
+	if err != nil {
+		return fmt.Errorf("%w: load recent sends: %w", ErrSendQueuedForRetry, err)
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
 		Conversation: *conv,
 		Action: policy.Action{
 			Type: action.ActionType, Intent: action.Intent, Text: action.Payload, PeerTGID: conv.PeerTGID,
 		},
-		GlobalKill: e.GlobalKill(),
-		Now:        time.Now(),
+		RecentAgentSends: recentSends,
+		GlobalKill:       e.GlobalKill(),
+		Now:              time.Now(),
 	})
 	// A hard Deny always stops the send — RequireApproval is more subtle: it
 	// is not a second vote against a row a HUMAN already approved via
@@ -324,6 +337,27 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	return nil
 }
 
+// recentAgentSends returns the timestamps of this conversation's agent-sent
+// messages since `since`, for policy.Input.RecentAgentSends — mirrors
+// agentapi.Server.recentAgentSends exactly (same query, same
+// DirectionAgentOutgoing filter) since both packages need identical
+// send-history semantics to enforce the SAME MaxMsgsPerMinute limit, but
+// this package must not import internal/agentapi (see Sender's doc comment
+// for the equivalent internal/telegram rationale).
+func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
+	msgs, err := e.Store.ListConversationMessages(ctx, userID, conversationID, 50)
+	if err != nil {
+		return nil, err
+	}
+	var out []time.Time
+	for _, m := range msgs {
+		if m.Direction == db.DirectionAgentOutgoing && m.CreatedAt.After(since) {
+			out = append(out, m.CreatedAt)
+		}
+	}
+	return out, nil
+}
+
 // recordSent does the bookkeeping every successful send needs, whether it
 // came from send() or recoverOne(): turn budget, and — added in review —
 // the conversation_messages row itself. Without the latter,
@@ -402,15 +436,24 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// original attempt actually DID land is a bookkeeping mismatch only —
 	// nothing un-sends a message that already reached the peer — but that
 	// mismatch is strictly safer than skipping the deny check and letting a
-	// vetoed reply out through the recovery path alone.
+	// vetoed reply out through the recovery path alone. Same reasoning
+	// extends to RecentAgentSends (a Codex finding on #307): a rate limit
+	// that has been exceeded by OTHER sends since this one got stuck must
+	// still stop the retry if the original RPC never actually reached
+	// Telegram.
+	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().Add(-time.Minute))
+	if err != nil {
+		return fmt.Errorf("load recent sends: %w", err)
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
 		Conversation: *conv,
 		Action: policy.Action{
 			Type: action.ActionType, Intent: action.Intent, Text: action.Payload, PeerTGID: conv.PeerTGID,
 		},
-		GlobalKill: e.GlobalKill(),
-		Now:        time.Now(),
+		RecentAgentSends: recentSends,
+		GlobalKill:       e.GlobalKill(),
+		Now:              time.Now(),
 	})
 	if result.Decision == policy.Deny {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {

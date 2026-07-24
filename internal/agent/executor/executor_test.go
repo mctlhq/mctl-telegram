@@ -571,6 +571,67 @@ func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
 	}
 }
 
+// TestExecutor_ProcessApproved_EnforcesRateLimitAcrossSends covers a Codex
+// finding on #307: send() never passed RecentAgentSends to policy.Evaluate,
+// so overRate always saw an empty slice and MaxMsgsPerMinute was
+// unenforced at send time — only propose_reply's initial check
+// (internal/agentapi) ever saw real history. With MaxMsgsPerMinute=1 and
+// two guarded actions queued, the first send must go through and the
+// second must now be denied (its own re-evaluation should see the first
+// send and trip the rate limit), not silently sent within the same minute.
+func TestExecutor_ProcessApproved_EnforcesRateLimitAcrossSends(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		MaxMsgsPerMinute: 1, IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile with rate limit 1/min: %v", err)
+	}
+	firstID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Happy to chat about the role.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed first approved action: %v", err)
+	}
+	secondID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Sure, let's set up a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed second approved action: %v", err)
+	}
+
+	n, err := exec.ProcessApproved(ctx)
+	if err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("processed = %d, want 2", n)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want exactly 1 (the second must be rate-limited, not sent within the same minute)", len(sender.calls))
+	}
+
+	first, err := store.GetAgentAction(ctx, uid, firstID)
+	if err != nil {
+		t.Fatalf("get first action: %v", err)
+	}
+	if first.Status != db.ActionExecuted {
+		t.Fatalf("first status = %q, want executed", first.Status)
+	}
+	second, err := store.GetAgentAction(ctx, uid, secondID)
+	if err != nil {
+		t.Fatalf("get second action: %v", err)
+	}
+	if second.Status != db.ActionDenied {
+		t.Fatalf("second status = %q, want denied (rate limit exceeded by the first send)", second.Status)
+	}
+}
+
 // TestExecutor_ProcessApproved_StopsUnreviewedActionWhenBudgetExhausted
 // covers a Codex finding on #307: send() only ever stopped for a hard Deny,
 // so RequireApproval was silently ignored even for an action NO human ever
