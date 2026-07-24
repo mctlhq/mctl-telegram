@@ -62,9 +62,12 @@ const (
 // short code the owner types in Saved Messages (/mctl approve <code>); unique
 // per user among rows that still carry one.
 type AgentAction struct {
-	ID                  int64
-	ApprovalCode        string
-	JobID               int64 // agent_jobs.id; 0 ⇒ not tied to a queue job
+	ID           int64
+	ApprovalCode string
+	JobID        int64 // agent_jobs.id; 0 ⇒ not tied to a queue job
+	// Attempt must match the job's currently claimed attempt when JobID != 0
+	// — see InsertAgentAction's doc comment. Ignored when JobID == 0.
+	Attempt             int
 	ConversationID      int64 // 0 ⇒ not tied to a conversation
 	UserID              int64
 	ActionType          string
@@ -89,10 +92,17 @@ type AgentAction struct {
 // approval for the same reply. Actions without a job (JobID == 0) are
 // exempt.
 //
-// A job-tied action also requires its job to still exist (returns
-// ErrAgentJobNotFound otherwise), which keeps a racing worker from recreating
-// encrypted action data after HardDeleteAccount's purge — see the insert
-// statement's comment.
+// A job-tied action also requires its job to still exist AND still be
+// processing under a.Attempt (returns ErrAgentJobNotFound otherwise), which
+// keeps a racing worker from recreating encrypted action data after
+// HardDeleteAccount's purge — see the insert statement's comment — and closes
+// a second race: if CompleteJob commits on the server but its HTTP response
+// never reaches the caller, the caller's local completed-guard never fires,
+// so it can still issue another action call afterward. Gating the INSERT's
+// source SELECT on the job's live status/attempt (the same compare-and-set
+// shape CompleteAgentJob/RetryAgentJob already use) means that later call
+// finds no matching job row and is rejected, even though the caller believes
+// the job is still open.
 func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, error) {
 	if a.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -150,17 +160,23 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
 			    payload_encrypted, policy_decision, policy_reasons, status)
 			 SELECT $1, j.id, $3, $4, $5, $6, $7, $8, $9, $10
-			   FROM agent_jobs j WHERE j.id = $2 AND j.user_id = $4`+lock+`
+			   FROM agent_jobs j
+			  WHERE j.id = $2 AND j.user_id = $4 AND j.status = $11 AND j.attempts = $12`+lock+`
 			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
 			 RETURNING id`,
 			nullable(a.ApprovalCode), a.JobID, convID, a.UserID, a.ActionType, a.Intent,
-			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status, JobProcessing, a.Attempt,
 		).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Two ways to land here: a redelivery hit the (job_id, action_type)
 			// unique index — the action exists, return it with its ORIGINAL
-			// approval_code — or the source SELECT found no job (purged account
-			// or foreign/bogus id) and the job must be reported gone.
+			// approval_code (looked up without an attempt filter: idempotent
+			// redelivery after a crash re-claims the job under a NEW attempt,
+			// and the existing row from the original attempt must still be
+			// returned, not treated as missing) — or the source SELECT found no
+			// job matching both id/user AND the live status+attempt gate (purged
+			// account, foreign/bogus id, or a stale/completed attempt) and the
+			// job must be reported gone.
 			lookupErr := s.DB.QueryRowContext(ctx,
 				`SELECT id FROM agent_actions
 				  WHERE job_id = $1 AND action_type = $2 AND user_id = $3`,

@@ -20,6 +20,7 @@ type fakeAPI struct {
 	}
 	proposeReplyCalls []struct {
 		convID, jobID int64
+		attempt       int
 		intent, text  string
 	}
 	saveLeadCalls    []SaveLeadRequest
@@ -79,11 +80,12 @@ func (f *fakeAPI) GetPolicy(ctx context.Context) (*PolicyDTO, error) {
 	return &PolicyDTO{Mode: "observe"}, nil
 }
 
-func (f *fakeAPI) ProposeReply(ctx context.Context, conversationID, jobID int64, intent, text string) (*ActionResult, error) {
+func (f *fakeAPI) ProposeReply(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*ActionResult, error) {
 	f.proposeReplyCalls = append(f.proposeReplyCalls, struct {
 		convID, jobID int64
+		attempt       int
 		intent, text  string
-	}{conversationID, jobID, intent, text})
+	}{conversationID, jobID, attempt, intent, text})
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -98,14 +100,14 @@ func (f *fakeAPI) SaveLead(ctx context.Context, req SaveLeadRequest) (int64, err
 	return 7, nil
 }
 
-func (f *fakeAPI) RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error) {
+func (f *fakeAPI) RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	return &OwnerFacingResult{ActionID: 2, NotificationID: 3}, nil
 }
 
-func (f *fakeAPI) SendOwnerSummary(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error) {
+func (f *fakeAPI) SendOwnerSummary(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
 	if f.err != nil {
 		return nil, f.err
 	}

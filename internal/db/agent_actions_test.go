@@ -407,6 +407,10 @@ func TestHasAgentActionForJob(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jobID := seedJob(t, s, uid, "evt:v1:1:1:has-action")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
 
 	has, err := s.HasAgentActionForJob(ctx, uid, jobID)
 	if err != nil {
@@ -417,7 +421,7 @@ func TestHasAgentActionForJob(t *testing.T) {
 	}
 
 	if _, err := s.InsertAgentAction(ctx, AgentAction{
-		JobID: jobID, UserID: uid, ActionType: ActionTypeReply,
+		JobID: jobID, Attempt: claimed[0].Attempts, UserID: uid, ActionType: ActionTypeReply,
 		PolicyDecision: PolicyAllow, Status: ActionApproved,
 	}); err != nil {
 		t.Fatalf("insert action: %v", err)

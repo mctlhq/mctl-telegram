@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -167,15 +166,26 @@ func ParseClaudeResult(stdout []byte) (*ClaudeResult, error) {
 var ErrClaudeReportedError = errors.New("claude reported is_error=true")
 
 // CheckResult turns a parsed ClaudeResult into an error iff IsError is set,
-// wrapping ErrClaudeReportedError with the CLI's own subtype/result text for
-// context.
+// wrapping ErrClaudeReportedError with the CLI's own subtype for context.
+//
+// Deliberately excludes res.Result (the model's own result text) from the
+// returned error: on this path (is_error=true after a successful get_event
+// or get_conversation_context call), that text can carry content derived
+// from the Telegram message the model was reasoning about, and Worker.Loop
+// logs this error verbatim (slog.Warn). The redaction layer in
+// internal/audit/redact.go operates on structured attribute keys, not
+// free-form error string values, so embedding raw result text here would
+// bypass it the same way claudeinvoker.go's Run keeps subprocess
+// stdout/stderr out of its own returned errors. subtype is a small
+// enum-like string (e.g. "error_max_turns") safe to log; result length is
+// kept for triage without the content.
 func CheckResult(res *ClaudeResult) error {
 	if res == nil || !res.IsError {
 		return nil
 	}
-	detail := strings.TrimSpace(res.Result)
-	if detail == "" {
-		detail = res.Subtype
+	subtype := res.Subtype
+	if subtype == "" {
+		subtype = "unknown"
 	}
-	return fmt.Errorf("%w: %s", ErrClaudeReportedError, detail)
+	return fmt.Errorf("%w: subtype=%s (result: %d bytes, see run logs)", ErrClaudeReportedError, subtype, len(res.Result))
 }

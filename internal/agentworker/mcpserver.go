@@ -16,10 +16,10 @@ type agentAPI interface {
 	GetConversationContext(ctx context.Context, conversationID int64, limit int) (*ConversationContext, error)
 	GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error)
 	GetPolicy(ctx context.Context) (*PolicyDTO, error)
-	ProposeReply(ctx context.Context, conversationID, jobID int64, intent, text string) (*ActionResult, error)
+	ProposeReply(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*ActionResult, error)
 	SaveLead(ctx context.Context, req SaveLeadRequest) (int64, error)
-	RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error)
-	SendOwnerSummary(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error)
+	RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error)
+	SendOwnerSummary(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error)
 	PauseAutopilot(ctx context.Context, paused bool) (bool, error)
 	CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string) error
 }
@@ -211,7 +211,7 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			if text == "" {
 				return mcplib.NewToolResultError("text is required"), nil
 			}
-			out, err := b.api.ProposeReply(ctx, b.job.ConversationID, b.job.JobID, intent, text)
+			out, err := b.api.ProposeReply(ctx, b.job.ConversationID, b.job.JobID, b.job.Attempt, intent, text)
 			if err != nil {
 				return toolErr(err), nil
 			}
@@ -278,7 +278,7 @@ func (b *toolBuilder) requestOwnerApproval() (mcplib.Tool, mcpserver.ToolHandler
 			if text == "" {
 				return mcplib.NewToolResultError("text is required"), nil
 			}
-			out, err := b.api.RequestOwnerApproval(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
+			out, err := b.api.RequestOwnerApproval(ctx, b.job.ConversationID, b.job.JobID, b.job.Attempt, stringArg(args, "intent", ""), text)
 			if err != nil {
 				return toolErr(err), nil
 			}
@@ -301,7 +301,7 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 			if text == "" {
 				return mcplib.NewToolResultError("text is required"), nil
 			}
-			out, err := b.api.SendOwnerSummary(ctx, b.job.ConversationID, b.job.JobID, stringArg(args, "intent", ""), text)
+			out, err := b.api.SendOwnerSummary(ctx, b.job.ConversationID, b.job.JobID, b.job.Attempt, stringArg(args, "intent", ""), text)
 			if err != nil {
 				return toolErr(err), nil
 			}

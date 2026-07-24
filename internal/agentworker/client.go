@@ -262,8 +262,10 @@ type ActionResult struct {
 
 // ProposeReply calls POST /actions/propose_reply. Deliberately no peer
 // parameter (see agentapi.handleProposeReply's doc comment) — conversationID
-// pins the send target server-side.
-func (c *Client) ProposeReply(ctx context.Context, conversationID, jobID int64, intent, text string) (*ActionResult, error) {
+// pins the send target server-side. attempt is only meaningful (and only
+// sent) alongside a non-zero jobID — see agentapi's proposeReplyRequest doc
+// comment on why the server fences job-tied inserts by it.
+func (c *Client) ProposeReply(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*ActionResult, error) {
 	req := map[string]any{
 		"conversation_id": conversationID,
 		"intent":          intent,
@@ -271,6 +273,7 @@ func (c *Client) ProposeReply(ctx context.Context, conversationID, jobID int64, 
 	}
 	if jobID != 0 {
 		req["job_id"] = jobID
+		req["attempt"] = attempt
 	}
 	var out ActionResult
 	if err := c.do(ctx, http.MethodPost, "/actions/propose_reply", req, &out); err != nil {
@@ -321,13 +324,14 @@ type OwnerFacingResult struct {
 	Reasons        []string `json:"reasons,omitempty"`
 }
 
-func (c *Client) ownerFacing(ctx context.Context, path string, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error) {
+func (c *Client) ownerFacing(ctx context.Context, path string, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
 	body := map[string]any{"text": text}
 	if conversationID != 0 {
 		body["conversation_id"] = conversationID
 	}
 	if jobID != 0 {
 		body["job_id"] = jobID
+		body["attempt"] = attempt
 	}
 	if intent != "" {
 		body["intent"] = intent
@@ -339,12 +343,12 @@ func (c *Client) ownerFacing(ctx context.Context, path string, conversationID, j
 	return &out, nil
 }
 
-func (c *Client) RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error) {
-	return c.ownerFacing(ctx, "/actions/request_owner_approval", conversationID, jobID, intent, text)
+func (c *Client) RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
+	return c.ownerFacing(ctx, "/actions/request_owner_approval", conversationID, jobID, attempt, intent, text)
 }
 
-func (c *Client) SendOwnerSummary(ctx context.Context, conversationID, jobID int64, intent, text string) (*OwnerFacingResult, error) {
-	return c.ownerFacing(ctx, "/notify/summary", conversationID, jobID, intent, text)
+func (c *Client) SendOwnerSummary(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
+	return c.ownerFacing(ctx, "/notify/summary", conversationID, jobID, attempt, intent, text)
 }
 
 func (c *Client) PauseAutopilot(ctx context.Context, paused bool) (bool, error) {

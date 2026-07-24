@@ -3,6 +3,7 @@ package agentworker
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -215,6 +216,34 @@ func TestParseClaudeResult_ParsesSuccessAndError(t *testing.T) {
 	}
 	if !errors.Is(checkErr, ErrClaudeReportedError) {
 		t.Fatalf("checkErr = %v, want wrapping ErrClaudeReportedError", checkErr)
+	}
+}
+
+// TestCheckResult_ExcludesResultTextFromError guards against a Codex finding
+// on #308: when is_error=true, res.Result can carry model-authored text
+// derived from the private Telegram message the job was processing (e.g. a
+// get_event/get_conversation_context tool result echoed back on a confused
+// turn), and Worker.Loop logs CheckResult's returned error verbatim via
+// slog.Warn — a path internal/audit/redact.go's key-based redaction cannot
+// reach. The error must carry only bounded, content-free metadata
+// (subtype, result length), never the result text itself.
+func TestCheckResult_ExcludesResultTextFromError(t *testing.T) {
+	const secret = "my SSN is 123-45-6789, please don't tell anyone"
+	res := &ClaudeResult{
+		Type: "result", Subtype: "error_during_execution", IsError: true, Result: secret,
+	}
+	err := CheckResult(res)
+	if err == nil {
+		t.Fatal("expected CheckResult to report is_error=true")
+	}
+	if !errors.Is(err, ErrClaudeReportedError) {
+		t.Fatalf("err = %v, want wrapping ErrClaudeReportedError", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("err = %q, must not contain the raw result text", err.Error())
+	}
+	if !strings.Contains(err.Error(), "error_during_execution") {
+		t.Fatalf("err = %q, want it to still carry the subtype", err.Error())
 	}
 }
 

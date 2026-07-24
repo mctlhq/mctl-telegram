@@ -96,7 +96,7 @@ func TestClient_ProposeReply_OmitsJobIDWhenZero(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		writeJSONFixture(w, ActionResult{ActionID: 5, Decision: "require_approval", Status: "pending_approval", ApprovalCode: "AB12"})
 	})
-	res, err := client.ProposeReply(context.Background(), 9, 0, "discovery", "hi there")
+	res, err := client.ProposeReply(context.Background(), 9, 0, 0, "discovery", "hi there")
 	if err != nil {
 		t.Fatalf("ProposeReply: %v", err)
 	}
@@ -106,8 +106,33 @@ func TestClient_ProposeReply_OmitsJobIDWhenZero(t *testing.T) {
 	if _, ok := gotBody["job_id"]; ok {
 		t.Fatalf("job_id should be omitted when zero: %#v", gotBody)
 	}
+	if _, ok := gotBody["attempt"]; ok {
+		t.Fatalf("attempt should be omitted when job_id is zero: %#v", gotBody)
+	}
 	if gotBody["conversation_id"].(float64) != 9 {
 		t.Fatalf("conversation_id = %#v", gotBody["conversation_id"])
+	}
+}
+
+// TestClient_ProposeReply_SendsAttemptWithJobID guards against a Codex
+// finding on #308: InsertAgentAction now fences job-tied action inserts by
+// the job's live status/attempt (see its doc comment), so a caller that
+// omits attempt on a job-tied propose_reply would always be rejected as a
+// stale attempt (0 never matches a real claimed job).
+func TestClient_ProposeReply_SendsAttemptWithJobID(t *testing.T) {
+	var gotBody map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeJSONFixture(w, ActionResult{ActionID: 5, Decision: "allow"})
+	})
+	if _, err := client.ProposeReply(context.Background(), 9, 42, 3, "discovery", "hi there"); err != nil {
+		t.Fatalf("ProposeReply: %v", err)
+	}
+	if gotBody["job_id"].(float64) != 42 {
+		t.Fatalf("job_id = %#v", gotBody["job_id"])
+	}
+	if gotBody["attempt"].(float64) != 3 {
+		t.Fatalf("attempt = %#v, want 3", gotBody["attempt"])
 	}
 }
 
