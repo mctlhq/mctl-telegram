@@ -194,6 +194,47 @@ func TestExecutor_Approve_PreSendTransientFailureAlsoWrapsErrSendQueuedForRetry(
 	}
 }
 
+// TestExecutor_Approve_PostSendPersistenceFailureWrapsErrSendQueuedForRetry
+// covers a Codex finding on #307: if the Telegram RPC already succeeded but
+// RecordAgentActionSent then fails (a transient DB error), the reply
+// genuinely reached the recruiter — the row is left `executing` (the whole
+// transaction rolls back) for RecoverStuck to safely retry via the same
+// persisted random_id. The old bare error told the owner "could not
+// approve" for a message that had already sent, which could prompt a
+// confusing manual duplicate reply. Forced here with a trigger that fails
+// only the conversation_messages INSERT inside RecordAgentActionSent's
+// transaction — renaming the whole table would also break
+// recentAgentSends' SELECT against it earlier in send(), before the RPC
+// this test needs to actually happen.
+func TestExecutor_Approve_PostSendPersistenceFailureWrapsErrSendQueuedForRetry(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	if _, err := store.DB.ExecContext(ctx,
+		`CREATE TRIGGER fail_conv_msg_insert BEFORE INSERT ON conversation_messages BEGIN SELECT RAISE(ABORT, 'forced failure'); END`,
+	); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = store.DB.ExecContext(context.Background(), `DROP TRIGGER fail_conv_msg_insert`)
+	})
+
+	err := exec.Approve(ctx, uid, code)
+	if !errors.Is(err, ErrSendQueuedForRetry) {
+		t.Fatalf("err = %v, want it to wrap ErrSendQueuedForRetry", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1 (the RPC must have actually been attempted)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionExecuting {
+		t.Fatalf("action status = %q, want executing (left for RecoverStuck, bookkeeping rolled back)", action.Status)
+	}
+}
+
 func TestExecutor_Approve_WrongCodeReturnsNotFound(t *testing.T) {
 	exec, _, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()

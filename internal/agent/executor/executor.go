@@ -363,7 +363,19 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	}
 	ok, err = e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, tgMessageID, text)
 	if err != nil {
-		return fmt.Errorf("record executed: %w", err)
+		// The Telegram RPC above already succeeded — the reply genuinely
+		// reached the recruiter. A failure here (transient DB error) leaves
+		// the row in `executing` (RecordAgentActionSent rolls its whole
+		// transaction back on any error), which is exactly the state
+		// RecoverStuck already knows how to retry safely: SendWithRandomID
+		// with the same persisted random_id is a safe no-op if Telegram
+		// already has it, so a later retry will complete the bookkeeping
+		// this call failed to. Wrapped in ErrSendQueuedForRetry (a Codex
+		// finding on #307 caught this was a bare error) so
+		// control.Router.handleApprove doesn't tell the owner "could not
+		// approve" for a message that already sent — that could prompt a
+		// confusing manual duplicate reply.
+		return fmt.Errorf("%w: record executed: %w", ErrSendQueuedForRetry, err)
 	}
 	if !ok {
 		// Lost the CAS: another goroutine (a concurrent RecoverStuck sweep
