@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -435,7 +436,11 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 		if len(payload) > 0 {
 			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 			if err != nil {
-				return nil, fmt.Errorf("open stuck action payload: %w", err)
+				// Same isolation reasoning as ListActionsByStatus: one
+				// undecryptable stuck row must not block RecoverStuck's sweep
+				// from retrying every other tenant's genuinely-crashed send.
+				slog.Warn("agent_actions: skipping stuck row with undecryptable payload", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
 			}
 			a.Payload = string(pt)
 		}
@@ -509,7 +514,15 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 		if len(payload) > 0 {
 			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 			if err != nil {
-				return nil, fmt.Errorf("open action payload: %w", err)
+				// A single row's ciphertext failing to open (corruption, a key
+				// rotation gap) must not block every other tenant's approved
+				// action behind it — ProcessApproved always re-queries this
+				// same oldest-first list, so an unskipped bad row would sit at
+				// the front of every sweep forever. Quarantine just this row;
+				// it stays in `approved`/`executing` untouched and can be
+				// investigated separately.
+				slog.Warn("agent_actions: skipping row with undecryptable payload", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
 			}
 			a.Payload = string(pt)
 		}
@@ -781,7 +794,12 @@ func (s *Store) ListPendingOwnerNotifications(ctx context.Context, limit int) ([
 		if len(body) > 0 {
 			pt, err := s.Crypt.OpenForUser(body, n.UserID)
 			if err != nil {
-				return nil, fmt.Errorf("open notification body: %w", err)
+				// Same isolation reasoning as ListActionsByStatus: one
+				// undecryptable notification must not block DeliverPending's
+				// sweep from reaching every other tenant's deliverable
+				// summaries/approval requests behind it.
+				slog.Warn("owner_notifications: skipping row with undecryptable body", "notification_id", n.ID, "user_id", n.UserID, "err", err)
+				continue
 			}
 			n.Body = string(pt)
 		}

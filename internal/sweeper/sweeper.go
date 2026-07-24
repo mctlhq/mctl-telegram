@@ -11,6 +11,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
+	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -272,5 +273,37 @@ func agentNotifierSweepOnce(ctx context.Context, notifier *control.Notifier) {
 	}
 	if delivered > 0 || failed > 0 {
 		slog.Info("notifier delivery sweep", "delivered", delivered, "failed", failed)
+	}
+}
+
+// AgentProfileSweeperInterval is how often AgentProfile() re-reads the
+// mounted YAML profile. A minute is a reasonable staleness bound for a
+// config file that changes rarely (owner edits, not per-request traffic)
+// without adding a filesystem watcher's added complexity.
+const AgentProfileSweeperInterval = time.Minute
+
+// AgentProfile periodically calls Provider.Reload until ctx is cancelled.
+// Provider.Reload was designed to swap profile data safely at runtime (see
+// its own doc comment), but a Codex finding on #307 caught that
+// cmd/server/main.go only ever called it once, at initial profile.Load —
+// no production caller reloaded it afterward, so updating the mounted YAML
+// (moving a value into `restricted`, adding a new never_auto_send marker)
+// had no effect on a running process until the next full restart.
+func AgentProfile(ctx context.Context, provider *profile.Provider) {
+	ticker := time.NewTicker(AgentProfileSweeperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := provider.Reload(); err != nil {
+				// Best-effort, matching every other sweeper here: keep serving
+				// the last-good in-memory copy rather than crashing the
+				// process over a transient read/parse error on the mounted
+				// file (e.g. a ConfigMap update caught mid-write).
+				slog.Warn("agent profile reload failed, keeping previous copy", "err", err)
+			}
+		}
 	}
 }

@@ -103,10 +103,13 @@ type Registry struct {
 	// latency, i.e. how long a reply sits waiting for a human before it
 	// actually goes out.
 	AgentApprovalLatencySeconds prometheus.Histogram
-	// AgentExecutorRestartsTotal counts crash-recovery sweep runs that found
-	// at least one stuck executing action to retry — a proxy for "the
-	// executor process restarted mid-send" since that is the only way an
-	// action reaches executing and stays there past the grace window.
+	// AgentExecutorRestartsTotal counts actions observed stuck in executing
+	// for the FIRST time (not every sweep that still finds them stuck) — a
+	// proxy for "the executor process restarted mid-send" since that is the
+	// only way an action reaches executing and stays there past the grace
+	// window. Counting by first-observation (not sweep count) keeps a
+	// single persistently-failing retry from inflating this past the actual
+	// number of distinct restart episodes (Codex finding on #307).
 	AgentExecutorRestartsTotal prometheus.Counter
 }
 
@@ -276,7 +279,7 @@ func New() *Registry {
 
 	r.AgentExecutorRestartsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_agent_executor_restarts_total",
-		Help: "Crash-recovery sweep runs that found at least one action stuck in executing to retry.",
+		Help: "Actions observed stuck in executing for the first time (not counted again on later sweeps while still stuck).",
 	})
 
 	// Register all collectors. MustRegister panics on duplicate names, which

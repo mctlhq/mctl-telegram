@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // fakeSender records every call and lets tests control success/failure and
@@ -460,11 +463,25 @@ func TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend(t *testing.T) {
 // to textually match must NOT be blocked once ProfileOwnerTGID scopes the
 // check to the account the profile actually belongs to — only that
 // account's own matching action should still be denied.
+//
+// ProfileOwnerTGID is a Telegram account id, not an internal users.id — a
+// real telegram_accounts row is seeded here (via SaveSession) so the test
+// exercises the actual GetTelegramID resolution path instead of the two ID
+// namespaces coincidentally matching, which is exactly what a Codex finding
+// on #307 caught: an earlier version of this test set ProfileOwnerTGID
+// directly to the internal uid, which meant restrictedFieldBlocks' scope
+// check (comparing a Telegram id against an internal id) could never
+// actually match anything, silently disabling enforcement for every
+// account including the real owner's.
 func TestExecutor_Approve_RestrictedFieldScopedToProfileOwner(t *testing.T) {
 	exec, sender, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
 	exec.Profile = &fakeRestrictedChecker{key: "references", neverAutoSend: true, matched: true}
-	exec.ProfileOwnerTGID = uid
+	const ownerTGID = int64(999888777)
+	if err := store.SaveSession(ctx, uid, []byte("session-bytes"), ownerTGID, "Owner", "owner"); err != nil {
+		t.Fatalf("seed owner telegram account: %v", err)
+	}
+	exec.ProfileOwnerTGID = ownerTGID
 
 	otherUID, err := store.EnsureUser(ctx, "other-owner", "", "test")
 	if err != nil {
@@ -568,6 +585,59 @@ func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
 	}
 	if action.Status != db.ActionDenied {
 		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
+// TestExecutor_RecoverStuck_RestartCounterOnlyCountsNewlyStuckActions guards
+// against a Codex finding on #307: AgentExecutorRestartsTotal is documented
+// as a proxy for "the executor process restarted mid-send", but a normal
+// transient send failure deliberately leaves an action in `executing` for
+// the next sweep to retry — before this fix, every sweep that still found
+// the SAME persistently-failing action re-incremented the counter, so one
+// stuck action could inflate it far past the number of actual restarts.
+func TestExecutor_RecoverStuck_RestartCounterOnlyCountsNewlyStuckActions(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+	actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 777); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+	// Every retry keeps failing, so the action never leaves `executing`.
+	sender.failNext = 10
+
+	for i := 0; i < 3; i++ {
+		if _, err := exec.RecoverStuck(ctx); err != nil {
+			t.Fatalf("recover sweep %d: %v", i, err)
+		}
+	}
+	if got := testutil.ToFloat64(exec.m.AgentExecutorRestartsTotal); got != 1 {
+		t.Fatalf("restarts counter = %v after 3 sweeps of the same still-stuck action, want 1", got)
+	}
+
+	// A genuinely new stuck action must still be counted.
+	actionID2, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "hi again", PolicyDecision: db.PolicyRequireApproval, PolicyReasons: "observe mode",
+		Status: db.ActionPendingApproval, ApprovalCode: "TESTCD2",
+	})
+	if err != nil {
+		t.Fatalf("seed second pending action: %v", err)
+	}
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID2, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition 2: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID2, 778); err != nil || !ok {
+		t.Fatalf("begin executing 2: ok=%v err=%v", ok, err)
+	}
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover sweep 4: %v", err)
+	}
+	if got := testutil.ToFloat64(exec.m.AgentExecutorRestartsTotal); got != 2 {
+		t.Fatalf("restarts counter = %v after a second distinct action got stuck, want 2", got)
 	}
 }
 
@@ -690,6 +760,62 @@ func TestExecutor_ProcessApproved_StopsUnreviewedActionWhenBudgetExhausted(t *te
 	}
 	if second.Status != db.ActionDenied {
 		t.Fatalf("second status = %q, want denied (no human ever reviewed it, and the budget is now exhausted)", second.Status)
+	}
+}
+
+// TestExecutor_RecoverStuck_StopsUnreviewedActionWhenApprovalNowRequired is
+// the recovery-path counterpart of
+// TestExecutor_ProcessApproved_StopsUnreviewedActionWhenBudgetExhausted: a
+// Codex finding on #307 caught that recoverOne only stopped a retry for a
+// hard Deny, missing the same requireApprovalBypassesUnreviewedAllow
+// escalation send() has — so a guarded auto-approved (PolicyAllow) action
+// that crashed mid-send and got picked up by RecoverStuck could still go out
+// even after the turn budget was exhausted by another send during the grace
+// window, bypassing a guard a fresh send() call would have enforced.
+func TestExecutor_RecoverStuck_StopsUnreviewedActionWhenApprovalNowRequired(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		MaxAutonomousTurns: 1, IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile with turn budget 1: %v", err)
+	}
+	// Consume the one-turn budget with an unrelated already-executed send —
+	// mirrors what a sibling ProcessApproved call would have done during the
+	// grace window while this action was stuck.
+	if err := store.IncrementAutonomousTurns(ctx, uid, conv.ID); err != nil {
+		t.Fatalf("consume turn budget: %v", err)
+	}
+
+	stuckID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Sure, let's set up a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed stuck-to-be action: %v", err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, uid, stuckID, 4242); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+
+	n, err := exec.RecoverStuck(ctx)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("recovered count = %d, want 1", n)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0 (budget exhausted, no human ever reviewed this draft)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, stuckID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
 	}
 }
 

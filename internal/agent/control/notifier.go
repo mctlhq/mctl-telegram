@@ -74,12 +74,16 @@ type Notifier struct {
 	GlobalKill func() bool
 }
 
-// defaultClaimLease and defaultMaxPendingAge are NewNotifier's defaults.
+// defaultClaimLease and defaultMaxPendingAge are NewNotifier's defaults,
+// used as-is by tests and any caller that never overrides the field.
 // defaultClaimLease matches executor.Executor's default StuckGrace — both
 // bound "how long can one delivery attempt plausibly still be in flight
-// before we assume it died". defaultMaxPendingAge matches the approval TTL
-// default (AgentApprovalTTL) as the codebase's existing convention for "how
-// long is a day-scale undelivered thing acceptable to keep retrying".
+// before we assume it died". defaultMaxPendingAge matches AgentApprovalTTL's
+// own default (24h) only by coincidence of both defaulting the same way;
+// cmd/server/main.go overwrites MaxPendingAge with the actually-configured
+// cfg.AgentApprovalTTL after construction so the two stay in sync even when
+// AGENT_APPROVAL_TTL is set above 24h — see that wiring's comment for the
+// Codex finding this fixed.
 const (
 	defaultClaimLease    = 2 * time.Minute
 	defaultMaxPendingAge = 24 * time.Hour

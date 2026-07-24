@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
@@ -106,6 +107,12 @@ type Executor struct {
 	// crashed rather than genuinely in flight in this same process.
 	StuckGrace time.Duration
 	m          *metrics.Registry
+
+	// stuckMu guards stuckSeen, the set of action IDs RecoverStuck has
+	// already counted toward AgentExecutorRestartsTotal — see
+	// trackNewlyStuck.
+	stuckMu   sync.Mutex
+	stuckSeen map[int64]struct{}
 }
 
 // New constructs an Executor. m may be nil (tests).
@@ -279,7 +286,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
-	if reason, blocked := e.restrictedFieldBlocks(action); blocked {
+	reason, blocked, err := e.restrictedFieldBlocks(ctx, action)
+	if err != nil {
+		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
+	}
+	if blocked {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload: %w", err)
 		}
@@ -393,10 +404,17 @@ func (e *Executor) RecoverStuck(ctx context.Context) (int, error) {
 		e.m.AgentActionsExecutingStuck.Set(float64(len(stuck)))
 	}
 	if len(stuck) == 0 {
+		e.stuckMu.Lock()
+		e.stuckSeen = nil
+		e.stuckMu.Unlock()
 		return 0, nil
 	}
 	if e.m != nil {
-		e.m.AgentExecutorRestartsTotal.Inc()
+		if newly := e.trackNewlyStuck(stuck); newly > 0 {
+			e.m.AgentExecutorRestartsTotal.Add(float64(newly))
+		}
+	} else {
+		e.trackNewlyStuck(stuck)
 	}
 	slog.Warn("executor: recovering stuck executing actions", "count", len(stuck))
 	for _, a := range stuck {
@@ -406,6 +424,31 @@ func (e *Executor) RecoverStuck(ctx context.Context) (int, error) {
 		}
 	}
 	return len(stuck), nil
+}
+
+// trackNewlyStuck updates the executor's memory of which action IDs were
+// already observed stuck in a prior sweep and returns how many of the
+// current batch are being seen as stuck for the first time. A normal
+// transient send error deliberately leaves an action in `executing` for
+// recoverOne to retry (see its own doc comment) — without this tracking, a
+// single action that keeps failing would re-count as a "restart" on every
+// sweep it's found in, even though the process never actually restarted
+// (Codex finding on #307). Actions that drop out of the stuck list
+// (recovered or otherwise resolved) are forgotten, so the tracked set never
+// grows unbounded.
+func (e *Executor) trackNewlyStuck(stuck []db.AgentAction) int {
+	e.stuckMu.Lock()
+	defer e.stuckMu.Unlock()
+	next := make(map[int64]struct{}, len(stuck))
+	newly := 0
+	for _, a := range stuck {
+		next[a.ID] = struct{}{}
+		if _, seen := e.stuckSeen[a.ID]; !seen {
+			newly++
+		}
+	}
+	e.stuckSeen = next
+	return newly
 }
 
 // recoverOne retries the exact send an interrupted executing row was mid-way
@@ -455,13 +498,32 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
 	})
-	if result.Decision == policy.Deny {
+	// Mirrors send()'s requireApprovalBypassesUnreviewedAllow exactly: a
+	// PolicyAllow action (guarded-mode auto-approved, no human ever reviewed
+	// this exact draft) whose CURRENT re-evaluation now says RequireApproval
+	// — e.g. the account switched to observe mode, the intent was delisted,
+	// or the turn budget was exhausted during StuckGrace — has no human
+	// decision to defer to and must not be sent by the recovery path either.
+	// A Codex finding on #307 caught that recoverOne only checked for a hard
+	// Deny, so this exact escalation path (present in send() since an
+	// earlier round) was missing here, letting a crashed-then-recovered
+	// guarded action bypass a newly-required approval that a fresh send
+	// through send() would have caught.
+	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
+	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval during recovery: %w", err)
 		}
+		if requireApprovalBypassesUnreviewedAllow {
+			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action during recovery: %s", strings.Join(result.Reasons, "; "))
+		}
 		return fmt.Errorf("policy denies at recovery time: %s", strings.Join(result.Reasons, "; "))
 	}
-	if reason, blocked := e.restrictedFieldBlocks(action); blocked {
+	reason, blocked, err := e.restrictedFieldBlocks(ctx, action)
+	if err != nil {
+		return fmt.Errorf("check restricted fields during recovery: %w", err)
+	}
+	if blocked {
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
 		}
@@ -508,24 +570,39 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 // action never actually went through a human's /mctl approve: PolicyAllow
 // means propose_reply's own policy auto-approved it in guarded mode with no
 // owner ever seeing the draft; PolicyRequireApproval means it did.
-func (e *Executor) restrictedFieldBlocks(action db.AgentAction) (reason string, blocked bool) {
+func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAction) (reason string, blocked bool, err error) {
 	if e.Profile == nil {
-		return "", false
+		return "", false, nil
 	}
-	if e.ProfileOwnerTGID != 0 && action.UserID != e.ProfileOwnerTGID {
-		return "", false
+	if e.ProfileOwnerTGID != 0 {
+		// AGENT_PROFILE_OWNER_TG_ID is a Telegram account id, while
+		// action.UserID is the internal users.id — these are different ID
+		// namespaces that normally never carry the same numeric value, so
+		// comparing them directly (as an earlier version of this check did)
+		// meant the scope check always evaluated as "not the owner" — even
+		// for the configured owner's own actions — and silently disabled
+		// restricted-field enforcement entirely rather than merely scoping
+		// it (Codex finding on #307). Resolve the action owner's actual
+		// Telegram id before comparing.
+		ownerTGID, err := e.Store.GetTelegramID(ctx, action.UserID)
+		if err != nil {
+			return "", false, fmt.Errorf("resolve action owner telegram id: %w", err)
+		}
+		if ownerTGID != e.ProfileOwnerTGID {
+			return "", false, nil
+		}
 	}
 	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(action.Payload)
 	if !matched {
-		return "", false
+		return "", false, nil
 	}
 	if neverAutoSend {
-		return fmt.Sprintf("payload echoes never_auto_send restricted field %q", key), true
+		return fmt.Sprintf("payload echoes never_auto_send restricted field %q", key), true, nil
 	}
 	if approvalRequired && action.PolicyDecision != db.PolicyRequireApproval {
-		return fmt.Sprintf("payload echoes approval_required restricted field %q without owner review", key), true
+		return fmt.Sprintf("payload echoes approval_required restricted field %q without owner review", key), true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 // defaultRandomID draws a fresh Telegram RPC random_id from crypto/rand.

@@ -141,6 +141,16 @@ func main() {
 	agentExecutor := executor.New(store, &poolSender{pool: pool}, agentGlobalKill, m)
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentNotifier.GlobalKill = agentGlobalKill
+	// Wire the notification retry horizon to the SAME configured approval
+	// TTL the executor/sweeper use (cfg.AgentApprovalTTL), not the
+	// constructor's own 24h default — a Codex finding on #307 caught that
+	// with AGENT_APPROVAL_TTL configured above 24h, an approval notification
+	// could be retired as permanently failed while its linked action was
+	// still genuinely approvable, so the owner would never receive a code
+	// that was still live.
+	if cfg.AgentApprovalTTL > 0 {
+		agentNotifier.MaxPendingAge = cfg.AgentApprovalTTL
+	}
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
 
 	// AGENT_PROFILE_PATH is optional and loaded independently of
@@ -176,6 +186,11 @@ func main() {
 		// restrictedFieldBlocks to it unconditionally.
 		agentExecutor.ProfileOwnerTGID = cfg.AgentProfileOwnerTGID
 		slog.Info("agent owner profile loaded", "path", path)
+		// Periodically re-read the mounted file so an owner's edit (e.g.
+		// moving a value into `restricted`, adding a never_auto_send marker)
+		// takes effect without a restart — see sweeper.AgentProfile's doc
+		// comment for the Codex finding this fixed.
+		go sweeper.AgentProfile(ctx, agentProfileProvider)
 	}
 
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
