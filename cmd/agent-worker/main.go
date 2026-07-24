@@ -83,9 +83,13 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("agent-worker: starting poll loop", "version", version, "api_base_url", apiBaseURL)
-	worker.Loop(ctx)
+	loopErr := worker.Loop(ctx)
 	slog.Info("agent-worker: stopped")
-	return nil
+	// A fatal-auth stop must reach main() as a nonzero exit — otherwise a
+	// process supervisor watching for failures sees the same clean return as
+	// an ordinary SIGTERM shutdown and never restarts or alerts on an
+	// expired/revoked token, even though Loop already logged the error.
+	return loopErr
 }
 
 // runMCPServe is the stdio MCP server mode. It reads its job-scoped identity

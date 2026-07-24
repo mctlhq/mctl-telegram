@@ -226,14 +226,6 @@ func (c *Client) GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[s
 	return out, nil
 }
 
-func (c *Client) GetLead(ctx context.Context, leadID int64) (*LeadDTO, error) {
-	var out LeadDTO
-	if err := c.do(ctx, http.MethodGet, "/leads/"+strconv.FormatInt(leadID, 10), nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 type PolicyDTO struct {
 	Mode               string `json:"mode"`
 	AutopilotPaused    bool   `json:"autopilot_paused"`

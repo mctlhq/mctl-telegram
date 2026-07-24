@@ -130,7 +130,11 @@ func TestWorker_Loop_BacksOffAndRecoversOnPollError(t *testing.T) {
 // any other transient network blip and retried forever, silently
 // accumulating unprocessed jobs while still looking "alive" (just noisy
 // warnings) in logs. The loop must exit instead of retrying, and never call
-// PollEvents again afterward.
+// PollEvents again afterward. It must also return ErrFatalAuth rather than
+// nil — a second Codex finding on #308: cmd/agent-worker's run() previously
+// discarded Loop's outcome entirely, so main() always exited 0 even on this
+// stop, indistinguishable to a process supervisor from an ordinary SIGTERM
+// shutdown.
 func TestWorker_Loop_StopsRetryingOnFatalAuthError(t *testing.T) {
 	poller := &fakePoller{results: []pollResult{
 		{err: &APIError{StatusCode: 401, Message: "token expired"}},
@@ -140,8 +144,9 @@ func TestWorker_Loop_StopsRetryingOnFatalAuthError(t *testing.T) {
 
 	ctx := context.Background()
 	done := make(chan struct{})
+	var loopErr error
 	go func() {
-		w.Loop(ctx)
+		loopErr = w.Loop(ctx)
 		close(done)
 	}()
 
@@ -151,6 +156,9 @@ func TestWorker_Loop_StopsRetryingOnFatalAuthError(t *testing.T) {
 		t.Fatal("Loop did not exit promptly on a fatal auth error")
 	}
 
+	if !errors.Is(loopErr, ErrFatalAuth) {
+		t.Fatalf("Loop err = %v, want ErrFatalAuth", loopErr)
+	}
 	if got := poller.callCount(); got != 1 {
 		t.Fatalf("PollEvents called %d times, want exactly 1 (no retry on a fatal auth error)", got)
 	}
@@ -182,8 +190,9 @@ func TestWorker_Loop_ExitsPromptlyOnContextCancel(t *testing.T) {
 	w := NewWorker(poller, &fakeRunner{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	var loopErr error
 	go func() {
-		w.Loop(ctx)
+		loopErr = w.Loop(ctx)
 		close(done)
 	}()
 	cancel()
@@ -191,6 +200,9 @@ func TestWorker_Loop_ExitsPromptlyOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Loop did not exit promptly on cancel")
+	}
+	if loopErr != nil {
+		t.Fatalf("Loop err = %v, want nil on an ordinary ctx-cancel shutdown", loopErr)
 	}
 }
 

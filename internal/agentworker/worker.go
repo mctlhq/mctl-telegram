@@ -50,22 +50,32 @@ func NewWorker(poller eventPoller, runner Runner) *Worker {
 	return &Worker{poller: poller, runner: runner}
 }
 
+// ErrFatalAuth is returned by Loop when it stops because PollEvents reported
+// a fatal (401/403) auth error, distinguishing that from an ordinary ctx
+// cancellation — cmd/agent-worker's run() propagates it so a process
+// supervisor sees a nonzero exit instead of what would otherwise look like
+// an intentional, clean shutdown.
+var ErrFatalAuth = errors.New("agent-worker: fatal auth error, poll loop stopped")
+
 // Loop polls for jobs and runs them one at a time until ctx is canceled.
 // Sequential (not concurrent) processing is a deliberate simplification for
 // the initial version: the account-scoped rate/turn limits the policy engine
 // already enforces (internal/agent/policy) are per-conversation, not
 // per-worker, so nothing here currently depends on concurrency — revisit if
 // throughput becomes a real bottleneck.
-func (w *Worker) Loop(ctx context.Context) {
+//
+// Returns nil on a normal ctx-cancel shutdown, ErrFatalAuth if it stopped
+// because of an unrecoverable 401/403 (see isFatalAuthError).
+func (w *Worker) Loop(ctx context.Context) error {
 	backoff := minPollBackoff
 	for {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		jobs, err := w.poller.PollEvents(ctx, 1)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return nil
 			}
 			if isFatalAuthError(err) {
 				// AGENT_API_TOKEN is read once at process start (see
@@ -79,11 +89,11 @@ func (w *Worker) Loop(ctx context.Context) {
 				// Stopping the loop turns that into a visible process
 				// exit — restart with a fresh token is the only real fix.
 				slog.Error("agent-worker: auth failure is not recoverable by retrying, stopping poll loop", "err", err)
-				return
+				return ErrFatalAuth
 			}
 			slog.Warn("agent-worker: poll failed", "err", err, "retry_in", backoff)
 			if !sleepCtx(ctx, backoff) {
-				return
+				return nil
 			}
 			backoff = nextBackoff(backoff)
 			continue
@@ -93,10 +103,14 @@ func (w *Worker) Loop(ctx context.Context) {
 			jobCtx, cancel := context.WithDeadline(ctx, job.ParsedDeadline(jobDeadlineFallback))
 			err := w.runner.Run(jobCtx, job)
 			cancel()
+			// event_id (format evt:v1:<account>:<chat>:<message>) is
+			// deliberately not logged here — it's not a redacted slog key,
+			// and job_id already gives an operator everything needed to
+			// correlate against the API for triage.
 			if err != nil {
-				slog.Warn("agent-worker: job invocation failed", "job_id", job.JobID, "event_id", job.EventID, "err", err)
+				slog.Warn("agent-worker: job invocation failed", "job_id", job.JobID, "err", err)
 			} else {
-				slog.Info("agent-worker: job invocation finished", "job_id", job.JobID, "event_id", job.EventID)
+				slog.Info("agent-worker: job invocation finished", "job_id", job.JobID)
 			}
 		}
 	}
