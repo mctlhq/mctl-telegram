@@ -91,6 +91,21 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
 		}
 	}
+	// job_leads shipped before job_id existed on it; CREATE TABLE IF NOT
+	// EXISTS above is a no-op on deployments that already have the table, so
+	// the column needs its own idempotent ALTER pass before the index below
+	// can reference it.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
+		return fmt.Errorf("migrate agent: %w", err)
+	}
+	// Lets POST /jobs/{id}/complete recognize a lead-save as a valid durable
+	// result too, not just an agent_actions row — see HasJobLeadForJob.
+	// No FK to agent_jobs: job_leads precedes agent_jobs in the CREATE TABLE
+	// sequence, matching agent_actions.job_id's existing no-FK precedent.
+	idxStmt := `CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`
+	if _, err := dbConn.ExecContext(ctx, idxStmt); err != nil {
+		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, idxStmt)
+	}
 	return nil
 }
 
@@ -192,7 +207,6 @@ func agentSchemaSQLite() []string {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-			job_id INTEGER,
 			company TEXT,
 			role TEXT,
 			recruiter_name TEXT,
@@ -204,12 +218,6 @@ func agentSchemaSQLite() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
-		// Lets POST /jobs/{id}/complete recognize a lead-save as a valid
-		// durable result too, not just an agent_actions row — see
-		// HasJobLeadForJob. No FK to agent_jobs: job_leads is created before
-		// agent_jobs in this file, matching agent_actions.job_id's existing
-		// no-FK precedent rather than reordering the whole schema.
-		`CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -366,7 +374,6 @@ func agentSchemaPG() []string {
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
-			job_id BIGINT,
 			company TEXT,
 			role TEXT,
 			recruiter_name TEXT,
@@ -378,12 +385,6 @@ func agentSchemaPG() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
-		// Lets POST /jobs/{id}/complete recognize a lead-save as a valid
-		// durable result too, not just an agent_actions row — see
-		// HasJobLeadForJob. No FK to agent_jobs: job_leads is created before
-		// agent_jobs in this file, matching agent_actions.job_id's existing
-		// no-FK precedent rather than reordering the whole schema.
-		`CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
