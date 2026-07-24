@@ -70,7 +70,16 @@ func (p *Provider) Reload() error {
 		return fmt.Errorf("read profile %s: %w", p.path, err)
 	}
 	var d Data
-	if err := yaml.Unmarshal(raw, &d); err != nil {
+	// UnmarshalStrict, not Unmarshal: a Codex finding on #307 caught that a
+	// misspelled safety marker (never_auto_sent, approval_require, ...)
+	// under a restricted-section entry silently decoded as an unknown key
+	// yaml.v2 just ignores — the value would still MATCH in MatchRestricted
+	// (its `value` field is spelled correctly), but with both marker
+	// booleans defaulting false, restrictedFieldBlocks would let it
+	// auto-send with no enforcement at all, and no startup or reload error
+	// would ever reveal the typo. Strict decoding fails closed on any
+	// unrecognized field name instead.
+	if err := yaml.UnmarshalStrict(raw, &d); err != nil {
 		return fmt.Errorf("parse profile %s: %w", p.path, err)
 	}
 	normalizeData(&d)
@@ -144,6 +153,7 @@ func normalizeValue(v any) any {
 func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	bestRank := -1
 	for k, f := range p.data.Restricted {
 		if f.Value == nil {
 			continue
@@ -157,16 +167,28 @@ func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, appr
 		}
 		// Go map iteration order is unspecified, and returning on the FIRST
 		// match found a Codex finding on #307 caught: if a draft happens to
-		// echo two different restricted fields at once, whichever one the
-		// map iteration visits first wins — a never_auto_send value could
-		// slip through completely unenforced whenever a weaker
-		// approval_required-only match happened to be visited first. Keep
-		// scanning and only replace the current best match with a stricter
-		// one (never_auto_send outranks approval_required-only), so the
-		// strongest applicable restriction is always the one returned,
-		// independent of map iteration order.
-		if !matched || (f.NeverAutoSend && !neverAutoSend) {
+		// echo two (or more) different restricted fields at once, whichever
+		// one the map iteration visits first used to win outright. Rank
+		// every match — never_auto_send (2) outranks approval_required-only
+		// (1) outranks a field with neither marker set (0) — and keep
+		// scanning for a strictly higher rank, so the strongest applicable
+		// restriction is always the one returned regardless of iteration
+		// order. An earlier version of this fix only special-cased
+		// never_auto_send, which a follow-up Codex finding on #307 caught
+		// still lost approval_required to an unmarked entry visited first:
+		// restrictedFieldBlocks only checks approvalRequired at all when
+		// neverAutoSend is false, so returning an unmarked match (both
+		// false) let an approval-gated value auto-send unreviewed.
+		rank := 0
+		if f.ApprovalRequired {
+			rank = 1
+		}
+		if f.NeverAutoSend {
+			rank = 2
+		}
+		if rank > bestRank {
 			key, neverAutoSend, approvalRequired, matched = k, f.NeverAutoSend, f.ApprovalRequired, true
+			bestRank = rank
 		}
 	}
 	return key, neverAutoSend, approvalRequired, matched

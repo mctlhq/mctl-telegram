@@ -262,6 +262,59 @@ restricted:
 	}
 }
 
+// TestMatchRestricted_ApprovalRequiredWinsOverUnmarkedField covers a
+// follow-up Codex finding on #307: the first fix only special-cased
+// never_auto_send, so an approval_required match could still lose to an
+// UNMARKED restricted field (both booleans false — tracked for some other
+// reason, with no enforcement flag at all) visited first by map iteration.
+// restrictedFieldBlocks only inspects approvalRequired when neverAutoSend
+// is false, so returning the unmarked match let an approval-gated value
+// auto-send with no review at all. approval_required must win over a
+// completely unmarked match.
+func TestMatchRestricted_ApprovalRequiredWinsOverUnmarkedField(t *testing.T) {
+	path := writeTestProfile(t, `
+restricted:
+  internal_note:
+    value: "team-alpha"
+  current_salary:
+    value: 145000
+    approval_required: true
+`)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	text := "My current comp is 145000 base, internally tagged team-alpha"
+	for i := 0; i < 50; i++ {
+		key, neverAutoSend, approvalRequired, matched := p.MatchRestricted(text)
+		if !matched {
+			t.Fatal("expected a match")
+		}
+		if neverAutoSend || !approvalRequired || key != "current_salary" {
+			t.Fatalf("iteration %d: got key=%q neverAutoSend=%v approvalRequired=%v, want key=current_salary approvalRequired=true (the unmarked field must not shadow the approval_required one)", i, key, neverAutoSend, approvalRequired)
+		}
+	}
+}
+
+// TestLoad_RejectsMisspelledRestrictedFieldMarker covers a Codex finding on
+// #307: a misspelled safety marker under a restricted-section entry (e.g.
+// never_auto_sent instead of never_auto_send) used to decode silently as an
+// ignored unknown key, loading successfully with both real markers
+// defaulting to false — the restricted value would still MATCH in
+// MatchRestricted, but with no enforcement at all, and nothing would ever
+// reveal the typo. Load must now fail loudly instead.
+func TestLoad_RejectsMisspelledRestrictedFieldMarker(t *testing.T) {
+	path := writeTestProfile(t, `
+restricted:
+  current_salary:
+    value: 145000
+    never_auto_sent: true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for a misspelled restricted-field marker, got nil")
+	}
+}
+
 func TestMatchRestricted_NoMatchOnUnrelatedText(t *testing.T) {
 	path := writeTestProfile(t, testYAML)
 	p, err := Load(path)
