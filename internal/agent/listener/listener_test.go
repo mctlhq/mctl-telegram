@@ -178,6 +178,49 @@ func TestPersist_OwnerOutgoingTakesOverConversation(t *testing.T) {
 	}
 }
 
+// TestPersist_OwnerOutgoingDeniesPendingActions covers a Codex finding on
+// #307: the automatically-detected takeover path (the owner just replying
+// directly, with no /mctl command) set the conversation to taken_over but,
+// unlike the explicit /mctl takeover command's handler, never denied
+// pending actions — leaving a race where executor.send could read the
+// conversation before this transition and still win its approved→executing
+// CAS afterward, sending the agent's reply on top of the owner's own
+// message. An approved action for the conversation must now be denied the
+// same way the explicit command already does.
+func TestPersist_OwnerOutgoingDeniesPendingActions(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	conv, err := store.EnsureConversation(ctx, acct.userID, recruit, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Sure, let's schedule a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed approved action: %v", err)
+	}
+
+	ex := Extracted{Event: db.IncomingEvent{
+		EventID: "evt:v1:100:555:100", UserID: acct.userID,
+		Kind: db.EventKindOwnerOutgoing, ChatTGID: recruit,
+		SenderTGID: acct.tgID, MessageID: 100, Body: "I'll handle this",
+	}}
+	if err := l.persist(ctx, acct, ex); err != nil {
+		t.Fatalf("persist owner outgoing: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied (automatic takeover must deny pending actions like /mctl takeover does)", action.Status)
+	}
+}
+
 type recordingRouter struct {
 	calls int
 	text  string

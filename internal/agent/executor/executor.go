@@ -342,7 +342,14 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return nil
 	}
 	e.recordSent(ctx, action, tgMessageID, text)
-	if e.m != nil {
+	if e.m != nil && action.PolicyDecision == db.PolicyRequireApproval {
+		// A Codex finding on #307 caught this observation running
+		// unconditionally, including when send() is called from
+		// ProcessApproved for guarded-mode PolicyAllow actions — those never
+		// received an owner /mctl approve at all, so they have no
+		// "approval" whose latency this histogram is supposed to measure;
+		// counting them just pollutes it with proposal-to-sweep delays that
+		// have nothing to do with how long an owner took to decide.
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
@@ -555,7 +562,9 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// anomalously high, so omitting them would bias the metric toward
 	// looking healthier than it is.
 	e.recordSent(ctx, action, tgMessageID, text)
-	if e.m != nil {
+	if e.m != nil && action.PolicyDecision == db.PolicyRequireApproval {
+		// Same restriction as send() (a Codex finding on #307): only count
+		// actions that actually went through a human /mctl approve.
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil

@@ -254,6 +254,29 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			if err := l.Store.SetConversationState(ctx, acct.userID, conv.ID, db.ConversationTakenOver); err != nil {
 				return fmt.Errorf("set taken over: %w", err)
 			}
+			// control.Router.handleTakeover (the explicit /mctl takeover
+			// command) has always denied pending actions in the same breath
+			// as the state transition — this automatically-detected
+			// takeover path (the owner just replying directly, without
+			// typing a command) did not, which a Codex finding on #307
+			// caught as a real race: executor.send reads the conversation
+			// and evaluates policy, then performs a separate approved→
+			// executing CAS a few lines later; if this DenyPendingActionsFor-
+			// Conversation call had never run at all, that CAS could land in
+			// the gap and still succeed, sending the agent's reply on top of
+			// the owner's own message. Calling it here closes that gap the
+			// same way handleTakeover's does: the CAS and this UPDATE
+			// contend on the SAME row's status column, so whichever commits
+			// first wins and the other's WHERE clause simply stops matching
+			// — ordinary optimistic concurrency, no new locking primitive
+			// needed. Best-effort like handleTakeover's isn't (that one
+			// propagates the error) — but here a failure must not block
+			// insertAuditEvent below from ever running, or this idempotent
+			// dedup check would keep re-attempting the same takeover
+			// detection forever.
+			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID, "owner sent a message directly"); err != nil {
+				slog.Warn("agent listener: deny pending actions on auto-detected takeover failed", "user_id", acct.userID, "conversation_id", conv.ID, "err", err)
+			}
 		}
 		return l.insertAuditEvent(ctx, ex.Event)
 

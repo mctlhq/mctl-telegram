@@ -641,6 +641,68 @@ func TestExecutor_RecoverStuck_RestartCounterOnlyCountsNewlyStuckActions(t *test
 	}
 }
 
+// TestExecutor_ApprovalLatency_OnlyObservedForHumanApprovedActions covers a
+// Codex finding on #307: AgentApprovalLatencySeconds was observed
+// unconditionally, including for guarded-mode PolicyAllow actions sent via
+// ProcessApproved that never received an owner /mctl approve at all — those
+// have no "approval" whose latency this histogram is supposed to measure,
+// so counting them polluted it with proposal-to-sweep delays. Only a
+// PolicyRequireApproval action (one that actually went through /mctl
+// approve) should be observed.
+func TestExecutor_ApprovalLatency_OnlyObservedForHumanApprovedActions(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+
+	// Guarded-mode auto-approval: never human-reviewed.
+	if _, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Happy to chat about the role.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	}); err != nil {
+		t.Fatalf("seed guarded approved action: %v", err)
+	}
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile allowing discovery: %v", err)
+	}
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if got := histogramSampleCount(t, exec.m, "mctl_agent_approval_latency_seconds"); got != 0 {
+		t.Fatalf("latency histogram sample count after a guarded auto-send = %d, want 0 (never human-approved)", got)
+	}
+
+	// A genuine owner /mctl approve must still be observed.
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if got := histogramSampleCount(t, exec.m, "mctl_agent_approval_latency_seconds"); got != 1 {
+		t.Fatalf("latency histogram sample count after a human /mctl approve = %d, want 1", got)
+	}
+}
+
+func histogramSampleCount(t *testing.T, m *metrics.Registry, name string) uint64 {
+	t.Helper()
+	mfs, err := m.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			var total uint64
+			for _, metric := range mf.GetMetric() {
+				total += metric.GetHistogram().GetSampleCount()
+			}
+			return total
+		}
+	}
+	return 0
+}
+
 // TestExecutor_ProcessApproved_EnforcesRateLimitAcrossSends covers a Codex
 // finding on #307: send() never passed RecentAgentSends to policy.Evaluate,
 // so overRate always saw an empty slice and MaxMsgsPerMinute was
