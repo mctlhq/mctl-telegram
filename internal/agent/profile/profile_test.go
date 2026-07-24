@@ -229,6 +229,39 @@ func TestMatchRestricted_FindsNumericValueInText(t *testing.T) {
 	}
 }
 
+// TestMatchRestricted_NeverAutoSendWinsOverApprovalRequired covers a Codex
+// finding on #307: when a draft echoes TWO restricted fields at once — one
+// never_auto_send, one approval_required-only — MatchRestricted must always
+// return the never_auto_send field, never the weaker one, regardless of Go's
+// unspecified map iteration order. Run in a loop so a build that regresses
+// to "return on first match" is caught even though map order varies from
+// run to run rather than failing deterministically on any single iteration.
+func TestMatchRestricted_NeverAutoSendWinsOverApprovalRequired(t *testing.T) {
+	path := writeTestProfile(t, `
+restricted:
+  current_salary:
+    value: 145000
+    approval_required: true
+  references:
+    value: "available on request, contact via email"
+    never_auto_send: true
+`)
+	p, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	text := "My current comp is 145000 base, and references: available on request, contact via email"
+	for i := 0; i < 50; i++ {
+		key, neverAutoSend, _, matched := p.MatchRestricted(text)
+		if !matched {
+			t.Fatal("expected a match")
+		}
+		if !neverAutoSend || key != "references" {
+			t.Fatalf("iteration %d: got key=%q neverAutoSend=%v, want key=references neverAutoSend=true (the approval_required-only match must not shadow the never_auto_send one)", i, key, neverAutoSend)
+		}
+	}
+}
+
 func TestMatchRestricted_NoMatchOnUnrelatedText(t *testing.T) {
 	path := writeTestProfile(t, testYAML)
 	p, err := Load(path)

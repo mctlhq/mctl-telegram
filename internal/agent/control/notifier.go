@@ -62,6 +62,16 @@ type Notifier struct {
 	// in ListPendingOwnerNotifications' oldest-50 batch that the sweep never
 	// reaches a healthy account's newer notifications at all.
 	MaxPendingAge time.Duration
+	// GlobalKill reads config.Config.AgentKillSwitch at call time (never a
+	// snapshot — see executor.Executor.GlobalKill's identical doc comment).
+	// nil ⇒ no kill-switch gate, matching tests that construct a Notifier
+	// directly without wiring cmd/server/main.go's config. A Codex finding
+	// on #307 caught that DeliverPending had no way to observe the kill
+	// switch at all: a summary or approval request queued BEFORE the switch
+	// flipped on would still go out, contradicting the policy path's
+	// documented guarantee that the emergency switch silences every
+	// owner-facing message, not just new ones.
+	GlobalKill func() bool
 }
 
 // defaultClaimLease and defaultMaxPendingAge are NewNotifier's defaults.
@@ -95,6 +105,13 @@ func (n *Notifier) Reply(ctx context.Context, userID int64, text string) error {
 // (delivered, failed) counts; a delivery failure for one notification does
 // not stop the batch (the row stays `pending` and is retried next sweep).
 func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, err error) {
+	if n.GlobalKill != nil && n.GlobalKill() {
+		// Silence ALL owner-facing delivery while the kill switch is on,
+		// including rows queued before it flipped — leave them pending
+		// (not failed) so they deliver normally once the switch is off
+		// again, exactly like a claim lease that simply expires unused.
+		return 0, 0, nil
+	}
 	notifs, err := n.Store.ListPendingOwnerNotifications(ctx, 50)
 	if err != nil {
 		return 0, 0, fmt.Errorf("list pending notifications: %w", err)

@@ -133,8 +133,14 @@ func main() {
 	// dispatches, so assigning it after the goroutine starts is a data race
 	// (and a window where an early Saved Messages command silently no-ops
 	// against a nil router).
-	agentExecutor := executor.New(store, &poolSender{pool: pool}, func() bool { return cfg.AgentKillSwitch }, m)
+	// Read at call time by both the executor and the notifier — never a
+	// snapshot — so a redeploy that flips AGENT_KILL_SWITCH takes effect on
+	// the very next send/delivery attempt of an already-running process, not
+	// just newly-started ones.
+	agentGlobalKill := func() bool { return cfg.AgentKillSwitch }
+	agentExecutor := executor.New(store, &poolSender{pool: pool}, agentGlobalKill, m)
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
+	agentNotifier.GlobalKill = agentGlobalKill
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
 
 	// AGENT_PROFILE_PATH is optional and loaded independently of
@@ -164,6 +170,11 @@ func main() {
 			os.Exit(1)
 		}
 		agentExecutor.Profile = agentProfileProvider
+		// config.Load already refuses to start if AgentProfilePath is set
+		// without a positive AgentProfileOwnerTGID (see config.go), so this
+		// is always a real account id here — safe to scope
+		// restrictedFieldBlocks to it unconditionally.
+		agentExecutor.ProfileOwnerTGID = cfg.AgentProfileOwnerTGID
 		slog.Info("agent owner profile loaded", "path", path)
 	}
 

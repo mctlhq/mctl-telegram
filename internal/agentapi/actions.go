@@ -236,14 +236,31 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		// action via InsertAgentAction's (job_id, action_type) conflict
 		// must not queue a second approval-request notification.
 		// internal/agent/control.Notifier (A-PR7) delivers this to Saved
-		// Messages; best-effort here — a delivery failure must not fail the
-		// propose_reply call itself, the action is already durably
-		// persisted and the owner can still `/mctl leads`/`/mctl show` to
-		// find it even if this particular ping is lost.
+		// Messages.
 		if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 			UserID: id.UserID, Kind: db.NotificationApproval, ActionID: actionID, Body: req.Text,
 		}); nerr != nil {
 			logHandlerErr("propose_reply", fmt.Errorf("queue approval notification: %w", nerr))
+			// A Codex finding on #307 caught that this used to be swallowed
+			// as best-effort on the theory that "the owner can still
+			// /mctl leads`/`/mctl show` to find it" — false: neither
+			// command surfaces a pending action or its approval code (see
+			// control.Router.handleLeads/handleShow), so a lost
+			// notification was the ONLY path to ever deliver ApprovalCode
+			// to the owner, and the draft would silently expire unapprovable.
+			// Fail the call instead so the caller retries — safe only when
+			// req.JobID != 0: InsertAgentAction is idempotent on
+			// (job_id, action_type) and InsertOwnerNotification is
+			// idempotent on action_id, so neither insert can be duplicated
+			// by a retry. A standalone (JobID == 0) propose_reply has no
+			// such idempotency key — InsertAgentAction would insert a
+			// second, distinct action row on retry — so that path is left
+			// best-effort rather than risk minting a duplicate draft with
+			// its own approval code.
+			if req.JobID != 0 {
+				writeJSONError(w, http.StatusInternalServerError, "propose failed: could not queue approval notification")
+				return
+			}
 		}
 	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")

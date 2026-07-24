@@ -402,6 +402,62 @@ func TestOwnerNotifications_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestListPendingOwnerNotifications_ExcludesLeasedRows covers a Codex
+// finding on #307: a currently-claimed row (e.g. one another replica or the
+// same sweep tick's own failed-but-still-leased attempt is holding) used to
+// still occupy a slot in the oldest-N batch, so a run of permanently-failing
+// notifications could crowd out a healthy account's newer, deliverable one
+// for as long as their claims kept getting re-issued. The leased row must
+// not be returned while its lease is active, and must reappear once it
+// expires.
+func TestListPendingOwnerNotifications_ExcludesLeasedRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	leasedID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "stuck",
+	})
+	if err != nil {
+		t.Fatalf("insert leased: %v", err)
+	}
+	healthyID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "healthy",
+	})
+	if err != nil {
+		t.Fatalf("insert healthy: %v", err)
+	}
+
+	claimed, err := s.ClaimOwnerNotification(ctx, uid, leasedID, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("claim leased row: claimed=%v err=%v", claimed, err)
+	}
+
+	pending, err := s.ListPendingOwnerNotifications(ctx, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != healthyID {
+		t.Fatalf("pending = %+v, want only the healthy row (id=%d) while the other is leased", pending, healthyID)
+	}
+
+	// Force the lease to have expired and confirm the row becomes visible
+	// again — this is not a permanent exclusion, only a temporary one.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET claimed_until = $1 WHERE id = $2`,
+		time.Now().Add(-time.Minute).UTC(), leasedID,
+	); err != nil {
+		t.Fatalf("force-expire lease: %v", err)
+	}
+	pending, err = s.ListPendingOwnerNotifications(ctx, 50)
+	if err != nil {
+		t.Fatalf("list after expiry: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending after expiry = %d rows, want 2", len(pending))
+	}
+}
+
 func TestHasAgentActionForJob(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

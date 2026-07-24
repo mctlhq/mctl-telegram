@@ -68,6 +68,50 @@ func TestNotifier_DeliverPending_SummaryDeliveredAsIs(t *testing.T) {
 	}
 }
 
+// TestNotifier_DeliverPending_KillSwitchSilencesQueuedDelivery covers a
+// Codex finding on #307: the notifier had no way to observe
+// AGENT_KILL_SWITCH at all, so a summary/approval request queued before the
+// switch flipped on was still delivered — contradicting the policy path's
+// documented guarantee that the emergency switch silences every
+// owner-facing message. The row must stay pending (not failed) so it
+// delivers normally once the switch is off again.
+func TestNotifier_DeliverPending_KillSwitchSilencesQueuedDelivery(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
+	}); err != nil {
+		t.Fatalf("seed notification: %v", err)
+	}
+
+	notifier := NewNotifier(store, sender)
+	notifier.GlobalKill = func() bool { return true }
+	delivered, failed, err := notifier.DeliverPending(ctx)
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if delivered != 0 || failed != 0 {
+		t.Fatalf("delivered=%d failed=%d, want 0/0 while the kill switch is on", delivered, failed)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %d, want 0 while the kill switch is on", len(sender.sent))
+	}
+
+	// Once the switch is off, the same row delivers normally — it must not
+	// have been marked failed or otherwise consumed while silenced.
+	notifier.GlobalKill = func() bool { return false }
+	delivered, failed, err = notifier.DeliverPending(ctx)
+	if err != nil {
+		t.Fatalf("deliver after kill switch off: %v", err)
+	}
+	if delivered != 1 || failed != 0 {
+		t.Fatalf("delivered=%d failed=%d, want 1/0 once the kill switch is off", delivered, failed)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %d, want 1 once the kill switch is off", len(sender.sent))
+	}
+}
+
 // TestNotifier_DeliverPending_SkipsAlreadyClaimedRow guards against the P2
 // found in review: two replicas (or two overlapping sweep ticks) racing on
 // the same pending row must not both call SendToSelf for it. Simulated here
@@ -334,18 +378,21 @@ func TestNotifier_DeliverPending_TransientFormatErrorStaysPending(t *testing.T) 
 	if len(sender.sent) != 0 {
 		t.Fatalf("sent = %d, want 0 (format failed before any send attempt)", len(sender.sent))
 	}
-	pending, err := store.ListPendingOwnerNotifications(ctx, 50)
-	if err != nil {
-		t.Fatalf("list pending: %v", err)
+	// Checked directly against the row's status rather than via
+	// ListPendingOwnerNotifications: DeliverPending leaves the row claimed
+	// after a format failure (see the retry-next-sweep comment in
+	// DeliverPending), and ListPendingOwnerNotifications now deliberately
+	// excludes currently-leased rows (a separate #307 fix) — the row is
+	// genuinely still `pending`, just not currently claimable, and that
+	// distinction is exactly what this test needs to assert.
+	var status string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT status FROM owner_notifications WHERE id = ?`, notifID,
+	).Scan(&status); err != nil {
+		t.Fatalf("select notification status: %v", err)
 	}
-	found := false
-	for _, n := range pending {
-		if n.ID == notifID {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("notification was retired on a format error before MaxPendingAge elapsed — should still be pending")
+	if status != db.NotificationPending {
+		t.Fatalf("status = %q, want %q (notification was retired on a format error before MaxPendingAge elapsed)", status, db.NotificationPending)
 	}
 }
 

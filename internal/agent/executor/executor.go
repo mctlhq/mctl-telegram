@@ -89,6 +89,18 @@ type Executor struct {
 	// AGENT_PROFILE_PATH being optional — see cmd/server/main.go). When set,
 	// every send checks the payload against it before the RPC fires.
 	Profile RestrictedFieldChecker
+	// ProfileOwnerTGID is the one Telegram account Profile's restricted
+	// section actually belongs to (config.Config.AgentProfileOwnerTGID —
+	// mctl-telegram is multi-tenant but AGENT_PROFILE_PATH loads a single
+	// process-wide YAML file, see cmd/server/main.go). 0 means "not
+	// configured" and disables the scoping check entirely, matching a nil
+	// Profile. A Codex finding on #307 caught that restrictedFieldBlocks had
+	// no such scoping at all: in a multi-tenant deployment, EVERY action —
+	// regardless of which account it belonged to — was checked against this
+	// one owner's private restricted values, so an unrelated tenant's
+	// approved reply could be incorrectly denied whenever its text happened
+	// to match a restricted value that has nothing to do with them.
+	ProfileOwnerTGID int64
 	// StuckGrace bounds RecoverStuck's sweep — an action must have sat in
 	// executing with no update for at least this long before it is assumed
 	// crashed rather than genuinely in flight in this same process.
@@ -443,6 +455,9 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 // owner ever seeing the draft; PolicyRequireApproval means it did.
 func (e *Executor) restrictedFieldBlocks(action db.AgentAction) (reason string, blocked bool) {
 	if e.Profile == nil {
+		return "", false
+	}
+	if e.ProfileOwnerTGID != 0 && action.UserID != e.ProfileOwnerTGID {
 		return "", false
 	}
 	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(action.Payload)

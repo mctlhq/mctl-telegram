@@ -452,6 +452,58 @@ func TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend(t *testing.T) {
 	}
 }
 
+// TestExecutor_Approve_RestrictedFieldScopedToProfileOwner covers a Codex
+// finding on #307: restrictedFieldBlocks had no notion of which account
+// Profile's restricted section actually belongs to, so in a multi-tenant
+// deployment EVERY user's action was checked against the one configured
+// owner's private restricted values. A second account's reply that happened
+// to textually match must NOT be blocked once ProfileOwnerTGID scopes the
+// check to the account the profile actually belongs to — only that
+// account's own matching action should still be denied.
+func TestExecutor_Approve_RestrictedFieldScopedToProfileOwner(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.Profile = &fakeRestrictedChecker{key: "references", neverAutoSend: true, matched: true}
+	exec.ProfileOwnerTGID = uid
+
+	otherUID, err := store.EnsureUser(ctx, "other-owner", "", "test")
+	if err != nil {
+		t.Fatalf("ensure other user: %v", err)
+	}
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: otherUID, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+	}); err != nil {
+		t.Fatalf("seed other profile: %v", err)
+	}
+	otherConv, err := store.EnsureConversation(ctx, otherUID, 556, "peer2", "Peer2")
+	if err != nil {
+		t.Fatalf("ensure other conversation: %v", err)
+	}
+	_, otherCode := seedPendingApproval(t, store, otherUID, otherConv.ID, "here are my references")
+	if err := exec.Approve(ctx, otherUID, otherCode); err != nil {
+		t.Fatalf("approve for the unrelated account should succeed (not this profile's owner): %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls for unrelated account = %d, want 1", len(sender.calls))
+	}
+
+	// The actual profile owner's matching action must still be blocked.
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "here are my references")
+	if err := exec.Approve(ctx, uid, code); err == nil {
+		t.Fatal("expected owner-profile-blocks error for the profile's actual owner")
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls after the owner's blocked attempt = %d, want still 1", len(sender.calls))
+	}
+}
+
 // TestExecutor_ProcessApproved_ApprovalRequiredFieldBlocksAutoSend covers the
 // guarded-mode half of the same restricted-field gate: an approval_required
 // value must not go out through the auto-approved (no human review) path.

@@ -737,14 +737,25 @@ type OwnerNotification struct {
 // codebase scan across accounts (RequeueStaleAgentJobs,
 // ExpireStaleAgentActions), since the caller already has to resolve a
 // per-user Telegram client to actually deliver each one regardless.
+//
+// Currently-leased rows (claimed_until in the future — see
+// ClaimOwnerNotification) are excluded: a Codex finding on #307 caught that
+// without this, a batch of permanently-failing notifications (e.g. all
+// belonging to one account with a revoked session) would occupy the same
+// oldest-50 slots on every sweep even while their claim was active and
+// therefore certain to be skipped again, wasting the whole batch on rows
+// DeliverPending cannot act on instead of reaching healthy accounts' newer,
+// deliverable notifications ranked just past position 50.
 func (s *Store) ListPendingOwnerNotifications(ctx context.Context, limit int) ([]OwnerNotification, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, user_id, kind, action_id, body_encrypted, status, tg_message_id, sent_at, created_at
-		   FROM owner_notifications WHERE status = $1 ORDER BY created_at LIMIT $2`,
-		NotificationPending, limit,
+		   FROM owner_notifications
+		  WHERE status = $1 AND (claimed_until IS NULL OR claimed_until < $2)
+		  ORDER BY created_at LIMIT $3`,
+		NotificationPending, time.Now().UTC(), limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pending owner notifications: %w", err)

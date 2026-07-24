@@ -155,9 +155,21 @@ func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, appr
 		if s == "" || !strings.Contains(text, s) {
 			continue
 		}
-		return k, f.NeverAutoSend, f.ApprovalRequired, true
+		// Go map iteration order is unspecified, and returning on the FIRST
+		// match found a Codex finding on #307 caught: if a draft happens to
+		// echo two different restricted fields at once, whichever one the
+		// map iteration visits first wins — a never_auto_send value could
+		// slip through completely unenforced whenever a weaker
+		// approval_required-only match happened to be visited first. Keep
+		// scanning and only replace the current best match with a stricter
+		// one (never_auto_send outranks approval_required-only), so the
+		// strongest applicable restriction is always the one returned,
+		// independent of map iteration order.
+		if !matched || (f.NeverAutoSend && !neverAutoSend) {
+			key, neverAutoSend, approvalRequired, matched = k, f.NeverAutoSend, f.ApprovalRequired, true
+		}
 	}
-	return "", false, false, false
+	return key, neverAutoSend, approvalRequired, matched
 }
 
 // PublicProfile implements agentapi.OwnerProfileProvider. peerTGID is

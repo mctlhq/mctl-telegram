@@ -217,6 +217,17 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
 		}
 	}
+	// AgentProfileOwnerTGID's doc comment documents it as required whenever
+	// AgentProfilePath is set — a missing or malformed value silently
+	// defaulted to 0, so the profile loaded successfully at startup but
+	// handleRecruiterProfile then returned 403 for every account (owner ID
+	// zero is explicitly forbidden there), leaving a seemingly enabled
+	// endpoint permanently unusable with no loud failure anywhere. Fail
+	// closed here instead, matching this function's existing DemoReviewer
+	// validation immediately above.
+	if c.AgentProfilePath != "" && c.AgentProfileOwnerTGID <= 0 {
+		return nil, fmt.Errorf("AGENT_PROFILE_OWNER_TG_ID must be set to a positive Telegram id when AGENT_PROFILE_PATH is set")
+	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)

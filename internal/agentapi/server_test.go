@@ -391,6 +391,70 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	}
 }
 
+// TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall covers a
+// Codex finding on #307: a transient InsertOwnerNotification failure used to
+// be logged and swallowed, still returning 200 — the action was durably
+// persisted but the owner had no way to ever learn its approval code, since
+// (contrary to the removed comment's claim) neither /mctl leads nor
+// /mctl show surfaces a pending action's code. For a job-tied request this
+// is safe to turn into a real failure: InsertAgentAction is idempotent on
+// (job_id, action_type) and InsertOwnerNotification is idempotent on
+// action_id, so a caller retry after a 500 cannot create a duplicate action
+// or a duplicate notification — it lands on the exact same rows.
+func TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:notif-fail", conv.ID)
+	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Text: "Thanks for reaching out!"}
+
+	// Force InsertOwnerNotification to fail with a genuine SQL error (not a
+	// validation error) by renaming its target table out from under it —
+	// the preceding InsertAgentAction call (a different table) still
+	// succeeds, exactly reproducing "the action is durably persisted but the
+	// notification insert fails transiently".
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`ALTER TABLE owner_notifications RENAME TO owner_notifications_gone`); err != nil {
+		t.Fatalf("rename table: %v", err)
+	}
+
+	rec := h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when the notification cannot be queued, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := h.store.GetAgentJob(context.Background(), h.userID, jobID); err != nil {
+		t.Fatalf("job should still exist for retry: %v", err)
+	}
+
+	// Restore the table and retry — must land on the SAME action/approval
+	// code (idempotent), not mint a second draft.
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`ALTER TABLE owner_notifications_gone RENAME TO owner_notifications`); err != nil {
+		t.Fatalf("restore table: %v", err)
+	}
+	rec2 := h.do("POST", "/actions/propose_reply", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec2, &resp)
+	action2, err := h.store.GetAgentActionByCode(context.Background(), h.userID, resp.ApprovalCode)
+	if err != nil {
+		t.Fatalf("lookup by code: %v", err)
+	}
+	if action2.ID != resp.ActionID {
+		t.Fatalf("code resolves to action %d, want %d", action2.ID, resp.ActionID)
+	}
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	if len(notifs) != 1 {
+		t.Fatalf("pending notifications = %d, want exactly 1 (no duplicate from the retry)", len(notifs))
+	}
+}
+
 func TestHandleProposeReply_DeniesURLInReply(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeObserve)
