@@ -144,6 +144,12 @@ func main() {
 	// minute-scale interval, so an owner could still approve a code already
 	// past AGENT_APPROVAL_TTL if the sweeper simply hadn't reached it yet.
 	agentExecutor.ApprovalTTL = cfg.AgentApprovalTTL
+	// A Codex finding on #307 caught that the executor had NO equivalent of
+	// evaluateSendGate's ALLOW_SEND/send_enabled checks at all — poolSender
+	// went straight to the Telegram RPC regardless, contradicting
+	// internal/web/security.html's published guarantee that enabling the
+	// listener does not bypass those gates.
+	agentExecutor.SendGate = &allowSendGate{store: store, allowSend: cfg.AllowSend}
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentNotifier.GlobalKill = agentGlobalKill
 	// Wire the notification retry horizon to the SAME configured approval

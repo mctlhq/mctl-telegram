@@ -73,6 +73,27 @@ type Sender interface {
 // deterministic values without depending on crypto/rand timing.
 type RandomIDSource func() (int64, error)
 
+// SendGate mirrors internal/mcp's evaluateSendGate (ALLOW_SEND and the
+// per-account telegram_accounts.send_enabled flag) so the executor's
+// autonomous sends respect the SAME safety switch the MCP tool surface
+// already enforces. An interface here so this package does not import
+// internal/mcp, matching Sender's rationale.
+//
+// A Codex finding on #307 caught that Executor had NO such check at all:
+// poolSender.SendWithRandomID (cmd/server/agentwiring.go) went straight to
+// the Telegram RPC regardless of ALLOW_SEND or send_enabled, contradicting
+// this deployment's own published guarantee (internal/web/security.html:
+// "Enabling the listener does not bypass the existing ALLOW_SEND, scope,
+// per-account, and per-peer send gates") — with ALLOW_SEND=false (the
+// documented production default on tg.mctl.ai), an approved or
+// guarded-mode-auto-approved agent action would still send a REAL
+// recruiter message.
+type SendGate interface {
+	// SendAllowed reports whether userID may currently send for real. reason
+	// is a human-readable explanation for logging/denial when allowed=false.
+	SendAllowed(ctx context.Context, userID int64) (allowed bool, reason string, err error)
+}
+
 // RestrictedFieldChecker exposes the owner's YAML-configured restricted
 // fields (never_auto_send / approval_required — see internal/agent/profile)
 // so the executor can refuse to send a payload that echoes one, regardless
@@ -92,6 +113,10 @@ type Executor struct {
 	Sender      Sender
 	GlobalKill  func() bool // reads config.Config.AgentKillSwitch at call time, not a snapshot
 	NewRandomID RandomIDSource
+	// SendGate is optional (nil ⇒ no ALLOW_SEND/send_enabled check — only
+	// acceptable for tests; cmd/server/main.go always wires a real one) —
+	// see SendGate's doc comment for why this exists and what it enforces.
+	SendGate SendGate
 	// Profile is optional (nil ⇒ no restricted-field enforcement, matching
 	// AGENT_PROFILE_PATH being optional — see cmd/server/main.go). When set,
 	// every send checks the payload against it before the RPC fires.
@@ -328,6 +353,24 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("owner profile blocks send: %s", reason)
 	}
+	if e.SendGate != nil {
+		allowed, gateReason, err := e.SendGate.SendAllowed(ctx, action.UserID)
+		if err != nil {
+			return fmt.Errorf("%w: check send gate: %w", ErrSendQueuedForRetry, err)
+		}
+		if !allowed {
+			// Same treatment as a hard policy Deny: this deployment's own
+			// published guarantee (internal/web/security.html) is that
+			// enabling the listener does not bypass ALLOW_SEND/send_enabled,
+			// so a blocked gate must stop the send exactly like a Deny
+			// would, not queue for a retry that will keep failing until an
+			// operator changes the gate.
+			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+				return fmt.Errorf("deny gated send: %w", err)
+			}
+			return fmt.Errorf("send gate blocks send: %s", gateReason)
+		}
+	}
 
 	randomID, err := e.NewRandomID()
 	if err != nil {
@@ -553,6 +596,18 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
 		}
 		return fmt.Errorf("owner profile blocks recovery send: %s", reason)
+	}
+	if e.SendGate != nil {
+		allowed, gateReason, err := e.SendGate.SendAllowed(ctx, action.UserID)
+		if err != nil {
+			return fmt.Errorf("check send gate during recovery: %w", err)
+		}
+		if !allowed {
+			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+				return fmt.Errorf("deny gated recovery send: %w", err)
+			}
+			return fmt.Errorf("send gate blocks recovery send: %s", gateReason)
+		}
 	}
 	text := action.Payload
 	if profile.DisclosureText != "" {

@@ -434,6 +434,82 @@ func (f *fakeRestrictedChecker) MatchRestricted(string) (string, bool, bool, boo
 	return f.key, f.neverAutoSend, f.approvalRequired, f.matched
 }
 
+// fakeSendGate lets tests control SendAllowed's outcome without needing a
+// real db.Store.IsSendEnabled/ALLOW_SEND wiring.
+type fakeSendGate struct {
+	allowed bool
+	reason  string
+	err     error
+}
+
+func (f *fakeSendGate) SendAllowed(context.Context, int64) (bool, string, error) {
+	return f.allowed, f.reason, f.err
+}
+
+// TestExecutor_Approve_SendGateBlocksSend covers a Codex finding on #307:
+// the executor had no equivalent of internal/mcp's evaluateSendGate
+// (ALLOW_SEND / per-account send_enabled) at all — poolSender went straight
+// to the Telegram RPC regardless, contradicting internal/web/security.html's
+// published guarantee that enabling the listener does not bypass those
+// gates. A blocked gate must stop the send exactly like a hard policy Deny.
+func TestExecutor_Approve_SendGateBlocksSend(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	exec.SendGate = &fakeSendGate{allowed: false, reason: "server flag ALLOW_SEND=false"}
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+
+	err := exec.Approve(ctx, uid, code)
+	if err == nil {
+		t.Fatal("expected an error when the send gate blocks the send")
+	}
+	if errors.Is(err, ErrSendQueuedForRetry) {
+		t.Fatalf("err = %v, want a hard deny, not a retryable ErrSendQueuedForRetry (ALLOW_SEND=false won't fix itself on retry)", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0 — the gate must block the RPC entirely", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
+// TestExecutor_RecoverStuck_SendGateBlocksRecoverySend is the crash-recovery
+// counterpart: a gate that closed during the grace window must also stop
+// recoverOne from retrying the send.
+func TestExecutor_RecoverStuck_SendGateBlocksRecoverySend(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := store.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET status = ?, updated_at = ? WHERE id = ?`,
+		db.ActionExecuting, time.Now().Add(-time.Hour).UTC(), actionID,
+	); err != nil {
+		t.Fatalf("force stuck: %v", err)
+	}
+	exec.SendGate = &fakeSendGate{allowed: false, reason: "per-account send_enabled=false"}
+
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1 (only the original Approve send, no recovery retry)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
 // TestExecutor_Approve_RecordsConversationHistory guards against the P1
 // found in review: a successful send never called InsertConversationMessage,
 // so recentAgentSends (the rate-limit input in internal/agentapi) always saw
