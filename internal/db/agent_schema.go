@@ -147,6 +147,12 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_created_at ON conversation_messages(created_at)`,
+		// Serves ListRecentAgentOutgoingTimestamps, a hot per-send path (every
+		// executor send and propose_reply call): without conversation_id as
+		// the leading column, the (conversation_id, direction, created_at >
+		// since) filter would fall back to idx_conv_messages_conv and scan
+		// every row for the conversation regardless of direction.
+		`CREATE INDEX IF NOT EXISTS idx_conv_messages_direction_created ON conversation_messages(conversation_id, direction, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			approval_code TEXT,
@@ -320,6 +326,12 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_created_at ON conversation_messages(created_at)`,
+		// Serves ListRecentAgentOutgoingTimestamps, a hot per-send path (every
+		// executor send and propose_reply call): without conversation_id as
+		// the leading column, the (conversation_id, direction, created_at >
+		// since) filter would fall back to idx_conv_messages_conv and scan
+		// every row for the conversation regardless of direction.
+		`CREATE INDEX IF NOT EXISTS idx_conv_messages_direction_created ON conversation_messages(conversation_id, direction, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id BIGSERIAL PRIMARY KEY,
 			approval_code TEXT,

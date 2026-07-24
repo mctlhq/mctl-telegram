@@ -460,6 +460,43 @@ func (s *Store) InsertConversationMessage(ctx context.Context, userID int64, m C
 	return id, nil
 }
 
+// ListRecentAgentOutgoingTimestamps returns the created_at timestamps of
+// every agent_outgoing conversation_messages row newer than `since` —
+// policy.Input.RecentAgentSends' MaxMsgsPerMinute input. A dedicated,
+// correctly-scoped query rather than callers fetching
+// ListConversationMessages' top-N-of-any-direction page and filtering: a
+// Codex finding on #307 caught that both internal/agentapi's and
+// internal/agent/executor's recentAgentSends helpers did exactly that
+// filter-after-fetch, so 50+ newer messages of ANY direction (inbound,
+// owner takeover, another agent reply) arriving after a real agent send
+// could push it out of that fixed-size page entirely — RecentAgentSends
+// would then silently miss it, undercounting the rate limit and letting
+// another action send when MaxMsgsPerMinute should have blocked it.
+func (s *Store) ListRecentAgentOutgoingTimestamps(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
+	if _, err := s.GetConversation(ctx, userID, conversationID); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT created_at FROM conversation_messages
+		  WHERE conversation_id = $1 AND direction = $2 AND created_at > $3
+		  ORDER BY created_at`,
+		conversationID, DirectionAgentOutgoing, since,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list recent agent outgoing timestamps: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []time.Time
+	for rows.Next() {
+		var t time.Time
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan agent outgoing timestamp: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // ListConversationMessages returns the newest `limit` messages of a
 // conversation in chronological order, bodies decrypted. userID scopes the
 // read to the conversation owner.

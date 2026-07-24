@@ -275,7 +275,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	// delivered could both send within the same minute even with
 	// MaxMsgsPerMinute=1, since each one's own evaluation still saw zero
 	// prior sends.
-	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().Add(-time.Minute))
+	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		return fmt.Errorf("%w: load recent sends: %w", ErrSendQueuedForRetry, err)
 	}
@@ -388,23 +388,17 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 
 // recentAgentSends returns the timestamps of this conversation's agent-sent
 // messages since `since`, for policy.Input.RecentAgentSends — mirrors
-// agentapi.Server.recentAgentSends exactly (same query, same
-// DirectionAgentOutgoing filter) since both packages need identical
-// send-history semantics to enforce the SAME MaxMsgsPerMinute limit, but
-// this package must not import internal/agentapi (see Sender's doc comment
-// for the equivalent internal/telegram rationale).
+// agentapi.Server.recentAgentSends exactly (both delegate to
+// db.Store.ListRecentAgentOutgoingTimestamps) since both packages need
+// identical send-history semantics to enforce the SAME MaxMsgsPerMinute
+// limit, but this package must not import internal/agentapi (see Sender's
+// doc comment for the equivalent internal/telegram rationale). Used to
+// fetch ListConversationMessages' top-50-of-any-direction page and filter
+// it locally — a Codex finding on #307 caught that 50+ newer messages of
+// ANY direction could push a real agent send out of that fixed-size page
+// entirely, silently undercounting the rate limit.
 func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
-	msgs, err := e.Store.ListConversationMessages(ctx, userID, conversationID, 50)
-	if err != nil {
-		return nil, err
-	}
-	var out []time.Time
-	for _, m := range msgs {
-		if m.Direction == db.DirectionAgentOutgoing && m.CreatedAt.After(since) {
-			out = append(out, m.CreatedAt)
-		}
-	}
-	return out, nil
+	return e.Store.ListRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since)
 }
 
 // RecoverStuck retries every action found stuck in executing past
@@ -503,7 +497,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// that has been exceeded by OTHER sends since this one got stuck must
 	// still stop the retry if the original RPC never actually reached
 	// Telegram.
-	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().Add(-time.Minute))
+	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		return fmt.Errorf("load recent sends: %w", err)
 	}

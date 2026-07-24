@@ -37,26 +37,18 @@ func (s *Server) loadProfile(w http.ResponseWriter, ctx context.Context, userID 
 
 // recentAgentSends returns the timestamps of this conversation's recent
 // agent-sent messages, for the policy engine's per-minute rate check.
-// Deliberately scoped to ONE conversation rather than the whole account: the
-// db layer (internal/db) exposes no cross-conversation "recent sends for
-// this user" query yet, and inventing one here (raw SQL outside internal/db)
-// would break this codebase's repo-pattern convention of keeping SQL out of
-// callers. A per-conversation rate is also a defensible product choice on
-// its own (a burst answering one dialog vs. bursting across many are
-// different risk profiles) — revisit if request_owner_approval/propose_reply
-// need a true account-wide limit.
+// Deliberately scoped to ONE conversation rather than the whole account: a
+// per-conversation rate is a defensible product choice on its own (a burst
+// answering one dialog vs. bursting across many are different risk
+// profiles) — revisit if request_owner_approval/propose_reply need a true
+// account-wide limit. Delegates to db.Store.ListRecentAgentOutgoingTimestamps
+// (a Codex finding on #307 caught this used to fetch
+// ListConversationMessages' top-50-of-any-direction page and filter it
+// locally — 50+ newer messages of ANY direction could push a real agent
+// send out of that fixed-size page entirely, silently undercounting the
+// rate limit).
 func (s *Server) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
-	msgs, err := s.Store.ListConversationMessages(ctx, userID, conversationID, 50)
-	if err != nil {
-		return nil, err
-	}
-	var out []time.Time
-	for _, m := range msgs {
-		if m.Direction == db.DirectionAgentOutgoing && m.CreatedAt.After(since) {
-			out = append(out, m.CreatedAt)
-		}
-	}
-	return out, nil
+	return s.Store.ListRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since)
 }
 
 // isApprovalCodeCollision reports whether err looks like a violation of the
@@ -184,7 +176,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().Add(-time.Minute))
+	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		logHandlerErr("propose_reply", err)
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
