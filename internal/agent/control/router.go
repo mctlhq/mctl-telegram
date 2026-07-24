@@ -220,6 +220,8 @@ func approverErrText(err error) string {
 	switch {
 	case errors.Is(err, executor.ErrApprovalCodeNotFound):
 		return "code not found or already used"
+	case errors.Is(err, executor.ErrApprovalExpired):
+		return "this draft expired before it was approved — too old to send now"
 	case errors.Is(err, executor.ErrLostRace):
 		return "already resolved (approved, rejected, or expired) by the time this was processed"
 	default:

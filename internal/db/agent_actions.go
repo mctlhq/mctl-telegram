@@ -468,6 +468,37 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	return n, nil
 }
 
+// ExpireAgentActionIfStale is ExpireStaleAgentActions' single-row
+// counterpart: the same pending_approval -> expired transition and cutoff
+// logic, scoped by id/user instead of a bulk time-based scan. Returns
+// ok=true when this call is what actually expired the row.
+//
+// A Codex finding on #307 caught that Executor.Approve had no TTL check of
+// its own at all — the bulk sweeper runs on its own minute-scale interval
+// (or could simply be failing), so an owner typing /mctl approve on a code
+// that is already past AGENT_APPROVAL_TTL but hasn't been swept YET would
+// still succeed, sending an already-stale draft. pending_approval->expired
+// is deliberately absent from allowedActionTransitions (see its own doc
+// comment) — this is the dedicated method that transition needs, mirroring
+// SetAgentActionExecuted/BeginExecutingAgentAction's precedent for
+// transitions with their own preconditions beyond a bare status match.
+func (s *Store) ExpireAgentActionIfStale(ctx context.Context, userID, id int64, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, nil
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
+		  WHERE id = $3 AND user_id = $4 AND status = $5 AND updated_at < $6`,
+		ActionExpired, time.Now().UTC(), id, userID, ActionPendingApproval, cutoff,
+	)
+	if err != nil {
+		return false, fmt.Errorf("expire agent action if stale: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // ListStuckExecutingActions returns actions stuck in executing whose
 // updated_at is older than grace, for the executor's crash-recovery sweep.
 // System-wide (no user scoping) and unordered beyond updated_at, matching

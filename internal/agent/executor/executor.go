@@ -36,6 +36,12 @@ var ErrApprovalCodeNotFound = errors.New("approval code not found")
 // the TTL sweep) already decided it.
 var ErrLostRace = errors.New("action state changed concurrently")
 
+// ErrApprovalExpired is returned by Approve when the code is still live
+// (GetAgentActionByCode found it, still pending_approval) but has already
+// sat past ApprovalTTL — see Approve's doc comment for why this check
+// cannot simply be left to the async ExpireStaleAgentActions sweeper alone.
+var ErrApprovalExpired = errors.New("approval code expired")
+
 // ErrSendQueuedForRetry is returned by Approve when the initial Telegram
 // send fails with a transient error. The action is deliberately left in
 // `executing` (not reverted) for RecoverStuck to retry with the same
@@ -106,7 +112,19 @@ type Executor struct {
 	// executing with no update for at least this long before it is assumed
 	// crashed rather than genuinely in flight in this same process.
 	StuckGrace time.Duration
-	m          *metrics.Registry
+	// ApprovalTTL bounds how long a pending_approval action stays
+	// approvable — 0 disables the check (matching tests that construct an
+	// Executor directly). config.Config.AgentApprovalTTL's doc comment
+	// already documents the async ExpireStaleAgentActions sweeper as the
+	// mechanism that transitions a stale row to `expired`, but a Codex
+	// finding on #307 caught that sweeper runs on its own minute-scale
+	// interval (and could simply be failing) — with no check here, an
+	// owner typing /mctl approve on a code that is already past the TTL
+	// but hasn't been swept YET would still succeed, sending an
+	// already-stale draft. Approve() re-checks the TTL itself instead of
+	// relying solely on the sweeper having already caught up.
+	ApprovalTTL time.Duration
+	m           *metrics.Registry
 
 	// stuckMu guards stuckSeen, the set of action IDs RecoverStuck has
 	// already counted toward AgentExecutorRestartsTotal — see
@@ -146,6 +164,20 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 	}
 	if action.Status != db.ActionPendingApproval {
 		return fmt.Errorf("%w: action is %s, not pending_approval", ErrLostRace, action.Status)
+	}
+	if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
+		// The row is still pending_approval — ExpireStaleAgentActions
+		// hasn't reached it yet, or is currently failing — but it is
+		// already past the configured TTL. Transition it ourselves rather
+		// than sending an already-stale draft just because the async
+		// sweeper hasn't caught up. Not a hard requirement that this call
+		// wins its own CAS (someone else, e.g. the sweeper itself, may have
+		// already expired it a moment earlier) — either way the row is no
+		// longer approvable, so ErrApprovalExpired is correct regardless.
+		if _, err := e.Store.ExpireAgentActionIfStale(ctx, userID, action.ID, e.ApprovalTTL); err != nil {
+			return fmt.Errorf("expire stale approval: %w", err)
+		}
+		return ErrApprovalExpired
 	}
 	ok, err := e.Store.UpdateAgentActionStatus(ctx, userID, action.ID, db.ActionPendingApproval, db.ActionApproved)
 	if err != nil {

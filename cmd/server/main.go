@@ -139,6 +139,11 @@ func main() {
 	// just newly-started ones.
 	agentGlobalKill := func() bool { return cfg.AgentKillSwitch }
 	agentExecutor := executor.New(store, &poolSender{pool: pool}, agentGlobalKill, m)
+	// A Codex finding on #307 caught that Approve() had no TTL check of its
+	// own: the bulk ExpireStaleAgentActions sweeper runs on its own
+	// minute-scale interval, so an owner could still approve a code already
+	// past AGENT_APPROVAL_TTL if the sweeper simply hadn't reached it yet.
+	agentExecutor.ApprovalTTL = cfg.AgentApprovalTTL
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentNotifier.GlobalKill = agentGlobalKill
 	// Wire the notification retry horizon to the SAME configured approval

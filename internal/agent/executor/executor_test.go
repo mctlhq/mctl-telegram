@@ -206,6 +206,43 @@ func TestExecutor_Approve_WrongCodeReturnsNotFound(t *testing.T) {
 	}
 }
 
+// TestExecutor_Approve_RejectsExpiredCodeEvenBeforeSweeperRuns covers a
+// Codex finding on #307: Approve() had no TTL check of its own, relying
+// entirely on the async ExpireStaleAgentActions sweeper (which runs on its
+// own minute-scale interval, or could simply be failing) to catch a stale
+// pending_approval row. A code past ApprovalTTL must be rejected — and the
+// row transitioned to expired — even if the sweeper hasn't reached it yet.
+func TestExecutor_Approve_RejectsExpiredCodeEvenBeforeSweeperRuns(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	exec.ApprovalTTL = time.Hour
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if _, err := store.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET updated_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour).UTC(), actionID,
+	); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+
+	err := exec.Approve(ctx, uid, code)
+	if !errors.Is(err, ErrApprovalExpired) {
+		t.Fatalf("err = %v, want ErrApprovalExpired", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0 (an expired draft must never send)", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionExpired {
+		t.Fatalf("status = %q, want expired", action.Status)
+	}
+	if action.ApprovalCode != "" {
+		t.Fatalf("approval code = %q, want cleared on expiry", action.ApprovalCode)
+	}
+}
+
 func TestExecutor_Reject_TransitionsToRejected(t *testing.T) {
 	exec, sender, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
