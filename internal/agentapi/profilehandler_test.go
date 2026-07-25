@@ -116,6 +116,39 @@ func TestAdminAgentProfileHandler_CreatesWithSafeDefaults(t *testing.T) {
 	}
 }
 
+// TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField guards the P2
+// fix: disclosure_text/intent_allowlist/blocked_senders must distinguish
+// "field omitted" (leave alone) from "field explicitly set to empty string"
+// (clear it) — otherwise, once set, none of them could ever be unset short of
+// a direct SQL update.
+func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+
+	first := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"111,222","disclosure_text":"I'm an AI."}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first call status = %d, want 200, body=%s", first.Code, first.Body.String())
+	}
+
+	second := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":""}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second call status = %d, want 200, body=%s", second.Code, second.Body.String())
+	}
+	var resp agentProfileResponse
+	if err := json.NewDecoder(second.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.BlockedSenders != "" {
+		t.Errorf("blocked_senders = %q, want cleared to empty by explicit \"\"", resp.BlockedSenders)
+	}
+	if resp.DisclosureText != "I'm an AI." {
+		t.Errorf("disclosure_text = %q, want unchanged (field omitted from second request)", resp.DisclosureText)
+	}
+}
+
 // TestAdminAgentProfileHandler_PartialUpdatePreservesOtherFields is the
 // read-modify-write guarantee the admin workflow depends on: flipping just
 // listener_enabled must not reset mode/limits set by an earlier call.

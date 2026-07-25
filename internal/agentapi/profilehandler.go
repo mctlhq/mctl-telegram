@@ -11,16 +11,16 @@ import (
 type upsertAgentProfileRequest struct {
 	// TelegramID is the account whose profile is being created or updated —
 	// same "target, not caller" shape as mintAgentTokenRequest.
-	TelegramID         int64  `json:"telegram_id"`
-	Mode               string `json:"mode,omitempty"`
-	AutopilotPaused    *bool  `json:"autopilot_paused,omitempty"`
-	ListenerEnabled    *bool  `json:"listener_enabled,omitempty"`
-	DisclosureText     string `json:"disclosure_text,omitempty"`
-	MaxAutonomousTurns int    `json:"max_autonomous_turns,omitempty"`
-	MaxMsgsPerMinute   int    `json:"max_msgs_per_minute,omitempty"`
-	MaxReplyChars      int    `json:"max_reply_chars,omitempty"`
-	IntentAllowlist    string `json:"intent_allowlist,omitempty"`
-	BlockedSenders     string `json:"blocked_senders,omitempty"`
+	TelegramID         int64   `json:"telegram_id"`
+	Mode               string  `json:"mode,omitempty"`
+	AutopilotPaused    *bool   `json:"autopilot_paused,omitempty"`
+	ListenerEnabled    *bool   `json:"listener_enabled,omitempty"`
+	DisclosureText     *string `json:"disclosure_text,omitempty"`
+	MaxAutonomousTurns int     `json:"max_autonomous_turns,omitempty"`
+	MaxMsgsPerMinute   int     `json:"max_msgs_per_minute,omitempty"`
+	MaxReplyChars      int     `json:"max_reply_chars,omitempty"`
+	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
+	BlockedSenders     *string `json:"blocked_senders,omitempty"`
 }
 
 type agentProfileResponse struct {
@@ -118,8 +118,8 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		if req.ListenerEnabled != nil {
 			p.ListenerEnabled = *req.ListenerEnabled
 		}
-		if req.DisclosureText != "" {
-			p.DisclosureText = req.DisclosureText
+		if req.DisclosureText != nil {
+			p.DisclosureText = *req.DisclosureText
 		}
 		if req.MaxAutonomousTurns != 0 {
 			p.MaxAutonomousTurns = req.MaxAutonomousTurns
@@ -130,13 +130,20 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		if req.MaxReplyChars != 0 {
 			p.MaxReplyChars = req.MaxReplyChars
 		}
-		if req.IntentAllowlist != "" {
-			p.IntentAllowlist = req.IntentAllowlist
+		if req.IntentAllowlist != nil {
+			p.IntentAllowlist = *req.IntentAllowlist
 		}
-		if req.BlockedSenders != "" {
-			p.BlockedSenders = req.BlockedSenders
+		if req.BlockedSenders != nil {
+			p.BlockedSenders = *req.BlockedSenders
 		}
 
+		// Read-modify-write, not a transaction: a concurrent PUT for the same
+		// telegram_id between the GetAgentProfile above and this Upsert can
+		// silently clobber the other request's fields. Accepted for now — this
+		// route is admin-only and today's expected call pattern is one operator
+		// making sequential changes (enable listener, then later flip mode),
+		// not concurrent writers. Add a CAS (e.g. compare updated_at) or a
+		// per-user advisory lock here if that assumption stops holding.
 		if err := store.UpsertAgentProfile(ctx, p); err != nil {
 			logHandlerErr("admin.agent_profile.upsert", err)
 			store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "error", err.Error(), "")
