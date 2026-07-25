@@ -104,6 +104,19 @@ func run() error {
 		}
 		healthErrCh <- nil
 	}()
+	// A bind failure (port already in use, malformed AGENT_HEALTH_ADDR)
+	// surfaces via ListenAndServe almost immediately. Without this check,
+	// run() doesn't read healthErrCh until after Loop exits — normally only
+	// on shutdown — so a broken probe socket would otherwise fail every
+	// liveness/readiness check for the pod's entire lifetime instead of
+	// failing the process fast at startup.
+	select {
+	case err := <-healthErrCh:
+		if err != nil {
+			return fmt.Errorf("start health server: %w", err)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

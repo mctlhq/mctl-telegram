@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
 )
@@ -32,7 +33,14 @@ func newHealthServer(addr string, health *agentworker.Health) *http.Server {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		writeProbeResult(w, health.Ready())
 	})
-	return &http.Server{Addr: addr, Handler: mux}
+	return &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// Matches cmd/server/main.go's convention — without this, any client
+		// that can reach the pod can hold a connection open by trickling
+		// headers one byte at a time (Slowloris), tying up worker resources.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 }
 
 func writeProbeResult(w http.ResponseWriter, ok bool) {

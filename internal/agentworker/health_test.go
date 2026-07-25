@@ -51,6 +51,22 @@ func TestHealth_FatalIsPermanent(t *testing.T) {
 	}
 }
 
+// TestHealth_ReadyBecomesFalseOnceStopped guards against a Codex/Claude
+// finding: a probe request racing the shutdown grace period (Loop returned,
+// SetStopped fired, but the health HTTP server hasn't closed yet) must not
+// see readyz=200 — the process is already on its way out.
+func TestHealth_ReadyBecomesFalseOnceStopped(t *testing.T) {
+	h := &Health{}
+	h.SetPollResult(true)
+	if !h.Ready() {
+		t.Fatal("Ready() after a successful poll = false, want true")
+	}
+	h.SetStopped()
+	if h.Ready() {
+		t.Fatal("Ready() after SetStopped = true, want false")
+	}
+}
+
 func TestHealth_AliveUntilStopped(t *testing.T) {
 	h := &Health{}
 	if !h.Alive() {

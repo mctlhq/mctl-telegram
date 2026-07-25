@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigureLogging_UsesJSONAndRedactsSensitiveFields(t *testing.T) {
@@ -67,6 +69,38 @@ func TestEnvFloat_ReturnsDefaultWhenUnset(t *testing.T) {
 	}
 	if got != 5 {
 		t.Fatalf("got = %v, want default 5", got)
+	}
+}
+
+// TestRun_FailsFastOnHealthServerBindError guards against a Claude/Codex
+// finding: run() previously didn't read healthErrCh until after
+// worker.Loop(ctx) exited — normally only on shutdown — so a health server
+// that failed to bind (port already in use, malformed AGENT_HEALTH_ADDR)
+// left the pod running with no probe socket, failing every liveness/
+// readiness check for its entire lifetime with no early signal. run() must
+// now return the bind error immediately, before ever starting the poll
+// loop (so it never calls the unreachable AGENT_API_BASE_URL below).
+func TestRun_FailsFastOnHealthServerBindError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	defer ln.Close()
+
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1") // unreachable; run() must never get here
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	t.Setenv("AGENT_HEALTH_ADDR", ln.Addr().String())
+
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run() = nil, want a bind error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run() did not fail fast on a health server bind conflict")
 	}
 }
 
