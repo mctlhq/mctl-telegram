@@ -51,6 +51,7 @@ jobs:
     outputs:
       ref: ${{ steps.pr-ref.outputs.ref }}
       sha: ${{ github.event.pull_request.head.sha || steps.pr-ref.outputs.sha }}
+      base_sha: ${{ github.event.pull_request.base.sha || steps.pr-ref.outputs.base_sha }}
       stale: ${{ steps.staleness.outputs.stale }}
     steps:
       # author_association alone is too coarse (MEMBER = any org member,
@@ -78,10 +79,17 @@ jobs:
         if: github.event_name == 'issue_comment'
         id: pr-ref
         run: |
-          ref=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
-          sha=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefOid -q .headRefOid)
-          echo "ref=$ref" >> $GITHUB_OUTPUT
-          echo "sha=$sha" >> $GITHUB_OUTPUT
+          read -r ref sha base_sha < <(
+            gh pr view "${{ github.event.issue.number }}" \
+              --repo "${{ github.repository }}" \
+              --json headRefName,headRefOid,baseRefOid \
+              --jq '[.headRefName, .headRefOid, .baseRefOid] | @tsv'
+          )
+          {
+            echo "ref=$ref"
+            echo "sha=$sha"
+            echo "base_sha=$base_sha"
+          } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -230,24 +238,24 @@ jobs:
         if: steps.dedup.outputs.already_reviewed != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          fetch-depth: 1
+          # The review and complexity classifier use an immutable
+          # base-sha...head-sha diff. Full history guarantees the merge base
+          # is present without fetching a mutable branch during the review.
+          fetch-depth: 0
           ref: ${{ needs.gate.outputs.sha }}
 
       - name: Classify PR complexity and pick model
         id: classify
         if: steps.dedup.outputs.already_reviewed != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.gate.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.gate.outputs.sha }}
         run: |
-          PR=${{ github.event.pull_request.number || github.event.issue.number }}
-
-          # Collect changed file paths (newline-separated)
-          files=$(gh pr view "$PR" --repo ${{ github.repository }} \
-            --json files --jq '[.files[].path] | join("\n")')
-
-          # Count added/removed lines (exclude diff headers)
-          lines=$(gh pr diff "$PR" --repo ${{ github.repository }} 2>/dev/null \
-            | grep -c '^[+-][^+-]' || true)
+          # Read only the immutable commit pair captured by gate. Never query
+          # the live PR here: its head may move while this run is active.
+          files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          lines=$(git diff --numstat "$BASE_SHA...$HEAD_SHA" |
+            awk '{ if ($1 ~ /^[0-9]+$/) added += $1; if ($2 ~ /^[0-9]+$/) removed += $2 } END { print added + removed + 0 }')
 
           # Score: 3=opus, 2=sonnet, 1=haiku
           score=1
@@ -255,42 +263,33 @@ jobs:
             if echo "$f" | grep -qE '^internal/(auth|crypto|db|mcp|telegram)/'; then
               score=3; break
             elif echo "$f" | grep -qE '\.go$' && ! echo "$f" | grep -qE '_test\.go$'; then
-              [ $score -lt 2 ] && score=2
+              (( score < 2 )) && score=2
             fi
           done <<< "$files"
 
           # Large diffs bump one tier (up to opus)
-          if [ "$lines" -gt 400 ] && [ $score -lt 3 ]; then
+          if [ "$lines" -gt 400 ] && (( score < 3 )); then
             score=$((score + 1))
           fi
 
-          case $score in
+          case "$score" in
             3) model="claude-sonnet-4-6" ;;
             2) model="claude-sonnet-4-6" ;;
             *) model="claude-haiku-4-5-20251001" ;;
           esac
 
-          echo "model=$model"   >> $GITHUB_OUTPUT
-          echo "score=$score"   >> $GITHUB_OUTPUT
-          echo "lines=$lines"   >> $GITHUB_OUTPUT
-          echo "PR #$PR: model=$model score=$score lines=$lines"
+          {
+            echo "model=$model"
+            echo "score=$score"
+            echo "lines=$lines"
+          } >> "$GITHUB_OUTPUT"
+          echo "Pinned diff $BASE_SHA...$HEAD_SHA: model=$model score=$score lines=$lines"
 
-      # gate's staleness check is a point-in-time snapshot; the SHA-scoped
-      # concurrency group deliberately lets this run keep going even after a
-      # newer commit lands (see the group comment above), but that means the
-      # classify step's `gh pr view`/`gh pr diff` calls above, and Claude's
-      # own `gh pr diff`/`gh pr view` tool calls below, all read the PR by
-      # NUMBER — live, current-head data — while checkout and the verdict's
-      # `-f commit_id` stay pinned to the (possibly now superseded)
-      # needs.gate.outputs.sha. A Codex finding on #309 caught that this
-      # lets a run analyze a mixture of the pinned commit's checkout and a
-      # newer commit's live PR data, then bind that mixed analysis to the
-      # old commit_id. Re-checking immediately before the expensive Claude
-      # call — rather than trying to pin every `gh pr` call, which `gh pr
-      # diff` has no flag for — means a run that's gone stale in the gap
-      # since `gate` bails here for near-zero cost instead of reviewing
-      # mismatched content; the newer commit's own correctly-triggered run
-      # (already in flight or about to fire) reviews the current state.
+      # Avoid spending a session if the run became stale before Claude starts.
+      # Correctness no longer depends on this point-in-time check: complexity,
+      # review input, inline comments, and the verdict are all bound to the
+      # immutable base/head pair even if a newer push lands during Claude's
+      # invocation.
       - name: Re-check staleness immediately before the review call
         id: prerun-staleness
         if: steps.dedup.outputs.already_reviewed != 'true'
@@ -323,10 +322,15 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+            BASE SHA: ${{ needs.gate.outputs.base_sha }}
             COMMIT SHA: ${{ needs.gate.outputs.sha }}
 
             You are the automated code reviewer for this pull request. Review
-            the PR diff thoroughly.
+            the immutable diff thoroughly. Use exactly:
+            `git diff ${{ needs.gate.outputs.base_sha }}...${{ needs.gate.outputs.sha }}`
+            Never use `gh pr diff` or `gh pr view`: those read mutable PR data
+            and may point at a newer commit while this invocation is running.
+            Files in the checkout and both git object IDs are pinned.
 
             Focus on:
             - Correctness and logic errors; edge cases the change misses.
@@ -356,13 +360,17 @@ jobs:
             the PR with a one-line reason and nothing else:
             `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f event="APPROVE" -f body="<reason>"`.
 
-            Otherwise, post each finding as an inline comment using the
-            mcp__github_inline_comment__create_inline_comment tool, prefixed
-            with a severity tag:
+            Otherwise, post each finding as an inline review comment using
+            the commit-bound REST call below, prefixed with a severity tag:
             - P1 — must fix before merge (bug, security hole, data loss).
             - P2 — should fix before merge (likely bug, missing test, unsafe
               pattern).
             - P3 — nice to have (style, minor nit); does not block merge.
+
+            Bind every inline comment to COMMIT SHA explicitly:
+            `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/comments --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f path="<repo-relative path>" -F line=<new-file line> -f side="RIGHT" -f body="<P1/P2/P3 finding>"`
+            Never omit commit_id. If the relevant line exists only on the
+            removed side, use `side="LEFT"` and its old-file line number.
 
             Finish by submitting a single PR review verdict (this is the merge
             gate — `main` requires one approving review). Include the P1/P2/P3
@@ -380,12 +388,11 @@ jobs:
           # token, an unrestricted `gh api` lets prompt-injected PR content
           # hit ANY REST endpoint those scopes authorize (editing/closing
           # unrelated PRs or issues, deleting review artifacts, etc.), not
-          # just posting this PR's own verdict. Repo and PR number are
-          # already concrete values by the time this string is built (GH
-          # Actions expressions resolve before claude_args ever reaches the
-          # CLI), so the allowlist pins the exact verdict endpoint instead
-          # of a wildcard.
-          claude_args: '--model ${{ steps.classify.outputs.model }} --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
+          # just posting this PR's own findings/verdict. Repo and PR number
+          # are concrete by the time this string is built, so the allowlist
+          # exposes only the two commit-bound review endpoints plus read-only
+          # local git diff. No tool can read mutable PR diff/view data.
+          claude_args: '--model ${{ steps.classify.outputs.model }} --allowedTools "Bash(git diff:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/comments:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews:*)"'
 
       - name: Check primary review actually succeeded
         # The action can report GH Actions outcome=success while the
