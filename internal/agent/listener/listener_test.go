@@ -42,6 +42,32 @@ func newTestListener(t *testing.T, router CommandRouter) (*Listener, *db.Store, 
 	return New(store, queue.New(store, "listener-test", nil), router, nil), store, &account{userID: uid, tgID: selfTG}
 }
 
+func claimAttemptForJob(t *testing.T, store *db.Store, userID, jobID int64) int {
+	t.Helper()
+	for tries := 0; tries < 50; tries++ {
+		jobs, err := store.ClaimAgentJobs(context.Background(), "listener-test", userID, 50)
+		if err != nil {
+			t.Fatalf("claim jobs: %v", err)
+		}
+		if len(jobs) == 0 {
+			t.Fatalf("job %d was not claimable", jobID)
+		}
+		for _, job := range jobs {
+			if job.ID == jobID {
+				return job.Attempts
+			}
+			// ClaimAgentJobs deliberately serializes one conversation. Finish
+			// older jobs as ignored so a test that targets a later source
+			// message models the real ordering rather than bypassing fencing.
+			if err := store.CompleteAgentJob(context.Background(), job.ID, job.Attempts, db.JobIgnored, "test advanced to later message"); err != nil {
+				t.Fatalf("finish earlier job %d: %v", job.ID, err)
+			}
+		}
+	}
+	t.Fatalf("job %d was not reached after advancing earlier jobs", jobID)
+	return 0
+}
+
 func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	ctx := context.Background()
 	l, store, acct := newTestListener(t, nil)
@@ -322,8 +348,10 @@ func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
 	).Scan(&sourceJobID); err != nil {
 		t.Fatalf("get source job: %v", err)
 	}
+	sourceAttempt := claimAttemptForJob(t, store, acct.userID, sourceJobID)
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: sourceJobID, Attempt: sourceAttempt,
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft answering the original text", PolicyDecision: db.PolicyRequireApproval,
 		Status: db.ActionPendingApproval, ApprovalCode: "EDIT01",
 	})
@@ -379,8 +407,10 @@ func TestPersist_MessageEditKeepsDraftFromLaterMessage(t *testing.T) {
 	).Scan(&laterJobID); err != nil {
 		t.Fatalf("get later source job: %v", err)
 	}
+	laterAttempt := claimAttemptForJob(t, store, acct.userID, laterJobID)
 	laterActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		JobID: laterJobID, ConversationID: conv.ID, UserID: acct.userID,
+		JobID: laterJobID, Attempt: laterAttempt,
+		ConversationID: conv.ID, UserID: acct.userID,
 		ActionType: db.ActionTypeReply, Payload: "Answer to current question",
 		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionPendingApproval,
 		ApprovalCode: "LATER1",
@@ -442,8 +472,10 @@ func TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated(t *testing.
 	).Scan(&editedJobID); err != nil {
 		t.Fatalf("get edited source job: %v", err)
 	}
+	editedAttempt := claimAttemptForJob(t, store, acct.userID, editedJobID)
 	freshActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		JobID: editedJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: editedJobID, Attempt: editedAttempt,
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft answering the EDITED text", PolicyDecision: db.PolicyRequireApproval,
 		Status: db.ActionPendingApproval, ApprovalCode: "EDIT02",
 	})
@@ -497,8 +529,10 @@ func TestPersist_MessageEditLeavesExecutingActionAlone(t *testing.T) {
 	).Scan(&sourceJobID); err != nil {
 		t.Fatalf("get source job: %v", err)
 	}
+	sourceAttempt := claimAttemptForJob(t, store, acct.userID, sourceJobID)
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: sourceJobID, Attempt: sourceAttempt,
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft mid-send", PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
 	})
 	if err != nil {

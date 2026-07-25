@@ -347,14 +347,26 @@ func TestHandleProposeReply_ObserveModeRequiresApproval(t *testing.T) {
 // propose_reply but before completing the job, sweeper requeues it, worker
 // calls propose_reply again) must get back the code ACTUALLY stored on the
 // row — not a fresh one the DB never saw, which would send the owner a code
-// that /mctl approve can never match.
+// that /mctl approve can never match. The redelivery is simulated as it
+// really happens — a requeue that bumps the job's claimed attempt — not a
+// bare repeat of the same request, so this also exercises
+// InsertAgentAction's attempt-fencing (see its doc comment) alongside the
+// dedup path: the second call's higher attempt must still resolve to the
+// same pre-existing row via the (job_id, action_type) index, not be rejected
+// as stale.
 func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:redelivery", conv.ID)
+	// Claim it first, like a real worker would via GET /events — propose_reply
+	// is only ever called while the job is actively processing.
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
 
-	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Text: "Thanks for reaching out!"}
+	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Text: "Thanks for reaching out!"}
 
 	rec1 := h.do("POST", "/actions/propose_reply", req)
 	if rec1.Code != http.StatusOK {
@@ -363,8 +375,23 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	var resp1 actionResponse
 	decodeBody(t, rec1, &resp1)
 
-	// Simulate redelivery: same job_id, same action_type, called again
+	// Simulate a crash-and-requeue redelivery: the sweeper retries the job
+	// (bumping its attempt) and a worker reclaims it under the new attempt,
 	// without the first call ever reaching /jobs/{id}/complete.
+	if _, err := h.store.RetryAgentJob(context.Background(), jobID, claimed[0].Attempts, "worker crashed"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC(), jobID,
+	); err != nil {
+		t.Fatalf("unbackoff: %v", err)
+	}
+	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
+	}
+	req.Attempt = reclaimed[0].Attempts
+
 	rec2 := h.do("POST", "/actions/propose_reply", req)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("second propose status = %d, body=%s", rec2.Code, rec2.Body.String())
@@ -396,8 +423,12 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:policy-changed-redelivery", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
 	req := proposeReplyRequest{
-		ConversationID: conv.ID, JobID: jobID,
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
 		Intent: "discovery", Text: "Thanks for reaching out!",
 	}
 
@@ -417,6 +448,19 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("switch profile to allow: %v", err)
 	}
+	if _, err := h.store.RetryAgentJob(context.Background(), jobID, claimed[0].Attempts, "worker crashed"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC(), jobID,
+	); err != nil {
+		t.Fatalf("unbackoff: %v", err)
+	}
+	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
+	}
+	req.Attempt = reclaimed[0].Attempts
 	replay := h.do("POST", "/actions/propose_reply", req)
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
@@ -459,7 +503,14 @@ func TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall(t *testin
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:notif-fail", conv.ID)
-	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Text: "Thanks for reaching out!"}
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+		Text: "Thanks for reaching out!",
+	}
 
 	// Force InsertOwnerNotification to fail with a genuine SQL error (not a
 	// validation error) by renaming its target table out from under it —
@@ -624,7 +675,7 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	// Now propose a reply (persists an action tied to the job), then complete
 	// should succeed.
 	proposeRec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
-		ConversationID: conv.ID, JobID: jobID, Text: "Thanks!",
+		ConversationID: conv.ID, JobID: jobID, Attempt: 1, Text: "Thanks!",
 	})
 	if proposeRec.Code != http.StatusOK {
 		t.Fatalf("propose status = %d, body=%s", proposeRec.Code, proposeRec.Body.String())
@@ -852,8 +903,12 @@ func TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification(t *testing.T) 
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:notify-redelivery", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
 
-	req := ownerNotifyRequest{JobID: jobID, Text: "Recruiter from Acme reached out."}
+	req := ownerNotifyRequest{JobID: jobID, Attempt: claimed[0].Attempts, Text: "Recruiter from Acme reached out."}
 
 	rec1 := h.do("POST", "/notify/summary", req)
 	if rec1.Code != http.StatusOK {
@@ -888,6 +943,101 @@ func TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification(t *testing.T) 
 	}
 }
 
+func TestHandleOwnerFacing_RedeliveryUsesPersistedActionState(t *testing.T) {
+	t.Run("denied action stays denied after kill switch is lifted", func(t *testing.T) {
+		h := newHarness(t)
+		h.seedProfile(db.AgentModeObserve)
+		conv := h.seedConversation(555)
+		jobID := h.seedJob("evt:v1:1:555:notify-denied-replay", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		req := ownerNotifyRequest{
+			JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Original summary",
+		}
+
+		h.srv.GlobalKill = true
+		first := h.do("POST", "/notify/summary", req)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		var original struct {
+			ActionID int64  `json:"action_id"`
+			Decision string `json:"decision"`
+		}
+		decodeBody(t, first, &original)
+		if original.Decision != db.PolicyDeny {
+			t.Fatalf("first decision=%q, want deny", original.Decision)
+		}
+
+		h.srv.GlobalKill = false
+		req.Text = "Changed replay text"
+		replay := h.do("POST", "/notify/summary", req)
+		if replay.Code != http.StatusOK {
+			t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+		}
+		var got struct {
+			ActionID       int64  `json:"action_id"`
+			NotificationID int64  `json:"notification_id"`
+			Decision       string `json:"decision"`
+		}
+		decodeBody(t, replay, &got)
+		if got.ActionID != original.ActionID || got.Decision != db.PolicyDeny || got.NotificationID != 0 {
+			t.Fatalf("replay=%+v, want original denied action without notification", got)
+		}
+	})
+
+	t.Run("executed action keeps original body after kill switch engages", func(t *testing.T) {
+		h := newHarness(t)
+		h.seedProfile(db.AgentModeObserve)
+		conv := h.seedConversation(555)
+		jobID := h.seedJob("evt:v1:1:555:notify-executed-replay", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		req := ownerNotifyRequest{
+			JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Original summary",
+		}
+
+		first := h.do("POST", "/notify/summary", req)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		var original struct {
+			ActionID       int64 `json:"action_id"`
+			NotificationID int64 `json:"notification_id"`
+		}
+		decodeBody(t, first, &original)
+
+		h.srv.GlobalKill = true
+		req.Text = "Changed replay text"
+		replay := h.do("POST", "/notify/summary", req)
+		if replay.Code != http.StatusOK {
+			t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+		}
+		var got struct {
+			ActionID       int64 `json:"action_id"`
+			NotificationID int64 `json:"notification_id"`
+		}
+		decodeBody(t, replay, &got)
+		if got != original {
+			t.Fatalf("replay=%+v, want original ids %+v", got, original)
+		}
+
+		notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("list notifications: %v", err)
+		}
+		if len(notifs) != 1 || notifs[0].Body != "Original summary" {
+			t.Fatalf("notifications=%+v, want one notification with original persisted body", notifs)
+		}
+	})
+}
+
 // TestHandleProposeReply_RejectsMismatchedJobConversation guards against the
 // P1-adjacent P2 found in review: a worker must not be able to pair a job
 // tied to one conversation with a different conversation_id in the request
@@ -917,17 +1067,20 @@ func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:lead-only", conv.ID)
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
-		t.Fatalf("claim: %v", err)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
 
-	leadRec := h.do("POST", "/leads", saveLeadRequest{ConversationID: conv.ID, JobID: jobID, Company: "Acme"})
+	leadRec := h.do("POST", "/leads", saveLeadRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Company: "Acme",
+	})
 	if leadRec.Code != http.StatusOK {
 		t.Fatalf("save lead status = %d, body=%s", leadRec.Code, leadRec.Body.String())
 	}
 
 	completeRec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: 1, Status: db.JobCompleted,
+		Attempt: claimed[0].Attempts, Status: db.JobCompleted,
 	})
 	if completeRec.Code != http.StatusOK {
 		t.Fatalf("complete status = %d, want 200 (lead save alone should satisfy the invariant), body=%s",

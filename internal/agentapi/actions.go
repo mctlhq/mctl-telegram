@@ -121,10 +121,13 @@ func (s *Server) insertStandaloneApprovalWithNotification(ctx context.Context, a
 }
 
 type proposeReplyRequest struct {
-	ConversationID int64  `json:"conversation_id"`
-	JobID          int64  `json:"job_id,omitempty"`
-	Intent         string `json:"intent"`
-	Text           string `json:"text"`
+	ConversationID int64 `json:"conversation_id"`
+	JobID          int64 `json:"job_id,omitempty"`
+	// Attempt must match the job's currently claimed attempt (as returned by
+	// GET /events) when JobID is set — see InsertAgentAction's doc comment.
+	Attempt int    `json:"attempt,omitempty"`
+	Intent  string `json:"intent"`
+	Text    string `json:"text"`
 }
 
 type actionResponse struct {
@@ -214,7 +217,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	})
 
 	base := db.AgentAction{
-		JobID: req.JobID, ConversationID: req.ConversationID, UserID: id.UserID,
+		JobID: req.JobID, Attempt: req.Attempt, ConversationID: req.ConversationID, UserID: id.UserID,
 		ActionType: db.ActionTypeReply, Intent: req.Intent, Payload: req.Text,
 		PolicyDecision: string(result.Decision), PolicyReasons: strings.Join(result.Reasons, "; "),
 	}
@@ -239,6 +242,18 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
 	}
 	if errors.Is(err, db.ErrAgentJobNotFound) {
+		if req.JobID != 0 {
+			// req.JobID's existence/ownership was already confirmed above
+			// (the GetAgentJob check ~30 lines up) — reaching this with
+			// ErrAgentJobNotFound means InsertAgentAction's own live
+			// status/attempt gate lost the race: the job completed (or was
+			// reclaimed under a new attempt) between that check and this
+			// insert. Same "too late" shape as handleJobComplete's own CAS
+			// loss, so it gets the same 409, not the 400 a truly bogus
+			// job_id gets.
+			writeJSONError(w, http.StatusConflict, "job is no longer the active attempt for this account")
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")
 		return
 	}
@@ -298,6 +313,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 type saveLeadRequest struct {
 	ConversationID int64  `json:"conversation_id"`
 	JobID          int64  `json:"job_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
 	Company        string `json:"company"`
 	Role           string `json:"role"`
 	RecruiterName  string `json:"recruiter_name"`
@@ -325,13 +341,17 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leadID, err := s.Store.UpsertJobLead(r.Context(), db.JobLead{
-		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID,
+		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID, Attempt: req.Attempt,
 		Company: req.Company, Role: req.Role,
 		RecruiterName: req.RecruiterName, RecruiterTGID: req.RecruiterTGID, Compensation: req.Compensation,
 		Status: req.Status, Detail: req.Detail,
 	})
 	if errors.Is(err, db.ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
+		return
+	}
+	if errors.Is(err, db.ErrAgentJobNotFound) {
+		writeJSONError(w, http.StatusConflict, "job is no longer the active attempt for this account")
 		return
 	}
 	if err != nil {
@@ -344,10 +364,13 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 }
 
 type ownerNotifyRequest struct {
-	ConversationID int64  `json:"conversation_id,omitempty"`
-	JobID          int64  `json:"job_id,omitempty"`
-	Intent         string `json:"intent,omitempty"`
-	Text           string `json:"text"`
+	ConversationID int64 `json:"conversation_id,omitempty"`
+	JobID          int64 `json:"job_id,omitempty"`
+	// Attempt must match the job's currently claimed attempt when JobID is
+	// set — see InsertAgentAction's doc comment.
+	Attempt int    `json:"attempt,omitempty"`
+	Intent  string `json:"intent,omitempty"`
+	Text    string `json:"text"`
 }
 
 // handleRequestOwnerApproval is POST /actions/request_owner_approval. Unlike
@@ -425,13 +448,18 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		status = db.ActionDenied
 	}
 	actionID, err := s.Store.InsertAgentAction(ctx, db.AgentAction{
-		JobID: req.JobID, ConversationID: req.ConversationID, UserID: id.UserID,
+		JobID: req.JobID, Attempt: req.Attempt, ConversationID: req.ConversationID, UserID: id.UserID,
 		ActionType: actionType, Intent: req.Intent, Payload: req.Text,
 		PolicyDecision: string(result.Decision), PolicyReasons: strings.Join(result.Reasons, "; "),
 		Status: status,
 	})
 	if errors.Is(err, db.ErrAgentJobNotFound) {
-		writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")
+		// Covers both a truly bogus/foreign job_id and InsertAgentAction's
+		// live status/attempt gate losing the race (the job completed or was
+		// reclaimed under a new attempt since the caller last saw it) — this
+		// handler has no earlier pre-check to tell the two apart, unlike
+		// handleProposeReply.
+		writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account, or is no longer the active attempt")
 		return
 	}
 	if err != nil {
@@ -439,11 +467,32 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		writeJSONError(w, http.StatusInternalServerError, "request failed")
 		return
 	}
-	if status == db.ActionDenied {
-		s.audit(ctx, id.UserID, tool, "denied", strings.Join(result.Reasons, "; "))
+	// A job redelivery may resolve the insert through the
+	// (job_id, action_type) idempotency key after policy or request text has
+	// changed. As with propose_reply above, durable state is authoritative:
+	// never turn a previously denied action into a notification merely
+	// because a kill switch was lifted before the replay, and never report a
+	// previously executed action as freshly denied.
+	persisted, err := s.Store.GetAgentAction(ctx, id.UserID, actionID)
+	if err != nil {
+		logHandlerErr(tool, fmt.Errorf("reload persisted owner-facing action: %w", err))
+		writeJSONError(w, http.StatusInternalServerError, "request failed")
+		return
+	}
+	persistedReasons := result.Reasons
+	if persisted.PolicyReasons != "" {
+		persistedReasons = strings.Split(persisted.PolicyReasons, "; ")
+	}
+	if persisted.Status == db.ActionDenied {
+		s.audit(ctx, id.UserID, tool, "denied", persisted.PolicyReasons)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"action_id": actionID, "decision": string(result.Decision), "reasons": result.Reasons,
+			"action_id": actionID, "decision": persisted.PolicyDecision, "reasons": persistedReasons,
 		})
+		return
+	}
+	if persisted.Status != db.ActionExecuted {
+		logHandlerErr(tool, fmt.Errorf("unexpected persisted owner-facing action status %q", persisted.Status))
+		writeJSONError(w, http.StatusInternalServerError, "request failed")
 		return
 	}
 	// InsertOwnerNotification is idempotent per action_id (see its doc
@@ -451,7 +500,7 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	// InsertAgentAction resolved via the (job_id, action_type) conflict must
 	// not queue a second copy of the same summary/approval request.
 	notifID, err := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
-		UserID: id.UserID, Kind: notificationKind, ActionID: actionID, Body: req.Text,
+		UserID: id.UserID, Kind: notificationKind, ActionID: actionID, Body: persisted.Payload,
 	})
 	if err != nil {
 		logHandlerErr(tool, err)

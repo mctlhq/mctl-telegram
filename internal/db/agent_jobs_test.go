@@ -422,18 +422,24 @@ func TestInsertAgentAction_IdempotentPerJob(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	attempt := claimed[0].Attempts
 
 	first, err := s.InsertAgentAction(ctx, AgentAction{
-		UserID: uid, JobID: jid, ActionType: ActionTypeReply,
+		UserID: uid, JobID: jid, Attempt: attempt, ActionType: ActionTypeReply,
 		PolicyDecision: "require_approval", ApprovalCode: "AB12",
 	})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	// A redelivered job proposing again must land on the SAME row — same id,
-	// and crucially the original approval code, not a second live one.
+	// A redelivered job proposing again — same attempt, an unresolved response
+	// retried by the caller — must land on the SAME row — same id, and
+	// crucially the original approval code, not a second live one.
 	second, err := s.InsertAgentAction(ctx, AgentAction{
-		UserID: uid, JobID: jid, ActionType: ActionTypeReply,
+		UserID: uid, JobID: jid, Attempt: attempt, ActionType: ActionTypeReply,
 		PolicyDecision: "require_approval", ApprovalCode: "ZZ99",
 	})
 	if err != nil {
@@ -451,7 +457,7 @@ func TestInsertAgentAction_IdempotentPerJob(t *testing.T) {
 	}
 	// A different action type for the same job is a separate row.
 	if third, err := s.InsertAgentAction(ctx, AgentAction{
-		UserID: uid, JobID: jid, ActionType: ActionTypeOwnerSummary,
+		UserID: uid, JobID: jid, Attempt: attempt, ActionType: ActionTypeOwnerSummary,
 		PolicyDecision: "allow",
 	}); err != nil || third == first {
 		t.Fatalf("other type: id=%d err=%v", third, err)
@@ -501,6 +507,79 @@ func TestInsertAgentAction_RequiresLiveJob(t *testing.T) {
 	).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("post-purge action rows = %d err=%v, want 0", n, err)
 	}
+}
+
+// TestInsertAgentAction_RejectsAfterJobNoLongerActive guards a Codex finding
+// on #308: if CompleteJob commits on the server but its HTTP response never
+// reaches the caller (a lost response, not a lost request), the caller's
+// local completed-guard never fires and can still issue another
+// state-changing tool call afterward, believing the job is still open.
+// Without a server-side fence, that late call would still persist an
+// agent_actions row — and once an executor (A-PR7/#297) consumes approved
+// rows, could still get sent — despite the job already being terminal.
+// InsertAgentAction must reject any job-tied insert once the job is no
+// longer processing under the exact attempt the caller claimed it with,
+// covering both ways that can happen: the job reached a terminal status, or
+// it was reclaimed under a new attempt (visibility-timeout requeue) after a
+// stale worker's local state fell behind.
+func TestInsertAgentAction_RejectsAfterJobNoLongerActive(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	t.Run("terminal status", func(t *testing.T) {
+		jid := seedJob(t, s, uid, "evt:v1:1:1:terminal")
+		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		attempt := claimed[0].Attempts
+		// Simulate CompleteJob committing server-side (e.g. status=ignored)
+		// while the caller never observed the response.
+		if err := s.CompleteAgentJob(ctx, jid, attempt, JobIgnored, ""); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		if _, err := s.InsertAgentAction(ctx, AgentAction{
+			UserID: uid, JobID: jid, Attempt: attempt, ActionType: ActionTypeReply,
+			PolicyDecision: "require_approval", Payload: "late reply",
+		}); !errors.Is(err, ErrAgentJobNotFound) {
+			t.Fatalf("post-completion insert err = %v, want ErrAgentJobNotFound", err)
+		}
+	})
+
+	t.Run("stale attempt after requeue", func(t *testing.T) {
+		jid := seedJob(t, s, uid, "evt:v1:1:1:stale-attempt")
+		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		staleAttempt := claimed[0].Attempts
+		if _, err := s.RetryAgentJob(ctx, jid, staleAttempt, "worker crashed"); err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+		// RetryAgentJob backs next_run_at off by AgentJobBackoff (30s+); pull it
+		// back to now so the reclaim below doesn't have to sleep for it.
+		if _, err := s.DB.ExecContext(ctx,
+			`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC(), jid,
+		); err != nil {
+			t.Fatalf("unbackoff: %v", err)
+		}
+		reclaimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		if err != nil || len(reclaimed) != 1 {
+			t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
+		}
+		if reclaimed[0].Attempts == staleAttempt {
+			t.Fatalf("reclaim did not bump attempt: still %d", staleAttempt)
+		}
+		// The stale worker, still believing it owns staleAttempt, must not be
+		// able to persist an action against the job's now-active attempt.
+		if _, err := s.InsertAgentAction(ctx, AgentAction{
+			UserID: uid, JobID: jid, Attempt: staleAttempt, ActionType: ActionTypeReply,
+			PolicyDecision: "require_approval", Payload: "stale reply",
+		}); !errors.Is(err, ErrAgentJobNotFound) {
+			t.Fatalf("stale-attempt insert err = %v, want ErrAgentJobNotFound", err)
+		}
+	})
 }
 
 func TestSweepAgentMessageBodies_ExpiresPendingJobs(t *testing.T) {

@@ -72,9 +72,12 @@ const (
 // short code the owner types in Saved Messages (/mctl approve <code>); unique
 // per user among rows that still carry one.
 type AgentAction struct {
-	ID                  int64
-	ApprovalCode        string
-	JobID               int64 // agent_jobs.id; 0 ⇒ not tied to a queue job
+	ID           int64
+	ApprovalCode string
+	JobID        int64 // agent_jobs.id; 0 ⇒ not tied to a queue job
+	// Attempt must match the job's currently claimed attempt when JobID != 0
+	// — see InsertAgentAction's doc comment. Ignored when JobID == 0.
+	Attempt             int
 	ConversationID      int64 // 0 ⇒ not tied to a conversation
 	UserID              int64
 	ActionType          string
@@ -101,10 +104,17 @@ type AgentAction struct {
 // approval for the same reply. Actions without a job (JobID == 0) are
 // exempt.
 //
-// A job-tied action also requires its job to still exist (returns
-// ErrAgentJobNotFound otherwise), which keeps a racing worker from recreating
-// encrypted action data after HardDeleteAccount's purge — see the insert
-// statement's comment.
+// A job-tied action also requires its job to still exist AND still be
+// processing under a.Attempt (returns ErrAgentJobNotFound otherwise), which
+// keeps a racing worker from recreating encrypted action data after
+// HardDeleteAccount's purge — see the insert statement's comment — and closes
+// a second race: if CompleteJob commits on the server but its HTTP response
+// never reaches the caller, the caller's local completed-guard never fires,
+// so it can still issue another action call afterward. Gating the INSERT's
+// source SELECT on the job's live status/attempt (the same compare-and-set
+// shape CompleteAgentJob/RetryAgentJob already use) means that later call
+// finds no matching job row and is rejected, even though the caller believes
+// the job is still open.
 func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, error) {
 	if a.UserID <= 0 {
 		return 0, errors.New("user id required")
@@ -162,17 +172,23 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
 			    payload_encrypted, policy_decision, policy_reasons, status)
 			 SELECT $1, j.id, $3, $4, $5, $6, $7, $8, $9, $10
-			   FROM agent_jobs j WHERE j.id = $2 AND j.user_id = $4`+lock+`
+			   FROM agent_jobs j
+			  WHERE j.id = $2 AND j.user_id = $4 AND j.status = $11 AND j.attempts = $12`+lock+`
 			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
 			 RETURNING id`,
 			nullable(a.ApprovalCode), a.JobID, convID, a.UserID, a.ActionType, a.Intent,
-			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status, JobProcessing, a.Attempt,
 		).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Two ways to land here: a redelivery hit the (job_id, action_type)
 			// unique index — the action exists, return it with its ORIGINAL
-			// approval_code — or the source SELECT found no job (purged account
-			// or foreign/bogus id) and the job must be reported gone.
+			// approval_code (looked up without an attempt filter: idempotent
+			// redelivery after a crash re-claims the job under a NEW attempt,
+			// and the existing row from the original attempt must still be
+			// returned, not treated as missing) — or the source SELECT found no
+			// job matching both id/user AND the live status+attempt gate (purged
+			// account, foreign/bogus id, or a stale/completed attempt) and the
+			// job must be reported gone.
 			lookupErr := s.DB.QueryRowContext(ctx,
 				`SELECT id FROM agent_actions
 				  WHERE job_id = $1 AND action_type = $2 AND user_id = $3`,
@@ -906,6 +922,7 @@ type JobLead struct {
 	UserID         int64
 	ConversationID int64
 	JobID          int64 // 0 ⇒ not tied to a specific queue job (e.g. a manual/backfilled save)
+	Attempt        int   // required live claim attempt when JobID != 0
 	Company        string
 	Role           string
 	RecruiterName  string
@@ -939,12 +956,15 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if l.Detail == "" {
 		l.Detail = "{}"
 	}
-	var id int64
-	err := s.DB.QueryRowContext(ctx,
-		`INSERT INTO job_leads
-		   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
-		    compensation, status, detail, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)
+	var (
+		id  int64
+		err error
+	)
+	const insertLead = `INSERT INTO job_leads
+	   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
+	    compensation, status, detail, updated_at)
+	`
+	const mergeLead = `
 		 ON CONFLICT (conversation_id) DO UPDATE SET
 		   job_id = CASE WHEN EXCLUDED.job_id IS NOT NULL THEN EXCLUDED.job_id ELSE job_leads.job_id END,
 		   company = CASE WHEN EXCLUDED.company IS NOT NULL THEN EXCLUDED.company ELSE job_leads.company END,
@@ -956,15 +976,35 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 		   detail = CASE WHEN EXCLUDED.detail <> '{}' THEN EXCLUDED.detail ELSE job_leads.detail END,
 		   updated_at = EXCLUDED.updated_at
 		 WHERE job_leads.user_id = EXCLUDED.user_id
-		 RETURNING id`,
+		 RETURNING id`
+	args := []any{
 		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
 		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
 		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
-	).Scan(&id)
+	}
+	if l.JobID != 0 {
+		lock := ""
+		if s.isPostgres(ctx) {
+			lock = " FOR SHARE"
+		}
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+`
+			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
+			   FROM agent_jobs j
+			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
+			    AND j.status=$12 AND j.attempts=$13`+lock+mergeLead,
+			append(args, JobProcessing, l.Attempt)...,
+		).Scan(&id)
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+` VALUES($1,$2,NULL,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)`+mergeLead,
+			args...,
+		).Scan(&id)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		// The WHERE guard rejected the update: the conflicting lead row is
-		// owned by a different user. Should be unreachable given the upfront
-		// ownership check, but must not silently succeed.
+		if l.JobID != 0 {
+			return 0, ErrAgentJobNotFound
+		}
 		return 0, ErrJobLeadNotFound
 	}
 	if err != nil {
