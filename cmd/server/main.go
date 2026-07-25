@@ -429,6 +429,14 @@ func main() {
 			mux.With(auth.Middleware(provider, true, m)).Post("/api/agent/token",
 				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg)))
 		}
+		// Admin-scoped agent_profiles management. Same provider/scope as the
+		// token mint above — an agent worker's own aud=agent token must never
+		// reach this route. Previously the only way to create or change this
+		// row was a direct SQL insert; this is the managed opt-in path an
+		// operator uses for enable/disable, test-account rotation, and future
+		// production onboarding.
+		mux.With(auth.Middleware(provider, true, m)).Put("/api/admin/agent/profile",
+			agentapi.NewAdminAgentProfileHandler(store))
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
