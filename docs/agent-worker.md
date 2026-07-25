@@ -71,10 +71,27 @@ transport is in use.
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
 | `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. |
 | `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
+| `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz` probe server (default: `:8080`, all interfaces). |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
 are internal — set only by the parent worker process on the `--mcp-serve`
 subprocess it spawns per job, never configured by an operator.
+
+### Health probe binding: `:8080`, not loopback-only
+
+The plan's `communication-agent-preview` deployment (Part 2, G3 — the
+future persistent-session Channels adapter) requires "loopback health
+probes only," reflecting that component's larger blast radius (a
+long-lived interactive session, broader potential tool exposure). That
+requirement does not extend to this worker: `cmd/agent-worker` is
+stateless per job, exposes exactly the 11 restricted MCP tools, and — more
+concretely — the platform's actual `service-templates/worker/
+values.yaml.tpl` wires liveness/readiness as standard Kubernetes `httpGet`
+probes, which the kubelet reaches via the pod IP, not loopback; binding
+this server to `127.0.0.1` by default would silently break those probes
+for anyone deploying from the standard template. `AGENT_HEALTH_ADDR`
+remains operator-configurable if a future deployment wants to pair a
+loopback bind with `exec` probes instead — just not as the default.
 
 ## Deployment note
 

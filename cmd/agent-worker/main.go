@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -95,28 +96,25 @@ func run() error {
 	if healthAddr == "" {
 		healthAddr = ":8080"
 	}
+	// Listen synchronously so a bind failure (port already in use, malformed
+	// AGENT_HEALTH_ADDR, slow DNS on a hostname address) surfaces here,
+	// before the poll loop ever starts — a fixed-duration escape (the
+	// previous approach) can't distinguish "still binding" from "bound
+	// fine," so under load or a slow resolve it would start Loop anyway
+	// and leave the pod with no probe socket for its entire lifetime.
+	ln, err := net.Listen("tcp", healthAddr)
+	if err != nil {
+		return fmt.Errorf("start health server: listen on %s: %w", healthAddr, err)
+	}
 	healthSrv := newHealthServer(healthAddr, health)
 	healthErrCh := make(chan error, 1)
 	go func() {
-		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := healthSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			healthErrCh <- err
 			return
 		}
 		healthErrCh <- nil
 	}()
-	// A bind failure (port already in use, malformed AGENT_HEALTH_ADDR)
-	// surfaces via ListenAndServe almost immediately. Without this check,
-	// run() doesn't read healthErrCh until after Loop exits — normally only
-	// on shutdown — so a broken probe socket would otherwise fail every
-	// liveness/readiness check for the pod's entire lifetime instead of
-	// failing the process fast at startup.
-	select {
-	case err := <-healthErrCh:
-		if err != nil {
-			return fmt.Errorf("start health server: %w", err)
-		}
-	case <-time.After(50 * time.Millisecond):
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
