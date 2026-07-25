@@ -28,13 +28,6 @@ func stringArg(args map[string]any, key, def string) string {
 	return def
 }
 
-func boolArg(args map[string]any, key string, def bool) bool {
-	if v, ok := args[key].(bool); ok {
-		return v
-	}
-	return def
-}
-
 func intArg(args map[string]any, key string, def int) int {
 	switch v := args[key].(type) {
 	case float64:
