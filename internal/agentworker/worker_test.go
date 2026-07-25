@@ -206,6 +206,66 @@ func TestWorker_Loop_ExitsPromptlyOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestWorker_Loop_HealthReflectsFatalAuthError(t *testing.T) {
+	poller := &fakePoller{results: []pollResult{
+		{err: &APIError{StatusCode: 403, Message: "revoked"}},
+	}}
+	health := &Health{}
+	w := NewWorker(poller, &fakeRunner{}).WithHealth(health)
+
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		w.Loop(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Loop did not exit promptly on a fatal auth error")
+	}
+
+	if health.Ready() {
+		t.Fatal("health.Ready() after a fatal auth error = true, want false")
+	}
+	if health.Alive() {
+		t.Fatal("health.Alive() after Loop returned = true, want false")
+	}
+}
+
+func TestWorker_Loop_HealthBecomesReadyAfterFirstSuccessfulPoll(t *testing.T) {
+	poller := &fakePoller{results: []pollResult{
+		{err: errors.New("network blip")},
+		{jobs: nil},
+	}}
+	health := &Health{}
+	w := NewWorker(poller, &fakeRunner{}).WithHealth(health)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		w.Loop(ctx)
+		close(done)
+	}()
+
+	if health.Ready() {
+		t.Fatal("health.Ready() before any poll = true, want false")
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for !health.Ready() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !health.Ready() {
+		t.Fatal("health.Ready() never became true after a successful poll")
+	}
+	cancel()
+	<-done
+	if health.Alive() {
+		t.Fatal("health.Alive() after Loop returned = true, want false")
+	}
+}
+
 func TestParseClaudeResult_ParsesSuccessAndError(t *testing.T) {
 	ok, err := ParseClaudeResult([]byte(`{"type":"result","subtype":"success","is_error":false,"duration_ms":404,"num_turns":3,"total_cost_usd":0.01,"result":"done"}`))
 	if err != nil {

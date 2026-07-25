@@ -44,10 +44,19 @@ const (
 type Worker struct {
 	poller eventPoller
 	runner Runner
+	health *Health
 }
 
 func NewWorker(poller eventPoller, runner Runner) *Worker {
 	return &Worker{poller: poller, runner: runner}
+}
+
+// WithHealth attaches a Health reporter that Loop updates as it runs, for
+// cmd/agent-worker's HTTP probes. Optional — Loop works identically without
+// one (Health's methods are all nil-safe).
+func (w *Worker) WithHealth(h *Health) *Worker {
+	w.health = h
+	return w
 }
 
 // ErrFatalAuth is returned by Loop when it stops because PollEvents reported
@@ -67,6 +76,7 @@ var ErrFatalAuth = errors.New("agent-worker: fatal auth error, poll loop stopped
 // Returns nil on a normal ctx-cancel shutdown, ErrFatalAuth if it stopped
 // because of an unrecoverable 401/403 (see isFatalAuthError).
 func (w *Worker) Loop(ctx context.Context) error {
+	defer w.health.SetStopped()
 	backoff := minPollBackoff
 	for {
 		if ctx.Err() != nil {
@@ -88,9 +98,11 @@ func (w *Worker) Loop(ctx context.Context) error {
 				// operator signal that anything actually needs fixing.
 				// Stopping the loop turns that into a visible process
 				// exit — restart with a fresh token is the only real fix.
+				w.health.SetFatal()
 				slog.Error("agent-worker: auth failure is not recoverable by retrying, stopping poll loop", "err", err)
 				return ErrFatalAuth
 			}
+			w.health.SetPollResult(false)
 			slog.Warn("agent-worker: poll failed", "err", err, "retry_in", backoff)
 			if !sleepCtx(ctx, backoff) {
 				return nil
@@ -98,6 +110,7 @@ func (w *Worker) Loop(ctx context.Context) error {
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		w.health.SetPollResult(true)
 		backoff = minPollBackoff
 		for _, job := range jobs {
 			jobCtx, cancel := context.WithDeadline(ctx, job.ParsedDeadline(jobDeadlineFallback))

@@ -22,10 +22,12 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
@@ -86,13 +88,42 @@ func run() error {
 		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 		MaxBudgetUSD: maxBudgetUSD,
 	}
-	worker := agentworker.NewWorker(client, invoker)
+	health := &agentworker.Health{}
+	worker := agentworker.NewWorker(client, invoker).WithHealth(health)
+
+	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
+	if healthAddr == "" {
+		healthAddr = ":8080"
+	}
+	healthSrv := newHealthServer(healthAddr, health)
+	healthErrCh := make(chan error, 1)
+	go func() {
+		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			healthErrCh <- err
+			return
+		}
+		healthErrCh <- nil
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	slog.Info("agent-worker: starting poll loop", "version", version, "api_base_url", apiBaseURL)
+	slog.Info("agent-worker: starting poll loop", "version", version, "api_base_url", apiBaseURL, "health_addr", healthAddr)
 	loopErr := worker.Loop(ctx)
 	slog.Info("agent-worker: stopped")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("agent-worker: health server shutdown", "err", err)
+	}
+	if err := <-healthErrCh; err != nil {
+		// The health server is only load-bearing for probes, not for the
+		// poll loop's own correctness — a failure here shouldn't mask
+		// loopErr (the actually meaningful exit reason), just get logged
+		// alongside it.
+		slog.Warn("agent-worker: health server failed", "err", err)
+	}
+
 	// A fatal-auth stop must reach main() as a nonzero exit — otherwise a
 	// process supervisor watching for failures sees the same clean return as
 	// an ordinary SIGTERM shutdown and never restarts or alerts on an
