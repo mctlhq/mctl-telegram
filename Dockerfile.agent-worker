@@ -1,0 +1,62 @@
+# Runtime image for cmd/agent-worker (Option C, the communication agent's
+# production transport). Deliberately a separate image from the main
+# Dockerfile: agent-worker shells out to the `claude` CLI per job
+# (internal/agentworker.ClaudeInvoker), which needs Node.js + the
+# @anthropic-ai/claude-code npm package — neither belongs in the public
+# mctl-telegram server image. See docs/plans/communication-agent.md Part 1,
+# C1 for why this is a dedicated image rather than a third mode bolted onto
+# mctl-claude-remote (that image is PR-steward-specialized: PTY supervisor,
+# GitHub App/kubectl tooling, Remote Control session management — none of
+# which agent-worker needs or should have access to).
+FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags="-s -w -X main.version=${APP_VERSION}" \
+    -o /mctl-telegram-agent-worker ./cmd/agent-worker
+
+# Digest-pinned, not a floating tag — same rationale as the builder stage
+# above and mctl-claude-remote's CLAUDE_CODE_NPM_VERSION pin: rebuilding the
+# same commit must not silently pull a different Node/Debian runtime
+# underneath the pinned Claude Code package. Update deliberately, not as a
+# side effect of an unrelated rebuild.
+FROM node:22-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
+
+# Pinned, not floated — same rationale as mctl-claude-remote's pin: a
+# version bump here is a deliberate, tested decision, not an incidental
+# side effect of an unrelated rebuild.
+ARG CLAUDE_CODE_NPM_VERSION=2.1.220
+
+LABEL org.opencontainers.image.title="mctl-telegram-agent-worker" \
+      org.opencontainers.image.description="Headless Option C worker for the mctl-telegram communication agent" \
+      org.opencontainers.image.source="https://github.com/mctlhq/mctl-telegram" \
+      org.opencontainers.image.licenses="MIT"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}"
+
+COPY --from=builder /mctl-telegram-agent-worker /usr/local/bin/mctl-telegram-agent-worker
+
+# node:22-slim already ships a non-root "node" user at uid/gid 1000 — reuse
+# it rather than creating a second uid-1000 identity.
+USER node:node
+ENV HOME=/home/node
+
+EXPOSE 8080
+
+# tini as PID 1 (not the worker binary directly): when a job's deadline
+# fires, ClaudeInvoker.Run kills the direct `claude` process, but the
+# --mcp-serve subprocess it spawned (internal/agentworker/mcpserver.go) can
+# still be running and gets reparented to PID 1. Without an init process to
+# reap it, repeated timeouts accumulate zombies.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mctl-telegram-agent-worker"]
