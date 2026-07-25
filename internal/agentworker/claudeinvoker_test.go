@@ -152,6 +152,31 @@ func argvOrEmpty(argv []string, i int) string {
 	return argv[i]
 }
 
+func TestMinimalEnv_PreservesProxyAndTrustSettingsWithoutAgentSecrets(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.test:8443")
+	t.Setenv("NO_PROXY", "localhost,.svc")
+	t.Setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/custom.pem")
+	t.Setenv("SSL_CERT_FILE", "/etc/ssl/cert.pem")
+	t.Setenv("AGENT_API_TOKEN", "must-not-leak")
+
+	got := make(map[string]string)
+	for _, kv := range minimalEnv() {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["HTTPS_PROXY"] != "http://proxy.test:8443" ||
+		got["NO_PROXY"] != "localhost,.svc" ||
+		got["NODE_EXTRA_CA_CERTS"] != "/etc/ssl/custom.pem" ||
+		got["SSL_CERT_FILE"] != "/etc/ssl/cert.pem" {
+		t.Fatalf("proxy/trust settings not preserved: %#v", got)
+	}
+	if _, ok := got["AGENT_API_TOKEN"]; ok {
+		t.Fatalf("AGENT_API_TOKEN leaked into Claude env: %#v", got)
+	}
+}
+
 func TestClaudeInvoker_Run_ReturnsErrorWhenClaudeReportsIsError(t *testing.T) {
 	stdout := `{"type":"result","subtype":"error_max_turns","is_error":true,"result":"ran out of turns"}`
 	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)

@@ -249,7 +249,7 @@ func TestCompleteAgentJob_MissingStatusIsRejectedLocally(t *testing.T) {
 
 func TestSaveJobLead_PassesThroughAllFields(t *testing.T) {
 	api := &fakeAPI{}
-	b := &toolBuilder{api: api, job: JobContext{JobID: 1, ConversationID: 9}}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 1, Attempt: 4, ConversationID: 9}}
 	tool, handler := b.saveJobLead()
 	callTool(t, tool, handler, map[string]any{
 		"company": "Acme", "role": "Engineer", "recruiter_name": "Anna",
@@ -259,7 +259,7 @@ func TestSaveJobLead_PassesThroughAllFields(t *testing.T) {
 		t.Fatalf("saveLeadCalls = %#v", api.saveLeadCalls)
 	}
 	req := api.saveLeadCalls[0]
-	if req.Company != "Acme" || req.RecruiterTGID != 555 || req.ConversationID != 9 || req.JobID != 1 {
+	if req.Company != "Acme" || req.RecruiterTGID != 555 || req.ConversationID != 9 || req.JobID != 1 || req.Attempt != 4 {
 		t.Fatalf("req = %#v", req)
 	}
 }

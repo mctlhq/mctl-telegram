@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 )
 
 // version is set via -ldflags "-X main.version=..." at build time (see
@@ -35,6 +37,7 @@ import (
 var version = "dev"
 
 func main() {
+	configureLogging(os.Stderr)
 	if len(os.Args) > 1 && os.Args[1] == "--mcp-serve" {
 		if err := runMCPServe(); err != nil {
 			slog.Error("agent-worker: mcp-serve failed", "err", err)
@@ -46,6 +49,11 @@ func main() {
 		slog.Error("agent-worker: fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+func configureLogging(w io.Writer) {
+	inner := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})
+	slog.SetDefault(slog.New(audit.NewRedactingHandler(inner)))
 }
 
 // run is the default (poll-loop) mode.

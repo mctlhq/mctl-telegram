@@ -277,6 +277,7 @@ func (c *Client) ProposeReply(ctx context.Context, conversationID, jobID int64, 
 type SaveLeadRequest struct {
 	ConversationID int64
 	JobID          int64
+	Attempt        int
 	Company        string
 	Role           string
 	RecruiterName  string
@@ -299,6 +300,7 @@ func (c *Client) SaveLead(ctx context.Context, req SaveLeadRequest) (int64, erro
 	}
 	if req.JobID != 0 {
 		body["job_id"] = req.JobID
+		body["attempt"] = req.Attempt
 	}
 	var out struct {
 		LeadID int64 `json:"lead_id"`

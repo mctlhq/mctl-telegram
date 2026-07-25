@@ -1,9 +1,29 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 )
+
+func TestConfigureLogging_UsesJSONAndRedactsSensitiveFields(t *testing.T) {
+	var out bytes.Buffer
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	configureLogging(&out)
+	slog.Info("test", "body", "private message", "mode", "worker")
+
+	got := out.String()
+	if !strings.HasPrefix(got, "{") || !strings.Contains(got, `"mode":"worker"`) {
+		t.Fatalf("log is not structured JSON: %s", got)
+	}
+	if strings.Contains(got, "private message") || !strings.Contains(got, "[redacted") {
+		t.Fatalf("sensitive body was not redacted: %s", got)
+	}
+}
 
 // TestEnvFloat_FailsLoudlyOnInvalidValue guards against the P2 finding that
 // an operator-set-but-unparseable AGENT_MAX_BUDGET_USD silently fell back to

@@ -1067,17 +1067,20 @@ func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:lead-only", conv.ID)
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
-		t.Fatalf("claim: %v", err)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
 
-	leadRec := h.do("POST", "/leads", saveLeadRequest{ConversationID: conv.ID, JobID: jobID, Company: "Acme"})
+	leadRec := h.do("POST", "/leads", saveLeadRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Company: "Acme",
+	})
 	if leadRec.Code != http.StatusOK {
 		t.Fatalf("save lead status = %d, body=%s", leadRec.Code, leadRec.Body.String())
 	}
 
 	completeRec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: 1, Status: db.JobCompleted,
+		Attempt: claimed[0].Attempts, Status: db.JobCompleted,
 	})
 	if completeRec.Code != http.StatusOK {
 		t.Fatalf("complete status = %d, want 200 (lead save alone should satisfy the invariant), body=%s",

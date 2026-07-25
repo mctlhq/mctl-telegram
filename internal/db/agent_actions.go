@@ -922,6 +922,7 @@ type JobLead struct {
 	UserID         int64
 	ConversationID int64
 	JobID          int64 // 0 ⇒ not tied to a specific queue job (e.g. a manual/backfilled save)
+	Attempt        int   // required live claim attempt when JobID != 0
 	Company        string
 	Role           string
 	RecruiterName  string
@@ -955,12 +956,15 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if l.Detail == "" {
 		l.Detail = "{}"
 	}
-	var id int64
-	err := s.DB.QueryRowContext(ctx,
-		`INSERT INTO job_leads
-		   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
-		    compensation, status, detail, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)
+	var (
+		id  int64
+		err error
+	)
+	const insertLead = `INSERT INTO job_leads
+	   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
+	    compensation, status, detail, updated_at)
+	`
+	const mergeLead = `
 		 ON CONFLICT (conversation_id) DO UPDATE SET
 		   job_id = CASE WHEN EXCLUDED.job_id IS NOT NULL THEN EXCLUDED.job_id ELSE job_leads.job_id END,
 		   company = CASE WHEN EXCLUDED.company IS NOT NULL THEN EXCLUDED.company ELSE job_leads.company END,
@@ -972,15 +976,35 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 		   detail = CASE WHEN EXCLUDED.detail <> '{}' THEN EXCLUDED.detail ELSE job_leads.detail END,
 		   updated_at = EXCLUDED.updated_at
 		 WHERE job_leads.user_id = EXCLUDED.user_id
-		 RETURNING id`,
+		 RETURNING id`
+	args := []any{
 		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
 		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
 		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
-	).Scan(&id)
+	}
+	if l.JobID != 0 {
+		lock := ""
+		if s.isPostgres(ctx) {
+			lock = " FOR SHARE"
+		}
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+`
+			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
+			   FROM agent_jobs j
+			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
+			    AND j.status=$12 AND j.attempts=$13`+lock+mergeLead,
+			append(args, JobProcessing, l.Attempt)...,
+		).Scan(&id)
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+` VALUES($1,$2,NULL,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)`+mergeLead,
+			args...,
+		).Scan(&id)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		// The WHERE guard rejected the update: the conflicting lead row is
-		// owned by a different user. Should be unreachable given the upfront
-		// ownership check, but must not silently succeed.
+		if l.JobID != 0 {
+			return 0, ErrAgentJobNotFound
+		}
 		return 0, ErrJobLeadNotFound
 	}
 	if err != nil {

@@ -136,6 +136,23 @@ func TestClient_ProposeReply_SendsAttemptWithJobID(t *testing.T) {
 	}
 }
 
+func TestClient_SaveLead_SendsAttemptWithJobID(t *testing.T) {
+	var gotBody map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeJSONFixture(w, map[string]int64{"lead_id": 7})
+	})
+	id, err := client.SaveLead(context.Background(), SaveLeadRequest{
+		ConversationID: 9, JobID: 42, Attempt: 3, Company: "Acme",
+	})
+	if err != nil {
+		t.Fatalf("SaveLead: %v", err)
+	}
+	if id != 7 || gotBody["job_id"].(float64) != 42 || gotBody["attempt"].(float64) != 3 {
+		t.Fatalf("id/body=%d/%#v, want fenced job 42 attempt 3", id, gotBody)
+	}
+}
+
 func TestClient_GetConversationContext_ParsesLead(t *testing.T) {
 	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/conversations/9/context" {

@@ -187,20 +187,28 @@ func jobPrompt() string {
 
 // minimalEnv passes through only what the `claude` subprocess needs to
 // authenticate and run (HOME for credential/config lookup, PATH to find its
-// own dependencies, and any CLAUDE_CODE_*/ANTHROPIC_* auth vars already in
-// this process's environment) rather than the worker's full environment —
+// own dependencies, explicit proxy/custom-CA settings, and any
+// CLAUDE_CODE_*/ANTHROPIC_* auth vars already in this process's environment)
+// rather than the worker's full environment —
 // AGENT_API_TOKEN in particular must never leak into the model's own
 // process env since it is set only on the MCP server subprocess's env
 // (see Run's mcpServerConfig.Env), not this one.
 func minimalEnv() []string {
 	var out []string
+	passthrough := map[string]struct{}{
+		"HOME": {}, "PATH": {}, "USER": {},
+		"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "NO_PROXY": {},
+		"http_proxy": {}, "https_proxy": {}, "no_proxy": {},
+		"NODE_EXTRA_CA_CERTS": {}, "SSL_CERT_FILE": {}, "SSL_CERT_DIR": {},
+	}
 	for _, kv := range os.Environ() {
 		key, _, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
+		_, explicitlyAllowed := passthrough[key]
 		switch {
-		case key == "HOME", key == "PATH", key == "USER":
+		case explicitlyAllowed:
 			out = append(out, kv)
 		case strings.HasPrefix(key, "CLAUDE_"):
 			out = append(out, kv)

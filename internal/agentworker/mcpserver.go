@@ -238,6 +238,7 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			lead := SaveLeadRequest{
 				ConversationID: b.job.ConversationID,
 				JobID:          b.job.JobID,
+				Attempt:        b.job.Attempt,
 				Company:        stringArg(args, "company", ""),
 				Role:           stringArg(args, "role", ""),
 				RecruiterName:  stringArg(args, "recruiter_name", ""),

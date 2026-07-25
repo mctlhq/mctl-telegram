@@ -480,6 +480,70 @@ func TestUpsertJobLead_PartialMerge(t *testing.T) {
 	}
 }
 
+func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	jobID := seedJob(t, s, uid, "evt:v1:1:555:lead-fence")
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, jobID,
+	); err != nil {
+		t.Fatalf("bind job conversation: %v", err)
+	}
+	first, err := s.ClaimAgentJobs(ctx, "worker-1", uid, 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim: jobs=%+v err=%v", first, err)
+	}
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: first[0].Attempts,
+		Company: "Original",
+	}); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+
+	if _, err := s.RetryAgentJob(ctx, jobID, first[0].Attempts, "worker lost"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET next_run_at=$1 WHERE id=$2`, time.Now().UTC(), jobID,
+	); err != nil {
+		t.Fatalf("unbackoff: %v", err)
+	}
+	second, err := s.ClaimAgentJobs(ctx, "worker-2", uid, 1)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second claim: jobs=%+v err=%v", second, err)
+	}
+
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: first[0].Attempts,
+		Company: "Stale overwrite",
+	}); err != ErrAgentJobNotFound {
+		t.Fatalf("stale save err=%v, want ErrAgentJobNotFound", err)
+	}
+	got, err := s.GetJobLeadByConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get after stale save: %v", err)
+	}
+	if got.Company != "Original" {
+		t.Fatalf("stale attempt changed company to %q", got.Company)
+	}
+
+	if _, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: second[0].Attempts,
+		Company: "Fresh",
+	}); err != nil {
+		t.Fatalf("fresh save: %v", err)
+	}
+	got, _ = s.GetJobLeadByConversation(ctx, uid, conv.ID)
+	if got.Company != "Fresh" {
+		t.Fatalf("fresh attempt left company at %q", got.Company)
+	}
+}
+
 func TestUpsertJobLead_StatusPreservedOnMetadataOnlySave(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

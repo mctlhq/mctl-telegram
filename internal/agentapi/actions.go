@@ -313,6 +313,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 type saveLeadRequest struct {
 	ConversationID int64  `json:"conversation_id"`
 	JobID          int64  `json:"job_id,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
 	Company        string `json:"company"`
 	Role           string `json:"role"`
 	RecruiterName  string `json:"recruiter_name"`
@@ -340,13 +341,17 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leadID, err := s.Store.UpsertJobLead(r.Context(), db.JobLead{
-		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID,
+		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID, Attempt: req.Attempt,
 		Company: req.Company, Role: req.Role,
 		RecruiterName: req.RecruiterName, RecruiterTGID: req.RecruiterTGID, Compensation: req.Compensation,
 		Status: req.Status, Detail: req.Detail,
 	})
 	if errors.Is(err, db.ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
+		return
+	}
+	if errors.Is(err, db.ErrAgentJobNotFound) {
+		writeJSONError(w, http.StatusConflict, "job is no longer the active attempt for this account")
 		return
 	}
 	if err != nil {
