@@ -200,6 +200,13 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			tg_message_id INTEGER NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(user_id, tg_message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -385,6 +392,13 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			tg_message_id BIGINT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(user_id, tg_message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

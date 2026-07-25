@@ -166,6 +166,7 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 	stmts := []string{
 		`DELETE FROM owner_notifications WHERE user_id = $1`,
 		`DELETE FROM agent_actions WHERE user_id = $1`,
+		`DELETE FROM agent_sent_messages WHERE user_id = $1`,
 		`DELETE FROM job_leads WHERE user_id = $1`,
 		`DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)`,
 		`DELETE FROM conversations WHERE user_id = $1`,

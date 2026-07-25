@@ -765,6 +765,34 @@ func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, c
 	return n, nil
 }
 
+// DenyPendingActionsForSourceMessage invalidates only drafts derived from a
+// particular Telegram message (including drafts produced from earlier edits
+// of that same message id). Other messages in the conversation may have
+// independent, still-current drafts and must not be cancelled.
+func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, conversationID, sourceMessageID int64, reason string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+		  WHERE user_id = $4 AND conversation_id = $5
+		    AND status IN ($6, $7, $8)
+		    AND job_id IN (
+		        SELECT j.id
+		          FROM agent_jobs j
+		          JOIN incoming_events e
+		            ON e.event_id = j.event_id AND e.user_id = j.user_id
+		         WHERE j.user_id = $4 AND j.conversation_id = $5
+		           AND e.message_id = $9
+		    )`,
+		ActionDenied, reason, time.Now().UTC(), userID, conversationID,
+		ActionProposed, ActionPendingApproval, ActionApproved, sourceMessageID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("deny pending actions for source message: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ListActionsByStatus returns up to limit actions in the given status,
 // oldest first, system-wide (no user scoping) — the executor's
 // ProcessApproved sweep uses it to pick up guarded-mode auto-approved

@@ -18,7 +18,10 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
-const sentMarkerTTL = 2 * time.Minute
+const (
+	sentMarkerTTL        = 2 * time.Minute
+	durableSentMarkerTTL = 24 * time.Hour
+)
 
 type account struct {
 	userID int64
@@ -60,12 +63,21 @@ func (l *Listener) MarkSent(userID, messageID int64) {
 	if userID <= 0 || messageID <= 0 {
 		return
 	}
+	if err := l.Store.MarkAgentSentMessage(context.Background(), userID, messageID, durableSentMarkerTTL); err != nil {
+		slog.Error("persist agent sent marker failed", "user_id", userID, "message_id", messageID, "err", err)
+	}
 	l.sentMessages.Store(sentMessageKey{userID: userID, messageID: messageID}, time.Now())
 }
 
-func (l *Listener) consumeSent(userID, messageID int64) bool {
+func (l *Listener) consumeSent(ctx context.Context, userID, messageID int64) bool {
 	key := sentMessageKey{userID: userID, messageID: messageID}
 	v, ok := l.sentMessages.LoadAndDelete(key)
+	durable, err := l.Store.ConsumeAgentSentMessage(ctx, userID, messageID, durableSentMarkerTTL)
+	if err != nil {
+		slog.Error("consume agent sent marker failed", "user_id", userID, "message_id", messageID, "err", err)
+	} else if durable {
+		return true
+	}
 	if !ok {
 		return false
 	}
@@ -160,7 +172,7 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 	// Programmatic sends made through telegram.SendMessage are echoed back as
 	// ordinary Out messages on the same user session. Consume their marker before
 	// extraction so only a genuinely human outgoing message triggers takeover.
-	if msg.Out && l.consumeSent(acct.userID, int64(msg.ID)) {
+	if msg.Out && l.consumeSent(ctx, acct.userID, int64(msg.ID)) {
 		return nil
 	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
@@ -224,8 +236,8 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			// DenyPendingActionsForConversation) — deliberately not treated
 			// as an error here: a message edit racing an in-flight send is
 			// expected, not exceptional.
-			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID,
-				"source message edited"); err != nil {
+			if _, err := l.Store.DenyPendingActionsForSourceMessage(ctx, acct.userID, conv.ID,
+				ex.Event.MessageID, "source message edited"); err != nil {
 				return fmt.Errorf("deny actions for edited message: %w", err)
 			}
 		}

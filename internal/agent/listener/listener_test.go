@@ -316,8 +316,14 @@ func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get conversation: %v", err)
 	}
+	var sourceJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 0, original.Message),
+	).Scan(&sourceJobID); err != nil {
+		t.Fatalf("get source job: %v", err)
+	}
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft answering the original text", PolicyDecision: db.PolicyRequireApproval,
 		Status: db.ActionPendingApproval, ApprovalCode: "EDIT01",
 	})
@@ -347,6 +353,54 @@ func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
 	}
 	if jobCount != 2 {
 		t.Fatalf("job count = %d, want 2 (original + edit)", jobCount)
+	}
+}
+
+func TestPersist_MessageEditKeepsDraftFromLaterMessage(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna"})
+
+	older := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Older text", Date: 1000}
+	later := &tg.Message{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Current question", Date: 1001}
+	if err := l.onMessage(ctx, acct, entities, older, false); err != nil {
+		t.Fatalf("onMessage older: %v", err)
+	}
+	if err := l.onMessage(ctx, acct, entities, later, false); err != nil {
+		t.Fatalf("onMessage later: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	var laterJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 43, 0, later.Message),
+	).Scan(&laterJobID); err != nil {
+		t.Fatalf("get later source job: %v", err)
+	}
+	laterActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: laterJobID, ConversationID: conv.ID, UserID: acct.userID,
+		ActionType: db.ActionTypeReply, Payload: "Answer to current question",
+		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionPendingApproval,
+		ApprovalCode: "LATER1",
+	})
+	if err != nil {
+		t.Fatalf("seed later action: %v", err)
+	}
+
+	editedOlder := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited older text", Date: 1000}
+	editedOlder.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, editedOlder, true); err != nil {
+		t.Fatalf("edit older message: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, laterActionID)
+	if err != nil {
+		t.Fatalf("get later action: %v", err)
+	}
+	if action.Status != db.ActionPendingApproval {
+		t.Fatalf("later action status=%q, want pending_approval", action.Status)
 	}
 }
 
@@ -382,8 +436,14 @@ func TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated(t *testing.
 
 	// Stands in for the fresh, correctly-edited proposal the edit's own job
 	// would go on to produce.
+	var editedJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 2000, edited.Message),
+	).Scan(&editedJobID); err != nil {
+		t.Fatalf("get edited source job: %v", err)
+	}
 	freshActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: editedJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft answering the EDITED text", PolicyDecision: db.PolicyRequireApproval,
 		Status: db.ActionPendingApproval, ApprovalCode: "EDIT02",
 	})
@@ -431,8 +491,14 @@ func TestPersist_MessageEditLeavesExecutingActionAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get conversation: %v", err)
 	}
+	var sourceJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 0, original.Message),
+	).Scan(&sourceJobID); err != nil {
+		t.Fatalf("get source job: %v", err)
+	}
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
-		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
 		Payload: "Draft mid-send", PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
 	})
 	if err != nil {
