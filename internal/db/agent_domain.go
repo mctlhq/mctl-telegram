@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -125,6 +126,113 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 		return nil, fmt.Errorf("get agent profile: %w", err)
 	}
 	return &p, nil
+}
+
+// EnsureAgentProfile inserts a profile row with the safe C1 defaults
+// (observe, autopilot paused, listener off) if none exists yet -- a no-op
+// otherwise. Explicit column values rather than the table's own DEFAULTs
+// (autopilot_paused DEFAULT FALSE) because a brand-new profile created
+// through the admin bootstrap flow should start paused even though the
+// schema-level default does not require it. The INSERT ... ON CONFLICT DO
+// NOTHING is a single atomic statement -- there is no read-then-write window
+// for a concurrent EnsureAgentProfile or UpdateAgentProfileFields call to
+// race against.
+func (s *Store) EnsureAgentProfile(ctx context.Context, userID int64) error {
+	if userID <= 0 {
+		return errors.New("user id required")
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO agent_profiles
+		   (user_id, mode, autopilot_paused, listener_enabled,
+		    max_autonomous_turns, max_msgs_per_minute, max_reply_chars)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)
+		 ON CONFLICT (user_id) DO NOTHING`,
+		userID, AgentModeObserve, true, false, 6, 2, 1200,
+	); err != nil {
+		return fmt.Errorf("ensure agent profile: %w", err)
+	}
+	return nil
+}
+
+// AgentProfileUpdate carries only the fields to change; a nil pointer means
+// "leave this column alone". This is the type UpdateAgentProfileFields
+// consumes -- see its doc comment for why this shape exists.
+type AgentProfileUpdate struct {
+	Mode               *string
+	AutopilotPaused    *bool
+	ListenerEnabled    *bool
+	DisclosureText     *string
+	MaxAutonomousTurns *int
+	MaxMsgsPerMinute   *int
+	MaxReplyChars      *int
+	IntentAllowlist    *string
+	BlockedSenders     *string
+}
+
+// UpdateAgentProfileFields applies only the non-nil fields in u, leaving
+// every other column untouched -- including ones a concurrent single-field
+// writer (SetAgentAutopilotPaused, called by POST /autopilot/pause and the
+// owner's /mctl pause command) might be changing at the same instant. This
+// is what makes a partial admin update safe against that race: a
+// read-modify-write (read the whole row, mutate a local copy, write the
+// whole row back) has a window where the local copy's untouched fields go
+// stale; a single UPDATE statement naming only the columns actually being
+// set has no such window because the columns it doesn't mention are never
+// read here at all. Returns ErrAgentProfileNotFound if no row exists yet --
+// call EnsureAgentProfile first. A no-op call (every field nil) is a no-op
+// query too, not an error.
+func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u AgentProfileUpdate) error {
+	if userID <= 0 {
+		return errors.New("user id required")
+	}
+	var sets []string
+	var args []any
+	set := func(col string, val any) {
+		args = append(args, val)
+		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
+	}
+	if u.Mode != nil {
+		set("mode", *u.Mode)
+	}
+	if u.AutopilotPaused != nil {
+		set("autopilot_paused", *u.AutopilotPaused)
+	}
+	if u.ListenerEnabled != nil {
+		set("listener_enabled", *u.ListenerEnabled)
+	}
+	if u.DisclosureText != nil {
+		set("disclosure_text", *u.DisclosureText)
+	}
+	if u.MaxAutonomousTurns != nil {
+		set("max_autonomous_turns", *u.MaxAutonomousTurns)
+	}
+	if u.MaxMsgsPerMinute != nil {
+		set("max_msgs_per_minute", *u.MaxMsgsPerMinute)
+	}
+	if u.MaxReplyChars != nil {
+		set("max_reply_chars", *u.MaxReplyChars)
+	}
+	if u.IntentAllowlist != nil {
+		set("intent_allowlist", *u.IntentAllowlist)
+	}
+	if u.BlockedSenders != nil {
+		set("blocked_senders", *u.BlockedSenders)
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+	set("updated_at", time.Now().UTC())
+	args = append(args, userID)
+	query := fmt.Sprintf(`UPDATE agent_profiles SET %s WHERE user_id = $%d`,
+		strings.Join(sets, ", "), len(args))
+	res, err := s.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("update agent profile fields: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAgentProfileNotFound
+	}
+	return nil
 }
 
 // SetAgentAutopilotPaused flips the per-account pause flag. Used by the

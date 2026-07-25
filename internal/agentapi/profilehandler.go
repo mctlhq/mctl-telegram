@@ -46,14 +46,28 @@ type agentProfileResponse struct {
 // loosen its own guardrails (turn itself off observe mode, unpause its own
 // autopilot, or enable its own listener).
 //
-// Semantics are read-modify-write, not blind replace: an existing profile's
-// fields are only overwritten by the ones actually present in the request
-// body (nil pointer / zero-value / empty-string fields are left untouched),
+// Semantics are a true partial update, not read-modify-write: only the
+// fields actually present in the request body are ever written (via
+// db.UpdateAgentProfileFields, a single UPDATE naming just those columns),
 // so a caller can flip just listener_enabled without resending mode/limits
-// and accidentally resetting them. A brand-new profile starts from the safe
-// C1 defaults (observe, autopilot paused, listener off) before the request's
-// fields are applied on top — matching the "fail closed" posture of every
-// other communication-agent default in this codebase.
+// and accidentally resetting them -- and, unlike an earlier version of this
+// handler that read the whole row then wrote it back, this can never
+// silently revert a concurrent single-field writer such as
+// SetAgentAutopilotPaused (called by POST /autopilot/pause and the owner's
+// /mctl pause command): there is no local copy of the untouched columns to
+// go stale between read and write, because they are never read here at all.
+// A brand-new profile is bootstrapped via db.EnsureAgentProfile with the
+// safe C1 defaults (observe, autopilot paused, listener off) before the
+// request's fields are applied on top.
+//
+// Known limitation: telegram_id is resolved via db.UserIDByTelegramID, which
+// only looks at users.telegram_login_id -- populated for accounts that have
+// signed in through the local-jwt OAuth flow. An account connected only via
+// local-dev/shared-hmac-legacy auth (github_login-created, Telegram identity
+// tracked in telegram_accounts.telegram_user_id instead) will 404 here even
+// though it exists. Not a blocker for C1 (mctl-telegram-preview runs
+// local-jwt), but resolving through the connected-account table too is a
+// follow-up if this endpoint needs to provision non-local-jwt accounts.
 func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identity(w, r)
@@ -92,70 +106,51 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			return
 		}
 
-		p := db.AgentProfile{
-			UserID:             targetUserID,
-			Mode:               db.AgentModeObserve,
-			AutopilotPaused:    true,
-			ListenerEnabled:    false,
-			MaxAutonomousTurns: 6,
-			MaxMsgsPerMinute:   2,
-			MaxReplyChars:      1200,
-		}
-		if existing, err := store.GetAgentProfile(ctx, targetUserID); err == nil {
-			p = *existing
-		} else if !errors.Is(err, db.ErrAgentProfileNotFound) {
+		if err := store.EnsureAgentProfile(ctx, targetUserID); err != nil {
 			logHandlerErr("admin.agent_profile.upsert", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to load existing profile")
+			writeJSONError(w, http.StatusInternalServerError, "failed to initialize agent profile")
 			return
 		}
 
+		update := db.AgentProfileUpdate{
+			AutopilotPaused: req.AutopilotPaused,
+			ListenerEnabled: req.ListenerEnabled,
+			DisclosureText:  req.DisclosureText,
+			IntentAllowlist: req.IntentAllowlist,
+			BlockedSenders:  req.BlockedSenders,
+		}
 		if req.Mode != "" {
-			p.Mode = req.Mode
+			update.Mode = &req.Mode
 		}
-		if req.AutopilotPaused != nil {
-			p.AutopilotPaused = *req.AutopilotPaused
-		}
-		if req.ListenerEnabled != nil {
-			p.ListenerEnabled = *req.ListenerEnabled
-		}
-		if req.DisclosureText != nil {
-			p.DisclosureText = *req.DisclosureText
-		}
-		// > 0, not != 0: UpsertAgentProfile itself replaces any <= 0 value with
-		// the default (agent_domain.go), but that clamping happens on its own
-		// local copy of p after this handler has already built the response
-		// below. A negative value would sail through here, get silently
-		// snapped to the default in the DB, while the response still echoed
-		// the negative number back to the caller as if it had been honored.
+		// > 0, not != 0: a negative limit must not be written at all, not even
+		// clamped -- writing it would let it briefly diverge between this
+		// handler's later response and whatever floor a future validation
+		// layer might enforce. Omitting it here just leaves the existing
+		// stored value in place, exactly like any other unset field.
 		if req.MaxAutonomousTurns > 0 {
-			p.MaxAutonomousTurns = req.MaxAutonomousTurns
+			update.MaxAutonomousTurns = &req.MaxAutonomousTurns
 		}
 		if req.MaxMsgsPerMinute > 0 {
-			p.MaxMsgsPerMinute = req.MaxMsgsPerMinute
+			update.MaxMsgsPerMinute = &req.MaxMsgsPerMinute
 		}
 		if req.MaxReplyChars > 0 {
-			p.MaxReplyChars = req.MaxReplyChars
-		}
-		if req.IntentAllowlist != nil {
-			p.IntentAllowlist = *req.IntentAllowlist
-		}
-		if req.BlockedSenders != nil {
-			p.BlockedSenders = *req.BlockedSenders
+			update.MaxReplyChars = &req.MaxReplyChars
 		}
 
-		// Read-modify-write, not a transaction: a concurrent PUT for the same
-		// telegram_id between the GetAgentProfile above and this Upsert can
-		// silently clobber the other request's fields. Accepted for now — this
-		// route is admin-only and today's expected call pattern is one operator
-		// making sequential changes (enable listener, then later flip mode),
-		// not concurrent writers. Add a CAS (e.g. compare updated_at) or a
-		// per-user advisory lock here if that assumption stops holding.
-		if err := store.UpsertAgentProfile(ctx, p); err != nil {
+		if err := store.UpdateAgentProfileFields(ctx, targetUserID, update); err != nil {
 			logHandlerErr("admin.agent_profile.upsert", err)
 			store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "error", err.Error(), "")
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent profile")
 			return
 		}
+
+		p, err := store.GetAgentProfile(ctx, targetUserID)
+		if err != nil {
+			logHandlerErr("admin.agent_profile.upsert", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to load saved profile")
+			return
+		}
+
 		store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "ok", "", "")
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,

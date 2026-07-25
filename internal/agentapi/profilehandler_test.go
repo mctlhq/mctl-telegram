@@ -149,6 +149,51 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 }
 
+// TestAdminAgentProfileHandler_DoesNotClobberConcurrentAutopilotPause guards
+// the Codex P1: a partial update that never touches autopilot_paused must
+// not revert a concurrent SetAgentAutopilotPaused(true) write (the call
+// POST /autopilot/pause and the owner's /mctl pause command use) just
+// because it happened to run between this handler reading and re-writing a
+// stale copy of the row. The old read-modify-write implementation could
+// lose exactly this race; the current UpdateAgentProfileFields-based
+// implementation never reads autopilot_paused at all when the request
+// doesn't mention it, so there is nothing to go stale.
+func TestAdminAgentProfileHandler_DoesNotClobberConcurrentAutopilotPause(t *testing.T) {
+	store := newProfileTestStore(t)
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{UserID: uid, Mode: db.AgentModeObserve}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+
+	// Simulates the safety pause landing in between this admin request's
+	// (implicit) read of the account and its write -- e.g. the owner sends
+	// /mctl pause in Saved Messages while an operator happens to be updating
+	// an unrelated field like max_reply_chars at the same moment.
+	if err := store.SetAgentAutopilotPaused(ctx, uid, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"max_reply_chars":900}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp agentProfileResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.AutopilotPaused {
+		t.Errorf("autopilot_paused = false, want true -- the concurrent safety pause was clobbered")
+	}
+	if resp.MaxReplyChars != 900 {
+		t.Errorf("max_reply_chars = %d, want 900", resp.MaxReplyChars)
+	}
+}
+
 // TestAdminAgentProfileHandler_NegativeLimitDoesNotLeakIntoResponse guards
 // the response/DB divergence found in review: a negative limit must not be
 // echoed back as "honored" when UpsertAgentProfile is about to silently
