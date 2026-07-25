@@ -516,11 +516,15 @@ func TestExecutor_RecoverStuck_RespectsGraceWindow(t *testing.T) {
 // without needing a real profile.Provider/YAML file.
 type fakeRestrictedChecker struct {
 	key                             string
+	value                           string
 	neverAutoSend, approvalRequired bool
 	matched                         bool
 }
 
-func (f *fakeRestrictedChecker) MatchRestricted(string) (string, bool, bool, bool) {
+func (f *fakeRestrictedChecker) MatchRestricted(text string) (string, bool, bool, bool) {
+	if f.value != "" && !strings.Contains(text, f.value) {
+		return "", false, false, false
+	}
 	return f.key, f.neverAutoSend, f.approvalRequired, f.matched
 }
 
@@ -621,6 +625,65 @@ func TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend(t *testing.T) {
 	if action.Status != db.ActionDenied {
 		t.Fatalf("status = %q, want denied", action.Status)
 	}
+}
+
+func TestExecutor_RestrictionsInspectFinalComposedBody(t *testing.T) {
+	t.Run("fresh send includes disclosure", func(t *testing.T) {
+		exec, sender, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		exec.Profile = &fakeRestrictedChecker{
+			key: "private_disclosure", value: "PRIVATE-DISCLOSURE",
+			neverAutoSend: true, matched: true,
+		}
+		if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+			UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "PRIVATE-DISCLOSURE",
+		}); err != nil {
+			t.Fatalf("set disclosure: %v", err)
+		}
+		actionID, code := seedPendingApproval(t, store, uid, conv.ID, "safe draft")
+
+		if err := exec.Approve(ctx, uid, code); err == nil {
+			t.Fatal("expected final-body restriction to block disclosure")
+		}
+		if len(sender.calls) != 0 {
+			t.Fatalf("send calls=%d, want 0", len(sender.calls))
+		}
+		action, err := store.GetAgentAction(ctx, uid, actionID)
+		if err != nil {
+			t.Fatalf("get action: %v", err)
+		}
+		if action.Status != db.ActionDenied {
+			t.Fatalf("status=%q, want denied", action.Status)
+		}
+	})
+
+	t.Run("recovery uses persisted exact body", func(t *testing.T) {
+		exec, sender, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		exec.Profile = &fakeRestrictedChecker{
+			key: "private_disclosure", value: "PRIVATE-DISCLOSURE",
+			neverAutoSend: true, matched: true,
+		}
+		actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "safe draft")
+		if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+			t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+		}
+		reserveActionForRecovery(t, store, uid, actionID, 8182, "safe draft"+policy.DisclosureSep+"PRIVATE-DISCLOSURE")
+
+		if n, err := exec.RecoverStuck(ctx); err != nil || n != 1 {
+			t.Fatalf("recover: count=%d err=%v", n, err)
+		}
+		if len(sender.calls) != 0 {
+			t.Fatalf("send calls=%d, want 0", len(sender.calls))
+		}
+		action, err := store.GetAgentAction(ctx, uid, actionID)
+		if err != nil {
+			t.Fatalf("get action: %v", err)
+		}
+		if action.Status != db.ActionDenied {
+			t.Fatalf("status=%q, want denied", action.Status)
+		}
+	})
 }
 
 // TestExecutor_Approve_RestrictedFieldScopedToProfileOwner covers a Codex

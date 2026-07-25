@@ -203,6 +203,68 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 	return id, nil
 }
 
+// InsertStandaloneApprovalWithNotification atomically creates a jobless
+// pending-approval action and the Saved Messages notification that carries
+// its approval code. A standalone proposal has no idempotency key, so
+// inserting these rows separately cannot safely return an error after only
+// the action commits: a caller retry would mint a second action/code. The
+// transaction makes the pair all-or-nothing.
+func (s *Store) InsertStandaloneApprovalWithNotification(ctx context.Context, a AgentAction, notificationBody string) (int64, error) {
+	if a.JobID != 0 {
+		return 0, errors.New("standalone approval action must not have a job id")
+	}
+	if a.UserID <= 0 || a.ConversationID <= 0 {
+		return 0, errors.New("user id and conversation id required")
+	}
+	if a.ActionType == "" || a.PolicyDecision == "" {
+		return 0, errors.New("action type and policy decision required")
+	}
+	if a.Status != ActionPendingApproval || a.ApprovalCode == "" {
+		return 0, errors.New("pending approval status and approval code required")
+	}
+	if _, err := s.GetConversation(ctx, a.UserID, a.ConversationID); err != nil {
+		return 0, err
+	}
+	payload, err := s.Crypt.SealForUser([]byte(a.Payload), a.UserID)
+	if err != nil {
+		return 0, fmt.Errorf("seal action payload: %w", err)
+	}
+	body, err := s.Crypt.SealForUser([]byte(notificationBody), a.UserID)
+	if err != nil {
+		return 0, fmt.Errorf("seal notification body: %w", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin standalone approval tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var id int64
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO agent_actions
+		   (approval_code, job_id, conversation_id, user_id, action_type, intent,
+		    payload_encrypted, policy_decision, policy_reasons, status)
+		 VALUES($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9)
+		 RETURNING id`,
+		a.ApprovalCode, a.ConversationID, a.UserID, a.ActionType, a.Intent,
+		payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("insert standalone approval action: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO owner_notifications(user_id, kind, action_id, body_encrypted, status)
+		 VALUES($1,$2,$3,$4,$5)`,
+		a.UserID, NotificationApproval, id, body, NotificationPending,
+	); err != nil {
+		return 0, fmt.Errorf("insert standalone approval notification: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit standalone approval: %w", err)
+	}
+	return id, nil
+}
+
 // GetAgentAction returns an action by id, scoped to the owning user, payload
 // decrypted.
 func (s *Store) GetAgentAction(ctx context.Context, userID, id int64) (*AgentAction, error) {

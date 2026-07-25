@@ -391,6 +391,59 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	}
 }
 
+func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:policy-changed-redelivery", conv.ID)
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID,
+		Intent: "discovery", Text: "Thanks for reaching out!",
+	}
+
+	first := h.do("POST", "/actions/propose_reply", req)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	var original actionResponse
+	decodeBody(t, first, &original)
+	if original.Status != db.ActionPendingApproval || original.ApprovalCode == "" {
+		t.Fatalf("original response=%+v, want pending approval with code", original)
+	}
+
+	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
+		UserID: h.userID, Mode: db.AgentModeGuarded,
+		DisclosureText: "I'm an AI assistant.", IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("switch profile to allow: %v", err)
+	}
+	replay := h.do("POST", "/actions/propose_reply", req)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	var got actionResponse
+	decodeBody(t, replay, &got)
+	if got.ActionID != original.ActionID {
+		t.Fatalf("action id=%d, want persisted %d", got.ActionID, original.ActionID)
+	}
+	if got.Decision != db.PolicyRequireApproval || got.Status != db.ActionPendingApproval {
+		t.Fatalf("replay decision/status=%q/%q, want persisted require_approval/pending_approval", got.Decision, got.Status)
+	}
+	if got.ApprovalCode != original.ApprovalCode {
+		t.Fatalf("approval code=%q, want persisted %q", got.ApprovalCode, original.ApprovalCode)
+	}
+
+	var notifications int
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM owner_notifications WHERE action_id = $1`, original.ActionID,
+	).Scan(&notifications); err != nil {
+		t.Fatalf("count notifications: %v", err)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications=%d, want one idempotent approval notification", notifications)
+	}
+}
+
 // TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall covers a
 // Codex finding on #307: a transient InsertOwnerNotification failure used to
 // be logged and swallowed, still returning 200 — the action was durably
@@ -452,6 +505,70 @@ func TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall(t *testin
 	}
 	if len(notifs) != 1 {
 		t.Fatalf("pending notifications = %d, want exactly 1 (no duplicate from the retry)", len(notifs))
+	}
+}
+
+func TestHandleProposeReply_StandaloneActionAndNotificationAreAtomic(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	req := proposeReplyRequest{
+		ConversationID: conv.ID,
+		Text:           "Thanks for reaching out!",
+	}
+
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`ALTER TABLE owner_notifications RENAME TO owner_notifications_gone`); err != nil {
+		t.Fatalf("rename table: %v", err)
+	}
+
+	rec := h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when the notification cannot be queued, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var actions int
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM agent_actions WHERE user_id = $1`, h.userID,
+	).Scan(&actions); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+	if actions != 0 {
+		t.Fatalf("actions=%d, want transaction rollback after notification failure", actions)
+	}
+
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`ALTER TABLE owner_notifications_gone RENAME TO owner_notifications`); err != nil {
+		t.Fatalf("restore table: %v", err)
+	}
+
+	rec = h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Status != db.ActionPendingApproval || resp.ApprovalCode == "" {
+		t.Fatalf("response status/code=%q/%q, want pending approval with code", resp.Status, resp.ApprovalCode)
+	}
+
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM agent_actions WHERE user_id = $1`, h.userID,
+	).Scan(&actions); err != nil {
+		t.Fatalf("count actions after retry: %v", err)
+	}
+	if actions != 1 {
+		t.Fatalf("actions=%d, want one committed action", actions)
+	}
+
+	var notifications int
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM owner_notifications WHERE action_id = $1`, resp.ActionID,
+	).Scan(&notifications); err != nil {
+		t.Fatalf("count notifications: %v", err)
+	}
+	if notifications != 1 {
+		t.Fatalf("notifications=%d, want one committed notification", notifications)
 	}
 }
 

@@ -325,7 +325,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
-	reason, blocked, err := e.restrictedFieldBlocks(ctx, action)
+	text := action.Payload
+	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
+		text = text + sep + profile.DisclosureText
+	}
+	reason, blocked, err := e.restrictedFieldBlocks(ctx, action, text)
 	if err != nil {
 		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
 	}
@@ -347,10 +351,6 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 	}
 
-	text := action.Payload
-	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
-		text = text + sep + profile.DisclosureText
-	}
 	randomID, err := e.NewRandomID()
 	if err != nil {
 		return fmt.Errorf("%w: generate random id: %w", ErrSendQueuedForRetry, err)
@@ -587,7 +587,11 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		}
 		return fmt.Errorf("policy denies at recovery time: %s", strings.Join(result.Reasons, "; "))
 	}
-	reason, blocked, err := e.restrictedFieldBlocks(ctx, action)
+	text := action.SendBody
+	if text == "" {
+		return fmt.Errorf("action %d is executing with no persisted send body", action.ID)
+	}
+	reason, blocked, err := e.restrictedFieldBlocks(ctx, action, text)
 	if err != nil {
 		return fmt.Errorf("check restricted fields during recovery: %w", err)
 	}
@@ -603,10 +607,6 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			// and the first RPC may already have reached Telegram.
 			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
-	}
-	text := action.SendBody
-	if text == "" {
-		return fmt.Errorf("action %d is executing with no persisted send body", action.ID)
 	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, action.SendRandomID, text)
 	if err != nil {
@@ -637,7 +637,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	return nil
 }
 
-// restrictedFieldBlocks reports whether action's payload must be blocked by
+// restrictedFieldBlocks reports whether finalText must be blocked by
 // the owner's restricted-field markers (internal/agent/profile), which the
 // DB-backed policy engine has no notion of. never_auto_send always blocks —
 // not even an owner-approved reply may include it verbatim, only the owner
@@ -646,7 +646,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 // action never actually went through a human's /mctl approve: PolicyAllow
 // means propose_reply's own policy auto-approved it in guarded mode with no
 // owner ever seeing the draft; PolicyRequireApproval means it did.
-func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAction) (reason string, blocked bool, err error) {
+func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAction, finalText string) (reason string, blocked bool, err error) {
 	if e.Profile == nil {
 		return "", false, nil
 	}
@@ -668,7 +668,7 @@ func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAct
 			return "", false, nil
 		}
 	}
-	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(action.Payload)
+	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(finalText)
 	if !matched {
 		return "", false, nil
 	}

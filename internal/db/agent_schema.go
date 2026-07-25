@@ -306,6 +306,7 @@ func agentSchemaSQLite() []string {
 		// resolved via the (job_id, action_type) idempotency conflict must not
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
@@ -484,6 +485,7 @@ func agentSchemaPG() []string {
 		// resolved via the (job_id, action_type) idempotency conflict must not
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id BIGSERIAL PRIMARY KEY,
 			event_id TEXT NOT NULL,

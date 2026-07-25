@@ -117,6 +117,29 @@ func TestMigrate_UpgradesPreExistingConversationsWithoutPeerAccessHash(t *testin
 	}
 }
 
+func TestMigrate_CreatesPendingNotificationSweepIndex(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var count int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master
+		  WHERE type = 'index' AND name = 'idx_owner_notifications_pending'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("check pending notification index: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pending notification indexes=%d, want 1", count)
+	}
+}
+
 func TestRetirePreExecutorApprovedActions_RunsOnce(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

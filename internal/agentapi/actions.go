@@ -101,6 +101,25 @@ func (s *Server) insertActionWithApprovalCode(ctx context.Context, a db.AgentAct
 	return 0, "", errors.New("failed to allocate a unique approval code")
 }
 
+func (s *Server) insertStandaloneApprovalWithNotification(ctx context.Context, a db.AgentAction) (int64, string, error) {
+	for attempt := 0; attempt < maxApprovalCodeAttempts; attempt++ {
+		code, err := newApprovalCode()
+		if err != nil {
+			return 0, "", err
+		}
+		a.ApprovalCode = code
+		id, err := s.Store.InsertStandaloneApprovalWithNotification(ctx, a, a.Payload)
+		if err == nil {
+			return id, code, nil
+		}
+		if isApprovalCodeCollision(err) {
+			continue
+		}
+		return 0, "", err
+	}
+	return 0, "", errors.New("failed to allocate a unique approval code")
+}
+
 type proposeReplyRequest struct {
 	ConversationID int64  `json:"conversation_id"`
 	JobID          int64  `json:"job_id,omitempty"`
@@ -202,13 +221,19 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 
 	var actionID int64
 	var approvalCode string
+	notificationQueued := false
 	switch result.Decision {
 	case policy.Deny:
 		base.Status = db.ActionDenied
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
 	case policy.RequireApproval:
 		base.Status = db.ActionPendingApproval
-		actionID, approvalCode, err = s.insertActionWithApprovalCode(ctx, base)
+		if base.JobID == 0 {
+			actionID, approvalCode, err = s.insertStandaloneApprovalWithNotification(ctx, base)
+			notificationQueued = err == nil
+		} else {
+			actionID, approvalCode, err = s.insertActionWithApprovalCode(ctx, base)
+		}
 	default: // policy.Allow
 		base.Status = db.ActionApproved
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
@@ -222,7 +247,18 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "propose failed")
 		return
 	}
-	if base.Status == db.ActionPendingApproval {
+	// InsertAgentAction is idempotent for job-tied actions and may have
+	// returned a row created by an earlier attempt under a different policy
+	// result. Drive notification and response handling from durable state,
+	// not from this replay's freshly-evaluated `base`.
+	persisted, err := s.Store.GetAgentAction(ctx, id.UserID, actionID)
+	if err != nil {
+		logHandlerErr("propose_reply", fmt.Errorf("reload persisted action: %w", err))
+		writeJSONError(w, http.StatusInternalServerError, "propose failed")
+		return
+	}
+	approvalCode = persisted.ApprovalCode
+	if persisted.Status == db.ActionPendingApproval && !notificationQueued {
 		// Idempotent per action_id (see InsertOwnerNotification's doc
 		// comment) — a redelivered job that lands on the same existing
 		// action via InsertAgentAction's (job_id, action_type) conflict
@@ -240,25 +276,22 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			// control.Router.handleLeads/handleShow), so a lost
 			// notification was the ONLY path to ever deliver ApprovalCode
 			// to the owner, and the draft would silently expire unapprovable.
-			// Fail the call instead so the caller retries — safe only when
-			// req.JobID != 0: InsertAgentAction is idempotent on
-			// (job_id, action_type) and InsertOwnerNotification is
-			// idempotent on action_id, so neither insert can be duplicated
-			// by a retry. A standalone (JobID == 0) propose_reply has no
-			// such idempotency key — InsertAgentAction would insert a
-			// second, distinct action row on retry — so that path is left
-			// best-effort rather than risk minting a duplicate draft with
-			// its own approval code.
-			if req.JobID != 0 {
-				writeJSONError(w, http.StatusInternalServerError, "propose failed: could not queue approval notification")
-				return
-			}
+			// Job-tied actions are safe to retry through their
+			// (job_id, action_type) idempotency key. Standalone approval
+			// actions never reach this branch: their action+notification pair
+			// is committed atomically above.
+			writeJSONError(w, http.StatusInternalServerError, "propose failed: could not queue approval notification")
+			return
 		}
 	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
+	responseReasons := result.Reasons
+	if persisted.PolicyReasons != "" {
+		responseReasons = strings.Split(persisted.PolicyReasons, "; ")
+	}
 	writeJSON(w, http.StatusOK, actionResponse{
-		ActionID: actionID, Decision: string(result.Decision), Reasons: result.Reasons,
-		Status: base.Status, ApprovalCode: approvalCode,
+		ActionID: actionID, Decision: persisted.PolicyDecision, Reasons: responseReasons,
+		Status: persisted.Status, ApprovalCode: approvalCode,
 	})
 }
 
