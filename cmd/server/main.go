@@ -94,6 +94,20 @@ func main() {
 	store := db.NewStore(rawDB, cryp).WithMetrics(m)
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
+	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
+	peerCache := telegram.NewPeerCache()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				peerCache.Sweep()
+			}
+		}
+	}()
 
 	// api_id-wide MTProto rate limiter. One instance shared by the pool and the
 	// interactive login client (via oauth.WithLoginConfig) so all sessions —
@@ -138,18 +152,26 @@ func main() {
 	// the very next send/delivery attempt of an already-running process, not
 	// just newly-started ones.
 	agentGlobalKill := func() bool { return cfg.AgentKillSwitch }
-	agentExecutor := executor.New(store, &poolSender{pool: pool}, agentGlobalKill, m)
+	agentExecutor := executor.New(store, &poolSender{pool: pool, store: store, peerCache: peerCache}, agentGlobalKill, m)
+	demoReviewerTGID := int64(0)
+	if cfg.DemoReviewerEnabled {
+		demoReviewerTGID = cfg.DemoReviewerTGID
+	}
+	executorGate := &agentSendGate{
+		store:              store,
+		allowSend:          cfg.AllowSend,
+		demoReviewerTGID:   demoReviewerTGID,
+		adminTelegramIDs:   telegramIDSet(cfg.TGLoginAdmins),
+		clientTelegramIDs:  telegramIDSet(cfg.TGLoginClients),
+		autoApproveClients: cfg.AutoApproveClients,
+		limiter:            limiter,
+	}
+	agentExecutor.SendGate = executorGate.Allow
 	// A Codex finding on #307 caught that Approve() had no TTL check of its
 	// own: the bulk ExpireStaleAgentActions sweeper runs on its own
 	// minute-scale interval, so an owner could still approve a code already
 	// past AGENT_APPROVAL_TTL if the sweeper simply hadn't reached it yet.
 	agentExecutor.ApprovalTTL = cfg.AgentApprovalTTL
-	// A Codex finding on #307 caught that the executor had NO equivalent of
-	// evaluateSendGate's ALLOW_SEND/send_enabled checks at all — poolSender
-	// went straight to the Telegram RPC regardless, contradicting
-	// internal/web/security.html's published guarantee that enabling the
-	// listener does not bypass those gates.
-	agentExecutor.SendGate = &allowSendGate{store: store, allowSend: cfg.AllowSend}
 	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
 	agentNotifier.GlobalKill = agentGlobalKill
 	// Wire the notification retry horizon to the SAME configured approval
@@ -366,26 +388,6 @@ func main() {
 	accountHandlers := web.NewAccountHandlers(store, pool)
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
-
-	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
-
-	// Instantiate the peer cache and start a background sweep goroutine so
-	// stale entries do not accumulate over the lifetime of the process. The
-	// 10-minute default TTL means a 5-minute sweep interval bounds the worst-
-	// case overhang to one extra TTL window.
-	peerCache := telegram.NewPeerCache()
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				peerCache.Sweep()
-			}
-		}
-	}()
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes

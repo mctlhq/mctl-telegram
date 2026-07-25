@@ -13,6 +13,11 @@ import (
 // matches.
 var ErrAgentActionNotFound = errors.New("agent action not found")
 
+// ErrAgentSendBudgetExhausted means another execution reservation consumed
+// the conversation's autonomous-turn or per-minute budget before this action
+// could claim it. The executor must fail closed instead of sending.
+var ErrAgentSendBudgetExhausted = errors.New("agent send budget exhausted")
+
 // ErrJobLeadNotFound is returned by GetJobLead when no row matches.
 var ErrJobLeadNotFound = errors.New("job lead not found")
 
@@ -79,7 +84,8 @@ type AgentAction struct {
 	PolicyReasons       string
 	Status              string
 	ExecutedTGMessageID int64
-	SendRandomID        int64 // 0 ⇒ not yet allocated; persisted before the send RPC, see BeginExecutingAgentAction
+	SendRandomID        int64  // 0 ⇒ not yet allocated; persisted before the send RPC, see BeginExecutingAgentAction
+	SendBody            string // exact final outbound body paired with SendRandomID; encrypted at rest
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -214,22 +220,22 @@ func (s *Store) GetAgentActionByCode(ctx context.Context, userID int64, code str
 
 func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (*AgentAction, error) {
 	var (
-		a             AgentAction
-		code          sql.NullString
-		jobID, convID sql.NullInt64
-		execMsgID     sql.NullInt64
-		sendRandomID  sql.NullInt64
-		payload       []byte
+		a                 AgentAction
+		code              sql.NullString
+		jobID, convID     sql.NullInt64
+		execMsgID         sql.NullInt64
+		sendRandomID      sql.NullInt64
+		payload, sendBody []byte
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE `+where,
 		args...,
 	).Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-		&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt)
+		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentActionNotFound
 	}
@@ -247,6 +253,13 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 			return nil, fmt.Errorf("open action payload: %w", err)
 		}
 		a.Payload = string(pt)
+	}
+	if len(sendBody) > 0 {
+		pt, err := s.Crypt.OpenForUser(sendBody, a.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("open action send body: %w", err)
+		}
+		a.SendBody = string(pt)
 	}
 	return &a, nil
 }
@@ -337,19 +350,117 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 // a retry of the same send is always possible. Returns false on a lost CAS
 // race (concurrent reject, or a second executor goroutine).
 func (s *Store) BeginExecutingAgentAction(ctx context.Context, userID, id, randomID int64) (bool, error) {
+	action, err := s.GetAgentAction(ctx, userID, id)
+	if err != nil {
+		return false, err
+	}
+	return s.ReserveAgentActionSend(ctx, *action, randomID, "", 0, 0, time.Time{}, false)
+}
+
+// ReserveAgentActionSend atomically claims an approved action, persists the
+// random_id and exact final body, and reserves one autonomous turn. When
+// enforceBudget is true it serializes on the conversation row and checks both
+// the turn budget and the complete one-minute send window before making the
+// reservation. This closes the cross-replica race where two different action
+// rows could both pass policy against the same pre-send history.
+//
+// Executing actions are themselves durable rate reservations. A subsequent
+// claim counts them alongside completed conversation_messages, so the budget
+// remains consumed across process crashes and until RecordAgentActionSent
+// atomically replaces the executing reservation with a durable history row.
+func (s *Store) ReserveAgentActionSend(
+	ctx context.Context,
+	action AgentAction,
+	randomID int64,
+	finalBody string,
+	maxAutonomousTurns, maxMsgsPerMinute int,
+	rateWindowStart time.Time,
+	enforceBudget bool,
+) (bool, error) {
 	if randomID == 0 {
 		return false, errors.New("send random id required")
 	}
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = $1, send_random_id = $2, updated_at = $3
-		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		ActionExecuting, randomID, time.Now().UTC(), id, userID, ActionApproved,
+	if action.UserID <= 0 || action.ID <= 0 || action.ConversationID <= 0 {
+		return false, errors.New("action user, id, and conversation required")
+	}
+	var sendBody []byte
+	if finalBody != "" {
+		var err error
+		sendBody, err = s.Crypt.SealForUser([]byte(finalBody), action.UserID)
+		if err != nil {
+			return false, fmt.Errorf("seal action send body: %w", err)
+		}
+	}
+
+	pg := s.isPostgres(ctx)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin reserve-send tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	lock := ""
+	if pg {
+		lock = " FOR UPDATE"
+	}
+	var autonomousTurns int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT autonomous_turns FROM conversations
+		  WHERE id = $1 AND user_id = $2`+lock,
+		action.ConversationID, action.UserID,
+	).Scan(&autonomousTurns); errors.Is(err, sql.ErrNoRows) {
+		return false, ErrConversationNotFound
+	} else if err != nil {
+		return false, fmt.Errorf("lock conversation for send reservation: %w", err)
+	}
+
+	if enforceBudget && maxAutonomousTurns > 0 && autonomousTurns >= maxAutonomousTurns {
+		return false, fmt.Errorf("%w: autonomous turns %d/%d", ErrAgentSendBudgetExhausted, autonomousTurns, maxAutonomousTurns)
+	}
+	if enforceBudget && maxMsgsPerMinute > 0 {
+		var recent int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT
+			   (SELECT COUNT(*) FROM conversation_messages
+			     WHERE conversation_id = $1 AND direction = $2 AND created_at > $3)
+			 + (SELECT COUNT(*) FROM agent_actions
+			     WHERE conversation_id = $1 AND status IN ($4, $5)
+			       AND send_random_id IS NOT NULL AND updated_at > $3)`,
+			action.ConversationID, DirectionAgentOutgoing, rateWindowStart, ActionExecuting, ActionDenied,
+		).Scan(&recent); err != nil {
+			return false, fmt.Errorf("count reserved agent sends: %w", err)
+		}
+		if recent >= maxMsgsPerMinute {
+			return false, fmt.Errorf("%w: messages per minute %d/%d", ErrAgentSendBudgetExhausted, recent, maxMsgsPerMinute)
+		}
+	}
+
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, send_random_id = $2, send_body_encrypted = $3, updated_at = $4
+		  WHERE id = $5 AND user_id = $6 AND conversation_id = $7 AND status = $8`,
+		ActionExecuting, randomID, sendBody, now, action.ID, action.UserID, action.ConversationID, ActionApproved,
 	)
 	if err != nil {
-		return false, fmt.Errorf("begin executing agent action: %w", err)
+		return false, fmt.Errorf("claim agent action send: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversations
+		    SET autonomous_turns = autonomous_turns + 1, updated_at = $1
+		  WHERE id = $2 AND user_id = $3`,
+		now, action.ConversationID, action.UserID,
+	); err != nil {
+		return false, fmt.Errorf("reserve autonomous turn: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit send reservation: %w", err)
+	}
+	return true, nil
 }
 
 // SetAgentActionExecuted records the Telegram message id of the sent reply and
@@ -371,36 +482,45 @@ func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessag
 
 // RecordAgentActionSent atomically does everything a successful executor
 // send needs recorded: flips the action executing -> executed (the same CAS
-// SetAgentActionExecuted performs), increments the conversation's
-// autonomous-turn counter, and inserts the outgoing conversation_messages
-// row — all in ONE transaction. Returns ok=false, exactly like
+// SetAgentActionExecuted performs), updates the conversation's last-send
+// timestamp, and inserts the outgoing conversation_messages row — all in ONE
+// transaction. The autonomous turn was already reserved by
+// ReserveAgentActionSend before the RPC. Returns ok=false, exactly like
 // SetAgentActionExecuted, when the CAS finds the row already out of
 // `executing` (a concurrent sweep/call already recorded it); in that case
 // no other write in this function happens either, matching the executor's
 // existing "don't double-count a completion someone else already recorded"
 // rule.
 //
-// Before this, the executor called SetAgentActionExecuted,
-// IncrementAutonomousTurns, and InsertConversationMessage as three
-// sequential, independently-committing calls (see recordSent in
-// internal/agent/executor) — a Codex finding on #307 caught that a crash
-// between the first and the other two leaves the action row terminal
-// (`executed`, so no recovery sweep ever revisits it) while under-counting
-// the turn budget and rate-limit history for a send that genuinely
-// happened, silently loosening both safety guards. Wrapping all three in
-// one transaction closes that window: either the whole completion is
-// recorded, or none of it is (and RecoverStuck's next sweep — the row is
-// STILL `executing` in that case — retries the CAS from scratch).
+// The conversation row is locked before the action transition. Reservation
+// claims use the same lock order, so there is no visibility gap where a new
+// claim can observe neither the executing reservation nor the completed
+// history row.
 func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, conversationID, tgMessageID int64, sentText string) (bool, error) {
+	pg := s.isPostgres(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin record-sent tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	lock := ""
+	if pg {
+		lock = " FOR UPDATE"
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM conversations WHERE id = $1 AND user_id = $2`+lock,
+		conversationID, userID,
+	).Scan(new(int64)); errors.Is(err, sql.ErrNoRows) {
+		return false, ErrConversationNotFound
+	} else if err != nil {
+		return false, fmt.Errorf("lock conversation for send completion: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_actions
-		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL, updated_at = $3
+		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL,
+		        send_body_encrypted = NULL, updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
 		ActionExecuted, tgMessageID, time.Now().UTC(), actionID, userID, ActionExecuting,
 	)
@@ -414,12 +534,11 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE conversations
-		    SET autonomous_turns = autonomous_turns + 1,
-		        last_agent_reply_at = $1, updated_at = $1
+		    SET last_agent_reply_at = $1, updated_at = $1
 		  WHERE id = $2 AND user_id = $3`,
 		now, conversationID, userID,
 	); err != nil {
-		return false, fmt.Errorf("increment autonomous turns: %w", err)
+		return false, fmt.Errorf("record last agent reply: %w", err)
 	}
 
 	var body []byte
@@ -510,7 +629,7 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
 		ActionExecuting, cutoff,
 	)
@@ -521,16 +640,16 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 	var out []AgentAction
 	for rows.Next() {
 		var (
-			a             AgentAction
-			code          sql.NullString
-			jobID, convID sql.NullInt64
-			execMsgID     sql.NullInt64
-			sendRandomID  sql.NullInt64
-			payload       []byte
+			a                 AgentAction
+			code              sql.NullString
+			jobID, convID     sql.NullInt64
+			execMsgID         sql.NullInt64
+			sendRandomID      sql.NullInt64
+			payload, sendBody []byte
 		)
 		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-			&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan stuck action: %w", err)
 		}
 		a.ApprovalCode = code.String
@@ -548,6 +667,14 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 				continue
 			}
 			a.Payload = string(pt)
+		}
+		if len(sendBody) > 0 {
+			pt, err := s.Crypt.OpenForUser(sendBody, a.UserID)
+			if err != nil {
+				slog.Warn("agent_actions: skipping stuck row with undecryptable send body", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
+			}
+			a.SendBody = string(pt)
 		}
 		out = append(out, a)
 	}
@@ -588,7 +715,7 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE status = $1 ORDER BY updated_at LIMIT $2`,
 		status, limit,
 	)
@@ -599,16 +726,16 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 	var out []AgentAction
 	for rows.Next() {
 		var (
-			a             AgentAction
-			code          sql.NullString
-			jobID, convID sql.NullInt64
-			execMsgID     sql.NullInt64
-			sendRandomID  sql.NullInt64
-			payload       []byte
+			a                 AgentAction
+			code              sql.NullString
+			jobID, convID     sql.NullInt64
+			execMsgID         sql.NullInt64
+			sendRandomID      sql.NullInt64
+			payload, sendBody []byte
 		)
 		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-			&execMsgID, &sendRandomID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan action: %w", err)
 		}
 		a.ApprovalCode = code.String
@@ -630,6 +757,14 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 				continue
 			}
 			a.Payload = string(pt)
+		}
+		if len(sendBody) > 0 {
+			pt, err := s.Crypt.OpenForUser(sendBody, a.UserID)
+			if err != nil {
+				slog.Warn("agent_actions: skipping row with undecryptable send body", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
+			}
+			a.SendBody = string(pt)
 		}
 		out = append(out, a)
 	}

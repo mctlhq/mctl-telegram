@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // Agent domain schema (communication agent, M6). These tables back the
@@ -47,6 +48,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_random_id", "BIGINT", "INTEGER"); err != nil {
 		return err
 	}
+	// agent_actions.send_body_encrypted: the exact final body paired with
+	// send_random_id. Recovery must never rebuild it from mutable profile
+	// configuration (notably disclosure_text), because Telegram deduplicates
+	// retries by random_id and therefore requires every retry to be identical.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_body_encrypted", "BYTEA", "BLOB"); err != nil {
+		return err
+	}
 	// owner_notifications.claimed_until: added in A-PR7 round-3 review fixes —
 	// see Store.ClaimOwnerNotification's doc comment for why delivery needs a
 	// lease.
@@ -87,6 +95,77 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	idxStmt := `CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, idxStmt); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, idxStmt)
+	}
+	if err := retirePreExecutorApprovedActions(ctx, dbConn); err != nil {
+		return err
+	}
+	return nil
+}
+
+// retirePreExecutorApprovedActions is a one-shot rollout boundary for A-PR7.
+// Older releases persisted guarded-mode actions as approved but had no
+// production executor, so they may be arbitrarily stale. The migration marker
+// and status update share one transaction: exactly one replica retires those
+// rows, while later restarts leave newly-approved work untouched.
+func retirePreExecutorApprovedActions(ctx context.Context, dbConn *sql.DB) error {
+	tx, err := dbConn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pre-executor action retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO agent_migrations(name) VALUES($1) ON CONFLICT (name) DO NOTHING`,
+		"retire_pre_executor_approved_v1",
+	)
+	if err != nil {
+		return fmt.Errorf("record pre-executor action retirement: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		// Legacy executing rows predate the exact-body/turn reservation. Their
+		// RPC may already have landed, but retrying is unsafe because the body
+		// paired with random_id was never snapshotted. Account them
+		// conservatively before terminalizing: one turn per ambiguous send;
+		// the retained random_id makes the denied row count in the short rate
+		// window as well.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE conversations
+			    SET autonomous_turns = autonomous_turns + (
+			          SELECT COUNT(*) FROM agent_actions a
+			           WHERE a.conversation_id = conversations.id
+			             AND a.status = $1
+			             AND a.send_body_encrypted IS NULL
+			        ),
+			        updated_at = $2
+			  WHERE EXISTS (
+			        SELECT 1 FROM agent_actions a
+			         WHERE a.conversation_id = conversations.id
+			           AND a.status = $1
+			           AND a.send_body_encrypted IS NULL
+			  )`,
+			ActionExecuting, time.Now().UTC(),
+		); err != nil {
+			return fmt.Errorf("reserve accounting for legacy executing actions: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_actions
+			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			  WHERE status = $4 AND send_body_encrypted IS NULL`,
+			ActionDenied, "retired ambiguous execution at rollout boundary", time.Now().UTC(), ActionExecuting,
+		); err != nil {
+			return fmt.Errorf("retire legacy executing actions: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_actions
+			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			  WHERE status = $4`,
+			ActionDenied, "retired at executor rollout boundary", time.Now().UTC(), ActionApproved,
+		); err != nil {
+			return fmt.Errorf("retire pre-executor approved actions: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit pre-executor action retirement: %w", err)
 	}
 	return nil
 }
@@ -175,6 +254,7 @@ func agentSchemaSQLite() []string {
 			-- the executing status a self-healing transient state instead of the
 			-- original design's permanent crash trap.
 			send_random_id INTEGER,
+			send_body_encrypted BLOB,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -191,6 +271,10 @@ func agentSchemaSQLite() []string {
 		// this index the sweep degrades to a full-table scan as terminal
 		// action rows accumulate.
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -348,6 +432,7 @@ func agentSchemaPG() []string {
 			-- see the SQLite copy of this table for send_random_id's role in
 			-- crash-safe recovery of the executing state.
 			send_random_id BIGINT,
+			send_body_encrypted BYTEA,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
@@ -364,6 +449,10 @@ func agentSchemaPG() []string {
 		// this index the sweep degrades to a full-table scan as terminal
 		// action rows accumulate.
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

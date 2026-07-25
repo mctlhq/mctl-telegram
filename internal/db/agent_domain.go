@@ -460,9 +460,15 @@ func (s *Store) InsertConversationMessage(ctx context.Context, userID int64, m C
 	return id, nil
 }
 
-// ListRecentAgentOutgoingTimestamps returns the created_at timestamps of
-// every agent_outgoing conversation_messages row newer than `since` —
-// policy.Input.RecentAgentSends' MaxMsgsPerMinute input. A dedicated,
+// ListRecentAgentOutgoingTimestamps returns timestamps for completed sends
+// plus durable execution reservations newer than `since` —
+// policy.Input.RecentAgentSends' MaxMsgsPerMinute input. Executing rows count
+// because the RPC may already have reached Telegram; denied rows with a
+// random_id count because a recovery-time policy change cannot prove that the
+// original RPC did not land. This fail-closed accounting survives crashes and
+// prevents another replica from spending the same rate budget.
+//
+// A dedicated,
 // correctly-scoped query rather than callers fetching
 // ListConversationMessages' top-N-of-any-direction page and filtering: a
 // Codex finding on #307 caught that both internal/agentapi's and
@@ -473,14 +479,45 @@ func (s *Store) InsertConversationMessage(ctx context.Context, userID int64, m C
 // would then silently miss it, undercounting the rate limit and letting
 // another action send when MaxMsgsPerMinute should have blocked it.
 func (s *Store) ListRecentAgentOutgoingTimestamps(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
+	return s.listRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since, 0)
+}
+
+// ListRecentAgentOutgoingTimestampsExcludingAction is the crash-recovery
+// variant: the action being retried already owns one execution reservation
+// and must not count itself as a newer competing send during policy
+// re-evaluation.
+func (s *Store) ListRecentAgentOutgoingTimestampsExcludingAction(
+	ctx context.Context,
+	userID, conversationID int64,
+	since time.Time,
+	excludeActionID int64,
+) ([]time.Time, error) {
+	return s.listRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since, excludeActionID)
+}
+
+func (s *Store) listRecentAgentOutgoingTimestamps(
+	ctx context.Context,
+	userID, conversationID int64,
+	since time.Time,
+	excludeActionID int64,
+) ([]time.Time, error) {
 	if _, err := s.GetConversation(ctx, userID, conversationID); err != nil {
 		return nil, err
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT created_at FROM conversation_messages
-		  WHERE conversation_id = $1 AND direction = $2 AND created_at > $3
-		  ORDER BY created_at`,
-		conversationID, DirectionAgentOutgoing, since,
+		`SELECT sent_at FROM (
+		    SELECT created_at AS sent_at
+		      FROM conversation_messages
+		     WHERE conversation_id = $1 AND direction = $2 AND created_at > $3
+		    UNION ALL
+		    SELECT updated_at AS sent_at
+		      FROM agent_actions
+		     WHERE conversation_id = $1 AND status IN ($4, $5)
+		       AND send_random_id IS NOT NULL AND updated_at > $3
+		       AND ($6 = 0 OR id <> $6)
+		  ) reserved_and_sent
+		  ORDER BY sent_at`,
+		conversationID, DirectionAgentOutgoing, since, ActionExecuting, ActionDenied, excludeActionID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list recent agent outgoing timestamps: %w", err)

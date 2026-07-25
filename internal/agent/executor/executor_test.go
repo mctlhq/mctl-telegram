@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -43,6 +44,7 @@ func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerA
 }
 
 var errSendFailed = &sendErr{"send failed"}
+var errGateDenied = errors.New("gate denied")
 
 type sendErr struct{ msg string }
 
@@ -103,6 +105,20 @@ func seedPendingApproval(t *testing.T, store *db.Store, uid, convID int64, text 
 		t.Fatalf("seed pending action: %v", err)
 	}
 	return actionID, "TESTCD"
+}
+
+func reserveActionForRecovery(t *testing.T, store *db.Store, uid, actionID, randomID int64, finalBody string) {
+	t.Helper()
+	action, err := store.GetAgentAction(context.Background(), uid, actionID)
+	if err != nil {
+		t.Fatalf("get action for reservation: %v", err)
+	}
+	if ok, err := store.ReserveAgentActionSend(
+		context.Background(), *action, randomID, finalBody,
+		0, 0, time.Time{}, false,
+	); err != nil || !ok {
+		t.Fatalf("reserve action for recovery: ok=%v err=%v", ok, err)
+	}
 }
 
 func TestExecutor_Approve_SendsAndMarksExecuted(t *testing.T) {
@@ -349,6 +365,46 @@ func TestExecutor_Approve_TakeoverDeniesAtSendTime(t *testing.T) {
 	}
 }
 
+func TestExecutor_SendGateBlocksFreshAndRecoveryRPCs(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.SendGate = func(context.Context, int64, int64) error { return errGateDenied }
+
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, errGateDenied) {
+		t.Fatalf("approve err=%v, want gate denial", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("fresh send calls=%d, want 0", len(sender.calls))
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get approved action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status=%q, want denied so a stale fresh draft cannot send when the gate reopens", action.Status)
+	}
+
+	recoveryID, _ := seedPendingApproval(t, store, uid, conv.ID, "retry")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, recoveryID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve recovery action: ok=%v err=%v", ok, err)
+	}
+	reserveActionForRecovery(t, store, uid, recoveryID, 8181, "retry"+policy.DisclosureSep+"I'm an AI assistant.")
+	if n, err := exec.RecoverStuck(ctx); err != nil || n != 1 {
+		t.Fatalf("recover: count=%d err=%v", n, err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("recovery send calls=%d, want 0", len(sender.calls))
+	}
+	action, err = store.GetAgentAction(ctx, uid, recoveryID)
+	if err != nil {
+		t.Fatalf("get reserved action: %v", err)
+	}
+	if action.Status != db.ActionExecuting {
+		t.Fatalf("status=%q, want executing reservation retained", action.Status)
+	}
+}
+
 // TestExecutor_RecoverStuck_RetriesWithSameRandomID is the core
 // crash-recovery guarantee: an action stuck in executing (simulating a
 // process death between BeginExecutingAgentAction and the send RPC, or
@@ -367,8 +423,14 @@ func TestExecutor_RecoverStuck_RetriesWithSameRandomID(t *testing.T) {
 	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
 		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 424242); err != nil || !ok {
-		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	reserveActionForRecovery(t, store, uid, actionID, 424242, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
+	// Mutable profile configuration must not change the body associated with
+	// the already-persisted random_id.
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "NEW disclosure",
+		MaxAutonomousTurns: 1, MaxMsgsPerMinute: 1,
+	}); err != nil {
+		t.Fatalf("change disclosure after reservation: %v", err)
 	}
 	_ = code
 
@@ -385,12 +447,42 @@ func TestExecutor_RecoverStuck_RetriesWithSameRandomID(t *testing.T) {
 	if sender.calls[0].randomID != 424242 {
 		t.Fatalf("retry random_id = %d, want the original 424242", sender.calls[0].randomID)
 	}
+	if sender.calls[0].text != "hi"+policy.DisclosureSep+"I'm an AI assistant." {
+		t.Fatalf("retry text = %q, want the exact pre-crash snapshot", sender.calls[0].text)
+	}
 	action, err := store.GetAgentAction(ctx, uid, actionID)
 	if err != nil {
 		t.Fatalf("get action: %v", err)
 	}
 	if action.Status != db.ActionExecuted {
 		t.Fatalf("status = %q, want executed", action.Status)
+	}
+}
+
+func TestExecutor_RecoverStuck_DoesNotCountItsOwnReservationAgainstBudget(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		MaxAutonomousTurns: 1, MaxMsgsPerMinute: 1, IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed one-send budget: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Intent: "discovery", Payload: "Hello", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	reserveActionForRecovery(t, store, uid, actionID, 9090, "Hello"+policy.DisclosureSep+"I'm an AI assistant.")
+
+	if n, err := exec.RecoverStuck(ctx); err != nil || n != 1 {
+		t.Fatalf("recover: count=%d err=%v", n, err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls=%d, want 1; current reservation must not block its own retry", len(sender.calls))
 	}
 }
 
@@ -406,9 +498,7 @@ func TestExecutor_RecoverStuck_RespectsGraceWindow(t *testing.T) {
 	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
 		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 1); err != nil || !ok {
-		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
-	}
+	reserveActionForRecovery(t, store, uid, actionID, 1, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
 
 	n, err := exec.RecoverStuck(ctx)
 	if err != nil {
@@ -432,82 +522,6 @@ type fakeRestrictedChecker struct {
 
 func (f *fakeRestrictedChecker) MatchRestricted(string) (string, bool, bool, bool) {
 	return f.key, f.neverAutoSend, f.approvalRequired, f.matched
-}
-
-// fakeSendGate lets tests control SendAllowed's outcome without needing a
-// real db.Store.IsSendEnabled/ALLOW_SEND wiring.
-type fakeSendGate struct {
-	allowed bool
-	reason  string
-	err     error
-}
-
-func (f *fakeSendGate) SendAllowed(context.Context, int64) (bool, string, error) {
-	return f.allowed, f.reason, f.err
-}
-
-// TestExecutor_Approve_SendGateBlocksSend covers a Codex finding on #307:
-// the executor had no equivalent of internal/mcp's evaluateSendGate
-// (ALLOW_SEND / per-account send_enabled) at all — poolSender went straight
-// to the Telegram RPC regardless, contradicting internal/web/security.html's
-// published guarantee that enabling the listener does not bypass those
-// gates. A blocked gate must stop the send exactly like a hard policy Deny.
-func TestExecutor_Approve_SendGateBlocksSend(t *testing.T) {
-	exec, sender, store, uid, conv := newTestExecutor(t)
-	exec.SendGate = &fakeSendGate{allowed: false, reason: "server flag ALLOW_SEND=false"}
-	ctx := context.Background()
-	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
-
-	err := exec.Approve(ctx, uid, code)
-	if err == nil {
-		t.Fatal("expected an error when the send gate blocks the send")
-	}
-	if errors.Is(err, ErrSendQueuedForRetry) {
-		t.Fatalf("err = %v, want a hard deny, not a retryable ErrSendQueuedForRetry (ALLOW_SEND=false won't fix itself on retry)", err)
-	}
-	if len(sender.calls) != 0 {
-		t.Fatalf("send calls = %d, want 0 — the gate must block the RPC entirely", len(sender.calls))
-	}
-	action, err := store.GetAgentAction(ctx, uid, actionID)
-	if err != nil {
-		t.Fatalf("get action: %v", err)
-	}
-	if action.Status != db.ActionDenied {
-		t.Fatalf("status = %q, want denied", action.Status)
-	}
-}
-
-// TestExecutor_RecoverStuck_SendGateBlocksRecoverySend is the crash-recovery
-// counterpart: a gate that closed during the grace window must also stop
-// recoverOne from retrying the send.
-func TestExecutor_RecoverStuck_SendGateBlocksRecoverySend(t *testing.T) {
-	exec, sender, store, uid, conv := newTestExecutor(t)
-	ctx := context.Background()
-	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
-	if err := exec.Approve(ctx, uid, code); err != nil {
-		t.Fatalf("approve: %v", err)
-	}
-	if _, err := store.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = ?, updated_at = ? WHERE id = ?`,
-		db.ActionExecuting, time.Now().Add(-time.Hour).UTC(), actionID,
-	); err != nil {
-		t.Fatalf("force stuck: %v", err)
-	}
-	exec.SendGate = &fakeSendGate{allowed: false, reason: "per-account send_enabled=false"}
-
-	if _, err := exec.RecoverStuck(ctx); err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	if len(sender.calls) != 1 {
-		t.Fatalf("send calls = %d, want 1 (only the original Approve send, no recovery retry)", len(sender.calls))
-	}
-	action, err := store.GetAgentAction(ctx, uid, actionID)
-	if err != nil {
-		t.Fatalf("get action: %v", err)
-	}
-	if action.Status != db.ActionDenied {
-		t.Fatalf("status = %q, want denied", action.Status)
-	}
 }
 
 // TestExecutor_Approve_RecordsConversationHistory guards against the P1
@@ -717,9 +731,7 @@ func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
 	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
 		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 99); err != nil || !ok {
-		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
-	}
+	reserveActionForRecovery(t, store, uid, actionID, 99, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
 
 	killed := true
 	exec.GlobalKill = func() bool { return killed }
@@ -757,9 +769,7 @@ func TestExecutor_RecoverStuck_RestartCounterOnlyCountsNewlyStuckActions(t *test
 	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
 		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID, 777); err != nil || !ok {
-		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
-	}
+	reserveActionForRecovery(t, store, uid, actionID, 777, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
 	// Every retry keeps failing, so the action never leaves `executing`.
 	sender.failNext = 10
 
@@ -784,9 +794,7 @@ func TestExecutor_RecoverStuck_RestartCounterOnlyCountsNewlyStuckActions(t *test
 	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID2, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
 		t.Fatalf("approve transition 2: ok=%v err=%v", ok, err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, actionID2, 778); err != nil || !ok {
-		t.Fatalf("begin executing 2: ok=%v err=%v", ok, err)
-	}
+	reserveActionForRecovery(t, store, uid, actionID2, 778, "hi again"+policy.DisclosureSep+"I'm an AI assistant.")
 	if _, err := exec.RecoverStuck(ctx); err != nil {
 		t.Fatalf("recover sweep 4: %v", err)
 	}
@@ -1012,9 +1020,7 @@ func TestExecutor_RecoverStuck_StopsUnreviewedActionWhenApprovalNowRequired(t *t
 	if err != nil {
 		t.Fatalf("seed stuck-to-be action: %v", err)
 	}
-	if ok, err := store.BeginExecutingAgentAction(ctx, uid, stuckID, 4242); err != nil || !ok {
-		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
-	}
+	reserveActionForRecovery(t, store, uid, stuckID, 4242, "Sure, let's set up a call."+policy.DisclosureSep+"I'm an AI assistant.")
 
 	n, err := exec.RecoverStuck(ctx)
 	if err != nil {

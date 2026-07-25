@@ -69,30 +69,15 @@ type Sender interface {
 	SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error)
 }
 
+// SendGate applies the deployment-wide send boundary immediately before an
+// executor RPC: ALLOW_SEND, owner scope/tier, per-account send_enabled, and
+// the per-peer limiter. Production wiring always provides one; nil is kept
+// for isolated executor unit tests.
+type SendGate func(ctx context.Context, userID, peerTGID int64) error
+
 // RandomIDSource abstracts random_id generation so tests can supply
 // deterministic values without depending on crypto/rand timing.
 type RandomIDSource func() (int64, error)
-
-// SendGate mirrors internal/mcp's evaluateSendGate (ALLOW_SEND and the
-// per-account telegram_accounts.send_enabled flag) so the executor's
-// autonomous sends respect the SAME safety switch the MCP tool surface
-// already enforces. An interface here so this package does not import
-// internal/mcp, matching Sender's rationale.
-//
-// A Codex finding on #307 caught that Executor had NO such check at all:
-// poolSender.SendWithRandomID (cmd/server/agentwiring.go) went straight to
-// the Telegram RPC regardless of ALLOW_SEND or send_enabled, contradicting
-// this deployment's own published guarantee (internal/web/security.html:
-// "Enabling the listener does not bypass the existing ALLOW_SEND, scope,
-// per-account, and per-peer send gates") — with ALLOW_SEND=false (the
-// documented production default on tg.mctl.ai), an approved or
-// guarded-mode-auto-approved agent action would still send a REAL
-// recruiter message.
-type SendGate interface {
-	// SendAllowed reports whether userID may currently send for real. reason
-	// is a human-readable explanation for logging/denial when allowed=false.
-	SendAllowed(ctx context.Context, userID int64) (allowed bool, reason string, err error)
-}
 
 // RestrictedFieldChecker exposes the owner's YAML-configured restricted
 // fields (never_auto_send / approval_required — see internal/agent/profile)
@@ -111,12 +96,9 @@ type RestrictedFieldChecker interface {
 type Executor struct {
 	Store       *db.Store
 	Sender      Sender
+	SendGate    SendGate
 	GlobalKill  func() bool // reads config.Config.AgentKillSwitch at call time, not a snapshot
 	NewRandomID RandomIDSource
-	// SendGate is optional (nil ⇒ no ALLOW_SEND/send_enabled check — only
-	// acceptable for tests; cmd/server/main.go always wires a real one) —
-	// see SendGate's doc comment for why this exists and what it enforces.
-	SendGate SendGate
 	// Profile is optional (nil ⇒ no restricted-field enforcement, matching
 	// AGENT_PROFILE_PATH being optional — see cmd/server/main.go). When set,
 	// every send checks the payload against it before the RPC fires.
@@ -354,31 +336,43 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return fmt.Errorf("owner profile blocks send: %s", reason)
 	}
 	if e.SendGate != nil {
-		allowed, gateReason, err := e.SendGate.SendAllowed(ctx, action.UserID)
-		if err != nil {
-			return fmt.Errorf("%w: check send gate: %w", ErrSendQueuedForRetry, err)
-		}
-		if !allowed {
-			// Same treatment as a hard policy Deny: this deployment's own
-			// published guarantee (internal/web/security.html) is that
-			// enabling the listener does not bypass ALLOW_SEND/send_enabled,
-			// so a blocked gate must stop the send exactly like a Deny
-			// would, not queue for a retry that will keep failing until an
-			// operator changes the gate.
+		if err := e.SendGate(ctx, action.UserID, conv.PeerTGID); err != nil {
+			// A fresh action has not reached Telegram yet, so fail closed and
+			// terminalize it instead of leaving a stale approved draft that
+			// could send automatically when an operator later reopens a gate.
 			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 				return fmt.Errorf("deny gated send: %w", err)
 			}
-			return fmt.Errorf("send gate blocks send: %s", gateReason)
+			return fmt.Errorf("send gate blocks send: %w", err)
 		}
 	}
 
+	text := action.Payload
+	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
+		text = text + sep + profile.DisclosureText
+	}
 	randomID, err := e.NewRandomID()
 	if err != nil {
 		return fmt.Errorf("%w: generate random id: %w", ErrSendQueuedForRetry, err)
 	}
-	ok, err := e.Store.BeginExecutingAgentAction(ctx, action.UserID, action.ID, randomID)
+	ok, err := e.Store.ReserveAgentActionSend(
+		ctx,
+		action,
+		randomID,
+		text,
+		profile.MaxAutonomousTurns,
+		profile.MaxMsgsPerMinute,
+		time.Now().UTC().Add(-time.Minute),
+		action.PolicyDecision == db.PolicyAllow,
+	)
+	if errors.Is(err, db.ErrAgentSendBudgetExhausted) {
+		if _, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
+			return fmt.Errorf("deny action after atomic budget check: %w", denyErr)
+		}
+		return fmt.Errorf("policy budget exhausted before execution claim: %w", err)
+	}
 	if err != nil {
-		return fmt.Errorf("%w: begin executing: %w", ErrSendQueuedForRetry, err)
+		return fmt.Errorf("%w: reserve execution: %w", ErrSendQueuedForRetry, err)
 	}
 	if !ok {
 		// Genuinely terminal, not a retry case: something else (a second
@@ -388,10 +382,6 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return ErrLostRace
 	}
 
-	text := action.Payload
-	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
-		text = text + sep + profile.DisclosureText
-	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, randomID, text)
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
@@ -552,13 +542,23 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// that has been exceeded by OTHER sends since this one got stuck must
 	// still stop the retry if the original RPC never actually reached
 	// Telegram.
-	recentSends, err := e.recentAgentSends(ctx, action.UserID, action.ConversationID, time.Now().UTC().Add(-time.Minute))
+	recentSends, err := e.Store.ListRecentAgentOutgoingTimestampsExcludingAction(
+		ctx, action.UserID, action.ConversationID, time.Now().UTC().Add(-time.Minute), action.ID,
+	)
 	if err != nil {
 		return fmt.Errorf("load recent sends: %w", err)
 	}
+	// ReserveAgentActionSend already charged this action's turn before the
+	// original RPC. Re-evaluate recovery against the budget that existed
+	// before this action's own reservation; sibling reservations remain
+	// visible and can still stop the retry.
+	policyConversation := *conv
+	if policyConversation.AutonomousTurns > 0 {
+		policyConversation.AutonomousTurns--
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
-		Conversation: *conv,
+		Conversation: policyConversation,
 		Action: policy.Action{
 			Type: action.ActionType, Intent: action.Intent, Text: action.Payload, PeerTGID: conv.PeerTGID,
 		},
@@ -598,20 +598,15 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		return fmt.Errorf("owner profile blocks recovery send: %s", reason)
 	}
 	if e.SendGate != nil {
-		allowed, gateReason, err := e.SendGate.SendAllowed(ctx, action.UserID)
-		if err != nil {
-			return fmt.Errorf("check send gate during recovery: %w", err)
-		}
-		if !allowed {
-			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
-				return fmt.Errorf("deny gated recovery send: %w", err)
-			}
-			return fmt.Errorf("send gate blocks recovery send: %s", gateReason)
+		if err := e.SendGate(ctx, action.UserID, conv.PeerTGID); err != nil {
+			// Keep the durable reservation intact. The gate may be reopened,
+			// and the first RPC may already have reached Telegram.
+			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
 	}
-	text := action.Payload
-	if profile.DisclosureText != "" {
-		text = text + policy.DisclosureSep + profile.DisclosureText
+	text := action.SendBody
+	if text == "" {
+		return fmt.Errorf("action %d is executing with no persisted send body", action.ID)
 	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, action.SendRandomID, text)
 	if err != nil {

@@ -116,3 +116,84 @@ func TestMigrate_UpgradesPreExistingConversationsWithoutPeerAccessHash(t *testin
 		t.Fatalf("PeerAccessHash = %d, want 0 (backfilled default)", conv.PeerAccessHash)
 	}
 }
+
+func TestRetirePreExecutorApprovedActions_RunsOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "rollout-owner")
+	conv, err := s.EnsureConversation(ctx, uid, 9001, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	// Fresh migrations install the marker with no rows to retire. Remove it
+	// to simulate the first deployment over a database created by an older
+	// release.
+	if _, err := s.DB.ExecContext(ctx,
+		`DELETE FROM agent_migrations WHERE name = $1`,
+		"retire_pre_executor_approved_v1",
+	); err != nil {
+		t.Fatalf("remove marker: %v", err)
+	}
+	oldID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ConversationID: conv.ID, ActionType: ActionTypeReply,
+		Payload: "stale", PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert stale action: %v", err)
+	}
+	ambiguousID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ConversationID: conv.ID, ActionType: ActionTypeReply,
+		Payload: "possibly sent", PolicyDecision: PolicyAllow, Status: ActionExecuting,
+	})
+	if err != nil {
+		t.Fatalf("insert legacy executing action: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions SET send_random_id = $1 WHERE id = $2`,
+		12345, ambiguousID,
+	); err != nil {
+		t.Fatalf("seed legacy random id: %v", err)
+	}
+	if err := retirePreExecutorApprovedActions(ctx, s.DB); err != nil {
+		t.Fatalf("retire old actions: %v", err)
+	}
+	old, err := s.GetAgentAction(ctx, uid, oldID)
+	if err != nil {
+		t.Fatalf("get retired action: %v", err)
+	}
+	if old.Status != ActionDenied {
+		t.Fatalf("old action status=%q, want denied", old.Status)
+	}
+	ambiguous, err := s.GetAgentAction(ctx, uid, ambiguousID)
+	if err != nil {
+		t.Fatalf("get legacy executing action: %v", err)
+	}
+	if ambiguous.Status != ActionDenied {
+		t.Fatalf("legacy executing status=%q, want denied", ambiguous.Status)
+	}
+	gotConv, err := s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation after retirement: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns=%d, want one conservative legacy reservation", gotConv.AutonomousTurns)
+	}
+
+	newID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ConversationID: conv.ID, ActionType: ActionTypeReply,
+		Payload: "fresh", PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert fresh action: %v", err)
+	}
+	if err := retirePreExecutorApprovedActions(ctx, s.DB); err != nil {
+		t.Fatalf("rerun retirement: %v", err)
+	}
+	fresh, err := s.GetAgentAction(ctx, uid, newID)
+	if err != nil {
+		t.Fatalf("get fresh action: %v", err)
+	}
+	if fresh.Status != ActionApproved {
+		t.Fatalf("fresh action status=%q, want approved after marker exists", fresh.Status)
+	}
+}

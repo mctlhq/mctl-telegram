@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -216,6 +218,111 @@ func TestRecordAgentActionSent_AtomicWithTurnAndHistory(t *testing.T) {
 	}
 	if len(msgs) != 1 {
 		t.Fatalf("conversation_messages = %d rows after a double call, want still 1", len(msgs))
+	}
+}
+
+func TestReserveAgentActionSend_SerializesBudgetAndPersistsExactBody(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "reservation-owner")
+	conv, err := s.EnsureConversation(ctx, uid, 777, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	const finalBody = "Draft\n\nDisclosure snapshot"
+	var ids []int64
+	for i := 0; i < 2; i++ {
+		id, err := s.InsertAgentAction(ctx, AgentAction{
+			ConversationID: conv.ID,
+			UserID:         uid,
+			ActionType:     ActionTypeReply,
+			Payload:        "Draft",
+			PolicyDecision: PolicyAllow,
+			Status:         ActionApproved,
+		})
+		if err != nil {
+			t.Fatalf("insert action %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	type result struct {
+		id  int64
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id int64) {
+			defer wg.Done()
+			<-start
+			action, err := s.GetAgentAction(ctx, uid, id)
+			if err != nil {
+				results <- result{id: id, err: err}
+				return
+			}
+			ok, err := s.ReserveAgentActionSend(
+				ctx, *action, int64(100+i), finalBody,
+				1, 1, time.Now().UTC().Add(-time.Minute), true,
+			)
+			results <- result{id: id, ok: ok, err: err}
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winner int64
+	var budgetDenied int
+	for r := range results {
+		switch {
+		case r.ok && r.err == nil:
+			winner = r.id
+		case errors.Is(r.err, ErrAgentSendBudgetExhausted):
+			budgetDenied++
+		default:
+			t.Fatalf("unexpected reservation result for action %d: ok=%v err=%v", r.id, r.ok, r.err)
+		}
+	}
+	if winner == 0 || budgetDenied != 1 {
+		t.Fatalf("winner=%d budgetDenied=%d, want one of each", winner, budgetDenied)
+	}
+	got, err := s.GetAgentAction(ctx, uid, winner)
+	if err != nil {
+		t.Fatalf("get winning action: %v", err)
+	}
+	if got.Status != ActionExecuting || got.SendBody != finalBody || got.SendRandomID == 0 {
+		t.Fatalf("winning action = %+v, want executing with persisted body/random id", got)
+	}
+	gotConv, err := s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns=%d, want one durable reservation", gotConv.AutonomousTurns)
+	}
+	recent, err := s.ListRecentAgentOutgoingTimestamps(ctx, uid, conv.ID, time.Now().UTC().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("list recent reservations: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("recent reservations=%d, want 1", len(recent))
+	}
+
+	// A recovery-time deny is ambiguous: the original RPC may have landed.
+	// Keep both turn and per-minute accounting fail-closed.
+	if ok, err := s.UpdateAgentActionStatus(ctx, uid, winner, ActionExecuting, ActionDenied); err != nil || !ok {
+		t.Fatalf("deny reserved action: ok=%v err=%v", ok, err)
+	}
+	recent, err = s.ListRecentAgentOutgoingTimestamps(ctx, uid, conv.ID, time.Now().UTC().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("list denied reservation: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("denied reservation disappeared from rate accounting: %d", len(recent))
 	}
 }
 
