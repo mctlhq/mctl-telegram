@@ -79,15 +79,28 @@ subprocess it spawns per job, never configured by an operator.
 ## Deployment note
 
 This binary requires the `claude` CLI itself (and its own Anthropic
-credentials) to be present in its runtime environment — that bootstrap
-(image contents, `claude auth login`, credential persistence) is a
-deployment concern tracked under Workstream C of the Communication Agent
-plan, the same way `mctl-claude-remote` documents its own one-time
-`claude auth login` bootstrap. `cmd/agent-worker` itself ships as a second
-binary in the `mctl-telegram` image (see the Dockerfile) but is not wired
-into the default `ENTRYPOINT` — it is a separate deployment
-(`mctl-communication-agent` per the plan), not started by the main
-`mctl-telegram` server process.
+credentials) to be present in its runtime environment — the main
+`mctl-telegram` image (Go-only alpine, `ENTRYPOINT ["mctl-telegram"]`) has
+neither, so `cmd/agent-worker` does **not** ship there. It has its own
+dedicated image, built from `Dockerfile.agent-worker` at the repo root
+(`node:22-slim` + a pinned `@anthropic-ai/claude-code` + this binary, no
+`git`/`gh`/`kubectl`/PR-steward tooling), published as
+`ghcr.io/mctlhq/{component_name}` by the platform's `deploy-service`
+workflow — for C1, `component_name=communication-agent-worker-preview` — see
+`docs/plans/communication-agent.md` Part 1, C1. Claude credential bootstrap
+(`claude auth login`, persistence) for that deployment is tracked in the
+same plan section, the same way `mctl-claude-remote` documents its own
+one-time bootstrap for its unrelated PR-steward deployment.
+
+**Read-only root filesystem requires a writable `/tmp`.** The C1 hardening
+baseline sets `readOnlyRootFilesystem: true` (see the plan's C1 hardening
+baseline), but `internal/agentworker/claudeinvoker.go`'s
+`mcpConfigTempFile` writes the per-job MCP config via `os.CreateTemp`,
+which resolves to `/tmp` (or `$TMPDIR`) by default — with the root
+filesystem read-only and no writable mount there, every job fails
+immediately at that write. The deployment must mount an `emptyDir` at
+`/tmp` (or point `TMPDIR` at one) so this keeps working under the
+hardening baseline; this is not optional, not just a hardening nice-to-have.
 
 ## Testing
 
