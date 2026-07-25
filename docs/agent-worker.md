@@ -79,15 +79,18 @@ subprocess it spawns per job, never configured by an operator.
 ## Deployment note
 
 This binary requires the `claude` CLI itself (and its own Anthropic
-credentials) to be present in its runtime environment — that bootstrap
-(image contents, `claude auth login`, credential persistence) is a
-deployment concern tracked under Workstream C of the Communication Agent
-plan, the same way `mctl-claude-remote` documents its own one-time
-`claude auth login` bootstrap. `cmd/agent-worker` itself ships as a second
-binary in the `mctl-telegram` image (see the Dockerfile) but is not wired
-into the default `ENTRYPOINT` — it is a separate deployment
-(`mctl-communication-agent` per the plan), not started by the main
-`mctl-telegram` server process.
+credentials) to be present in its runtime environment — the main
+`mctl-telegram` image (Go-only alpine, `ENTRYPOINT ["mctl-telegram"]`) has
+neither, so `cmd/agent-worker` does **not** ship there. It has its own
+dedicated image, built from `Dockerfile.agent-worker` at the repo root
+(`node:22-slim` + a pinned `@anthropic-ai/claude-code` + this binary, no
+`git`/`gh`/`kubectl`/PR-steward tooling), published as
+`ghcr.io/mctlhq/{component_name}` by the platform's `deploy-service`
+workflow — for C1, `component_name=communication-agent-worker-preview` — see
+`docs/plans/communication-agent.md` Part 1, C1. Claude credential bootstrap
+(`claude auth login`, persistence) for that deployment is tracked in the
+same plan section, the same way `mctl-claude-remote` documents its own
+one-time bootstrap for its unrelated PR-steward deployment.
 
 ## Testing
 

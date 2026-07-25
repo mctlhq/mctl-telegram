@@ -22,7 +22,12 @@ RUN CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-s -w -X main.version=${APP_VERSION}" \
     -o /mctl-telegram-agent-worker ./cmd/agent-worker
 
-FROM node:22-slim
+# Digest-pinned, not a floating tag — same rationale as the builder stage
+# above and mctl-claude-remote's CLAUDE_CODE_NPM_VERSION pin: rebuilding the
+# same commit must not silently pull a different Node/Debian runtime
+# underneath the pinned Claude Code package. Update deliberately, not as a
+# side effect of an unrelated rebuild.
+FROM node:22-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 
 # Pinned, not floated — same rationale as mctl-claude-remote's pin: a
 # version bump here is a deliberate, tested decision, not an incidental
@@ -36,6 +41,7 @@ LABEL org.opencontainers.image.title="mctl-telegram-agent-worker" \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    tini \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}"
 
@@ -48,4 +54,9 @@ ENV HOME=/home/node
 
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/mctl-telegram-agent-worker"]
+# tini as PID 1 (not the worker binary directly): when a job's deadline
+# fires, ClaudeInvoker.Run kills the direct `claude` process, but the
+# --mcp-serve subprocess it spawned (internal/agentworker/mcpserver.go) can
+# still be running and gets reparented to PID 1. Without an init process to
+# reap it, repeated timeouts accumulate zombies.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mctl-telegram-agent-worker"]
