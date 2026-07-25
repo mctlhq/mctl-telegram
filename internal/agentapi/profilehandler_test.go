@@ -149,6 +149,38 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 }
 
+// TestAdminAgentProfileHandler_NegativeLimitDoesNotLeakIntoResponse guards
+// the response/DB divergence found in review: a negative limit must not be
+// echoed back as "honored" when UpsertAgentProfile is about to silently
+// clamp it to the default.
+func TestAdminAgentProfileHandler_NegativeLimitDoesNotLeakIntoResponse(t *testing.T) {
+	store := newProfileTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"max_msgs_per_minute":-1}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp agentProfileResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.MaxMsgsPerMinute != 2 {
+		t.Errorf("max_msgs_per_minute = %d, want 2 (default) — a negative value must not be echoed as honored", resp.MaxMsgsPerMinute)
+	}
+	stored, err := store.GetAgentProfile(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	if stored.MaxMsgsPerMinute != 2 {
+		t.Errorf("stored max_msgs_per_minute = %d, want 2", stored.MaxMsgsPerMinute)
+	}
+}
+
 // TestAdminAgentProfileHandler_PartialUpdatePreservesOtherFields is the
 // read-modify-write guarantee the admin workflow depends on: flipping just
 // listener_enabled must not reset mode/limits set by an earlier call.

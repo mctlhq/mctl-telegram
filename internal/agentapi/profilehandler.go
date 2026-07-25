@@ -121,13 +121,19 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		if req.DisclosureText != nil {
 			p.DisclosureText = *req.DisclosureText
 		}
-		if req.MaxAutonomousTurns != 0 {
+		// > 0, not != 0: UpsertAgentProfile itself replaces any <= 0 value with
+		// the default (agent_domain.go), but that clamping happens on its own
+		// local copy of p after this handler has already built the response
+		// below. A negative value would sail through here, get silently
+		// snapped to the default in the DB, while the response still echoed
+		// the negative number back to the caller as if it had been honored.
+		if req.MaxAutonomousTurns > 0 {
 			p.MaxAutonomousTurns = req.MaxAutonomousTurns
 		}
-		if req.MaxMsgsPerMinute != 0 {
+		if req.MaxMsgsPerMinute > 0 {
 			p.MaxMsgsPerMinute = req.MaxMsgsPerMinute
 		}
-		if req.MaxReplyChars != 0 {
+		if req.MaxReplyChars > 0 {
 			p.MaxReplyChars = req.MaxReplyChars
 		}
 		if req.IntentAllowlist != nil {
@@ -150,7 +156,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent profile")
 			return
 		}
-		store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "success", "", "")
+		store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "ok", "", "")
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,
 			"mode", p.Mode, "listener_enabled", p.ListenerEnabled, "autopilot_paused", p.AutopilotPaused)
