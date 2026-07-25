@@ -423,8 +423,12 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:policy-changed-redelivery", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
 	req := proposeReplyRequest{
-		ConversationID: conv.ID, JobID: jobID,
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
 		Intent: "discovery", Text: "Thanks for reaching out!",
 	}
 
@@ -444,6 +448,19 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("switch profile to allow: %v", err)
 	}
+	if _, err := h.store.RetryAgentJob(context.Background(), jobID, claimed[0].Attempts, "worker crashed"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC(), jobID,
+	); err != nil {
+		t.Fatalf("unbackoff: %v", err)
+	}
+	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
+	}
+	req.Attempt = reclaimed[0].Attempts
 	replay := h.do("POST", "/actions/propose_reply", req)
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
@@ -486,7 +503,14 @@ func TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall(t *testin
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:notif-fail", conv.ID)
-	req := proposeReplyRequest{ConversationID: conv.ID, JobID: jobID, Text: "Thanks for reaching out!"}
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+		Text: "Thanks for reaching out!",
+	}
 
 	// Force InsertOwnerNotification to fail with a genuine SQL error (not a
 	// validation error) by renaming its target table out from under it —
@@ -917,6 +941,101 @@ func TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification(t *testing.T) 
 	if count != 1 {
 		t.Fatalf("owner_notifications count = %d, want exactly 1", count)
 	}
+}
+
+func TestHandleOwnerFacing_RedeliveryUsesPersistedActionState(t *testing.T) {
+	t.Run("denied action stays denied after kill switch is lifted", func(t *testing.T) {
+		h := newHarness(t)
+		h.seedProfile(db.AgentModeObserve)
+		conv := h.seedConversation(555)
+		jobID := h.seedJob("evt:v1:1:555:notify-denied-replay", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		req := ownerNotifyRequest{
+			JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Original summary",
+		}
+
+		h.srv.GlobalKill = true
+		first := h.do("POST", "/notify/summary", req)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		var original struct {
+			ActionID int64  `json:"action_id"`
+			Decision string `json:"decision"`
+		}
+		decodeBody(t, first, &original)
+		if original.Decision != db.PolicyDeny {
+			t.Fatalf("first decision=%q, want deny", original.Decision)
+		}
+
+		h.srv.GlobalKill = false
+		req.Text = "Changed replay text"
+		replay := h.do("POST", "/notify/summary", req)
+		if replay.Code != http.StatusOK {
+			t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+		}
+		var got struct {
+			ActionID       int64  `json:"action_id"`
+			NotificationID int64  `json:"notification_id"`
+			Decision       string `json:"decision"`
+		}
+		decodeBody(t, replay, &got)
+		if got.ActionID != original.ActionID || got.Decision != db.PolicyDeny || got.NotificationID != 0 {
+			t.Fatalf("replay=%+v, want original denied action without notification", got)
+		}
+	})
+
+	t.Run("executed action keeps original body after kill switch engages", func(t *testing.T) {
+		h := newHarness(t)
+		h.seedProfile(db.AgentModeObserve)
+		conv := h.seedConversation(555)
+		jobID := h.seedJob("evt:v1:1:555:notify-executed-replay", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+		}
+		req := ownerNotifyRequest{
+			JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Original summary",
+		}
+
+		first := h.do("POST", "/notify/summary", req)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		var original struct {
+			ActionID       int64 `json:"action_id"`
+			NotificationID int64 `json:"notification_id"`
+		}
+		decodeBody(t, first, &original)
+
+		h.srv.GlobalKill = true
+		req.Text = "Changed replay text"
+		replay := h.do("POST", "/notify/summary", req)
+		if replay.Code != http.StatusOK {
+			t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+		}
+		var got struct {
+			ActionID       int64 `json:"action_id"`
+			NotificationID int64 `json:"notification_id"`
+		}
+		decodeBody(t, replay, &got)
+		if got != original {
+			t.Fatalf("replay=%+v, want original ids %+v", got, original)
+		}
+
+		notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 10)
+		if err != nil {
+			t.Fatalf("list notifications: %v", err)
+		}
+		if len(notifs) != 1 || notifs[0].Body != "Original summary" {
+			t.Fatalf("notifications=%+v, want one notification with original persisted body", notifs)
+		}
+	})
 }
 
 // TestHandleProposeReply_RejectsMismatchedJobConversation guards against the

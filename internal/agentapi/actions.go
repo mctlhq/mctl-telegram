@@ -121,8 +121,8 @@ func (s *Server) insertStandaloneApprovalWithNotification(ctx context.Context, a
 }
 
 type proposeReplyRequest struct {
-	ConversationID int64  `json:"conversation_id"`
-	JobID          int64  `json:"job_id,omitempty"`
+	ConversationID int64 `json:"conversation_id"`
+	JobID          int64 `json:"job_id,omitempty"`
 	// Attempt must match the job's currently claimed attempt (as returned by
 	// GET /events) when JobID is set — see InsertAgentAction's doc comment.
 	Attempt int    `json:"attempt,omitempty"`
@@ -462,11 +462,32 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		writeJSONError(w, http.StatusInternalServerError, "request failed")
 		return
 	}
-	if status == db.ActionDenied {
-		s.audit(ctx, id.UserID, tool, "denied", strings.Join(result.Reasons, "; "))
+	// A job redelivery may resolve the insert through the
+	// (job_id, action_type) idempotency key after policy or request text has
+	// changed. As with propose_reply above, durable state is authoritative:
+	// never turn a previously denied action into a notification merely
+	// because a kill switch was lifted before the replay, and never report a
+	// previously executed action as freshly denied.
+	persisted, err := s.Store.GetAgentAction(ctx, id.UserID, actionID)
+	if err != nil {
+		logHandlerErr(tool, fmt.Errorf("reload persisted owner-facing action: %w", err))
+		writeJSONError(w, http.StatusInternalServerError, "request failed")
+		return
+	}
+	persistedReasons := result.Reasons
+	if persisted.PolicyReasons != "" {
+		persistedReasons = strings.Split(persisted.PolicyReasons, "; ")
+	}
+	if persisted.Status == db.ActionDenied {
+		s.audit(ctx, id.UserID, tool, "denied", persisted.PolicyReasons)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"action_id": actionID, "decision": string(result.Decision), "reasons": result.Reasons,
+			"action_id": actionID, "decision": persisted.PolicyDecision, "reasons": persistedReasons,
 		})
+		return
+	}
+	if persisted.Status != db.ActionExecuted {
+		logHandlerErr(tool, fmt.Errorf("unexpected persisted owner-facing action status %q", persisted.Status))
+		writeJSONError(w, http.StatusInternalServerError, "request failed")
 		return
 	}
 	// InsertOwnerNotification is idempotent per action_id (see its doc
@@ -474,7 +495,7 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	// InsertAgentAction resolved via the (job_id, action_type) conflict must
 	// not queue a second copy of the same summary/approval request.
 	notifID, err := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
-		UserID: id.UserID, Kind: notificationKind, ActionID: actionID, Body: req.Text,
+		UserID: id.UserID, Kind: notificationKind, ActionID: actionID, Body: persisted.Payload,
 	})
 	if err != nil {
 		logHandlerErr(tool, err)
