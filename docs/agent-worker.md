@@ -92,6 +92,16 @@ workflow — for C1, `component_name=communication-agent-worker-preview` — see
 same plan section, the same way `mctl-claude-remote` documents its own
 one-time bootstrap for its unrelated PR-steward deployment.
 
+**Read-only root filesystem requires a writable `/tmp`.** The C1 hardening
+baseline sets `readOnlyRootFilesystem: true` (see the plan's C1 hardening
+baseline), but `internal/agentworker/claudeinvoker.go`'s
+`mcpConfigTempFile` writes the per-job MCP config via `os.CreateTemp`,
+which resolves to `/tmp` (or `$TMPDIR`) by default — with the root
+filesystem read-only and no writable mount there, every job fails
+immediately at that write. The deployment must mount an `emptyDir` at
+`/tmp` (or point `TMPDIR` at one) so this keeps working under the
+hardening baseline; this is not optional, not just a hardening nice-to-have.
+
 ## Testing
 
 `internal/agentworker` has full unit coverage without ever invoking the real
