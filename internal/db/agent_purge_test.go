@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
@@ -44,6 +45,9 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("notification: %v", err)
 	}
+	if err := s.MarkAgentSentMessage(ctx, uid, 1234, 24*time.Hour); err != nil {
+		t.Fatalf("sent marker: %v", err)
+	}
 	// Seed gotd watermark tables via raw SQL (the typed setters land in a
 	// later PR; the tables themselves exist in this schema).
 	if _, err := s.DB.ExecContext(ctx,
@@ -68,7 +72,7 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 
 	// Every agent table must be empty for this user.
 	tables := []string{
-		"agent_profiles", "incoming_events", "conversations", "job_leads",
+		"agent_profiles", "incoming_events", "agent_sent_messages", "conversations", "job_leads",
 		"agent_actions", "owner_notifications", "tg_update_state", "tg_channel_state",
 	}
 	for _, tbl := range tables {

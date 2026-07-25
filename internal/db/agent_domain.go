@@ -166,6 +166,7 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 	stmts := []string{
 		`DELETE FROM owner_notifications WHERE user_id = $1`,
 		`DELETE FROM agent_actions WHERE user_id = $1`,
+		`DELETE FROM agent_sent_messages WHERE user_id = $1`,
 		`DELETE FROM job_leads WHERE user_id = $1`,
 		`DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)`,
 		`DELETE FROM conversations WHERE user_id = $1`,
@@ -235,9 +236,15 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 // independent of Telegram's own dialog list. The (user_id, peer_tg_id) pair is
 // unique; peers are only ever private users in v1.
 type Conversation struct {
-	UserID           int64
-	ID               int64
-	PeerTGID         int64
+	UserID   int64
+	ID       int64
+	PeerTGID int64
+	// PeerAccessHash is the MTProto access_hash Telegram returned for this
+	// peer, captured from an incoming update's entity data (see
+	// SetConversationPeerAccessHash). 0 ⇒ unknown — messages.* RPCs reject a
+	// zero-access-hash InputPeerUser with PEER_ID_INVALID, so the executor
+	// must have a nonzero value here before it can send at all.
+	PeerAccessHash   int64
 	PeerUsername     string
 	PeerDisplayName  string
 	State            string
@@ -291,11 +298,11 @@ func (s *Store) getConversation(ctx context.Context, where string, args ...any) 
 		lastIn, lastOut   sql.NullTime
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, state,
+		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
 		        autonomous_turns, last_incoming_at, last_agent_reply_at, created_at, updated_at
 		   FROM conversations WHERE `+where,
 		args...,
-	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.State,
+	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
 		&c.AutonomousTurns, &lastIn, &lastOut, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConversationNotFound
@@ -312,6 +319,29 @@ func (s *Store) getConversation(ctx context.Context, where string, args ...any) 
 		c.LastAgentReplyAt = lastOut.Time
 	}
 	return &c, nil
+}
+
+// SetConversationPeerAccessHash persists the MTProto access_hash Telegram
+// returned for this peer, captured from an incoming update's entity data
+// (internal/agent/listener.ExtractMessage). messages.* RPCs reject an
+// InputPeerUser carrying a zero access_hash with PEER_ID_INVALID — see
+// internal/telegram/messages.go's seedPeerCache doc comment for the
+// underlying MTProto rule — so the executor cannot send at all until this
+// has run at least once for a conversation. accessHash == 0 is a no-op: the
+// listener does not always have a usable one (e.g. a Telegram "min" user's
+// hash works only for limited contexts, never for messages.*), and a zero
+// value must never overwrite an already-known good hash.
+func (s *Store) SetConversationPeerAccessHash(ctx context.Context, userID, peerTGID, accessHash int64) error {
+	if accessHash == 0 {
+		return nil
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE conversations SET peer_access_hash = $1, updated_at = $2 WHERE user_id = $3 AND peer_tg_id = $4`,
+		accessHash, time.Now().UTC(), userID, peerTGID,
+	); err != nil {
+		return fmt.Errorf("set conversation peer access hash: %w", err)
+	}
+	return nil
 }
 
 // SetConversationState transitions a conversation to the given state.
@@ -429,6 +459,80 @@ func (s *Store) InsertConversationMessage(ctx context.Context, userID int64, m C
 		return 0, fmt.Errorf("insert conversation message: %w", err)
 	}
 	return id, nil
+}
+
+// ListRecentAgentOutgoingTimestamps returns timestamps for completed sends
+// plus durable execution reservations newer than `since` —
+// policy.Input.RecentAgentSends' MaxMsgsPerMinute input. Executing rows count
+// because the RPC may already have reached Telegram; denied rows with a
+// random_id count because a recovery-time policy change cannot prove that the
+// original RPC did not land. This fail-closed accounting survives crashes and
+// prevents another replica from spending the same rate budget.
+//
+// A dedicated,
+// correctly-scoped query rather than callers fetching
+// ListConversationMessages' top-N-of-any-direction page and filtering: a
+// Codex finding on #307 caught that both internal/agentapi's and
+// internal/agent/executor's recentAgentSends helpers did exactly that
+// filter-after-fetch, so 50+ newer messages of ANY direction (inbound,
+// owner takeover, another agent reply) arriving after a real agent send
+// could push it out of that fixed-size page entirely — RecentAgentSends
+// would then silently miss it, undercounting the rate limit and letting
+// another action send when MaxMsgsPerMinute should have blocked it.
+func (s *Store) ListRecentAgentOutgoingTimestamps(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
+	return s.listRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since, 0)
+}
+
+// ListRecentAgentOutgoingTimestampsExcludingAction is the crash-recovery
+// variant: the action being retried already owns one execution reservation
+// and must not count itself as a newer competing send during policy
+// re-evaluation.
+func (s *Store) ListRecentAgentOutgoingTimestampsExcludingAction(
+	ctx context.Context,
+	userID, conversationID int64,
+	since time.Time,
+	excludeActionID int64,
+) ([]time.Time, error) {
+	return s.listRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since, excludeActionID)
+}
+
+func (s *Store) listRecentAgentOutgoingTimestamps(
+	ctx context.Context,
+	userID, conversationID int64,
+	since time.Time,
+	excludeActionID int64,
+) ([]time.Time, error) {
+	if _, err := s.GetConversation(ctx, userID, conversationID); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT sent_at FROM (
+		    SELECT created_at AS sent_at
+		      FROM conversation_messages
+		     WHERE conversation_id = $1 AND direction = $2 AND created_at > $3
+		    UNION ALL
+		    SELECT updated_at AS sent_at
+		      FROM agent_actions
+		     WHERE conversation_id = $1 AND status IN ($4, $5)
+		       AND send_random_id IS NOT NULL AND updated_at > $3
+		       AND ($6 = 0 OR id <> $6)
+		  ) reserved_and_sent
+		  ORDER BY sent_at`,
+		conversationID, DirectionAgentOutgoing, since, ActionExecuting, ActionDenied, excludeActionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list recent agent outgoing timestamps: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []time.Time
+	for rows.Next() {
+		var t time.Time
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan agent outgoing timestamp: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // ListConversationMessages returns the newest `limit` messages of a

@@ -63,6 +63,15 @@ func (s *Server) handleRecruiterProfile(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusNotImplemented, "owner profile not configured")
 		return
 	}
+	if s.ProfileOwnerTGID == 0 || id.TelegramID != s.ProfileOwnerTGID {
+		// This deployment's mounted profile belongs to one specific account
+		// (see ProfileOwnerTGID's doc comment on Server); an agent token
+		// minted for any other account this multi-tenant service hosts —
+		// even a legitimately admin-issued one — must not be able to read
+		// it off this endpoint.
+		writeJSONError(w, http.StatusForbidden, "owner profile not available for this account")
+		return
+	}
 	profile, err := s.Profile.PublicProfile(peerTGID)
 	if err != nil {
 		logHandlerErr("get_recruiter_profile", err)

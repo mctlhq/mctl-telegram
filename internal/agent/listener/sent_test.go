@@ -46,6 +46,34 @@ func TestOnMessage_ProgrammaticSendEchoDoesNotTriggerTakeover(t *testing.T) {
 	}
 }
 
+func TestOnMessage_ProgrammaticSendMarkerSurvivesListenerRestart(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if _, err := store.EnsureConversation(ctx, acct.userID, recruit, "anna_hr", "Anna"); err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	l.MarkSent(acct.userID, 779)
+	restarted := New(store, l.Queue, nil, nil)
+	echo := &tg.Message{
+		ID:      779,
+		Out:     true,
+		PeerID:  &tg.PeerUser{UserID: recruit},
+		Message: "agent-generated reply after restart",
+	}
+	if err := restarted.onMessage(ctx, acct, ents(), echo, false); err != nil {
+		t.Fatalf("programmatic echo after restart: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.State != db.ConversationActive {
+		t.Fatalf("programmatic echo after restart changed state to %q", conv.State)
+	}
+}
+
 func TestOnMessage_UnmarkedOwnerOutgoingStillTriggersTakeover(t *testing.T) {
 	ctx := context.Background()
 	l, store, acct := newTestListener(t, nil)

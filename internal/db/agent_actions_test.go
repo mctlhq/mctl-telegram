@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -100,6 +102,227 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
 	}); err != nil {
 		t.Fatalf("reuse released code: %v", err)
+	}
+}
+
+// TestRecordAgentActionSent_AtomicWithTurnAndHistory covers a Codex finding
+// on #307: before RecordAgentActionSent existed, the executor called
+// SetAgentActionExecuted, IncrementAutonomousTurns, and
+// InsertConversationMessage as three separate, independently-committing
+// statements — a crash between the first and the other two left the action
+// terminal (`executed`, so no recovery sweep ever revisits it) while
+// under-counting the turn budget and rate-limit history for a send that
+// genuinely happened. This test proves the all-or-nothing property directly:
+// a lost CAS (row not in `executing`) must leave the conversation's turn
+// counter and message history completely untouched, not partially updated.
+func TestRecordAgentActionSent_AtomicWithTurnAndHistory(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	id, err := s.InsertAgentAction(ctx, AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: ActionTypeReply,
+		Payload: "Thanks!", PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Lost-CAS case: the row is still pending_approval, never reached
+	// executing, so the CAS inside RecordAgentActionSent must fail — and
+	// crucially, NEITHER the turn counter NOR conversation_messages may be
+	// touched even though this call reaches the point where those writes
+	// would otherwise happen.
+	ok, err := s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "should not be recorded")
+	if err != nil {
+		t.Fatalf("record sent (lost CAS): %v", err)
+	}
+	if ok {
+		t.Fatal("RecordAgentActionSent succeeded on a row that was never executing")
+	}
+	gotConv, err := s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 0 {
+		t.Fatalf("autonomous_turns = %d after a lost CAS, want 0 (no partial write)", gotConv.AutonomousTurns)
+	}
+	msgs, err := s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("conversation_messages = %d rows after a lost CAS, want 0 (no partial write)", len(msgs))
+	}
+
+	// Now the real transition: approved -> executing, then a successful
+	// RecordAgentActionSent must flip the action AND increment the turn AND
+	// insert the history row, all together.
+	if ok, err := s.UpdateAgentActionStatus(ctx, uid, id, ActionPendingApproval, ActionApproved); err != nil || !ok {
+		t.Fatalf("approve: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.BeginExecutingAgentAction(ctx, uid, id, 42); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+	ok, err = s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "Thanks! I'm an AI assistant.")
+	if err != nil {
+		t.Fatalf("record sent: %v", err)
+	}
+	if !ok {
+		t.Fatal("RecordAgentActionSent failed on a row that was executing")
+	}
+	action, err := s.GetAgentAction(ctx, uid, id)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != ActionExecuted || action.ExecutedTGMessageID != 999 {
+		t.Fatalf("action = %+v, want executed/999", action)
+	}
+	gotConv, err = s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns = %d, want 1", gotConv.AutonomousTurns)
+	}
+	msgs, err = s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Direction != DirectionAgentOutgoing || msgs[0].TGMessageID != 999 {
+		t.Fatalf("conversation messages = %+v, want one agent_outgoing row with tg_message_id=999", msgs)
+	}
+
+	// A second call (crash-recovery double call) must lose the CAS again and
+	// must NOT double-increment the turn counter or insert a second row.
+	ok, err = s.RecordAgentActionSent(ctx, uid, id, conv.ID, 999, "Thanks! I'm an AI assistant.")
+	if err != nil {
+		t.Fatalf("record sent (double call): %v", err)
+	}
+	if ok {
+		t.Fatal("RecordAgentActionSent succeeded on an already-executed row")
+	}
+	gotConv, err = s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns = %d after a double call, want still 1", gotConv.AutonomousTurns)
+	}
+	msgs, err = s.ListConversationMessages(ctx, uid, conv.ID, 10)
+	if err != nil {
+		t.Fatalf("list conversation messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("conversation_messages = %d rows after a double call, want still 1", len(msgs))
+	}
+}
+
+func TestReserveAgentActionSend_SerializesBudgetAndPersistsExactBody(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "reservation-owner")
+	conv, err := s.EnsureConversation(ctx, uid, 777, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	const finalBody = "Draft\n\nDisclosure snapshot"
+	var ids []int64
+	for i := 0; i < 2; i++ {
+		id, err := s.InsertAgentAction(ctx, AgentAction{
+			ConversationID: conv.ID,
+			UserID:         uid,
+			ActionType:     ActionTypeReply,
+			Payload:        "Draft",
+			PolicyDecision: PolicyAllow,
+			Status:         ActionApproved,
+		})
+		if err != nil {
+			t.Fatalf("insert action %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	type result struct {
+		id  int64
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id int64) {
+			defer wg.Done()
+			<-start
+			action, err := s.GetAgentAction(ctx, uid, id)
+			if err != nil {
+				results <- result{id: id, err: err}
+				return
+			}
+			ok, err := s.ReserveAgentActionSend(
+				ctx, *action, int64(100+i), finalBody,
+				1, 1, time.Now().UTC().Add(-time.Minute), true,
+			)
+			results <- result{id: id, ok: ok, err: err}
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winner int64
+	var budgetDenied int
+	for r := range results {
+		switch {
+		case r.ok && r.err == nil:
+			winner = r.id
+		case errors.Is(r.err, ErrAgentSendBudgetExhausted):
+			budgetDenied++
+		default:
+			t.Fatalf("unexpected reservation result for action %d: ok=%v err=%v", r.id, r.ok, r.err)
+		}
+	}
+	if winner == 0 || budgetDenied != 1 {
+		t.Fatalf("winner=%d budgetDenied=%d, want one of each", winner, budgetDenied)
+	}
+	got, err := s.GetAgentAction(ctx, uid, winner)
+	if err != nil {
+		t.Fatalf("get winning action: %v", err)
+	}
+	if got.Status != ActionExecuting || got.SendBody != finalBody || got.SendRandomID == 0 {
+		t.Fatalf("winning action = %+v, want executing with persisted body/random id", got)
+	}
+	gotConv, err := s.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if gotConv.AutonomousTurns != 1 {
+		t.Fatalf("autonomous_turns=%d, want one durable reservation", gotConv.AutonomousTurns)
+	}
+	recent, err := s.ListRecentAgentOutgoingTimestamps(ctx, uid, conv.ID, time.Now().UTC().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("list recent reservations: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("recent reservations=%d, want 1", len(recent))
+	}
+
+	// A recovery-time deny is ambiguous: the original RPC may have landed.
+	// Keep both turn and per-minute accounting fail-closed.
+	if ok, err := s.UpdateAgentActionStatus(ctx, uid, winner, ActionExecuting, ActionDenied); err != nil || !ok {
+		t.Fatalf("deny reserved action: ok=%v err=%v", ok, err)
+	}
+	recent, err = s.ListRecentAgentOutgoingTimestamps(ctx, uid, conv.ID, time.Now().UTC().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("list denied reservation: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("denied reservation disappeared from rate accounting: %d", len(recent))
 	}
 }
 
@@ -399,6 +622,119 @@ func TestOwnerNotifications_Lifecycle(t *testing.T) {
 		`SELECT id FROM owner_notifications WHERE id = $1 AND status = $2`, id, NotificationSent,
 	).Scan(new(int64)); err != nil {
 		t.Fatalf("sent notification was overwritten: %v", err)
+	}
+}
+
+// TestListPendingOwnerNotifications_ExcludesLeasedRows covers a Codex
+// finding on #307: a currently-claimed row (e.g. one another replica or the
+// same sweep tick's own failed-but-still-leased attempt is holding) used to
+// still occupy a slot in the oldest-N batch, so a run of permanently-failing
+// notifications could crowd out a healthy account's newer, deliverable one
+// for as long as their claims kept getting re-issued. The leased row must
+// not be returned while its lease is active, and must reappear once it
+// expires.
+func TestListPendingOwnerNotifications_ExcludesLeasedRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+
+	leasedID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "stuck",
+	})
+	if err != nil {
+		t.Fatalf("insert leased: %v", err)
+	}
+	healthyID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "healthy",
+	})
+	if err != nil {
+		t.Fatalf("insert healthy: %v", err)
+	}
+
+	_, claimed, err := s.ClaimOwnerNotification(ctx, uid, leasedID, 12345, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("claim leased row: claimed=%v err=%v", claimed, err)
+	}
+
+	pending, err := s.ListPendingOwnerNotifications(ctx, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != healthyID {
+		t.Fatalf("pending = %+v, want only the healthy row (id=%d) while the other is leased", pending, healthyID)
+	}
+
+	// Force the lease to have expired and confirm the row becomes visible
+	// again — this is not a permanent exclusion, only a temporary one.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET claimed_until = $1 WHERE id = $2`,
+		time.Now().Add(-time.Minute).UTC(), leasedID,
+	); err != nil {
+		t.Fatalf("force-expire lease: %v", err)
+	}
+	pending, err = s.ListPendingOwnerNotifications(ctx, 50)
+	if err != nil {
+		t.Fatalf("list after expiry: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending after expiry = %d rows, want 2", len(pending))
+	}
+}
+
+// TestClaimOwnerNotification_ReusesPersistedRandomIDOnRetry covers a Codex
+// finding on #307: the claim lease alone only protects against two
+// REPLICAS racing the same row concurrently — it does nothing for a single
+// replica that crashes AFTER SendToSelf reaches Telegram but BEFORE
+// MarkOwnerNotificationSent commits. Without a persisted random_id, the
+// retry (once the lease expires) would call SendToSelf again with a FRESH
+// random_id, and Telegram has no way to dedup that against the first,
+// genuinely-delivered send. The second claim (after the first lease
+// expires without ever completing) must return the SAME random_id as the
+// first, not the new candidate it was offered.
+func TestClaimOwnerNotification_ReusesPersistedRandomIDOnRetry(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	notifID, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationSummary, Body: "hello",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	firstRandomID, claimed, err := s.ClaimOwnerNotification(ctx, uid, notifID, 111, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim: claimed=%v err=%v", claimed, err)
+	}
+	if firstRandomID != 111 {
+		t.Fatalf("first claim random id = %d, want the candidate 111 (nothing persisted yet)", firstRandomID)
+	}
+
+	// Simulate a crash: the lease expires without SendToSelf's outcome ever
+	// being recorded (no MarkOwnerNotificationSent/Failed call).
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE owner_notifications SET claimed_until = $1 WHERE id = $2`,
+		time.Now().Add(-time.Minute).UTC(), notifID,
+	); err != nil {
+		t.Fatalf("force-expire lease: %v", err)
+	}
+
+	secondRandomID, claimed, err := s.ClaimOwnerNotification(ctx, uid, notifID, 222, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("second claim: claimed=%v err=%v", claimed, err)
+	}
+	if secondRandomID != firstRandomID {
+		t.Fatalf("second claim random id = %d, want the original %d reused (not the new candidate 222)", secondRandomID, firstRandomID)
+	}
+
+	var stored sql.NullInt64
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT random_id FROM owner_notifications WHERE id = $1`, notifID,
+	).Scan(&stored); err != nil {
+		t.Fatalf("select stored random_id: %v", err)
+	}
+	if !stored.Valid || stored.Int64 != firstRandomID {
+		t.Fatalf("stored random_id = %+v, want %d", stored, firstRandomID)
 	}
 }
 

@@ -18,7 +18,10 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
-const sentMarkerTTL = 2 * time.Minute
+const (
+	sentMarkerTTL        = 2 * time.Minute
+	durableSentMarkerTTL = 24 * time.Hour
+)
 
 type account struct {
 	userID int64
@@ -60,12 +63,21 @@ func (l *Listener) MarkSent(userID, messageID int64) {
 	if userID <= 0 || messageID <= 0 {
 		return
 	}
+	if err := l.Store.MarkAgentSentMessage(context.Background(), userID, messageID, durableSentMarkerTTL); err != nil {
+		slog.Error("persist agent sent marker failed", "user_id", userID, "message_id", messageID, "err", err)
+	}
 	l.sentMessages.Store(sentMessageKey{userID: userID, messageID: messageID}, time.Now())
 }
 
-func (l *Listener) consumeSent(userID, messageID int64) bool {
+func (l *Listener) consumeSent(ctx context.Context, userID, messageID int64) bool {
 	key := sentMessageKey{userID: userID, messageID: messageID}
 	v, ok := l.sentMessages.LoadAndDelete(key)
+	durable, err := l.Store.ConsumeAgentSentMessage(ctx, userID, messageID, durableSentMarkerTTL)
+	if err != nil {
+		slog.Error("consume agent sent marker failed", "user_id", userID, "message_id", messageID, "err", err)
+	} else if durable {
+		return true
+	}
 	if !ok {
 		return false
 	}
@@ -160,7 +172,7 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 	// Programmatic sends made through telegram.SendMessage are echoed back as
 	// ordinary Out messages on the same user session. Consume their marker before
 	// extraction so only a genuinely human outgoing message triggers takeover.
-	if msg.Out && l.consumeSent(acct.userID, int64(msg.ID)) {
+	if msg.Out && l.consumeSent(ctx, acct.userID, int64(msg.ID)) {
 		return nil
 	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
@@ -181,6 +193,53 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		conv, err := l.Store.EnsureConversation(ctx, acct.userID, ex.Event.ChatTGID, username, displayName)
 		if err != nil {
 			return fmt.Errorf("ensure conversation: %w", err)
+		}
+		// A no-op when ex.SenderAccessHash is 0 (see the method's doc
+		// comment) — every inbound message from a peer we can still resolve
+		// carries a usable hash, so this reaches a working value within one
+		// exchange even for a conversation that predates this fix.
+		if err := l.Store.SetConversationPeerAccessHash(ctx, acct.userID, ex.Event.ChatTGID, ex.SenderAccessHash); err != nil {
+			return fmt.Errorf("set conversation peer access hash: %w", err)
+		}
+		if ex.Event.Kind == db.EventKindMessageEdit {
+			// gotd delivers updates at least once — the SAME edit can arrive
+			// again later (a reconnect/gap-recovery replay), and Queue.Ingest
+			// already treats that redelivery as a no-op via its unique
+			// event_id constraint. But this deny call has no such dedup of
+			// its own: a Codex finding on #307 caught that a redelivered
+			// edit re-runs DenyPendingActionsForConversation, which would
+			// deny the FRESH, correctly-edited proposal the FIRST delivery's
+			// job already produced — while the redelivered Ingest is a
+			// no-op and creates nothing to replace it, leaving the
+			// conversation with no valid pending action at all. Checking
+			// whether this exact event_id was already ingested — the same
+			// idempotency check EventKindOwnerOutgoing below already uses —
+			// makes the whole block (deny + ingest) a no-op together on a
+			// redelivery, not just the ingest half.
+			if _, err := l.Store.GetIncomingEvent(ctx, acct.userID, ex.Event.EventID); err == nil {
+				return nil
+			} else if !errors.Is(err, db.ErrIncomingEventNotFound) {
+				return fmt.Errorf("check existing edit event: %w", err)
+			}
+			// Must run BEFORE Queue.Ingest below, not after: Ingest publishes
+			// the new job as immediately claimable, and Ingest/this deny are
+			// two separate transactions, not one atomic unit. Denying AFTER
+			// publishing left a window where a poller could claim that job,
+			// propose a fresh (correctly-edited) reply, and have this same
+			// deny call catch that brand-new action too — ordering, not a
+			// synchronization primitive, is what closes the window. A draft
+			// the agent already proposed from the pre-edit text must not go
+			// out unchanged — deny it and let the new job (enqueued below,
+			// carrying the edited event under its own :e<ts> event id)
+			// produce a fresh proposal from the current text. Actions
+			// already `executing` are left alone by design (see
+			// DenyPendingActionsForConversation) — deliberately not treated
+			// as an error here: a message edit racing an in-flight send is
+			// expected, not exceptional.
+			if _, err := l.Store.DenyPendingActionsForSourceMessage(ctx, acct.userID, conv.ID,
+				ex.Event.MessageID, "source message edited"); err != nil {
+				return fmt.Errorf("deny actions for edited message: %w", err)
+			}
 		}
 		// Queue.Ingest atomically commits the event, job, and conversation's
 		// last_incoming_at timestamp. Duplicate gotd redeliveries are a no-op and
@@ -206,6 +265,29 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		if err == nil {
 			if err := l.Store.SetConversationState(ctx, acct.userID, conv.ID, db.ConversationTakenOver); err != nil {
 				return fmt.Errorf("set taken over: %w", err)
+			}
+			// control.Router.handleTakeover (the explicit /mctl takeover
+			// command) has always denied pending actions in the same breath
+			// as the state transition — this automatically-detected
+			// takeover path (the owner just replying directly, without
+			// typing a command) did not, which a Codex finding on #307
+			// caught as a real race: executor.send reads the conversation
+			// and evaluates policy, then performs a separate approved→
+			// executing CAS a few lines later; if this DenyPendingActionsFor-
+			// Conversation call had never run at all, that CAS could land in
+			// the gap and still succeed, sending the agent's reply on top of
+			// the owner's own message. Calling it here closes that gap the
+			// same way handleTakeover's does: the CAS and this UPDATE
+			// contend on the SAME row's status column, so whichever commits
+			// first wins and the other's WHERE clause simply stops matching
+			// — ordinary optimistic concurrency, no new locking primitive
+			// needed. Best-effort like handleTakeover's isn't (that one
+			// propagates the error) — but here a failure must not block
+			// insertAuditEvent below from ever running, or this idempotent
+			// dedup check would keep re-attempting the same takeover
+			// detection forever.
+			if _, err := l.Store.DenyPendingActionsForConversation(ctx, acct.userID, conv.ID, "owner sent a message directly"); err != nil {
+				slog.Warn("agent listener: deny pending actions on auto-detected takeover failed", "user_id", acct.userID, "conversation_id", conv.ID, "err", err)
 			}
 		}
 		return l.insertAuditEvent(ctx, ex.Event)

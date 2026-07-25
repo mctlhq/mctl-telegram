@@ -1,12 +1,27 @@
 package telegram
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/tg"
 )
+
+func TestResolveUserPeerFromDialogs_UsesHashBearingCache(t *testing.T) {
+	cache := NewPeerCache()
+	cache.Set(7, "user:42", &tg.InputPeerUser{UserID: 42, AccessHash: 9999})
+	// A nil client is intentional: a valid cache hit must avoid a network
+	// lookup entirely.
+	peer, err := ResolveUserPeerFromDialogs(context.Background(), nil, 42, cache, 7)
+	if err != nil {
+		t.Fatalf("resolve cached peer: %v", err)
+	}
+	if peer.UserID != 42 || peer.AccessHash != 9999 {
+		t.Fatalf("peer=%+v, want cached hash-bearing InputPeerUser", peer)
+	}
+}
 
 func TestPeerCache_SetAndGet(t *testing.T) {
 	pc := NewPeerCache()

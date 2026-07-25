@@ -61,6 +61,42 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 	return out, nil
 }
 
+// ResolveUserPeerFromDialogs recovers a hash-bearing InputPeerUser when a
+// short update did not include Entities.Users. UpdateShortMessage commonly
+// has exactly that shape, so relying only on update-local entities leaves a
+// zero access_hash and makes messages.sendMessage fail with PEER_ID_INVALID.
+//
+// The most recent 200 dialogs are sufficient for an actively messaging peer;
+// the result is also seeded into the shared cache and persisted by the caller.
+func ResolveUserPeerFromDialogs(ctx context.Context, c *telegram.Client, peerTGID int64, cache *PeerCache, userID int64) (*tg.InputPeerUser, error) {
+	peerSpec := fmt.Sprintf("user:%d", peerTGID)
+	if cache != nil {
+		if cached, ok := cache.Get(userID, peerSpec); ok {
+			if peer, ok := cached.(*tg.InputPeerUser); ok && peer.AccessHash != 0 {
+				return peer, nil
+			}
+		}
+	}
+	res, err := c.API().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		Limit:      200,
+		OffsetPeer: &tg.InputPeerEmpty{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+	}
+	users, chats, _ := decodeDialogsResult(res)
+	seedPeerCache(cache, userID, users, chats)
+	u, ok := users[peerTGID]
+	if !ok || u == nil || u.Min || u.AccessHash == 0 {
+		return nil, fmt.Errorf("user:%d has no resolvable access hash in recent dialogs", peerTGID)
+	}
+	peer := &tg.InputPeerUser{UserID: peerTGID, AccessHash: u.AccessHash}
+	if cache != nil {
+		cache.Set(userID, peerSpec, peer)
+	}
+	return peer, nil
+}
+
 func decodeDialogsResult(r tg.MessagesDialogsClass) (users map[int64]*tg.User, chats map[int64]tg.ChatClass, dialogs []tg.DialogClass) {
 	users = make(map[int64]*tg.User)
 	chats = make(map[int64]tg.ChatClass)

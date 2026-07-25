@@ -93,6 +93,24 @@ type Registry struct {
 	// counted in AgentJobsTotal{status="dead_letter"}; kept as a dedicated
 	// counter because it is the primary alerting signal.
 	AgentDeadLetterTotal prometheus.Counter
+	// AgentActionsExecutingStuck is the count of actions the executor's
+	// crash-recovery sweep found in `executing` past its grace window on the
+	// most recent tick. Should stay ~0 given send_random_id-based retry
+	// (see internal/agent/executor) — any nonzero reading is a real
+	// incident (a send that is failing on every retry), not expected noise.
+	AgentActionsExecutingStuck prometheus.Gauge
+	// AgentApprovalLatencySeconds measures owner approve -> executed
+	// latency, i.e. how long a reply sits waiting for a human before it
+	// actually goes out.
+	AgentApprovalLatencySeconds prometheus.Histogram
+	// AgentExecutorRestartsTotal counts actions observed stuck in executing
+	// for the FIRST time (not every sweep that still finds them stuck) — a
+	// proxy for "the executor process restarted mid-send" since that is the
+	// only way an action reaches executing and stays there past the grace
+	// window. Counting by first-observation (not sweep count) keeps a
+	// single persistently-failing retry from inflating this past the actual
+	// number of distinct restart episodes (Codex finding on #307).
+	AgentExecutorRestartsTotal prometheus.Counter
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -248,6 +266,22 @@ func New() *Registry {
 		Help: "Total communication-agent jobs moved to dead_letter after exhausting their attempts.",
 	})
 
+	r.AgentActionsExecutingStuck = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_agent_actions_executing_stuck",
+		Help: "Communication-agent actions found stuck in executing past the crash-recovery grace window on the most recent sweep. Should stay ~0.",
+	})
+
+	r.AgentApprovalLatencySeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "mctl_agent_approval_latency_seconds",
+		Help:    "Time from owner approval to a communication-agent reply actually being sent (executed).",
+		Buckets: []float64{.5, 1, 2, 5, 10, 30, 60, 120, 300},
+	})
+
+	r.AgentExecutorRestartsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_agent_executor_restarts_total",
+		Help: "Actions observed stuck in executing for the first time (not counted again on later sweeps while still stuck).",
+	})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
@@ -273,6 +307,9 @@ func New() *Registry {
 		r.AgentEventsReceivedTotal,
 		r.AgentJobsTotal,
 		r.AgentDeadLetterTotal,
+		r.AgentActionsExecutingStuck,
+		r.AgentApprovalLatencySeconds,
+		r.AgentExecutorRestartsTotal,
 	)
 	return r
 }

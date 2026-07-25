@@ -79,6 +79,31 @@ func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	}
 }
 
+// TestOnMessage_PersistsPeerAccessHash guards against the P1 found in
+// round-4 review: without this, the executor's send path always built a
+// zero-access-hash InputPeerUser and every reply failed with
+// PEER_ID_INVALID. An incoming message's entity data is the only place this
+// hash is ever available, so the listener must capture and persist it onto
+// the conversation row.
+func TestOnMessage_PersistsPeerAccessHash(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", AccessHash: 555111333})
+
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.PeerAccessHash != 555111333 {
+		t.Fatalf("PeerAccessHash = %d, want 555111333", conv.PeerAccessHash)
+	}
+}
+
 func installFailingJobTrigger(t *testing.T, store *db.Store) {
 	t.Helper()
 	if _, err := store.DB.ExecContext(context.Background(), `
@@ -150,6 +175,49 @@ func TestPersist_OwnerOutgoingTakesOverConversation(t *testing.T) {
 	}
 	if err := l.persist(ctx, acct, ex); err != nil {
 		t.Fatalf("duplicate owner event: %v", err)
+	}
+}
+
+// TestPersist_OwnerOutgoingDeniesPendingActions covers a Codex finding on
+// #307: the automatically-detected takeover path (the owner just replying
+// directly, with no /mctl command) set the conversation to taken_over but,
+// unlike the explicit /mctl takeover command's handler, never denied
+// pending actions — leaving a race where executor.send could read the
+// conversation before this transition and still win its approved→executing
+// CAS afterward, sending the agent's reply on top of the owner's own
+// message. An approved action for the conversation must now be denied the
+// same way the explicit command already does.
+func TestPersist_OwnerOutgoingDeniesPendingActions(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	conv, err := store.EnsureConversation(ctx, acct.userID, recruit, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Sure, let's schedule a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed approved action: %v", err)
+	}
+
+	ex := Extracted{Event: db.IncomingEvent{
+		EventID: "evt:v1:100:555:100", UserID: acct.userID,
+		Kind: db.EventKindOwnerOutgoing, ChatTGID: recruit,
+		SenderTGID: acct.tgID, MessageID: 100, Body: "I'll handle this",
+	}}
+	if err := l.persist(ctx, acct, ex); err != nil {
+		t.Fatalf("persist owner outgoing: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied (automatic takeover must deny pending actions like /mctl takeover does)", action.Status)
 	}
 }
 
@@ -226,5 +294,231 @@ func TestPersist_SavedCommandRouterFailureIsRetriedWithoutAuditDedup(t *testing.
 	}
 	if events != 1 {
 		t.Fatalf("successful command audit rows = %d, want 1", events)
+	}
+}
+
+// TestPersist_MessageEditDeniesPendingAction is A-PR7's crash-recovery
+// spec's "edit invalidates the draft" requirement: a pending_approval (or
+// proposed/approved) action for a conversation must be denied when the
+// sender edits the message the draft was built from, so a stale draft
+// answering pre-edit text can never go out unchanged.
+func TestPersist_MessageEditDeniesPendingAction(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	var sourceJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 0, original.Message),
+	).Scan(&sourceJobID); err != nil {
+		t.Fatalf("get source job: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft answering the original text", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "EDIT01",
+	})
+	if err != nil {
+		t.Fatalf("seed pending action: %v", err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("action status = %q, want denied after the source message was edited", action.Status)
+	}
+
+	// The edit itself still enqueues its own job under a distinct event id,
+	// so a fresh proposal can be produced from the current text.
+	var jobCount int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs WHERE conversation_id=$1`, conv.ID).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 2 {
+		t.Fatalf("job count = %d, want 2 (original + edit)", jobCount)
+	}
+}
+
+func TestPersist_MessageEditKeepsDraftFromLaterMessage(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna"})
+
+	older := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Older text", Date: 1000}
+	later := &tg.Message{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Current question", Date: 1001}
+	if err := l.onMessage(ctx, acct, entities, older, false); err != nil {
+		t.Fatalf("onMessage older: %v", err)
+	}
+	if err := l.onMessage(ctx, acct, entities, later, false); err != nil {
+		t.Fatalf("onMessage later: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	var laterJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 43, 0, later.Message),
+	).Scan(&laterJobID); err != nil {
+		t.Fatalf("get later source job: %v", err)
+	}
+	laterActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: laterJobID, ConversationID: conv.ID, UserID: acct.userID,
+		ActionType: db.ActionTypeReply, Payload: "Answer to current question",
+		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionPendingApproval,
+		ApprovalCode: "LATER1",
+	})
+	if err != nil {
+		t.Fatalf("seed later action: %v", err)
+	}
+
+	editedOlder := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited older text", Date: 1000}
+	editedOlder.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, editedOlder, true); err != nil {
+		t.Fatalf("edit older message: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, laterActionID)
+	if err != nil {
+		t.Fatalf("get later action: %v", err)
+	}
+	if action.Status != db.ActionPendingApproval {
+		t.Fatalf("later action status=%q, want pending_approval", action.Status)
+	}
+}
+
+// TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated guards
+// against a Codex finding on #307: gotd delivers updates at least once, so
+// the SAME edit can arrive again later (a reconnect/gap-recovery replay).
+// Queue.Ingest already treats that redelivery as a no-op via its unique
+// event_id constraint, but the deny call had no such dedup of its own — a
+// redelivered edit would re-deny whatever fresh, correctly-edited proposal
+// the FIRST delivery's job already produced, while the redelivered Ingest
+// creates nothing to replace it. Simulated here by delivering the identical
+// edited message twice, seeding a fresh proposal in between (standing in
+// for what the first delivery's job would have produced).
+func TestPersist_RedeliveredEditDoesNotDenyTheFreshProposalItCreated(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit (first delivery): %v", err)
+	}
+
+	// Stands in for the fresh, correctly-edited proposal the edit's own job
+	// would go on to produce.
+	var editedJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 2000, edited.Message),
+	).Scan(&editedJobID); err != nil {
+		t.Fatalf("get edited source job: %v", err)
+	}
+	freshActionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: editedJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft answering the EDITED text", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionPendingApproval, ApprovalCode: "EDIT02",
+	})
+	if err != nil {
+		t.Fatalf("seed fresh proposal: %v", err)
+	}
+
+	// Redelivery: the identical edited message, same ID/text/edit-date —
+	// gotd would produce the exact same event_id for this.
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit (redelivery): %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, freshActionID)
+	if err != nil {
+		t.Fatalf("get fresh action: %v", err)
+	}
+	if action.Status != db.ActionPendingApproval {
+		t.Fatalf("fresh proposal status = %q, want still pending_approval — a redelivered edit must not deny the response it already produced", action.Status)
+	}
+
+	var jobCount int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs WHERE conversation_id=$1`, conv.ID).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 2 {
+		t.Fatalf("job count = %d, want 2 (original + edit) — the redelivery must not enqueue a third job", jobCount)
+	}
+}
+
+// TestPersist_MessageEditLeavesExecutingActionAlone confirms an action
+// already `executing` (a send may be in flight) is NOT denied by an edit
+// racing it — DenyPendingActionsForConversation deliberately excludes that
+// status, see its doc comment.
+func TestPersist_MessageEditLeavesExecutingActionAlone(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+
+	original := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Original text", Date: 1000}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna", LastName: "Recruiter"})
+	if err := l.onMessage(ctx, acct, entities, original, false); err != nil {
+		t.Fatalf("onMessage original: %v", err)
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	var sourceJobID int64
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT id FROM agent_jobs WHERE event_id=$1`, eventIDForMessage(acct.tgID, recruit, 42, 0, original.Message),
+	).Scan(&sourceJobID); err != nil {
+		t.Fatalf("get source job: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: sourceJobID, ConversationID: conv.ID, UserID: acct.userID, ActionType: db.ActionTypeReply,
+		Payload: "Draft mid-send", PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed action: %v", err)
+	}
+	if ok, err := store.BeginExecutingAgentAction(ctx, acct.userID, actionID, 999); err != nil || !ok {
+		t.Fatalf("begin executing: ok=%v err=%v", ok, err)
+	}
+
+	edited := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Edited text", Date: 1000}
+	edited.SetEditDate(2000)
+	if err := l.onMessage(ctx, acct, entities, edited, true); err != nil {
+		t.Fatalf("onMessage edit: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionExecuting {
+		t.Fatalf("action status = %q, want still executing (in-flight sends are not recalled)", action.Status)
 	}
 }
