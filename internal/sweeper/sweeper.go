@@ -9,6 +9,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
+	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
+	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -200,5 +203,107 @@ func agentJobsSweepOnce(ctx context.Context, q *queue.Queue, visibility, approva
 		slog.Warn("agent action expiry sweep failed", "err", err)
 	} else if expired > 0 {
 		slog.Info("agent action sweep", "expired_approvals", expired, "ttl", approvalTTL)
+	}
+}
+
+// AgentExecutorSweeperInterval is how often AgentExecutor() wakes up. Half
+// of executor.Executor's default StuckGrace (2m), so a crashed send is
+// retried on roughly the first sweep after it becomes eligible rather than
+// waiting up to a full extra interval.
+const AgentExecutorSweeperInterval = time.Minute
+
+// AgentExecutor runs the executor's two background responsibilities until
+// ctx is cancelled: retrying sends stuck in `executing` past their grace
+// window (crash recovery), and sending guarded-mode actions that were
+// auto-approved by propose_reply but never picked up by an owner /mctl
+// approve (there is none to wait for in guarded mode).
+func AgentExecutor(ctx context.Context, exec *executor.Executor) {
+	ticker := time.NewTicker(AgentExecutorSweeperInterval)
+	defer ticker.Stop()
+	agentExecutorSweepOnce(ctx, exec)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			agentExecutorSweepOnce(ctx, exec)
+		}
+	}
+}
+
+func agentExecutorSweepOnce(ctx context.Context, exec *executor.Executor) {
+	if stuck, err := exec.RecoverStuck(ctx); err != nil {
+		slog.Warn("executor recovery sweep failed", "err", err)
+	} else if stuck > 0 {
+		slog.Warn("executor recovered stuck executing actions", "count", stuck)
+	}
+	if n, err := exec.ProcessApproved(ctx); err != nil {
+		slog.Warn("executor approved-action sweep failed", "err", err)
+	} else if n > 0 {
+		slog.Info("executor sent approved actions", "count", n)
+	}
+}
+
+// AgentNotifierSweeperInterval is how often AgentNotifier() wakes up. An
+// approval request or summary sitting unsent for up to this long is an
+// acceptable trade against not hammering Saved Messages sends.
+const AgentNotifierSweeperInterval = 30 * time.Second
+
+// AgentNotifier delivers pending owner_notifications rows until ctx is
+// cancelled.
+func AgentNotifier(ctx context.Context, notifier *control.Notifier) {
+	ticker := time.NewTicker(AgentNotifierSweeperInterval)
+	defer ticker.Stop()
+	agentNotifierSweepOnce(ctx, notifier)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			agentNotifierSweepOnce(ctx, notifier)
+		}
+	}
+}
+
+func agentNotifierSweepOnce(ctx context.Context, notifier *control.Notifier) {
+	delivered, failed, err := notifier.DeliverPending(ctx)
+	if err != nil {
+		slog.Warn("notifier delivery sweep failed", "err", err)
+		return
+	}
+	if delivered > 0 || failed > 0 {
+		slog.Info("notifier delivery sweep", "delivered", delivered, "failed", failed)
+	}
+}
+
+// AgentProfileSweeperInterval is how often AgentProfile() re-reads the
+// mounted YAML profile. A minute is a reasonable staleness bound for a
+// config file that changes rarely (owner edits, not per-request traffic)
+// without adding a filesystem watcher's added complexity.
+const AgentProfileSweeperInterval = time.Minute
+
+// AgentProfile periodically calls Provider.Reload until ctx is cancelled.
+// Provider.Reload was designed to swap profile data safely at runtime (see
+// its own doc comment), but a Codex finding on #307 caught that
+// cmd/server/main.go only ever called it once, at initial profile.Load —
+// no production caller reloaded it afterward, so updating the mounted YAML
+// (moving a value into `restricted`, adding a new never_auto_send marker)
+// had no effect on a running process until the next full restart.
+func AgentProfile(ctx context.Context, provider *profile.Provider) {
+	ticker := time.NewTicker(AgentProfileSweeperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := provider.Reload(); err != nil {
+				// Best-effort, matching every other sweeper here: keep serving
+				// the last-good in-memory copy rather than crashing the
+				// process over a transient read/parse error on the mounted
+				// file (e.g. a ConfigMap update caught mid-write).
+				slog.Warn("agent profile reload failed, keeping previous copy", "err", err)
+			}
+		}
 	}
 }

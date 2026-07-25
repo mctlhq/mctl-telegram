@@ -18,7 +18,10 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gotd/contrib/middleware/ratelimit"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
+	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
+	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
@@ -91,6 +94,20 @@ func main() {
 	store := db.NewStore(rawDB, cryp).WithMetrics(m)
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
+	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
+	peerCache := telegram.NewPeerCache()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				peerCache.Sweep()
+			}
+		}
+	}()
 
 	// api_id-wide MTProto rate limiter. One instance shared by the pool and the
 	// interactive login client (via oauth.WithLoginConfig) so all sessions —
@@ -117,6 +134,98 @@ func main() {
 		WithMetrics(m).
 		WithAgentRuntime(agentListener)
 	defer pool.Shutdown()
+
+	// Communication-agent control plane: the executor sends approved replies
+	// (crash-safely — see internal/agent/executor's package doc), the
+	// notifier delivers summaries/approval requests to Saved Messages, and
+	// the router turns the owner's /mctl commands into calls on both. Built
+	// here (not above, alongside agentListener) because all three need
+	// `pool` to actually reach Telegram — hence agentListener.Router is
+	// assigned after construction rather than passed into listener.New.
+	// This MUST happen before go listener.RunSupervisor below: the
+	// supervisor goroutine reads agentListener.Router the moment an update
+	// dispatches, so assigning it after the goroutine starts is a data race
+	// (and a window where an early Saved Messages command silently no-ops
+	// against a nil router).
+	// Read at call time by both the executor and the notifier — never a
+	// snapshot — so a redeploy that flips AGENT_KILL_SWITCH takes effect on
+	// the very next send/delivery attempt of an already-running process, not
+	// just newly-started ones.
+	agentGlobalKill := func() bool { return cfg.AgentKillSwitch }
+	agentExecutor := executor.New(store, &poolSender{pool: pool, store: store, peerCache: peerCache}, agentGlobalKill, m)
+	demoReviewerTGID := int64(0)
+	if cfg.DemoReviewerEnabled {
+		demoReviewerTGID = cfg.DemoReviewerTGID
+	}
+	executorGate := &agentSendGate{
+		store:              store,
+		allowSend:          cfg.AllowSend,
+		demoReviewerTGID:   demoReviewerTGID,
+		adminTelegramIDs:   telegramIDSet(cfg.TGLoginAdmins),
+		clientTelegramIDs:  telegramIDSet(cfg.TGLoginClients),
+		autoApproveClients: cfg.AutoApproveClients,
+		limiter:            limiter,
+	}
+	agentExecutor.SendGate = executorGate.Allow
+	// A Codex finding on #307 caught that Approve() had no TTL check of its
+	// own: the bulk ExpireStaleAgentActions sweeper runs on its own
+	// minute-scale interval, so an owner could still approve a code already
+	// past AGENT_APPROVAL_TTL if the sweeper simply hadn't reached it yet.
+	agentExecutor.ApprovalTTL = cfg.AgentApprovalTTL
+	agentNotifier := control.NewNotifier(store, &poolSelfSender{pool: pool})
+	agentNotifier.GlobalKill = agentGlobalKill
+	// Wire the notification retry horizon to the SAME configured approval
+	// TTL the executor/sweeper use (cfg.AgentApprovalTTL), not the
+	// constructor's own 24h default — a Codex finding on #307 caught that
+	// with AGENT_APPROVAL_TTL configured above 24h, an approval notification
+	// could be retired as permanently failed while its linked action was
+	// still genuinely approvable, so the owner would never receive a code
+	// that was still live.
+	if cfg.AgentApprovalTTL > 0 {
+		agentNotifier.MaxPendingAge = cfg.AgentApprovalTTL
+	}
+	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
+
+	// AGENT_PROFILE_PATH is optional and loaded independently of
+	// AGENT_ENABLED: without it, GET /recruiters/{peer} returns 501 (see
+	// agentapi.Server.Profile's nil-safe doc comment) and the executor's
+	// restricted-field gate is simply skipped (Executor.Profile stays nil)
+	// rather than failing startup — a deployment that hasn't finished
+	// onboarding the owner's profile yet should not be blocked from running
+	// everything else. Gating this on cfg.AgentEnabled (an earlier version
+	// of this block did) was itself a bug, caught by review: the executor's
+	// sweeper (go sweeper.AgentExecutor below) starts unconditionally, so
+	// with AGENT_ENABLED=false but a profile path already configured — the
+	// exact shape of a staged C1 rollout, see the Communication Agent plan
+	// — any action left ActionApproved from before a redeploy would still
+	// get picked up and sent by the sweeper with restrictedFieldBlocks
+	// treating the nil profile as "allow everything," silently skipping the
+	// approval_required/never_auto_send checks the profile is there to
+	// enforce. Loaded here (before RunSupervisor/the sweeper goroutines
+	// below), so agentExecutor.Profile is assigned before any goroutine
+	// that might read it starts.
+	var agentProfileProvider *profile.Provider
+	if path := cfg.AgentProfilePath; path != "" {
+		var err error
+		agentProfileProvider, err = profile.Load(path)
+		if err != nil {
+			slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
+			os.Exit(1)
+		}
+		agentExecutor.Profile = agentProfileProvider
+		// config.Load already refuses to start if AgentProfilePath is set
+		// without a positive AgentProfileOwnerTGID (see config.go), so this
+		// is always a real account id here — safe to scope
+		// restrictedFieldBlocks to it unconditionally.
+		agentExecutor.ProfileOwnerTGID = cfg.AgentProfileOwnerTGID
+		slog.Info("agent owner profile loaded", "path", path)
+		// Periodically re-read the mounted file so an owner's edit (e.g.
+		// moving a value into `restricted`, adding a never_auto_send marker)
+		// takes effect without a restart — see sweeper.AgentProfile's doc
+		// comment for the Codex finding this fixed.
+		go sweeper.AgentProfile(ctx, agentProfileProvider)
+	}
+
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
 
 	// Set the pool-capacity gauge. -1 when uncapped so a Prometheus expression
@@ -159,6 +268,13 @@ func main() {
 	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
 	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.
 	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL)
+	// Communication-agent executor: retries sends stuck in `executing` past
+	// their grace window (crash recovery) and sends guarded-mode actions
+	// that landed as `approved` with no owner to type /mctl approve.
+	go sweeper.AgentExecutor(ctx, agentExecutor)
+	// Communication-agent notifier: delivers pending owner_notifications
+	// (summaries, approval requests) to Saved Messages.
+	go sweeper.AgentNotifier(ctx, agentNotifier)
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -273,26 +389,6 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
 
-	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
-
-	// Instantiate the peer cache and start a background sweep goroutine so
-	// stale entries do not accumulate over the lifetime of the process. The
-	// 10-minute default TTL means a 5-minute sweep interval bounds the worst-
-	// case overhang to one extra TTL window.
-	peerCache := telegram.NewPeerCache()
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				peerCache.Sweep()
-			}
-		}
-	}()
-
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
@@ -336,6 +432,16 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
+		// agentProfileProvider was already loaded (or left nil) above,
+		// before RunSupervisor started — reused here rather than loading it
+		// a second time. ProfileOwnerTGID scopes GET /recruiters/{peer} to
+		// the one account this profile actually belongs to (see
+		// agentapi.Server.ProfileOwnerTGID's doc comment); 0 means "not
+		// configured", which handleRecruiterProfile treats as forbidden for
+		// everyone, matching a nil Profile's 501.
+		if agentProfileProvider != nil {
+			agentSrv.WithProfile(agentProfileProvider, cfg.AgentProfileOwnerTGID)
+		}
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
 		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m)(agentMux))

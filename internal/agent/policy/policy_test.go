@@ -105,6 +105,23 @@ func TestEvaluate_DenyRules(t *testing.T) {
 	}
 }
 
+// TestEvaluate_MaxReplyCharsClampedToTelegramLimit covers a Codex finding on
+// #307: MAX_REPLY_CHARS configured above Telegram's own 4096-character cap
+// let this length check pass a payload the send RPC would then reject with
+// the permanent MESSAGE_TOO_LONG — and the executor treats every send error
+// as transient, so recovery would retry the identical oversized payload
+// forever. A reply between 4096 and the (misconfigured, larger) configured
+// limit must still be denied here, before it ever reaches the executor.
+func TestEvaluate_MaxReplyCharsClampedToTelegramLimit(t *testing.T) {
+	in := baseInput()
+	in.Profile.MaxReplyChars = 10000
+	in.Profile.DisclosureText = "AI."
+	in.Action.Text = repeatRune(4200) // over Telegram's 4096 cap, under the configured 10000
+	if got := Evaluate(in); got.Decision != Deny {
+		t.Fatalf("decision = %s (%v), want deny (text exceeds Telegram's platform limit even though MaxReplyChars allows it)", got.Decision, got.Reasons)
+	}
+}
+
 func TestEvaluate_NoFalsePositivesOnOrdinaryReplies(t *testing.T) {
 	ordinary := []string{
 		"Could you share the salary range for this role?",

@@ -211,3 +211,69 @@ func TestLoadToolFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadAgentProfileOwnerRequired covers a Codex finding on #307:
+// AGENT_PROFILE_OWNER_TG_ID is documented as required whenever
+// AGENT_PROFILE_PATH is set, but a missing or malformed value silently
+// defaulted to 0 with no validation, so the profile loaded successfully
+// while GET /recruiters/{peer} returned 403 for every account (owner id
+// zero is explicitly forbidden there) — a seemingly enabled endpoint left
+// permanently unusable with no loud failure anywhere.
+func TestLoadAgentProfileOwnerRequired(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "profile path set without owner id fails",
+			env:     map[string]string{"AGENT_PROFILE_PATH": "/tmp/profile.yaml"},
+			wantErr: true,
+		},
+		{
+			name:    "profile path set with zero owner id fails",
+			env:     map[string]string{"AGENT_PROFILE_PATH": "/tmp/profile.yaml", "AGENT_PROFILE_OWNER_TG_ID": "0"},
+			wantErr: true,
+		},
+		{
+			name:    "profile path set with negative owner id fails",
+			env:     map[string]string{"AGENT_PROFILE_PATH": "/tmp/profile.yaml", "AGENT_PROFILE_OWNER_TG_ID": "-5"},
+			wantErr: true,
+		},
+		{
+			name:    "profile path set with positive owner id succeeds",
+			env:     map[string]string{"AGENT_PROFILE_PATH": "/tmp/profile.yaml", "AGENT_PROFILE_OWNER_TG_ID": "12345"},
+			wantErr: false,
+		},
+		{
+			name:    "owner id set without profile path is ignored",
+			env:     map[string]string{"AGENT_PROFILE_OWNER_TG_ID": "12345"},
+			wantErr: false,
+		},
+		{
+			name:    "neither set succeeds",
+			env:     map[string]string{},
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "AGENT_PROFILE_OWNER_TG_ID") {
+					t.Errorf("error should mention AGENT_PROFILE_OWNER_TG_ID, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+		})
+	}
+}

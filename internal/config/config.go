@@ -139,6 +139,21 @@ type Config struct {
 	// redeploying config even if the database is unreachable or compromised.
 	// Set via AGENT_KILL_SWITCH.
 	AgentKillSwitch bool
+	// AgentProfilePath points at the owner's YAML profile (identity, public
+	// bio, skills, preferences, restricted section) mounted into the
+	// container. Optional even with AGENT_ENABLED=true — see its call site
+	// in cmd/server/main.go for what happens when it's unset. Set via
+	// AGENT_PROFILE_PATH.
+	AgentProfilePath string
+	// AgentProfileOwnerTGID is the Telegram id of the account
+	// AgentProfilePath's profile belongs to. mctl-telegram is multi-tenant
+	// and POST /api/agent/token can mint an aud=agent token for ANY account
+	// it hosts, not just this deployment's intended communication-agent
+	// owner — without this, GET /recruiters/{peer} would hand that owner's
+	// identity/skills/preferences to a worker authenticated as an unrelated
+	// account. Required whenever AgentProfilePath is set; ignored otherwise.
+	// Set via AGENT_PROFILE_OWNER_TG_ID.
+	AgentProfileOwnerTGID int64
 }
 
 func Load() (*Config, error) {
@@ -164,6 +179,8 @@ func Load() (*Config, error) {
 		AgentApprovalTTL:         envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
 		AgentEnabled:             envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:          envBool("AGENT_KILL_SWITCH", false),
+		AgentProfilePath:         os.Getenv("AGENT_PROFILE_PATH"),
+		AgentProfileOwnerTGID:    envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		LogLevel:                 envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:    os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:     os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
@@ -199,6 +216,17 @@ func Load() (*Config, error) {
 		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
 		}
+	}
+	// AgentProfileOwnerTGID's doc comment documents it as required whenever
+	// AgentProfilePath is set — a missing or malformed value silently
+	// defaulted to 0, so the profile loaded successfully at startup but
+	// handleRecruiterProfile then returned 403 for every account (owner ID
+	// zero is explicitly forbidden there), leaving a seemingly enabled
+	// endpoint permanently unusable with no loud failure anywhere. Fail
+	// closed here instead, matching this function's existing DemoReviewer
+	// validation immediately above.
+	if c.AgentProfilePath != "" && c.AgentProfileOwnerTGID <= 0 {
+		return nil, fmt.Errorf("AGENT_PROFILE_OWNER_TG_ID must be set to a positive Telegram id when AGENT_PROFILE_PATH is set")
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
@@ -306,6 +334,18 @@ func envInt(key string, def int) int {
 		return def
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func envInt64(key string, def int64) int64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return def
 	}

@@ -3,6 +3,7 @@ package agentapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -36,26 +37,18 @@ func (s *Server) loadProfile(w http.ResponseWriter, ctx context.Context, userID 
 
 // recentAgentSends returns the timestamps of this conversation's recent
 // agent-sent messages, for the policy engine's per-minute rate check.
-// Deliberately scoped to ONE conversation rather than the whole account: the
-// db layer (internal/db) exposes no cross-conversation "recent sends for
-// this user" query yet, and inventing one here (raw SQL outside internal/db)
-// would break this codebase's repo-pattern convention of keeping SQL out of
-// callers. A per-conversation rate is also a defensible product choice on
-// its own (a burst answering one dialog vs. bursting across many are
-// different risk profiles) — revisit if request_owner_approval/propose_reply
-// need a true account-wide limit.
+// Deliberately scoped to ONE conversation rather than the whole account: a
+// per-conversation rate is a defensible product choice on its own (a burst
+// answering one dialog vs. bursting across many are different risk
+// profiles) — revisit if request_owner_approval/propose_reply need a true
+// account-wide limit. Delegates to db.Store.ListRecentAgentOutgoingTimestamps
+// (a Codex finding on #307 caught this used to fetch
+// ListConversationMessages' top-50-of-any-direction page and filter it
+// locally — 50+ newer messages of ANY direction could push a real agent
+// send out of that fixed-size page entirely, silently undercounting the
+// rate limit).
 func (s *Server) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
-	msgs, err := s.Store.ListConversationMessages(ctx, userID, conversationID, 50)
-	if err != nil {
-		return nil, err
-	}
-	var out []time.Time
-	for _, m := range msgs {
-		if m.Direction == db.DirectionAgentOutgoing && m.CreatedAt.After(since) {
-			out = append(out, m.CreatedAt)
-		}
-	}
-	return out, nil
+	return s.Store.ListRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since)
 }
 
 // isApprovalCodeCollision reports whether err looks like a violation of the
@@ -98,6 +91,25 @@ func (s *Server) insertActionWithApprovalCode(ctx context.Context, a db.AgentAct
 				}
 				return id, existing.ApprovalCode, nil
 			}
+			return id, code, nil
+		}
+		if isApprovalCodeCollision(err) {
+			continue
+		}
+		return 0, "", err
+	}
+	return 0, "", errors.New("failed to allocate a unique approval code")
+}
+
+func (s *Server) insertStandaloneApprovalWithNotification(ctx context.Context, a db.AgentAction) (int64, string, error) {
+	for attempt := 0; attempt < maxApprovalCodeAttempts; attempt++ {
+		code, err := newApprovalCode()
+		if err != nil {
+			return 0, "", err
+		}
+		a.ApprovalCode = code
+		id, err := s.Store.InsertStandaloneApprovalWithNotification(ctx, a, a.Payload)
+		if err == nil {
 			return id, code, nil
 		}
 		if isApprovalCodeCollision(err) {
@@ -186,7 +198,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().Add(-time.Minute))
+	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		logHandlerErr("propose_reply", err)
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
@@ -212,13 +224,19 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 
 	var actionID int64
 	var approvalCode string
+	notificationQueued := false
 	switch result.Decision {
 	case policy.Deny:
 		base.Status = db.ActionDenied
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
 	case policy.RequireApproval:
 		base.Status = db.ActionPendingApproval
-		actionID, approvalCode, err = s.insertActionWithApprovalCode(ctx, base)
+		if base.JobID == 0 {
+			actionID, approvalCode, err = s.insertStandaloneApprovalWithNotification(ctx, base)
+			notificationQueued = err == nil
+		} else {
+			actionID, approvalCode, err = s.insertActionWithApprovalCode(ctx, base)
+		}
 	default: // policy.Allow
 		base.Status = db.ActionApproved
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
@@ -244,10 +262,51 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "propose failed")
 		return
 	}
+	// InsertAgentAction is idempotent for job-tied actions and may have
+	// returned a row created by an earlier attempt under a different policy
+	// result. Drive notification and response handling from durable state,
+	// not from this replay's freshly-evaluated `base`.
+	persisted, err := s.Store.GetAgentAction(ctx, id.UserID, actionID)
+	if err != nil {
+		logHandlerErr("propose_reply", fmt.Errorf("reload persisted action: %w", err))
+		writeJSONError(w, http.StatusInternalServerError, "propose failed")
+		return
+	}
+	approvalCode = persisted.ApprovalCode
+	if persisted.Status == db.ActionPendingApproval && !notificationQueued {
+		// Idempotent per action_id (see InsertOwnerNotification's doc
+		// comment) — a redelivered job that lands on the same existing
+		// action via InsertAgentAction's (job_id, action_type) conflict
+		// must not queue a second approval-request notification.
+		// internal/agent/control.Notifier (A-PR7) delivers this to Saved
+		// Messages.
+		if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+			UserID: id.UserID, Kind: db.NotificationApproval, ActionID: actionID, Body: req.Text,
+		}); nerr != nil {
+			logHandlerErr("propose_reply", fmt.Errorf("queue approval notification: %w", nerr))
+			// A Codex finding on #307 caught that this used to be swallowed
+			// as best-effort on the theory that "the owner can still
+			// /mctl leads`/`/mctl show` to find it" — false: neither
+			// command surfaces a pending action or its approval code (see
+			// control.Router.handleLeads/handleShow), so a lost
+			// notification was the ONLY path to ever deliver ApprovalCode
+			// to the owner, and the draft would silently expire unapprovable.
+			// Job-tied actions are safe to retry through their
+			// (job_id, action_type) idempotency key. Standalone approval
+			// actions never reach this branch: their action+notification pair
+			// is committed atomically above.
+			writeJSONError(w, http.StatusInternalServerError, "propose failed: could not queue approval notification")
+			return
+		}
+	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
+	responseReasons := result.Reasons
+	if persisted.PolicyReasons != "" {
+		responseReasons = strings.Split(persisted.PolicyReasons, "; ")
+	}
 	writeJSON(w, http.StatusOK, actionResponse{
-		ActionID: actionID, Decision: string(result.Decision), Reasons: result.Reasons,
-		Status: base.Status, ApprovalCode: approvalCode,
+		ActionID: actionID, Decision: persisted.PolicyDecision, Reasons: responseReasons,
+		Status: persisted.Status, ApprovalCode: approvalCode,
 	})
 }
 

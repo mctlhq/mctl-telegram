@@ -44,6 +44,16 @@ type Server struct {
 	Store   *db.Store
 	Queue   *queue.Queue
 	Profile OwnerProfileProvider
+	// ProfileOwnerTGID is the Telegram id of the account Profile actually
+	// describes. A deployment mounts exactly one owner's AGENT_PROFILE_PATH
+	// (see cmd/server/main.go), but mctl-telegram is a multi-tenant service
+	// and POST /api/agent/token can mint an aud=agent token for ANY account
+	// it hosts, not just this deployment's intended owner — an admin minting
+	// one for an unrelated account must not let that worker read this
+	// owner's identity/skills/preferences off GET /recruiters/{peer}. 0
+	// means "no profile owner configured" and handleRecruiterProfile treats
+	// every caller as out of scope, the same as Profile being nil.
+	ProfileOwnerTGID int64
 	// GlobalKill mirrors config.Config.AgentKillSwitch — the env-only kill
 	// switch policy.Evaluate checks on every action. A public field (set
 	// directly by main.go, matching e.g. mcpSrv.MediaDownloadMaxBytes
@@ -74,9 +84,12 @@ func New(store *db.Store, q *queue.Queue, jobVisibility time.Duration, m *metric
 	}
 }
 
-// WithProfile attaches an OwnerProfileProvider. Returns s for chaining.
-func (s *Server) WithProfile(p OwnerProfileProvider) *Server {
+// WithProfile attaches an OwnerProfileProvider scoped to ownerTGID — see
+// ProfileOwnerTGID's doc comment for why the scope matters. Returns s for
+// chaining.
+func (s *Server) WithProfile(p OwnerProfileProvider, ownerTGID int64) *Server {
 	s.Profile = p
+	s.ProfileOwnerTGID = ownerTGID
 	return s
 }
 

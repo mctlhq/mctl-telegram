@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // Agent domain schema (communication agent, M6). These tables back the
@@ -31,20 +32,140 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 			return fmt.Errorf("migrate agent: %w\nstmt: %s", err, s)
 		}
 	}
-	// job_leads shipped before job_id existed on it; CREATE TABLE IF NOT
-	// EXISTS above is a no-op on deployments that already have the table, so
-	// the column needs its own idempotent ALTER pass before the index below
-	// can reference it.
+
+	// Idempotent ALTER passes for columns added after the tables above first
+	// shipped — CREATE TABLE IF NOT EXISTS is a no-op against a deployment
+	// that already has the table, so a column added later needs the same
+	// addColumnIfMissing treatment db.go's Migrate uses for the core
+	// tables, or it silently never appears on an existing database. None of
+	// these three have a CREATE INDEX anywhere in this file that references
+	// them, so — unlike job_leads.job_id below — they can safely run after
+	// the whole stmts list above with no ordering dependency.
+	//
+	// agent_actions.send_random_id: added in A-PR7 (#297) — see
+	// internal/agent/executor's package doc for why the executor needs a
+	// persisted MTProto random_id.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_random_id", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	// agent_actions.send_body_encrypted: the exact final body paired with
+	// send_random_id. Recovery must never rebuild it from mutable profile
+	// configuration (notably disclosure_text), because Telegram deduplicates
+	// retries by random_id and therefore requires every retry to be identical.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_body_encrypted", "BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	// owner_notifications.claimed_until: added in A-PR7 round-3 review fixes —
+	// see Store.ClaimOwnerNotification's doc comment for why delivery needs a
+	// lease.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "claimed_until", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	// conversations.peer_access_hash: added in A-PR7 round-4 review fixes —
+	// see Store.SetConversationPeerAccessHash's doc comment for why the
+	// executor needs it to send at all (MTProto rejects a zero-access-hash
+	// InputPeerUser with PEER_ID_INVALID).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT DEFAULT 0", "INTEGER DEFAULT 0"); err != nil {
+		return err
+	}
+	// owner_notifications.random_id: added in a later A-PR7 review round —
+	// see Store.ClaimOwnerNotification's doc comment for why notification
+	// delivery needs the executor's persisted-random-id pattern to be
+	// crash-safe against Telegram-side duplicates, not just claim-safe
+	// against concurrent replicas.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "random_id", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+
+	// job_leads.job_id: added alongside A-PR6 (#296) so POST
+	// /jobs/{id}/complete can recognize a lead-only result — see
+	// HasJobLeadForJob. Unlike the three columns above, its index is NOT
+	// inline in the job_leads CREATE TABLE stmts list above (see #310):
+	// on a pre-A-PR6 database, job_leads exists without job_id, and a
+	// CREATE INDEX ... ON job_leads(job_id) run in the same pass as that
+	// CREATE TABLE would fail outright with a missing-column error before
+	// this ALTER ever got a chance to run. Kept as its own ALTER-then-INDEX
+	// pair, strictly after the stmts loop, so the column always exists
+	// first. No FK to agent_jobs: job_leads precedes agent_jobs in the
+	// CREATE TABLE sequence, matching agent_actions.job_id's existing
+	// no-FK precedent rather than reordering the whole schema.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
 		return fmt.Errorf("migrate agent: %w", err)
 	}
-	// Lets POST /jobs/{id}/complete recognize a lead-save as a valid durable
-	// result too, not just an agent_actions row — see HasJobLeadForJob.
-	// No FK to agent_jobs: job_leads precedes agent_jobs in the CREATE TABLE
-	// sequence, matching agent_actions.job_id's existing no-FK precedent.
 	idxStmt := `CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, idxStmt); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, idxStmt)
+	}
+	if err := retirePreExecutorApprovedActions(ctx, dbConn); err != nil {
+		return err
+	}
+	return nil
+}
+
+// retirePreExecutorApprovedActions is a one-shot rollout boundary for A-PR7.
+// Older releases persisted guarded-mode actions as approved but had no
+// production executor, so they may be arbitrarily stale. The migration marker
+// and status update share one transaction: exactly one replica retires those
+// rows, while later restarts leave newly-approved work untouched.
+func retirePreExecutorApprovedActions(ctx context.Context, dbConn *sql.DB) error {
+	tx, err := dbConn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pre-executor action retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO agent_migrations(name) VALUES($1) ON CONFLICT (name) DO NOTHING`,
+		"retire_pre_executor_approved_v1",
+	)
+	if err != nil {
+		return fmt.Errorf("record pre-executor action retirement: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		// Legacy executing rows predate the exact-body/turn reservation. Their
+		// RPC may already have landed, but retrying is unsafe because the body
+		// paired with random_id was never snapshotted. Account them
+		// conservatively before terminalizing: one turn per ambiguous send;
+		// the retained random_id makes the denied row count in the short rate
+		// window as well.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE conversations
+			    SET autonomous_turns = autonomous_turns + (
+			          SELECT COUNT(*) FROM agent_actions a
+			           WHERE a.conversation_id = conversations.id
+			             AND a.status = $1
+			             AND a.send_body_encrypted IS NULL
+			        ),
+			        updated_at = $2
+			  WHERE EXISTS (
+			        SELECT 1 FROM agent_actions a
+			         WHERE a.conversation_id = conversations.id
+			           AND a.status = $1
+			           AND a.send_body_encrypted IS NULL
+			  )`,
+			ActionExecuting, time.Now().UTC(),
+		); err != nil {
+			return fmt.Errorf("reserve accounting for legacy executing actions: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_actions
+			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			  WHERE status = $4 AND send_body_encrypted IS NULL`,
+			ActionDenied, "retired ambiguous execution at rollout boundary", time.Now().UTC(), ActionExecuting,
+		); err != nil {
+			return fmt.Errorf("retire legacy executing actions: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_actions
+			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			  WHERE status = $4`,
+			ActionDenied, "retired at executor rollout boundary", time.Now().UTC(), ActionApproved,
+		); err != nil {
+			return fmt.Errorf("retire pre-executor approved actions: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit pre-executor action retirement: %w", err)
 	}
 	return nil
 }
@@ -79,12 +200,20 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			tg_message_id INTEGER NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(user_id, tg_message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			peer_tg_id INTEGER NOT NULL,
 			peer_username TEXT,
 			peer_display_name TEXT,
+			peer_access_hash INTEGER NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT 'active',
 			autonomous_turns INTEGER NOT NULL DEFAULT 0,
 			last_incoming_at DATETIME,
@@ -104,6 +233,12 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_created_at ON conversation_messages(created_at)`,
+		// Serves ListRecentAgentOutgoingTimestamps, a hot per-send path (every
+		// executor send and propose_reply call): without conversation_id as
+		// the leading column, the (conversation_id, direction, created_at >
+		// since) filter would fall back to idx_conv_messages_conv and scan
+		// every row for the conversation regardless of direction.
+		`CREATE INDEX IF NOT EXISTS idx_conv_messages_direction_created ON conversation_messages(conversation_id, direction, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			approval_code TEXT,
@@ -117,6 +252,16 @@ func agentSchemaSQLite() []string {
 			policy_reasons TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'proposed',
 			executed_tg_message_id INTEGER,
+			-- send_random_id is generated and persisted BEFORE the executor issues
+			-- the MTProto send RPC (approved -> executing), not after. A crash
+			-- between the persist and the RPC, or between the RPC and recording
+			-- executed, is recovered by retrying messages.sendMessage with this
+			-- SAME random_id: Telegram dedups on it server-side, so the retry is a
+			-- safe no-op if the original send actually landed. This is what makes
+			-- the executing status a self-healing transient state instead of the
+			-- original design's permanent crash trap.
+			send_random_id INTEGER,
+			send_body_encrypted BLOB,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -133,6 +278,10 @@ func agentSchemaSQLite() []string {
 		// this index the sweep degrades to a full-table scan as terminal
 		// action rows accumulate.
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -157,12 +306,14 @@ func agentSchemaSQLite() []string {
 			status TEXT NOT NULL DEFAULT 'pending',
 			tg_message_id INTEGER,
 			sent_at DATETIME,
+			claimed_until DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		// One notification per action: a redelivered job whose action insert
 		// resolved via the (job_id, action_type) idempotency conflict must not
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
@@ -241,12 +392,20 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			tg_message_id BIGINT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(user_id, tg_message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			peer_tg_id BIGINT NOT NULL,
 			peer_username TEXT,
 			peer_display_name TEXT,
+			peer_access_hash BIGINT NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT 'active',
 			autonomous_turns INT NOT NULL DEFAULT 0,
 			last_incoming_at TIMESTAMPTZ,
@@ -266,6 +425,12 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_messages_created_at ON conversation_messages(created_at)`,
+		// Serves ListRecentAgentOutgoingTimestamps, a hot per-send path (every
+		// executor send and propose_reply call): without conversation_id as
+		// the leading column, the (conversation_id, direction, created_at >
+		// since) filter would fall back to idx_conv_messages_conv and scan
+		// every row for the conversation regardless of direction.
+		`CREATE INDEX IF NOT EXISTS idx_conv_messages_direction_created ON conversation_messages(conversation_id, direction, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id BIGSERIAL PRIMARY KEY,
 			approval_code TEXT,
@@ -279,6 +444,10 @@ func agentSchemaPG() []string {
 			policy_reasons TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'proposed',
 			executed_tg_message_id BIGINT,
+			-- see the SQLite copy of this table for send_random_id's role in
+			-- crash-safe recovery of the executing state.
+			send_random_id BIGINT,
+			send_body_encrypted BYTEA,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
@@ -295,6 +464,10 @@ func agentSchemaPG() []string {
 		// this index the sweep degrades to a full-table scan as terminal
 		// action rows accumulate.
 		`CREATE INDEX IF NOT EXISTS idx_agent_actions_status_updated ON agent_actions(status, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_migrations (
+			name TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		`CREATE TABLE IF NOT EXISTS job_leads (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -319,12 +492,14 @@ func agentSchemaPG() []string {
 			status TEXT NOT NULL DEFAULT 'pending',
 			tg_message_id BIGINT,
 			sent_at TIMESTAMPTZ,
+			claimed_until TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		// One notification per action: a redelivered job whose action insert
 		// resolved via the (job_id, action_type) idempotency conflict must not
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id BIGSERIAL PRIMARY KEY,
 			event_id TEXT NOT NULL,

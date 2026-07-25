@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
@@ -198,5 +199,47 @@ func TestConversationMessages_RoundTripAndOrder(t *testing.T) {
 	}
 	if _, err := s.ListConversationMessages(ctx, other, conv.ID, 10); err != ErrConversationNotFound {
 		t.Fatalf("cross-user list err = %v, want ErrConversationNotFound", err)
+	}
+}
+
+// TestListRecentAgentOutgoingTimestamps_SurvivesBusyConversation covers a
+// Codex finding on #307: policy.Input.RecentAgentSends' rate-limit input
+// used to be built by fetching ListConversationMessages' fixed top-50
+// page (any direction) and filtering it in Go. A real agent_outgoing send
+// followed by 50+ newer messages of any OTHER direction pushed that send
+// out of the page entirely, silently undercounting the rate limit. Querying
+// agent_outgoing rows directly (this test) must find the send regardless of
+// how many other messages arrived after it.
+func TestListRecentAgentOutgoingTimestamps_SurvivesBusyConversation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	since := time.Now().UTC().Add(-time.Minute)
+
+	if _, err := s.InsertConversationMessage(ctx, uid, ConversationMessage{
+		ConversationID: conv.ID, Direction: DirectionAgentOutgoing, Body: "the real send", TGMessageID: 1,
+	}); err != nil {
+		t.Fatalf("insert agent_outgoing: %v", err)
+	}
+	// 60 newer messages of a DIFFERENT direction — enough to have pushed the
+	// send above out of any fixed-size top-N page.
+	for i := 0; i < 60; i++ {
+		if _, err := s.InsertConversationMessage(ctx, uid, ConversationMessage{
+			ConversationID: conv.ID, Direction: DirectionIncoming, Body: "noise", TGMessageID: int64(i + 2),
+		}); err != nil {
+			t.Fatalf("insert incoming %d: %v", i, err)
+		}
+	}
+
+	got, err := s.ListRecentAgentOutgoingTimestamps(ctx, uid, conv.ID, since)
+	if err != nil {
+		t.Fatalf("list recent agent outgoing: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("recent agent outgoing timestamps = %d, want 1 (the send must not be lost behind 60 newer messages of another direction)", len(got))
 	}
 }

@@ -118,6 +118,39 @@ func TestExtractMessage_SkipsUnsupportedMessages(t *testing.T) {
 	}
 }
 
+// TestExtractMessage_CapturesSenderAccessHash guards against the P1 found
+// in round-4 review: the executor's send path needs a real access_hash to
+// build a working InputPeerUser, and the only place that hash is ever
+// available is the entity data on the peer's own incoming messages.
+func TestExtractMessage_CapturesSenderAccessHash(t *testing.T) {
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "hi"}
+	got, ok := ExtractMessage(ownerUID, selfTG, msg, ents(&tg.User{ID: recruit, AccessHash: 123456789}), false)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if got.SenderAccessHash != 123456789 {
+		t.Fatalf("SenderAccessHash = %d, want 123456789", got.SenderAccessHash)
+	}
+}
+
+// TestExtractMessage_MinUserAccessHashIsIgnored guards against trusting a
+// Telegram "min" user's access_hash — valid only for limited contexts (e.g.
+// profile photos), not for messages.* RPCs, which would still return
+// PEER_ID_INVALID for one. Persisting it would look like a fix while
+// silently reintroducing the same failure.
+func TestExtractMessage_MinUserAccessHashIsIgnored(t *testing.T) {
+	u := &tg.User{ID: recruit, AccessHash: 123456789}
+	u.SetMin(true)
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "hi"}
+	got, ok := ExtractMessage(ownerUID, selfTG, msg, ents(u), false)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if got.SenderAccessHash != 0 {
+		t.Fatalf("SenderAccessHash = %d, want 0 (min user hash must be ignored)", got.SenderAccessHash)
+	}
+}
+
 func TestExtractMessage_SenderFromFromID(t *testing.T) {
 	msg := &tg.Message{ID: 5, PeerID: &tg.PeerUser{UserID: recruit}, FromID: &tg.PeerUser{UserID: 999}, Message: "hi"}
 	got, ok := ExtractMessage(ownerUID, selfTG, msg, ents(), false)
