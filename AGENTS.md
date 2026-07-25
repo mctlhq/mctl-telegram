@@ -22,6 +22,10 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - `internal/bridge/` — Local Bridge websocket relay (M4)
 - `internal/crypto/` — AES-256-GCM session encryption, HKDF key derivation
 - `Dockerfile` — multi-stage build
+- `docs/plans/communication-agent.md` — canonical Communication Agent plan
+  (status, architecture, rollout gates, Channels preview); the single source
+  of truth for both Claude and Codex, supersedes any local `~/.claude/plans/*`
+  draft
 
 ## Conventions
 - `go fmt`, `go vet`, `golangci-lint` before commit
