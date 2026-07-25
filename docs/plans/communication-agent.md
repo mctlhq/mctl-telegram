@@ -218,8 +218,10 @@ claims a job via long-poll, builds a strict envelope, invokes `claude -p`
 with the restricted agent MCP tools and `--json-schema`, parses the result,
 calls the corresponding `/api/agent/v1/actions/*` endpoint. A job is only
 marked complete after its result is durably persisted server-side. No shell,
-filesystem, or generic HTTP tool exposed to the model. Ships as a second
-binary in the mctl-telegram image.
+filesystem, or generic HTTP tool exposed to the model. Ships in its own
+dedicated image (`Dockerfile.agent-worker`, not the main `mctl-telegram`
+image — the worker needs the `claude` CLI, which the Go-only server image
+deliberately doesn't have) — see `docs/agent-worker.md`.
 
 **PR 8b — Channels preview** — see Part 2. Not a hardening-debt item on PR 8;
 a separate, later, optional track.
