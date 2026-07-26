@@ -118,6 +118,38 @@ Acceptance:
   `listener_enabled=false` / `autopilot_paused=true`. No test window was
   opened during this deployment.
 
+### 2026-07-26 — worker parity and legacy profile retirement
+
+- GitOps workflow
+  [run 30219882645](https://github.com/mctlhq/mctl-gitops/actions/runs/30219882645)
+  built `Dockerfile.agent-worker` from exact code merge
+  `57f9ba6e3e8fdd0ac37c6c8607ec20f1b57e69b4` and published
+  `ghcr.io/mctlhq/agent-worker-preview:main-57f9ba6` with digest
+  `sha256:1a5404d253e5f110efdaa0c189ddd9f90216d3e637b7019ccae3d4b9360a3d0d`.
+- Startup logs proved the migration sequence without exposing profile
+  content: the first DB-backed release logged
+  `legacy agent owner profile migration checked` with `imported=true`;
+  subsequent restarts logged `imported=false` for the same tenant row.
+- GitOps PR
+  [#641](https://github.com/mctlhq/mctl-gitops/pull/641), merged as
+  `1d67c6c635445c41065ff0067fcae8ef0acb1c1c`, removed
+  `AGENT_PROFILE_PATH`, `AGENT_PROFILE_OWNER_TG_ID`, the plaintext profile
+  Secret projection, and its volume mount. Runtime profile reads are now
+  encrypted and DB-backed only.
+- The same PR completed the C1 worker pod baseline: non-root execution,
+  read-only root filesystem, all capabilities dropped, privilege escalation
+  disabled, `RuntimeDefault` seccomp, no service-account token, explicit
+  ephemeral-storage bounds, and bounded writable `HOME`/`/tmp` emptyDir
+  mounts. Claude review approved the PR with no P1/P2 findings and all
+  manifest/lint checks passed.
+- After merge, the platform status API reported both
+  `labs-mctl-telegram-preview` and `labs-agent-worker-preview`
+  `Healthy / Synced`, both selecting `main-57f9ba6`. Worker replicas remained
+  `0`; the server kill switch remained on and no test window was opened.
+- The separate production quota-domain gate is tracked in
+  [#334](https://github.com/mctlhq/mctl-telegram/issues/334). Admin merge
+  bypasses do not supply runtime model capacity and are not a C2 mitigation.
+
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
@@ -126,10 +158,9 @@ Acceptance:
 - [x] Deploy the encrypted per-tenant DB profile implementation and the
       hardened server by exact merge SHA; verify ArgoCD `Synced Healthy` and
       record the image digest.
-- [ ] Verify the legacy YAML was imported once, then remove the profile
-      ConfigMap and migration env vars. A Vault-mounted plaintext profile is
-      no longer needed.
-- [ ] Build and deploy the matching `Dockerfile.agent-worker` image by exact
+- [x] Verify the legacy YAML was imported once, then remove the plaintext
+      profile Secret projection and migration env vars.
+- [x] Build and deploy the matching `Dockerfile.agent-worker` image by exact
       merge SHA before the worker is scaled above zero.
 - [ ] Run the 30-fixture harness and record aggregate results here.
 - [ ] Run the remaining kill-switch-after-approval live drill. Draft,
