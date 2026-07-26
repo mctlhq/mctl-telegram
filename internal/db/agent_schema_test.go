@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -179,6 +180,59 @@ func TestMigrate_CreatesPendingNotificationSweepIndex(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("pending notification indexes=%d, want 1", count)
+	}
+}
+
+func TestRetirePlaintextApprovalCodes_ExpiresLegacyCapabilities(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "legacy-code-owner")
+
+	// Seed the pre-hardening row shape to simulate upgrading a live database.
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO agent_actions
+		   (approval_code, user_id, action_type, policy_decision, status)
+		 VALUES($1,$2,$3,$4,$5)`,
+		"LEGACY", uid, ActionTypeReply, PolicyRequireApproval, ActionPendingApproval,
+	)
+	if err != nil {
+		t.Fatalf("seed legacy approval: %v", err)
+	}
+	legacyID, _ := res.LastInsertId()
+
+	if err := retirePlaintextApprovalCodes(ctx, s.DB); err != nil {
+		t.Fatalf("retire plaintext approvals: %v", err)
+	}
+	var (
+		status string
+		code   sql.NullString
+	)
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT status, approval_code FROM agent_actions WHERE id = $1`,
+		legacyID,
+	).Scan(&status, &code); err != nil {
+		t.Fatalf("read retired approval: %v", err)
+	}
+	if status != ActionExpired || code.Valid {
+		t.Fatalf("retired approval status/code = %q/%v, want expired/nil", status, code)
+	}
+
+	freshID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply, ApprovalCode: "FRESH1",
+		PolicyDecision: PolicyRequireApproval, Status: ActionPendingApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert protected approval: %v", err)
+	}
+	if err := retirePlaintextApprovalCodes(ctx, s.DB); err != nil {
+		t.Fatalf("rerun retirement: %v", err)
+	}
+	fresh, err := s.GetAgentAction(ctx, uid, freshID)
+	if err != nil {
+		t.Fatalf("get protected approval after rerun: %v", err)
+	}
+	if fresh.Status != ActionPendingApproval || fresh.ApprovalCode != "FRESH1" {
+		t.Fatalf("fresh approval changed on rerun: %+v", fresh)
 	}
 }
 

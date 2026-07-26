@@ -55,6 +55,38 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_body_encrypted", "BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// Approval codes are looked up by a tenant-scoped keyed blind index and
+	// retained reversibly only as per-user AES-GCM ciphertext so notification
+	// retries can reproduce the original command without leaving a live
+	// capability in plaintext.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "approval_code_hash", "BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "approval_code_encrypted", "BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	if _, err := dbConn.ExecContext(ctx, `DROP INDEX IF EXISTS idx_agent_actions_code`); err != nil {
+		return fmt.Errorf("drop plaintext approval-code index: %w", err)
+	}
+	if _, err := dbConn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code_hash
+		   ON agent_actions(user_id, approval_code_hash)
+		 WHERE approval_code_hash IS NOT NULL`,
+	); err != nil {
+		return fmt.Errorf("create approval-code hash index: %w", err)
+	}
+	// Existing plaintext codes cannot be encrypted here because schema
+	// migration intentionally has no access to the application encryption
+	// key. Expire those drafts and require a fresh proposal rather than
+	// retaining a readable approval capability. This converges on every boot
+	// so a temporary rollback cannot reintroduce persistent plaintext.
+	//
+	// This is intentionally not dual-write compatible with the old binary:
+	// production and preview use Recreate deployments, documented in the
+	// runbook, so every old pod is gone before this migration starts.
+	if err := retirePlaintextApprovalCodes(ctx, dbConn); err != nil {
+		return err
+	}
 	// owner_notifications.claimed_until: added in A-PR7 round-3 review fixes —
 	// see Store.ClaimOwnerNotification's doc comment for why delivery needs a
 	// lease.
@@ -110,6 +142,34 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	return nil
 }
 
+func retirePlaintextApprovalCodes(ctx context.Context, dbConn *sql.DB) error {
+	tx, err := dbConn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin plaintext approval-code retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, updated_at = $2
+		  WHERE approval_code IS NOT NULL AND status = $3`,
+		ActionExpired, now, ActionPendingApproval,
+	); err != nil {
+		return fmt.Errorf("expire plaintext approval actions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_actions SET approval_code = NULL
+		  WHERE approval_code IS NOT NULL`,
+	); err != nil {
+		return fmt.Errorf("clear plaintext approval codes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit plaintext approval-code retirement: %w", err)
+	}
+	return nil
+}
+
 // retirePreExecutorApprovedActions is a one-shot rollout boundary for A-PR7.
 // Older releases persisted guarded-mode actions as approved but had no
 // production executor, so they may be arbitrarily stale. The migration marker
@@ -157,7 +217,8 @@ func retirePreExecutorApprovedActions(ctx context.Context, dbConn *sql.DB) error
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE agent_actions
-			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+			        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
 			  WHERE status = $4 AND send_body_encrypted IS NULL`,
 			ActionDenied, "retired ambiguous execution at rollout boundary", time.Now().UTC(), ActionExecuting,
 		); err != nil {
@@ -165,7 +226,8 @@ func retirePreExecutorApprovedActions(ctx context.Context, dbConn *sql.DB) error
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE agent_actions
-			    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+			    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+			        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
 			  WHERE status = $4`,
 			ActionDenied, "retired at executor rollout boundary", time.Now().UTC(), ActionApproved,
 		); err != nil {
@@ -251,6 +313,8 @@ func agentSchemaSQLite() []string {
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			approval_code TEXT,
+			approval_code_hash BLOB,
+			approval_code_encrypted BLOB,
 			job_id INTEGER,
 			conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -274,7 +338,6 @@ func agentSchemaSQLite() []string {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
 		// The queue is at-least-once: a redelivered job proposing again must
 		// dedupe onto its existing action row (keeping the original
 		// approval_code) instead of minting a second live approval.
@@ -449,6 +512,8 @@ func agentSchemaPG() []string {
 		`CREATE TABLE IF NOT EXISTS agent_actions (
 			id BIGSERIAL PRIMARY KEY,
 			approval_code TEXT,
+			approval_code_hash BYTEA,
+			approval_code_encrypted BYTEA,
 			job_id BIGINT,
 			conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -466,7 +531,6 @@ func agentSchemaPG() []string {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_code ON agent_actions(user_id, approval_code) WHERE approval_code IS NOT NULL`,
 		// The queue is at-least-once: a redelivered job proposing again must
 		// dedupe onto its existing action row (keeping the original
 		// approval_code) instead of minting a second live approval.

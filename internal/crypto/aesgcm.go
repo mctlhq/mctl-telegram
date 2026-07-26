@@ -3,6 +3,7 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -164,13 +165,45 @@ func (a *AESGCM) OpenForUser(blob []byte, userID int64) ([]byte, error) {
 	}
 }
 
+// BlindIndexForUser returns a deterministic tenant-scoped HMAC suitable for
+// indexed equality lookup of a short secret. Unlike an unkeyed hash, a DB-only
+// compromise cannot offline-enumerate a low-entropy value such as a six-digit
+// approval code. purpose is part of the HKDF context so an index key cannot be
+// reused across application domains.
+func (a *AESGCM) BlindIndexForUser(purpose string, value []byte, userID int64) ([]byte, error) {
+	if purpose == "" {
+		return nil, errors.New("blind-index purpose required")
+	}
+	var key []byte
+	if a.Enabled() {
+		var err error
+		key, err = deriveKey(a.Key, userID, "mctl-telegram-blind-index-v1:"+purpose)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Local development intentionally supports a missing encryption key.
+		// Keep lookup deterministic there without pretending it protects the
+		// local plaintext database.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", purpose, userID)))
+		key = sum[:]
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(value)
+	return mac.Sum(nil), nil
+}
+
 // deriveUserKey runs HKDF-SHA256(master, salt=user_id_be64, info=hkdfInfo)
 // to obtain a 32-byte AES-256 subkey. Different user IDs produce
 // cryptographically independent keys.
 func deriveUserKey(master []byte, userID int64) ([]byte, error) {
+	return deriveKey(master, userID, hkdfInfo)
+}
+
+func deriveKey(master []byte, userID int64, info string) ([]byte, error) {
 	salt := make([]byte, 8)
 	binary.BigEndian.PutUint64(salt, uint64(userID))
-	r := hkdf.New(sha256.New, master, salt, []byte(hkdfInfo))
+	r := hkdf.New(sha256.New, master, salt, []byte(info))
 	out := make([]byte, 32)
 	if _, err := io.ReadFull(r, out); err != nil {
 		return nil, fmt.Errorf("hkdf: %w", err)

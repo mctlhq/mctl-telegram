@@ -1,6 +1,10 @@
 package audit
 
-import "testing"
+import (
+	"log/slog"
+	"strings"
+	"testing"
+)
 
 func TestScrubText(t *testing.T) {
 	cases := []struct {
@@ -50,5 +54,12 @@ func TestScrubText(t *testing.T) {
 				t.Errorf("ScrubText(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRedactAttr_ApprovalCodeCiphertext(t *testing.T) {
+	got := redactAttr(slog.String("approval_code_encrypted", "secret-ciphertext"))
+	if got.Value.Kind() != slog.KindString || !strings.HasPrefix(got.Value.String(), "[redacted len=") {
+		t.Fatalf("approval ciphertext was not redacted: %v", got)
 	}
 }

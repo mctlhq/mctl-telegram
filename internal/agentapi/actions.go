@@ -13,7 +13,7 @@ import (
 )
 
 // maxApprovalCodeAttempts bounds the retry loop on the astronomically rare
-// (user_id, approval_code) unique-index collision (see approvalcode.go).
+// (user_id, approval_code_hash) unique-index collision (see approvalcode.go).
 const maxApprovalCodeAttempts = 3
 
 // loadProfile fetches the caller's agent profile or writes a 404. Every
@@ -52,17 +52,17 @@ func (s *Server) recentAgentSends(ctx context.Context, userID, conversationID in
 }
 
 // isApprovalCodeCollision reports whether err looks like a violation of the
-// (user_id, approval_code) unique index specifically — narrower than a bare
+// (user_id, approval_code_hash) unique index specifically — narrower than a bare
 // "unique" substring match, which would also match the unrelated
 // (job_id, action_type) index on the same table and mask its real error
 // behind three pointless retries. Matches by driver-reported name rather
 // than an errors.As type check against pgx/modernc so this package does not
 // need to import either driver: Postgres names the index itself
 // ("idx_agent_actions_code") in its error text; SQLite instead lists the
-// column pair ("agent_actions.approval_code").
+// column pair ("agent_actions.approval_code_hash").
 func isApprovalCodeCollision(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "idx_agent_actions_code") || strings.Contains(msg, "approval_code")
+	return strings.Contains(msg, "idx_agent_actions_code_hash") || strings.Contains(msg, "approval_code_hash")
 }
 
 // insertActionWithApprovalCode wraps InsertAgentAction with the approval-code
