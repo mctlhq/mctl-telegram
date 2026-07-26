@@ -19,6 +19,35 @@ Canary incidents are out of scope here; see
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
 - [SloBurnRate — SLO error-budget burn-rate alerts](#sloburnrate)
 - [Canary](#canary)
+- [Deployment compatibility boundaries](#deployment-compatibility)
+
+---
+
+<a id="deployment-compatibility"></a>
+## Deployment compatibility boundaries
+
+Both stable and preview mctl-telegram Deployments use Kubernetes
+`strategy.type: Recreate`. Keep that invariant: an old server revision must
+reach zero pods before a new revision starts. Stable and preview use separate
+databases and secrets, so each environment crosses a schema boundary
+independently.
+
+This is a correctness requirement, not only an MTProto optimization. Some
+security migrations intentionally do not dual-write legacy plaintext fields.
+For example, the approval-code migration expires old plaintext capabilities
+and writes only a keyed hash plus ciphertext. Old and new binaries therefore
+must not overlap. Before promoting such a release:
+
+1. verify the rendered Deployment strategy is `Recreate` and has no
+   `rollingUpdate` field;
+2. verify the old ReplicaSet has zero ready pods before accepting traffic on
+   the new one;
+3. do not use `kubectl rollout` overrides that restore `RollingUpdate`;
+4. roll back by stopping the new revision before starting the old one, and
+   assume pre-migration pending approvals may require fresh drafts.
+
+The rolling guidance in generic secret-rotation procedures does not override
+this workload-specific boundary.
 
 ---
 
@@ -86,7 +115,7 @@ sum(rate(mctl_sessions_revoked_total[5m])) by (reason)
    confirm it is reacting. A target of 70% utilization is recommended; see
    [docs/hpa.md](hpa.md) for the Kubernetes HPA stanza.
 
-4. **Raise `TELEGRAM_MAX_SESSIONS` on the Deployment** (rolling restart):
+4. **Raise `TELEGRAM_MAX_SESSIONS` on the Deployment** (Recreate restart):
    ```sh
    kubectl -n mctl-telegram set env deployment/mctl-telegram \
      TELEGRAM_MAX_SESSIONS=<new-value>
@@ -369,7 +398,8 @@ sum(rate(mctl_auth_failures_total{reason=~"jwt_invalid_signature|jwt_expired"}[5
    - For `local-jwt` provider: the server uses `OAUTH_JWT_SIGNING_KEY`
      (preferred) or `OAUTH_JWT_SECRET` (deprecated fallback). Ensure the
      new key is deployed to **all** pods before rotating the issuing
-     service's key. Use a rolling deployment with `maxUnavailable=0`.
+     service's key. Preserve the workload's `Recreate` strategy and complete
+     the replacement before rotating the issuer.
    - For `shared-hmac` provider: `OAUTH_JWT_SECRET` must match between the
      token issuer and the mctl-telegram server. Redeploy both in the same
      release.

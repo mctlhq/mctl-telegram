@@ -80,6 +80,10 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	// key. Expire those drafts and require a fresh proposal rather than
 	// retaining a readable approval capability. This converges on every boot
 	// so a temporary rollback cannot reintroduce persistent plaintext.
+	//
+	// This is intentionally not dual-write compatible with the old binary:
+	// production and preview use Recreate deployments, documented in the
+	// runbook, so every old pod is gone before this migration starts.
 	if err := retirePlaintextApprovalCodes(ctx, dbConn); err != nil {
 		return err
 	}
