@@ -82,17 +82,55 @@ Acceptance:
   `AUTH_KEY_DUPLICATED`. The safe stopped state is unaffected, but the test
   account must complete a fresh OAuth reconnect before the next live window.
 
+### 2026-07-26 — pre-production hardening and exact-SHA preview
+
+- PRs
+  [#323](https://github.com/mctlhq/mctl-telegram/pull/323),
+  [#324](https://github.com/mctlhq/mctl-telegram/pull/324),
+  [#326](https://github.com/mctlhq/mctl-telegram/pull/326),
+  [#327](https://github.com/mctlhq/mctl-telegram/pull/327),
+  [#328](https://github.com/mctlhq/mctl-telegram/pull/328), and
+  [#331](https://github.com/mctlhq/mctl-telegram/pull/331) shipped a
+  fail-closed review gate, terminal-session retirement, hashed/encrypted
+  approval codes, mutation-safe job claim, encrypted per-tenant owner
+  profiles, and atomic exact-result completion.
+- PR [#332](https://github.com/mctlhq/mctl-telegram/pull/332) shipped the
+  operations runbook, full retention/deletion mapping, dead-letter and stuck
+  execution alerts, retention enforcement, and adversarial policy tests.
+  Codex found three P2 issues before merge: an executing-action retention
+  race, contradictory privacy wording, and a nonexistent key-rotation
+  procedure. All were fixed, their threads resolved, and a final Codex
+  review returned no additional findings.
+- Full Go tests, vet, targeted race tests, Docker build, govulncheck,
+  Prometheus rule validation, manifest checks, and CodeQL passed. Claude
+  review did not run because the organization monthly quota was exhausted;
+  the explicit operator-approved admin exception was used only for that
+  failed check.
+- Main merge `57f9ba6` was built as
+  `ghcr.io/mctlhq/mctl-telegram:main-57f9ba6` with digest
+  `sha256:212b0e9292449550c0bca9cea8f7d5dd58edee11e18c1251e7e1718892da0547`.
+  GitOps commit `0cd36f1` selected that exact tag. The platform status API
+  reported `labs-mctl-telegram-preview` and `labs-agent-worker-preview`
+  `Healthy / Synced`; the server used `main-57f9ba6`, and the worker's
+  GitOps source remained `replicaCount: 0`.
+- The closed-state source of truth remains
+  `AGENT_KILL_SWITCH=true`, worker replicas `0`, and the previously verified
+  `listener_enabled=false` / `autopilot_paused=true`. No test window was
+  opened during this deployment.
+
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
 - [x] Deploy the Saved Messages fix by exact merge SHA and verify the live
       approve cycle.
-- [ ] Deploy the encrypted per-tenant DB profile implementation, verify the
-      legacy YAML was imported once, then remove the profile ConfigMap and
-      migration env vars. A Vault-mounted plaintext profile is no longer
-      needed.
-- [ ] Deploy the merged server and `Dockerfile.agent-worker` image by exact
-      merge SHA; verify ArgoCD `Synced Healthy` and the running image digest.
+- [x] Deploy the encrypted per-tenant DB profile implementation and the
+      hardened server by exact merge SHA; verify ArgoCD `Synced Healthy` and
+      record the image digest.
+- [ ] Verify the legacy YAML was imported once, then remove the profile
+      ConfigMap and migration env vars. A Vault-mounted plaintext profile is
+      no longer needed.
+- [ ] Build and deploy the matching `Dockerfile.agent-worker` image by exact
+      merge SHA before the worker is scaled above zero.
 - [ ] Run the 30-fixture harness and record aggregate results here.
 - [ ] Run the remaining kill-switch-after-approval live drill. Draft,
       notification, audit, and one harmless explicitly approved reply have
@@ -102,9 +140,9 @@ Acceptance:
       `autopilot_paused=true`, worker replicas `0`.
 - [ ] Reconnect the preview Telegram test account with a fresh OAuth session
       before opening another test window.
-- [ ] Store approval codes as hashes, run the `random_id` retry drill, and
-      ship the full retention/adversarial hardening set before guarded
-      autopilot.
+- [x] Store approval codes as hashes and ship the full
+      retention/adversarial hardening set.
+- [ ] Run the `random_id` retry drill before guarded autopilot.
 - [ ] Provision a production quota domain isolated from interactive sessions
       and `claude-review.yml` before C2.
 - [ ] Close implementation issues #296/#297 and GitOps #624 only after all
