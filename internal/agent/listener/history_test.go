@@ -365,3 +365,41 @@ func TestPollSavedHistory_RPCFailureDoesNotBreakInboundDM(t *testing.T) {
 		t.Fatalf("inbound DM jobs = %d, want 1", jobs)
 	}
 }
+
+// TestPollSavedHistory_RoutesCommandWithOutFalse guards against a regression
+// found live on 2026-07-26: messages.getHistory against Peer: InputPeerSelf
+// does not reliably set Out the way the live push path's UpdateNewMessage
+// does -- a real owner-typed /mctl command was observed coming back with
+// Out: false, which the original ExtractMessage-based implementation
+// silently misclassified as an ordinary inbound private_message (since its
+// self-chat/command branch is gated on msg.Out) instead of routing it at
+// all. ExtractSavedHistoryMessage must not depend on Out.
+func TestPollSavedHistory_RoutesCommandWithOutFalse(t *testing.T) {
+	ctx := context.Background()
+	router := &lockedRecordingRouter{}
+	l, store, acct := newTestListener(t, router)
+	if err := store.AdvanceSavedCommandCursor(ctx, acct.userID, 100); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	msg := &tg.Message{
+		ID: 101, Out: false,
+		PeerID:  &tg.PeerUser{UserID: selfTG},
+		Message: "/mctl approve OUTFALSE",
+	}
+	api := &fakeSavedHistoryAPI{results: []historyResult{{messages: []tg.MessageClass{msg}}}}
+
+	if err := l.pollSavedHistory(ctx, acct, api); err != nil {
+		t.Fatalf("history poll: %v", err)
+	}
+	if router.callCount() != 1 {
+		t.Fatalf("router calls = %d, want 1 (Out:false command was not routed)", router.callCount())
+	}
+	eventID := eventIDForMessage(acct.tgID, acct.tgID, 101, 0, "/mctl approve OUTFALSE")
+	event, err := store.GetIncomingEvent(ctx, acct.userID, eventID)
+	if err != nil {
+		t.Fatalf("get incoming event: %v", err)
+	}
+	if event.Kind != db.EventKindSavedCommand {
+		t.Fatalf("event kind = %q, want %q", event.Kind, db.EventKindSavedCommand)
+	}
+}
