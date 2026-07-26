@@ -3,6 +3,7 @@ package agentworker
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,12 @@ import (
 	"testing"
 	"time"
 )
+
+//go:embed testdata/c1-fixtures.jsonl
+var c1FixturesJSONL string
+
+//go:embed testdata/c1-system-prompt.txt
+var c1SystemPrompt string
 
 // This is an opt-in model evaluation, not a normal unit test. It launches the
 // real Claude Code CLI and the real agent-worker stdio MCP server once per
@@ -60,7 +67,7 @@ func TestC1ObserveEval(t *testing.T) {
 	}
 
 	workerBin := buildEvalWorker(t)
-	systemPrompt := readEvalFile(t, "testdata/c1-system-prompt.txt")
+	systemPrompt := c1SystemPrompt
 	claudeBin := os.Getenv("AGENT_CLAUDE_BIN")
 	if claudeBin == "" {
 		claudeBin = "claude"
@@ -133,13 +140,8 @@ func TestC1ObserveEval(t *testing.T) {
 
 func loadC1Fixtures(t *testing.T) []c1Fixture {
 	t.Helper()
-	f, err := os.Open(evalPath(t, "testdata/c1-fixtures.jsonl"))
-	if err != nil {
-		t.Fatalf("open fixtures: %v", err)
-	}
-	defer func() { _ = f.Close() }()
 	var fixtures []c1Fixture
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(c1FixturesJSONL))
 	for scanner.Scan() {
 		var fixture c1Fixture
 		if err := json.Unmarshal(scanner.Bytes(), &fixture); err != nil {
@@ -155,6 +157,12 @@ func loadC1Fixtures(t *testing.T) []c1Fixture {
 
 func buildEvalWorker(t *testing.T) string {
 	t.Helper()
+	if bin := os.Getenv("AGENT_EVAL_WORKER_BIN"); bin != "" {
+		if _, err := os.Stat(bin); err != nil {
+			t.Fatalf("AGENT_EVAL_WORKER_BIN %q: %v", bin, err)
+		}
+		return bin
+	}
 	bin := filepath.Join(t.TempDir(), "agent-worker")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/agent-worker")
 	cmd.Dir = evalRepoRoot(t)
@@ -162,20 +170,6 @@ func buildEvalWorker(t *testing.T) string {
 		t.Fatalf("build eval worker: %v\n%s", err, out)
 	}
 	return bin
-}
-
-func readEvalFile(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(evalPath(t, name))
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
-	}
-	return string(b)
-}
-
-func evalPath(t *testing.T, name string) string {
-	t.Helper()
-	return filepath.Join(evalRepoRoot(t), "internal", "agentworker", name)
 }
 
 func evalRepoRoot(t *testing.T) string {
