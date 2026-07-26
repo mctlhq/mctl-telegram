@@ -111,7 +111,7 @@ func TestClient_NonOKStatus_ReturnsAPIError(t *testing.T) {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "job is no longer claimed under that attempt"})
 	})
-	err := client.CompleteJob(context.Background(), 1, 1, "completed", "")
+	err := client.CompleteJob(context.Background(), 1, 1, "completed", "", JobResultRef{ActionID: 7})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -221,7 +221,10 @@ func TestClient_CompleteJob_SendsAttemptAndStatus(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		writeJSONFixture(w, map[string]any{"completed": true})
 	})
-	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "sent reply"); err != nil {
+	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "sent reply", JobResultRef{
+		ActionID: 17,
+		LeadID:   23,
+	}); err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
 	if gotPath != "/jobs/42/complete" {
@@ -229,6 +232,35 @@ func TestClient_CompleteJob_SendsAttemptAndStatus(t *testing.T) {
 	}
 	if gotBody["attempt"].(float64) != 2 || gotBody["status"] != "completed" {
 		t.Fatalf("body = %#v", gotBody)
+	}
+	if gotBody["result_action_id"].(float64) != 17 || gotBody["result_lead_id"].(float64) != 23 {
+		t.Fatalf("result refs = %#v", gotBody)
+	}
+}
+
+func TestClient_CompleteJob_FallsBackToLegacyShape(t *testing.T) {
+	var calls int
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if calls == 1 {
+			if _, ok := body["result_action_id"]; !ok {
+				t.Fatal("first request did not use exact-result shape")
+			}
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if _, ok := body["result_action_id"]; ok {
+			t.Fatal("legacy retry still included result_action_id")
+		}
+		writeJSONFixture(w, map[string]any{"completed": true})
+	})
+	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "", JobResultRef{ActionID: 17}); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
 	}
 }
 

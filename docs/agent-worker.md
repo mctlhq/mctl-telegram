@@ -63,10 +63,12 @@ transport is in use.
    `deadline` and is requeued by the existing visibility-timeout sweeper
    (`internal/sweeper.AgentJobs`, A-PR2/#288); repeated failures eventually
    dead-letter it. `POST /jobs/{id}/complete` itself refuses to mark a job
-   `completed` unless a durable result (an `agent_actions` row or a saved
-   lead) already exists for it (`agentapi.handleJobComplete`) — so even a
-   model that calls `complete_agent_job` without having done anything first
-   gets a 409, not a silently-lost job.
+   `completed` unless it can atomically bind exact durable
+   `result_action_id`/`result_lead_id` values to that claim. Those ids are
+   captured inside the job-scoped MCP server from successful result-tool
+   responses; they are not arguments the model can supply to
+   `complete_agent_job`. A completion without a valid same-user, same-job
+   result gets a 409, not a silently-lost job.
 
 ## Configuration
 
@@ -114,6 +116,23 @@ workflow — for C1, `component_name=communication-agent-worker-preview` — see
 (`claude auth login`, persistence) for that deployment is tracked in the
 same plan section, the same way `mctl-claude-remote` documents its own
 one-time bootstrap for its unrelated PR-steward deployment.
+
+### Exact-result rollout boundary
+
+The API and worker are separate Deployments, so the exact-result completion
+protocol must be rolled out in a compatibility window:
+
+1. Deploy the API with `AGENT_ALLOW_LEGACY_COMPLETION=true`. This temporarily
+   accepts the old completion body and marks those responses with
+   `Deprecation` and `Sunset` headers.
+2. Deploy the new workers. They send exact result IDs first and retry a
+   pre-upgrade API's decoder-only `400` once with the legacy body.
+3. Confirm all old worker pods are gone and new jobs persist
+   `result_action_id` or `result_lead_id`.
+4. Redeploy the API with `AGENT_ALLOW_LEGACY_COMPLETION=false` (the default).
+
+Do not leave the bridge enabled after the rollout: while it is on, a legacy
+worker can complete a job without the new exact-result invariant.
 
 **Read-only root filesystem requires a writable `/tmp`.** The C1 hardening
 baseline sets `readOnlyRootFilesystem: true` (see the plan's C1 hardening

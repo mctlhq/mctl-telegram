@@ -189,9 +189,9 @@ pattern). Endpoints: `POST /jobs/claim` (long-poll claim; deprecated
 *Hardening debt flagged post-merge, not blocking observe-mode:*
 - ✅ `POST /jobs/claim` is the worker path; the mutating legacy `GET /events`
   is deprecated and retained only for rolling-upgrade compatibility.
-- Completion is not fully atomic/server-verified in the strict sense — the
-  linkage isn't stored as a direct `result_action_id` column on `agent_jobs`
-  for a single-transaction verify+complete. Fix before guarded autopilot.
+- ✅ Completion atomically verifies and stores exact
+  `result_action_id`/`result_lead_id` linkage while fencing the active claim
+  attempt; the model cannot supply either id to `complete_agent_job`.
 
 **PR 7 — `feat(agent): saved-messages control plane + executor + owner profile`** ✅ merged (#307, spec issue #297)
 `internal/agent/control`: `ParseCommand` for

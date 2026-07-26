@@ -14,6 +14,14 @@ import (
 // transition loses its compare-and-set race.
 var ErrAgentJobNotFound = errors.New("agent job not found")
 
+// ErrAgentJobResultRequired is returned when status=completed is requested
+// without an exact durable action/lead id to bind to the job.
+var ErrAgentJobResultRequired = errors.New("agent job durable result required")
+
+// ErrAgentJobResultInvalid is returned when a supplied result id does not
+// belong to the same user and job.
+var ErrAgentJobResultInvalid = errors.New("agent job durable result invalid")
+
 // Agent job statuses. A job is the unit of at-least-once delivery from an
 // incoming event to the external Claude agent:
 //
@@ -45,6 +53,8 @@ type AgentJob struct {
 	ClaimedBy      string
 	ClaimedAt      time.Time // zero value ⇒ never claimed
 	LastError      string
+	ResultActionID int64
+	ResultLeadID   int64
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -312,7 +322,7 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		  )
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		           created_at, updated_at`,
+		           result_action_id, result_lead_id, created_at, updated_at`,
 		JobProcessing, replicaID, now, JobPending, limit, userID,
 	)
 	if err != nil {
@@ -350,20 +360,23 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 	var out []AgentJob
 	for rows.Next() {
 		var (
-			j         AgentJob
-			convID    sql.NullInt64
-			claimedBy sql.NullString
-			claimedAt sql.NullTime
-			lastErr   sql.NullString
+			j                            AgentJob
+			convID                       sql.NullInt64
+			claimedBy                    sql.NullString
+			claimedAt                    sql.NullTime
+			lastErr                      sql.NullString
+			resultActionID, resultLeadID sql.NullInt64
 		)
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
-			&j.CreatedAt, &j.UpdatedAt); err != nil {
+			&resultActionID, &resultLeadID, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
 		j.ClaimedBy = claimedBy.String
 		j.LastError = lastErr.String
+		j.ResultActionID = resultActionID.Int64
+		j.ResultLeadID = resultLeadID.Int64
 		if claimedAt.Valid {
 			j.ClaimedAt = claimedAt.Time
 		}
@@ -377,7 +390,7 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		        created_at, updated_at
+		        result_action_id, result_lead_id, created_at, updated_at
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
@@ -429,6 +442,97 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, attempt int, 
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit complete tx: %w", err)
+	}
+	return nil
+}
+
+// CompleteAgentJobWithResult atomically verifies exact durable result ids and
+// closes one user-scoped claim. The result checks and terminal transition run
+// in the same transaction and are fenced by attempt, eliminating the
+// handler-level "EXISTS then complete" TOCTOU window.
+func (s *Store) CompleteAgentJobWithResult(
+	ctx context.Context,
+	userID, jobID int64,
+	attempt int,
+	status, note string,
+	resultActionID, resultLeadID int64,
+) error {
+	if userID <= 0 {
+		return errors.New("user id required")
+	}
+	if status != JobCompleted && status != JobFailed && status != JobIgnored {
+		return fmt.Errorf("invalid terminal job status %q", status)
+	}
+	if resultActionID < 0 || resultLeadID < 0 {
+		return ErrAgentJobResultInvalid
+	}
+	if status == JobCompleted && resultActionID <= 0 && resultLeadID <= 0 {
+		return ErrAgentJobResultRequired
+	}
+	if status != JobCompleted && (resultActionID != 0 || resultLeadID != 0) {
+		return ErrAgentJobResultInvalid
+	}
+
+	now := time.Now().UTC()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin complete-with-result tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if resultActionID > 0 {
+		var exists bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(
+			    SELECT 1 FROM agent_actions
+			     WHERE id = $1 AND job_id = $2 AND user_id = $3
+			)`,
+			resultActionID, jobID, userID,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("verify job result action: %w", err)
+		}
+		if !exists {
+			return ErrAgentJobResultInvalid
+		}
+	}
+	if resultLeadID > 0 {
+		var exists bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(
+			    SELECT 1
+			      FROM agent_job_lead_results r
+			      JOIN job_leads l ON l.id = r.lead_id
+			     WHERE r.lead_id = $1 AND r.job_id = $2
+			       AND r.user_id = $3 AND l.user_id = $3
+			)`,
+			resultLeadID, jobID, userID,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("verify job result lead: %w", err)
+		}
+		if !exists {
+			return ErrAgentJobResultInvalid
+		}
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE agent_jobs
+		    SET status = $1, last_error = $2,
+		        result_action_id = $3, result_lead_id = $4, updated_at = $5
+		  WHERE id = $6 AND user_id = $7 AND status = $8 AND attempts = $9`,
+		status, nullable(note), nullableInt(resultActionID), nullableInt(resultLeadID),
+		now, jobID, userID, JobProcessing, attempt,
+	)
+	if err != nil {
+		return fmt.Errorf("complete agent job with result: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAgentJobNotFound
+	}
+	if err := finishOpenAttempt(ctx, tx, jobID, status, note, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete-with-result tx: %w", err)
 	}
 	return nil
 }

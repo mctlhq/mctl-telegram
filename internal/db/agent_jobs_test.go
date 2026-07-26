@@ -148,6 +148,167 @@ func TestCompleteAgentJob_CASFromProcessing(t *testing.T) {
 	}
 }
 
+func TestCompleteAgentJobWithResult_BindsExactActionAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "result-owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:result")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	attempt := claimed[0].Attempts
+
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", 0, 0,
+	); !errors.Is(err, ErrAgentJobResultRequired) {
+		t.Fatalf("complete without result err = %v", err)
+	}
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: jid, Attempt: attempt, UserID: uid,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", actionID+999, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("complete with wrong action err = %v", err)
+	}
+	stillProcessing, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get after invalid result: %v", err)
+	}
+	if stillProcessing.Status != JobProcessing || stillProcessing.ResultActionID != 0 {
+		t.Fatalf("invalid result partially completed job: %+v", stillProcessing)
+	}
+
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", actionID, 0,
+	); err != nil {
+		t.Fatalf("complete with action: %v", err)
+	}
+	completed, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get completed: %v", err)
+	}
+	if completed.Status != JobCompleted || completed.ResultActionID != actionID || completed.ResultLeadID != 0 {
+		t.Fatalf("completed job = %+v", completed)
+	}
+}
+
+func TestCompleteAgentJobWithResult_RejectsCrossTenantAndStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "result-owner-a")
+	other := seedAgentUser(t, s, "result-owner-b")
+	jid := seedJob(t, s, owner, "evt:v1:1:1:result-owner")
+	otherJob := seedJob(t, s, other, "evt:v1:2:1:result-other")
+	ownerClaims, err := s.ClaimAgentJobs(ctx, "owner-worker", owner, 1)
+	if err != nil || len(ownerClaims) != 1 {
+		t.Fatalf("claim owner: jobs=%+v err=%v", ownerClaims, err)
+	}
+	otherClaims, err := s.ClaimAgentJobs(ctx, "other-worker", other, 1)
+	if err != nil || len(otherClaims) != 1 {
+		t.Fatalf("claim other: jobs=%+v err=%v", otherClaims, err)
+	}
+	otherActionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: otherJob, Attempt: otherClaims[0].Attempts, UserID: other,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert other action: %v", err)
+	}
+	ownerActionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: jid, Attempt: ownerClaims[0].Attempts, UserID: owner,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert owner action: %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts, JobCompleted, "", otherActionID, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("cross-tenant result err = %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts-1, JobCompleted, "", ownerActionID, 0,
+	); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("stale attempt err = %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts, JobFailed, "", otherActionID, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("failed status accepted a result ref, err = %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts, JobFailed, "", -1, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("negative result id err = %v", err)
+	}
+}
+
+func TestCompleteAgentJobWithResult_PreservesLeadAssociationAcrossUpserts(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "lead-history-owner")
+	conv, err := s.EnsureConversation(ctx, uid, 77, "", "")
+	if err != nil {
+		t.Fatalf("conversation: %v", err)
+	}
+
+	first := seedJob(t, s, uid, "evt:v1:1:77:lead-first")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, first); err != nil {
+		t.Fatalf("bind first conversation: %v", err)
+	}
+	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim first: jobs=%+v err=%v", claimed, err)
+	}
+	leadID, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, JobID: first, Attempt: claimed[0].Attempts, Company: "Acme",
+	})
+	if err != nil {
+		t.Fatalf("save first lead: %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(ctx, uid, first, claimed[0].Attempts, JobCompleted, "", 0, leadID); err != nil {
+		t.Fatalf("complete first: %v", err)
+	}
+
+	second := seedJob(t, s, uid, "evt:v1:1:77:lead-second")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, second); err != nil {
+		t.Fatalf("bind second conversation: %v", err)
+	}
+	claimed, err = s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != second {
+		t.Fatalf("claim second: jobs=%+v err=%v", claimed, err)
+	}
+	secondLeadID, err := s.UpsertJobLead(ctx, JobLead{
+		UserID: uid, ConversationID: conv.ID, JobID: second, Attempt: claimed[0].Attempts, Role: "Staff",
+	})
+	if err != nil {
+		t.Fatalf("save second lead: %v", err)
+	}
+	if secondLeadID != leadID {
+		t.Fatalf("lead row changed: first=%d second=%d", leadID, secondLeadID)
+	}
+	if err := s.CompleteAgentJobWithResult(ctx, uid, second, claimed[0].Attempts, JobCompleted, "", 0, secondLeadID); err != nil {
+		t.Fatalf("complete second: %v", err)
+	}
+
+	var associations int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_lead_results WHERE lead_id=$1 AND job_id IN ($2,$3)`,
+		leadID, first, second,
+	).Scan(&associations); err != nil {
+		t.Fatalf("count associations: %v", err)
+	}
+	if associations != 2 {
+		t.Fatalf("associations = %d, want 2", associations)
+	}
+}
+
 func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

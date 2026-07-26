@@ -51,6 +51,11 @@ type Server struct {
 	// elsewhere in this codebase) rather than a constructor arg, since it can
 	// change across a config reload without needing a new Server.
 	GlobalKill bool
+	// AllowLegacyJobCompletion is a temporary rolling-upgrade bridge for
+	// workers that predate exact result linkage. Keep false normally; enable
+	// only while old worker pods are draining, then disable after the new
+	// workers are confirmed healthy.
+	AllowLegacyJobCompletion bool
 
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration

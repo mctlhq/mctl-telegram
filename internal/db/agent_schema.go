@@ -131,10 +131,21 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	// Direct result linkage makes "persist result + complete exact claim" a
+	// single verifiable transaction instead of a handler-level existence
+	// check followed by a separate queue transition.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "result_action_id",
+		"BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "result_lead_id",
+		"BIGINT", "INTEGER"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
-	// /jobs/{id}/complete can recognize a lead-only result — see
-	// HasJobLeadForJob. Unlike the three columns above, its index is NOT
+	// /jobs/{id}/complete can bind a lead-only result. Unlike the columns
+	// above, its index is NOT
 	// inline in the job_leads CREATE TABLE stmts list above (see #310):
 	// on a pre-A-PR6 database, job_leads exists without job_id, and a
 	// CREATE INDEX ... ON job_leads(job_id) run in the same pass as that
@@ -419,6 +430,8 @@ func agentSchemaSQLite() []string {
 			claimed_by TEXT,
 			claimed_at DATETIME,
 			last_error TEXT,
+			result_action_id INTEGER,
+			result_lead_id INTEGER,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -438,6 +451,13 @@ func agentSchemaSQLite() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
+			job_id INTEGER PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			lead_id INTEGER NOT NULL REFERENCES job_leads(id) ON DELETE CASCADE,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_lead_results_lead ON agent_job_lead_results(lead_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INTEGER NOT NULL DEFAULT 0,
@@ -618,6 +638,8 @@ func agentSchemaPG() []string {
 			claimed_by TEXT,
 			claimed_at TIMESTAMPTZ,
 			last_error TEXT,
+			result_action_id BIGINT,
+			result_lead_id BIGINT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
@@ -637,6 +659,13 @@ func agentSchemaPG() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
+			job_id BIGINT PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			lead_id BIGINT NOT NULL REFERENCES job_leads(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_lead_results_lead ON agent_job_lead_results(lead_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INT NOT NULL DEFAULT 0,
