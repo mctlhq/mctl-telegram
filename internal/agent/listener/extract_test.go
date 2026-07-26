@@ -87,6 +87,42 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 	}
 }
 
+func TestExtractMessage_RejectsIndirectSavedCommands(t *testing.T) {
+	forwarded := &tg.Message{
+		ID: 20, Out: true, PeerID: &tg.PeerUser{UserID: selfTG},
+		Message: "/mctl approve FORWARDED",
+	}
+	forwarded.SetFwdFrom(tg.MessageFwdHeader{Date: 1})
+
+	otherSavedPeer := &tg.Message{
+		ID: 21, Out: true, PeerID: &tg.PeerUser{UserID: selfTG},
+		Message: "/mctl approve OTHERPEER",
+	}
+	otherSavedPeer.SetSavedPeerID(&tg.PeerUser{UserID: recruit})
+
+	otherAuthor := &tg.Message{
+		ID: 22, Out: true, PeerID: &tg.PeerUser{UserID: selfTG},
+		Message: "/mctl approve OTHERAUTHOR",
+	}
+	otherAuthor.SetFromID(&tg.PeerUser{UserID: recruit})
+
+	for _, msg := range []*tg.Message{forwarded, otherSavedPeer, otherAuthor} {
+		if _, ok := ExtractMessage(ownerUID, selfTG, msg, ents(), false); ok {
+			t.Fatalf("indirect Saved Messages command accepted: id=%d", msg.ID)
+		}
+	}
+
+	directWithSavedPeer := &tg.Message{
+		ID: 23, Out: true, PeerID: &tg.PeerUser{UserID: selfTG},
+		Message: "/mctl status",
+	}
+	directWithSavedPeer.SetSavedPeerID(&tg.PeerUser{UserID: selfTG})
+	directWithSavedPeer.SetFromID(&tg.PeerUser{UserID: selfTG})
+	if _, ok := ExtractMessage(ownerUID, selfTG, directWithSavedPeer, ents(), false); !ok {
+		t.Fatal("direct owner-authored command with self saved_peer_id was rejected")
+	}
+}
+
 func TestExtractMessage_MediaOnlyOwnerMessageIsTakeover(t *testing.T) {
 	out := &tg.Message{ID: 13, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: ""}
 	got, ok := ExtractMessage(ownerUID, selfTG, out, ents(), false)

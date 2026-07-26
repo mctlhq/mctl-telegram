@@ -73,6 +73,18 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			return Extracted{}, false
 		}
 		if peerUser.UserID == selfTGID {
+			// A command must be authored directly by the owner in their primary
+			// Saved Messages dialog. Forwarded messages and messages surfaced
+			// from another saved peer/topic are content, not control input.
+			if _, forwarded := msg.GetFwdFrom(); forwarded {
+				return Extracted{}, false
+			}
+			if savedPeer, set := msg.GetSavedPeerID(); set && !isSelfPeer(savedPeer, selfTGID) {
+				return Extracted{}, false
+			}
+			if from, set := msg.GetFromID(); set && !isSelfPeer(from, selfTGID) {
+				return Extracted{}, false
+			}
 			// Saved Messages is private scratch space. Retain only explicit /mctl
 			// control commands; ordinary personal notes must never enter agent
 			// retention or reach the command router.
@@ -135,6 +147,11 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		Meta:       senderMeta(senderUser),
 	}
 	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser)}, true
+}
+
+func isSelfPeer(peer tg.PeerClass, selfTGID int64) bool {
+	user, ok := peer.(*tg.PeerUser)
+	return ok && user.UserID == selfTGID
 }
 
 // senderAccessHash extracts a usable access_hash from the sender's entity,
