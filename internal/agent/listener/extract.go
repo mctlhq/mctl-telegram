@@ -73,34 +73,7 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			return Extracted{}, false
 		}
 		if peerUser.UserID == selfTGID {
-			// A command must be authored directly by the owner in their primary
-			// Saved Messages dialog. Forwarded messages and messages surfaced
-			// from another saved peer/topic are content, not control input.
-			if _, forwarded := msg.GetFwdFrom(); forwarded {
-				return Extracted{}, false
-			}
-			if savedPeer, set := msg.GetSavedPeerID(); set && !isSelfPeer(savedPeer, selfTGID) {
-				return Extracted{}, false
-			}
-			if from, set := msg.GetFromID(); set && !isSelfPeer(from, selfTGID) {
-				return Extracted{}, false
-			}
-			// Saved Messages is private scratch space. Retain only explicit /mctl
-			// control commands; ordinary personal notes must never enter agent
-			// retention or reach the command router.
-			if !isMCTLCommand(text) {
-				return Extracted{}, false
-			}
-			ev := db.IncomingEvent{
-				EventID:    eventIDForMessage(selfTGID, selfTGID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
-				UserID:     accountUserID,
-				Kind:       db.EventKindSavedCommand,
-				ChatTGID:   selfTGID,
-				SenderTGID: selfTGID,
-				MessageID:  int64(msg.ID),
-				Body:       msg.Message,
-			}
-			return Extracted{Event: ev, SavedCommandText: msg.Message}, true
+			return classifySavedCommand(accountUserID, selfTGID, msg, text, isEdit)
 		}
 		// Do not require text here: any visible owner intervention in a private
 		// chat (including media without caption) must stop autonomous replies.
@@ -152,6 +125,69 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 func isSelfPeer(peer tg.PeerClass, selfTGID int64) bool {
 	user, ok := peer.(*tg.PeerUser)
 	return ok && user.UserID == selfTGID
+}
+
+// classifySavedCommand applies the shared owner-authored-command rules for a
+// message already known to be in the primary Saved Messages dialog (PeerID
+// == selfTGID). Deliberately does not look at msg.Out: the live push path's
+// caller (ExtractMessage) has already gated on Out == true before reaching
+// here, but the history poller (pollSavedHistory) cannot -- Telegram's
+// messages.getHistory response for Peer: InputPeerSelf was observed
+// (live, 2026-07-26) setting Out == false on a message the same account had
+// just sent to itself, unlike the live push path's UpdateNewMessage, which
+// reliably sets it true. Gating on dialog membership plus the
+// forwarded/saved-peer/from-id checks below is correct either way: nothing
+// but the owner can ever author a message that lands in their own primary
+// Saved Messages dialog.
+func classifySavedCommand(accountUserID, selfTGID int64, msg *tg.Message, text string, isEdit bool) (Extracted, bool) {
+	// A command must be authored directly by the owner in their primary
+	// Saved Messages dialog. Forwarded messages and messages surfaced
+	// from another saved peer/topic are content, not control input.
+	if _, forwarded := msg.GetFwdFrom(); forwarded {
+		return Extracted{}, false
+	}
+	if savedPeer, set := msg.GetSavedPeerID(); set && !isSelfPeer(savedPeer, selfTGID) {
+		return Extracted{}, false
+	}
+	if from, set := msg.GetFromID(); set && !isSelfPeer(from, selfTGID) {
+		return Extracted{}, false
+	}
+	// Saved Messages is private scratch space. Retain only explicit /mctl
+	// control commands; ordinary personal notes must never enter agent
+	// retention or reach the command router.
+	if !isMCTLCommand(text) {
+		return Extracted{}, false
+	}
+	ev := db.IncomingEvent{
+		EventID:    eventIDForMessage(selfTGID, selfTGID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
+		UserID:     accountUserID,
+		Kind:       db.EventKindSavedCommand,
+		ChatTGID:   selfTGID,
+		SenderTGID: selfTGID,
+		MessageID:  int64(msg.ID),
+		Body:       msg.Message,
+	}
+	return Extracted{Event: ev, SavedCommandText: msg.Message}, true
+}
+
+// ExtractSavedHistoryMessage classifies one message fetched via
+// messages.getHistory against Peer: InputPeerSelf (see pollSavedHistory).
+// Every item the real API returns for that peer is, by construction, in the
+// owner's own Saved Messages dialog, so this does not need msg.Out the way
+// ExtractMessage does for a live update (see classifySavedCommand's doc
+// comment for why that flag cannot be trusted here) -- but it still checks
+// PeerID itself rather than trusting the caller, both as defense in depth
+// and because callers other than the real production RPC (tests, a future
+// caller with a different fetch) are not guaranteed the same invariant.
+func ExtractSavedHistoryMessage(accountUserID, selfTGID int64, msg *tg.Message) (Extracted, bool) {
+	if msg == nil {
+		return Extracted{}, false
+	}
+	peerUser, ok := msg.PeerID.(*tg.PeerUser)
+	if !ok || peerUser.UserID != selfTGID {
+		return Extracted{}, false
+	}
+	return classifySavedCommand(accountUserID, selfTGID, msg, strings.TrimSpace(msg.Message), false)
 }
 
 // senderAccessHash extracts a usable access_hash from the sender's entity,
