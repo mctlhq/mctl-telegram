@@ -21,7 +21,7 @@ type agentAPI interface {
 	RequestOwnerApproval(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error)
 	SendOwnerSummary(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error)
 	PauseAutopilot(ctx context.Context, paused bool) (bool, error)
-	CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string) error
+	CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string, result JobResultRef) error
 }
 
 // JobContext pins the identity of the single job this MCP server instance
@@ -85,6 +85,11 @@ type toolBuilder struct {
 	// ever in flight for a given job at a time.
 	mu        sync.Mutex
 	completed bool
+	// Durable result ids come only from successful pinned tool responses.
+	// complete_agent_job has no arguments through which the model can forge
+	// either id.
+	resultActionID int64
+	resultLeadID   int64
 }
 
 var errJobAlreadyCompleted = errors.New("this job was already marked complete — no further actions are allowed")
@@ -215,6 +220,7 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			if err != nil {
 				return toolErr(err), nil
 			}
+			b.resultActionID = out.ActionID
 			return jsonResult(out)
 		})
 	}
@@ -260,6 +266,7 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			if err != nil {
 				return toolErr(err), nil
 			}
+			b.resultLeadID = leadID
 			return jsonResult(map[string]any{"lead_id": leadID})
 		})
 	}
@@ -283,6 +290,7 @@ func (b *toolBuilder) requestOwnerApproval() (mcplib.Tool, mcpserver.ToolHandler
 			if err != nil {
 				return toolErr(err), nil
 			}
+			b.resultActionID = out.ActionID
 			return jsonResult(out)
 		})
 	}
@@ -306,6 +314,7 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 			if err != nil {
 				return toolErr(err), nil
 			}
+			b.resultActionID = out.ActionID
 			return jsonResult(out)
 		})
 	}
@@ -358,7 +367,12 @@ func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc
 			if status == "" {
 				return mcplib.NewToolResultError("status is required"), nil
 			}
-			if err := b.api.CompleteJob(ctx, b.job.JobID, b.job.Attempt, status, ""); err != nil {
+			result := JobResultRef{}
+			if status == "completed" {
+				result.ActionID = b.resultActionID
+				result.LeadID = b.resultLeadID
+			}
+			if err := b.api.CompleteJob(ctx, b.job.JobID, b.job.Attempt, status, "", result); err != nil {
 				return toolErr(err), nil
 			}
 			b.completed = true

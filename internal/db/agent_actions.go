@@ -945,41 +945,6 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 	return out, rows.Err()
 }
 
-// HasAgentActionForJob reports whether at least one agent_actions row exists
-// for the given job, scoped to the owning user. Used by the agent API's
-// POST /jobs/{id}/complete to enforce that a job can only be marked
-// completed once its result has actually been persisted — completion is not
-// a bare acknowledgement from the worker's local invocation.
-func (s *Store) HasAgentActionForJob(ctx context.Context, userID, jobID int64) (bool, error) {
-	var exists bool
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM agent_actions WHERE job_id = $1 AND user_id = $2)`,
-		jobID, userID,
-	).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("check agent action for job: %w", err)
-	}
-	return exists, nil
-}
-
-// HasJobLeadForJob reports whether a job_leads row is tagged with the given
-// job, scoped to the owning user — the job_leads-side counterpart to
-// HasAgentActionForJob. A job whose only durable output was a lead save
-// (rather than a proposed reply or owner notification) must still be
-// completable; POST /jobs/{id}/complete checks both before accepting
-// status=completed.
-func (s *Store) HasJobLeadForJob(ctx context.Context, userID, jobID int64) (bool, error) {
-	var exists bool
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM job_leads WHERE job_id = $1 AND user_id = $2)`,
-		jobID, userID,
-	).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("check job lead for job: %w", err)
-	}
-	return exists, nil
-}
-
 // JobLead is the structured vacancy record the agent extracts from a
 // recruiter conversation. Detail is a free-form JSON blob for fields that do
 // not warrant their own column (stack, interview process, remote policy, …);

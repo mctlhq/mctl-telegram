@@ -179,10 +179,9 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	if req.JobID != 0 {
 		// The job and the conversation the caller pairs it with must actually
 		// match — otherwise policy evaluates against the wrong conversation's
-		// state/peer while HasAgentActionForJob still lets the (unrelated)
-		// job complete, since the action row it checks is keyed on job_id
-		// alone. GetAgentJob already scopes to id.UserID, so a foreign job_id
-		// is rejected before this check ever runs.
+		// state/peer and persists a result that cannot validly belong to this
+		// job. GetAgentJob already scopes to id.UserID, so a foreign job_id is
+		// rejected before this check ever runs.
 		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
 		if errors.Is(err, db.ErrAgentJobNotFound) {
 			writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")

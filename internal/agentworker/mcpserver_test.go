@@ -29,6 +29,7 @@ type fakeAPI struct {
 		attempt int
 		status  string
 		note    string
+		result  JobResultRef
 	}
 	pauseAutopilotCalls []bool
 
@@ -122,7 +123,7 @@ func (f *fakeAPI) PauseAutopilot(ctx context.Context, paused bool) (bool, error)
 	return paused, nil
 }
 
-func (f *fakeAPI) CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string) error {
+func (f *fakeAPI) CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string, result JobResultRef) error {
 	if f.completeJobStarted != nil {
 		close(f.completeJobStarted)
 	}
@@ -134,7 +135,8 @@ func (f *fakeAPI) CompleteJob(ctx context.Context, jobID int64, attempt int, sta
 		attempt int
 		status  string
 		note    string
-	}{jobID, attempt, status, note})
+		result  JobResultRef
+	}{jobID, attempt, status, note, result})
 	return f.err
 }
 
@@ -195,7 +197,10 @@ func TestProposeReply_EmptyTextIsRejectedLocally(t *testing.T) {
 
 func TestCompleteAgentJob_UsesJobsPinnedIDAndAttempt(t *testing.T) {
 	api := &fakeAPI{}
-	b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 3}}
+	b := &toolBuilder{
+		api: api, job: JobContext{JobID: 42, Attempt: 3},
+		resultActionID: 17, resultLeadID: 23,
+	}
 	tool, handler := b.completeAgentJob()
 	// Even if the model tried to supply job_id/attempt, the schema has no
 	// such parameters, so a stale or wrong value can never override the
@@ -210,6 +215,55 @@ func TestCompleteAgentJob_UsesJobsPinnedIDAndAttempt(t *testing.T) {
 	call := api.completeJobCalls[0]
 	if call.jobID != 42 || call.attempt != 3 || call.status != "completed" {
 		t.Fatalf("call = %#v", call)
+	}
+	if call.result.ActionID != 17 || call.result.LeadID != 23 {
+		t.Fatalf("result = %#v, want action=17 lead=23", call.result)
+	}
+}
+
+func TestCompleteAgentJob_UsesIDsReturnedByResultTools(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 3, ConversationID: 9}}
+
+	proposeTool, proposeHandler := b.proposeReply()
+	if res := callTool(t, proposeTool, proposeHandler, map[string]any{
+		"intent": "discovery", "text": "Thanks",
+	}); res.IsError {
+		t.Fatalf("propose_reply failed: %#v", res)
+	}
+	leadTool, leadHandler := b.saveJobLead()
+	if res := callTool(t, leadTool, leadHandler, map[string]any{"company": "Acme"}); res.IsError {
+		t.Fatalf("save_job_lead failed: %#v", res)
+	}
+	completeTool, completeHandler := b.completeAgentJob()
+	if res := callTool(t, completeTool, completeHandler, map[string]any{
+		"status": "completed",
+		// These attacker-supplied keys are not in the schema and must not
+		// override the ids returned by the two successful tools above.
+		"result_action_id": float64(999),
+		"result_lead_id":   float64(998),
+	}); res.IsError {
+		t.Fatalf("complete_agent_job failed: %#v", res)
+	}
+
+	call := api.completeJobCalls[0]
+	if call.result.ActionID != 1 || call.result.LeadID != 7 {
+		t.Fatalf("result = %#v, want tool-returned action=1 lead=7", call.result)
+	}
+}
+
+func TestCompleteAgentJob_NonCompletedStatusCarriesNoResult(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{
+		api: api, job: JobContext{JobID: 42, Attempt: 3},
+		resultActionID: 17, resultLeadID: 23,
+	}
+	tool, handler := b.completeAgentJob()
+	if res := callTool(t, tool, handler, map[string]any{"status": "failed"}); res.IsError {
+		t.Fatalf("complete_agent_job failed: %#v", res)
+	}
+	if got := api.completeJobCalls[0].result; got.ActionID != 0 || got.LeadID != 0 {
+		t.Fatalf("failed completion carried result refs: %#v", got)
 	}
 }
 

@@ -111,7 +111,7 @@ func TestClient_NonOKStatus_ReturnsAPIError(t *testing.T) {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "job is no longer claimed under that attempt"})
 	})
-	err := client.CompleteJob(context.Background(), 1, 1, "completed", "")
+	err := client.CompleteJob(context.Background(), 1, 1, "completed", "", JobResultRef{ActionID: 7})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -221,7 +221,10 @@ func TestClient_CompleteJob_SendsAttemptAndStatus(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		writeJSONFixture(w, map[string]any{"completed": true})
 	})
-	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "sent reply"); err != nil {
+	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "sent reply", JobResultRef{
+		ActionID: 17,
+		LeadID:   23,
+	}); err != nil {
 		t.Fatalf("CompleteJob: %v", err)
 	}
 	if gotPath != "/jobs/42/complete" {
@@ -229,6 +232,9 @@ func TestClient_CompleteJob_SendsAttemptAndStatus(t *testing.T) {
 	}
 	if gotBody["attempt"].(float64) != 2 || gotBody["status"] != "completed" {
 		t.Fatalf("body = %#v", gotBody)
+	}
+	if gotBody["result_action_id"].(float64) != 17 || gotBody["result_lead_id"].(float64) != 23 {
+		t.Fatalf("result refs = %#v", gotBody)
 	}
 }
 

@@ -117,9 +117,11 @@ type JobEnvelope struct {
 // It deliberately excludes event and conversation data: ClaudeInvoker only
 // needs to know whether its exact claim reached a terminal state.
 type JobStatus struct {
-	JobID   int64  `json:"job_id"`
-	Status  string `json:"status"`
-	Attempt int    `json:"attempt"`
+	JobID          int64  `json:"job_id"`
+	Status         string `json:"status"`
+	Attempt        int    `json:"attempt"`
+	ResultActionID int64  `json:"result_action_id,omitempty"`
+	ResultLeadID   int64  `json:"result_lead_id,omitempty"`
 }
 
 func (s JobStatus) Terminal() bool {
@@ -384,14 +386,19 @@ func (c *Client) PauseAutopilot(ctx context.Context, paused bool) (bool, error) 
 	return out.AutopilotPaused, nil
 }
 
-// CompleteJob calls POST /jobs/{id}/complete. status must be "completed",
-// "failed", or "ignored" (see db.JobCompleted/JobFailed/JobIgnored). A
-// "completed" call fails server-side with 409 unless a durable result
-// (an agent_actions row or job_lead) was already persisted for this job —
-// see agentapi.handleJobComplete's doc comment. That check is the actual
-// crash-safety guarantee; this client makes no attempt to duplicate it
-// locally.
-func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string) error {
-	body := map[string]any{"attempt": attempt, "status": status, "note": note}
+// JobResultRef is populated from successful result-producing tool responses,
+// never from model-supplied complete_agent_job arguments.
+type JobResultRef struct {
+	ActionID int64
+	LeadID   int64
+}
+
+// CompleteJob calls POST /jobs/{id}/complete. For status=completed the
+// server atomically verifies and stores the exact durable result ids.
+func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, status, note string, result JobResultRef) error {
+	body := map[string]any{
+		"attempt": attempt, "status": status, "note": note,
+		"result_action_id": result.ActionID, "result_lead_id": result.LeadID,
+	}
 	return c.do(ctx, http.MethodPost, "/jobs/"+strconv.FormatInt(jobID, 10)+"/complete", body, nil)
 }
