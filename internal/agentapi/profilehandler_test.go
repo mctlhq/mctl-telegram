@@ -169,6 +169,25 @@ func TestAdminAgentProfileHandler_RejectsMisspelledRestrictedMarker(t *testing.T
 	}
 }
 
+func TestAdminAgentProfileHandler_RejectsDuplicateEnvelopeKeys(t *testing.T) {
+	store := newProfileTestStore(t)
+	for _, tgID := range []int64{777, 888} {
+		if _, err := store.EnsureUserByTelegramID(context.Background(), tgID, "", ""); err != nil {
+			t.Fatalf("seed user %d: %v", tgID, err)
+		}
+	}
+	h := NewAdminAgentProfileHandler(store)
+	for _, body := range []string{
+		`{"telegram_id":777,"owner_profile":{"identity":{"name":"Alice"}},"telegram_id":888}`,
+		`{"telegram_id":777,"owner_profile":{"restricted":{"salary":{"value":"1","never_auto_send":true}}},"owner_profile":{}}`,
+	} {
+		rec := doProfileReq(h, adminIdentity(), body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
+		}
+	}
+}
+
 func TestAdminAgentProfileHandler_UnknownTelegramID404s(t *testing.T) {
 	h := NewAdminAgentProfileHandler(newProfileTestStore(t))
 	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":999999}`)

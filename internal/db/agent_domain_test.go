@@ -174,6 +174,40 @@ func TestAgentOwnerProfile_ImportDoesNotOverwriteAndClear(t *testing.T) {
 	}
 }
 
+func TestAgentOwnerProfile_AccountPurgeKeepsImportTombstone(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "profile-delete")
+	if err := s.EnsureAgentProfile(ctx, uid); err != nil {
+		t.Fatalf("ensure profile: %v", err)
+	}
+	if inserted, err := s.SetAgentOwnerProfileIfMissing(ctx, uid, []byte(`{"identity":{"name":"Private"}}`)); err != nil || !inserted {
+		t.Fatalf("import: inserted=%v err=%v", inserted, err)
+	}
+	if err := purgeAgentData(ctx, s.DB, uid); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if err := s.EnsureAgentProfile(ctx, uid); err != nil {
+		t.Fatalf("recreate safe profile row: %v", err)
+	}
+	inserted, err := s.SetAgentOwnerProfileIfMissing(ctx, uid, []byte(`{"identity":{"name":"Restored"}}`))
+	if err != nil {
+		t.Fatalf("reimport after purge: %v", err)
+	}
+	if inserted {
+		t.Fatal("legacy profile was reimported after account purge")
+	}
+	var tombstones int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_profile_import_tombstones WHERE user_id=$1`, uid,
+	).Scan(&tombstones); err != nil {
+		t.Fatalf("read tombstone: %v", err)
+	}
+	if tombstones != 1 {
+		t.Fatalf("tombstones = %d, want 1", tombstones)
+	}
+}
+
 func TestListListenerEnabledProfiles(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

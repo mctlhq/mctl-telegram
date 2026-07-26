@@ -112,7 +112,7 @@ func ParseJSON(raw []byte) (Data, error) {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return Data{}, fmt.Errorf("profile document must be a JSON object")
 	}
-	if err := rejectDuplicateJSONKeys(trimmed); err != nil {
+	if err := RejectDuplicateJSONKeys(trimmed); err != nil {
 		return Data{}, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
@@ -134,7 +134,10 @@ func ParseJSON(raw []byte) (Data, error) {
 	return d, nil
 }
 
-func rejectDuplicateJSONKeys(raw []byte) error {
+// RejectDuplicateJSONKeys validates duplicate-free JSON objects recursively.
+// It is also used by the admin handler on the complete request envelope before
+// decoding can collapse duplicate tenant selectors or owner_profile fields.
+func RejectDuplicateJSONKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 
@@ -161,7 +164,7 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 					return fmt.Errorf("profile object key must be a string")
 				}
 				if _, duplicate := seen[key]; duplicate {
-					return fmt.Errorf("duplicate profile key %q", key)
+					return fmt.Errorf("duplicate JSON key %q", key)
 				}
 				seen[key] = struct{}{}
 				if err := walk(); err != nil {

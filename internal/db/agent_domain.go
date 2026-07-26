@@ -196,7 +196,11 @@ func (s *Store) SetAgentOwnerProfileIfMissing(ctx context.Context, userID int64,
 		    SET owner_profile_encrypted = $1, owner_profile_imported_at = $2,
 		        updated_at = $2
 		  WHERE user_id = $3 AND owner_profile_encrypted IS NULL
-		    AND owner_profile_imported_at IS NULL`,
+		    AND owner_profile_imported_at IS NULL
+		    AND NOT EXISTS (
+		        SELECT 1 FROM agent_profile_import_tombstones t
+		         WHERE t.user_id = agent_profiles.user_id
+		    )`,
 		encrypted, time.Now().UTC(), userID,
 	)
 	if err != nil {
@@ -388,6 +392,16 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 		if err := purgeAgentJobsHook(ctx, ex, userID); err != nil {
 			return err
 		}
+	}
+	// The users identity survives account deletion. Retain only this
+	// content-free tombstone so a still-mounted legacy AGENT_PROFILE_PATH
+	// cannot silently restore the private profile on the next restart.
+	if _, err := ex.ExecContext(ctx,
+		`INSERT INTO agent_profile_import_tombstones(user_id) VALUES($1)
+		 ON CONFLICT (user_id) DO NOTHING`,
+		userID,
+	); err != nil {
+		return fmt.Errorf("purge agent data: preserve profile import tombstone: %w", err)
 	}
 	stmts := []string{
 		`DELETE FROM owner_notifications WHERE user_id = $1`,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -80,8 +81,20 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusForbidden, "admin scope required")
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		rawRequest, err := io.ReadAll(r.Body)
+		if err != nil || agentprofile.RejectDuplicateJSONKeys(rawRequest) != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 		var req upsertAgentProfileRequest
-		if err := decodeStrict(w, r, &req); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(rawRequest))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}

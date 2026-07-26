@@ -274,6 +274,10 @@ func agentSchemaSQLite() []string {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_profile_import_tombstones (
+			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS incoming_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
@@ -474,6 +478,10 @@ func agentSchemaPG() []string {
 			owner_profile_imported_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS agent_profile_import_tombstones (
+			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE TABLE IF NOT EXISTS incoming_events (
 			id BIGSERIAL PRIMARY KEY,
