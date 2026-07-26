@@ -112,7 +112,14 @@ func ParseJSON(raw []byte) (Data, error) {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return Data{}, fmt.Errorf("profile document must be a JSON object")
 	}
+	if err := rejectDuplicateJSONKeys(trimmed); err != nil {
+		return Data{}, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	// Keep the exact numeric token. Decoding into any as float64 would turn
+	// 1000000 into 1e+06 and round integers above 2^53, allowing the original
+	// restricted literal to evade verbatim send-time matching.
+	dec.UseNumber()
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
 		return Data{}, err
@@ -125,6 +132,78 @@ func ParseJSON(raw []byte) (Data, error) {
 	}
 	normalizeData(&d)
 	return d, nil
+}
+
+func rejectDuplicateJSONKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+
+	var walk func() error
+	walk = func() error {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("profile object key must be a string")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("duplicate profile key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim('}') {
+				return fmt.Errorf("invalid profile object")
+			}
+		case '[':
+			for dec.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim(']') {
+				return fmt.Errorf("invalid profile array")
+			}
+		default:
+			return fmt.Errorf("unexpected profile delimiter %q", delim)
+		}
+		return nil
+	}
+
+	if err := walk(); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("profile document must contain exactly one JSON object")
+		}
+		return err
+	}
+	return nil
 }
 
 // normalizeData recursively converts every map[interface{}]interface{} that

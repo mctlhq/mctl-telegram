@@ -38,7 +38,7 @@ func TestMigrate_UpgradesPreExistingProfilesWithoutSenderAllowlist(t *testing.T)
 		t.Fatalf("migrate: %v", err)
 	}
 	var allowlist string
-	var ownerProfileColumnCount int
+	var ownerProfileColumnCount, ownerProfileImportColumnCount int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT sender_allowlist FROM agent_profiles WHERE user_id=7`,
 	).Scan(&allowlist); err != nil {
@@ -54,6 +54,14 @@ func TestMigrate_UpgradesPreExistingProfilesWithoutSenderAllowlist(t *testing.T)
 	}
 	if ownerProfileColumnCount != 1 {
 		t.Fatal("agent_profiles.owner_profile_encrypted column not added")
+	}
+	if err := conn.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('agent_profiles') WHERE name = 'owner_profile_imported_at'`,
+	).Scan(&ownerProfileImportColumnCount); err != nil {
+		t.Fatalf("check owner_profile_imported_at column: %v", err)
+	}
+	if ownerProfileImportColumnCount != 1 {
+		t.Fatal("agent_profiles.owner_profile_imported_at column not added")
 	}
 }
 

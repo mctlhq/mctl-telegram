@@ -193,8 +193,10 @@ func (s *Store) SetAgentOwnerProfileIfMissing(ctx context.Context, userID int64,
 	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_profiles
-		    SET owner_profile_encrypted = $1, updated_at = $2
-		  WHERE user_id = $3 AND owner_profile_encrypted IS NULL`,
+		    SET owner_profile_encrypted = $1, owner_profile_imported_at = $2,
+		        updated_at = $2
+		  WHERE user_id = $3 AND owner_profile_encrypted IS NULL
+		    AND owner_profile_imported_at IS NULL`,
 		encrypted, time.Now().UTC(), userID,
 	)
 	if err != nil {
@@ -330,6 +332,9 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 			}
 			set("owner_profile_encrypted", encrypted)
 		}
+		// Any explicit admin write, including clear, permanently closes the
+		// legacy import path for this tenant.
+		set("owner_profile_imported_at", time.Now().UTC())
 	}
 	if len(sets) == 0 {
 		return nil

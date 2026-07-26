@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -151,6 +152,25 @@ func TestAgentOwnerProfile_ImportDoesNotOverwriteAndClear(t *testing.T) {
 	}
 	if _, err := s.GetAgentOwnerProfile(ctx, uid); !errors.Is(err, ErrAgentOwnerProfileNotFound) {
 		t.Fatalf("get after clear err = %v", err)
+	}
+	inserted, err = s.SetAgentOwnerProfileIfMissing(ctx, uid, []byte(`{"identity":{"name":"Restored"}}`))
+	if err != nil {
+		t.Fatalf("reimport after clear: %v", err)
+	}
+	if inserted {
+		t.Fatal("legacy profile was reimported after administrative clear")
+	}
+	if _, err := s.GetAgentOwnerProfile(ctx, uid); !errors.Is(err, ErrAgentOwnerProfileNotFound) {
+		t.Fatalf("profile restored after clear: %v", err)
+	}
+	var importedAt sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT owner_profile_imported_at FROM agent_profiles WHERE user_id=$1`, uid,
+	).Scan(&importedAt); err != nil {
+		t.Fatalf("read import marker: %v", err)
+	}
+	if !importedAt.Valid {
+		t.Fatal("owner profile import marker was cleared")
 	}
 }
 

@@ -142,23 +142,36 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 
 // UserIDByTelegramID resolves a Telegram user id to the internal users.id
 // WITHOUT creating a row — the read-only counterpart of
-// EnsureUserByTelegramID. Returns ErrUserNotFound when no user has signed in
-// with that Telegram id. Used by the admin tools that act on another user.
+// EnsureUserByTelegramID. It accepts both login identities and finalised
+// connected accounts so local-dev/shared-HMAC users can be administered too.
+// Multiple distinct owners fail closed instead of choosing one tenant.
 func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, error) {
 	if tgID <= 0 {
 		return 0, errors.New("telegram id must be positive")
 	}
-	var id int64
+	var (
+		id    sql.NullInt64
+		count int
+	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id FROM users WHERE telegram_login_id = $1`, tgID,
-	).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrUserNotFound
-	}
+		`SELECT MIN(user_id), COUNT(DISTINCT user_id)
+		   FROM (
+		         SELECT id AS user_id FROM users WHERE telegram_login_id = $1
+		         UNION ALL
+		         SELECT user_id FROM telegram_accounts WHERE telegram_user_id = $1
+		        ) AS candidates`,
+		tgID,
+	).Scan(&id, &count)
 	if err != nil {
 		return 0, fmt.Errorf("select user by tg_id: %w", err)
 	}
-	return id, nil
+	if count == 0 || !id.Valid {
+		return 0, ErrUserNotFound
+	}
+	if count > 1 {
+		return 0, fmt.Errorf("%w: telegram id maps to %d users", ErrTelegramIdentityAmbiguous, count)
+	}
+	return id.Int64, nil
 }
 
 // Access tiers stored in users.access_tier. NULL is treated as TierNone.
@@ -701,8 +714,14 @@ var ErrSessionUnauthorized = errors.New("session not authorized")
 // the user to "finish 2FA". The row is revoked before this is returned.
 var ErrSessionRevoked = errors.New("session revoked")
 
-// ErrUserNotFound means no users row carries the requested telegram_login_id.
+// ErrUserNotFound means no login identity or connected account carries the
+// requested Telegram id.
 var ErrUserNotFound = errors.New("user not found")
+
+// ErrTelegramIdentityAmbiguous means one Telegram id is attached to multiple
+// internal users. Cross-tenant admin/profile operations must fail closed until
+// the identity rows are reconciled.
+var ErrTelegramIdentityAmbiguous = errors.New("telegram identity is ambiguous")
 
 // SessionExpiryReason captures why CheckSessionValid rejected a session, so
 // the caller can include the reason in the audit row / user response. It is

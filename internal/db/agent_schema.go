@@ -124,6 +124,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// Durable one-time import marker. It remains set when an administrator
+	// clears the document, preventing a still-mounted legacy YAML file from
+	// silently restoring data on the next process restart.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "owner_profile_imported_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can recognize a lead-only result — see
@@ -263,6 +270,7 @@ func agentSchemaSQLite() []string {
 			blocked_senders TEXT NOT NULL DEFAULT '',
 			sender_allowlist TEXT NOT NULL DEFAULT '',
 			owner_profile_encrypted BLOB,
+			owner_profile_imported_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -463,6 +471,7 @@ func agentSchemaPG() []string {
 			blocked_senders TEXT NOT NULL DEFAULT '',
 			sender_allowlist TEXT NOT NULL DEFAULT '',
 			owner_profile_encrypted BYTEA,
+			owner_profile_imported_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

@@ -84,9 +84,41 @@ func TestParseJSON_StrictSafetyMarkers(t *testing.T) {
 	if _, err := ParseJSON([]byte(`{"restricted":{"salary":{"value":"secret","never_auto_sent":true}}}`)); err == nil {
 		t.Fatal("misspelled restricted marker was accepted")
 	}
+	for _, raw := range []string{
+		`{"restricted":{"salary":{"value":"secret","never_auto_send":true}},"restricted":{}}`,
+		`{"restricted":{"salary":{"value":"secret","never_auto_send":true,"never_auto_send":false}}}`,
+	} {
+		if _, err := ParseJSON([]byte(raw)); err == nil {
+			t.Fatalf("duplicate-key document %q was accepted", raw)
+		}
+	}
 	for _, raw := range []string{"null", "[]", `{}` + `{}`} {
 		if _, err := ParseJSON([]byte(raw)); err == nil {
 			t.Fatalf("invalid document %q was accepted", raw)
+		}
+	}
+}
+
+func TestParseJSON_PreservesRestrictedNumericLiterals(t *testing.T) {
+	d, err := ParseJSON([]byte(`{
+		"restricted":{
+			"salary":{"value":1000000,"never_auto_send":true},
+			"account":{"value":9007199254740993,"never_auto_send":true}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, tc := range []struct {
+		text string
+		key  string
+	}{
+		{text: "salary is 1000000", key: "salary"},
+		{text: "account 9007199254740993", key: "account"},
+	} {
+		key, never, _, matched := matchRestricted(d, tc.text)
+		if !matched || key != tc.key || !never {
+			t.Fatalf("match %q = key=%q never=%v matched=%v", tc.text, key, never, matched)
 		}
 	}
 }

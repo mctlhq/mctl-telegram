@@ -70,15 +70,6 @@ type agentProfileResponse struct {
 // A brand-new profile is bootstrapped via db.EnsureAgentProfile with the
 // safe C1 defaults (observe, autopilot paused, listener off) before the
 // request's fields are applied on top.
-//
-// Known limitation: telegram_id is resolved via db.UserIDByTelegramID, which
-// only looks at users.telegram_login_id -- populated for accounts that have
-// signed in through the local-jwt OAuth flow. An account connected only via
-// local-dev/shared-hmac-legacy auth (github_login-created, Telegram identity
-// tracked in telegram_accounts.telegram_user_id instead) will 404 here even
-// though it exists. Not a blocker for C1 (mctl-telegram-preview runs
-// local-jwt), but resolving through the connected-account table too is a
-// follow-up if this endpoint needs to provision non-local-jwt accounts.
 func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identity(w, r)
