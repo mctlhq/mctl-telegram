@@ -7,13 +7,14 @@ fields, or Vault values into this file.
 
 ## Scope and acceptance
 
-C1 is bounded to the preview service, owner Telegram account `210408407`,
-and dedicated test sender `8745115872`. During a test window:
+C1 is bounded to the preview service, one owner Telegram account, and one
+dedicated allowlisted test sender. Exact Telegram identifiers remain in the
+private operational evidence store, not this repository. During a test window:
 
 - server kill switch is false;
 - profile mode is `observe`;
 - autopilot is unpaused only so proposals are permitted;
-- listener is enabled with `sender_allowlist=8745115872`;
+- listener is enabled with only the dedicated test sender allowlisted;
 - every reply still requires owner approval.
 
 Acceptance:
@@ -63,9 +64,9 @@ Acceptance:
   cursor retry semantics remain enforced.
 - A fresh `/mctl approve` command was captured from Saved Messages and routed
   through the existing durable event/control path. The corresponding action
-  reached `agent_actions.status=executed`; Telegram message id `3286` was
-  delivered to the allowlisted test peer `8745115872`. No message body is
-  recorded in this report.
+  reached `agent_actions.status=executed`, and the resulting message was
+  delivered to the allowlisted test peer. Neither the message body nor exact
+  Telegram identifiers are recorded in this report.
 - Diagnostic logging from #320/#321 was removed by the final #322 change; it
   is not present on main.
 - The test window was closed and verified live:
