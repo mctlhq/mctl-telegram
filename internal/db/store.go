@@ -447,6 +447,33 @@ func (s *Store) UpdateSessionBlob(ctx context.Context, userID int64, plaintext [
 	return nil
 }
 
+// UpdateSessionBlobByID rotates the bytes of the exact session row loaded by
+// a long-lived gotd client. A replacement OAuth session may already be active;
+// binding the write to the immutable row id prevents the old client from
+// overwriting the replacement's auth key.
+func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int64, plaintext []byte) error {
+	if sessionID <= 0 {
+		return fmt.Errorf("update session blob by id: invalid session id")
+	}
+	blob, err := s.Crypt.SealForUser(plaintext, userID)
+	if err != nil {
+		return err
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = $1
+		 WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL`,
+		blob, sessionID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update session blob by id: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNoActiveSession
+	}
+	return nil
+}
+
 // RevokeActiveSession marks the active telegram_accounts row for a user as
 // revoked. Returns true if a row was actually flipped. Idempotent: calling
 // it twice in a row only flips the first time.

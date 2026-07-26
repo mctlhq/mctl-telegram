@@ -111,6 +111,54 @@ func TestFinishRun_DoesNotRevokeReconnectedSession(t *testing.T) {
 	}
 }
 
+func TestSessionStore_KeepsLoadedRowIdentityAcrossReconnect(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "immutable-row-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := store.SaveSession(ctx, uid, []byte("old-session"), 555, "", ""); err != nil {
+		t.Fatalf("save old session: %v", err)
+	}
+	sessionStore := &SessionStore{UserID: uid, Store: store}
+	if _, err := sessionStore.LoadSession(ctx); err != nil {
+		t.Fatalf("load old session: %v", err)
+	}
+	oldRowID := sessionStore.LoadedRowID()
+
+	if err := store.SaveSession(ctx, uid, []byte("new-session"), 555, "", ""); err != nil {
+		t.Fatalf("save replacement session: %v", err)
+	}
+	if _, err := sessionStore.LoadSession(ctx); err != nil {
+		t.Fatalf("gotd reload after replacement: %v", err)
+	}
+	if got := sessionStore.LoadedRowID(); got != oldRowID {
+		t.Fatalf("loaded row id changed from %d to %d", oldRowID, got)
+	}
+	if err := sessionStore.StoreSession(ctx, []byte("old-client-rotation")); !errors.Is(err, db.ErrNoActiveSession) {
+		t.Fatalf("old client wrote replacement row: err=%v", err)
+	}
+	got, err := store.LoadSession(ctx, uid)
+	if err != nil {
+		t.Fatalf("load replacement: %v", err)
+	}
+	if string(got) != "new-session" {
+		t.Fatalf("replacement session overwritten: %q", got)
+	}
+}
+
+func TestAcquire_RejectsWhileTerminalSessionIsRetiring(t *testing.T) {
+	p := NewClientPool(1, "hash", time.Minute, nil)
+	p.retiring[7] = struct{}{}
+	if _, err := p.acquire(7); !errors.Is(err, ErrSessionRetiring) {
+		t.Fatalf("acquire error = %v, want ErrSessionRetiring", err)
+	}
+	if len(p.entries) != 0 {
+		t.Fatalf("acquire created entry while retiring: %v", p.entries)
+	}
+}
+
 func TestFinishRun_DoesNotDeleteReplacementEntry(t *testing.T) {
 	p := NewClientPool(1, "hash", time.Minute, nil)
 	oldEntry := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}

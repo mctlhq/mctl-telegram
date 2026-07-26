@@ -28,13 +28,19 @@ func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
 	if pt == nil {
 		return nil, session.ErrNotFound
 	}
-	s.rowID.Store(rowID)
+	// gotd can load storage more than once during one client's lifetime.
+	// Keep the first row immutable so an old client can never switch its
+	// identity to a replacement session created by a concurrent OAuth flow.
+	s.rowID.CompareAndSwap(0, rowID)
 	return pt, nil
 }
 
 func (s *SessionStore) StoreSession(ctx context.Context, data []byte) error {
 	if s.Store == nil {
 		return nil
+	}
+	if rowID := s.rowID.Load(); rowID > 0 {
+		return s.Store.UpdateSessionBlobByID(ctx, s.UserID, rowID, data)
 	}
 	return s.Store.UpdateSessionBlob(ctx, s.UserID, data)
 }

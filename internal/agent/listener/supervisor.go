@@ -45,11 +45,14 @@ func (r StoreResolver) GetTelegramID(ctx context.Context, userID int64) (int64, 
 		  LIMIT 1`,
 		userID,
 	).Scan(&tgID)
-	if errors.Is(err, sql.ErrNoRows) || !tgID.Valid || tgID.Int64 == 0 {
-		return 0, fmt.Errorf("active hosted Telegram account not found for user %d", userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("resolve Telegram id for user %d: %w", userID, err)
+	}
+	if !tgID.Valid || tgID.Int64 == 0 {
+		return 0, nil
 	}
 	return tgID.Int64, nil
 }

@@ -54,6 +54,11 @@ func sessionErrorFor(err error) error {
 // TELEGRAM_MAX_SESSIONS limit and cannot allocate a new client entry.
 var ErrPoolFull = errors.New("telegram: session pool at capacity")
 
+// ErrSessionRetiring is returned during the bounded interval in which an
+// asynchronously rejected auth key is being revoked. It prevents acquire
+// from rebuilding a client from the same still-active database row.
+var ErrSessionRetiring = errors.New("telegram: session is being retired")
+
 // ErrSessionRevokePersistFailed marks a call-wide Borrow failure where
 // Telegram rejected the session AND persisting that revoke to the DB itself
 // failed. It deliberately does NOT wrap one of the user-facing session
@@ -97,6 +102,9 @@ type ClientPool struct {
 	// pinned holds user ids whose entries are exempt from idle GC (listener
 	// clients that must stay connected without Borrow traffic).
 	pinned map[int64]struct{}
+	// retiring is a per-user tombstone held while finishRun persists an
+	// asynchronous terminal-session revoke outside the global pool mutex.
+	retiring map[int64]struct{}
 }
 
 type entry struct {
@@ -120,6 +128,7 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 		Store:       store,
 		entries:     make(map[int64]*entry),
 		pinned:      make(map[int64]struct{}),
+		retiring:    make(map[int64]struct{}),
 	}
 }
 
@@ -299,6 +308,9 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if _, ok := p.retiring[userID]; ok {
+		return nil, ErrSessionRetiring
+	}
 	if e, ok := p.entries[userID]; ok && !e.stopped {
 		return e, nil
 	}
@@ -392,6 +404,9 @@ func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
 	current, ownsEntry := p.entries[userID]
 	if ownsEntry && current == e {
 		delete(p.entries, userID)
+		if sentinel != nil && p.Store != nil {
+			p.retiring[userID] = struct{}{}
+		}
 	}
 	if p.metrics != nil {
 		p.metrics.TelegramClientPoolSize.Dec()
@@ -401,6 +416,11 @@ func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
 	if !ownsEntry || current != e || sentinel == nil || p.Store == nil {
 		return
 	}
+	defer func() {
+		p.mu.Lock()
+		delete(p.retiring, userID)
+		p.mu.Unlock()
+	}()
 	sessionID := int64(0)
 	if e.sessionStore != nil {
 		sessionID = e.sessionStore.LoadedRowID()
