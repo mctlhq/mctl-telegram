@@ -1,7 +1,7 @@
-// Package profile reads the owner's YAML profile — identity, public
-// biography, skills, preferences, and a restricted section — from a mounted
-// file (AGENT_PROFILE_PATH) and exposes the non-restricted parts to the
-// agent surface via agentapi.OwnerProfileProvider.
+// Package profile validates owner-profile documents and exposes the
+// non-restricted parts to the agent surface. Runtime documents are encrypted
+// per tenant in agent_profiles; the YAML reader exists only to import the
+// legacy AGENT_PROFILE_PATH format once.
 //
 // The restricted section (current compensation, references, anything the
 // owner marked approval_required or never_auto_send) is parsed so the
@@ -13,7 +13,11 @@
 package profile
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -27,23 +31,22 @@ import (
 // NeverAutoSend is the stricter marker: not even an approved reply may
 // include it verbatim; the owner must have typed it themselves.
 type RestrictedField struct {
-	Value            any  `yaml:"value"`
-	ApprovalRequired bool `yaml:"approval_required"`
-	NeverAutoSend    bool `yaml:"never_auto_send"`
+	Value            any  `json:"value" yaml:"value"`
+	ApprovalRequired bool `json:"approval_required" yaml:"approval_required"`
+	NeverAutoSend    bool `json:"never_auto_send" yaml:"never_auto_send"`
 }
 
 // Data is the parsed shape of the profile YAML file.
 type Data struct {
-	Identity      map[string]any             `yaml:"identity"`
-	PublicProfile map[string]any             `yaml:"public_profile"`
-	Skills        []string                   `yaml:"skills"`
-	Preferences   map[string]any             `yaml:"preferences"`
-	Restricted    map[string]RestrictedField `yaml:"restricted"`
+	Identity      map[string]any             `json:"identity,omitempty" yaml:"identity"`
+	PublicProfile map[string]any             `json:"public_profile,omitempty" yaml:"public_profile"`
+	Skills        []string                   `json:"skills,omitempty" yaml:"skills"`
+	Preferences   map[string]any             `json:"preferences,omitempty" yaml:"preferences"`
+	Restricted    map[string]RestrictedField `json:"restricted,omitempty" yaml:"restricted"`
 }
 
-// Provider implements agentapi.OwnerProfileProvider over a loaded Data.
-// Safe for concurrent use; Reload swaps the in-memory copy under a lock so a
-// config change does not require a process restart.
+// Provider reads the legacy YAML format. Runtime callers use TenantProvider;
+// this type remains for validation and one-time migration.
 type Provider struct {
 	path string
 	mu   sync.RWMutex
@@ -69,7 +72,6 @@ func (p *Provider) Reload() error {
 	if err != nil {
 		return fmt.Errorf("read profile %s: %w", p.path, err)
 	}
-	var d Data
 	// UnmarshalStrict, not Unmarshal: a Codex finding on #307 caught that a
 	// misspelled safety marker (never_auto_sent, approval_require, ...)
 	// under a restricted-section entry silently decoded as an unknown key
@@ -79,13 +81,131 @@ func (p *Provider) Reload() error {
 	// auto-send with no enforcement at all, and no startup or reload error
 	// would ever reveal the typo. Strict decoding fails closed on any
 	// unrecognized field name instead.
-	if err := yaml.UnmarshalStrict(raw, &d); err != nil {
+	d, err := ParseYAML(raw)
+	if err != nil {
 		return fmt.Errorf("parse profile %s: %w", p.path, err)
 	}
-	normalizeData(&d)
 	p.mu.Lock()
 	p.data = d
 	p.mu.Unlock()
+	return nil
+}
+
+// ParseYAML validates the legacy mounted-file format. It remains exported for
+// the one-time database migration path; runtime reads use encrypted JSON from
+// the tenant's agent_profiles row.
+func ParseYAML(raw []byte) (Data, error) {
+	var d Data
+	if err := yaml.UnmarshalStrict(raw, &d); err != nil {
+		return Data{}, err
+	}
+	normalizeData(&d)
+	return d, nil
+}
+
+// ParseJSON validates the admin/API storage format. DisallowUnknownFields
+// catches misspelled safety markers such as never_auto_sent instead of
+// silently defaulting them to false.
+func ParseJSON(raw []byte) (Data, error) {
+	var d Data
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return Data{}, fmt.Errorf("profile document must be a JSON object")
+	}
+	if err := RejectDuplicateJSONKeys(trimmed); err != nil {
+		return Data{}, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	// Keep the exact numeric token. Decoding into any as float64 would turn
+	// 1000000 into 1e+06 and round integers above 2^53, allowing the original
+	// restricted literal to evade verbatim send-time matching.
+	dec.UseNumber()
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&d); err != nil {
+		return Data{}, err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return Data{}, fmt.Errorf("profile document must contain exactly one JSON object")
+		}
+		return Data{}, err
+	}
+	normalizeData(&d)
+	return d, nil
+}
+
+// RejectDuplicateJSONKeys validates duplicate-free JSON objects recursively.
+// It is also used by the admin handler on the complete request envelope before
+// decoding can collapse duplicate tenant selectors or owner_profile fields.
+func RejectDuplicateJSONKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+
+	var walk func() error
+	walk = func() error {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]struct{})
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("profile object key must be a string")
+				}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("duplicate JSON key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim('}') {
+				return fmt.Errorf("invalid profile object")
+			}
+		case '[':
+			for dec.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if end != json.Delim(']') {
+				return fmt.Errorf("invalid profile array")
+			}
+		default:
+			return fmt.Errorf("unexpected profile delimiter %q", delim)
+		}
+		return nil
+	}
+
+	if err := walk(); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("profile document must contain exactly one JSON object")
+		}
+		return err
+	}
 	return nil
 }
 
@@ -153,8 +273,12 @@ func normalizeValue(v any) any {
 func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return matchRestricted(p.data, text)
+}
+
+func matchRestricted(data Data, text string) (key string, neverAutoSend, approvalRequired, matched bool) {
 	bestRank := -1
-	for k, f := range p.data.Restricted {
+	for k, f := range data.Restricted {
 		if f.Value == nil {
 			continue
 		}
@@ -202,21 +326,25 @@ func (p *Provider) MatchRestricted(text string) (key string, neverAutoSend, appr
 func (p *Provider) PublicProfile(peerTGID int64) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return publicProfile(p.data), nil
+}
+
+func publicProfile(data Data) map[string]any {
 	out := make(map[string]any, 4)
-	if len(p.data.Identity) > 0 {
-		out["identity"] = p.data.Identity
+	if len(data.Identity) > 0 {
+		out["identity"] = data.Identity
 	}
-	if len(p.data.PublicProfile) > 0 {
-		out["public_profile"] = p.data.PublicProfile
+	if len(data.PublicProfile) > 0 {
+		out["public_profile"] = data.PublicProfile
 	}
-	if len(p.data.Skills) > 0 {
-		out["skills"] = p.data.Skills
+	if len(data.Skills) > 0 {
+		out["skills"] = data.Skills
 	}
-	if len(p.data.Preferences) > 0 {
-		out["preferences"] = p.data.Preferences
+	if len(data.Preferences) > 0 {
+		out["preferences"] = data.Preferences
 	}
 	// data.Restricted is deliberately never added to out.
-	return out, nil
+	return out
 }
 
 // RestrictedField returns the named restricted-section entry, for the
@@ -228,4 +356,62 @@ func (p *Provider) RestrictedField(key string) (RestrictedField, bool) {
 	defer p.mu.RUnlock()
 	f, ok := p.data.Restricted[key]
 	return f, ok
+}
+
+// CanonicalJSON returns the loaded legacy profile in the strict encrypted-DB
+// format. It is used only by the startup import path.
+func (p *Provider) CanonicalJSON() ([]byte, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return json.Marshal(p.data)
+}
+
+// TenantStore is the narrow encrypted-document storage contract implemented
+// by db.Store.
+type TenantStore interface {
+	GetAgentOwnerProfile(ctx context.Context, userID int64) ([]byte, error)
+}
+
+// TenantProvider resolves every profile by authenticated internal user id.
+// It has no process-wide owner identity and therefore cannot accidentally
+// expose or enforce one tenant's data for another tenant.
+type TenantProvider struct {
+	store TenantStore
+}
+
+func NewTenantProvider(store TenantStore) *TenantProvider {
+	return &TenantProvider{store: store}
+}
+
+func (p *TenantProvider) load(ctx context.Context, userID int64) (Data, error) {
+	raw, err := p.store.GetAgentOwnerProfile(ctx, userID)
+	if err != nil {
+		return Data{}, err
+	}
+	d, err := ParseJSON(raw)
+	if err != nil {
+		return Data{}, fmt.Errorf("parse encrypted owner profile: %w", err)
+	}
+	return d, nil
+}
+
+// PublicProfile returns only safe fields for the authenticated tenant.
+func (p *TenantProvider) PublicProfile(ctx context.Context, userID, peerTGID int64) (map[string]any, error) {
+	d, err := p.load(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return publicProfile(d), nil
+}
+
+// MatchRestricted evaluates restricted values for the action's tenant. A
+// storage/decryption/validation error is returned so the executor can fail
+// closed before sending.
+func (p *TenantProvider) MatchRestricted(ctx context.Context, userID int64, text string) (key string, neverAutoSend, approvalRequired, matched bool, err error) {
+	d, err := p.load(ctx, userID)
+	if err != nil {
+		return "", false, false, false, err
+	}
+	key, neverAutoSend, approvalRequired, matched = matchRestricted(d, text)
+	return key, neverAutoSend, approvalRequired, matched, nil
 }

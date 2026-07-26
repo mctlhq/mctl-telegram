@@ -429,6 +429,32 @@ func TestUserIDByTelegramID(t *testing.T) {
 	if _, err := s.UserIDByTelegramID(ctx, 999); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("miss is not idempotent — a row was created: %v", err)
 	}
+
+	connectedOnly, err := s.EnsureUser(ctx, "connected-only", "", "local-dev")
+	if err != nil {
+		t.Fatalf("ensure connected-only user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted)
+		 VALUES($1,$2,$3)`,
+		connectedOnly, 888, []byte{0},
+	); err != nil {
+		t.Fatalf("seed connected account: %v", err)
+	}
+	if got, err := s.UserIDByTelegramID(ctx, 888); err != nil || got != connectedOnly {
+		t.Fatalf("connected-account lookup = %d, %v; want %d", got, err, connectedOnly)
+	}
+
+	other, err := s.EnsureUserByTelegramID(ctx, 888, "other", "Other")
+	if err != nil {
+		t.Fatalf("ensure ambiguous login user: %v", err)
+	}
+	if other == connectedOnly {
+		t.Fatal("ambiguity setup reused connected-only user")
+	}
+	if _, err := s.UserIDByTelegramID(ctx, 888); !errors.Is(err, ErrTelegramIdentityAmbiguous) {
+		t.Fatalf("ambiguous lookup err = %v, want ErrTelegramIdentityAmbiguous", err)
+	}
 }
 
 func TestToggleSendEnabled_AtomicFlip(t *testing.T) {

@@ -519,13 +519,21 @@ type fakeRestrictedChecker struct {
 	value                           string
 	neverAutoSend, approvalRequired bool
 	matched                         bool
+	userID                          int64
+	err                             error
 }
 
-func (f *fakeRestrictedChecker) MatchRestricted(text string) (string, bool, bool, bool) {
-	if f.value != "" && !strings.Contains(text, f.value) {
-		return "", false, false, false
+func (f *fakeRestrictedChecker) MatchRestricted(_ context.Context, userID int64, text string) (string, bool, bool, bool, error) {
+	if f.err != nil {
+		return "", false, false, false, f.err
 	}
-	return f.key, f.neverAutoSend, f.approvalRequired, f.matched
+	if f.userID != 0 && userID != f.userID {
+		return "", false, false, false, nil
+	}
+	if f.value != "" && !strings.Contains(text, f.value) {
+		return "", false, false, false, nil
+	}
+	return f.key, f.neverAutoSend, f.approvalRequired, f.matched, nil
 }
 
 // TestExecutor_Approve_RecordsConversationHistory guards against the P1
@@ -627,6 +635,34 @@ func TestExecutor_Approve_NeverAutoSendRestrictedFieldBlocksSend(t *testing.T) {
 	}
 }
 
+func TestExecutor_Approve_ProfileReadFailureFailsClosed(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.Profile = &fakeRestrictedChecker{err: errors.New("decrypt failed")}
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "safe draft")
+
+	if err := exec.Approve(ctx, uid, code); err == nil {
+		t.Fatal("expected profile read failure")
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+}
+
+func TestExecutor_Approve_MissingTenantProfileRemainsOptional(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.Profile = &fakeRestrictedChecker{err: db.ErrAgentOwnerProfileNotFound}
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "safe draft")
+
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve without owner profile: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(sender.calls))
+	}
+}
+
 func TestExecutor_RestrictionsInspectFinalComposedBody(t *testing.T) {
 	t.Run("fresh send includes disclosure", func(t *testing.T) {
 		exec, sender, store, uid, conv := newTestExecutor(t)
@@ -686,33 +722,14 @@ func TestExecutor_RestrictionsInspectFinalComposedBody(t *testing.T) {
 	})
 }
 
-// TestExecutor_Approve_RestrictedFieldScopedToProfileOwner covers a Codex
-// finding on #307: restrictedFieldBlocks had no notion of which account
-// Profile's restricted section actually belongs to, so in a multi-tenant
-// deployment EVERY user's action was checked against the one configured
-// owner's private restricted values. A second account's reply that happened
-// to textually match must NOT be blocked once ProfileOwnerTGID scopes the
-// check to the account the profile actually belongs to — only that
-// account's own matching action should still be denied.
-//
-// ProfileOwnerTGID is a Telegram account id, not an internal users.id — a
-// real telegram_accounts row is seeded here (via SaveSession) so the test
-// exercises the actual GetTelegramID resolution path instead of the two ID
-// namespaces coincidentally matching, which is exactly what a Codex finding
-// on #307 caught: an earlier version of this test set ProfileOwnerTGID
-// directly to the internal uid, which meant restrictedFieldBlocks' scope
-// check (comparing a Telegram id against an internal id) could never
-// actually match anything, silently disabling enforcement for every
-// account including the real owner's.
-func TestExecutor_Approve_RestrictedFieldScopedToProfileOwner(t *testing.T) {
+// Restricted fields are selected by the action's internal tenant id. A
+// matching private value from one tenant must not block another tenant.
+func TestExecutor_Approve_RestrictedFieldScopedToTenant(t *testing.T) {
 	exec, sender, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
-	exec.Profile = &fakeRestrictedChecker{key: "references", neverAutoSend: true, matched: true}
-	const ownerTGID = int64(999888777)
-	if err := store.SaveSession(ctx, uid, []byte("session-bytes"), ownerTGID, "Owner", "owner"); err != nil {
-		t.Fatalf("seed owner telegram account: %v", err)
+	exec.Profile = &fakeRestrictedChecker{
+		key: "references", neverAutoSend: true, matched: true, userID: uid,
 	}
-	exec.ProfileOwnerTGID = ownerTGID
 
 	otherUID, err := store.EnsureUser(ctx, "other-owner", "", "test")
 	if err != nil {

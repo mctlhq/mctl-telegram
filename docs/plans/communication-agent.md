@@ -199,6 +199,13 @@ pattern). Endpoints: `POST /jobs/claim` (long-poll claim; deprecated
 `internal/agent/profile`: `OwnerProfileProvider` reading a YAML profile from
 `AGENT_PROFILE_PATH`, restricted fields never returned to the agent surface.
 
+*Multi-tenant hardening:* runtime owner profiles move into
+`agent_profiles.owner_profile_encrypted` and are sealed with the tenant's
+derived AES-GCM key. Both recruiter-profile lookup and the executor's
+restricted-field gate resolve by authenticated/action `user_id`; there is no
+process-wide owner profile. `AGENT_PROFILE_PATH` remains only as an atomic
+import-if-missing migration path and cannot overwrite admin-managed data.
+
 `internal/agent/executor` crash-recovery design: approve → re-check kill
 switch/mode/state → **persist the Telegram `random_id` for the send before
 issuing the RPC** → set `executing` → send → `executed`. On restart while
@@ -266,8 +273,9 @@ namespace and the existing `mctl-telegram-preview` service (already deployed;
 confirmed present at
 `mctl-gitops/platform-gitops/services/labs/mctl-telegram-preview/values.yaml`).
 No new namespace for C1. Add `AGENT_ENABLED=true`, `AGENT_KILL_SWITCH=true`
-(dark start), `AGENT_PROFILE_PATH`, a dedicated Agent API token, a test
-Telegram account/session, and preview-only DB/encryption key. No production
+(dark start), provision the encrypted tenant owner profile through the admin
+API, a dedicated Agent API token, a test Telegram account/session, and a
+preview-only DB/encryption key. No production
 promotion in this PR. (The Channels-preview deployment,
 `communication-agent-preview`, is a separate new service under the same
 `labs` namespace — see Part 2 §8; it is not part of C1's baseline scope, it
@@ -697,13 +705,12 @@ image contains the required agent binaries before rollout.
 ```
 AGENT_ENABLED=true
 AGENT_KILL_SWITCH=true            # initial dark phase
-AGENT_PROFILE_PATH=<read-only mount>
-AGENT_PROFILE_OWNER_TG_ID=<test owner>
 ```
 
 Preview database only, preview encryption key only, test Telegram
 account/session only, dedicated `aud=agent` token, no production owner
-profile.
+profile. Provision the test owner profile with the admin API; the legacy
+`AGENT_PROFILE_PATH`/`AGENT_PROFILE_OWNER_TG_ID` pair is migration-only.
 
 **G3 — Add `communication-agent-preview`.**
 

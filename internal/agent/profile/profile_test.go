@@ -1,11 +1,25 @@
 package profile
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+var errTenantProfileMissing = errors.New("tenant profile missing")
+
+type fakeTenantStore map[int64][]byte
+
+func (s fakeTenantStore) GetAgentOwnerProfile(_ context.Context, userID int64) ([]byte, error) {
+	raw, ok := s[userID]
+	if !ok {
+		return nil, errTenantProfileMissing
+	}
+	return raw, nil
+}
 
 const testYAML = `
 identity:
@@ -63,6 +77,99 @@ func TestLoad_PublicProfile_OmitsRestricted(t *testing.T) {
 	prefs, ok := out["preferences"].(map[string]any)
 	if !ok || prefs["remote"] != true {
 		t.Fatalf("preferences = %+v, want remote=true", out["preferences"])
+	}
+}
+
+func TestParseJSON_StrictSafetyMarkers(t *testing.T) {
+	if _, err := ParseJSON([]byte(`{"restricted":{"salary":{"value":"secret","never_auto_sent":true}}}`)); err == nil {
+		t.Fatal("misspelled restricted marker was accepted")
+	}
+	for _, raw := range []string{
+		`{"restricted":{"salary":{"value":"secret","never_auto_send":true}},"restricted":{}}`,
+		`{"restricted":{"salary":{"value":"secret","never_auto_send":true,"never_auto_send":false}}}`,
+	} {
+		if _, err := ParseJSON([]byte(raw)); err == nil {
+			t.Fatalf("duplicate-key document %q was accepted", raw)
+		}
+	}
+	for _, raw := range []string{"null", "[]", `{}` + `{}`} {
+		if _, err := ParseJSON([]byte(raw)); err == nil {
+			t.Fatalf("invalid document %q was accepted", raw)
+		}
+	}
+}
+
+func TestParseJSON_PreservesRestrictedNumericLiterals(t *testing.T) {
+	d, err := ParseJSON([]byte(`{
+		"restricted":{
+			"salary":{"value":1000000,"never_auto_send":true},
+			"account":{"value":9007199254740993,"never_auto_send":true}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, tc := range []struct {
+		text string
+		key  string
+	}{
+		{text: "salary is 1000000", key: "salary"},
+		{text: "account 9007199254740993", key: "account"},
+	} {
+		key, never, _, matched := matchRestricted(d, tc.text)
+		if !matched || key != tc.key || !never {
+			t.Fatalf("match %q = key=%q never=%v matched=%v", tc.text, key, never, matched)
+		}
+	}
+}
+
+func TestTenantProvider_IsolatesPublicAndRestrictedData(t *testing.T) {
+	const aliceID int64 = 11
+	const bobID int64 = 22
+	provider := NewTenantProvider(fakeTenantStore{
+		aliceID: []byte(`{
+			"identity":{"name":"Alice"},
+			"restricted":{"secret":{"value":"ALICE-SECRET","never_auto_send":true}}
+		}`),
+		bobID: []byte(`{
+			"identity":{"name":"Bob"},
+			"restricted":{"secret":{"value":"BOB-SECRET","approval_required":true}}
+		}`),
+	})
+	ctx := context.Background()
+
+	alice, err := provider.PublicProfile(ctx, aliceID, 555)
+	if err != nil {
+		t.Fatalf("alice public profile: %v", err)
+	}
+	bob, err := provider.PublicProfile(ctx, bobID, 555)
+	if err != nil {
+		t.Fatalf("bob public profile: %v", err)
+	}
+	if alice["identity"].(map[string]any)["name"] != "Alice" {
+		t.Fatalf("alice profile = %+v", alice)
+	}
+	if bob["identity"].(map[string]any)["name"] != "Bob" {
+		t.Fatalf("bob profile = %+v", bob)
+	}
+	if _, ok := alice["restricted"]; ok {
+		t.Fatalf("restricted data leaked: %+v", alice)
+	}
+
+	key, never, approval, matched, err := provider.MatchRestricted(ctx, aliceID, "value ALICE-SECRET")
+	if err != nil || !matched || key != "secret" || !never || approval {
+		t.Fatalf("alice restriction = key=%q never=%v approval=%v matched=%v err=%v",
+			key, never, approval, matched, err)
+	}
+	_, _, _, matched, err = provider.MatchRestricted(ctx, bobID, "value ALICE-SECRET")
+	if err != nil {
+		t.Fatalf("bob restriction: %v", err)
+	}
+	if matched {
+		t.Fatal("Alice restricted value matched in Bob's tenant")
+	}
+	if _, err := provider.PublicProfile(ctx, 999, 555); !errors.Is(err, errTenantProfileMissing) {
+		t.Fatalf("missing tenant err = %v", err)
 	}
 }
 

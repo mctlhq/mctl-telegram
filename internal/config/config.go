@@ -139,20 +139,15 @@ type Config struct {
 	// redeploying config even if the database is unreachable or compromised.
 	// Set via AGENT_KILL_SWITCH.
 	AgentKillSwitch bool
-	// AgentProfilePath points at the owner's YAML profile (identity, public
-	// bio, skills, preferences, restricted section) mounted into the
-	// container. Optional even with AGENT_ENABLED=true — see its call site
-	// in cmd/server/main.go for what happens when it's unset. Set via
-	// AGENT_PROFILE_PATH.
+	// AgentProfilePath is the deprecated mounted-YAML migration source. At
+	// startup it is imported into the target tenant's encrypted DB profile
+	// only when that document is still missing; it is never consulted on
+	// runtime reads and never overwrites an admin-managed document.
 	AgentProfilePath string
 	// AgentProfileOwnerTGID is the Telegram id of the account
-	// AgentProfilePath's profile belongs to. mctl-telegram is multi-tenant
-	// and POST /api/agent/token can mint an aud=agent token for ANY account
-	// it hosts, not just this deployment's intended communication-agent
-	// owner — without this, GET /recruiters/{peer} would hand that owner's
-	// identity/skills/preferences to a worker authenticated as an unrelated
-	// account. Required whenever AgentProfilePath is set; ignored otherwise.
-	// Set via AGENT_PROFILE_OWNER_TG_ID.
+	// receiving the legacy AgentProfilePath import. Required whenever that
+	// path is set; ignored otherwise. Runtime lookup is by authenticated
+	// internal user_id, not this process-wide value.
 	AgentProfileOwnerTGID int64
 }
 

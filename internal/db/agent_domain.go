@@ -14,6 +14,11 @@ import (
 // that account.
 var ErrAgentProfileNotFound = errors.New("agent profile not found")
 
+// ErrAgentOwnerProfileNotFound means the account has an agent policy row but
+// has not configured the encrypted identity/profile document used by the
+// communication worker.
+var ErrAgentOwnerProfileNotFound = errors.New("agent owner profile not found")
+
 // ErrConversationNotFound is returned by the conversation getters when no row
 // matches.
 var ErrConversationNotFound = errors.New("conversation not found")
@@ -156,6 +161,95 @@ func (s *Store) EnsureAgentProfile(ctx context.Context, userID int64) error {
 	return nil
 }
 
+// SetAgentOwnerProfile encrypts and replaces one account's owner-profile
+// document. The caller validates and canonicalizes the document before this
+// storage boundary; the store's responsibility is tenant-key encryption and
+// an update scoped by user_id.
+func (s *Store) SetAgentOwnerProfile(ctx context.Context, userID int64, document []byte) error {
+	if len(document) == 0 {
+		return errors.New("owner profile document required")
+	}
+	return s.UpdateAgentProfileFields(ctx, userID, AgentProfileUpdate{
+		OwnerProfileDocument: &document,
+	})
+}
+
+// SetAgentOwnerProfileIfMissing is the atomic legacy-YAML migration path.
+// It never overwrites a profile already managed through the admin API.
+// inserted reports whether this call populated the previously-empty column.
+func (s *Store) SetAgentOwnerProfileIfMissing(ctx context.Context, userID int64, document []byte) (inserted bool, err error) {
+	if userID <= 0 {
+		return false, errors.New("user id required")
+	}
+	if len(document) == 0 {
+		return false, errors.New("owner profile document required")
+	}
+	if s.Crypt == nil {
+		return false, errors.New("owner profile encryption is not configured")
+	}
+	encrypted, err := s.Crypt.SealForUser(document, userID)
+	if err != nil {
+		return false, fmt.Errorf("encrypt agent owner profile: %w", err)
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_profiles
+		    SET owner_profile_encrypted = $1, owner_profile_imported_at = $2,
+		        updated_at = $2
+		  WHERE user_id = $3 AND owner_profile_encrypted IS NULL
+		    AND owner_profile_imported_at IS NULL
+		    AND NOT EXISTS (
+		        SELECT 1 FROM agent_profile_import_tombstones t
+		         WHERE t.user_id = agent_profiles.user_id
+		    )`,
+		encrypted, time.Now().UTC(), userID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("import agent owner profile: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("import agent owner profile rows affected: %w", err)
+	}
+	return n == 1, nil
+}
+
+// GetAgentOwnerProfile decrypts one account's owner-profile document. A blob
+// copied to another tenant row cannot decrypt because OpenForUser derives a
+// different subkey for each user_id.
+func (s *Store) GetAgentOwnerProfile(ctx context.Context, userID int64) ([]byte, error) {
+	if userID <= 0 {
+		return nil, errors.New("user id required")
+	}
+	var encrypted []byte
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT owner_profile_encrypted FROM agent_profiles WHERE user_id = $1`,
+		userID,
+	).Scan(&encrypted)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && len(encrypted) == 0) {
+		return nil, ErrAgentOwnerProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent owner profile: %w", err)
+	}
+	if s.Crypt == nil {
+		return nil, errors.New("owner profile encryption is not configured")
+	}
+	document, err := s.Crypt.OpenForUser(encrypted, userID)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt agent owner profile: %w", err)
+	}
+	return document, nil
+}
+
+// ClearAgentOwnerProfile removes the profile document without changing the
+// account's policy/listener settings.
+func (s *Store) ClearAgentOwnerProfile(ctx context.Context, userID int64) error {
+	empty := []byte(nil)
+	return s.UpdateAgentProfileFields(ctx, userID, AgentProfileUpdate{
+		OwnerProfileDocument: &empty,
+	})
+}
+
 // AgentProfileUpdate carries only the fields to change; a nil pointer means
 // "leave this column alone". This is the type UpdateAgentProfileFields
 // consumes -- see its doc comment for why this shape exists.
@@ -170,6 +264,11 @@ type AgentProfileUpdate struct {
 	IntentAllowlist    *string
 	BlockedSenders     *string
 	SenderAllowlist    *string
+	// OwnerProfileDocument is plaintext canonical JSON at this boundary.
+	// nil leaves it unchanged; a pointer to an empty slice clears it; a
+	// non-empty document is tenant-key encrypted in the same UPDATE as all
+	// other requested fields.
+	OwnerProfileDocument *[]byte
 }
 
 // UpdateAgentProfileFields applies only the non-nil fields in u, leaving
@@ -224,6 +323,23 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	if u.SenderAllowlist != nil {
 		set("sender_allowlist", *u.SenderAllowlist)
 	}
+	if u.OwnerProfileDocument != nil {
+		if len(*u.OwnerProfileDocument) == 0 {
+			set("owner_profile_encrypted", nil)
+		} else {
+			if s.Crypt == nil {
+				return errors.New("owner profile encryption is not configured")
+			}
+			encrypted, err := s.Crypt.SealForUser(*u.OwnerProfileDocument, userID)
+			if err != nil {
+				return fmt.Errorf("encrypt agent owner profile: %w", err)
+			}
+			set("owner_profile_encrypted", encrypted)
+		}
+		// Any explicit admin write, including clear, permanently closes the
+		// legacy import path for this tenant.
+		set("owner_profile_imported_at", time.Now().UTC())
+	}
 	if len(sets) == 0 {
 		return nil
 	}
@@ -276,6 +392,16 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 		if err := purgeAgentJobsHook(ctx, ex, userID); err != nil {
 			return err
 		}
+	}
+	// The users identity survives account deletion. Retain only this
+	// content-free tombstone so a still-mounted legacy AGENT_PROFILE_PATH
+	// cannot silently restore the private profile on the next restart.
+	if _, err := ex.ExecContext(ctx,
+		`INSERT INTO agent_profile_import_tombstones(user_id) VALUES($1)
+		 ON CONFLICT (user_id) DO NOTHING`,
+		userID,
+	); err != nil {
+		return fmt.Errorf("purge agent data: preserve profile import tombstone: %w", err)
 	}
 	stmts := []string{
 		`DELETE FROM owner_notifications WHERE user_id = $1`,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,6 +81,110 @@ func TestAdminAgentProfileHandler_RejectsInvalidMode(t *testing.T) {
 	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"mode":"yolo"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminAgentProfileHandler_StoresEncryptedTenantDocumentAndClears(t *testing.T) {
+	store := newProfileTestStore(t)
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	rec := doProfileReq(h, adminIdentity(), `{
+		"telegram_id":777,
+		"owner_profile":{
+			"identity":{"name":"Private Jane"},
+			"skills":["Go"],
+			"restricted":{"salary":{"value":"145000","approval_required":true}}
+		}
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var response agentProfileResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.OwnerProfileConfigured {
+		t.Fatal("owner_profile_configured = false")
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("Private Jane")) || bytes.Contains(rec.Body.Bytes(), []byte("145000")) {
+		t.Fatalf("owner profile echoed in response: %s", rec.Body.String())
+	}
+
+	var encrypted []byte
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT owner_profile_encrypted FROM agent_profiles WHERE user_id=$1`, uid,
+	).Scan(&encrypted); err != nil {
+		t.Fatalf("read encrypted profile: %v", err)
+	}
+	if len(encrypted) == 0 || encrypted[0] != crypto.VersionPerUser {
+		t.Fatalf("stored blob version = %x, want per-user encrypted", encrypted)
+	}
+	if bytes.Contains(encrypted, []byte("Private Jane")) || bytes.Contains(encrypted, []byte("145000")) {
+		t.Fatal("plaintext profile data present in DB blob")
+	}
+
+	// A policy-only partial update must preserve the document.
+	rec = doProfileReq(h, adminIdentity(), `{"telegram_id":777,"max_reply_chars":700}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	document, err := store.GetAgentOwnerProfile(ctx, uid)
+	if err != nil || !bytes.Contains(document, []byte("Private Jane")) {
+		t.Fatalf("profile after partial update = %s, err=%v", document, err)
+	}
+
+	rec = doProfileReq(h, adminIdentity(), `{"telegram_id":777,"owner_profile":null}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode clear response: %v", err)
+	}
+	if response.OwnerProfileConfigured {
+		t.Fatal("owner_profile_configured = true after clear")
+	}
+	if _, err := store.GetAgentOwnerProfile(ctx, uid); !errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
+		t.Fatalf("get cleared profile err = %v", err)
+	}
+}
+
+func TestAdminAgentProfileHandler_RejectsMisspelledRestrictedMarker(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	rec := doProfileReq(h, adminIdentity(), `{
+		"telegram_id":777,
+		"owner_profile":{
+			"restricted":{"salary":{"value":"145000","approval_require":true}}
+		}
+	}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminAgentProfileHandler_RejectsDuplicateEnvelopeKeys(t *testing.T) {
+	store := newProfileTestStore(t)
+	for _, tgID := range []int64{777, 888} {
+		if _, err := store.EnsureUserByTelegramID(context.Background(), tgID, "", ""); err != nil {
+			t.Fatalf("seed user %d: %v", tgID, err)
+		}
+	}
+	h := NewAdminAgentProfileHandler(store)
+	for _, body := range []string{
+		`{"telegram_id":777,"owner_profile":{"identity":{"name":"Alice"}},"telegram_id":888}`,
+		`{"telegram_id":777,"owner_profile":{"restricted":{"salary":{"value":"1","never_auto_send":true}}},"owner_profile":{}}`,
+	} {
+		rec := doProfileReq(h, adminIdentity(), body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
+		}
 	}
 }
 

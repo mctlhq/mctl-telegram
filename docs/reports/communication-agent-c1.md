@@ -85,9 +85,14 @@ Acceptance:
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
-- [ ] Move the whole owner profile from Git ConfigMap to Vault-backed Secret.
 - [x] Deploy the Saved Messages fix by exact merge SHA and verify the live
       approve cycle.
+- [ ] Deploy the encrypted per-tenant DB profile implementation, verify the
+      legacy YAML was imported once, then remove the profile ConfigMap and
+      migration env vars. A Vault-mounted plaintext profile is no longer
+      needed.
+- [ ] Deploy the merged server and `Dockerfile.agent-worker` image by exact
+      merge SHA; verify ArgoCD `Synced Healthy` and the running image digest.
 - [ ] Run the 30-fixture harness and record aggregate results here.
 - [ ] Run the remaining kill-switch-after-approval live drill. Draft,
       notification, audit, and one harmless explicitly approved reply have
