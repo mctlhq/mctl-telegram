@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -77,13 +78,26 @@ func (l *Listener) pollSavedHistory(ctx context.Context, acct *account, api save
 				cursor = messageID
 				continue
 			}
-			if ex, relevant := ExtractMessage(acct.userID, acct.tgID, msg, tg.Entities{}, false); relevant &&
-				ex.Event.Kind == db.EventKindSavedCommand {
+			ex, relevant := ExtractMessage(acct.userID, acct.tgID, msg, tg.Entities{}, false)
+			if relevant && ex.Event.Kind == db.EventKindSavedCommand {
 				if err := l.persistExtracted(ctx, acct, ex); err != nil {
 					// Do not cross a command that did not finish routing. The
 					// same message remains eligible on the next tick.
 					return err
 				}
+			} else if msg.Out && isMCTLCommand(strings.TrimSpace(msg.Message)) {
+				// TEMP DIAGNOSTIC (debug/saved-command-extract-trace) — remove
+				// before merge. A message that looks like an /mctl command but
+				// was not classified as one; dump the raw discriminator fields.
+				savedPeer, savedPeerSet := msg.GetSavedPeerID()
+				fromID, fromSet := msg.GetFromID()
+				_, fwd := msg.GetFwdFrom()
+				peerType := fmt.Sprintf("%T", msg.PeerID)
+				slog.Warn("TEMP diag: saved-history command not classified",
+					"message_id", messageID, "relevant", relevant, "kind", ex.Event.Kind,
+					"peer_type", peerType, "fwd", fwd,
+					"saved_peer_set", savedPeerSet, "saved_peer_type", fmt.Sprintf("%T", savedPeer), "saved_peer", fmt.Sprintf("%+v", savedPeer),
+					"from_set", fromSet, "from_type", fmt.Sprintf("%T", fromID), "from", fmt.Sprintf("%+v", fromID))
 			}
 		}
 		// Notes, notifications, forwards, media-only/service messages, and
