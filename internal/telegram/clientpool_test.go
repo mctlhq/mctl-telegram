@@ -45,6 +45,49 @@ func TestSessionErrorFor(t *testing.T) {
 	}
 }
 
+func TestFinishRun_RevokesAsyncTerminalSession(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "async-revoke-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), now, now.Add(60*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	p := NewClientPool(1, "hash", time.Minute, store)
+	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	p.entries[uid] = e
+
+	p.finishRun(uid, e, tgerr.New(406, "AUTH_KEY_DUPLICATED"))
+
+	if _, ok := p.entries[uid]; ok {
+		t.Fatal("terminal entry remained in pool")
+	}
+	if _, err := store.CheckSessionValid(ctx, uid); !errors.Is(err, db.ErrNoActiveSession) {
+		t.Fatalf("session was not revoked: %v", err)
+	}
+}
+
+func TestFinishRun_DoesNotDeleteReplacementEntry(t *testing.T) {
+	p := NewClientPool(1, "hash", time.Minute, nil)
+	oldEntry := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	replacement := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	p.entries[7] = replacement
+
+	p.finishRun(7, oldEntry, context.Canceled)
+
+	if got := p.entries[7]; got != replacement {
+		t.Fatalf("replacement entry was removed: got %p, want %p", got, replacement)
+	}
+}
+
 // TestClose_RemovesEntryUnderLock verifies the fix for the race condition
 // flagged by codex on PR #2: Close() must remove the entry from p.entries
 // while still holding the mutex, otherwise a concurrent acquire() can

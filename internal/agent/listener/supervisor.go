@@ -95,6 +95,14 @@ func reconcile(ctx context.Context, l *Listener, pool Pool, res AccountResolver)
 	for _, p := range profiles {
 		tgID, err := res.GetTelegramID(ctx, p.UserID)
 		if err != nil {
+			// A profile can stay listener_enabled while its hosted MTProto
+			// session is revoked (for example AUTH_KEY_DUPLICATED). Remove its
+			// handler and pin until OAuth creates a fresh active session; the
+			// next reconciliation automatically installs it again.
+			if _, active := l.get(p.UserID); active {
+				pool.Unpin(p.UserID)
+				l.RemoveAccount(p.UserID)
+			}
 			slog.Warn("agent supervisor: resolve tg id failed", "user_id", p.UserID, "err", err)
 			continue
 		}

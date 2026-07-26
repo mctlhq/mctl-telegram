@@ -26,6 +26,7 @@ var unfinishedSessionCodes = []string{
 // expired/deactivated/banned. These are NOT half-finished setups — the
 // user-facing message must not mention 2FA.
 var revokedSessionCodes = []string{
+	"AUTH_KEY_DUPLICATED",
 	"AUTH_KEY_UNREGISTERED",
 	"AUTH_KEY_INVALID",
 	"SESSION_REVOKED",
@@ -354,6 +355,23 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 		<-ctx.Done()
 		return ctx.Err()
 	})
+	p.finishRun(userID, e, err)
+}
+
+// finishRun records a client exit and removes only the entry that actually
+// exited. A replacement entry may already have been installed after Close or
+// RemoveAtomic; deleting by user id alone would accidentally evict that newer
+// client when the old goroutine eventually returned.
+//
+// Terminal MTProto authentication errors can arrive after Borrow has already
+// returned successfully (notably from a pinned listener's updates.Manager).
+// Revoke the backing DB row here as well as in Borrow so the supervisor does
+// not redial a permanently invalid auth key forever. The revoke runs under the
+// pool mutex only while this exact entry is still current, which prevents a
+// concurrent reconnect from installing a fresh session between entry removal
+// and revocation.
+func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
+	sentinel := sessionErrorFor(err)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e.stopped = true
@@ -370,7 +388,17 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 			p.metrics.TelegramClientErrorsTotal.Inc()
 		}
 	}
-	delete(p.entries, userID)
+	current, ownsEntry := p.entries[userID]
+	if ownsEntry && current == e {
+		delete(p.entries, userID)
+		if sentinel != nil && p.Store != nil {
+			if _, revokeErr := p.Store.RevokeActiveSession(context.Background(), userID, "unauthorized"); revokeErr != nil {
+				slog.Error("telegram session rejected after client exit, revoke failed", "user_id", userID, "err", revokeErr)
+			} else {
+				slog.Warn("telegram session rejected after client exit, revoked", "user_id", userID, "err", err)
+			}
+		}
+	}
 	if p.metrics != nil {
 		p.metrics.TelegramClientPoolSize.Dec()
 	}

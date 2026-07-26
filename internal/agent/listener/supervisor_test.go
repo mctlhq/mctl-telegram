@@ -26,6 +26,7 @@ func (p *fakePool) Borrow(ctx context.Context, userID int64, fn func(context.Con
 type fakeResolver struct {
 	profiles []db.AgentProfile
 	tgIDs    map[int64]int64
+	tgIDErrs map[int64]error
 	listErr  error
 }
 
@@ -37,6 +38,9 @@ func (r *fakeResolver) ListListenerEnabledProfiles(context.Context) ([]db.AgentP
 }
 
 func (r *fakeResolver) GetTelegramID(_ context.Context, userID int64) (int64, error) {
+	if err := r.tgIDErrs[userID]; err != nil {
+		return 0, err
+	}
 	return r.tgIDs[userID], nil
 }
 
@@ -80,6 +84,40 @@ func TestReconcile_ListFailureKeepsActiveAccounts(t *testing.T) {
 	}
 	if ids := l.ActiveUserIDs(); len(ids) != 1 || ids[0] != 7 {
 		t.Fatalf("active after error = %v", ids)
+	}
+}
+
+func TestReconcile_MissingSessionUnpinsUntilReconnect(t *testing.T) {
+	ctx := context.Background()
+	l := New(nil, nil, nil, nil)
+	if !l.SetAccount(7, 1007) {
+		t.Fatal("set account")
+	}
+	pool := &fakePool{}
+	res := &fakeResolver{
+		profiles: []db.AgentProfile{{UserID: 7}},
+		tgIDs:    map[int64]int64{7: 1007},
+		tgIDErrs: map[int64]error{7: errors.New("session revoked")},
+	}
+
+	reconcile(ctx, l, pool, res)
+	if len(pool.unpins) != 1 || pool.unpins[0] != 7 {
+		t.Fatalf("unpins = %v", pool.unpins)
+	}
+	if ids := l.ActiveUserIDs(); len(ids) != 0 {
+		t.Fatalf("active after session loss = %v", ids)
+	}
+	if len(pool.borrows) != 0 {
+		t.Fatalf("borrows while session missing = %v", pool.borrows)
+	}
+
+	delete(res.tgIDErrs, 7)
+	reconcile(ctx, l, pool, res)
+	if len(pool.pins) != 1 || pool.pins[0] != 7 {
+		t.Fatalf("pins after reconnect = %v", pool.pins)
+	}
+	if len(pool.borrows) != 1 || pool.borrows[0] != 7 {
+		t.Fatalf("borrows after reconnect = %v", pool.borrows)
 	}
 }
 
