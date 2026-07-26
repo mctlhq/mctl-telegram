@@ -368,6 +368,11 @@ func agentSchemaSQLite() []string {
 			access_hash INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, channel_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_saved_command_cursors (
+			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			last_message_id INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 }
 
@@ -554,6 +559,11 @@ func agentSchemaPG() []string {
 			pts INT NOT NULL DEFAULT 0,
 			access_hash BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, channel_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS agent_saved_command_cursors (
+			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			last_message_id BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 	}
 }

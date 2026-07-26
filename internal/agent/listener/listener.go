@@ -23,6 +23,8 @@ import (
 const (
 	sentMarkerTTL        = 2 * time.Minute
 	durableSentMarkerTTL = 24 * time.Hour
+	savedHistoryInterval = 5 * time.Second
+	savedHistoryLimit    = 100
 )
 
 type account struct {
@@ -30,6 +32,7 @@ type account struct {
 	tgID            int64
 	senderAllowlist map[int64]struct{}
 	mgr             *updates.Manager
+	savedCommandMu  sync.Mutex
 }
 
 type sentMessageKey struct {
@@ -178,6 +181,10 @@ func (l *Listener) RunFor(ctx context.Context, userID int64, c *gotdtelegram.Cli
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	go l.runSavedHistoryPoller(pollCtx, a, c.API())
+
 	// updates.Manager retains its internal state after Run exits and rejects a
 	// second Run as "already authorized". Pool reconnects invoke RunFor again on
 	// the same account, so clear only the in-memory runtime state first; the DB
@@ -220,11 +227,20 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 		!l.senderAllowed(acct, ex.Event.SenderTGID) {
 		return nil
 	}
-	if err := l.persist(ctx, acct, ex); err != nil {
+	if err := l.persistExtracted(ctx, acct, ex); err != nil {
 		slog.Warn("agent listener persist failed", "user_id", acct.userID, "kind", ex.Event.Kind, "err", err)
 		return err
 	}
 	return nil
+}
+
+func (l *Listener) persistExtracted(ctx context.Context, acct *account, ex Extracted) error {
+	if ex.Event.Kind != db.EventKindSavedCommand {
+		return l.persist(ctx, acct, ex)
+	}
+	acct.savedCommandMu.Lock()
+	defer acct.savedCommandMu.Unlock()
+	return l.persist(ctx, acct, ex)
 }
 
 func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) error {

@@ -262,9 +262,9 @@ func (s *Store) SetAgentAutopilotPaused(ctx context.Context, userID int64, pause
 // takes the agent's stored (encrypted) recruiter data with it. Order respects
 // FKs: children before parents, though ON DELETE CASCADE on conversations
 // would also cover messages/leads — the explicit deletes keep it robust to
-// schema changes and readable. tg_update_state / tg_channel_state and
-// agent_profiles cascade on users(id), but the users row survives account
-// deletion, so they are purged here too.
+// schema changes and readable. tg_update_state / tg_channel_state,
+// agent_saved_command_cursors, and agent_profiles cascade on users(id), but
+// the users row survives account deletion, so they are purged here too.
 //
 // purgeAgentJobsHook is set by the queue package's init (agent_jobs.go) to
 // also drop the queue tables, which are introduced in a later change than
@@ -285,6 +285,7 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 		`DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)`,
 		`DELETE FROM conversations WHERE user_id = $1`,
 		`DELETE FROM incoming_events WHERE user_id = $1`,
+		`DELETE FROM agent_saved_command_cursors WHERE user_id = $1`,
 		`DELETE FROM tg_channel_state WHERE user_id = $1`,
 		`DELETE FROM tg_update_state WHERE user_id = $1`,
 		`DELETE FROM agent_profiles WHERE user_id = $1`,
