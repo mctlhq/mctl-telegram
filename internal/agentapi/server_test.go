@@ -351,10 +351,10 @@ func TestHandleLegacyEvents_IsDeprecatedAndClaims(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get("Deprecation"); got != "true" {
-		t.Fatalf("Deprecation = %q, want true", got)
+	if got := rec.Header().Get("Deprecation"); got != "@1785024000" {
+		t.Fatalf("Deprecation = %q, want @1785024000", got)
 	}
-	if got := rec.Header().Get("Sunset"); got != "Wed, 31 Dec 2026 23:59:59 GMT" {
+	if got := rec.Header().Get("Sunset"); got != "Thu, 31 Dec 2026 23:59:59 GMT" {
 		t.Fatalf("Sunset = %q", got)
 	}
 	if got := rec.Header().Get("Link"); got != `</api/agent/v1/jobs/claim>; rel="successor-version"` {

@@ -34,8 +34,8 @@ type jobEnvelope struct {
 // upgrade. It is intentionally deprecated because claiming mutates durable
 // queue state; new workers use POST /jobs/claim.
 func (s *Server) handleLegacyEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Sunset", "Wed, 31 Dec 2026 23:59:59 GMT")
+	w.Header().Set("Deprecation", "@1785024000")
+	w.Header().Set("Sunset", "Thu, 31 Dec 2026 23:59:59 GMT")
 	w.Header().Set("Link", `</api/agent/v1/jobs/claim>; rel="successor-version"`)
 	s.handleClaimJobs(w, r)
 }
