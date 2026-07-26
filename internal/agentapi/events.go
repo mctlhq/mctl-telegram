@@ -152,6 +152,41 @@ type completeJobRequest struct {
 	Note    string `json:"note"`
 }
 
+type jobStatusResponse struct {
+	JobID   int64  `json:"job_id"`
+	Status  string `json:"status"`
+	Attempt int    `json:"attempt"`
+}
+
+// handleGetJob is GET /jobs/{id}. It exposes only the durable status and
+// attempt of a user-scoped job so a headless worker can enforce the
+// postcondition "claude exit 0 AND complete_agent_job actually succeeded."
+// No event, conversation, error, or message content is returned.
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(w, r)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := s.Store.GetAgentJob(r.Context(), id.UserID, jobID)
+	if errors.Is(err, db.ErrAgentJobNotFound) {
+		writeJSONError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		logHandlerErr("get_agent_job", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, jobStatusResponse{
+		JobID: job.ID, Status: job.Status, Attempt: job.Attempts,
+	})
+}
+
 // handleJobComplete is POST /jobs/{id}/complete. A job may only be completed
 // as "completed" once its result is durably persisted: the handler requires
 // a matching agent_actions row to already exist for status=completed,

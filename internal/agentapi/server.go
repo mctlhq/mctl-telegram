@@ -121,6 +121,7 @@ func (s *Server) Register(mux registrar) {
 	mux.Get("/recruiters/{peer}", s.handleRecruiterProfile)
 	mux.Get("/leads/{id}", s.handleGetLead)
 	mux.Get("/policy", s.handlePolicy)
+	mux.Get("/jobs/{id}", s.handleGetJob)
 	mux.Post("/actions/propose_reply", s.handleProposeReply)
 	mux.Post("/leads", s.handleSaveLead)
 	mux.Post("/actions/request_owner_approval", s.handleRequestOwnerApproval)

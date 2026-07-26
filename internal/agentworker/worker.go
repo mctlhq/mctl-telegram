@@ -16,15 +16,12 @@ type eventPoller interface {
 	PollEvents(ctx context.Context, limit int) ([]JobEnvelope, error)
 }
 
-// Runner invokes one Claude turn for a single claimed job and reports
-// whether the invocation itself succeeded (process ran and exited 0) —
-// NOT whether the model actually completed the job. A worker crash or a
-// model that never calls complete_agent_job both leave the job claimed;
-// the existing visibility-timeout sweeper (internal/sweeper.AgentJobs,
-// A-PR2) requeues it, and repeated failures eventually dead-letter it.
-// This package deliberately does not duplicate that recovery logic — see
-// mctlhq/mctl-telegram#298's "no special crash-recovery logic needed in the
-// worker itself" note.
+// Runner invokes one Claude turn for a single claimed job. Success means the
+// process ran cleanly AND this exact attempt reached a terminal state through
+// complete_agent_job. A worker crash or an unsuccessful turn still leaves
+// the job claimed for the existing visibility-timeout sweeper to requeue;
+// Runner makes that outcome observable immediately instead of logging it as
+// a successful invocation.
 type Runner interface {
 	Run(ctx context.Context, job JobEnvelope) error
 }
@@ -121,9 +118,15 @@ func (w *Worker) Loop(ctx context.Context) error {
 			// and job_id already gives an operator everything needed to
 			// correlate against the API for triage.
 			if err != nil {
-				slog.Warn("agent-worker: job invocation failed", "job_id", job.JobID, "err", err)
+				outcome := "invocation_failed"
+				if errors.Is(err, ErrAgentDidNotCompleteJob) {
+					outcome = "model_exited_without_completion"
+				}
+				slog.Warn("agent-worker: job invocation failed",
+					"job_id", job.JobID, "outcome", outcome, "err", err)
 			} else {
-				slog.Info("agent-worker: job invocation finished", "job_id", job.JobID)
+				slog.Info("agent-worker: job invocation finished",
+					"job_id", job.JobID, "outcome", "completed")
 			}
 		}
 	}

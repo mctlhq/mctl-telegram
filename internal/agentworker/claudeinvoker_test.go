@@ -3,12 +3,30 @@ package agentworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func jobStatusServer(t *testing.T, jobID int64, status string, attempt int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/jobs/42" {
+			t.Fatalf("completion check = %s %s, want GET /jobs/42", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer super-secret-token" {
+			t.Fatalf("completion check Authorization = %q", got)
+		}
+		writeJSONFixture(w, JobStatus{JobID: jobID, Status: status, Attempt: attempt})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // fakeClaudeScript writes a shell script standing in for the real `claude`
 // binary: it dumps its argv to argvFile (one arg per line, so the test can
@@ -56,11 +74,12 @@ func readArgv(t *testing.T, path string) []string {
 func TestClaudeInvoker_Run_BuildsExpectedInvocation(t *testing.T) {
 	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"handled it"}`
 	bin, argvFile, mcpConfigCopy, mcpConfigPerm := fakeClaudeScript(t, stdout, 0)
+	statusSrv := jobStatusServer(t, 42, "completed", 1)
 
 	inv := &ClaudeInvoker{
 		ClaudeBin:  bin,
 		Self:       "/usr/local/bin/agent-worker",
-		APIBaseURL: "https://example.test/api/agent/v1",
+		APIBaseURL: statusSrv.URL,
 		APIToken:   "super-secret-token",
 	}
 	job := JobEnvelope{JobID: 42, EventID: "evt:v1:1:2:3", ConversationID: 9, Attempt: 1}
@@ -143,6 +162,9 @@ func TestClaudeInvoker_Run_BuildsExpectedInvocation(t *testing.T) {
 	if serverCfg.Env["AGENT_API_TOKEN"] != "super-secret-token" {
 		t.Fatalf("api token not passed to mcp server env: %#v", serverCfg.Env)
 	}
+	if !serverCfg.AlwaysLoad {
+		t.Fatal("mcp server alwaysLoad = false, want true so tools are present in the first turn")
+	}
 }
 
 func argvOrEmpty(argv []string, i int) string {
@@ -193,5 +215,50 @@ func TestClaudeInvoker_Run_NonZeroExitIsAnError(t *testing.T) {
 	err := inv.Run(context.Background(), JobEnvelope{JobID: 1})
 	if err == nil {
 		t.Fatal("expected an error for nonzero exit")
+	}
+}
+
+func TestClaudeInvoker_Run_RejectsSuccessfulCLIWithoutDurableCompletion(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"mcp__agent__complete_agent_job({\"status\":\"completed\"})"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	statusSrv := jobStatusServer(t, 42, "processing", 1)
+	inv := &ClaudeInvoker{
+		ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL,
+		APIToken: "super-secret-token",
+	}
+
+	err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1})
+	if !errors.Is(err, ErrAgentDidNotCompleteJob) {
+		t.Fatalf("Run err = %v, want ErrAgentDidNotCompleteJob", err)
+	}
+}
+
+func TestClaudeInvoker_Run_RejectsCompletionByDifferentAttempt(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	statusSrv := jobStatusServer(t, 42, "completed", 2)
+	inv := &ClaudeInvoker{
+		ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL,
+		APIToken: "super-secret-token",
+	}
+
+	err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1})
+	if !errors.Is(err, ErrAgentDidNotCompleteJob) {
+		t.Fatalf("Run err = %v, want ErrAgentDidNotCompleteJob", err)
+	}
+}
+
+func TestClaudeInvoker_Run_RejectsCompletionForDifferentJob(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	statusSrv := jobStatusServer(t, 99, "completed", 1)
+	inv := &ClaudeInvoker{
+		ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL,
+		APIToken: "super-secret-token",
+	}
+
+	err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1})
+	if !errors.Is(err, ErrAgentDidNotCompleteJob) {
+		t.Fatalf("Run err = %v, want ErrAgentDidNotCompleteJob", err)
 	}
 }

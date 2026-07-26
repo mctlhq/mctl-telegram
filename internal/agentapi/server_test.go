@@ -171,6 +171,7 @@ func TestHandlers_RequireAuth(t *testing.T) {
 		{"GET", "/recruiters/555"},
 		{"GET", "/leads/1"},
 		{"GET", "/policy"},
+		{"GET", "/jobs/1"},
 		{"POST", "/leads"},
 		{"POST", "/actions/propose_reply"},
 		{"POST", "/actions/request_owner_approval"},
@@ -182,6 +183,69 @@ func TestHandlers_RequireAuth(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s: status = %d, want 401", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+func TestHandleGetJob_ReturnsMinimalDurableStatus(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:status", conv.ID)
+
+	rec := h.do("GET", "/jobs/"+itoaTest(jobID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var pending jobStatusResponse
+	decodeBody(t, rec, &pending)
+	if pending.JobID != jobID || pending.Status != db.JobPending || pending.Attempt != 0 {
+		t.Fatalf("pending response = %#v", pending)
+	}
+
+	claim := h.do("GET", "/events", nil)
+	if claim.Code != http.StatusOK {
+		t.Fatalf("claim status = %d", claim.Code)
+	}
+	rec = h.do("GET", "/jobs/"+itoaTest(jobID), nil)
+	var processing jobStatusResponse
+	decodeBody(t, rec, &processing)
+	if processing.Status != db.JobProcessing || processing.Attempt != 1 {
+		t.Fatalf("processing response = %#v", processing)
+	}
+
+	complete := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: 1, Status: db.JobIgnored,
+	})
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete status = %d, body=%s", complete.Code, complete.Body.String())
+	}
+	rec = h.do("GET", "/jobs/"+itoaTest(jobID), nil)
+	var terminal jobStatusResponse
+	decodeBody(t, rec, &terminal)
+	if terminal.Status != db.JobIgnored || terminal.Attempt != 1 {
+		t.Fatalf("terminal response = %#v", terminal)
+	}
+}
+
+func TestHandleGetJob_IsScopedToCaller(t *testing.T) {
+	h := newHarness(t)
+	otherUID, err := h.store.EnsureUser(context.Background(), "job-owner-other", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if _, _, err := h.store.InsertIncomingEvent(context.Background(), db.IncomingEvent{
+		EventID: "evt:v1:2:999:status", UserID: otherUID, Kind: db.EventKindPrivateMessage,
+		ChatTGID: 999, SenderTGID: 999, MessageID: 1, Body: "private",
+	}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	jobID, _, err := h.store.EnqueueAgentJob(context.Background(), "evt:v1:2:999:status", otherUID, 0)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	rec := h.do("GET", "/jobs/"+itoaTest(jobID), nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user status = %d, want 404", rec.Code)
 	}
 }
 

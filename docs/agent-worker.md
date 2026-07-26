@@ -38,8 +38,10 @@ transport is in use.
    - `--strict-mcp-config` so no other locally configured MCP server leaks
      in, and `--allowedTools` names exactly the 11 `mcp__agent__*` tools —
      no `Bash`, `Read`, `Write`, `WebFetch`, or any other built-in tool is
-     ever available to this invocation. The tool surface is exactly the
-     JSON API surface, by construction.
+     ever available to this invocation. The server config also sets
+     `alwaysLoad: true`, which makes Claude Code wait for the cold-started
+     stdio server and include its tools in the first (and only) model turn.
+     The tool surface is exactly the JSON API surface, by construction.
    - `--output-format json` so the worker can tell a real failure
      (`is_error: true`, e.g. an internal SDK error or a hit `--max-budget-usd`
      cap) apart from an ordinary "nothing to do" turn.
@@ -52,8 +54,12 @@ transport is in use.
    parses or acts on the model's final text — only the tool calls have any
    effect, and only `complete_agent_job` (itself just another API call)
    marks the job done.
-4. A worker crash, or a model turn that never calls `complete_agent_job`,
-   needs no special recovery here: the job stays claimed until its
+4. After Claude exits successfully, the worker calls `GET /jobs/{id}` and
+   reports success only if this exact attempt is now `completed`, `failed`,
+   or `ignored`. Final model text — including text that merely resembles a
+   tool call — is never accepted as completion evidence. A worker crash, or
+   a model turn that never calls `complete_agent_job`, is logged as a failed
+   invocation and the job stays claimed until its
    `deadline` and is requeued by the existing visibility-timeout sweeper
    (`internal/sweeper.AgentJobs`, A-PR2/#288); repeated failures eventually
    dead-letter it. `POST /jobs/{id}/complete` itself refuses to mark a job

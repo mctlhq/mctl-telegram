@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -83,22 +84,35 @@ type mcpConfig struct {
 }
 
 type mcpServerConfig struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
+	Command    string            `json:"command"`
+	Args       []string          `json:"args"`
+	Env        map[string]string `json:"env"`
+	AlwaysLoad bool              `json:"alwaysLoad"`
 }
 
-// Run builds and executes one `claude -p` invocation for job, per the
-// contract described in NewMCPServer/Worker.Loop's doc comments: the model
-// does all of its work through the 11 MCP tools; this method only reports
-// whether the process itself ran successfully, not what the model did with
-// it (see ErrClaudeReportedError for the one CLI-level exception this method
-// does check).
+// ErrAgentDidNotCompleteJob means Claude exited successfully but the durable
+// job remained non-terminal (or was completed under a different attempt).
+// A zero process exit is not a successful worker outcome unless the model
+// actually called complete_agent_job and its fenced database transition
+// succeeded.
+var ErrAgentDidNotCompleteJob = errors.New("agent did not complete job")
+
+// Run builds and executes one `claude -p` invocation for job. The model does
+// all of its work through the 11 MCP tools, and this method reports success
+// only when both the CLI result is successful and the API confirms that this
+// exact claimed attempt reached a terminal state.
 func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	cfg := mcpConfig{MCPServers: map[string]mcpServerConfig{
 		ServerName: {
 			Command: c.Self,
 			Args:    []string{"--mcp-serve"},
+			// Claude Code starts MCP servers asynchronously by default. A
+			// single-turn `claude -p` can therefore build and dispatch its
+			// only model request before this cold stdio server's tools are
+			// present. alwaysLoad makes startup wait for the server (bounded
+			// by Claude Code's MCP connection timeout) and eagerly includes
+			// all 11 tools in the first turn.
+			AlwaysLoad: true,
 			Env: map[string]string{
 				"AGENT_API_BASE_URL": c.APIBaseURL,
 				"AGENT_API_TOKEN":    c.APIToken,
@@ -169,7 +183,25 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	if parseErr != nil {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
-	return CheckResult(res)
+	if err := CheckResult(res); err != nil {
+		return err
+	}
+
+	// The final model text is never evidence of a completed action: a model
+	// with no tools can emit text that merely resembles a tool call and still
+	// exit 0/is_error=false. Query the API's durable, user-scoped job record
+	// instead. Requiring the same attempt preserves the claim fencing used by
+	// complete_agent_job and prevents a stale invocation from taking credit
+	// for a newer worker's completion.
+	status, err := NewClient(c.APIBaseURL, c.APIToken, nil).GetJobStatus(ctx, job.JobID)
+	if err != nil {
+		return fmt.Errorf("verify job %d completion: %w", job.JobID, err)
+	}
+	if status.JobID != job.JobID || status.Attempt != job.Attempt || !status.Terminal() {
+		return fmt.Errorf("%w: job_id=%d returned_job_id=%d status=%s attempt=%d expected_attempt=%d",
+			ErrAgentDidNotCompleteJob, job.JobID, status.JobID, status.Status, status.Attempt, job.Attempt)
+	}
+	return nil
 }
 
 // jobPrompt is deliberately minimal AND deliberately job-identity-free: the
