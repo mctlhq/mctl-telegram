@@ -167,3 +167,89 @@ func TestSweepAgentMessageBodies_DeletesOldRowsOnly(t *testing.T) {
 		t.Fatalf("zero-retention sweep removed %d rows, want 0", rows)
 	}
 }
+
+func TestSweepAgentMessageBodies_RetiresAndClearsOldActionContent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "old-action-owner")
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply, PolicyDecision: PolicyRequireApproval,
+		Status: ActionPendingApproval, ApprovalCode: "AB12", Payload: "private draft",
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status=$1, send_body_encrypted=$2, created_at=$3, updated_at=$3
+		  WHERE id=$4`,
+		ActionApproved, []byte("encrypted-final-body"), time.Now().UTC().Add(-40*24*time.Hour), actionID,
+	); err != nil {
+		t.Fatalf("backdate action: %v", err)
+	}
+
+	if _, err := s.SweepAgentMessageBodies(ctx, 30*24*time.Hour); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	var (
+		status                                      string
+		payload, sendBody, codeHash, codeCiphertext []byte
+		code                                        *string
+	)
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT status, payload_encrypted, send_body_encrypted,
+		        approval_code_hash, approval_code_encrypted, approval_code
+		   FROM agent_actions WHERE id=$1`, actionID,
+	).Scan(&status, &payload, &sendBody, &codeHash, &codeCiphertext, &code); err != nil {
+		t.Fatalf("read action: %v", err)
+	}
+	if status != ActionDenied {
+		t.Fatalf("status = %q, want denied", status)
+	}
+	if payload != nil || sendBody != nil || codeHash != nil || codeCiphertext != nil || code != nil {
+		t.Fatalf("expired action retained content/capability: payload=%x send=%x hash=%x ciphertext=%x code=%v",
+			payload, sendBody, codeHash, codeCiphertext, code)
+	}
+}
+
+func TestSweepAgentMessageBodies_DoesNotClearExecutingOldAction(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "active-old-action-owner")
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply, PolicyDecision: PolicyRequireApproval,
+		Status: ActionPendingApproval, ApprovalCode: "CD34", Payload: "active private draft",
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status=$1, send_body_encrypted=$2, created_at=$3, updated_at=$4
+		  WHERE id=$5`,
+		ActionExecuting, []byte("active-encrypted-final-body"),
+		time.Now().UTC().Add(-40*24*time.Hour), time.Now().UTC().Add(-40*24*time.Hour), actionID,
+	); err != nil {
+		t.Fatalf("backdate active action: %v", err)
+	}
+
+	if _, err := s.SweepAgentMessageBodies(ctx, 30*24*time.Hour); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	var (
+		status            string
+		payload, sendBody []byte
+	)
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT status, payload_encrypted, send_body_encrypted
+		   FROM agent_actions WHERE id=$1`, actionID,
+	).Scan(&status, &payload, &sendBody); err != nil {
+		t.Fatalf("read action: %v", err)
+	}
+	if status != ActionExecuting {
+		t.Fatalf("status = %q, want executing", status)
+	}
+	if payload == nil || sendBody == nil {
+		t.Fatalf("active action content cleared: payload=%x send=%x", payload, sendBody)
+	}
+}

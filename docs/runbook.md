@@ -20,6 +20,7 @@ Canary incidents are out of scope here; see
 - [SloBurnRate — SLO error-budget burn-rate alerts](#sloburnrate)
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
+- [Communication Agent operations](#communication-agent-operations)
 
 ---
 
@@ -48,6 +49,196 @@ must not overlap. Before promoting such a release:
 
 The rolling guidance in generic secret-rotation procedures does not override
 this workload-specific boundary.
+
+---
+
+<a id="communication-agent-operations"></a>
+## Communication Agent operations
+
+The communication agent has three independent containment controls:
+
+- `AGENT_KILL_SWITCH=true` denies new agent actions at the server policy and
+  executor layers.
+- `agent_profiles.listener_enabled=false` stops Telegram ingestion for that
+  account after the supervisor reconciles.
+- `agent_profiles.autopilot_paused=true` denies autonomous replies for that
+  account.
+- worker Deployment replicas `0` stops model job processing.
+
+No one control substitutes for the others. The closed state between test
+windows is all four controls together: kill switch true, listener disabled,
+autopilot paused, and worker replicas zero.
+
+### Safe bootstrap and test-window procedure
+
+1. Start dark: server deployed by exact commit SHA with
+   `AGENT_ENABLED=true`, `AGENT_KILL_SWITCH=true`, and `Recreate`; worker
+   replicas zero.
+2. Verify the server pod is healthy, the database migration completed, and
+   the preview/stable environment points only to its own database,
+   encryption key, Telegram session, and worker credential.
+3. Provision the account profile through the admin API with mode `observe`,
+   `listener_enabled=false`, `autopilot_paused=true`, and an exact sender
+   allowlist. Do not use an empty allowlist for a bounded test.
+4. Mint an account-scoped `aud=agent` token with the shortest practical TTL,
+   store it in the account's dedicated worker Secret, and ensure the model
+   process itself does not receive that token. Never reuse one tenant's
+   token in another worker.
+5. Scale that account's worker to one replica and verify readiness with the
+   queue empty. A replica is one worker process, not a request-parallelism
+   setting: `100` replicas can claim up to 100 independent jobs, but does
+   not guarantee 100-way throughput and can exhaust model quota, database
+   connections, and Telegram/API budgets.
+6. Open the bounded window in this order: set the listener on, confirm the
+   pinned account is healthy, unpause autopilot, then set the global kill
+   switch false by a reviewed deployment. Keep mode `observe` until every
+   production gate in the canonical plan is complete.
+7. Close immediately after evidence collection in the reverse safety order:
+   set kill switch true, pause autopilot, disable the listener, then scale
+   the worker to zero. Verify live pod/env state; a committed values file is
+   not sufficient evidence.
+
+The Telegram listener remains a single-replica responsibility until account
+ownership/leader election exists. Worker replicas are horizontally safe at
+the durable queue layer, including per-conversation ordering and stale-attempt
+fencing, but each current Deployment is still tenant-scoped by one
+`AGENT_API_TOKEN`. Do not build a shared worker by exposing an admin or
+multi-tenant token to Claude; a shared pool requires job-scoped capabilities
+or a trusted scheduler that injects exactly one tenant credential per
+invocation.
+
+### Configuration reference
+
+| Variable/control | Default | Operational meaning |
+|---|---:|---|
+| `AGENT_ENABLED` | `false` | Mounts the Agent API and starts agent runtime components. It is not the emergency send cutoff. |
+| `AGENT_KILL_SWITCH` | `false` | Global server-side deny gate. Production values must explicitly set it; dark starts use `true`. |
+| `AGENT_RETENTION_DAYS` | `30` | Clears encrypted message-derived content after this many days. `0` means indefinite retention and is prohibited for production without a documented exception. |
+| `AGENT_JOB_VISIBILITY` | `5m` | Time before a processing claim is treated as stale and requeued/dead-lettered. Must exceed the worst expected model turn. |
+| `AGENT_APPROVAL_TTL` | `24h` | Maximum pending owner-approval lifetime. |
+| `AGENT_PROFILE_PATH` | unset | One-time legacy YAML import only. Remove it after the encrypted DB import is verified. |
+| `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |
+| profile `listener_enabled` | `false` | Per-account Telegram ingest switch. |
+| profile `autopilot_paused` | `true` on bootstrap | Per-account autonomous action pause. |
+| profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
+| worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
+
+### Dead-letter handling
+
+`MctlAgentDeadLetter` means a job exhausted its configured attempts.
+Contain the agent first if the cause is not already understood. Inspect only
+metadata initially; message content may be private:
+
+```sql
+SELECT id, user_id, event_id, status, attempts, max_attempts,
+       last_error, created_at, updated_at
+FROM agent_jobs
+WHERE status = 'dead_letter'
+ORDER BY updated_at DESC
+LIMIT 50;
+```
+
+Classify the cause before replay: permanent policy/input errors are not
+replayed; quota/network/worker crashes may be replayable after remediation.
+Confirm the source `incoming_events.body_encrypted` still exists and no
+durable action/lead already completed the intent. Never manually send a
+reply to compensate for an `executing` action: Telegram may have accepted
+the original persisted `random_id`.
+
+There is deliberately no public replay endpoint. A controlled operator
+requeue is a database change and requires a ticket/evidence record:
+
+```sql
+BEGIN;
+SELECT id, user_id, status, attempts, last_error
+FROM agent_jobs
+WHERE id = :job_id AND user_id = :user_id
+FOR UPDATE;
+
+UPDATE agent_jobs
+SET status = 'pending', attempts = 0, next_run_at = CURRENT_TIMESTAMP,
+    claimed_by = NULL, claimed_at = NULL, last_error = NULL,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :job_id AND user_id = :user_id AND status = 'dead_letter';
+COMMIT;
+```
+
+Require exactly one updated row. Keep mode `observe`, watch the attempt and
+action rows, and close the test window if it dead-letters again.
+
+### Agent alert response
+
+- `MctlAgentDeadLetter` (warning): close unexplained test traffic, inspect
+  job/attempt metadata, fix the cause, and use the controlled replay above
+  only for a transient failure.
+- `MctlAgentActionsExecutingStuck` (critical): set the global kill switch,
+  pause the account, and disable its listener. Inspect the persisted action
+  status, `send_random_id`, and Telegram-side outcome. Do not change the
+  random ID or reconstruct a different body.
+
+### Retention and deletion matrix
+
+| Storage surface | Content | Retention | Deletion mechanism |
+|---|---|---|---|
+| `incoming_events` | Event/dedup metadata plus encrypted inbound body | Body: `AGENT_RETENTION_DAYS` (30d default); metadata tombstone: account lifetime | Body nulled by agent retention sweeper; row purged by hard account deletion |
+| `conversation_messages` | Encrypted inbound/outbound context | `AGENT_RETENTION_DAYS` | Rows deleted by agent retention sweeper or hard account deletion |
+| `agent_actions` | Policy/lifecycle metadata, encrypted draft and exact send body, encrypted approval capability | Terminal or inactive pre-send content: `AGENT_RETENTION_DAYS`; executing recovery content: until terminal; lifecycle tombstone: account lifetime | Old inactive pre-send actions are denied, then terminal content/capabilities are nulled; executing rows retain the exact body and random ID for safe recovery; row purged on hard deletion |
+| `owner_notifications` | Encrypted owner summary/draft plus delivery metadata | Body: `AGENT_RETENTION_DAYS`; metadata: account lifetime | Body nulled by sweeper; row purged on hard deletion |
+| `job_leads` | Recruiter/company/role/compensation details | Account lifetime or earlier user-requested deletion | Hard account deletion |
+| `conversations` | Peer metadata, state, counters, timestamps | Account lifetime | Hard account deletion |
+| `agent_jobs`, `agent_job_attempts` | Queue state, attempt timing, bounded error text, result IDs | Account lifetime; message body is not copied here | Hard account deletion |
+| `agent_profiles` | Policy settings and per-tenant encrypted owner profile | Account lifetime | Hard account deletion; a content-free legacy-import tombstone may remain while the login identity remains |
+| update/cursor/sent-marker tables | Telegram watermarks, Saved Messages cursor, dedup IDs | Account lifetime | Hard account deletion |
+| `audit_logs` | Tool/action metadata and redacted errors; no message body/token/session | `AUDIT_RETENTION_DAYS` (90d default) | Audit sweeper; approved early-purge SQL if required |
+| worker Claude session | No persisted conversation (`--no-session-persistence`) | Process lifetime | Process/pod exit |
+| container logs | Redacted structured operational logs | Platform Loki policy, normally 14–30d | Platform log retention |
+| database backups / PVC snapshots | Encrypted database pages and worker credential state | Platform backup policy | Natural backup expiry; selective row deletion cannot rewrite immutable historical snapshots |
+
+`AGENT_RETENTION_DAYS=0` and `AUDIT_RETENTION_DAYS=0` mean “keep forever”,
+not “delete immediately.”
+
+### Delete one account's Communication Agent data
+
+1. Set the global kill switch, pause and disable the target profile, and
+   scale its worker Deployment to zero. Wait for in-flight claims to stop.
+2. Delete the target worker Secret. Because current `aud=agent` JWTs are
+   stateless, deletion stops new pod use but does not revoke a copied token;
+   wait for its expiry or rotate the signing key in a separately reviewed,
+   all-client migration. This limitation blocks a general shared-worker
+   design.
+3. Call authenticated `DELETE /api/account`. It atomically removes Telegram
+   sessions and all user-scoped agent profiles, events, messages,
+   conversations, leads, actions, notifications, jobs, attempts, cursors,
+   watermarks, and sent-message markers. The stable login identity and
+   audit history intentionally survive.
+4. Verify zero rows for the internal `user_id` across those tables. Do not
+   query by a raw Telegram ID in evidence or logs.
+5. If the request also requires early audit erasure, delete
+   `audit_logs WHERE user_id = :user_id` under an approved privacy ticket
+   after the endpoint's own deletion audit row is written. This removes that
+   user's complete hash chain; never edit individual audit rows.
+6. Record the database-backup and log-retention expiry dates. Immutable
+   backups are not selectively rewritten; access remains restricted until
+   their normal expiry.
+
+### Credential rotation
+
+- Agent API token: scale the tenant worker to zero, mint a replacement with
+  the shortest practical TTL, update only that tenant's Secret, start one
+  replica, verify claims, then remove the old Secret. A suspected copied
+  token requires signing-key rotation or waiting for expiry.
+- Claude credential/state: scale to zero, revoke it at the provider, replace
+  the dedicated credential volume/secret, start one replica, and verify the
+  old credential fails. Never reuse the PR-review credential pool.
+- Telegram session: disable listener and pause, disconnect/revoke the old
+  session, complete OAuth for the replacement, then re-enable only after the
+  account identity is verified.
+- Encryption key: online/in-place rotation is not currently supported. Treat
+  suspected compromise as an incident: close the agent window, revoke
+  sessions and tokens, keep the old key isolated for recovery, and implement
+  a separately reviewed dual-key re-encryption migration before replacing
+  it. Never replace the key directly; existing ciphertext would become
+  unreadable.
 
 ---
 
