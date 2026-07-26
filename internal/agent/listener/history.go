@@ -70,6 +70,19 @@ func (l *Listener) pollSavedHistory(ctx context.Context, acct *account, api save
 			continue
 		}
 		msg, ok := raw.(*tg.Message)
+		// TEMP DIAGNOSTIC (debug/saved-command-extract-trace) — remove before merge.
+		slog.Warn("TEMP diag: history item", "message_id", messageID, "raw_type", fmt.Sprintf("%T", raw), "asserted_ok", ok,
+			"text", func() string {
+				if ok {
+					return msg.Message
+				}
+				return ""
+			}(), "out", func() bool {
+				if ok {
+					return msg.Out
+				}
+				return false
+			}())
 		if ok {
 			if msg.Out && l.consumeSent(ctx, acct.userID, messageID) {
 				if err := l.Store.AdvanceSavedCommandCursor(ctx, acct.userID, messageID); err != nil {
