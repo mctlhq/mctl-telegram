@@ -14,7 +14,7 @@ import (
 // when the first claim attempt comes up empty.
 const eventsPollInterval = 1 * time.Second
 
-// jobEnvelope is the payload GET /events returns per claimed job. It carries
+// jobEnvelope is the payload POST /jobs/claim returns per claimed job. It carries
 // only identity/routing fields — the worker fetches the full event body via
 // GET /event/{eventID}, keeping the wake-up response small and avoiding a
 // second encryption round-trip on jobs that never get past dedup.
@@ -30,11 +30,21 @@ type jobEnvelope struct {
 	Deadline string `json:"deadline"` // RFC3339; advisory, see Server.jobVisibility
 }
 
-// handleEvents is GET /events — a long-poll claim of the next due job(s).
+// handleLegacyEvents preserves the original GET endpoint during a rolling
+// upgrade. It is intentionally deprecated because claiming mutates durable
+// queue state; new workers use POST /jobs/claim.
+func (s *Server) handleLegacyEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Deprecation", "@1785024000")
+	w.Header().Set("Sunset", "Thu, 31 Dec 2026 23:59:59 GMT")
+	w.Header().Set("Link", `</api/agent/v1/jobs/claim>; rel="successor-version"`)
+	s.handleClaimJobs(w, r)
+}
+
+// handleClaimJobs is POST /jobs/claim — a long-poll claim of the next due job(s).
 // Honors an optional integer ?limit= (default 1, capped at 10). Always
 // responds 200; an empty "jobs" array means the poll window elapsed with
 // nothing to claim, not an error.
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
 		return

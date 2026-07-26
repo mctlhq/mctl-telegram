@@ -17,7 +17,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
-// defaultLongPollTimeout bounds GET /events. Kept comfortably under the
+// defaultLongPollTimeout bounds POST /jobs/claim. Kept comfortably under the
 // router's 60s middleware.Timeout (see cmd/server/main.go) so a slow claim
 // loop is cut off by us, not by the framework returning a bare 503.
 const defaultLongPollTimeout = 20 * time.Second
@@ -93,7 +93,7 @@ func (s *Server) WithProfile(p OwnerProfileProvider, ownerTGID int64) *Server {
 	return s
 }
 
-// WithLongPollTimeout overrides the GET /events hold time. Returns s for
+// WithLongPollTimeout overrides the job-claim hold time. Returns s for
 // chaining. Exposed mainly so tests can use a short timeout.
 func (s *Server) WithLongPollTimeout(d time.Duration) *Server {
 	if d > 0 {
@@ -113,9 +113,9 @@ type registrar interface {
 // Register binds every /api/agent/v1 route onto mux. Paths are relative —
 // mount at "/api/agent/v1" (behind the aud=agent auth middleware; see
 // cmd/server/main.go's selectAgentProvider) and the effective URLs become
-// e.g. "/api/agent/v1/events".
+// e.g. "/api/agent/v1/jobs/claim".
 func (s *Server) Register(mux registrar) {
-	mux.Get("/events", s.handleEvents)
+	mux.Get("/events", s.handleLegacyEvents)
 	mux.Get("/event/{eventID}", s.handleGetEvent)
 	mux.Get("/conversations/{id}/context", s.handleConversationContext)
 	mux.Get("/recruiters/{peer}", s.handleRecruiterProfile)
@@ -127,5 +127,6 @@ func (s *Server) Register(mux registrar) {
 	mux.Post("/actions/request_owner_approval", s.handleRequestOwnerApproval)
 	mux.Post("/notify/summary", s.handleNotifySummary)
 	mux.Post("/autopilot/pause", s.handleAutopilotPause)
+	mux.Post("/jobs/claim", s.handleClaimJobs)
 	mux.Post("/jobs/{id}/complete", s.handleJobComplete)
 }

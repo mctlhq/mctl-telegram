@@ -124,7 +124,7 @@ type proposeReplyRequest struct {
 	ConversationID int64 `json:"conversation_id"`
 	JobID          int64 `json:"job_id,omitempty"`
 	// Attempt must match the job's currently claimed attempt (as returned by
-	// GET /events) when JobID is set — see InsertAgentAction's doc comment.
+	// POST /jobs/claim) when JobID is set; see InsertAgentAction's doc comment.
 	Attempt int    `json:"attempt,omitempty"`
 	Intent  string `json:"intent"`
 	Text    string `json:"text"`

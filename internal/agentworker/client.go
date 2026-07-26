@@ -1,6 +1,6 @@
 // Package agentworker is the production (Option C) transport for the
 // communication agent: a headless worker that long-polls
-// /api/agent/v1/events for the next due job and invokes `claude -p` with a
+// /api/agent/v1/jobs/claim for the next due job and invokes `claude -p` with a
 // restricted MCP tool surface that proxies 1:1 onto the same JSON API a
 // human bridge daemon or the experimental Channels adapter (A-PR8b) would
 // use. See mctlhq/mctl-telegram#298 and the transport decision in the
@@ -47,7 +47,7 @@ type Client struct {
 // "https://labs-mctl-telegram.labs.svc:8080/api/agent/v1"); hc may be nil to
 // use http.DefaultClient. A trailing slash on baseURL is trimmed: every path
 // built in this package already starts with "/", so an untrimmed trailing
-// slash produces a double slash (".../v1//events") that the mounted chi
+// slash produces a double slash (".../v1//jobs/claim") that the mounted chi
 // router doesn't match — an operator configuring the otherwise-correct-
 // looking ".../v1/" would see every request 404 forever with no jobs ever
 // processed.
@@ -152,7 +152,7 @@ func (j JobEnvelope) ParsedDeadline(fallback time.Duration) time.Time {
 // request timeout either.
 const pollEventsDeadline = 30 * time.Second
 
-// PollEvents is GET /events?limit=N — a long-poll claim of due jobs.
+// PollEvents is POST /jobs/claim?limit=N — a long-poll claim of due jobs.
 func (c *Client) PollEvents(ctx context.Context, limit int) ([]JobEnvelope, error) {
 	if limit <= 0 {
 		limit = 1
@@ -162,8 +162,8 @@ func (c *Client) PollEvents(ctx context.Context, limit int) ([]JobEnvelope, erro
 	var out struct {
 		Jobs []JobEnvelope `json:"jobs"`
 	}
-	path := "/events?limit=" + strconv.Itoa(limit)
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+	path := "/jobs/claim?limit=" + strconv.Itoa(limit)
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Jobs, nil
