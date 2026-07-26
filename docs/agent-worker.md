@@ -149,3 +149,9 @@ server, and uses a local fake Agent API to feed
 classification ≥27/30, terminal completion 30/30, zero restricted-data
 echoes, and zero job/conversation/attempt binding violations. Normal
 `go test ./...` skips the model evaluation and spends no model quota.
+
+`Dockerfile.agent-worker` also includes the compiled opt-in test binary at
+`/usr/local/bin/mctl-telegram-agent-eval.test` so C1 can run the identical
+harness inside a one-shot Kubernetes Job with the worker's dedicated Claude
+credential. Set `AGENT_EVAL_WORKER_BIN=/usr/local/bin/mctl-telegram-agent-worker`
+there; the default image entrypoint remains the production worker.
