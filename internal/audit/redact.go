@@ -35,6 +35,7 @@ var sensitiveKeys = map[string]struct{}{
 	"password":                    {},
 	"phone":                       {},
 	"code":                        {},
+	"approval_code_encrypted":     {},
 	"session_encrypted":           {},
 	"session":                     {},
 	"tg_api_hash":                 {},
