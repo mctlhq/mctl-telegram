@@ -134,3 +134,18 @@ handler against a fake `agentAPI`, and `claudeinvoker_test.go` swaps in a
 fake shell script for `ClaudeBin` to assert on the exact CLI invocation
 (flags, `--mcp-config` contents, tool allowlist) without touching the
 network.
+
+The C1 observe-mode model evaluation is intentionally opt-in because it runs
+30 real Claude Code turns and consumes quota:
+
+```bash
+AGENT_C1_EVAL=1 go test ./internal/agentworker \
+  -run TestC1ObserveEval -count=1 -v
+```
+
+It builds the real `cmd/agent-worker`, starts its real job-scoped stdio MCP
+server, and uses a local fake Agent API to feed
+`testdata/c1-fixtures.jsonl` and record durable effects. Acceptance is
+classification ≥27/30, terminal completion 30/30, zero restricted-data
+echoes, and zero job/conversation/attempt binding violations. Normal
+`go test ./...` skips the model evaluation and spends no model quota.

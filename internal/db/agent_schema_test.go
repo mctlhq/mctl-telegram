@@ -5,6 +5,48 @@ import (
 	"testing"
 )
 
+func TestMigrate_UpgradesPreExistingProfilesWithoutSenderAllowlist(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE agent_profiles (
+		user_id INTEGER PRIMARY KEY,
+		mode TEXT NOT NULL DEFAULT 'observe',
+		autopilot_paused INTEGER NOT NULL DEFAULT 0,
+		listener_enabled INTEGER NOT NULL DEFAULT 0,
+		disclosure_text TEXT NOT NULL DEFAULT '',
+		max_autonomous_turns INTEGER NOT NULL DEFAULT 6,
+		max_msgs_per_minute INTEGER NOT NULL DEFAULT 2,
+		max_reply_chars INTEGER NOT NULL DEFAULT 1200,
+		intent_allowlist TEXT NOT NULL DEFAULT '',
+		blocked_senders TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed pre-existing profiles: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO agent_profiles(user_id) VALUES(7)`); err != nil {
+		t.Fatalf("seed pre-existing profile row: %v", err)
+	}
+
+	if err := Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var allowlist string
+	if err := conn.QueryRowContext(ctx,
+		`SELECT sender_allowlist FROM agent_profiles WHERE user_id=7`,
+	).Scan(&allowlist); err != nil {
+		t.Fatalf("read upgraded sender allowlist: %v", err)
+	}
+	if allowlist != "" {
+		t.Fatalf("sender_allowlist = %q, want empty compatibility default", allowlist)
+	}
+}
+
 // TestMigrate_UpgradesPreExistingJobLeadsWithoutJobIDColumn guards against
 // the P1 found in round-4 review: on a database that already has job_leads
 // from before A-PR6 (#296) — i.e. without a job_id column — the agent

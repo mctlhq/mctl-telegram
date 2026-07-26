@@ -82,3 +82,24 @@ func TestReconcile_ListFailureKeepsActiveAccounts(t *testing.T) {
 		t.Fatalf("active after error = %v", ids)
 	}
 }
+
+func TestReconcile_RefreshesSenderAllowlistOnActiveAccount(t *testing.T) {
+	ctx := context.Background()
+	l := New(nil, nil, nil, nil)
+	pool := &fakePool{}
+	res := &fakeResolver{
+		profiles: []db.AgentProfile{{UserID: 7, SenderAllowlist: "555"}},
+		tgIDs:    map[int64]int64{7: 1007},
+	}
+	reconcile(ctx, l, pool, res)
+	acct, ok := l.get(7)
+	if !ok || !l.senderAllowed(acct, 555) || l.senderAllowed(acct, 777) {
+		t.Fatalf("initial allowlist was not installed")
+	}
+
+	res.profiles[0].SenderAllowlist = "777"
+	reconcile(ctx, l, pool, res)
+	if l.senderAllowed(acct, 555) || !l.senderAllowed(acct, 777) {
+		t.Fatalf("updated allowlist was not refreshed")
+	}
+}

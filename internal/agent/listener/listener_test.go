@@ -105,6 +105,64 @@ func TestOnMessage_PersistsEventJobAndConversationIdentity(t *testing.T) {
 	}
 }
 
+func TestOnMessage_SenderAllowlistFiltersBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if !l.SetAccountProfile(acct.userID, acct.tgID, "999, 777") {
+		t.Fatal("set account profile")
+	}
+	filtered, ok := l.get(acct.userID)
+	if !ok {
+		t.Fatal("listener account missing")
+	}
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna"})
+
+	if err := l.onMessage(ctx, filtered, entities, msg, false); err != nil {
+		t.Fatalf("filtered onMessage: %v", err)
+	}
+	var events, jobs, conversations int
+	for table, dest := range map[string]*int{
+		"incoming_events": &events,
+		"agent_jobs":      &jobs,
+		"conversations":   &conversations,
+	} {
+		if err := store.DB.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(dest); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+	}
+	if events != 0 || jobs != 0 || conversations != 0 {
+		t.Fatalf("filtered sender persisted events/jobs/conversations = %d/%d/%d", events, jobs, conversations)
+	}
+
+	// Reconciliation refreshes the allowlist on the existing manager without
+	// requiring a disconnect. The same peer becomes eligible immediately.
+	if !l.SetAccountProfile(acct.userID, acct.tgID, "555") {
+		t.Fatal("refresh account profile")
+	}
+	if err := l.onMessage(ctx, filtered, entities, msg, false); err != nil {
+		t.Fatalf("allowed onMessage: %v", err)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs`).Scan(&jobs); err != nil {
+		t.Fatalf("count allowed jobs: %v", err)
+	}
+	if jobs != 1 {
+		t.Fatalf("allowed sender jobs = %d, want 1", jobs)
+	}
+}
+
+func TestParseSenderAllowlist_EmptyAllowsAllAndInvalidFailsClosed(t *testing.T) {
+	l := New(nil, nil, nil, nil)
+	empty := &account{senderAllowlist: parseSenderAllowlist("  ")}
+	if !l.senderAllowed(empty, 555) {
+		t.Fatal("empty allowlist must preserve allow-all compatibility")
+	}
+	invalid := &account{senderAllowlist: parseSenderAllowlist("not-an-id,-1")}
+	if l.senderAllowed(invalid, 555) {
+		t.Fatal("configured but invalid allowlist must fail closed")
+	}
+}
+
 // TestOnMessage_PersistsPeerAccessHash guards against the P1 found in
 // round-4 review: without this, the executor's send path always built a
 // zero-access-hash InputPeerUser and every reply failed with
