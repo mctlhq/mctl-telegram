@@ -148,6 +148,102 @@ func TestCompleteAgentJob_CASFromProcessing(t *testing.T) {
 	}
 }
 
+func TestCompleteAgentJobWithResult_BindsExactActionAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "result-owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:result")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	attempt := claimed[0].Attempts
+
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", 0, 0,
+	); !errors.Is(err, ErrAgentJobResultRequired) {
+		t.Fatalf("complete without result err = %v", err)
+	}
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: jid, Attempt: attempt, UserID: uid,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", actionID+999, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("complete with wrong action err = %v", err)
+	}
+	stillProcessing, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get after invalid result: %v", err)
+	}
+	if stillProcessing.Status != JobProcessing || stillProcessing.ResultActionID != 0 {
+		t.Fatalf("invalid result partially completed job: %+v", stillProcessing)
+	}
+
+	if err := s.CompleteAgentJobWithResult(
+		ctx, uid, jid, attempt, JobCompleted, "", actionID, 0,
+	); err != nil {
+		t.Fatalf("complete with action: %v", err)
+	}
+	completed, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get completed: %v", err)
+	}
+	if completed.Status != JobCompleted || completed.ResultActionID != actionID || completed.ResultLeadID != 0 {
+		t.Fatalf("completed job = %+v", completed)
+	}
+}
+
+func TestCompleteAgentJobWithResult_RejectsCrossTenantAndStaleAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	owner := seedAgentUser(t, s, "result-owner-a")
+	other := seedAgentUser(t, s, "result-owner-b")
+	jid := seedJob(t, s, owner, "evt:v1:1:1:result-owner")
+	otherJob := seedJob(t, s, other, "evt:v1:2:1:result-other")
+	ownerClaims, err := s.ClaimAgentJobs(ctx, "owner-worker", owner, 1)
+	if err != nil || len(ownerClaims) != 1 {
+		t.Fatalf("claim owner: jobs=%+v err=%v", ownerClaims, err)
+	}
+	otherClaims, err := s.ClaimAgentJobs(ctx, "other-worker", other, 1)
+	if err != nil || len(otherClaims) != 1 {
+		t.Fatalf("claim other: jobs=%+v err=%v", otherClaims, err)
+	}
+	otherActionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: otherJob, Attempt: otherClaims[0].Attempts, UserID: other,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert other action: %v", err)
+	}
+	ownerActionID, err := s.InsertAgentAction(ctx, AgentAction{
+		JobID: jid, Attempt: ownerClaims[0].Attempts, UserID: owner,
+		ActionType: ActionTypeReply, PolicyDecision: PolicyAllow, Status: ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert owner action: %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts, JobCompleted, "", otherActionID, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("cross-tenant result err = %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts-1, JobCompleted, "", ownerActionID, 0,
+	); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("stale attempt err = %v", err)
+	}
+	if err := s.CompleteAgentJobWithResult(
+		ctx, owner, jid, ownerClaims[0].Attempts, JobFailed, "", otherActionID, 0,
+	); !errors.Is(err, ErrAgentJobResultInvalid) {
+		t.Fatalf("failed status accepted a result ref, err = %v", err)
+	}
+}
+
 func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

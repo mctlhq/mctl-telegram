@@ -84,10 +84,21 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Direct result linkage makes "persist result + complete exact claim" a
+	// single verifiable transaction instead of a handler-level existence
+	// check followed by a separate queue transition.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "result_action_id",
+		"BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "result_lead_id",
+		"BIGINT", "INTEGER"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
-	// /jobs/{id}/complete can recognize a lead-only result — see
-	// HasJobLeadForJob. Unlike the three columns above, its index is NOT
+	// /jobs/{id}/complete can bind a lead-only result. Unlike the columns
+	// above, its index is NOT
 	// inline in the job_leads CREATE TABLE stmts list above (see #310):
 	// on a pre-A-PR6 database, job_leads exists without job_id, and a
 	// CREATE INDEX ... ON job_leads(job_id) run in the same pass as that
@@ -335,6 +346,8 @@ func agentSchemaSQLite() []string {
 			claimed_by TEXT,
 			claimed_at DATETIME,
 			last_error TEXT,
+			result_action_id INTEGER,
+			result_lead_id INTEGER,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -527,6 +540,8 @@ func agentSchemaPG() []string {
 			claimed_by TEXT,
 			claimed_at TIMESTAMPTZ,
 			last_error TEXT,
+			result_action_id BIGINT,
+			result_lead_id BIGINT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

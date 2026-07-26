@@ -81,6 +81,24 @@ func (q *Queue) Complete(ctx context.Context, jobID int64, attempt int, status, 
 	return err
 }
 
+// CompleteWithResult is the agent-API completion path. It atomically binds
+// exact user-scoped durable output ids to the terminal claim.
+func (q *Queue) CompleteWithResult(
+	ctx context.Context,
+	userID, jobID int64,
+	attempt int,
+	status, note string,
+	resultActionID, resultLeadID int64,
+) error {
+	err := q.Store.CompleteAgentJobWithResult(
+		ctx, userID, jobID, attempt, status, note, resultActionID, resultLeadID,
+	)
+	if err == nil {
+		q.count(status, 1)
+	}
+	return err
+}
+
 // Retry returns a processing job to the queue with backoff, or dead-letters
 // it when attempts are exhausted. attempt is the claim identity from Claim.
 func (q *Queue) Retry(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {

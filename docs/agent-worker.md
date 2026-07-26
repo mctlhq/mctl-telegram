@@ -63,10 +63,12 @@ transport is in use.
    `deadline` and is requeued by the existing visibility-timeout sweeper
    (`internal/sweeper.AgentJobs`, A-PR2/#288); repeated failures eventually
    dead-letter it. `POST /jobs/{id}/complete` itself refuses to mark a job
-   `completed` unless a durable result (an `agent_actions` row or a saved
-   lead) already exists for it (`agentapi.handleJobComplete`) — so even a
-   model that calls `complete_agent_job` without having done anything first
-   gets a 409, not a silently-lost job.
+   `completed` unless it can atomically bind exact durable
+   `result_action_id`/`result_lead_id` values to that claim. Those ids are
+   captured inside the job-scoped MCP server from successful result-tool
+   responses; they are not arguments the model can supply to
+   `complete_agent_job`. A completion without a valid same-user, same-job
+   result gets a 409, not a silently-lost job.
 
 ## Configuration
 

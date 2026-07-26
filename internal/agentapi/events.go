@@ -157,15 +157,19 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 type completeJobRequest struct {
-	Attempt int    `json:"attempt"`
-	Status  string `json:"status"`
-	Note    string `json:"note"`
+	Attempt        int    `json:"attempt"`
+	Status         string `json:"status"`
+	Note           string `json:"note"`
+	ResultActionID int64  `json:"result_action_id,omitempty"`
+	ResultLeadID   int64  `json:"result_lead_id,omitempty"`
 }
 
 type jobStatusResponse struct {
-	JobID   int64  `json:"job_id"`
-	Status  string `json:"status"`
-	Attempt int    `json:"attempt"`
+	JobID          int64  `json:"job_id"`
+	Status         string `json:"status"`
+	Attempt        int    `json:"attempt"`
+	ResultActionID int64  `json:"result_action_id,omitempty"`
+	ResultLeadID   int64  `json:"result_lead_id,omitempty"`
 }
 
 // handleGetJob is GET /jobs/{id}. It exposes only the durable status and
@@ -194,16 +198,14 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, jobStatusResponse{
 		JobID: job.ID, Status: job.Status, Attempt: job.Attempts,
+		ResultActionID: job.ResultActionID, ResultLeadID: job.ResultLeadID,
 	})
 }
 
 // handleJobComplete is POST /jobs/{id}/complete. A job may only be completed
-// as "completed" once its result is durably persisted: the handler requires
-// a matching agent_actions row to already exist for status=completed,
-// turning "worker acked without producing a result" into an explicit 409
-// instead of a silently-lost job. status=failed/ignored carry no such
-// requirement — those are legitimate terminal outcomes with no action to
-// show for them.
+// as "completed" while atomically linking an exact persisted action or lead.
+// status=failed/ignored carry no result because those are legitimate
+// terminal outcomes with no durable output.
 func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -236,31 +238,20 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	if req.Status == db.JobCompleted {
-		hasAction, err := s.Store.HasAgentActionForJob(ctx, id.UserID, jobID)
-		if err != nil {
-			logHandlerErr("complete_agent_job", err)
-			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		// A lead save (POST /leads with this job_id) is also a valid durable
-		// result — not every job produces a reply/notification action row.
-		hasLead := false
-		if !hasAction {
-			hasLead, err = s.Store.HasJobLeadForJob(ctx, id.UserID, jobID)
-			if err != nil {
-				logHandlerErr("complete_agent_job", err)
-				writeJSONError(w, http.StatusInternalServerError, "lookup failed")
-				return
-			}
-		}
-		if !hasAction && !hasLead {
+	if err := s.Queue.CompleteWithResult(
+		ctx, id.UserID, jobID, req.Attempt, req.Status, req.Note,
+		req.ResultActionID, req.ResultLeadID,
+	); err != nil {
+		if errors.Is(err, db.ErrAgentJobResultRequired) {
 			writeJSONError(w, http.StatusConflict,
-				"cannot mark job completed without a persisted result — propose a reply, request owner approval, send a notification, or save a lead (with this job_id) first")
+				"cannot mark job completed without an exact persisted result id")
 			return
 		}
-	}
-	if err := s.Queue.Complete(ctx, jobID, req.Attempt, req.Status, req.Note); err != nil {
+		if errors.Is(err, db.ErrAgentJobResultInvalid) {
+			writeJSONError(w, http.StatusConflict,
+				"result does not belong to this job and account")
+			return
+		}
 		if errors.Is(err, db.ErrAgentJobNotFound) {
 			// Lost the compare-and-set race (stale claim, already completed by
 			// another attempt after a visibility-timeout requeue) — the caller's

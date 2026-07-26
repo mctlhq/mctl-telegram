@@ -778,12 +778,21 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	if proposeRec.Code != http.StatusOK {
 		t.Fatalf("propose status = %d, body=%s", proposeRec.Code, proposeRec.Body.String())
 	}
+	var proposed actionResponse
+	decodeBody(t, proposeRec, &proposed)
 
 	rec2 := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: 1, Status: db.JobCompleted,
+		Attempt: 1, Status: db.JobCompleted, ResultActionID: proposed.ActionID,
 	})
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	statusRec := h.do("GET", "/jobs/"+itoaTest(jobID), nil)
+	var completed jobStatusResponse
+	decodeBody(t, statusRec, &completed)
+	if completed.ResultActionID != proposed.ActionID || completed.ResultLeadID != 0 {
+		t.Fatalf("completed result refs = action:%d lead:%d, want action:%d",
+			completed.ResultActionID, completed.ResultLeadID, proposed.ActionID)
 	}
 }
 
@@ -1140,7 +1149,7 @@ func TestHandleOwnerFacing_RedeliveryUsesPersistedActionState(t *testing.T) {
 // P1-adjacent P2 found in review: a worker must not be able to pair a job
 // tied to one conversation with a different conversation_id in the request
 // body — that would evaluate policy against the wrong conversation while
-// still letting the (unrelated) job complete via HasAgentActionForJob.
+// persisting a result against the unrelated job.
 func TestHandleProposeReply_RejectsMismatchedJobConversation(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeObserve)
@@ -1176,9 +1185,11 @@ func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
 	if leadRec.Code != http.StatusOK {
 		t.Fatalf("save lead status = %d, body=%s", leadRec.Code, leadRec.Body.String())
 	}
+	var saved map[string]int64
+	decodeBody(t, leadRec, &saved)
 
 	completeRec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: claimed[0].Attempts, Status: db.JobCompleted,
+		Attempt: claimed[0].Attempts, Status: db.JobCompleted, ResultLeadID: saved["lead_id"],
 	})
 	if completeRec.Code != http.StatusOK {
 		t.Fatalf("complete status = %d, want 200 (lead save alone should satisfy the invariant), body=%s",

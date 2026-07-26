@@ -45,6 +45,17 @@ func TestMigrate_UpgradesPreExistingProfilesWithoutSenderAllowlist(t *testing.T)
 	if allowlist != "" {
 		t.Fatalf("sender_allowlist = %q, want empty compatibility default", allowlist)
 	}
+	for _, column := range []string{"result_action_id", "result_lead_id"} {
+		var count int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM pragma_table_info('agent_jobs') WHERE name = $1`, column,
+		).Scan(&count); err != nil {
+			t.Fatalf("check agent_jobs.%s: %v", column, err)
+		}
+		if count != 1 {
+			t.Fatalf("agent_jobs.%s column not added", column)
+		}
+	}
 }
 
 // TestMigrate_UpgradesPreExistingJobLeadsWithoutJobIDColumn guards against
