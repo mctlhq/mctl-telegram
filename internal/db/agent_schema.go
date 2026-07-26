@@ -116,6 +116,14 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// agent_profiles.owner_profile_encrypted holds the account-specific
+	// identity, public biography, skills, preferences, and restricted fields.
+	// Keeping it on the tenant row removes the process-wide mounted-profile
+	// singleton and lets every lookup derive the encryption key from user_id.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "owner_profile_encrypted",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can recognize a lead-only result — see
@@ -254,6 +262,7 @@ func agentSchemaSQLite() []string {
 			intent_allowlist TEXT NOT NULL DEFAULT '',
 			blocked_senders TEXT NOT NULL DEFAULT '',
 			sender_allowlist TEXT NOT NULL DEFAULT '',
+			owner_profile_encrypted BLOB,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -453,6 +462,7 @@ func agentSchemaPG() []string {
 			intent_allowlist TEXT NOT NULL DEFAULT '',
 			blocked_senders TEXT NOT NULL DEFAULT '',
 			sender_allowlist TEXT NOT NULL DEFAULT '',
+			owner_profile_encrypted BYTEA,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

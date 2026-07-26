@@ -186,44 +186,46 @@ func main() {
 	}
 	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
 
-	// AGENT_PROFILE_PATH is optional and loaded independently of
-	// AGENT_ENABLED: without it, GET /recruiters/{peer} returns 501 (see
-	// agentapi.Server.Profile's nil-safe doc comment) and the executor's
-	// restricted-field gate is simply skipped (Executor.Profile stays nil)
-	// rather than failing startup — a deployment that hasn't finished
-	// onboarding the owner's profile yet should not be blocked from running
-	// everything else. Gating this on cfg.AgentEnabled (an earlier version
-	// of this block did) was itself a bug, caught by review: the executor's
-	// sweeper (go sweeper.AgentExecutor below) starts unconditionally, so
-	// with AGENT_ENABLED=false but a profile path already configured — the
-	// exact shape of a staged C1 rollout, see the Communication Agent plan
-	// — any action left ActionApproved from before a redeploy would still
-	// get picked up and sent by the sweeper with restrictedFieldBlocks
-	// treating the nil profile as "allow everything," silently skipping the
-	// approval_required/never_auto_send checks the profile is there to
-	// enforce. Loaded here (before RunSupervisor/the sweeper goroutines
-	// below), so agentExecutor.Profile is assigned before any goroutine
-	// that might read it starts.
-	var agentProfileProvider *profile.Provider
+	// Runtime profile reads are always tenant-scoped and DB-backed. Missing
+	// documents are allowed (the worker endpoint returns 404 and the
+	// restricted-field check has nothing to enforce), while malformed or
+	// undecryptable stored documents fail closed before a send.
+	agentProfileProvider := profile.NewTenantProvider(store)
+	agentExecutor.Profile = agentProfileProvider
+
+	// AGENT_PROFILE_PATH is a backwards-compatible one-time import only. It
+	// populates the configured account's encrypted DB document if missing and
+	// never overwrites an admin-managed profile. The mounted file is no longer
+	// a process-wide runtime source of truth.
 	if path := cfg.AgentProfilePath; path != "" {
-		var err error
-		agentProfileProvider, err = profile.Load(path)
+		legacyProvider, err := profile.Load(path)
 		if err != nil {
 			slog.Error("agent profile load failed; refusing to start", "path", path, "err", err)
 			os.Exit(1)
 		}
-		agentExecutor.Profile = agentProfileProvider
-		// config.Load already refuses to start if AgentProfilePath is set
-		// without a positive AgentProfileOwnerTGID (see config.go), so this
-		// is always a real account id here — safe to scope
-		// restrictedFieldBlocks to it unconditionally.
-		agentExecutor.ProfileOwnerTGID = cfg.AgentProfileOwnerTGID
-		slog.Info("agent owner profile loaded", "path", path)
-		// Periodically re-read the mounted file so an owner's edit (e.g.
-		// moving a value into `restricted`, adding a never_auto_send marker)
-		// takes effect without a restart — see sweeper.AgentProfile's doc
-		// comment for the Codex finding this fixed.
-		go sweeper.AgentProfile(ctx, agentProfileProvider)
+		userID, err := store.UserIDByTelegramID(ctx, cfg.AgentProfileOwnerTGID)
+		if err != nil {
+			slog.Error("legacy agent profile owner resolution failed; refusing to start",
+				"path", path, "telegram_id", cfg.AgentProfileOwnerTGID, "err", err)
+			os.Exit(1)
+		}
+		if err := store.EnsureAgentProfile(ctx, userID); err != nil {
+			slog.Error("legacy agent profile row initialization failed; refusing to start",
+				"path", path, "user_id", userID, "err", err)
+			os.Exit(1)
+		}
+		document, err := legacyProvider.CanonicalJSON()
+		if err != nil {
+			slog.Error("legacy agent profile serialization failed; refusing to start", "path", path, "err", err)
+			os.Exit(1)
+		}
+		imported, err := store.SetAgentOwnerProfileIfMissing(ctx, userID, document)
+		if err != nil {
+			slog.Error("legacy agent profile import failed; refusing to start", "path", path, "user_id", userID, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("legacy agent owner profile migration checked",
+			"path", path, "user_id", userID, "imported", imported)
 	}
 
 	go listener.RunSupervisor(ctx, agentListener, pool, listener.StoreResolver{Store: store}, 15*time.Second)
@@ -440,16 +442,7 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
-		// agentProfileProvider was already loaded (or left nil) above,
-		// before RunSupervisor started — reused here rather than loading it
-		// a second time. ProfileOwnerTGID scopes GET /recruiters/{peer} to
-		// the one account this profile actually belongs to (see
-		// agentapi.Server.ProfileOwnerTGID's doc comment); 0 means "not
-		// configured", which handleRecruiterProfile treats as forbidden for
-		// everyone, matching a nil Profile's 501.
-		if agentProfileProvider != nil {
-			agentSrv.WithProfile(agentProfileProvider, cfg.AgentProfileOwnerTGID)
-		}
+		agentSrv.WithProfile(agentProfileProvider)
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
 		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m)(agentMux))

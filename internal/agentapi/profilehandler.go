@@ -1,10 +1,13 @@
 package agentapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 
+	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -22,6 +25,9 @@ type upsertAgentProfileRequest struct {
 	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
 	BlockedSenders     *string `json:"blocked_senders,omitempty"`
 	SenderAllowlist    *string `json:"sender_allowlist,omitempty"`
+	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
+	// means unchanged; null clears it.
+	OwnerProfile json.RawMessage `json:"owner_profile,omitempty"`
 }
 
 type agentProfileResponse struct {
@@ -36,6 +42,9 @@ type agentProfileResponse struct {
 	IntentAllowlist    string `json:"intent_allowlist"`
 	BlockedSenders     string `json:"blocked_senders"`
 	SenderAllowlist    string `json:"sender_allowlist"`
+	// The profile contents are deliberately never echoed from this
+	// administrative policy response.
+	OwnerProfileConfigured bool `json:"owner_profile_configured"`
 }
 
 // NewAdminAgentProfileHandler returns the http.HandlerFunc for PUT
@@ -95,6 +104,24 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "mode must be observe, guarded, or off")
 			return
 		}
+		var ownerProfileDocument []byte
+		clearOwnerProfile := false
+		if len(req.OwnerProfile) > 0 {
+			if bytes.Equal(bytes.TrimSpace(req.OwnerProfile), []byte("null")) {
+				clearOwnerProfile = true
+			} else {
+				parsed, err := agentprofile.ParseJSON(req.OwnerProfile)
+				if err != nil {
+					writeJSONError(w, http.StatusBadRequest, "invalid owner_profile")
+					return
+				}
+				ownerProfileDocument, err = json.Marshal(parsed)
+				if err != nil {
+					writeJSONError(w, http.StatusBadRequest, "invalid owner_profile")
+					return
+				}
+			}
+		}
 
 		ctx := r.Context()
 		targetUserID, err := store.UserIDByTelegramID(ctx, req.TelegramID)
@@ -122,6 +149,12 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			BlockedSenders:  req.BlockedSenders,
 			SenderAllowlist: req.SenderAllowlist,
 		}
+		if clearOwnerProfile {
+			empty := []byte(nil)
+			update.OwnerProfileDocument = &empty
+		} else if len(ownerProfileDocument) > 0 {
+			update.OwnerProfileDocument = &ownerProfileDocument
+		}
 		if req.Mode != "" {
 			update.Mode = &req.Mode
 		}
@@ -146,11 +179,18 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent profile")
 			return
 		}
-
 		p, err := store.GetAgentProfile(ctx, targetUserID)
 		if err != nil {
 			logHandlerErr("admin.agent_profile.upsert", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to load saved profile")
+			return
+		}
+		ownerProfileConfigured := true
+		if _, err := store.GetAgentOwnerProfile(ctx, targetUserID); errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
+			ownerProfileConfigured = false
+		} else if err != nil {
+			logHandlerErr("admin.agent_profile.get_owner_profile", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to load owner profile state")
 			return
 		}
 
@@ -160,17 +200,18 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			"mode", p.Mode, "listener_enabled", p.ListenerEnabled, "autopilot_paused", p.AutopilotPaused)
 
 		writeJSON(w, http.StatusOK, agentProfileResponse{
-			TelegramID:         req.TelegramID,
-			Mode:               p.Mode,
-			AutopilotPaused:    p.AutopilotPaused,
-			ListenerEnabled:    p.ListenerEnabled,
-			DisclosureText:     p.DisclosureText,
-			MaxAutonomousTurns: p.MaxAutonomousTurns,
-			MaxMsgsPerMinute:   p.MaxMsgsPerMinute,
-			MaxReplyChars:      p.MaxReplyChars,
-			IntentAllowlist:    p.IntentAllowlist,
-			BlockedSenders:     p.BlockedSenders,
-			SenderAllowlist:    p.SenderAllowlist,
+			TelegramID:             req.TelegramID,
+			Mode:                   p.Mode,
+			AutopilotPaused:        p.AutopilotPaused,
+			ListenerEnabled:        p.ListenerEnabled,
+			DisclosureText:         p.DisclosureText,
+			MaxAutonomousTurns:     p.MaxAutonomousTurns,
+			MaxMsgsPerMinute:       p.MaxMsgsPerMinute,
+			MaxReplyChars:          p.MaxReplyChars,
+			IntentAllowlist:        p.IntentAllowlist,
+			BlockedSenders:         p.BlockedSenders,
+			SenderAllowlist:        p.SenderAllowlist,
+			OwnerProfileConfigured: ownerProfileConfigured,
 		})
 	}
 }

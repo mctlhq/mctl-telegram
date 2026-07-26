@@ -1,7 +1,9 @@
 package db
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -62,6 +64,93 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 	}
 	if err := s.SetAgentAutopilotPaused(ctx, uid+999, true); err != ErrAgentProfileNotFound {
 		t.Fatalf("pause missing profile err = %v, want ErrAgentProfileNotFound", err)
+	}
+}
+
+func TestAgentOwnerProfile_EncryptedAndTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	alice := seedAgentUser(t, s, "profile-alice")
+	bob := seedAgentUser(t, s, "profile-bob")
+	for _, userID := range []int64{alice, bob} {
+		if err := s.EnsureAgentProfile(ctx, userID); err != nil {
+			t.Fatalf("ensure profile %d: %v", userID, err)
+		}
+	}
+	document := []byte(`{"identity":{"name":"Private Alice"}}`)
+	if err := s.SetAgentOwnerProfile(ctx, alice, document); err != nil {
+		t.Fatalf("set alice: %v", err)
+	}
+	if err := s.SetAgentOwnerProfile(ctx, bob, document); err != nil {
+		t.Fatalf("set bob: %v", err)
+	}
+
+	var aliceBlob, bobBlob []byte
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT owner_profile_encrypted FROM agent_profiles WHERE user_id=$1`, alice,
+	).Scan(&aliceBlob); err != nil {
+		t.Fatalf("read alice blob: %v", err)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT owner_profile_encrypted FROM agent_profiles WHERE user_id=$1`, bob,
+	).Scan(&bobBlob); err != nil {
+		t.Fatalf("read bob blob: %v", err)
+	}
+	if bytes.Contains(aliceBlob, []byte("Private Alice")) {
+		t.Fatal("owner profile was stored in plaintext")
+	}
+	if bytes.Equal(aliceBlob, bobBlob) {
+		t.Fatal("same document produced identical ciphertext across tenants")
+	}
+	got, err := s.GetAgentOwnerProfile(ctx, alice)
+	if err != nil {
+		t.Fatalf("get alice: %v", err)
+	}
+	if !bytes.Equal(got, document) {
+		t.Fatalf("document = %s, want %s", got, document)
+	}
+
+	// Even a DB-level cross-tenant copy cannot be opened under Bob's derived
+	// key.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_profiles SET owner_profile_encrypted=$1 WHERE user_id=$2`,
+		aliceBlob, bob,
+	); err != nil {
+		t.Fatalf("copy ciphertext: %v", err)
+	}
+	if _, err := s.GetAgentOwnerProfile(ctx, bob); err == nil {
+		t.Fatal("cross-tenant ciphertext unexpectedly decrypted")
+	}
+}
+
+func TestAgentOwnerProfile_ImportDoesNotOverwriteAndClear(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "profile-import")
+	if err := s.EnsureAgentProfile(ctx, uid); err != nil {
+		t.Fatalf("ensure profile: %v", err)
+	}
+	first := []byte(`{"identity":{"name":"First"}}`)
+	inserted, err := s.SetAgentOwnerProfileIfMissing(ctx, uid, first)
+	if err != nil || !inserted {
+		t.Fatalf("first import: inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = s.SetAgentOwnerProfileIfMissing(ctx, uid, []byte(`{"identity":{"name":"Second"}}`))
+	if err != nil || inserted {
+		t.Fatalf("second import: inserted=%v err=%v", inserted, err)
+	}
+	got, err := s.GetAgentOwnerProfile(ctx, uid)
+	if err != nil {
+		t.Fatalf("get imported profile: %v", err)
+	}
+	if !bytes.Equal(got, first) {
+		t.Fatalf("second import overwrote document: %s", got)
+	}
+	if err := s.ClearAgentOwnerProfile(ctx, uid); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, err := s.GetAgentOwnerProfile(ctx, uid); !errors.Is(err, ErrAgentOwnerProfileNotFound) {
+		t.Fatalf("get after clear err = %v", err)
 	}
 }
 

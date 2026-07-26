@@ -87,9 +87,9 @@ type RandomIDSource func() (int64, error)
 // markers. An interface here so this package does not import
 // internal/agent/profile, matching Sender's rationale.
 type RestrictedFieldChecker interface {
-	// MatchRestricted reports the first restricted field (if any) whose
-	// value appears verbatim in text.
-	MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool)
+	// MatchRestricted reports the strongest restricted field (if any) whose
+	// value appears verbatim in text for this action's tenant.
+	MatchRestricted(ctx context.Context, userID int64, text string) (key string, neverAutoSend, approvalRequired, matched bool, err error)
 }
 
 // Executor holds the dependencies every method needs.
@@ -99,22 +99,10 @@ type Executor struct {
 	SendGate    SendGate
 	GlobalKill  func() bool // reads config.Config.AgentKillSwitch at call time, not a snapshot
 	NewRandomID RandomIDSource
-	// Profile is optional (nil ⇒ no restricted-field enforcement, matching
-	// AGENT_PROFILE_PATH being optional — see cmd/server/main.go). When set,
-	// every send checks the payload against it before the RPC fires.
+	// Profile is optional (nil means no restricted-field enforcement). The
+	// production provider resolves encrypted data by action.UserID; every
+	// send checks that tenant's payload before the RPC fires.
 	Profile RestrictedFieldChecker
-	// ProfileOwnerTGID is the one Telegram account Profile's restricted
-	// section actually belongs to (config.Config.AgentProfileOwnerTGID —
-	// mctl-telegram is multi-tenant but AGENT_PROFILE_PATH loads a single
-	// process-wide YAML file, see cmd/server/main.go). 0 means "not
-	// configured" and disables the scoping check entirely, matching a nil
-	// Profile. A Codex finding on #307 caught that restrictedFieldBlocks had
-	// no such scoping at all: in a multi-tenant deployment, EVERY action —
-	// regardless of which account it belonged to — was checked against this
-	// one owner's private restricted values, so an unrelated tenant's
-	// approved reply could be incorrectly denied whenever its text happened
-	// to match a restricted value that has nothing to do with them.
-	ProfileOwnerTGID int64
 	// StuckGrace bounds RecoverStuck's sweep — an action must have sat in
 	// executing with no update for at least this long before it is assumed
 	// crashed rather than genuinely in flight in this same process.
@@ -650,25 +638,13 @@ func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAct
 	if e.Profile == nil {
 		return "", false, nil
 	}
-	if e.ProfileOwnerTGID != 0 {
-		// AGENT_PROFILE_OWNER_TG_ID is a Telegram account id, while
-		// action.UserID is the internal users.id — these are different ID
-		// namespaces that normally never carry the same numeric value, so
-		// comparing them directly (as an earlier version of this check did)
-		// meant the scope check always evaluated as "not the owner" — even
-		// for the configured owner's own actions — and silently disabled
-		// restricted-field enforcement entirely rather than merely scoping
-		// it (Codex finding on #307). Resolve the action owner's actual
-		// Telegram id before comparing.
-		ownerTGID, err := e.Store.GetTelegramID(ctx, action.UserID)
-		if err != nil {
-			return "", false, fmt.Errorf("resolve action owner telegram id: %w", err)
-		}
-		if ownerTGID != e.ProfileOwnerTGID {
-			return "", false, nil
-		}
+	key, neverAutoSend, approvalRequired, matched, err := e.Profile.MatchRestricted(ctx, action.UserID, finalText)
+	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
+		return "", false, nil
 	}
-	key, neverAutoSend, approvalRequired, matched := e.Profile.MatchRestricted(finalText)
+	if err != nil {
+		return "", false, fmt.Errorf("load tenant restricted fields: %w", err)
+	}
 	if !matched {
 		return "", false, nil
 	}

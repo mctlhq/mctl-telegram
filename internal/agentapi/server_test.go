@@ -839,38 +839,39 @@ func TestHandleRecruiterProfile_NotConfigured(t *testing.T) {
 	}
 }
 
-// fakeOwnerProfileProvider is a minimal OwnerProfileProvider for testing
-// GET /recruiters/{peer} without a real profile.Provider/YAML file.
-type fakeOwnerProfileProvider struct{}
+// fakeOwnerProfileProvider records the internal tenant id used for lookup.
+type fakeOwnerProfileProvider struct {
+	gotUserID int64
+	err       error
+}
 
-func (fakeOwnerProfileProvider) PublicProfile(int64) (map[string]any, error) {
+func (f *fakeOwnerProfileProvider) PublicProfile(_ context.Context, userID, _ int64) (map[string]any, error) {
+	f.gotUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
 	return map[string]any{"identity": map[string]any{"name": "Jane Doe"}}, nil
 }
 
-// TestHandleRecruiterProfile_WrongAccountForbidden guards against the P1
-// found in review: a single process-wide profile provider was returned to
-// ANY caller with a valid aud=agent token, even though POST
-// /api/agent/token can mint one for an arbitrary target account on this
-// multi-tenant service. A worker authenticated as an unrelated account must
-// not be able to read this deployment's mounted owner profile.
-func TestHandleRecruiterProfile_WrongAccountForbidden(t *testing.T) {
+func TestHandleRecruiterProfile_TenantWithoutDocumentNotFound(t *testing.T) {
 	h := newHarness(t)
-	h.srv.WithProfile(fakeOwnerProfileProvider{}, h.id.TelegramID+1) // profile belongs to a DIFFERENT account
+	h.srv.WithProfile(&fakeOwnerProfileProvider{err: db.ErrAgentOwnerProfileNotFound})
 	rec := h.do("GET", "/recruiters/555", nil)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 
-// TestHandleRecruiterProfile_CorrectAccountAllowed is the positive
-// counterpart: the account the profile is actually scoped to must still be
-// able to read it.
-func TestHandleRecruiterProfile_CorrectAccountAllowed(t *testing.T) {
+func TestHandleRecruiterProfile_UsesAuthenticatedTenant(t *testing.T) {
 	h := newHarness(t)
-	h.srv.WithProfile(fakeOwnerProfileProvider{}, h.id.TelegramID)
+	provider := &fakeOwnerProfileProvider{}
+	h.srv.WithProfile(provider)
 	rec := h.do("GET", "/recruiters/555", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if provider.gotUserID != h.userID {
+		t.Fatalf("provider user id = %d, want authenticated internal user id %d", provider.gotUserID, h.userID)
 	}
 }
 
