@@ -45,11 +45,14 @@ func (r StoreResolver) GetTelegramID(ctx context.Context, userID int64) (int64, 
 		  LIMIT 1`,
 		userID,
 	).Scan(&tgID)
-	if errors.Is(err, sql.ErrNoRows) || !tgID.Valid || tgID.Int64 == 0 {
-		return 0, fmt.Errorf("active hosted Telegram account not found for user %d", userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("resolve Telegram id for user %d: %w", userID, err)
+	}
+	if !tgID.Valid || tgID.Int64 == 0 {
+		return 0, nil
 	}
 	return tgID.Int64, nil
 }
@@ -95,7 +98,20 @@ func reconcile(ctx context.Context, l *Listener, pool Pool, res AccountResolver)
 	for _, p := range profiles {
 		tgID, err := res.GetTelegramID(ctx, p.UserID)
 		if err != nil {
+			// Resolver failures can be transient database or context errors.
+			// Preserve an already-running listener and retry next tick.
 			slog.Warn("agent supervisor: resolve tg id failed", "user_id", p.UserID, "err", err)
+			continue
+		}
+		if tgID == 0 {
+			// A profile can stay listener_enabled while its hosted MTProto
+			// session is revoked (for example AUTH_KEY_DUPLICATED). Remove its
+			// handler and pin until OAuth creates a fresh active session; the
+			// next reconciliation automatically installs it again.
+			if _, active := l.get(p.UserID); active {
+				pool.Unpin(p.UserID)
+				l.RemoveAccount(p.UserID)
+			}
 			continue
 		}
 		if !l.SetAccountProfile(p.UserID, tgID, p.SenderAllowlist) {

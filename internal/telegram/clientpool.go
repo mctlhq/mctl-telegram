@@ -26,6 +26,7 @@ var unfinishedSessionCodes = []string{
 // expired/deactivated/banned. These are NOT half-finished setups — the
 // user-facing message must not mention 2FA.
 var revokedSessionCodes = []string{
+	"AUTH_KEY_DUPLICATED",
 	"AUTH_KEY_UNREGISTERED",
 	"AUTH_KEY_INVALID",
 	"SESSION_REVOKED",
@@ -53,6 +54,11 @@ func sessionErrorFor(err error) error {
 // TELEGRAM_MAX_SESSIONS limit and cannot allocate a new client entry.
 var ErrPoolFull = errors.New("telegram: session pool at capacity")
 
+// ErrSessionRetiring is returned during the bounded interval in which an
+// asynchronously rejected auth key is being revoked. It prevents acquire
+// from rebuilding a client from the same still-active database row.
+var ErrSessionRetiring = errors.New("telegram: session is being retired")
+
 // ErrSessionRevokePersistFailed marks a call-wide Borrow failure where
 // Telegram rejected the session AND persisting that revoke to the DB itself
 // failed. It deliberately does NOT wrap one of the user-facing session
@@ -65,6 +71,8 @@ var ErrPoolFull = errors.New("telegram: session pool at capacity")
 // user-facing message (sessionErrText) must NOT treat it the same as a
 // clean revoke.
 var ErrSessionRevokePersistFailed = errors.New("telegram: session rejected but revoke could not be persisted")
+
+const asyncSessionRevokeTimeout = 5 * time.Second
 
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
@@ -94,15 +102,19 @@ type ClientPool struct {
 	// pinned holds user ids whose entries are exempt from idle GC (listener
 	// clients that must stay connected without Borrow traffic).
 	pinned map[int64]struct{}
+	// retiring is a per-user tombstone held while finishRun persists an
+	// asynchronous terminal-session revoke outside the global pool mutex.
+	retiring map[int64]struct{}
 }
 
 type entry struct {
-	client   *telegram.Client
-	lastUsed time.Time
-	cancel   context.CancelFunc
-	ready    chan struct{}
-	runErr   error
-	stopped  bool
+	client       *telegram.Client
+	sessionStore *SessionStore
+	lastUsed     time.Time
+	cancel       context.CancelFunc
+	ready        chan struct{}
+	runErr       error
+	stopped      bool
 	// runFn, when non-nil, replaces the default block-until-cancelled run
 	// callback (agent listener entries run updates.Manager here).
 	runFn func(ctx context.Context) error
@@ -116,6 +128,7 @@ func NewClientPool(apiID int, apiHash string, idle time.Duration, store *db.Stor
 		Store:       store,
 		entries:     make(map[int64]*entry),
 		pinned:      make(map[int64]struct{}),
+		retiring:    make(map[int64]struct{}),
 	}
 }
 
@@ -295,6 +308,9 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if _, ok := p.retiring[userID]; ok {
+		return nil, ErrSessionRetiring
+	}
 	if e, ok := p.entries[userID]; ok && !e.stopped {
 		return e, nil
 	}
@@ -329,11 +345,12 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &entry{
-		client:   client,
-		lastUsed: time.Now(),
-		cancel:   cancel,
-		ready:    make(chan struct{}),
-		runFn:    runFn,
+		client:       client,
+		sessionStore: store,
+		lastUsed:     time.Now(),
+		cancel:       cancel,
+		ready:        make(chan struct{}),
+		runFn:        runFn,
 	}
 	p.entries[userID] = e
 	if p.metrics != nil {
@@ -354,8 +371,22 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 		<-ctx.Done()
 		return ctx.Err()
 	})
+	p.finishRun(userID, e, err)
+}
+
+// finishRun records a client exit and removes only the entry that actually
+// exited. A replacement entry may already have been installed after Close or
+// RemoveAtomic; deleting by user id alone would accidentally evict that newer
+// client when the old goroutine eventually returned.
+//
+// Terminal MTProto authentication errors can arrive after Borrow has already
+// returned successfully (notably from a pinned listener's updates.Manager).
+// Revoke the exact DB row this entry loaded so a concurrent OAuth reconnect is
+// never invalidated. Database I/O runs outside the pool mutex and with a
+// deadline so one stalled tenant cannot block every pool operation.
+func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
+	sentinel := sessionErrorFor(err)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e.stopped = true
 	if err != nil && err != context.Canceled {
 		e.runErr = err
@@ -370,9 +401,43 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 			p.metrics.TelegramClientErrorsTotal.Inc()
 		}
 	}
-	delete(p.entries, userID)
+	current, ownsEntry := p.entries[userID]
+	if ownsEntry && current == e {
+		delete(p.entries, userID)
+		if sentinel != nil && p.Store != nil {
+			p.retiring[userID] = struct{}{}
+		}
+	}
 	if p.metrics != nil {
 		p.metrics.TelegramClientPoolSize.Dec()
+	}
+	p.mu.Unlock()
+
+	if !ownsEntry || current != e || sentinel == nil || p.Store == nil {
+		return
+	}
+	defer func() {
+		p.mu.Lock()
+		delete(p.retiring, userID)
+		p.mu.Unlock()
+	}()
+	sessionID := int64(0)
+	if e.sessionStore != nil {
+		sessionID = e.sessionStore.LoadedRowID()
+	}
+	if sessionID == 0 {
+		slog.Error("telegram session rejected after client exit, loaded row unknown", "user_id", userID, "err", err)
+		return
+	}
+	revokeCtx, cancel := context.WithTimeout(context.Background(), asyncSessionRevokeTimeout)
+	defer cancel()
+	revoked, revokeErr := p.Store.RevokeSessionByID(revokeCtx, userID, sessionID, "unauthorized")
+	if revokeErr != nil {
+		slog.Error("telegram session rejected after client exit, revoke failed", "user_id", userID, "session_id", sessionID, "err", revokeErr)
+		return
+	}
+	if revoked {
+		slog.Warn("telegram session rejected after client exit, revoked", "user_id", userID, "session_id", sessionID, "err", err)
 	}
 }
 

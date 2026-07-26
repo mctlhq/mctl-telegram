@@ -367,6 +367,14 @@ const (
 // effort — a failure to write the new blob does not surface to the caller
 // (the next read will retry).
 func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
+	pt, _, err := s.LoadSessionWithID(ctx, userID)
+	return pt, err
+}
+
+// LoadSessionWithID returns the decrypted active session and the immutable
+// database row id that supplied it. The id lets a long-lived runtime revoke
+// exactly the rejected auth key without racing a later OAuth reconnect.
+func (s *Store) LoadSessionWithID(ctx context.Context, userID int64) ([]byte, int64, error) {
 	var (
 		rowID int64
 		blob  []byte
@@ -378,14 +386,14 @@ func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
 		userID,
 	).Scan(&rowID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query session: %w", err)
+		return nil, 0, fmt.Errorf("query session: %w", err)
 	}
 	pt, err := s.Crypt.OpenForUser(blob, userID)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt session: %w", err)
+		return nil, 0, fmt.Errorf("decrypt session: %w", err)
 	}
 	// Lazy migration: only rewrap when we are running with real encryption.
 	// Local-dev (VersionPlaintext) rows stay as-is to avoid surprising
@@ -407,7 +415,7 @@ func (s *Store) LoadSession(ctx context.Context, userID int64) ([]byte, error) {
 			)
 		}
 	}
-	return pt, nil
+	return pt, rowID, nil
 }
 
 // UpdateSessionBlob is called by the gotd SessionStorage when MTProto rotates
@@ -439,6 +447,33 @@ func (s *Store) UpdateSessionBlob(ctx context.Context, userID int64, plaintext [
 	return nil
 }
 
+// UpdateSessionBlobByID rotates the bytes of the exact session row loaded by
+// a long-lived gotd client. A replacement OAuth session may already be active;
+// binding the write to the immutable row id prevents the old client from
+// overwriting the replacement's auth key.
+func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int64, plaintext []byte) error {
+	if sessionID <= 0 {
+		return fmt.Errorf("update session blob by id: invalid session id")
+	}
+	blob, err := s.Crypt.SealForUser(plaintext, userID)
+	if err != nil {
+		return err
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = $1
+		 WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL`,
+		blob, sessionID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update session blob by id: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return ErrNoActiveSession
+	}
+	return nil
+}
+
 // RevokeActiveSession marks the active telegram_accounts row for a user as
 // revoked. Returns true if a row was actually flipped. Idempotent: calling
 // it twice in a row only flips the first time.
@@ -455,6 +490,29 @@ func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason st
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows > 0 && s.metrics != nil && reason != "" {
+		s.metrics.SessionsRevokedTotal.WithLabelValues(reason).Inc()
+	}
+	return rows > 0, nil
+}
+
+// RevokeSessionByID revokes one specific active session row. Runtime clients
+// use this after Telegram rejects the auth key they loaded: a concurrent OAuth
+// reconnect may already have inserted a newer active row for the same user, so
+// revoking by user_id alone could invalidate the replacement session.
+func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, reason string) (bool, error) {
+	if sessionID <= 0 {
+		return false, nil
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+		sessionID, userID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("revoke session by id: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows > 0 && s.metrics != nil && reason != "" {
