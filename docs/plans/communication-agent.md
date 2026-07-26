@@ -7,15 +7,18 @@ agent working on this codebase, in any session. Prior drafts lived only in
 to Codex) — this file supersedes them. Where this file conflicts with
 anything outside the repo, this file wins.
 
-**Status (2026-07-26)**: Workstream A (core backend) is merged through PR 8.
-C1 preview infrastructure is deployed and one complete Saved Messages
-approval cycle has passed live end to end. Saved-command delivery is now
-durable through DB-cursored history polling (#319, #322). C1 is still in
-bounded validation: the 30-fixture run, kill-switch-after-approval drill,
-and soak are not complete, and the listener is disabled and autopilot paused
-between test windows. The Channels preview (Part 2) is scoped but not started
-and is not a dependency of C1. Current evidence and the remaining C1
-checklist live in
+**Status (2026-07-26)**: Workstream A (core backend and pre-production
+hardening) is implemented through PR 9. C1 preview infrastructure is deployed
+and one complete Saved Messages approval cycle has passed live end to end.
+Saved-command delivery is durable through DB-cursored history polling
+(#319, #322). Approval codes are protected at rest, owner profiles are
+tenant-scoped and encrypted, and job claim/completion is mutation-safe and
+durably linked to exact results. C1 is still in bounded validation: the
+30-fixture run, `random_id`/kill-switch failure drills, and soak are not
+complete. The safe closed state remains kill switch on, listener off,
+autopilot paused, and worker replicas zero. The Channels preview (Part 2) is
+scoped but not started and is not a dependency of C1. Current evidence and
+the remaining C1 checklist live in
 [`docs/reports/communication-agent-c1.md`](../reports/communication-agent-c1.md).
 
 - ✅ A PR 1–5 — merged (#286, #288, #289, #299, #290)
@@ -25,6 +28,8 @@ checklist live in
 - ✅ Follow-up fixes — #309 (claude-review.yml dedup), #310 (job_leads schema fix)
 - ✅ Worker MCP startup + durable completion verification — #316
 - ✅ Saved Messages history polling + live approve cycle — #319, #322
+- ✅ Pre-production hardening — #323, #324, #326, #327, #328, #331
+- ✅ A PR 9 — operational runbook, retention, alerts, adversarial policy tests (#332)
 - 🟨 C1 — staging deployment and bounded observe validation — **in progress**
 - ⬜ A PR 8b / Channels preview (Part 2 below) — scoped, not started, not blocking
 - ⬜ C2 — production promotion, gated on soak + a separate production quota domain
@@ -245,19 +250,22 @@ deliberately doesn't have) — see `docs/agent-worker.md`.
 **PR 8b — Channels preview** — see Part 2. Not a hardening-debt item on PR 8;
 a separate, later, optional track.
 
-**PR 9 — `docs+chore`** — not started. Runbook (bootstrap, kill switches,
-dead-letter handling), config docs, adversarial test suite (prompt-injection
-inputs → expected deny/approval), remaining alerts/metrics, and the expanded
-retention table below.
+**PR 9 — `docs+chore`** — ✅ implemented. The
+[operational runbook](../runbook.md#communication-agent-operations) covers
+safe bootstrap/closure, kill switches, tenant/replica boundaries,
+dead-letter handling, configuration, credential rotation, alerts, complete
+retention/deletion mapping, and one-account deletion. Table-driven
+adversarial cases assert server-side deny/approval regardless of prompt
+injection influencing model output. Old encrypted action/send content and
+approval capabilities are retired and cleared by the retention sweeper.
 
 *Retention scope beyond the 30-day message-body sweeper*: drafts/proposed
 replies (`agent_actions.payload`), owner summaries (`owner_notifications.body`),
 saved leads (`job_leads`), per-turn conversation context, dead-letter
 entries, per-attempt audit rows (`agent_job_attempts`, `LogToolCall` chain),
 the worker's own session logs, and the pod's PVC/backup snapshots. PR 9
-should ship a retention table (storage surface → what's stored → retention
-period → deletion mechanism) plus a "delete this one user's data" procedure
-that actually reaches all of them.
+are covered by the runbook's storage surface → content → retention period →
+deletion mechanism table and its per-user deletion procedure.
 
 **Also merged, not originally tracked**: #310 (`fix(db): add
 job_leads.job_id via idempotent ALTER, not inline CREATE TABLE`) — a
@@ -267,13 +275,14 @@ see the closed-incident Appendix below.
 
 ## Workstream C — mctl-gitops (C1/C2)
 
-**C1 — staging deployment, disabled/observe-only.** Not started; the next
-actionable step now that #307/#308 are on main. Uses the existing `labs`
-namespace and the existing `mctl-telegram-preview` service (already deployed;
-confirmed present at
-`mctl-gitops/platform-gitops/services/labs/mctl-telegram-preview/values.yaml`).
-No new namespace for C1. Add `AGENT_ENABLED=true`, `AGENT_KILL_SWITCH=true`
-(dark start), provision the encrypted tenant owner profile through the admin
+**C1 — staging deployment, disabled/observe-only.** Deployed and validated
+through one complete live Saved Messages approval cycle; bounded validation
+and soak remain open. It uses the existing `labs` namespace and the existing
+`mctl-telegram-preview` service at
+`mctl-gitops/platform-gitops/services/labs/mctl-telegram-preview/values.yaml`.
+No new namespace is used for C1. Between runs the live state is
+`AGENT_KILL_SWITCH=true`, listener disabled, autopilot paused, and worker
+replicas zero. C1 uses an encrypted tenant owner profile through the admin
 API, a dedicated Agent API token, a test Telegram account/session, and a
 preview-only DB/encryption key. No production
 promotion in this PR. (The Channels-preview deployment,
@@ -321,13 +330,13 @@ DB: reuse the existing `labs-mctl-telegram` database (no new DB).
 2. **Before Guarded autopilot, all of the following must be true**:
    - Production quota domain provisioned and in use (separate from
      interactive Claude Code + `claude-review.yml` pool).
-   - PR 6 hardening debt resolved (`POST /jobs/claim`, atomic
-     `result_action_id`-based completion).
-   - Approval-code invariants verified by explicit tests; codes use a keyed
-     blind index and encrypted retry copy, not cleartext.
+   - ✅ PR 6 hardening debt resolved (`POST /jobs/claim`, atomic exact-result
+     completion).
+   - ✅ Approval-code invariants verified by explicit tests; codes use a
+     keyed blind index and encrypted retry copy, not cleartext.
    - `random_id` MTProto-dedup failure drill run against the `mctl-reviewer`
      test account.
-   - Full per-surface retention table shipped (PR 9).
+   - ✅ Full per-surface retention/deletion runbook shipped (PR 9).
 3. **Guarded autopilot** (discovery questions only auto-sent; everything else
    approval) → then
 4. **Hardening**: daily message caps, circuit breaker, replay protection,

@@ -135,6 +135,37 @@ spec:
               instability on a daemon host.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
 
+    - name: mctl-telegram-agent
+      rules:
+        - alert: MctlAgentDeadLetter
+          expr: increase(mctl_agent_dead_letter_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Communication-agent job reached dead letter"
+            description: >
+              {{ $value | humanize }} communication-agent jobs exhausted their
+              attempts in the last 15 minutes. Keep the test window closed if
+              failures are unexplained and follow the dead-letter procedure.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#communication-agent-operations"
+
+        - alert: MctlAgentActionsExecutingStuck
+          expr: mctl_agent_actions_executing_stuck > 0
+          for: 5m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "Communication-agent actions remain stuck in executing"
+            description: >
+              {{ $value | humanize }} actions are past the executor recovery
+              grace window. Close the agent window before investigating; do
+              not manually resend because Telegram may have accepted the
+              original random_id.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#communication-agent-operations"
+
     - name: mctl-telegram-tool-availability
       rules:
         - alert: MctlToolAvailabilityFastBurn

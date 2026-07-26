@@ -168,12 +168,38 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 	}
 	n, _ = res.RowsAffected()
 	total += n
-	// Action payloads (proposed reply text) and owner-notification bodies are
-	// also message-derived third-party content. Null their ciphertext past
-	// retention; the rows themselves are kept for audit/lifecycle history.
+	// An inactive pre-send action that remains non-terminal past the
+	// content-retention boundary must not keep an encrypted draft forever.
+	// Retire it before clearing the body so it cannot later be approved or
+	// reserved after its content is gone. Executing actions are deliberately
+	// excluded: their persisted-random-ID recovery must terminalize them
+	// before retention may clear their content.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, policy_reasons = $2,
+		        approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, updated_at = $3
+		  WHERE created_at < $4 AND updated_at < $4
+		    AND status IN ($5,$6,$7)`,
+		ActionDenied, "content expired by retention sweep", time.Now().UTC(), cutoff,
+		ActionProposed, ActionPendingApproval, ActionApproved,
+	); err != nil {
+		return total, fmt.Errorf("retire actions with expired content: %w", err)
+	}
+	// Action payloads, exact executor send bodies, approval capabilities, and
+	// owner-notification bodies are message-derived third-party content. Null
+	// their ciphertext past retention; keep only lifecycle tombstones.
 	res, err = s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET payload_encrypted = NULL
-		  WHERE created_at < $1 AND payload_encrypted IS NOT NULL`, cutoff,
+		`UPDATE agent_actions
+		    SET payload_encrypted = NULL, send_body_encrypted = NULL,
+		        approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL
+		  WHERE created_at < $1
+		    AND status IN ($2,$3,$4,$5)
+		    AND (payload_encrypted IS NOT NULL OR send_body_encrypted IS NOT NULL
+		         OR approval_code IS NOT NULL OR approval_code_hash IS NOT NULL
+		         OR approval_code_encrypted IS NOT NULL)`,
+		cutoff, ActionExecuted, ActionRejected, ActionExpired, ActionDenied,
 	)
 	if err != nil {
 		return total, fmt.Errorf("sweep action payloads: %w", err)
