@@ -69,6 +69,40 @@ func TestClient_PollEvents_ParsesJobs(t *testing.T) {
 	}
 }
 
+func TestClient_GetJobStatus_ParsesDurableState(t *testing.T) {
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/jobs/42" {
+			t.Fatalf("request = %s %s, want GET /jobs/42", r.Method, r.URL.Path)
+		}
+		writeJSONFixture(w, JobStatus{JobID: 42, Status: "ignored", Attempt: 3})
+	})
+	status, err := client.GetJobStatus(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetJobStatus: %v", err)
+	}
+	if status.JobID != 42 || status.Status != "ignored" || status.Attempt != 3 || !status.Terminal() {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestJobStatus_Terminal(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   bool
+	}{
+		{"pending", false},
+		{"processing", false},
+		{"dead_letter", false},
+		{"completed", true},
+		{"failed", true},
+		{"ignored", true},
+	} {
+		if got := (JobStatus{Status: tc.status}).Terminal(); got != tc.want {
+			t.Errorf("Terminal(%q) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
 func TestClient_NonOKStatus_ReturnsAPIError(t *testing.T) {
 	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)

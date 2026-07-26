@@ -113,6 +113,24 @@ type JobEnvelope struct {
 	Deadline       string `json:"deadline"`
 }
 
+// JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.
+// It deliberately excludes event and conversation data: ClaudeInvoker only
+// needs to know whether its exact claim reached a terminal state.
+type JobStatus struct {
+	JobID   int64  `json:"job_id"`
+	Status  string `json:"status"`
+	Attempt int    `json:"attempt"`
+}
+
+func (s JobStatus) Terminal() bool {
+	switch s.Status {
+	case "completed", "failed", "ignored":
+		return true
+	default:
+		return false
+	}
+}
+
 // ParsedDeadline parses Deadline, falling back to a short fixed window from
 // now if the field is missing or malformed rather than erroring — a bad
 // deadline should degrade the worker's local timeout, not abort the job.
@@ -149,6 +167,17 @@ func (c *Client) PollEvents(ctx context.Context, limit int) ([]JobEnvelope, erro
 		return nil, err
 	}
 	return out.Jobs, nil
+}
+
+// GetJobStatus returns the durable state of one user-scoped job. The worker
+// calls this after Claude exits to distinguish a real complete_agent_job tool
+// call from a successful CLI turn that produced only final text.
+func (c *Client) GetJobStatus(ctx context.Context, jobID int64) (*JobStatus, error) {
+	var out JobStatus
+	if err := c.do(ctx, http.MethodGet, "/jobs/"+strconv.FormatInt(jobID, 10), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // EventDTO mirrors agentapi's eventResponse.

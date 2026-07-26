@@ -171,7 +171,8 @@ pure `ExtractEvent()` mapping. **Requires `replicas=1`.**
 `internal/agentapi` under `/api/agent/v1`, `aud=agent` JWT (cloned bridge
 pattern). Endpoints: `GET /events` (long-poll claim), `GET /event/{id}`,
 `GET /conversations/{id}/context`, `GET /recruiters/{peer}`, `GET /leads/{id}`,
-`GET /policy`, `POST /actions/propose_reply`, `POST /leads`,
+`GET /policy`, `GET /jobs/{id}` (minimal durable completion postcondition),
+`POST /actions/propose_reply`, `POST /leads`,
 `POST /actions/request_owner_approval`, `POST /notify/summary`,
 `POST /autopilot/pause`, `POST /jobs/{id}/complete`.
 
@@ -780,14 +781,18 @@ must record expected DB/job/action states, not only log output.
 Telegram body is untrusted input. Channel instructions cannot override the
 server-side job binding. Model never chooses peer/user/conversation/job/attempt.
 Built-in tools are absent, not merely denied at invocation time. Only
-allowlisted Agent MCP tools are visible. Agent API token is available only
-to the MCP subprocess. Claude credentials are separate from PR
+allowlisted Agent MCP tools are visible; `alwaysLoad: true` blocks the first
+single-turn prompt until the job-scoped MCP server connects. Agent API token
+is available only to the MCP subprocess. Claude credentials are separate from PR
 review/steward credentials. No GitHub, Kubernetes, MinIO, production DB, or
 production Telegram secrets. No message bodies in logs, argv, Kubernetes
 events, or health endpoints. Saved Messages and outbound replies still pass
 existing send gates. `complete_agent_job` follows a durable action/lead
-commit. Stale attempts fail closed. Deployment can be disabled by scaling to
-zero. Server-side send kill switch remains independent of the worker pod.
+commit. After Claude exits, the worker accepts success only when
+`GET /jobs/{id}` confirms that the same attempt is terminal; final model text
+is never completion evidence. Stale attempts fail closed. Deployment can be
+disabled by scaling to zero. Server-side send kill switch remains independent
+of the worker pod.
 
 ## 2.12 PR sequence
 
