@@ -98,7 +98,7 @@ func reconcile(ctx context.Context, l *Listener, pool Pool, res AccountResolver)
 			slog.Warn("agent supervisor: resolve tg id failed", "user_id", p.UserID, "err", err)
 			continue
 		}
-		if !l.SetAccount(p.UserID, tgID) {
+		if !l.SetAccountProfile(p.UserID, tgID, p.SenderAllowlist) {
 			continue
 		}
 		pool.Pin(p.UserID)

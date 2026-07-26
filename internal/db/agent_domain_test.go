@@ -37,6 +37,7 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 		DisclosureText: "AI assistant", MaxAutonomousTurns: 3,
 		MaxMsgsPerMinute: 1, MaxReplyChars: 500,
 		IntentAllowlist: "greet,request_company", BlockedSenders: "42",
+		SenderAllowlist: "555,777",
 	}); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
@@ -46,6 +47,9 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 	}
 	if p.Mode != AgentModeGuarded || !p.ListenerEnabled || p.MaxAutonomousTurns != 3 {
 		t.Fatalf("update not applied: %+v", p)
+	}
+	if p.SenderAllowlist != "555,777" {
+		t.Fatalf("sender allowlist = %q, want 555,777", p.SenderAllowlist)
 	}
 
 	// Pause flag flips independently.

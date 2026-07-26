@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +26,10 @@ const (
 )
 
 type account struct {
-	userID int64
-	tgID   int64
-	mgr    *updates.Manager
+	userID          int64
+	tgID            int64
+	senderAllowlist map[int64]struct{}
+	mgr             *updates.Manager
 }
 
 type sentMessageKey struct {
@@ -86,15 +89,25 @@ func (l *Listener) consumeSent(ctx context.Context, userID, messageID int64) boo
 }
 
 func (l *Listener) SetAccount(userID, tgID int64) bool {
+	return l.SetAccountProfile(userID, tgID, "")
+}
+
+// SetAccountProfile installs or refreshes the listener-side fields of an
+// enabled profile. The allowlist is deliberately held next to the live update
+// manager so enforcement happens before any conversation, event, or job is
+// persisted. An empty list preserves the historical allow-all behavior.
+func (l *Listener) SetAccountProfile(userID, tgID int64, senderAllowlist string) bool {
 	if tgID == 0 {
 		return false
 	}
+	allowed := parseSenderAllowlist(senderAllowlist)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if a, ok := l.accounts[userID]; ok && a.tgID == tgID {
+		a.senderAllowlist = allowed
 		return true
 	}
-	acct := &account{userID: userID, tgID: tgID}
+	acct := &account{userID: userID, tgID: tgID, senderAllowlist: allowed}
 	acct.mgr = updates.New(updates.Config{
 		Handler:      l.dispatcherFor(acct),
 		Storage:      &telegram.UpdateStateStore{UserID: userID, Store: l.Store},
@@ -102,6 +115,30 @@ func (l *Listener) SetAccount(userID, tgID int64) bool {
 	})
 	l.accounts[userID] = acct
 	return true
+}
+
+func parseSenderAllowlist(csv string) map[int64]struct{} {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	allowed := make(map[int64]struct{})
+	for _, raw := range strings.Split(csv, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err == nil && id > 0 {
+			allowed[id] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func (l *Listener) senderAllowed(acct *account, senderTGID int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if acct.senderAllowlist == nil {
+		return true
+	}
+	_, ok := acct.senderAllowlist[senderTGID]
+	return ok
 }
 
 func (l *Listener) RemoveAccount(userID int64) {
@@ -177,6 +214,10 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
 	if !ok {
+		return nil
+	}
+	if (ex.Event.Kind == db.EventKindPrivateMessage || ex.Event.Kind == db.EventKindMessageEdit) &&
+		!l.senderAllowed(acct, ex.Event.SenderTGID) {
 		return nil
 	}
 	if err := l.persist(ctx, acct, ex); err != nil {

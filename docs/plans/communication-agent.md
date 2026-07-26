@@ -7,16 +7,21 @@ agent working on this codebase, in any session. Prior drafts lived only in
 to Codex) — this file supersedes them. Where this file conflicts with
 anything outside the repo, this file wins.
 
-**Status (2026-07-25)**: Workstream A (core backend) is merged through PR 8.
-C1 (staging deployment) has not started. The Channels preview (Part 2) is
-scoped but not started, and is not a dependency of C1.
+**Status (2026-07-26)**: Workstream A (core backend) is merged through PR 8.
+C1 preview infrastructure is deployed and the worker's MCP cold-start /
+completion bug is fixed on main. Bounded observe validation is in progress;
+the listener is disabled and autopilot paused between test windows. The
+Channels preview (Part 2) is scoped but not started and is not a dependency
+of C1. Current evidence and the remaining C1 checklist live in
+[`docs/reports/communication-agent-c1.md`](../reports/communication-agent-c1.md).
 
 - ✅ A PR 1–5 — merged (#286, #288, #289, #299, #290)
 - ✅ A PR 6 (Agent API) — merged as #306
 - ✅ A PR 7 (control plane + executor) — merged as #307 (commit `33311bf`)
 - ✅ A PR 8 (Option C headless worker) — merged as #308 (commit `98b338e`)
 - ✅ Follow-up fixes — #309 (claude-review.yml dedup), #310 (job_leads schema fix)
-- ⬜ C1 — staging deployment, disabled/observe-only — **next actionable step**
+- ✅ Worker MCP startup + durable completion verification — #316
+- 🟨 C1 — staging deployment and bounded observe validation — **in progress**
 - ⬜ A PR 8b / Channels preview (Part 2 below) — scoped, not started, not blocking
 - ⬜ C2 — production promotion, gated on soak + a separate production quota domain
 
@@ -738,6 +743,23 @@ before using Telegram; verify restricted tools and durable complete
 behavior. *Exit*: no manual prompt after pod start; no unknown prompt
 auto-accepted; channel readiness observable; synthetic job survives a
 process restart.
+
+**C1 validation hardening** 🟨 in progress
+
+- `agent_profiles.sender_allowlist` gates incoming private/edit events before
+  the listener creates any conversation, event, or job. Empty means allow all
+  for backward compatibility; C1 sets exactly the dedicated test sender.
+  Owner outgoing takeover detection and Saved Messages commands are not
+  filtered.
+- The opt-in real-model harness in
+  `internal/agentworker/eval_test.go` runs the production `ClaudeInvoker`,
+  real Claude Code CLI, and real job-scoped stdio MCP server over 30 JSONL
+  fixtures. It asserts action class and required extracted fields without
+  brittle exact-draft matching, plus 30/30 same-attempt terminal jobs, zero
+  restricted/adversarial output leaks, and zero wrong binding writes.
+- C1 acceptance is at least 27/30 correct fixture classifications, all 30
+  terminal, and zero leaks/wrong-peer/stale-attempt writes, followed by the
+  three live Telegram drills recorded in the C1 report.
 
 **Phase 2 — one test Telegram conversation.** Dedicated test owner + one
 allowlisted sender; `AGENT_KILL_SWITCH=false`; profile mode `observe`; do

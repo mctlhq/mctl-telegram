@@ -128,12 +128,12 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 	h := NewAdminAgentProfileHandler(store)
 
-	first := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"111,222","disclosure_text":"I'm an AI."}`)
+	first := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"111,222","sender_allowlist":"555","disclosure_text":"I'm an AI."}`)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first call status = %d, want 200, body=%s", first.Code, first.Body.String())
 	}
 
-	second := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":""}`)
+	second := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"","sender_allowlist":""}`)
 	if second.Code != http.StatusOK {
 		t.Fatalf("second call status = %d, want 200, body=%s", second.Code, second.Body.String())
 	}
@@ -143,6 +143,9 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 	if resp.BlockedSenders != "" {
 		t.Errorf("blocked_senders = %q, want cleared to empty by explicit \"\"", resp.BlockedSenders)
+	}
+	if resp.SenderAllowlist != "" {
+		t.Errorf("sender_allowlist = %q, want cleared to empty by explicit \"\"", resp.SenderAllowlist)
 	}
 	if resp.DisclosureText != "I'm an AI." {
 		t.Errorf("disclosure_text = %q, want unchanged (field omitted from second request)", resp.DisclosureText)

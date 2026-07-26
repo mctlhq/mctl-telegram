@@ -21,6 +21,7 @@ type upsertAgentProfileRequest struct {
 	MaxReplyChars      int     `json:"max_reply_chars,omitempty"`
 	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
 	BlockedSenders     *string `json:"blocked_senders,omitempty"`
+	SenderAllowlist    *string `json:"sender_allowlist,omitempty"`
 }
 
 type agentProfileResponse struct {
@@ -34,6 +35,7 @@ type agentProfileResponse struct {
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
 	BlockedSenders     string `json:"blocked_senders"`
+	SenderAllowlist    string `json:"sender_allowlist"`
 }
 
 // NewAdminAgentProfileHandler returns the http.HandlerFunc for PUT
@@ -118,6 +120,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			DisclosureText:  req.DisclosureText,
 			IntentAllowlist: req.IntentAllowlist,
 			BlockedSenders:  req.BlockedSenders,
+			SenderAllowlist: req.SenderAllowlist,
 		}
 		if req.Mode != "" {
 			update.Mode = &req.Mode
@@ -167,6 +170,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			MaxReplyChars:      p.MaxReplyChars,
 			IntentAllowlist:    p.IntentAllowlist,
 			BlockedSenders:     p.BlockedSenders,
+			SenderAllowlist:    p.SenderAllowlist,
 		})
 	}
 }

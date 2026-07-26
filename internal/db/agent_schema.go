@@ -76,6 +76,14 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "owner_notifications", "random_id", "BIGINT", "INTEGER"); err != nil {
 		return err
 	}
+	// agent_profiles.sender_allowlist: an optional CSV of Telegram peer ids
+	// whose incoming private messages may enter the agent queue. Empty keeps
+	// the historical allow-all behavior; a configured list is enforced by
+	// the listener before it creates a conversation, event, or job.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "sender_allowlist",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can recognize a lead-only result — see
@@ -183,6 +191,7 @@ func agentSchemaSQLite() []string {
 			max_reply_chars INTEGER NOT NULL DEFAULT 1200,
 			intent_allowlist TEXT NOT NULL DEFAULT '',
 			blocked_senders TEXT NOT NULL DEFAULT '',
+			sender_allowlist TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -375,6 +384,7 @@ func agentSchemaPG() []string {
 			max_reply_chars INT NOT NULL DEFAULT 1200,
 			intent_allowlist TEXT NOT NULL DEFAULT '',
 			blocked_senders TEXT NOT NULL DEFAULT '',
+			sender_allowlist TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
