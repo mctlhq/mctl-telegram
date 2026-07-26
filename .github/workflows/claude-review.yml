@@ -433,3 +433,11 @@ jobs:
         run: |
           gh pr comment "${{ github.event.pull_request.number || github.event.issue.number }}" --repo "${{ github.repository }}" \
             --body "Claude review failed to complete (see the [run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})). Not auto-retrying — re-trigger manually with \`@claude review\` once the underlying issue is resolved."
+
+      # Keep the notification above useful, but do not let continue-on-error
+      # turn a quota/auth/runtime failure into a green merge gate.
+      - name: Fail when Claude review did not complete
+        if: steps.review-check.outputs.failed == 'true'
+        run: |
+          echo "::error::Claude review did not complete"
+          exit 1
