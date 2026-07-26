@@ -96,8 +96,7 @@ func TestReconcile_MissingSessionUnpinsUntilReconnect(t *testing.T) {
 	pool := &fakePool{}
 	res := &fakeResolver{
 		profiles: []db.AgentProfile{{UserID: 7}},
-		tgIDs:    map[int64]int64{7: 1007},
-		tgIDErrs: map[int64]error{7: errors.New("session revoked")},
+		tgIDs:    map[int64]int64{},
 	}
 
 	reconcile(ctx, l, pool, res)
@@ -111,13 +110,35 @@ func TestReconcile_MissingSessionUnpinsUntilReconnect(t *testing.T) {
 		t.Fatalf("borrows while session missing = %v", pool.borrows)
 	}
 
-	delete(res.tgIDErrs, 7)
+	res.tgIDs[7] = 1007
 	reconcile(ctx, l, pool, res)
 	if len(pool.pins) != 1 || pool.pins[0] != 7 {
 		t.Fatalf("pins after reconnect = %v", pool.pins)
 	}
 	if len(pool.borrows) != 1 || pool.borrows[0] != 7 {
 		t.Fatalf("borrows after reconnect = %v", pool.borrows)
+	}
+}
+
+func TestReconcile_ResolverFailureKeepsActiveAccount(t *testing.T) {
+	ctx := context.Background()
+	l := New(nil, nil, nil, nil)
+	if !l.SetAccount(7, 1007) {
+		t.Fatal("set account")
+	}
+	pool := &fakePool{}
+	res := &fakeResolver{
+		profiles: []db.AgentProfile{{UserID: 7}},
+		tgIDs:    map[int64]int64{7: 1007},
+		tgIDErrs: map[int64]error{7: errors.New("database temporarily unavailable")},
+	}
+
+	reconcile(ctx, l, pool, res)
+	if len(pool.unpins) != 0 {
+		t.Fatalf("unpins on transient error = %v", pool.unpins)
+	}
+	if ids := l.ActiveUserIDs(); len(ids) != 1 || ids[0] != 7 {
+		t.Fatalf("active after transient error = %v", ids)
 	}
 }
 

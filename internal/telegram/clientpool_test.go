@@ -9,6 +9,7 @@ import (
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tgerr"
+	mcrypto "github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -52,17 +53,16 @@ func TestFinishRun_RevokesAsyncTerminalSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureUser: %v", err)
 	}
-	now := time.Now().UTC()
-	if _, err := store.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
-		 VALUES($1, $2, $3, $4, $5)`,
-		uid, 555, []byte("blob"), now, now.Add(60*24*time.Hour),
-	); err != nil {
+	if err := store.SaveSession(ctx, uid, []byte("blob"), 555, "", ""); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
 
 	p := NewClientPool(1, "hash", time.Minute, store)
-	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	sessionStore := &SessionStore{UserID: uid, Store: store}
+	if _, err := sessionStore.LoadSession(ctx); err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	e := &entry{sessionStore: sessionStore, lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
 	p.entries[uid] = e
 
 	p.finishRun(uid, e, tgerr.New(406, "AUTH_KEY_DUPLICATED"))
@@ -72,6 +72,42 @@ func TestFinishRun_RevokesAsyncTerminalSession(t *testing.T) {
 	}
 	if _, err := store.CheckSessionValid(ctx, uid); !errors.Is(err, db.ErrNoActiveSession) {
 		t.Fatalf("session was not revoked: %v", err)
+	}
+}
+
+func TestFinishRun_DoesNotRevokeReconnectedSession(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "async-reconnect-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := store.SaveSession(ctx, uid, []byte("old-session"), 555, "", ""); err != nil {
+		t.Fatalf("save old session: %v", err)
+	}
+	sessionStore := &SessionStore{UserID: uid, Store: store}
+	if _, err := sessionStore.LoadSession(ctx); err != nil {
+		t.Fatalf("load old session: %v", err)
+	}
+
+	p := NewClientPool(1, "hash", time.Minute, store)
+	e := &entry{sessionStore: sessionStore, lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	p.entries[uid] = e
+
+	if err := store.SaveSession(ctx, uid, []byte("new-session"), 555, "", ""); err != nil {
+		t.Fatalf("save replacement session: %v", err)
+	}
+	p.finishRun(uid, e, tgerr.New(406, "AUTH_KEY_DUPLICATED"))
+
+	if _, err := store.CheckSessionValid(ctx, uid); err != nil {
+		t.Fatalf("replacement session was revoked: %v", err)
+	}
+	got, err := store.LoadSession(ctx, uid)
+	if err != nil {
+		t.Fatalf("load replacement session: %v", err)
+	}
+	if string(got) != "new-session" {
+		t.Fatalf("active session = %q, want replacement", got)
 	}
 }
 
@@ -238,7 +274,11 @@ func newBorrowTestStore(t *testing.T) *db.Store {
 	if err := db.Migrate(ctx, conn); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
-	return &db.Store{DB: conn}
+	crypt, err := mcrypto.New(nil)
+	if err != nil {
+		t.Fatalf("new test crypto: %v", err)
+	}
+	return &db.Store{DB: conn, Crypt: crypt}
 }
 
 // TestBorrow_SessionsBorrowCounter verifies that Pool.Borrow increments

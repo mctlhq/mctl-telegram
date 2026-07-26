@@ -67,6 +67,8 @@ var ErrPoolFull = errors.New("telegram: session pool at capacity")
 // clean revoke.
 var ErrSessionRevokePersistFailed = errors.New("telegram: session rejected but revoke could not be persisted")
 
+const asyncSessionRevokeTimeout = 5 * time.Second
+
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
 // its own goroutine running client.Run(ctx, ...); the pool tears the entry down
 // after IdleTimeout of inactivity. Tool handlers call Borrow() to either
@@ -98,12 +100,13 @@ type ClientPool struct {
 }
 
 type entry struct {
-	client   *telegram.Client
-	lastUsed time.Time
-	cancel   context.CancelFunc
-	ready    chan struct{}
-	runErr   error
-	stopped  bool
+	client       *telegram.Client
+	sessionStore *SessionStore
+	lastUsed     time.Time
+	cancel       context.CancelFunc
+	ready        chan struct{}
+	runErr       error
+	stopped      bool
 	// runFn, when non-nil, replaces the default block-until-cancelled run
 	// callback (agent listener entries run updates.Manager here).
 	runFn func(ctx context.Context) error
@@ -330,11 +333,12 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &entry{
-		client:   client,
-		lastUsed: time.Now(),
-		cancel:   cancel,
-		ready:    make(chan struct{}),
-		runFn:    runFn,
+		client:       client,
+		sessionStore: store,
+		lastUsed:     time.Now(),
+		cancel:       cancel,
+		ready:        make(chan struct{}),
+		runFn:        runFn,
 	}
 	p.entries[userID] = e
 	if p.metrics != nil {
@@ -365,15 +369,12 @@ func (p *ClientPool) run(ctx context.Context, userID int64, e *entry) {
 //
 // Terminal MTProto authentication errors can arrive after Borrow has already
 // returned successfully (notably from a pinned listener's updates.Manager).
-// Revoke the backing DB row here as well as in Borrow so the supervisor does
-// not redial a permanently invalid auth key forever. The revoke runs under the
-// pool mutex only while this exact entry is still current, which prevents a
-// concurrent reconnect from installing a fresh session between entry removal
-// and revocation.
+// Revoke the exact DB row this entry loaded so a concurrent OAuth reconnect is
+// never invalidated. Database I/O runs outside the pool mutex and with a
+// deadline so one stalled tenant cannot block every pool operation.
 func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
 	sentinel := sessionErrorFor(err)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e.stopped = true
 	if err != nil && err != context.Canceled {
 		e.runErr = err
@@ -391,16 +392,32 @@ func (p *ClientPool) finishRun(userID int64, e *entry, err error) {
 	current, ownsEntry := p.entries[userID]
 	if ownsEntry && current == e {
 		delete(p.entries, userID)
-		if sentinel != nil && p.Store != nil {
-			if _, revokeErr := p.Store.RevokeActiveSession(context.Background(), userID, "unauthorized"); revokeErr != nil {
-				slog.Error("telegram session rejected after client exit, revoke failed", "user_id", userID, "err", revokeErr)
-			} else {
-				slog.Warn("telegram session rejected after client exit, revoked", "user_id", userID, "err", err)
-			}
-		}
 	}
 	if p.metrics != nil {
 		p.metrics.TelegramClientPoolSize.Dec()
+	}
+	p.mu.Unlock()
+
+	if !ownsEntry || current != e || sentinel == nil || p.Store == nil {
+		return
+	}
+	sessionID := int64(0)
+	if e.sessionStore != nil {
+		sessionID = e.sessionStore.LoadedRowID()
+	}
+	if sessionID == 0 {
+		slog.Error("telegram session rejected after client exit, loaded row unknown", "user_id", userID, "err", err)
+		return
+	}
+	revokeCtx, cancel := context.WithTimeout(context.Background(), asyncSessionRevokeTimeout)
+	defer cancel()
+	revoked, revokeErr := p.Store.RevokeSessionByID(revokeCtx, userID, sessionID, "unauthorized")
+	if revokeErr != nil {
+		slog.Error("telegram session rejected after client exit, revoke failed", "user_id", userID, "session_id", sessionID, "err", revokeErr)
+		return
+	}
+	if revoked {
+		slog.Warn("telegram session rejected after client exit, revoked", "user_id", userID, "session_id", sessionID, "err", err)
 	}
 }
 
