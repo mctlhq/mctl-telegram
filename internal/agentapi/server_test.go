@@ -782,7 +782,7 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	decodeBody(t, proposeRec, &proposed)
 
 	rec2 := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: 1, Status: db.JobCompleted, ResultActionID: proposed.ActionID,
+		Attempt: 1, Status: db.JobCompleted, ResultActionID: int64Ptr(proposed.ActionID),
 	})
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
@@ -793,6 +793,26 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	if completed.ResultActionID != proposed.ActionID || completed.ResultLeadID != 0 {
 		t.Fatalf("completed result refs = action:%d lead:%d, want action:%d",
 			completed.ResultActionID, completed.ResultLeadID, proposed.ActionID)
+	}
+}
+
+func TestHandleJobComplete_LegacyRolloutBridge(t *testing.T) {
+	h := newHarness(t)
+	h.srv.AllowLegacyJobCompletion = true
+	jobID := h.seedJob("evt:v1:1:1:legacy-complete", 0)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "legacy-worker", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
+		Attempt: claimed[0].Attempts, Status: db.JobCompleted,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Deprecation") == "" || rec.Header().Get("Sunset") == "" {
+		t.Fatalf("missing deprecation headers: %v", rec.Header())
 	}
 }
 
@@ -1189,7 +1209,7 @@ func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
 	decodeBody(t, leadRec, &saved)
 
 	completeRec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
-		Attempt: claimed[0].Attempts, Status: db.JobCompleted, ResultLeadID: saved["lead_id"],
+		Attempt: claimed[0].Attempts, Status: db.JobCompleted, ResultLeadID: int64Ptr(saved["lead_id"]),
 	})
 	if completeRec.Code != http.StatusOK {
 		t.Fatalf("complete status = %d, want 200 (lead save alone should satisfy the invariant), body=%s",
@@ -1243,7 +1263,8 @@ func TestHandleConversationContext(t *testing.T) {
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
+func boolPtr(b bool) *bool    { return &b }
+func int64Ptr(v int64) *int64 { return &v }
 
 // itoaTest formats an int64 for URL path construction in tests.
 func itoaTest(v int64) string {

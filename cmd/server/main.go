@@ -440,6 +440,7 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
+		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
 		// agentProfileProvider was already loaded (or left nil) above,
 		// before RunSupervisor started — reused here rather than loading it
 		// a second time. ProfileOwnerTGID scopes GET /recruiters/{peer} to

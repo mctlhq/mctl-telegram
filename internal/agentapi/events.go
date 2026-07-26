@@ -160,8 +160,8 @@ type completeJobRequest struct {
 	Attempt        int    `json:"attempt"`
 	Status         string `json:"status"`
 	Note           string `json:"note"`
-	ResultActionID int64  `json:"result_action_id,omitempty"`
-	ResultLeadID   int64  `json:"result_lead_id,omitempty"`
+	ResultActionID *int64 `json:"result_action_id,omitempty"`
+	ResultLeadID   *int64 `json:"result_lead_id,omitempty"`
 }
 
 type jobStatusResponse struct {
@@ -238,10 +238,29 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	if err := s.Queue.CompleteWithResult(
-		ctx, id.UserID, jobID, req.Attempt, req.Status, req.Note,
-		req.ResultActionID, req.ResultLeadID,
-	); err != nil {
+	var completeErr error
+	if req.ResultActionID == nil && req.ResultLeadID == nil && s.AllowLegacyJobCompletion {
+		// Rolling compatibility for workers released before exact result
+		// linkage. Keep this branch until every deployed worker sends the new
+		// fields; new workers always take CompleteWithResult below.
+		w.Header().Set("Deprecation", "@1785024000")
+		w.Header().Set("Sunset", "Thu, 31 Dec 2026 23:59:59 GMT")
+		completeErr = s.Queue.Complete(ctx, jobID, req.Attempt, req.Status, req.Note)
+	} else {
+		var actionID, leadID int64
+		if req.ResultActionID != nil {
+			actionID = *req.ResultActionID
+		}
+		if req.ResultLeadID != nil {
+			leadID = *req.ResultLeadID
+		}
+		completeErr = s.Queue.CompleteWithResult(
+			ctx, id.UserID, jobID, req.Attempt, req.Status, req.Note,
+			actionID, leadID,
+		)
+	}
+	if completeErr != nil {
+		err := completeErr
 		if errors.Is(err, db.ErrAgentJobResultRequired) {
 			writeJSONError(w, http.StatusConflict,
 				"cannot mark job completed without an exact persisted result id")
