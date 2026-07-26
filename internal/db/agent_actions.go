@@ -1043,6 +1043,20 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("upsert job lead: %w", err)
 	}
+	if l.JobID != 0 {
+		// job_leads is one mutable row per conversation. Preserve an
+		// immutable per-job association so a later upsert for the same
+		// conversation cannot rewrite the historical result of this job.
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO agent_job_lead_results(job_id, user_id, lead_id)
+			 VALUES($1,$2,$3)
+			 ON CONFLICT (job_id) DO UPDATE SET lead_id = EXCLUDED.lead_id
+			 WHERE agent_job_lead_results.user_id = EXCLUDED.user_id`,
+			l.JobID, l.UserID, id,
+		); err != nil {
+			return 0, fmt.Errorf("bind job lead result: %w", err)
+		}
+	}
 	return id, nil
 }
 

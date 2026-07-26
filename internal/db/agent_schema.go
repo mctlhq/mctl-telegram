@@ -451,6 +451,13 @@ func agentSchemaSQLite() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
+			job_id INTEGER PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			lead_id INTEGER NOT NULL REFERENCES job_leads(id) ON DELETE CASCADE,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_lead_results_lead ON agent_job_lead_results(lead_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INTEGER NOT NULL DEFAULT 0,
@@ -652,6 +659,13 @@ func agentSchemaPG() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
+			job_id BIGINT PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			lead_id BIGINT NOT NULL REFERENCES job_leads(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_job_lead_results_lead ON agent_job_lead_results(lead_id)`,
 		`CREATE TABLE IF NOT EXISTS tg_update_state (
 			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 			pts INT NOT NULL DEFAULT 0,

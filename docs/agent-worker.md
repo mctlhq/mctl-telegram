@@ -117,6 +117,23 @@ workflow — for C1, `component_name=communication-agent-worker-preview` — see
 same plan section, the same way `mctl-claude-remote` documents its own
 one-time bootstrap for its unrelated PR-steward deployment.
 
+### Exact-result rollout boundary
+
+The API and worker are separate Deployments, so the exact-result completion
+protocol must be rolled out in a compatibility window:
+
+1. Deploy the API with `AGENT_ALLOW_LEGACY_COMPLETION=true`. This temporarily
+   accepts the old completion body and marks those responses with
+   `Deprecation` and `Sunset` headers.
+2. Deploy the new workers. They send exact result IDs first and retry a
+   pre-upgrade API's decoder-only `400` once with the legacy body.
+3. Confirm all old worker pods are gone and new jobs persist
+   `result_action_id` or `result_lead_id`.
+4. Redeploy the API with `AGENT_ALLOW_LEGACY_COMPLETION=false` (the default).
+
+Do not leave the bridge enabled after the rollout: while it is on, a legacy
+worker can complete a job without the new exact-result invariant.
+
 **Read-only root filesystem requires a writable `/tmp`.** The C1 hardening
 baseline sets `readOnlyRootFilesystem: true` (see the plan's C1 hardening
 baseline), but `internal/agentworker/claudeinvoker.go`'s

@@ -463,10 +463,13 @@ func (s *Store) CompleteAgentJobWithResult(
 	if status != JobCompleted && status != JobFailed && status != JobIgnored {
 		return fmt.Errorf("invalid terminal job status %q", status)
 	}
+	if resultActionID < 0 || resultLeadID < 0 {
+		return ErrAgentJobResultInvalid
+	}
 	if status == JobCompleted && resultActionID <= 0 && resultLeadID <= 0 {
 		return ErrAgentJobResultRequired
 	}
-	if status != JobCompleted && (resultActionID > 0 || resultLeadID > 0) {
+	if status != JobCompleted && (resultActionID != 0 || resultLeadID != 0) {
 		return ErrAgentJobResultInvalid
 	}
 
@@ -496,8 +499,11 @@ func (s *Store) CompleteAgentJobWithResult(
 		var exists bool
 		if err := tx.QueryRowContext(ctx,
 			`SELECT EXISTS(
-			    SELECT 1 FROM job_leads
-			     WHERE id = $1 AND job_id = $2 AND user_id = $3
+			    SELECT 1
+			      FROM agent_job_lead_results r
+			      JOIN job_leads l ON l.id = r.lead_id
+			     WHERE r.lead_id = $1 AND r.job_id = $2
+			       AND r.user_id = $3 AND l.user_id = $3
 			)`,
 			resultLeadID, jobID, userID,
 		).Scan(&exists); err != nil {

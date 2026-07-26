@@ -238,6 +238,32 @@ func TestClient_CompleteJob_SendsAttemptAndStatus(t *testing.T) {
 	}
 }
 
+func TestClient_CompleteJob_FallsBackToLegacyShape(t *testing.T) {
+	var calls int
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if calls == 1 {
+			if _, ok := body["result_action_id"]; !ok {
+				t.Fatal("first request did not use exact-result shape")
+			}
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if _, ok := body["result_action_id"]; ok {
+			t.Fatal("legacy retry still included result_action_id")
+		}
+		writeJSONFixture(w, map[string]any{"completed": true})
+	})
+	if err := client.CompleteJob(context.Background(), 42, 2, "completed", "", JobResultRef{ActionID: 17}); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
 func writeJSONFixture(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

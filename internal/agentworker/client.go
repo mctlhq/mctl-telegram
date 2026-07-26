@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -400,5 +401,15 @@ func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, stat
 		"attempt": attempt, "status": status, "note": note,
 		"result_action_id": result.ActionID, "result_lead_id": result.LeadID,
 	}
-	return c.do(ctx, http.MethodPost, "/jobs/"+strconv.FormatInt(jobID, 10)+"/complete", body, nil)
+	path := "/jobs/" + strconv.FormatInt(jobID, 10) + "/complete"
+	err := c.do(ctx, http.MethodPost, path, body, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return err
+	}
+	// A pre-linkage server rejects the new result fields through its strict
+	// JSON decoder before mutating the claim. Retry that 400 once with the
+	// legacy shape so either server/worker rollout order remains available.
+	legacyBody := map[string]any{"attempt": attempt, "status": status, "note": note}
+	return c.do(ctx, http.MethodPost, path, legacyBody, nil)
 }

@@ -442,6 +442,7 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
+		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
 		agentSrv.WithProfile(agentProfileProvider)
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
