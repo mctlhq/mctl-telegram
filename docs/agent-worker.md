@@ -22,7 +22,7 @@ transport is in use.
 
 ## Job loop
 
-1. `run()` (the default entrypoint) long-polls `GET /events` for the next
+1. `run()` (the default entrypoint) long-polls `POST /jobs/claim` for the next
    due job. The server holds the connection open for up to ~20s per poll, so
    this is a tight loop with no client-side sleep on the happy path — a
    `PollEvents` failure backs off exponentially (2s → 60s) and resets on the

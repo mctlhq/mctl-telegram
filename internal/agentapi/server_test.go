@@ -166,6 +166,7 @@ func TestHandlers_RequireAuth(t *testing.T) {
 		method, path string
 	}{
 		{"GET", "/events"},
+		{"POST", "/jobs/claim"},
 		{"GET", "/event/evt:1"},
 		{"GET", "/conversations/1/context"},
 		{"GET", "/recruiters/555"},
@@ -201,7 +202,7 @@ func TestHandleGetJob_ReturnsMinimalDurableStatus(t *testing.T) {
 		t.Fatalf("pending response = %#v", pending)
 	}
 
-	claim := h.do("GET", "/events", nil)
+	claim := h.do("POST", "/jobs/claim", nil)
 	if claim.Code != http.StatusOK {
 		t.Fatalf("claim status = %d", claim.Code)
 	}
@@ -249,9 +250,9 @@ func TestHandleGetJob_IsScopedToCaller(t *testing.T) {
 	}
 }
 
-func TestHandleEvents_TimesOutEmpty(t *testing.T) {
+func TestHandleClaimJobs_TimesOutEmpty(t *testing.T) {
 	h := newHarness(t)
-	rec := h.do("GET", "/events", nil)
+	rec := h.do("POST", "/jobs/claim", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -264,12 +265,12 @@ func TestHandleEvents_TimesOutEmpty(t *testing.T) {
 	}
 }
 
-func TestHandleEvents_ClaimsQueuedJob(t *testing.T) {
+func TestHandleClaimJobs_ClaimsQueuedJob(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:1", conv.ID)
 
-	rec := h.do("GET", "/events", nil)
+	rec := h.do("POST", "/jobs/claim", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -285,7 +286,7 @@ func TestHandleEvents_ClaimsQueuedJob(t *testing.T) {
 	}
 
 	// A second poll must not re-claim the same (now-processing) job.
-	rec2 := h.do("GET", "/events", nil)
+	rec2 := h.do("POST", "/jobs/claim", nil)
 	var body2 struct {
 		Jobs []jobEnvelope `json:"jobs"`
 	}
@@ -295,10 +296,10 @@ func TestHandleEvents_ClaimsQueuedJob(t *testing.T) {
 	}
 }
 
-// TestHandleEvents_ScopedToCaller guards against the P1 found in review: a
+// TestHandleClaimJobs_ScopedToCaller guards against the P1 found in review: a
 // worker authenticated for one account must never be able to claim, and
 // thereby see the event_id/conversation_id of, another account's job.
-func TestHandleEvents_ScopedToCaller(t *testing.T) {
+func TestHandleClaimJobs_ScopedToCaller(t *testing.T) {
 	h := newHarness(t)
 	otherUID, err := h.store.EnsureUser(context.Background(), "other-owner", "", "test")
 	if err != nil {
@@ -320,7 +321,7 @@ func TestHandleEvents_ScopedToCaller(t *testing.T) {
 
 	// The harness's default identity (a DIFFERENT user) must see nothing —
 	// not even a hint that another account has a pending job.
-	rec := h.do("GET", "/events", nil)
+	rec := h.do("POST", "/jobs/claim", nil)
 	var body struct {
 		Jobs []jobEnvelope `json:"jobs"`
 	}
@@ -331,13 +332,46 @@ func TestHandleEvents_ScopedToCaller(t *testing.T) {
 
 	// The actual owner CAN claim it.
 	otherID := &auth.Identity{UserID: otherUID, Subject: "tg:2", TelegramID: 2}
-	rec2 := h.doAs(otherID, "GET", "/events", nil)
+	rec2 := h.doAs(otherID, "POST", "/jobs/claim", nil)
 	var body2 struct {
 		Jobs []jobEnvelope `json:"jobs"`
 	}
 	decodeBody(t, rec2, &body2)
 	if len(body2.Jobs) != 1 {
 		t.Fatalf("owner's own claim = %+v, want exactly one job", body2.Jobs)
+	}
+}
+
+func TestHandleLegacyEvents_IsDeprecatedAndClaims(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:legacy", conv.ID)
+
+	rec := h.do("GET", "/events", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Deprecation"); got != "true" {
+		t.Fatalf("Deprecation = %q, want true", got)
+	}
+	if got := rec.Header().Get("Sunset"); got != "Wed, 31 Dec 2026 23:59:59 GMT" {
+		t.Fatalf("Sunset = %q", got)
+	}
+	if got := rec.Header().Get("Link"); got != `</api/agent/v1/jobs/claim>; rel="successor-version"` {
+		t.Fatalf("Link = %q", got)
+	}
+	var body struct {
+		Jobs []jobEnvelope `json:"jobs"`
+	}
+	decodeBody(t, rec, &body)
+	if len(body.Jobs) != 1 || body.Jobs[0].JobID != jobID {
+		t.Fatalf("jobs = %+v, want one job with id %d", body.Jobs, jobID)
+	}
+
+	// The replacement endpoint is not itself deprecated.
+	rec = h.do("POST", "/jobs/claim", nil)
+	if got := rec.Header().Get("Deprecation"); got != "" {
+		t.Fatalf("POST Deprecation = %q, want empty", got)
 	}
 }
 
@@ -423,7 +457,7 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:redelivery", conv.ID)
-	// Claim it first, like a real worker would via GET /events — propose_reply
+	// Claim it first, like a real worker would via POST /jobs/claim — propose_reply
 	// is only ever called while the job is actively processing.
 	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
 	if err != nil || len(claimed) != 1 {
@@ -724,7 +758,7 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:2", conv.ID)
-	// Claim it first, like a real worker would via GET /events.
+	// Claim it first, like a real worker would via POST /jobs/claim.
 	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}

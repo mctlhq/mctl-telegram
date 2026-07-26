@@ -252,7 +252,7 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 // claim.
 //
 // The user_id filter is load-bearing, not an optimization: the agent API's
-// GET /events is called with a specific caller's aud=agent token, and
+// POST /jobs/claim is called with a specific caller's aud=agent token, and
 // without this filter a worker authenticated for one account could claim —
 // and thereby leak the event_id/conversation_id of, and starve — another
 // account's jobs. userID must be > 0; callers outside a per-user request

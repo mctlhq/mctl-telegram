@@ -77,7 +77,7 @@ preview), **mctl-gitops** (deployment).
 Telegram DM → gotd updates.Manager (in mctl-telegram, pinned ClientPool entry)
   → incoming_events (unique event_id, ON CONFLICT DO NOTHING)
   → agent_jobs (pending)                      ← durable, at-least-once, SKIP LOCKED claim
-  → Agent API /api/agent/v1 (aud=agent JWT, long-poll GET /events, 11 restricted tools)
+  → Agent API /api/agent/v1 (aud=agent JWT, long-poll POST /jobs/claim, 11 restricted tools)
   → TRANSPORT (swappable — worker pulls the same API either way):
       · PRODUCTION/DEFAULT: Option C headless worker (cmd/agent-worker) — Go
         process pulls a job, invokes `claude -p` with restricted MCP tools,
@@ -178,7 +178,8 @@ pure `ExtractEvent()` mapping. **Requires `replicas=1`.**
 
 **PR 6 — `feat(agent): agent-facing HTTP surface`** ✅ merged (#306, spec issue #296)
 `internal/agentapi` under `/api/agent/v1`, `aud=agent` JWT (cloned bridge
-pattern). Endpoints: `GET /events` (long-poll claim), `GET /event/{id}`,
+pattern). Endpoints: `POST /jobs/claim` (long-poll claim; deprecated
+`GET /events` retained for rolling-upgrade compatibility), `GET /event/{id}`,
 `GET /conversations/{id}/context`, `GET /recruiters/{peer}`, `GET /leads/{id}`,
 `GET /policy`, `GET /jobs/{id}` (minimal durable completion postcondition),
 `POST /actions/propose_reply`, `POST /leads`,
@@ -186,8 +187,8 @@ pattern). Endpoints: `GET /events` (long-poll claim), `GET /event/{id}`,
 `POST /autopilot/pause`, `POST /jobs/{id}/complete`.
 
 *Hardening debt flagged post-merge, not blocking observe-mode:*
-- `GET /events` claims a job (mutates state) despite being a GET — a real
-  REST-semantics hazard. Fix: add `POST /jobs/claim`, deprecate the GET path.
+- ✅ `POST /jobs/claim` is the worker path; the mutating legacy `GET /events`
+  is deprecated and retained only for rolling-upgrade compatibility.
 - Completion is not fully atomic/server-verified in the strict sense — the
   linkage isn't stored as a direct `result_action_id` column on `agent_jobs`
   for a single-transaction verify+complete. Fix before guarded autopilot.
