@@ -8,11 +8,14 @@ to Codex) — this file supersedes them. Where this file conflicts with
 anything outside the repo, this file wins.
 
 **Status (2026-07-26)**: Workstream A (core backend) is merged through PR 8.
-C1 preview infrastructure is deployed and the worker's MCP cold-start /
-completion bug is fixed on main. Bounded observe validation is in progress;
-the listener is disabled and autopilot paused between test windows. The
-Channels preview (Part 2) is scoped but not started and is not a dependency
-of C1. Current evidence and the remaining C1 checklist live in
+C1 preview infrastructure is deployed and one complete Saved Messages
+approval cycle has passed live end to end. Saved-command delivery is now
+durable through DB-cursored history polling (#319, #322). C1 is still in
+bounded validation: the 30-fixture run, kill-switch-after-approval drill,
+and soak are not complete, and the listener is disabled and autopilot paused
+between test windows. The Channels preview (Part 2) is scoped but not started
+and is not a dependency of C1. Current evidence and the remaining C1
+checklist live in
 [`docs/reports/communication-agent-c1.md`](../reports/communication-agent-c1.md).
 
 - ✅ A PR 1–5 — merged (#286, #288, #289, #299, #290)
@@ -21,6 +24,7 @@ of C1. Current evidence and the remaining C1 checklist live in
 - ✅ A PR 8 (Option C headless worker) — merged as #308 (commit `98b338e`)
 - ✅ Follow-up fixes — #309 (claude-review.yml dedup), #310 (job_leads schema fix)
 - ✅ Worker MCP startup + durable completion verification — #316
+- ✅ Saved Messages history polling + live approve cycle — #319, #322
 - 🟨 C1 — staging deployment and bounded observe validation — **in progress**
 - ⬜ A PR 8b / Channels preview (Part 2 below) — scoped, not started, not blocking
 - ⬜ C2 — production promotion, gated on soak + a separate production quota domain
