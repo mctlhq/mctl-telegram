@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -33,15 +34,34 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// Payload must round-trip decrypted and never sit in plaintext.
-	var blob []byte
+	// Payload and approval code must round-trip decrypted and never sit in
+	// plaintext. The code uses a deterministic hash for lookup and separate
+	// per-user ciphertext for idempotent notification retries.
+	var (
+		blob, codeHash, codeEncrypted []byte
+		plaintextCode                 sql.NullString
+	)
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT payload_encrypted FROM agent_actions WHERE id = $1`, id,
-	).Scan(&blob); err != nil {
-		t.Fatalf("select blob: %v", err)
+		`SELECT payload_encrypted, approval_code, approval_code_hash, approval_code_encrypted
+		   FROM agent_actions WHERE id = $1`, id,
+	).Scan(&blob, &plaintextCode, &codeHash, &codeEncrypted); err != nil {
+		t.Fatalf("select protected fields: %v", err)
 	}
 	if string(blob) == proposed {
 		t.Fatal("payload stored in plaintext")
+	}
+	if plaintextCode.Valid {
+		t.Fatalf("approval code stored in plaintext: %q", plaintextCode.String)
+	}
+	wantHash, err := s.approvalCodeHash("a1b2", uid)
+	if err != nil {
+		t.Fatalf("hash approval code: %v", err)
+	}
+	if !bytes.Equal(codeHash, wantHash) {
+		t.Fatalf("approval code hash = %x, want tenant blind index", codeHash)
+	}
+	if len(codeEncrypted) == 0 || string(codeEncrypted) == "a1b2" {
+		t.Fatal("approval code ciphertext missing or plaintext")
 	}
 	got, err := s.GetAgentActionByCode(ctx, uid, "a1b2")
 	if err != nil {
@@ -88,14 +108,20 @@ func TestAgentAction_LifecycleCAS(t *testing.T) {
 	}
 
 	// Reaching a terminal state releases the approval code so it can be reused.
-	var code sql.NullString
+	var (
+		code           sql.NullString
+		releasedHash   []byte
+		releasedCipher []byte
+	)
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT approval_code FROM agent_actions WHERE id = $1`, id,
-	).Scan(&code); err != nil {
+		`SELECT approval_code, approval_code_hash, approval_code_encrypted
+		   FROM agent_actions WHERE id = $1`, id,
+	).Scan(&code, &releasedHash, &releasedCipher); err != nil {
 		t.Fatalf("select code: %v", err)
 	}
-	if code.Valid {
-		t.Fatalf("approval code not released after executed: %q", code.String)
+	if code.Valid || len(releasedHash) != 0 || len(releasedCipher) != 0 {
+		t.Fatalf("approval code not fully released after executed: plaintext=%q hash=%x ciphertext=%x",
+			code.String, releasedHash, releasedCipher)
 	}
 	if _, err := s.InsertAgentAction(ctx, AgentAction{
 		ApprovalCode: "a1b2", UserID: uid, ActionType: ActionTypeReply,

@@ -76,6 +76,38 @@ func TestDifferentUsersProduceDifferentSubkeys(t *testing.T) {
 	}
 }
 
+func TestBlindIndexForUser_IsStableAndTenantScoped(t *testing.T) {
+	a, _ := New(testKey(t))
+	first, err := a.BlindIndexForUser("approval", []byte("ABC123"), 42)
+	if err != nil {
+		t.Fatalf("first index: %v", err)
+	}
+	repeated, err := a.BlindIndexForUser("approval", []byte("ABC123"), 42)
+	if err != nil {
+		t.Fatalf("repeated index: %v", err)
+	}
+	otherUser, err := a.BlindIndexForUser("approval", []byte("ABC123"), 43)
+	if err != nil {
+		t.Fatalf("other user index: %v", err)
+	}
+	otherPurpose, err := a.BlindIndexForUser("different", []byte("ABC123"), 42)
+	if err != nil {
+		t.Fatalf("other purpose index: %v", err)
+	}
+	if !bytes.Equal(first, repeated) {
+		t.Fatal("blind index is not deterministic")
+	}
+	if bytes.Equal(first, otherUser) {
+		t.Fatal("blind index must differ between users")
+	}
+	if bytes.Equal(first, otherPurpose) {
+		t.Fatal("blind index must differ between purposes")
+	}
+	if bytes.Equal(first, []byte("ABC123")) {
+		t.Fatal("blind index exposed plaintext")
+	}
+}
+
 func TestOpenForUser_LegacyV1Blob(t *testing.T) {
 	a, _ := New(testKey(t))
 	// Produce a legacy v1 blob via the old Seal entry point.

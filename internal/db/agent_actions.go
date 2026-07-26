@@ -69,8 +69,8 @@ const (
 // AgentAction is one proposed (and possibly executed) agent action. Payload is
 // the action content — for replies, the proposed message text — plaintext in
 // memory only, sealed with the owner's derived key at rest. ApprovalCode is a
-// short code the owner types in Saved Messages (/mctl approve <code>); unique
-// per user among rows that still carry one.
+// short code the owner types in Saved Messages (/mctl approve <code>). At
+// rest it is stored as a lookup hash plus per-user ciphertext, never plaintext.
 type AgentAction struct {
 	ID           int64
 	ApprovalCode string
@@ -91,6 +91,30 @@ type AgentAction struct {
 	SendBody            string // exact final outbound body paired with SendRandomID; encrypted at rest
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+}
+
+const approvalCodeBlindIndexPurpose = "agent-approval-code"
+
+func (s *Store) approvalCodeHash(code string, userID int64) ([]byte, error) {
+	if code == "" {
+		return nil, nil
+	}
+	return s.Crypt.BlindIndexForUser(approvalCodeBlindIndexPurpose, []byte(code), userID)
+}
+
+func (s *Store) protectApprovalCode(code string, userID int64) (hash, encrypted []byte, err error) {
+	if code == "" {
+		return nil, nil, nil
+	}
+	hash, err = s.approvalCodeHash(code, userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hash approval code: %w", err)
+	}
+	encrypted, err = s.Crypt.SealForUser([]byte(code), userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("seal approval code: %w", err)
+	}
+	return hash, encrypted, nil
 }
 
 // InsertAgentAction persists a proposed action and returns its id. The payload
@@ -128,6 +152,10 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 	if a.Status == "" {
 		a.Status = ActionProposed
 	}
+	codeHash, codeEncrypted, err := s.protectApprovalCode(a.ApprovalCode, a.UserID)
+	if err != nil {
+		return 0, err
+	}
 	// A non-zero conversation must belong to the same user — otherwise an
 	// action for one account could reference (and later act on) another
 	// account's conversation.
@@ -149,7 +177,6 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 		convID = a.ConversationID
 	}
 	var id int64
-	var err error
 	if a.JobID != 0 {
 		// Source the insert from the job row so a job-tied action can only be
 		// created while its job still exists. This closes a purge race:
@@ -169,14 +196,15 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 		}
 		err = s.DB.QueryRowContext(ctx,
 			`INSERT INTO agent_actions
-			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
-			    payload_encrypted, policy_decision, policy_reasons, status)
-			 SELECT $1, j.id, $3, $4, $5, $6, $7, $8, $9, $10
+			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
+			    user_id, action_type, intent, payload_encrypted, policy_decision,
+			    policy_reasons, status)
+			 SELECT $1, $2, j.id, $4, $5, $6, $7, $8, $9, $10, $11
 			   FROM agent_jobs j
-			  WHERE j.id = $2 AND j.user_id = $4 AND j.status = $11 AND j.attempts = $12`+lock+`
+			  WHERE j.id = $3 AND j.user_id = $5 AND j.status = $12 AND j.attempts = $13`+lock+`
 			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
 			 RETURNING id`,
-			nullable(a.ApprovalCode), a.JobID, convID, a.UserID, a.ActionType, a.Intent,
+			codeHash, codeEncrypted, a.JobID, convID, a.UserID, a.ActionType, a.Intent,
 			payload, a.PolicyDecision, a.PolicyReasons, a.Status, JobProcessing, a.Attempt,
 		).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -205,11 +233,12 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 	} else {
 		err = s.DB.QueryRowContext(ctx,
 			`INSERT INTO agent_actions
-			   (approval_code, job_id, conversation_id, user_id, action_type, intent,
-			    payload_encrypted, policy_decision, policy_reasons, status)
-			 VALUES($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9)
+			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
+			    user_id, action_type, intent, payload_encrypted, policy_decision,
+			    policy_reasons, status)
+			 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10)
 			 RETURNING id`,
-			nullable(a.ApprovalCode), convID, a.UserID, a.ActionType, a.Intent,
+			codeHash, codeEncrypted, convID, a.UserID, a.ActionType, a.Intent,
 			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
 		).Scan(&id)
 	}
@@ -249,6 +278,10 @@ func (s *Store) InsertStandaloneApprovalWithNotification(ctx context.Context, a 
 	if err != nil {
 		return 0, fmt.Errorf("seal notification body: %w", err)
 	}
+	codeHash, codeEncrypted, err := s.protectApprovalCode(a.ApprovalCode, a.UserID)
+	if err != nil {
+		return 0, err
+	}
 
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -259,11 +292,12 @@ func (s *Store) InsertStandaloneApprovalWithNotification(ctx context.Context, a 
 	var id int64
 	if err := tx.QueryRowContext(ctx,
 		`INSERT INTO agent_actions
-		   (approval_code, job_id, conversation_id, user_id, action_type, intent,
-		    payload_encrypted, policy_decision, policy_reasons, status)
-		 VALUES($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9)
+		   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
+		    user_id, action_type, intent, payload_encrypted, policy_decision,
+		    policy_reasons, status)
+		 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10)
 		 RETURNING id`,
-		a.ApprovalCode, a.ConversationID, a.UserID, a.ActionType, a.Intent,
+		codeHash, codeEncrypted, a.ConversationID, a.UserID, a.ActionType, a.Intent,
 		payload, a.PolicyDecision, a.PolicyReasons, a.Status,
 	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("insert standalone approval action: %w", err)
@@ -293,25 +327,29 @@ func (s *Store) GetAgentActionByCode(ctx context.Context, userID int64, code str
 	if code == "" {
 		return nil, ErrAgentActionNotFound
 	}
-	return s.getAgentAction(ctx, `user_id = $1 AND approval_code = $2`, userID, code)
+	hash, err := s.approvalCodeHash(code, userID)
+	if err != nil {
+		return nil, fmt.Errorf("hash approval code: %w", err)
+	}
+	return s.getAgentAction(ctx, `user_id = $1 AND approval_code_hash = $2`, userID, hash)
 }
 
 func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (*AgentAction, error) {
 	var (
 		a                 AgentAction
-		code              sql.NullString
 		jobID, convID     sql.NullInt64
 		execMsgID         sql.NullInt64
 		sendRandomID      sql.NullInt64
+		codeEncrypted     []byte
 		payload, sendBody []byte
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
+		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
 		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE `+where,
 		args...,
-	).Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
+	).Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
 		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -320,11 +358,17 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	if err != nil {
 		return nil, fmt.Errorf("get agent action: %w", err)
 	}
-	a.ApprovalCode = code.String
 	a.JobID = jobID.Int64
 	a.ConversationID = convID.Int64
 	a.ExecutedTGMessageID = execMsgID.Int64
 	a.SendRandomID = sendRandomID.Int64
+	if len(codeEncrypted) > 0 {
+		pt, err := s.Crypt.OpenForUser(codeEncrypted, a.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("open approval code: %w", err)
+		}
+		a.ApprovalCode = string(pt)
+	}
 	if len(payload) > 0 {
 		pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 		if err != nil {
@@ -344,7 +388,7 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 
 // terminalActionStatuses are the end states of the action lifecycle. Reaching
 // one releases the approval code (nulled) so its short string can be reused by
-// a future action without colliding on the (user_id, approval_code) unique
+// a future action without colliding on the (user_id, approval_code_hash) unique
 // index.
 var terminalActionStatuses = map[string]struct{}{
 	ActionExecuted: {}, ActionRejected: {}, ActionExpired: {}, ActionDenied: {},
@@ -401,7 +445,9 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 	var err error
 	if isTerminalActionStatus(to) {
 		res, err = s.DB.ExecContext(ctx,
-			`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
+			`UPDATE agent_actions
+			    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+			        approval_code_encrypted = NULL, updated_at = $2
 			  WHERE id = $3 AND user_id = $4 AND status = $5`,
 			to, time.Now().UTC(), id, userID, from,
 		)
@@ -547,7 +593,8 @@ func (s *Store) ReserveAgentActionSend(
 func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessageID int64) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
-		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL, updated_at = $3
+		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL,
+		        approval_code_hash = NULL, approval_code_encrypted = NULL, updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
 		ActionExecuted, tgMessageID, time.Now().UTC(), id, userID, ActionExecuting,
 	)
@@ -598,6 +645,7 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_actions
 		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL,
+		        approval_code_hash = NULL, approval_code_encrypted = NULL,
 		        send_body_encrypted = NULL, updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
 		ActionExecuted, tgMessageID, time.Now().UTC(), actionID, userID, ActionExecuting,
@@ -654,7 +702,9 @@ func (s *Store) ExpireStaleAgentActions(ctx context.Context, ttl time.Duration) 
 	}
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, updated_at = $2
 		  WHERE status = $3 AND updated_at < $4`,
 		ActionExpired, time.Now().UTC(), ActionPendingApproval, cutoff,
 	)
@@ -685,7 +735,9 @@ func (s *Store) ExpireAgentActionIfStale(ctx context.Context, userID, id int64, 
 	}
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_actions SET status = $1, approval_code = NULL, updated_at = $2
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, updated_at = $2
 		  WHERE id = $3 AND user_id = $4 AND status = $5 AND updated_at < $6`,
 		ActionExpired, time.Now().UTC(), id, userID, ActionPendingApproval, cutoff,
 	)
@@ -705,7 +757,7 @@ func (s *Store) ExpireAgentActionIfStale(ctx context.Context, userID, id int64, 
 func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Duration) ([]AgentAction, error) {
 	cutoff := time.Now().UTC().Add(-grace)
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
+		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
 		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
@@ -719,22 +771,29 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 	for rows.Next() {
 		var (
 			a                 AgentAction
-			code              sql.NullString
 			jobID, convID     sql.NullInt64
 			execMsgID         sql.NullInt64
 			sendRandomID      sql.NullInt64
+			codeEncrypted     []byte
 			payload, sendBody []byte
 		)
-		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
+		if err := rows.Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
 			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan stuck action: %w", err)
 		}
-		a.ApprovalCode = code.String
 		a.JobID = jobID.Int64
 		a.ConversationID = convID.Int64
 		a.ExecutedTGMessageID = execMsgID.Int64
 		a.SendRandomID = sendRandomID.Int64
+		if len(codeEncrypted) > 0 {
+			pt, err := s.Crypt.OpenForUser(codeEncrypted, a.UserID)
+			if err != nil {
+				slog.Warn("agent_actions: skipping stuck row with undecryptable approval code", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
+			}
+			a.ApprovalCode = string(pt)
+		}
 		if len(payload) > 0 {
 			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 			if err != nil {
@@ -768,7 +827,8 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, conversationID int64, reason string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
-		    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
 		  WHERE user_id = $4 AND conversation_id = $5
 		    AND status IN ($6, $7, $8)`,
 		ActionDenied, reason, time.Now().UTC(), userID, conversationID,
@@ -788,7 +848,8 @@ func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, c
 func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, conversationID, sourceMessageID int64, reason string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
-		    SET status = $1, approval_code = NULL, policy_reasons = $2, updated_at = $3
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
 		  WHERE user_id = $4 AND conversation_id = $5
 		    AND status IN ($6, $7, $8)
 		    AND job_id IN (
@@ -819,7 +880,7 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 		limit = 50
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, approval_code, job_id, conversation_id, user_id, action_type, intent,
+		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
 		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
 		   FROM agent_actions WHERE status = $1 ORDER BY updated_at LIMIT $2`,
@@ -833,22 +894,29 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 	for rows.Next() {
 		var (
 			a                 AgentAction
-			code              sql.NullString
 			jobID, convID     sql.NullInt64
 			execMsgID         sql.NullInt64
 			sendRandomID      sql.NullInt64
+			codeEncrypted     []byte
 			payload, sendBody []byte
 		)
-		if err := rows.Scan(&a.ID, &code, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
+		if err := rows.Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
 			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan action: %w", err)
 		}
-		a.ApprovalCode = code.String
 		a.JobID = jobID.Int64
 		a.ConversationID = convID.Int64
 		a.ExecutedTGMessageID = execMsgID.Int64
 		a.SendRandomID = sendRandomID.Int64
+		if len(codeEncrypted) > 0 {
+			pt, err := s.Crypt.OpenForUser(codeEncrypted, a.UserID)
+			if err != nil {
+				slog.Warn("agent_actions: skipping row with undecryptable approval code", "action_id", a.ID, "user_id", a.UserID, "err", err)
+				continue
+			}
+			a.ApprovalCode = string(pt)
+		}
 		if len(payload) > 0 {
 			pt, err := s.Crypt.OpenForUser(payload, a.UserID)
 			if err != nil {

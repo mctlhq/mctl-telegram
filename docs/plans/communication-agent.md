@@ -210,10 +210,11 @@ pending autonomous reply. Edit/delete of the source message invalidates the
 draft or produces a new versioned event. Approval TTL 24h → expired.
 
 *Approval code invariants*: cryptographically random (`newApprovalCode()`);
-**stored as cleartext today** — flag as hardening debt before guarded
-autopilot (a DB read compromise exposes live approval codes); single-use via
-status transition; bound to owner + conversation + action + the current
-message version; activated only via an atomic CAS state transition.
+stored as a tenant-scoped keyed blind index plus per-user AES-GCM ciphertext,
+never plaintext (legacy plaintext codes expire at the migration boundary);
+single-use via status transition; bound to owner + conversation + action +
+the current message version; activated only via an atomic CAS state
+transition.
 
 *`random_id` retry-safety* rests on MTProto's server-side dedup, which is
 real but untested against this codebase's actual retry edges (reconnect,
@@ -313,8 +314,8 @@ DB: reuse the existing `labs-mctl-telegram` database (no new DB).
      interactive Claude Code + `claude-review.yml` pool).
    - PR 6 hardening debt resolved (`POST /jobs/claim`, atomic
      `result_action_id`-based completion).
-   - Approval-code invariants verified by explicit test, codes stored as hash
-     not cleartext.
+   - Approval-code invariants verified by explicit tests; codes use a keyed
+     blind index and encrypted retry copy, not cleartext.
    - `random_id` MTProto-dedup failure drill run against the `mctl-reviewer`
      test account.
    - Full per-surface retention table shipped (PR 9).
