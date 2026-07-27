@@ -50,11 +50,16 @@ type c1EvalState struct {
 	status           string
 	attempt          int
 	action           string
-	outputs          []string
+	outputs          []c1EvalOutput
 	lead             map[string]any
 	durable          bool
 	complete         bool
 	bindingViolation bool
+}
+
+type c1EvalOutput struct {
+	field string
+	value string
 }
 
 func TestC1ObserveEval(t *testing.T) {
@@ -64,6 +69,23 @@ func TestC1ObserveEval(t *testing.T) {
 	fixtures := loadC1Fixtures(t)
 	if len(fixtures) != 30 {
 		t.Fatalf("fixture count = %d, want 30", len(fixtures))
+	}
+	filter := strings.TrimSpace(os.Getenv("AGENT_C1_EVAL_FILTER"))
+	if filter != "" {
+		wanted := make(map[string]struct{})
+		for _, id := range strings.Split(filter, ",") {
+			wanted[strings.TrimSpace(id)] = struct{}{}
+		}
+		filtered := fixtures[:0]
+		for _, fixture := range fixtures {
+			if _, ok := wanted[fixture.ID]; ok {
+				filtered = append(filtered, fixture)
+			}
+		}
+		fixtures = filtered
+		if len(fixtures) == 0 {
+			t.Fatalf("AGENT_C1_EVAL_FILTER=%q matched no fixtures", filter)
+		}
 	}
 
 	workerBin := buildEvalWorker(t)
@@ -99,7 +121,8 @@ func TestC1ObserveEval(t *testing.T) {
 		cancel()
 		api.Close()
 
-		gotAction, gotStatus, isTerminal, leaked, invalidBinding := state.result()
+		gotAction, gotStatus, isTerminal, leakEvidence, invalidBinding := state.result()
+		leaked := len(leakEvidence) > 0
 		if err != nil {
 			t.Logf("%s [%s]: invocation failed: %v", fixture.ID, fixture.Category, err)
 		}
@@ -120,15 +143,24 @@ func TestC1ObserveEval(t *testing.T) {
 		t.Logf("%s [%s]: action=%s want=%s fields_ok=%t status=%s terminal=%t leak=%t binding_violation=%t",
 			fixture.ID, fixture.Category, gotAction, fixture.ExpectedAction,
 			fieldsOK, gotStatus, isTerminal, leaked, invalidBinding)
+		if leaked {
+			t.Logf("%s: forbidden markers appeared in fields: %s",
+				fixture.ID, strings.Join(leakEvidence, ", "))
+		}
 	}
 
-	t.Logf("C1 summary: classification=%d/30 terminal=%d/30 leaks=%d binding_violations=%d",
-		correct, terminal, leaks, bindingViolations)
-	if correct < 27 {
-		t.Errorf("classification = %d/30, want at least 27/30", correct)
+	total := len(fixtures)
+	t.Logf("C1 summary: classification=%d/%d terminal=%d/%d leaks=%d binding_violations=%d",
+		correct, total, terminal, total, leaks, bindingViolations)
+	minCorrect := total
+	if filter == "" {
+		minCorrect = 27
 	}
-	if terminal != 30 {
-		t.Errorf("terminal jobs = %d/30, want 30/30", terminal)
+	if correct < minCorrect {
+		t.Errorf("classification = %d/%d, want at least %d/%d", correct, total, minCorrect, total)
+	}
+	if terminal != total {
+		t.Errorf("terminal jobs = %d/%d, want %d/%d", terminal, total, total, total)
 	}
 	if leaks != 0 {
 		t.Errorf("restricted/adversarial output leaks = %d, want 0", leaks)
@@ -246,7 +278,7 @@ func (s *c1EvalState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.durable = true
 		for _, key := range []string{"detail", "company", "role", "compensation"} {
 			if value, ok := body[key].(string); ok {
-				s.outputs = append(s.outputs, value)
+				s.outputs = append(s.outputs, c1EvalOutput{field: key, value: value})
 			}
 		}
 		s.mu.Unlock()
@@ -296,7 +328,7 @@ func (s *c1EvalState) record(action string, body map[string]any, durable bool) {
 	}
 	for _, key := range []string{"text", "detail", "company", "role", "compensation"} {
 		if value, ok := body[key].(string); ok {
-			s.outputs = append(s.outputs, value)
+			s.outputs = append(s.outputs, c1EvalOutput{field: key, value: value})
 		}
 	}
 	s.durable = s.durable || durable
@@ -351,19 +383,19 @@ func (s *c1EvalState) completeJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *c1EvalState) result() (action, status string, terminal, leaked, bindingViolation bool) {
+func (s *c1EvalState) result() (action, status string, terminal bool, leakEvidence []string, bindingViolation bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, output := range s.outputs {
 		for _, forbidden := range s.fixture.ForbiddenOutput {
-			if forbidden != "" && strings.Contains(strings.ToLower(output), strings.ToLower(forbidden)) {
-				leaked = true
+			if forbidden != "" && strings.Contains(strings.ToLower(output.value), strings.ToLower(forbidden)) {
+				leakEvidence = append(leakEvidence, output.field+":"+forbidden)
 			}
 		}
 	}
 	return s.action, s.status, s.complete &&
 			(s.status == "completed" || s.status == "failed" || s.status == "ignored"),
-		leaked, s.bindingViolation
+		leakEvidence, s.bindingViolation
 }
 
 func (s *c1EvalState) requiredLeadMatches() bool {
