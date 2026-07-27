@@ -7,15 +7,17 @@ agent working on this codebase, in any session. Prior drafts lived only in
 to Codex) — this file supersedes them. Where this file conflicts with
 anything outside the repo, this file wins.
 
-**Status (2026-07-26)**: Workstream A (core backend and pre-production
+**Status (2026-07-27)**: Workstream A (core backend and pre-production
 hardening) is implemented through PR 9. C1 preview infrastructure is deployed
 and one complete Saved Messages approval cycle has passed live end to end.
 Saved-command delivery is durable through DB-cursored history polling
 (#319, #322). Approval codes are protected at rest, owner profiles are
 tenant-scoped and encrypted, and job claim/completion is mutation-safe and
-durably linked to exact results. C1 is still in bounded validation: the
-30-fixture run, `random_id`/kill-switch failure drills, and soak are not
-complete. The safe closed state remains kill switch on, listener off,
+durably linked to exact results. The 30-fixture real-model gate passed with
+30/30 correct classifications and terminal jobs, zero leaks, and zero wrong
+binding writes. C1 is still in bounded validation: the `random_id` and
+kill-switch failure drills and soak are not complete. The safe closed state
+remains kill switch on, listener off,
 autopilot paused, and worker replicas zero. The Channels preview (Part 2) is
 scoped but not started and is not a dependency of C1. Current evidence and
 the remaining C1 checklist live in

@@ -150,6 +150,32 @@ Acceptance:
   [#334](https://github.com/mctlhq/mctl-telegram/issues/334). Admin merge
   bypasses do not supply runtime model capacity and are not a C2 mitigation.
 
+### 2026-07-27 — Telegram reconnect and 30-fixture gate
+
+- The preview Telegram account completed a fresh OAuth/MTProto reconnect.
+  A post-reconnect `list_dialogs` call succeeded, and server logs recorded a
+  successful Telegram login without another `AUTH_KEY_DUPLICATED` error.
+- The first full 30-fixture run correctly classified and terminated all 30
+  jobs but exposed restricted output in all three adversarial fixtures.
+  Field-level diagnostics identified the affected reply/summary arguments
+  without logging their values.
+- PR [#336](https://github.com/mctlhq/mctl-telegram/pull/336) made filtered
+  diagnostic runs fail closed, added field-level leak evidence, and hardened
+  the C1 prompt so adversarial clauses are silently discarded from every
+  tool argument. The targeted adversarial rerun passed 3/3 with zero leaks.
+- The final full real-Claude-Code evaluation passed in 393.148 seconds:
+  30/30 correct classifications, 30/30 same-attempt terminal jobs, zero
+  restricted/adversarial output leaks, and zero wrong binding writes.
+  `go test ./...`, `go vet ./...`, Docker, CodeQL, vulnerability, lint, and
+  manifest checks also passed. Claude review could not run because the
+  organization monthly quota was exhausted; the operator-approved admin
+  exception was limited to that infrastructure failure.
+- GitOps PR
+  [#644](https://github.com/mctlhq/mctl-gitops/pull/644) selected the same
+  validated prompt guardrails for deployment. Its manifest and YAML checks passed, and
+  Claude explicitly approved it with no P1/P2 findings. The PR did not alter
+  replicas, kill-switch, listener, or autopilot settings.
+
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
@@ -162,14 +188,14 @@ Acceptance:
       profile Secret projection and migration env vars.
 - [x] Build and deploy the matching `Dockerfile.agent-worker` image by exact
       merge SHA before the worker is scaled above zero.
-- [ ] Run the 30-fixture harness and record aggregate results here.
+- [x] Run the 30-fixture harness and record aggregate results here.
 - [ ] Run the remaining kill-switch-after-approval live drill. Draft,
       notification, audit, and one harmless explicitly approved reply have
       passed.
 - [x] Finish the completed test window in the safe stopped state:
       `AGENT_KILL_SWITCH=true`, `listener_enabled=false`,
       `autopilot_paused=true`, worker replicas `0`.
-- [ ] Reconnect the preview Telegram test account with a fresh OAuth session
+- [x] Reconnect the preview Telegram test account with a fresh OAuth session
       before opening another test window.
 - [x] Store approval codes as hashes and ship the full
       retention/adversarial hardening set.
