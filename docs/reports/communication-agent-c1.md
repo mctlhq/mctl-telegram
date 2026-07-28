@@ -172,9 +172,32 @@ Acceptance:
   exception was limited to that infrastructure failure.
 - GitOps PR
   [#644](https://github.com/mctlhq/mctl-gitops/pull/644) selected the same
-  validated prompt guardrails for deployment. Its manifest and YAML checks passed, and
-  Claude explicitly approved it with no P1/P2 findings. The PR did not alter
-  replicas, kill-switch, listener, or autopilot settings.
+  validated prompt guardrails for deployment. Its manifest and YAML checks
+  passed, and Claude explicitly approved it with no P1/P2 findings. The PR
+  did not alter replicas, kill-switch, listener, or autopilot settings.
+
+### 2026-07-28 — `random_id` drill deferred on runtime quota
+
+- The preflight found that the stored sender allowlist did not match the
+  dedicated test peer. It was corrected while the kill switch was on,
+  listener was off, autopilot was paused, and worker replicas were zero.
+- GitOps PR
+  [#649](https://github.com/mctlhq/mctl-gitops/pull/649) opened a bounded
+  test window after manifest, YAML, and Claude review checks passed. Live
+  state was verified as `observe`, kill switch off, listener on, autopilot
+  unpaused, one worker replica, and only the dedicated sender allowlisted.
+- The fresh allowlisted message was persisted and claimed by the worker, but
+  `claude -p` exited with status 1 before creating any durable action. One
+  queue retry was allowed; it also produced no action. The send/recovery
+  portion of the drill therefore did not start, and no Telegram reply was
+  sent.
+- The run was deferred to Friday, 2026-07-31, for a runtime quota reset.
+  GitOps PR
+  [#651](https://github.com/mctlhq/mctl-gitops/pull/651) restored the safe
+  stopped state. Live verification confirmed `AGENT_KILL_SWITCH=true`,
+  `listener_enabled=false`, `autopilot_paused=true`, worker replicas `0`,
+  and both Argo applications `Synced / Healthy`. The claimed job remains
+  durable with no action and can be retried deliberately after quota returns.
 
 ## Remaining checklist
 
