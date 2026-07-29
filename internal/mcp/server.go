@@ -51,6 +51,9 @@ type Server struct {
 	// MediaUploadMaxBytes is the maximum number of bytes allowed per send_media
 	// upload (file_url fetch or file_base64 decode). 0 means no cap.
 	MediaUploadMaxBytes int64
+	// Version is reported to MCP clients in the initialize response. Empty
+	// falls back to "dev" in HTTPHandler.
+	Version string
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -61,6 +64,16 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 		Confirms:   NewConfirmStore(),
 		MediaStore: NewMediaStore(),
 	}
+}
+
+// WithVersion sets the version reported to MCP clients in the initialize
+// response. Empty leaves the "dev" fallback applied in HTTPHandler. Returns
+// the receiver for chaining.
+func (s *Server) WithVersion(v string) *Server {
+	if v != "" {
+		s.Version = v
+	}
+	return s
 }
 
 // WithLimiter wires a shared *audit.RateLimiter so destructive tools can
@@ -128,9 +141,13 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 }
 
 func (s *Server) HTTPHandler() http.Handler {
+	v := s.Version
+	if v == "" {
+		v = "dev"
+	}
 	srv := mcpserver.NewMCPServer(
 		"mctl-telegram",
-		"0.7.0",
+		v,
 		mcpserver.WithToolCapabilities(true),
 	)
 	{t, h := s.toolListDialogs(); s.addTool(srv, t, h)}

@@ -45,6 +45,10 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// version is set via -ldflags "-X main.version=..." at build time (see
+// Dockerfile), matching every other binary in this repo.
+var version = "dev"
+
 func main() {
 	inner := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -391,7 +395,7 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
 	// Force the reviewer/demo account's sends to dry-run previews. Only armed
