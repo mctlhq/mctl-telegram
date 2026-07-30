@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.45.0](https://github.com/mctlhq/mctl-telegram/compare/0.44.1...0.45.0) (2026-07-30)
+
+
+### Features
+
+* **agent-worker:** add /livez /readyz health endpoints ([#312](https://github.com/mctlhq/mctl-telegram/issues/312)) ([665a83d](https://github.com/mctlhq/mctl-telegram/commit/665a83dc11a35350287485344f478c725459d592))
+* **agent:** add bounded C1 validation controls ([#317](https://github.com/mctlhq/mctl-telegram/issues/317)) ([925b67f](https://github.com/mctlhq/mctl-telegram/commit/925b67f3561ff27240fc35f96deb6d395612c858))
+* **agent:** agent-facing HTTP surface /api/agent/v1 (A-PR6) ([#306](https://github.com/mctlhq/mctl-telegram/issues/306)) ([c4864f6](https://github.com/mctlhq/mctl-telegram/commit/c4864f67c04aec6a958a2ce71c2b3449589061ac))
+* **agentapi:** admin-scoped PUT /api/admin/agent/profile ([#315](https://github.com/mctlhq/mctl-telegram/issues/315)) ([ca3deb4](https://github.com/mctlhq/mctl-telegram/commit/ca3deb48b2936209f8261a9af1e3eb2a39c9e105))
+* **agent:** headless worker for the communication agent (A-PR8, Option C) ([#308](https://github.com/mctlhq/mctl-telegram/issues/308)) ([98b338e](https://github.com/mctlhq/mctl-telegram/commit/98b338ecfb0e98d341bef89ca537b5e4daa50fe4))
+* **agents:** add opt-in flag for auto-fetching media ([#295](https://github.com/mctlhq/mctl-telegram/issues/295)) ([f2d8cce](https://github.com/mctlhq/mctl-telegram/commit/f2d8ccea46cd2b1f2f07b92d47671f71da692525))
+* **agent:** saved-messages control plane, executor, owner profile (A-PR7) ([#307](https://github.com/mctlhq/mctl-telegram/issues/307)) ([33311bf](https://github.com/mctlhq/mctl-telegram/commit/33311bf1ab3cccff3c58f676d3b427e3ee8343e0))
+* **agent:** store tenant owner profiles encrypted ([#328](https://github.com/mctlhq/mctl-telegram/issues/328)) ([061933b](https://github.com/mctlhq/mctl-telegram/commit/061933b261410bc45aa85ed57930814ceaaf94ab))
+* **docker:** add dedicated agent-worker runtime image ([#313](https://github.com/mctlhq/mctl-telegram/issues/313)) ([afe5823](https://github.com/mctlhq/mctl-telegram/commit/afe58231f2aa64b95808aeb43f35717f096caaff))
+
+
+### Bug Fixes
+
+* **agent-worker:** bind the health listener synchronously, not on a timer ([#314](https://github.com/mctlhq/mctl-telegram/issues/314)) ([cdadc2c](https://github.com/mctlhq/mctl-telegram/commit/cdadc2cf993cbb2661899407f8f7753d1e03529e))
+* **agent-worker:** suppress adversarial prompt echoes ([c5900eb](https://github.com/mctlhq/mctl-telegram/commit/c5900eb2f1c0c912fc3d56f36e5b1f386eaf806d))
+* **agent-worker:** suppress adversarial prompt echoes ([ddc1686](https://github.com/mctlhq/mctl-telegram/commit/ddc1686c8c2021fe5d1376feb7b173805892041f))
+* **agent:** bind job completion to durable result ([#331](https://github.com/mctlhq/mctl-telegram/issues/331)) ([c2fcf32](https://github.com/mctlhq/mctl-telegram/commit/c2fcf327e1328b405c83a52ab97d50a7fb290d59))
+* **agent:** claim jobs with POST ([#327](https://github.com/mctlhq/mctl-telegram/issues/327)) ([314b759](https://github.com/mctlhq/mctl-telegram/commit/314b759c6ef71997896ed6c4141c0ff665945c1d))
+* **agent:** close remaining policy gaps and sent-marker gap from [#290](https://github.com/mctlhq/mctl-telegram/issues/290)/[#299](https://github.com/mctlhq/mctl-telegram/issues/299) ([#304](https://github.com/mctlhq/mctl-telegram/issues/304)) ([cb544ce](https://github.com/mctlhq/mctl-telegram/commit/cb544cecda3e0d5aa80511e9faa9e15d8f37042f))
+* **agent:** poll Saved Messages commands from history ([#319](https://github.com/mctlhq/mctl-telegram/issues/319)) ([c66ae91](https://github.com/mctlhq/mctl-telegram/commit/c66ae9168fba0a54b2e5ec7070199fc4d87938dc))
+* **agent:** protect approval codes at rest ([#326](https://github.com/mctlhq/mctl-telegram/issues/326)) ([54f0aab](https://github.com/mctlhq/mctl-telegram/commit/54f0aabf26baed84729898734d74ee080a83c85a))
+* **agent:** saved-history poller must not gate on msg.Out ([#322](https://github.com/mctlhq/mctl-telegram/issues/322)) ([ea04c8f](https://github.com/mctlhq/mctl-telegram/commit/ea04c8fd387e87fc993a91a86dea0db58936e31f))
+* **agent:** verify durable MCP job completion ([#316](https://github.com/mctlhq/mctl-telegram/issues/316)) ([d92939d](https://github.com/mctlhq/mctl-telegram/commit/d92939dcafa68bce70f0dd99f7deaa87245e95e1))
+* **ci:** dedupe claude-review runs and drop blind fallback retry ([#309](https://github.com/mctlhq/mctl-telegram/issues/309)) ([e9e3db1](https://github.com/mctlhq/mctl-telegram/commit/e9e3db1c6bc2d9ecad61437ff71390ff965e7f1f))
+* **ci:** fail incomplete Claude reviews ([#323](https://github.com/mctlhq/mctl-telegram/issues/323)) ([2acc457](https://github.com/mctlhq/mctl-telegram/commit/2acc457baab81439e95249d7a0ad1c929116cc32))
+* **ci:** preserve zero diff-line count in Claude review ([#291](https://github.com/mctlhq/mctl-telegram/issues/291)) ([5133a87](https://github.com/mctlhq/mctl-telegram/commit/5133a87d734cf5c2932096cfca1cbb5e7838fea3))
+* **db:** add job_leads.job_id via idempotent ALTER, not inline CREATE TABLE ([#310](https://github.com/mctlhq/mctl-telegram/issues/310)) ([e4e7928](https://github.com/mctlhq/mctl-telegram/commit/e4e792857ea8a441183ac376d9cbbc0370d2cf45))
+* **oauth:** recover refresh-token rotation races instead of failing them ([#343](https://github.com/mctlhq/mctl-telegram/issues/343)) ([355cb96](https://github.com/mctlhq/mctl-telegram/commit/355cb965b37795957fabc3060b54d4dab48f3bbf))
+* **telegram:** retire duplicated auth sessions ([#324](https://github.com/mctlhq/mctl-telegram/issues/324)) ([0438490](https://github.com/mctlhq/mctl-telegram/commit/0438490d2e2bbf680e2891dce997ec2637378502))
+
 ## [0.44.1](https://github.com/mctlhq/mctl-telegram/compare/0.44.0...0.44.1) (2026-07-20)
 
 
