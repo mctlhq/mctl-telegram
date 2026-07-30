@@ -31,6 +31,16 @@ type RefreshToken struct {
 	CreatedAt        time.Time
 	ExpiresAt        time.Time
 	RevokedAt        time.Time // zero value ⇒ still active
+	// RevokedReason distinguishes why RevokedAt was set: "rotated" (normal
+	// rotation superseded this row — the only case eligible for grace-window
+	// replay recovery), "reuse_detected", or "explicit_revoke". Empty when
+	// the row is still active.
+	RevokedReason string
+	// ParentTokenHash is the SHA-256 hash of the predecessor token this row
+	// was rotated from, or nil for a family's first-issued token. Lets a
+	// grace-window replay of the predecessor be verified against its live
+	// successor with one indexed lookup (see LookupRefreshTokenByHashPair).
+	ParentTokenHash []byte
 }
 
 // Revoked reports whether the token has been revoked — by rotation, by a
@@ -71,14 +81,25 @@ func saveRefreshToken(ctx context.Context, ex execer, plaintext string, rt Refre
 	}
 	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, client_name, expires_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, client_name, expires_at, parent_token_hash)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		rt.FamilyID, hashRefreshToken(plaintext), rt.UserID, rt.ClientID,
 		rt.TelegramID, nullable(rt.TelegramUsername), nullable(rt.Scope), rt.ClientName, rt.ExpiresAt.UTC(),
+		nullableBytes(rt.ParentTokenHash),
 	); err != nil {
 		return fmt.Errorf("insert refresh token: %w", err)
 	}
 	return nil
+}
+
+// nullableBytes converts a nil/empty byte slice to a driver NULL, since a
+// zero-length []byte would otherwise be written as an empty BYTEA/BLOB
+// instead of SQL NULL.
+func nullableBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 // LookupRefreshToken returns the row matching the presented opaque token,
@@ -94,14 +115,15 @@ func (s *Store) LookupRefreshToken(ctx context.Context, plaintext string) (*Refr
 		username sql.NullString
 		scope    sql.NullString
 		revoked  sql.NullTime
+		reason   sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT family_id, user_id, client_id, telegram_id, telegram_username,
-		        scope, client_name, created_at, expires_at, revoked_at
+		        scope, client_name, created_at, expires_at, revoked_at, revoked_reason
 		   FROM oauth_refresh_tokens WHERE token_hash = $1`,
 		hashRefreshToken(plaintext),
 	).Scan(&rt.FamilyID, &rt.UserID, &rt.ClientID, &rt.TelegramID, &username,
-		&scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &revoked)
+		&scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &revoked, &reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrRefreshTokenNotFound
 	}
@@ -113,6 +135,41 @@ func (s *Store) LookupRefreshToken(ctx context.Context, plaintext string) (*Refr
 	if revoked.Valid {
 		rt.RevokedAt = revoked.Time
 	}
+	rt.RevokedReason = reason.String
+	return &rt, nil
+}
+
+// LookupRefreshTokenByHashPair verifies whether newPlaintext is the live,
+// unrevoked successor of oldPlaintext within the given family/client — the
+// exact check a grace-window replay needs before re-issuing an existing
+// successor instead of failing the caller. Returns ErrRefreshTokenNotFound
+// if no such row exists (wrong client, successor itself already superseded,
+// or the row is missing) — callers must treat that as "not eligible for
+// grace recovery", not as evidence of anything about oldPlaintext itself.
+func (s *Store) LookupRefreshTokenByHashPair(ctx context.Context, oldPlaintext, newPlaintext, familyID, clientID string) (*RefreshToken, error) {
+	var (
+		rt       RefreshToken
+		username sql.NullString
+		scope    sql.NullString
+	)
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT user_id, telegram_id, telegram_username, scope, client_name, created_at, expires_at
+		   FROM oauth_refresh_tokens
+		  WHERE token_hash = $1 AND parent_token_hash = $2
+		    AND family_id = $3 AND client_id = $4
+		    AND revoked_at IS NULL`,
+		hashRefreshToken(newPlaintext), hashRefreshToken(oldPlaintext), familyID, clientID,
+	).Scan(&rt.UserID, &rt.TelegramID, &username, &scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrRefreshTokenNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup refresh token by hash pair: %w", err)
+	}
+	rt.FamilyID = familyID
+	rt.ClientID = clientID
+	rt.TelegramUsername = username.String
+	rt.Scope = scope.String
 	return &rt, nil
 }
 
@@ -131,10 +188,11 @@ func (s *Store) RotateRefreshToken(ctx context.Context, oldPlaintext, newPlainte
 		return fmt.Errorf("begin rotate tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	oldHash := hashRefreshToken(oldPlaintext)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE oauth_refresh_tokens SET revoked_at = $1
+		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = 'rotated'
 		 WHERE token_hash = $2 AND revoked_at IS NULL`,
-		time.Now().UTC(), hashRefreshToken(oldPlaintext),
+		time.Now().UTC(), oldHash,
 	)
 	if err != nil {
 		return fmt.Errorf("revoke old refresh token: %w", err)
@@ -142,6 +200,7 @@ func (s *Store) RotateRefreshToken(ctx context.Context, oldPlaintext, newPlainte
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrRefreshTokenNotFound
 	}
+	newRT.ParentTokenHash = oldHash
 	if err := saveRefreshToken(ctx, tx, newPlaintext, newRT); err != nil {
 		return err
 	}
@@ -151,16 +210,18 @@ func (s *Store) RotateRefreshToken(ctx context.Context, oldPlaintext, newPlainte
 	return nil
 }
 
-// RevokeRefreshTokenFamily revokes every still-active token in a family.
-// It is the response to a reuse-detection event: an already-rotated token is
-// presented again, meaning either an honest client double-submitted or a
-// stolen token is in play. In both cases the safe move is to kill the lineage
-// and force a fresh login. Returns the number of rows revoked.
-func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error) {
+// RevokeRefreshTokenFamily revokes every still-active token in a family with
+// the given reason (e.g. "reuse_detected", "explicit_revoke"). It is the
+// response to a reuse-detection event: an already-rotated token is presented
+// again outside its grace window, meaning either an honest client's retry
+// arrived too late or a stolen token is in play. In both cases the safe move
+// is to kill the lineage and force a fresh login. Returns the number of rows
+// revoked.
+func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID, reason string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE oauth_refresh_tokens SET revoked_at = $1
-		 WHERE family_id = $2 AND revoked_at IS NULL`,
-		time.Now().UTC(), familyID,
+		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = $2
+		 WHERE family_id = $3 AND revoked_at IS NULL`,
+		time.Now().UTC(), reason, familyID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("revoke refresh token family: %w", err)

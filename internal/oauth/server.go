@@ -1480,12 +1480,94 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	writeTokenJSON(w, tok, refreshTok, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 }
 
+// rotationGraceWindow is how long after a rotation a replay of the
+// predecessor token is treated as a possible lost-response retry (see
+// handleTokenRefresh) rather than reuse. A package-level var, not a const,
+// so tests can advance the server clock past the window without sleeping
+// real wall-clock time.
+var rotationGraceWindow = 30 * time.Second
+
+// graceRecoveryOutcome distinguishes what handleTokenRefresh should do next
+// after attemptGraceRecovery runs.
+type graceRecoveryOutcome int
+
+const (
+	// graceRecovered: a live successor was found and re-issued; response
+	// already written.
+	graceRecovered graceRecoveryOutcome = iota
+	// graceRejectedSoft: no eligible successor, but this is NOT trusted as
+	// proof of theft (wrong client, expired successor, or no match at all);
+	// response already written as invalid_grant WITHOUT revoking anything.
+	graceRejectedSoft
+	// graceServerError: an internal failure occurred verifying or minting;
+	// response already written as a 500. Must not be treated as reuse — a
+	// transient failure must not kill a live token family.
+	graceServerError
+	// graceNotEligible: the presented token was not revoked by a recent
+	// normal rotation (outside the window, or revoked for a different
+	// reason). Nothing written yet; caller should proceed to hard-revoke
+	// the family as genuine reuse.
+	graceNotEligible
+)
+
+// attemptGraceRecovery checks whether refreshTok's predecessor was revoked
+// by a normal rotation within rotationGraceWindow, and if so, recovers the
+// live, unexpired successor a deterministic-derivation caller would have
+// recomputed and mints a fresh access token for it instead of treating the
+// replay as reuse. Shared by both places handleTokenRefresh discovers a
+// revoked predecessor: the direct case (LookupRefreshToken already showed it
+// revoked) and the concurrent-race case (RotateRefreshToken lost the race
+// against another request rotating the same token first) — both need
+// identical grace-window bounding, expiry checking, and error propagation,
+// so recovery logic lives in exactly one place.
+func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, refreshTok, revokedReason string, revokedAt time.Time, familyID, clientID string) graceRecoveryOutcome {
+	if revokedReason != "rotated" || s.clock().Sub(revokedAt) >= rotationGraceWindow {
+		return graceNotEligible
+	}
+	candidate := deriveSuccessorRefreshToken(s.cfg.JWTSecret, refreshTok)
+	child, lookupErr := s.store.LookupRefreshTokenByHashPair(r.Context(), refreshTok, candidate, familyID, clientID)
+	if lookupErr != nil {
+		if !errors.Is(lookupErr, db.ErrRefreshTokenNotFound) {
+			// A transient failure verifying the candidate must not be
+			// mistaken for "no match" — that would let a DB blip fall
+			// through to family revocation in the caller.
+			writeTokenError(w, "server_error", "could not verify grace-window replay", http.StatusInternalServerError)
+			return graceServerError
+		}
+		writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
+		return graceRejectedSoft
+	}
+	if child.Expired(s.clock()) {
+		// A successor minted just before the family's absolute expiry could
+		// otherwise be recovered and used to mint a fresh access token after
+		// that expiry — the same window that made the original token
+		// unusable must also close this recovery path.
+		writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
+		return graceRejectedSoft
+	}
+	groups, scopes, sErr := s.ResolveScopes(r.Context(), child.TelegramID)
+	if sErr != nil {
+		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
+		return graceServerError
+	}
+	tok, mErr := s.mintAccessToken(child.TelegramID, child.TelegramUsername, groups, scopes)
+	if mErr != nil {
+		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
+		return graceServerError
+	}
+	slog.Info("oauth refresh token grace-window replay: re-issuing existing successor", "family_id", familyID)
+	writeTokenJSON(w, tok, candidate, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
+	return graceRecovered
+}
+
 // handleTokenRefresh implements grant_type=refresh_token: it renews a
 // (typically expired) access token from a stored, rotating refresh token with
 // no Telegram interaction. This is what stops MCP clients losing access
 // once an access token's short TTL elapses. The presented refresh token is
 // rotated — the old one revoked, a new one returned. Presenting an
-// already-rotated token is treated as reuse and revokes the whole family.
+// already-rotated token within rotationGraceWindow is treated as a possible
+// lost-response retry and recovers the existing successor; past the window
+// it's treated as reuse and revokes the whole family.
 func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	refreshTok := r.FormValue("refresh_token")
 	clientID := r.FormValue("client_id")
@@ -1503,13 +1585,32 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reuse detection: an already-rotated (revoked) token is presented again.
-	// Either an honest client double-submitted or a stolen token is in play —
-	// kill the family and force a fresh login. If the revoke itself fails we
-	// must NOT fall through to a plain invalid_grant: that would leave the
-	// family's still-live token usable after a detected theft. Fail closed
-	// with a 500 so the incident surfaces and the caller retries.
 	if rt.Revoked() {
-		if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
+		// Grace window: if this row was superseded by a normal rotation very
+		// recently, the caller may be legitimately retrying after a dropped
+		// response. attemptGraceRecovery proves the caller already held
+		// refreshTok before it was rotated (by recomputing the deterministic
+		// successor and matching it against the live child) before re-issuing
+		// anything. A non-eligible outcome (wrong client, expired successor,
+		// or no match) is NOT treated as proof of theft: it soft-fails with
+		// invalid_grant WITHOUT revoking the family, so a wrong client_id or
+		// an unlucky lost race can't be used to kill a legitimate concurrent
+		// session. Only a replay outside the grace window (or of a token
+		// already revoked for a different reason) escalates to a full family
+		// revocation, below.
+		switch s.attemptGraceRecovery(w, r, refreshTok, rt.RevokedReason, rt.RevokedAt, rt.FamilyID, clientID) {
+		case graceRecovered, graceRejectedSoft, graceServerError:
+			return
+		case graceNotEligible:
+			// fall through to hard revoke
+		}
+		// Either an honest client double-submitted outside the grace window
+		// or a stolen token is in play — kill the family and force a fresh
+		// login. If the revoke itself fails we must NOT fall through to a
+		// plain invalid_grant: that would leave the family's still-live
+		// token usable after a detected theft. Fail closed with a 500 so the
+		// incident surfaces and the caller retries.
+		if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID, "reuse_detected"); revErr != nil {
 			slog.Error("refresh token family revoke failed — reuse detection not enforced",
 				"err", revErr, "family_id", rt.FamilyID)
 			writeTokenError(w, "server_error", "could not complete reuse detection", http.StatusInternalServerError)
@@ -1539,7 +1640,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
 	}
-	newRefresh := randomToken(32)
+	newRefresh := deriveSuccessorRefreshToken(s.cfg.JWTSecret, refreshTok)
 	if err := s.store.RotateRefreshToken(r.Context(), refreshTok, newRefresh, db.RefreshToken{
 		FamilyID:         rt.FamilyID,
 		UserID:           rt.UserID,
@@ -1557,20 +1658,50 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, db.ErrRefreshTokenNotFound) {
 			// The token was revoked between LookupRefreshToken and the
 			// rotation — a concurrent request rotated the same token first.
-			// That is a same-token double-use, indistinguishable from a theft
-			// race, so treat it like any other reuse and kill the family.
-			// Without this, the request that won the race would keep a live
-			// rotated token while the family stays intact. The cost is that a
-			// (rare) honest concurrent double-submit forces one re-login —
-			// well-behaved OAuth clients serialise refresh, so this path is
-			// effectively attacker-only in practice.
-			//
-			// Unlike the explicit-reuse path above, a revoke failure here is
-			// logged but not turned into a 500: the loser's token is already
-			// definitively gone (the winner revoked it), so invalid_grant is
-			// the correct client-facing answer regardless, and the family will
-			// still be caught if the now-revoked token is replayed.
-			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID); revErr != nil {
+			// This is the exact race deterministic derivation exists to
+			// recover from: since both requests derive the same candidate
+			// successor from refreshTok, the loser can recover the winner's
+			// already-committed row instead of treating it as reuse. Re-read
+			// the predecessor to learn how/when the winner revoked it, and
+			// run it through the SAME grace-window-bounded, expiry-checked,
+			// error-propagating recovery as a direct replay gets — an
+			// unbounded recovery here (no time check at all) would let an
+			// arbitrarily stalled request bypass the reuse-detection
+			// boundary entirely.
+			reRead, reErr := s.store.LookupRefreshToken(r.Context(), refreshTok)
+			if reErr != nil && !errors.Is(reErr, db.ErrRefreshTokenNotFound) {
+				// A transient failure re-reading the predecessor must not be
+				// mistaken for "nothing to recover" — that would let a DB
+				// blip fall through to family revocation, same class of bug
+				// attemptGraceRecovery itself already guards against.
+				slog.Error("could not re-read predecessor after rotation race",
+					"err", reErr, "family_id", rt.FamilyID)
+				writeTokenError(w, "server_error", "could not verify rotation race", http.StatusInternalServerError)
+				return
+			}
+			if reErr == nil && reRead.Revoked() {
+				switch s.attemptGraceRecovery(w, r, refreshTok, reRead.RevokedReason, reRead.RevokedAt, reRead.FamilyID, clientID) {
+				case graceRecovered, graceRejectedSoft, graceServerError:
+					return
+				case graceNotEligible:
+					// fall through to hard revoke
+				}
+			}
+			// reErr being ErrRefreshTokenNotFound here means the
+			// predecessor row was somehow deleted between the race and this
+			// re-read — falls through to hard revoke below, correctly:
+			// there is nothing left to verify or recover.
+			// No recoverable successor: either a genuinely stolen token is
+			// in play, or the race happened outside recovery range (e.g. the
+			// winner's row was itself already superseded, or too much time
+			// passed). Kill the family. Without this, the request that won
+			// the race would keep a live rotated token while the family
+			// stays intact. A revoke failure here is logged but not turned
+			// into a 500: the loser's token is already definitively gone
+			// (the winner revoked it), so invalid_grant is the correct
+			// client-facing answer regardless, and the family will still be
+			// caught if the now-revoked token is replayed.
+			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID, "reuse_detected"); revErr != nil {
 				slog.Error("refresh token family revoke failed after rotation race",
 					"err", revErr, "family_id", rt.FamilyID)
 			}
