@@ -1668,7 +1668,18 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 			// unbounded recovery here (no time check at all) would let an
 			// arbitrarily stalled request bypass the reuse-detection
 			// boundary entirely.
-			if reRead, reErr := s.store.LookupRefreshToken(r.Context(), refreshTok); reErr == nil && reRead.Revoked() {
+			reRead, reErr := s.store.LookupRefreshToken(r.Context(), refreshTok)
+			if reErr != nil && !errors.Is(reErr, db.ErrRefreshTokenNotFound) {
+				// A transient failure re-reading the predecessor must not be
+				// mistaken for "nothing to recover" — that would let a DB
+				// blip fall through to family revocation, same class of bug
+				// attemptGraceRecovery itself already guards against.
+				slog.Error("could not re-read predecessor after rotation race",
+					"err", reErr, "family_id", rt.FamilyID)
+				writeTokenError(w, "server_error", "could not verify rotation race", http.StatusInternalServerError)
+				return
+			}
+			if reErr == nil && reRead.Revoked() {
 				switch s.attemptGraceRecovery(w, r, refreshTok, reRead.RevokedReason, reRead.RevokedAt, reRead.FamilyID, clientID) {
 				case graceRecovered, graceRejectedSoft, graceServerError:
 					return
@@ -1676,6 +1687,10 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 					// fall through to hard revoke
 				}
 			}
+			// reErr being ErrRefreshTokenNotFound here means the
+			// predecessor row was somehow deleted between the race and this
+			// re-read — falls through to hard revoke below, correctly:
+			// there is nothing left to verify or recover.
 			// No recoverable successor: either a genuinely stolen token is
 			// in play, or the race happened outside recovery range (e.g. the
 			// winner's row was itself already superseded, or too much time
