@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // doTokenRequest posts form values to /oauth/token and returns the recorder.
@@ -240,6 +242,54 @@ func TestToken_RefreshReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	reuseForm.Set("client_id", "claude.ai")
 	if rec := doTokenRequest(t, mux, reuseForm); rec.Code == http.StatusOK {
 		t.Fatal("token family was not revoked after reuse detection")
+	}
+}
+
+// TestToken_RefreshGraceWindow_ExpiredSuccessorRejected ensures a grace
+// replay never hands back a successor that is itself already past its own
+// absolute expiry, even though the rotation itself is still within the
+// grace window — e.g. a token rotated shortly before the family's absolute
+// TTL elapses.
+func TestToken_RefreshGraceWindow_ExpiredSuccessorRejected(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 777, "dave", "Dave")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "short-lived-original"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "fam-short",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: 777,
+		ExpiresAt:  time.Now().Add(50 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("save short-lived token: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+
+	// First rotation succeeds — still well within the short TTL.
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first rotation failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Move the server clock forward past the inherited short expiry, but
+	// nowhere near the 30s grace window relative to the real rotation
+	// timestamp captured moments ago — this isolates "successor expired"
+	// from "outside the grace window" as the reason for rejection.
+	srv.clock = func() time.Time { return time.Now().Add(5 * time.Second) }
+
+	if rec := doTokenRequest(t, mux, form); rec.Code == http.StatusOK {
+		t.Fatal("grace-window replay recovered an already-expired successor")
 	}
 }
 
