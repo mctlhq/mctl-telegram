@@ -150,6 +150,22 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Rotation-replay grace window (fixes invalid_grant on legitimate refresh
+	// races): parent_token_hash lets a replayed predecessor be verified
+	// against its live successor with one indexed lookup, mirroring mctl-api.
+	// revoked_reason distinguishes a row superseded by normal rotation
+	// ('rotated') from one killed by reuse detection or an operator action
+	// ('reuse_detected' / 'explicit_revoke') — RevokedAt alone can't tell
+	// these apart, and only 'rotated' rows within the grace window are
+	// eligible for replay recovery.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "parent_token_hash",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "revoked_reason",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// Unique index on telegram_login_id (partial — NULLs ignored) so multiple
 	// pre-migration rows without telegram_login_id remain valid.
 	idxStmts := []string{
@@ -293,7 +309,9 @@ func sqliteSchema() []string {
 			client_name TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			expires_at DATETIME NOT NULL,
-			revoked_at DATETIME
+			revoked_at DATETIME,
+			parent_token_hash BLOB,
+			revoked_reason TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
@@ -351,7 +369,9 @@ func pgSchema() []string {
 			client_name TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			expires_at TIMESTAMPTZ NOT NULL,
-			revoked_at TIMESTAMPTZ
+			revoked_at TIMESTAMPTZ,
+			parent_token_hash BYTEA,
+			revoked_reason TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,

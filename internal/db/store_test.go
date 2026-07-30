@@ -560,7 +560,7 @@ func TestListIdentities_ConnectedVia(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save revoked token: %v", err)
 	}
-	if _, err := s.RevokeRefreshTokenFamily(ctx, "fam4"); err != nil {
+	if _, err := s.RevokeRefreshTokenFamily(ctx, "fam4", "explicit_revoke"); err != nil {
 		t.Fatalf("revoke token: %v", err)
 	}
 

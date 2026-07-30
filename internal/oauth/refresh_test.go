@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,10 +96,107 @@ func TestToken_RefreshGrantRenewsAccessToken(t *testing.T) {
 	}
 }
 
-// TestToken_RefreshRotationAndReuseDetection confirms that the old token is
-// dead after rotation, and that presenting it again revokes the whole family —
-// so even the freshly rotated token stops working.
-func TestToken_RefreshRotationAndReuseDetection(t *testing.T) {
+// TestToken_RefreshGraceWindowReplay_Succeeds covers the actual production
+// bug fix: a deterministic-derivation caller that retries a refresh with the
+// same predecessor within the grace window (e.g. after a dropped response)
+// must recover the already-committed successor and succeed, not fail with
+// invalid_grant.
+func TestToken_RefreshGraceWindowReplay_Succeeds(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	refreshForm := url.Values{}
+	refreshForm.Set("grant_type", "refresh_token")
+	refreshForm.Set("refresh_token", original)
+	refreshForm.Set("client_id", "claude.ai")
+
+	rec := doTokenRequest(t, mux, refreshForm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode rotated resp: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	// Immediate replay of the original token (well within the grace window,
+	// no clock manipulation needed — real elapsed time here is
+	// milliseconds) must succeed and hand back the SAME successor a
+	// deterministic-derivation caller would have recomputed.
+	rec2 := doTokenRequest(t, mux, refreshForm)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("grace-window replay was rejected: %d %s", rec2.Code, rec2.Body.String())
+	}
+	var replayed map[string]any
+	if err := json.NewDecoder(rec2.Body).Decode(&replayed); err != nil {
+		t.Fatalf("decode grace replay resp: %v", err)
+	}
+	if replayed["refresh_token"] != rotatedTok {
+		t.Errorf("grace replay refresh_token = %v, want %v (the already-committed successor)",
+			replayed["refresh_token"], rotatedTok)
+	}
+
+	// The recovered successor must still work for a further, genuine rotation.
+	nextForm := url.Values{}
+	nextForm.Set("grant_type", "refresh_token")
+	nextForm.Set("refresh_token", rotatedTok)
+	nextForm.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, nextForm); rec.Code != http.StatusOK {
+		t.Errorf("rotation on grace-replayed successor failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToken_RefreshGraceWindow_WrongClientRejected ensures a grace-window
+// replay presenting a different client_id than the original rotation is
+// never trusted, and doesn't disturb the legitimate successor.
+func TestToken_RefreshGraceWindow_WrongClientRejected(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	refreshForm := url.Values{}
+	refreshForm.Set("grant_type", "refresh_token")
+	refreshForm.Set("refresh_token", original)
+	refreshForm.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, refreshForm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode rotated resp: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	wrongClientForm := url.Values{}
+	wrongClientForm.Set("grant_type", "refresh_token")
+	wrongClientForm.Set("refresh_token", original)
+	wrongClientForm.Set("client_id", "someone-else")
+	if rec := doTokenRequest(t, mux, wrongClientForm); rec.Code == http.StatusOK {
+		t.Fatal("grace-window replay with mismatched client_id was accepted")
+	}
+
+	// The legitimate successor must remain usable after the rejected attempt.
+	legitForm := url.Values{}
+	legitForm.Set("grant_type", "refresh_token")
+	legitForm.Set("refresh_token", rotatedTok)
+	legitForm.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, legitForm); rec.Code != http.StatusOK {
+		t.Errorf("legitimate successor should still work after rejected cross-client replay: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToken_RefreshReuseAfterGraceWindow_RevokesFamily confirms that once the
+// grace window elapses, a replayed predecessor is treated as genuine reuse
+// and the whole family dies — so even the freshly rotated token stops
+// working.
+func TestToken_RefreshReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
@@ -121,9 +219,17 @@ func TestToken_RefreshRotationAndReuseDetection(t *testing.T) {
 	}
 	rotatedTok, _ := rotated["refresh_token"].(string)
 
-	// Reusing the original (now-rotated) token must be rejected.
+	// Advance the server's clock past the grace window. RevokedAt is
+	// stamped with real time.Now() in the store layer, independent of
+	// srv.clock — pushing srv.clock into the future is what moves the
+	// comparison past the window without a real sleep (same pattern as
+	// TestToken_RefreshRejectsExpiredToken above).
+	srv.clock = func() time.Time { return time.Now().Add(time.Hour) }
+
+	// Reusing the original (now-rotated) token past the grace window must
+	// be rejected.
 	if rec := doTokenRequest(t, mux, refreshForm); rec.Code == http.StatusOK {
-		t.Fatal("reusing a rotated refresh token was accepted")
+		t.Fatal("reusing a rotated refresh token past the grace window was accepted")
 	}
 
 	// Reuse detection must revoke the whole family, so the freshly rotated
@@ -134,6 +240,58 @@ func TestToken_RefreshRotationAndReuseDetection(t *testing.T) {
 	reuseForm.Set("client_id", "claude.ai")
 	if rec := doTokenRequest(t, mux, reuseForm); rec.Code == http.StatusOK {
 		t.Fatal("token family was not revoked after reuse detection")
+	}
+}
+
+// TestToken_RefreshRotationRace_ConcurrentRecovery models the real race this
+// fix targets: two requests racing to refresh the same predecessor token
+// (e.g. two MCP sessions sharing credentials). Both must succeed with the
+// identical rotated session instead of one winning and one hard-failing.
+func TestToken_RefreshRotationRace_ConcurrentRecovery(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	const n = 5
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	refreshTokens := make([]string, n)
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			form := url.Values{}
+			form.Set("grant_type", "refresh_token")
+			form.Set("refresh_token", original)
+			form.Set("client_id", "claude.ai")
+			rec := doTokenRequest(t, mux, form)
+			codes[i] = rec.Code
+			if rec.Code == http.StatusOK {
+				var body map[string]any
+				if err := json.NewDecoder(rec.Body).Decode(&body); err == nil {
+					refreshTokens[i], _ = body["refresh_token"].(string)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	var successToken string
+	for i, code := range codes {
+		if code == http.StatusOK {
+			successes++
+			if successToken == "" {
+				successToken = refreshTokens[i]
+			} else if refreshTokens[i] != successToken {
+				t.Errorf("racer %d got a different successor token than the others", i)
+			}
+		}
+	}
+	if successes != n {
+		t.Errorf("expected all %d concurrent racers to recover the same successor, got %d successes (codes: %v)", n, successes, codes)
 	}
 }
 

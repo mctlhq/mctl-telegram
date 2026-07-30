@@ -70,12 +70,22 @@ func TestRefreshToken_Rotate(t *testing.T) {
 	if !old.Revoked() {
 		t.Error("rotated token not marked revoked")
 	}
+	if old.RevokedReason != "rotated" {
+		t.Errorf("rotated token revoked_reason = %q, want \"rotated\"", old.RevokedReason)
+	}
 	newTok, err := s.LookupRefreshToken(ctx, "new")
 	if err != nil {
 		t.Fatalf("lookup new: %v", err)
 	}
 	if newTok.Revoked() {
 		t.Error("freshly rotated token reported revoked")
+	}
+	child, err := s.LookupRefreshTokenByHashPair(ctx, "old", "new", "fam-x", "c")
+	if err != nil {
+		t.Fatalf("lookup by hash pair: %v", err)
+	}
+	if child.TelegramID != 5 {
+		t.Errorf("lookup by hash pair returned wrong row: %+v", child)
 	}
 	// Rotating an already-revoked token must fail rather than mint a replacement.
 	if err := s.RotateRefreshToken(ctx, "old", "new2", base); !errors.Is(err, ErrRefreshTokenNotFound) {
@@ -97,7 +107,7 @@ func TestRefreshToken_RevokeFamily(t *testing.T) {
 	if err := s.SaveRefreshToken(ctx, "b", fam); err != nil {
 		t.Fatalf("save b: %v", err)
 	}
-	n, err := s.RevokeRefreshTokenFamily(ctx, "kin")
+	n, err := s.RevokeRefreshTokenFamily(ctx, "kin", "reuse_detected")
 	if err != nil {
 		t.Fatalf("revoke family: %v", err)
 	}
@@ -111,6 +121,9 @@ func TestRefreshToken_RevokeFamily(t *testing.T) {
 		}
 		if !got.Revoked() {
 			t.Errorf("token %s not revoked after family revoke", tok)
+		}
+		if got.RevokedReason != "reuse_detected" {
+			t.Errorf("token %s revoked_reason = %q, want \"reuse_detected\"", tok, got.RevokedReason)
 		}
 	}
 }
