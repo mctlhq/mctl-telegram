@@ -25,7 +25,7 @@ func (rm ResourceMetadata) wwwAuthenticate(requestPath string) string {
 		return `Bearer realm="mctl-telegram"`
 	}
 	metadataURL := strings.TrimRight(rm.BaseURL, "/") + "/.well-known/oauth-protected-resource"
-	if rm.MCPPath != "" && requestPath == rm.MCPPath {
+	if rm.MCPPath != "" && (requestPath == rm.MCPPath || strings.HasPrefix(requestPath, rm.MCPPath+"/")) {
 		metadataURL += rm.MCPPath
 	}
 	return `Bearer realm="mctl-telegram", resource_metadata="` + metadataURL + `"`

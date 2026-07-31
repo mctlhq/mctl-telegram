@@ -860,7 +860,7 @@ func (p rejectProvider) Authenticate(_ *http.Request) (*auth.Identity, error) {
 
 type protectedResourceMetadata struct {
 	Resource             string   `json:"resource"`
-	AuthorizationServers []string `json:"authorization_servers"`
+	AuthorizationServers []string `json:"authorization_servers,omitempty"`
 	ScopesSupported      []string `json:"scopes_supported"`
 }
 
