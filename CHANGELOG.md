@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.46.0](https://github.com/mctlhq/mctl-telegram/compare/0.45.0...0.46.0) (2026-07-31)
+
+
+### Features
+
+* **agent:** add bounded C1 validation controls ([#317](https://github.com/mctlhq/mctl-telegram/issues/317)) ([925b67f](https://github.com/mctlhq/mctl-telegram/commit/925b67f3561ff27240fc35f96deb6d395612c858))
+* **agentapi:** admin-scoped PUT /api/admin/agent/profile ([#315](https://github.com/mctlhq/mctl-telegram/issues/315)) ([ca3deb4](https://github.com/mctlhq/mctl-telegram/commit/ca3deb48b2936209f8261a9af1e3eb2a39c9e105))
+* **agent:** store tenant owner profiles encrypted ([#328](https://github.com/mctlhq/mctl-telegram/issues/328)) ([061933b](https://github.com/mctlhq/mctl-telegram/commit/061933b261410bc45aa85ed57930814ceaaf94ab))
+
+
+### Bug Fixes
+
+* **agent-worker:** suppress adversarial prompt echoes ([c5900eb](https://github.com/mctlhq/mctl-telegram/commit/c5900eb2f1c0c912fc3d56f36e5b1f386eaf806d))
+* **agent-worker:** suppress adversarial prompt echoes ([ddc1686](https://github.com/mctlhq/mctl-telegram/commit/ddc1686c8c2021fe5d1376feb7b173805892041f))
+* **agent:** bind job completion to durable result ([#331](https://github.com/mctlhq/mctl-telegram/issues/331)) ([c2fcf32](https://github.com/mctlhq/mctl-telegram/commit/c2fcf327e1328b405c83a52ab97d50a7fb290d59))
+* **agent:** claim jobs with POST ([#327](https://github.com/mctlhq/mctl-telegram/issues/327)) ([314b759](https://github.com/mctlhq/mctl-telegram/commit/314b759c6ef71997896ed6c4141c0ff665945c1d))
+* **agent:** poll Saved Messages commands from history ([#319](https://github.com/mctlhq/mctl-telegram/issues/319)) ([c66ae91](https://github.com/mctlhq/mctl-telegram/commit/c66ae9168fba0a54b2e5ec7070199fc4d87938dc))
+* **agent:** protect approval codes at rest ([#326](https://github.com/mctlhq/mctl-telegram/issues/326)) ([54f0aab](https://github.com/mctlhq/mctl-telegram/commit/54f0aabf26baed84729898734d74ee080a83c85a))
+* **agent:** saved-history poller must not gate on msg.Out ([#322](https://github.com/mctlhq/mctl-telegram/issues/322)) ([ea04c8f](https://github.com/mctlhq/mctl-telegram/commit/ea04c8fd387e87fc993a91a86dea0db58936e31f))
+* **agent:** verify durable MCP job completion ([#316](https://github.com/mctlhq/mctl-telegram/issues/316)) ([d92939d](https://github.com/mctlhq/mctl-telegram/commit/d92939dcafa68bce70f0dd99f7deaa87245e95e1))
+* **ci:** fail incomplete Claude reviews ([#323](https://github.com/mctlhq/mctl-telegram/issues/323)) ([2acc457](https://github.com/mctlhq/mctl-telegram/commit/2acc457baab81439e95249d7a0ad1c929116cc32))
+* **oauth:** complete RFC 9728 discovery and fix scope metadata drift ([#345](https://github.com/mctlhq/mctl-telegram/issues/345)) ([6e2970b](https://github.com/mctlhq/mctl-telegram/commit/6e2970bc09f9b80c2209743f9c5754db1bbc8556))
+* **oauth:** recover refresh-token rotation races instead of failing them ([#343](https://github.com/mctlhq/mctl-telegram/issues/343)) ([355cb96](https://github.com/mctlhq/mctl-telegram/commit/355cb965b37795957fabc3060b54d4dab48f3bbf))
+* **telegram:** retire duplicated auth sessions ([#324](https://github.com/mctlhq/mctl-telegram/issues/324)) ([0438490](https://github.com/mctlhq/mctl-telegram/commit/0438490d2e2bbf680e2891dce997ec2637378502))
+
 ## [0.45.0](https://github.com/mctlhq/mctl-telegram/compare/0.44.1...0.45.0) (2026-07-30)
 
 
