@@ -317,7 +317,7 @@ jobs:
           # feat/agents-* branches as this GitHub App; without the allowlist
           # entry the action hard-fails the whole review run on the
           # synchronize event ("Workflow initiated by non-human actor").
-          allowed_bots: "mctl-claude-remote"
+          allowed_bots: "mctl-claude-remote,github-actions"
           track_progress: true
           prompt: |
             REPO: ${{ github.repository }}
