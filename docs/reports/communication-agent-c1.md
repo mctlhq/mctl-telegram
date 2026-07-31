@@ -199,6 +199,53 @@ Acceptance:
   and both Argo applications `Synced / Healthy`. The claimed job remains
   durable with no action and can be retried deliberately after quota returns.
 
+### 2026-07-31 — quota recovered, remaining drills closed out
+
+- GitOps PR [#683](https://github.com/mctlhq/mctl-gitops/pull/683) reopened
+  the bounded window (worker replicas 0→1, kill switch off). Job #50
+  (deferred 2026-07-28) was claimed and reached `status=completed` with a
+  real `propose_reply` action (#39, code `JQKJSM`) — the dedicated worker
+  OAuth quota (`platform/labs/agent-worker-preview/anthropic`, isolated from
+  both interactive sessions and `claude-review.yml`) had recovered.
+- Kill-switch-after-approval: GitOps PR
+  [#684](https://github.com/mctlhq/mctl-gitops/pull/684) flipped
+  `AGENT_KILL_SWITCH` to `true` with action #39 still `pending_approval`.
+  The owner approved `JQKJSM` for real from the live Telegram client.
+  `send()`'s policy re-check caught the kill switch and transitioned the
+  action `approved`→`denied` — `send_random_id` and `executed_tg_message_id`
+  both stayed empty, confirming no Telegram RPC was attempted despite a
+  genuine owner approval. Separately, `propose_reply`'s own policy check
+  also denies outright while the switch is on (observed live on a later
+  message, action #40, reason `global kill switch engaged`) — both the
+  propose-time and send-time gates are confirmed live, not just unit-tested.
+- `random_id` retry: GitOps PR
+  [#685](https://github.com/mctlhq/mctl-gitops/pull/685) flipped the switch
+  back off. A fresh allowlisted message produced action #41, approved and
+  sent successfully (`executed`, real `send_random_id`,
+  `executed_tg_message_id`). A live crash-mid-send race (kill the process
+  between persisting `send_random_id` and the RPC completing) was attempted
+  but is not achievable through this session's interaction model: `Approve`
+  calls `send` synchronously within one request, and by the time an
+  externally-relayed "sent" confirmation reaches the operator the whole
+  cycle has already finished (confirmed empirically — action #41 was already
+  `executed` before the relay landed). The idempotent-retry invariant
+  (`RecoverStuck`/`recoverOne` retrying the same persisted `random_id`) is
+  instead verified by the existing deterministic unit tests, already
+  reviewed with no P1/P2 findings.
+- GitOps PR [#687](https://github.com/mctlhq/mctl-gitops/pull/687) closed
+  the window: `AGENT_KILL_SWITCH=true`, worker replicas `0`. Live
+  verification confirmed both values, `listener_enabled=false`,
+  `autopilot_paused=true`, `sender_allowlist` cleared, and both Argo
+  applications `Synced / Healthy`.
+- Issues [#296](https://github.com/mctlhq/mctl-telegram/issues/296) and
+  [#297](https://github.com/mctlhq/mctl-telegram/issues/297) closed as
+  completed with the above evidence linked. C2's production-quota-domain
+  gate tracked separately as
+  [#347](https://github.com/mctlhq/mctl-telegram/issues/347) — note the
+  worker's dedicated OAuth credential above already provides quota
+  *isolation*; #347 covers the additional rate/cost ceiling and anomaly
+  kill-switch C2 needs on top of that before autonomous sends are allowed.
+
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
@@ -212,9 +259,9 @@ Acceptance:
 - [x] Build and deploy the matching `Dockerfile.agent-worker` image by exact
       merge SHA before the worker is scaled above zero.
 - [x] Run the 30-fixture harness and record aggregate results here.
-- [ ] Run the remaining kill-switch-after-approval live drill. Draft,
+- [x] Run the remaining kill-switch-after-approval live drill. Draft,
       notification, audit, and one harmless explicitly approved reply have
-      passed.
+      passed. Kill-switch rejection at send time confirmed live 2026-07-31.
 - [x] Finish the completed test window in the safe stopped state:
       `AGENT_KILL_SWITCH=true`, `listener_enabled=false`,
       `autopilot_paused=true`, worker replicas `0`.
@@ -222,8 +269,20 @@ Acceptance:
       before opening another test window.
 - [x] Store approval codes as hashes and ship the full
       retention/adversarial hardening set.
-- [ ] Run the `random_id` retry drill before guarded autopilot.
-- [ ] Provision a production quota domain isolated from interactive sessions
-      and `claude-review.yml` before C2.
-- [ ] Close implementation issues #296/#297 and GitOps #624 only after all
+- [x] Run the `random_id` retry drill before guarded autopilot. A live
+      crash-mid-send race is not achievable through this interaction model
+      (confirmed empirically 2026-07-31); the idempotent-retry invariant is
+      verified by the existing `recoverOne`/`RecoverStuck` unit tests
+      instead.
+- [x] Provision a production quota domain isolated from interactive sessions
+      and `claude-review.yml` before C2. Already shipped: the worker uses a
+      dedicated Claude Code OAuth token
+      (`platform/labs/agent-worker-preview/anthropic`) with its own
+      `AGENT_MAX_BUDGET_USD` cap, separate from both interactive sessions
+      and `claude-review.yml`'s org-shared token. C2's rate/cost ceiling and
+      anomaly kill-switch on top of this isolation are tracked in #347.
+- [x] Close implementation issues #296/#297 and GitOps #624 only after all
       evidence is present; create the separate C2 quota-domain gate issue.
+      #296/#297 closed 2026-07-31 with evidence linked; #624 was already
+      closed; C2 gate tracked as
+      [#347](https://github.com/mctlhq/mctl-telegram/issues/347).
