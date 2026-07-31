@@ -118,6 +118,7 @@ invocation.
 | `AGENT_APPROVAL_TTL` | `24h` | Maximum pending owner-approval lifetime. |
 | `AGENT_PROFILE_PATH` | unset | One-time legacy YAML import only. Remove it after the encrypted DB import is verified. |
 | `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |
+| `AGENT_TEST_CRASH_AFTER_RESERVE` | `false` | **TEST-ONLY.** Hard-exits the process (code 137) immediately after `send_random_id` is persisted and an action is CASed to `executing`, before the Telegram RPC — for the `random_id`/`RecoverStuck` crash-recovery drill. Every send handled by the pod is hit while set, not just a chosen one. Must never be `true` outside a deliberate, bounded drill window. |
 | profile `listener_enabled` | `false` | Per-account Telegram ingest switch. |
 | profile `autopilot_paused` | `true` on bootstrap | Per-account autonomous action pause. |
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |

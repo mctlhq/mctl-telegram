@@ -158,6 +158,10 @@ func main() {
 	// just newly-started ones.
 	agentGlobalKill := func() bool { return cfg.AgentKillSwitch }
 	agentExecutor := executor.New(store, &poolSender{pool: pool, store: store, peerCache: peerCache}, agentGlobalKill, m)
+	agentExecutor.CrashAfterReserve = cfg.AgentTestCrashAfterReserve
+	if cfg.AgentTestCrashAfterReserve {
+		slog.Warn("communication agent TEST-ONLY crash-after-reserve fault injection is ENABLED — every send on this pod will hard-exit before reaching Telegram; must only be set for a deliberate drill window")
+	}
 	demoReviewerTGID := int64(0)
 	if cfg.DemoReviewerEnabled {
 		demoReviewerTGID = cfg.DemoReviewerTGID

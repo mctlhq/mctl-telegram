@@ -153,6 +153,17 @@ type Config struct {
 	// path is set; ignored otherwise. Runtime lookup is by authenticated
 	// internal user_id, not this process-wide value.
 	AgentProfileOwnerTGID int64
+	// AgentTestCrashAfterReserve is a TEST-ONLY fault-injection switch. When
+	// true, the executor hard-exits the process immediately after
+	// ReserveAgentActionSend persists send_random_id and CASes an action to
+	// `executing`, but before the Telegram RPC fires — deterministically
+	// reproducing the crash-mid-send scenario the random_id/RecoverStuck
+	// design exists for, so the retry-with-the-same-random_id drill (see
+	// docs/plans/communication-agent.md's Rollout gates) can be run live
+	// on demand instead of relying solely on unit tests. Must never be true
+	// outside a deliberate drill window — every real send on the pod is hit
+	// by this, not just a chosen one. Set via AGENT_TEST_CRASH_AFTER_RESERVE.
+	AgentTestCrashAfterReserve bool
 }
 
 func Load() (*Config, error) {
@@ -181,6 +192,7 @@ func Load() (*Config, error) {
 		AgentKillSwitch:            envBool("AGENT_KILL_SWITCH", false),
 		AgentProfilePath:           os.Getenv("AGENT_PROFILE_PATH"),
 		AgentProfileOwnerTGID:      envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
+		AgentTestCrashAfterReserve: envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
 		LogLevel:                   envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:      os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramOIDCClientID:       os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),

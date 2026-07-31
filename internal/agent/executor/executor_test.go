@@ -3,6 +3,10 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1162,4 +1166,119 @@ func TestExecutor_ProcessApproved_SendsGuardedModeActions(t *testing.T) {
 	if action.Status != db.ActionExecuted {
 		t.Fatalf("status = %q, want executed", action.Status)
 	}
+}
+
+// TestExecutor_CrashAfterReserve_ExitsAfterPersistingRandomID proves the
+// TEST-ONLY fault-injection point (config.Config.AgentTestCrashAfterReserve /
+// Executor.CrashAfterReserve) reproduces exactly the scenario RecoverStuck
+// exists for — send_random_id already durably persisted, row already
+// `executing` — and not some other point (too early: nothing to recover; too
+// late: the real send already happened, defeating the point of the drill).
+// os.Exit cannot be exercised safely in-process without killing the test
+// binary itself, so the crash runs in a real subprocess against a real file
+// DB the parent can re-inspect afterward.
+func TestExecutor_CrashAfterReserve_ExitsAfterPersistingRandomID(t *testing.T) {
+	if os.Getenv("EXECUTOR_CRASH_HELPER") == "1" {
+		runCrashAfterReserveHelper(t)
+		return
+	}
+	ctx := context.Background()
+	dsn := "file:" + filepath.Join(t.TempDir(), "crash.db") + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	conn, err := db.Open(ctx, dsn, 1, 1)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	crypt, err := crypto.New(testKey())
+	if err != nil {
+		t.Fatalf("crypto: %v", err)
+	}
+	store := db.NewStore(conn, crypt)
+	uid, err := store.EnsureUser(ctx, "owner", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close before handing the DB file to the subprocess: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestExecutor_CrashAfterReserve_ExitsAfterPersistingRandomID")
+	cmd.Env = append(os.Environ(),
+		"EXECUTOR_CRASH_HELPER=1",
+		"EXECUTOR_CRASH_HELPER_DSN="+dsn,
+		"EXECUTOR_CRASH_HELPER_UID="+strconv.FormatInt(uid, 10),
+		"EXECUTOR_CRASH_HELPER_CODE="+code,
+	)
+	out, runErr := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		t.Fatalf("subprocess did not exit via os.Exit as expected: err=%v output=%s", runErr, out)
+	}
+	if exitErr.ExitCode() != 137 {
+		t.Fatalf("subprocess exit code = %d, want 137 (os.Exit(137) from CrashAfterReserve); output=%s", exitErr.ExitCode(), out)
+	}
+
+	conn2, err := db.Open(ctx, dsn, 1, 1)
+	if err != nil {
+		t.Fatalf("reopen after crash: %v", err)
+	}
+	t.Cleanup(func() { _ = conn2.Close() })
+	store2 := db.NewStore(conn2, crypt)
+	action2, err := store2.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action after crash: %v", err)
+	}
+	if action2.Status != db.ActionExecuting {
+		t.Fatalf("status after crash = %q, want executing — random_id must be durably persisted before the crash point", action2.Status)
+	}
+	if action2.SendRandomID == 0 {
+		t.Fatalf("send_random_id not persisted before the crash")
+	}
+}
+
+// runCrashAfterReserveHelper is the subprocess body
+// TestExecutor_CrashAfterReserve_ExitsAfterPersistingRandomID execs itself
+// into via `-test.run` + EXECUTOR_CRASH_HELPER=1 — it is not a scenario `go
+// test` ever reaches directly. It re-opens the DB file the parent seeded,
+// approves the pre-planted action with CrashAfterReserve enabled, and
+// expects Approve to never return: os.Exit(137) inside send() must fire
+// first. If it does return, that's a real regression (the hook stopped
+// firing), reported by exiting nonzero for a reason other than 137 so the
+// parent's exit-code assertion fails loudly instead of silently passing.
+func runCrashAfterReserveHelper(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	dsn := os.Getenv("EXECUTOR_CRASH_HELPER_DSN")
+	conn, err := db.Open(ctx, dsn, 1, 1)
+	if err != nil {
+		t.Fatalf("helper: open: %v", err)
+	}
+	crypt, err := crypto.New(testKey())
+	if err != nil {
+		t.Fatalf("helper: crypto: %v", err)
+	}
+	store := db.NewStore(conn, crypt)
+	uid, err := strconv.ParseInt(os.Getenv("EXECUTOR_CRASH_HELPER_UID"), 10, 64)
+	if err != nil {
+		t.Fatalf("helper: parse uid: %v", err)
+	}
+	code := os.Getenv("EXECUTOR_CRASH_HELPER_CODE")
+	sender := &fakeSender{}
+	killed := false
+	execr := New(store, sender, func() bool { return killed }, nil)
+	execr.CrashAfterReserve = true
+	err = execr.Approve(ctx, uid, code)
+	t.Fatalf("helper: Approve returned instead of os.Exit(137) firing: err=%v sender_calls=%d", err, len(sender.calls))
 }
