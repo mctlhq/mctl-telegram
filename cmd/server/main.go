@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -322,11 +323,14 @@ func main() {
 	// chrome-rendered page needs to know this up front so it can hide the
 	// "manage" nav/footer link rather than link to a 404 in shared-hmac mode.
 	showManage := strings.EqualFold(cfg.AuthMode, "local-jwt")
+	resourceMeta := auth.ResourceMetadata{BaseURL: cfg.PublicBaseURL, MCPPath: cfg.MCPPath}
 
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
 	mux.Get("/metrics", metricsHandler(m, cfg.MetricsAllowCIDR))
-	mux.Get("/.well-known/oauth-protected-resource", protectedResource(cfg, authServer))
+	prmHandler := protectedResource(cfg, authServer)
+	mux.Get("/.well-known/oauth-protected-resource", prmHandler)
+	mux.Get("/.well-known/oauth-protected-resource"+cfg.MCPPath, prmHandler)
 	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
@@ -380,11 +384,11 @@ func main() {
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
 		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"))
-		mux.With(auth.Middleware(provider, true, m)).
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
 			Get("/telegram/connect/manage", manageSrv.HandleManage)
-		mux.With(auth.Middleware(provider, true, m)).
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
 			Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
-		mux.With(auth.Middleware(provider, true, m)).
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
 			Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 	}
 
@@ -393,7 +397,7 @@ func main() {
 	accountMux := chi.NewRouter()
 	accountHandlers := web.NewAccountHandlers(store, pool)
 	accountHandlers.Register(accountMux)
-	mux.Mount("/api/account", auth.Middleware(provider, true, m)(accountMux))
+	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
@@ -414,7 +418,7 @@ func main() {
 	// token would be rejected at /bridge. selectBridgeIssuer maps the same
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
-		mux.With(auth.Middleware(provider, true, m)).Post("/api/bridge/token",
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
 			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
 	}
 
@@ -432,7 +436,7 @@ func main() {
 	// accepts aud=agent tokens.
 	if cfg.AgentEnabled {
 		if secret := cfg.OAUTHJWTSecret; secret != "" {
-			mux.With(auth.Middleware(provider, true, m)).Post("/api/agent/token",
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/agent/token",
 				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg)))
 		}
 		// Admin-scoped agent_profiles management. Same provider/scope as the
@@ -441,7 +445,7 @@ func main() {
 		// row was a direct SQL insert; this is the managed opt-in path an
 		// operator uses for enable/disable, test-account rotation, and future
 		// production onboarding.
-		mux.With(auth.Middleware(provider, true, m)).Put("/api/admin/agent/profile",
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
 		agentProvider := selectAgentProvider(cfg, store)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
@@ -450,7 +454,7 @@ func main() {
 		agentSrv.WithProfile(agentProfileProvider)
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
-		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m)(agentMux))
+		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m, resourceMeta)(agentMux))
 		slog.Info("communication agent HTTP surface enabled", "path", "/api/agent/v1", "kill_switch", cfg.AgentKillSwitch)
 	}
 
@@ -462,7 +466,7 @@ func main() {
 	// runs, so unauthenticated humans still see instructions instead of
 	// a 401. MCP clients (Accept: application/json, text/event-stream)
 	// fall through and hit the full auth+ratelimit+MCP chain.
-	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m)(
+	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m, resourceMeta)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	// OriginGuard runs before auth: a present browser Origin must be on the
@@ -854,27 +858,45 @@ func (p rejectProvider) Authenticate(_ *http.Request) (*auth.Identity, error) {
 	return nil, errors.New(p.reason)
 }
 
+type protectedResourceMetadata struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers,omitempty"`
+	ScopesSupported      []string `json:"scopes_supported"`
+}
+
 // protectedResource serves the RFC 9728 OAuth Protected Resource Metadata so
 // claude.ai's connector knows which authorization server to talk to. In the
 // Telegram-native local-jwt mode this is the same service (PublicBaseURL);
 // in shared-hmac-legacy mode it stays pointed at api.mctl.ai; in local-dev
 // mode authServer is empty and the authorization_servers array is omitted so
 // OAuth clients do not discover endpoints that are not mounted.
+//
+// Registered at both /.well-known/oauth-protected-resource and its
+// cfg.MCPPath-suffixed alias — the "resource" field reflects which was
+// requested, mirroring the resource_metadata hint set by
+// auth.Middleware/auth.ResourceMetadata. scopes_supported is
+// oauth.DCRNegotiableScopes, identical to what
+// handleAuthorizationServerMetadata advertises: it excludes "mctl" (never
+// granted by ResolveScopes) and "admin:users" (implicit-privileged, not
+// DCR-negotiable) per that handler's documented rationale.
 func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
-	var authServersJSON string
+	var authServers []string
 	if authServer != "" {
-		authServersJSON = fmt.Sprintf("[%q]", authServer)
-	} else {
-		authServersJSON = "[]"
+		authServers = []string{authServer}
 	}
-	body := []byte(fmt.Sprintf(
-		`{"resource":%q,"authorization_servers":%s,"scopes_supported":["mctl","telegram:dialogs:read","telegram:messages:read","telegram:messages:send","telegram:messages:pin","admin:users"]}`,
-		cfg.PublicBaseURL,
-		authServersJSON,
-	))
-	return func(w http.ResponseWriter, _ *http.Request) {
+	base := strings.TrimRight(cfg.PublicBaseURL, "/")
+	mcpAlias := "/.well-known/oauth-protected-resource" + cfg.MCPPath
+	return func(w http.ResponseWriter, r *http.Request) {
+		resource := base
+		if r.URL.Path == mcpAlias {
+			resource = base + cfg.MCPPath
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body)
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
+			Resource:             resource,
+			AuthorizationServers: authServers,
+			ScopesSupported:      oauth.DCRNegotiableScopes,
+		})
 	}
 }
