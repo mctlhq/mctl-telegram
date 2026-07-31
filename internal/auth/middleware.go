@@ -10,13 +10,34 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
+// ResourceMetadata carries the base URL and MCP mount path needed to point a
+// 401 at this resource's RFC 9728 Protected Resource Metadata document via
+// the WWW-Authenticate resource_metadata parameter. Zero value (BaseURL=="")
+// omits resource_metadata entirely — matches prior behavior for any caller
+// that doesn't wire one.
+type ResourceMetadata struct {
+	BaseURL string
+	MCPPath string
+}
+
+func (rm ResourceMetadata) wwwAuthenticate(requestPath string) string {
+	if rm.BaseURL == "" {
+		return `Bearer realm="mctl-telegram"`
+	}
+	metadataURL := strings.TrimRight(rm.BaseURL, "/") + "/.well-known/oauth-protected-resource"
+	if rm.MCPPath != "" && requestPath == rm.MCPPath {
+		metadataURL += rm.MCPPath
+	}
+	return `Bearer realm="mctl-telegram", resource_metadata="` + metadataURL + `"`
+}
+
 // Middleware authenticates each request through the provider. When required is
 // false and the provider returns (nil, nil), the request proceeds with no
 // Identity in context (anonymous mode for local-dev).
 //
 // m is optional (nil-safe): when non-nil, authentication failures are
 // classified and counted in mctl_auth_failures_total{reason, provider}.
-func Middleware(p Provider, required bool, m *metrics.Registry) func(http.Handler) http.Handler {
+func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata) func(http.Handler) http.Handler {
 	providerLabel := providerName(p)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +54,7 @@ func Middleware(p Provider, required bool, m *metrics.Registry) func(http.Handle
 				if m != nil {
 					m.AuthFailuresTotal.WithLabelValues("no_token", providerLabel).Inc()
 				}
-				w.Header().Set("WWW-Authenticate", `Bearer realm="mctl-telegram"`)
+				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path))
 				writeJSONError(w, http.StatusUnauthorized, "authentication required")
 				return
 			}

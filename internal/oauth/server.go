@@ -760,12 +760,7 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		// token works correctly. Admins still receive admin:users in the
 		// JWT scopes claim; MCP per-tool gates check the claim, not this
 		// metadata field.
-		"scopes_supported": []string{
-			"telegram:dialogs:read",
-			"telegram:messages:read",
-			"telegram:messages:send",
-			"telegram:messages:pin",
-		},
+		"scopes_supported": DCRNegotiableScopes,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")

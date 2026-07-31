@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -884,27 +885,18 @@ func TestAuthorizationServerMetadata(t *testing.T) {
 	// based on TG_LOGIN_ADMINS), and advertising it caused client-tier
 	// users to see "not all requested permissions were granted" warnings
 	// because they cannot ever obtain that scope through DCR.
-	scopes, _ := body["scopes_supported"].([]any)
-	got := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		str, _ := s.(string)
-		got[str] = true
+	scopesAny, _ := body["scopes_supported"].([]any)
+	gotScopes := make([]string, len(scopesAny))
+	for i, s := range scopesAny {
+		gotScopes[i], _ = s.(string)
 	}
-	for _, want := range []string{
-		"telegram:dialogs:read",
-		"telegram:messages:read",
-		"telegram:messages:send",
-		"telegram:messages:pin",
-	} {
-		if !got[want] {
-			t.Errorf("scopes_supported missing %q", want)
-		}
-	}
-	if got["admin:users"] {
-		t.Errorf("scopes_supported must not include admin:users (privileged, not DCR-negotiable)")
-	}
-	if len(scopes) != 4 {
-		t.Errorf("scopes_supported len = %d, want 4", len(scopes))
+	// Must equal DCRNegotiableScopes exactly — this is one half of the
+	// drift-proofing for the PRM/AS-metadata scope-mismatch bug (see
+	// oauth.DCRNegotiableScopes doc comment and
+	// cmd/server.TestProtectedResource_ScopesMatchDCRNegotiableScopes for
+	// the other half).
+	if !reflect.DeepEqual(gotScopes, DCRNegotiableScopes) {
+		t.Errorf("scopes_supported = %v, want %v", gotScopes, DCRNegotiableScopes)
 	}
 }
 
