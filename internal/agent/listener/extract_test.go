@@ -87,6 +87,34 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 	}
 }
 
+// TestExtractMessage_SavedCommandIgnoresOutFlag guards against a live
+// regression found 2026-08-01 (mctl-telegram#354): the live push
+// (UpdateNewMessage) does not reliably set Out=true for a genuine owner
+// command in Saved Messages -- two consecutive real /mctl approve sends and
+// this account's own SendMessage echo of its own notification all arrived
+// with Out=false in the same session. A version of ExtractMessage gated on
+// Out for the self-peer case misfiled these as ordinary inbound private
+// messages, and the history-poller fallback's event_id-based dedup could
+// never recover from that misfiling -- the command was lost permanently.
+func TestExtractMessage_SavedCommandIgnoresOutFlag(t *testing.T) {
+	command := &tg.Message{ID: 40, Out: false, PeerID: &tg.PeerUser{UserID: selfTG}, Message: "/mctl approve RSVDWQ"}
+	got, ok := ExtractMessage(ownerUID, selfTG, command, ents(), false)
+	if !ok || got.Event.Kind != db.EventKindSavedCommand || got.SavedCommandText != command.Message {
+		t.Fatalf("Out=false saved command = %#v, ok=%v", got, ok)
+	}
+
+	note := &tg.Message{ID: 41, Out: false, PeerID: &tg.PeerUser{UserID: selfTG}, Message: "Draft reply awaiting approval..."}
+	if _, ok := ExtractMessage(ownerUID, selfTG, note, ents(), false); ok {
+		t.Fatal("Out=false non-command Saved Messages text must still not be retained")
+	}
+
+	forwarded := &tg.Message{ID: 42, Out: false, PeerID: &tg.PeerUser{UserID: selfTG}, Message: "/mctl approve FORWARDED"}
+	forwarded.SetFwdFrom(tg.MessageFwdHeader{Date: 1})
+	if _, ok := ExtractMessage(ownerUID, selfTG, forwarded, ents(), false); ok {
+		t.Fatal("Out=false forwarded message must still be rejected")
+	}
+}
+
 func TestExtractMessage_RejectsIndirectSavedCommands(t *testing.T) {
 	forwarded := &tg.Message{
 		ID: 20, Out: true, PeerID: &tg.PeerUser{UserID: selfTG},

@@ -66,14 +66,30 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 	}
 	text := strings.TrimSpace(msg.Message)
 
-	// Owner's own outgoing message.
+	// Saved Messages dialog: classify by peer identity, not msg.Out.
+	// classifySavedCommand's own doc comment already documents that Out is
+	// not reliable for this one peer on the messages.getHistory path; live
+	// evidence 2026-08-01 (mctl-telegram#354) showed the SAME unreliability
+	// on the live push too -- two consecutive genuine owner /mctl approve
+	// sends, and even this account's own SendMessage echo of its own draft
+	// notification moments earlier, all arrived with Out=false. Gating on
+	// Out here (as an earlier version of this function did) silently
+	// misfiled them as ordinary inbound private messages from "sender
+	// self", which the fallback poller's own event_id-based dedup can then
+	// never recover from -- the command is lost permanently, not delayed.
+	// classifySavedCommand's forwarded/saved-peer/from-id checks are what
+	// actually gate this peer (nothing but the owner can author a message
+	// that lands in their own primary Saved Messages dialog), so this is no
+	// less safe than the Out-gated version, only less fragile.
+	if isSelfPeer(msg.PeerID, selfTGID) {
+		return classifySavedCommand(accountUserID, selfTGID, msg, text, isEdit)
+	}
+
+	// Owner's own outgoing message to some other peer.
 	if msg.Out {
 		peerUser, ok := msg.PeerID.(*tg.PeerUser)
 		if !ok {
 			return Extracted{}, false
-		}
-		if peerUser.UserID == selfTGID {
-			return classifySavedCommand(accountUserID, selfTGID, msg, text, isEdit)
 		}
 		// Do not require text here: any visible owner intervention in a private
 		// chat (including media without caption) must stop autonomous replies.
@@ -129,13 +145,15 @@ func isSelfPeer(peer tg.PeerClass, selfTGID int64) bool {
 
 // classifySavedCommand applies the shared owner-authored-command rules for a
 // message already known to be in the primary Saved Messages dialog (PeerID
-// == selfTGID). Deliberately does not look at msg.Out: the live push path's
-// caller (ExtractMessage) has already gated on Out == true before reaching
-// here, but the history poller (pollSavedHistory) cannot -- Telegram's
-// messages.getHistory response for Peer: InputPeerSelf was observed
+// == selfTGID). Deliberately does not look at msg.Out: Out is unreliable for
+// this one peer on BOTH callers -- messages.getHistory against
+// Peer: InputPeerSelf (the history poller, pollSavedHistory) was observed
 // (live, 2026-07-26) setting Out == false on a message the same account had
-// just sent to itself, unlike the live push path's UpdateNewMessage, which
-// reliably sets it true. Gating on dialog membership plus the
+// just sent to itself, and the live push path (ExtractMessage's
+// UpdateNewMessage handling) was observed doing the exact same thing (live,
+// 2026-08-01, mctl-telegram#354) -- including for this account's own
+// SendMessage echo of its own draft notification moments earlier, not just
+// another-session sends. Gating on dialog membership plus the
 // forwarded/saved-peer/from-id checks below is correct either way: nothing
 // but the owner can ever author a message that lands in their own primary
 // Saved Messages dialog.
