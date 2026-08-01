@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -119,7 +120,11 @@ type Executor struct {
 	// already-stale draft. Approve() re-checks the TTL itself instead of
 	// relying solely on the sweeper having already caught up.
 	ApprovalTTL time.Duration
-	m           *metrics.Registry
+	// CrashAfterReserve is a TEST-ONLY fault injection switch — see
+	// config.Config.AgentTestCrashAfterReserve's doc comment. Must be false
+	// outside a deliberate drill.
+	CrashAfterReserve bool
+	m                 *metrics.Registry
 
 	// stuckMu guards stuckSeen, the set of action IDs RecoverStuck has
 	// already counted toward AgentExecutorRestartsTotal — see
@@ -368,6 +373,17 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// off `approved` between Approve()'s own CAS and this one — there
 		// is nothing left to retry, the row is decided.
 		return ErrLostRace
+	}
+	if e.CrashAfterReserve {
+		// TEST-ONLY: send_random_id is now durably persisted and the row is
+		// `executing` — hard-exit right here, before the RPC below, to
+		// deterministically reproduce the crash-mid-send scenario RecoverStuck
+		// exists for. os.Exit (not panic) so no deferred cleanup or recover()
+		// anywhere up the stack can turn this into a soft, recoverable error —
+		// the drill needs a genuine process restart. Every send handled by
+		// this pod is hit while the flag is set, not just a chosen one, so it
+		// must only ever be set for the duration of a deliberate drill window.
+		os.Exit(137)
 	}
 
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, randomID, text)
