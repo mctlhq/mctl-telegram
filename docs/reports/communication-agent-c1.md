@@ -246,6 +246,75 @@ Acceptance:
   *isolation*; #347 covers the additional rate/cost ceiling and anomaly
   kill-switch C2 needs on top of that before autonomous sends are allowed.
 
+### 2026-08-01 — `random_id` crash-recovery drill run live, sustained-soak bug found and fixed
+
+- PR [#351](https://github.com/mctlhq/mctl-telegram/pull/351) added a
+  TEST-ONLY fault-injection hook: `AGENT_TEST_CRASH_AFTER_RESERVE`
+  hard-exits (`os.Exit(137)`) immediately after `send_random_id` is
+  persisted and an action is CASed to `executing`, before the Telegram RPC.
+  `recoverOne` (the `RecoverStuck` retry path) does not check the flag, so
+  the post-crash retry always completes for real — no crash-loop risk.
+  Deployed to preview automatically on merge (`main-2b519dd`).
+- Opened the bounded window (GitOps
+  [#691](https://github.com/mctlhq/mctl-gitops/pull/691)):
+  `AGENT_TEST_CRASH_AFTER_RESERVE=true`.
+- **Found and fixed a real bug in the sustained soak** (open since GitOps
+  #688, 2026-07-31): `agent_profiles.autopilot_paused` and
+  `agent_profiles.mode` are two *separate* gates in `policy.Evaluate`
+  (`internal/agent/policy/policy.go`) — `autopilot_paused=true` is an
+  unconditional hard **deny** checked before `mode` is even read; it does
+  not downgrade to require-approval the way an earlier version of the
+  GitOps values-file comment incorrectly claimed. #688 only touched the
+  kill switch and worker replicas, never called the admin API to unpause
+  autopilot, so every drafted reply since the soak opened was silently
+  denied with zero owner-visible signal (confirmed live: action #42,
+  `policy_reasons="autopilot paused for this account"`). Fixed live by
+  setting `agent_profiles.autopilot_paused=false` for the test account
+  (`mode=observe` remained the actual require-approval gate throughout —
+  drafts still needed manual `/mctl approve`). GitOps #693 corrects the
+  values-file comment to describe the two gates accurately.
+- **Found a second real bug**, in the Saved Messages command path itself:
+  `internal/agent/listener/extract.go`'s live-push classifier
+  (`ExtractMessage`) trusts `msg.Out` to detect the owner's own outgoing
+  `/mctl` commands, but Telegram did not reliably set `Out=true` on the
+  live push for two consecutive `/mctl approve` sends in this session — both
+  landed as plain `EventKindPrivateMessage` instead of
+  `EventKindSavedCommand`, so `control.Router.HandleSavedText` was never
+  invoked. The documented fallback (`pollSavedHistory`, 5s interval, does
+  not trust `Out`) cannot recover from this: `eventIDForMessage` computes
+  the identical `event_id` for both classification paths, so the
+  already-inserted (mis-kinded) row makes the fallback's own dedup check
+  (`GetIncomingEvent`) treat the command as already-seen and skip it —
+  permanently, silently, with no owner-visible error. Worked around live by
+  deleting the two mis-kinded `incoming_events` rows and rewinding
+  `agent_saved_command_cursors.last_message_id` so the next 5s poll tick
+  reprocessed them correctly via `ExtractSavedHistoryMessage` (which does
+  not trust `Out`). Not yet root-caused (why the live push under-delivers
+  `Out=true` here) or fixed at the code level — tracked as a follow-up, not
+  blocking this drill's evidence since the workaround produced a genuine
+  live `/mctl approve` through the real router.
+- With autopilot unpaused and the saved command correctly routed: action
+  #43 (`propose_reply`, real inbound test message) was approved for real via
+  `/mctl approve` in live Telegram. The pod hard-exited with code 137 at
+  `2026-08-01T07:39:09Z` (`kubectl` confirmed `exitCode: 137`,
+  `restartCount` incremented). `agent_actions` id 43 was left `executing`
+  with a persisted `send_random_id` and no `executed_tg_message_id` —
+  exactly the crash-mid-send state `RecoverStuck` exists for. ~2 minutes
+  later (matching the default `StuckGrace`), the sweep retried and
+  completed the send for real: `status=executed`, the **same**
+  `send_random_id` as at crash time, and a genuine
+  `executed_tg_message_id`. This is the idempotent-retry invariant
+  confirmed live, not just by unit test as the 2026-07-31 entry above
+  recorded.
+- Closed the bounded window (GitOps
+  [#693](https://github.com/mctlhq/mctl-gitops/pull/693)):
+  `AGENT_TEST_CRASH_AFTER_RESERVE` reverted to `false`. Live verification
+  confirmed the flag absent from the deployed container env,
+  `AGENT_KILL_SWITCH=false`, and `agent_profiles` at
+  `mode=observe`/`autopilot_paused=false`/`listener_enabled=true` — the
+  correct, now actually-functioning state for the sustained real-traffic
+  soak toward the plan's 30-dialog MVP gate.
+
 ## Remaining checklist
 
 - [x] Merge the sender-allowlist/eval follow-up (#318).
@@ -269,11 +338,16 @@ Acceptance:
       before opening another test window.
 - [x] Store approval codes as hashes and ship the full
       retention/adversarial hardening set.
-- [x] Run the `random_id` retry drill before guarded autopilot. A live
-      crash-mid-send race is not achievable through this interaction model
-      (confirmed empirically 2026-07-31); the idempotent-retry invariant is
-      verified by the existing `recoverOne`/`RecoverStuck` unit tests
-      instead.
+- [x] Run the `random_id` retry drill before guarded autopilot. Run live
+      2026-08-01 using a deterministic TEST-ONLY fault-injection hook
+      (`AGENT_TEST_CRASH_AFTER_RESERVE`, mctl-telegram#351) instead of racing
+      the unwinnable manual timing window recorded 2026-07-31: real crash
+      (exit 137) confirmed via `kubectl`, real recovery via `RecoverStuck`
+      confirmed via the DB (same `send_random_id`, genuine
+      `executed_tg_message_id` ~2min later). See the 2026-08-01 evidence
+      entry above, including two real bugs found and fixed/worked around
+      along the way (sustained-soak `autopilot_paused` gap; Saved Messages
+      `Out`-flag misclassification).
 - [x] Provision a production quota domain isolated from interactive sessions
       and `claude-review.yml` before C2. Already shipped: the worker uses a
       dedicated Claude Code OAuth token
