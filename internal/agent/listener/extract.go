@@ -81,7 +81,7 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 	// actually gate this peer (nothing but the owner can author a message
 	// that lands in their own primary Saved Messages dialog), so this is no
 	// less safe than the Out-gated version, only less fragile.
-	if peerUser, ok := msg.PeerID.(*tg.PeerUser); ok && peerUser.UserID == selfTGID {
+	if isSelfPeer(msg.PeerID, selfTGID) {
 		return classifySavedCommand(accountUserID, selfTGID, msg, text, isEdit)
 	}
 
