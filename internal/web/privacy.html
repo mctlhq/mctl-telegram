@@ -121,7 +121,7 @@
     <li>The listener is active only for profiles explicitly marked as listener-enabled.</li>
     <li>Only explicit <code>/mctl ...</code> commands from Saved Messages are retained as control commands; ordinary personal notes are ignored.</li>
     <li>Disabling the listener removes the runtime account and immediately stops its pinned Telegram client.</li>
-    <li>A human reply marks the conversation as <code>taken_over</code>, preventing autonomous continuation under the server-side policy.</li>
+    <li>A human reply marks the conversation as <code>taken_over</code>, preventing autonomous continuation under the server-side policy. This is sticky and only reversible via an explicit <code>/mctl continue &lt;conversation id&gt;</code> command from the owner.</li>
     <li><code>observe</code> mode requires approval for replies; <code>guarded</code> mode remains subject to server-side policy, limits, blocked senders, disclosure checks, and the global kill switch.</li>
   </ul>
 

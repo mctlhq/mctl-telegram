@@ -32,7 +32,7 @@ The safety boundary is **server-side code and persisted state, not the model pro
 * The listener maps supported Telegram updates into deterministic event IDs and atomically commits the event, queue job, and conversation activity timestamp. A partial event-without-job commit is not accepted.
 * Persistence or command-routing failures are returned to `gotd`'s update manager. The stored Telegram watermark is not advanced, allowing reconnect and gap recovery to retry the update.
 * Ordinary Saved Messages notes are ignored. Only explicit `/mctl ...` control commands are retained and routed.
-* A genuine owner reply, including a media-only reply, moves the conversation to `taken_over`. A taken-over, paused, closed, blocked, or otherwise invalid conversation is denied by policy.
+* A genuine owner reply, including a media-only reply, moves the conversation to `taken_over`. A taken-over, paused, closed, blocked, or otherwise invalid conversation is denied by policy. This state is sticky — it does not expire on its own — and is only cleared by an explicit `/mctl continue <conversation id>` command, which also resets the conversation's autonomous-turn budget.
 * Programmatic `send_message` and `send_media` calls record the Telegram-assigned message ID so their outgoing update echo is not mistaken for a human takeover.
 * Disabling the listener removes the runtime account and unpins/stops its Telegram client rather than waiting for idle garbage collection.
 * The server-side policy engine fails closed for unknown modes, states, or action types. It denies when the global kill switch is active, the agent is off/paused, the sender is blocked, the peer mismatches, required disclosure is missing, or proposed content violates structural safety checks.
