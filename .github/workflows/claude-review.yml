@@ -306,6 +306,17 @@ jobs:
             echo "stale=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check fallback token availability
+        id: token-check
+        run: |
+          if [ -n "$TOKEN2" ]; then
+            echo "has_fallback=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_fallback=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          TOKEN2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
+
       - name: Claude review
         id: review
         if: steps.dedup.outputs.already_reviewed != 'true' && steps.prerun-staleness.outputs.stale != 'true'
@@ -417,27 +428,146 @@ jobs:
             echo "failed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # No automatic fallback-token retry: CLAUDE_CODE_OAUTH_TOKEN and
-      # CLAUDE_CODE_OAUTH_TOKEN_2 were directly observed (2026-07-22) to fail
-      # identically on the same run with "You've hit your org's monthly
-      # usage limit" ~16s apart — consistent with both drawing on the same
-      # org-wide quota, which would make an automatic second full session
-      # guaranteed to fail the same way while still burning real tokens
-      # first. Post a status comment instead and let a human decide whether
-      # to re-trigger (e.g. once the underlying cause is confirmed to be
-      # token-specific rather than quota exhaustion).
-      - name: Notify on primary review failure
-        if: steps.review-check.outputs.failed == 'true'
+      # Fallback retry on a SECOND token. An earlier revision of this file
+      # refused to do this, on the 2026-07-22 observation that
+      # CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN_2 failed
+      # identically ~16s apart and therefore had to share one org-wide quota.
+      # That generalisation was wrong: on 2026-08-03 the primary token was
+      # exhausted ("You're out of extra usage") while the fallback completed a
+      # full review on mctlhq/mctl-gitops#705 in the same minute. Every other
+      # mctlhq repo already wires this fallback; this repo was the only one
+      # left without it, so a dry primary token meant no review at all and a
+      # structurally unpassable merge gate.
+      - name: Reset git state before fallback
+        if: steps.review-check.outputs.failed == 'true' && steps.token-check.outputs.has_fallback == 'true'
+        run: git checkout . && git clean -fd
+
+      - name: Claude review (fallback token)
+        id: review2
+        if: steps.review-check.outputs.failed == 'true' && steps.token-check.outputs.has_fallback == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@51ea8ea73a139f2a74ff649e3092c25a904aed7e # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
+          # The mctl-agents pipeline pushes review-fix commits to same-repo
+          # feat/agents-* branches as this GitHub App; without the allowlist
+          # entry the action hard-fails the whole review run on the
+          # synchronize event ("Workflow initiated by non-human actor").
+          allowed_bots: "mctl-claude-remote,github-actions"
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+            BASE SHA: ${{ needs.gate.outputs.base_sha }}
+            COMMIT SHA: ${{ needs.gate.outputs.sha }}
+
+            You are the automated code reviewer for this pull request. Review
+            the immutable diff thoroughly. Use exactly:
+            `git diff ${{ needs.gate.outputs.base_sha }}...${{ needs.gate.outputs.sha }}`
+            Never use `gh pr diff` or `gh pr view`: those read mutable PR data
+            and may point at a newer commit while this invocation is running.
+            Files in the checkout and both git object IDs are pinned.
+
+            Focus on:
+            - Correctness and logic errors; edge cases the change misses.
+            - Security: injection, authentication/authorization, secret
+              handling, unsafe input.
+            - Concurrency: data races, deadlocks, goroutine leaks.
+            - Error handling: ignored errors, missing context, panics.
+            - Test coverage: behaviour changed without a corresponding test.
+
+            Follow the conventions in this repository's CLAUDE.md (Go style,
+            conventional commits, English only, no emoji).
+
+            IMPORTANT: this run's review target is pinned to the COMMIT SHA
+            above, not just the PR number. This SHA-scoped concurrency group
+            deliberately allows an older commit's review to keep running
+            alongside a newer commit's review instead of being cancelled, so
+            by the time you submit your verdict the PR's current head may
+            already be a later commit than the one you analyzed. Always
+            submit the verdict against COMMIT SHA explicitly — never rely on
+            a command that defaults to "the PR's current head" — or your
+            verdict for this (possibly now-outdated) commit could be silently
+            recorded against a commit you never reviewed.
+
+            If the diff is trivial — only config/values YAML (hostname, env
+            var, image tag, resource limits, replica count), a dependency bump
+            with no logic change, docs/comments, or a one-line typo — approve
+            the PR with a one-line reason and nothing else:
+            `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f event="APPROVE" -f body="<reason>"`.
+
+            Otherwise, post each finding as an inline review comment using
+            the commit-bound REST call below, prefixed with a severity tag:
+            - P1 — must fix before merge (bug, security hole, data loss).
+            - P2 — should fix before merge (likely bug, missing test, unsafe
+              pattern).
+            - P3 — nice to have (style, minor nit); does not block merge.
+
+            Bind every inline comment to COMMIT SHA explicitly:
+            `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/comments --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f path="<repo-relative path>" -F line=<new-file line> -f side="RIGHT" -f body="<P1/P2/P3 finding>"`
+            Never omit commit_id. If the relevant line exists only on the
+            removed side, use `side="LEFT"` and its old-file line number.
+
+            Finish by submitting a single PR review verdict (this is the merge
+            gate — `main` requires one approving review). Include the P1/P2/P3
+            counts in the body; be concise and do not restate the diff. Both
+            commands below explicitly bind the verdict to COMMIT SHA — do not
+            omit -f commit_id or use `gh pr review` instead, which implicitly
+            targets whatever the PR's current head happens to be at submit
+            time, not the commit you actually analyzed:
+            - No P1/P2 findings (P3 nits are fine): approve —
+              `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f event="APPROVE" -f body="No P1/P2 findings (<n> P3). Good to merge."`
+            - One or more P1/P2 findings: request changes —
+              `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews --method POST -f commit_id="${{ needs.gate.outputs.sha }}" -f event="REQUEST_CHANGES" -f body="Has P1/P2 findings, changes requested: <summary>"`
+          # Bash(gh api:*) would be too broad here — a Codex finding caught
+          # that with pull-requests: write and issues: write on this job's
+          # token, an unrestricted `gh api` lets prompt-injected PR content
+          # hit ANY REST endpoint those scopes authorize (editing/closing
+          # unrelated PRs or issues, deleting review artifacts, etc.), not
+          # just posting this PR's own findings/verdict. Repo and PR number
+          # are concrete by the time this string is built, so the allowlist
+          # exposes only the two commit-bound review endpoints plus read-only
+          # local git diff. No tool can read mutable PR diff/view data.
+          claude_args: '--model ${{ steps.classify.outputs.model }} --allowedTools "Bash(git diff:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/comments:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number || github.event.issue.number }}/reviews:*)"'
+
+      # The primary and the fallback write the same execution-output file, so
+      # re-read it here: after a fallback run it holds the FALLBACK result.
+      - name: Check final review outcome
+        id: review-final
+        if: always()
+        run: |
+          if [ "${{ steps.review-check.outputs.failed }}" != "true" ]; then
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.token-check.outputs.has_fallback }}" != "true" ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            OUT="$RUNNER_TEMP/claude-execution-output.json"
+            is_error="false"
+            if [ -f "$OUT" ]; then
+              is_error=$(jq -r '
+                if type != "array" then "false"
+                else ([.[] | select(.type == "result")] | if length > 0 then (.[-1].is_error // false | tostring) else "false" end)
+                end' "$OUT" 2>/dev/null || echo "false")
+            fi
+            if [ "${{ steps.review2.outcome }}" = "failure" ] || [ "$is_error" = "true" ]; then
+              echo "failed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "failed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Notify when no token could complete the review
+        if: steps.review-final.outputs.failed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment "${{ github.event.pull_request.number || github.event.issue.number }}" --repo "${{ github.repository }}" \
-            --body "Claude review failed to complete (see the [run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})). Not auto-retrying — re-trigger manually with \`@claude review\` once the underlying issue is resolved."
+            --body "Claude review failed to complete on both tokens (see the [run log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})). Re-trigger with \`@claude review\` once the underlying issue is resolved."
 
       # Keep the notification above useful, but do not let continue-on-error
       # turn a quota/auth/runtime failure into a green merge gate.
       - name: Fail when Claude review did not complete
-        if: steps.review-check.outputs.failed == 'true'
+        if: steps.review-final.outputs.failed == 'true'
         run: |
           echo "::error::Claude review did not complete"
           exit 1
