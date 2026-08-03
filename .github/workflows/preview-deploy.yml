@@ -39,3 +39,32 @@ jobs:
             -f image_tag="main-${SHORT_SHA}" \
             -f team_name=labs \
             -f component_name=mctl-telegram-preview
+
+      # Second deployable image from this same commit: cmd/agent-worker, built
+      # from Dockerfile.agent-worker onto a node:22-slim runtime with the claude
+      # CLI. Before 2026-08-03 only the dispatch above existed, so the worker
+      # image was rebuilt by hand or not at all — the running pod sat on a
+      # 2026-07-26 build while main moved four agent-worker commits ahead,
+      # including a fix for adversarial prompt echoes, and nothing surfaced it.
+      #
+      # image_tag deliberately matches the dispatch above (same short SHA): both
+      # images come from one commit, so "which code is this worker running" stays
+      # answerable by reading the tag. The two release-deploy runs race to push
+      # their tag bumps to mctl-gitops main; that push retries with a rebase
+      # (mctl-gitops .github/workflows/release-deploy.yaml, "Commit and push").
+      - name: Dispatch agent-worker preview release-deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${SHA::7}"
+          gh workflow run release-deploy.yaml \
+            --repo mctlhq/mctl-gitops \
+            --ref main \
+            -f repo=mctlhq/mctl-telegram \
+            -f git_ref="$SHA" \
+            -f image_name=ghcr.io/mctlhq/agent-worker-preview \
+            -f image_tag="main-${SHORT_SHA}" \
+            -f dockerfile_path=Dockerfile.agent-worker \
+            -f team_name=labs \
+            -f component_name=agent-worker-preview
