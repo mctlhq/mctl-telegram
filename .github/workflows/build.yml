@@ -74,6 +74,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # This repo ships a second deployable image from the same commit: cmd/agent-worker
+  # on a node:22-slim runtime with the claude CLI (see Dockerfile.agent-worker).
+  # Until 2026-08-03 nothing built it on PRs — the job above passes `context: .`
+  # with no `file:`, so it only ever built the default Dockerfile, and a change
+  # that broke the worker image landed green and failed at deploy time instead.
+  #
+  # A separate job rather than a matrix on the job above: a matrix would rename
+  # the check to "docker (Dockerfile)" and the existing required status check
+  # named "docker" would never report again, blocking every PR.
+  docker-agent-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          file: Dockerfile.agent-worker
+          push: false
+          # Explicit scope on BOTH ends so this job and `docker` don't evict each
+          # other from the default shared cache key on every run (and so this one
+          # actually reads back what it wrote).
+          cache-from: type=gha,scope=agent-worker
+          cache-to: type=gha,mode=max,scope=agent-worker
+
   validate-canary-manifest:
     runs-on: ubuntu-latest
     steps:
