@@ -1,0 +1,19 @@
+# mctl-telegram — Remote MCP Server for Telegram
+
+> `mctl-telegram` is a hosted Remote MCP connector for Telegram. It allows users to securely interact with their Telegram account via ChatGPT Apps, Claude.ai, or any MCP client with OAuth 2.1 authentication and preview-only safety controls.
+
+## Key Resources & Submissions
+
+- [Public Documentation](https://tg.mctl.ai/docs): Getting started and tool documentation.
+- [Security & Trust Model](https://tg.mctl.ai/security): Data minimization and session encryption details.
+- [ChatGPT App Directory Submission](https://github.com/mctlhq/mctl-telegram/blob/main/chatgpt-submission-package.md): Reviewer notes and submission package.
+- [Claude Connector Submission](https://github.com/mctlhq/mctl-telegram/blob/main/claude-connector-submission.md): Anthropic Remote MCP directory submission metadata.
+
+## Tools Summary (14 MCP Tools)
+
+- `list_dialogs`: Read-only list of dialogs.
+- `get_messages` & `get_unread_messages`: Read-only message history and unread items.
+- `send_message`: Write tool (Preview-only dry-run by default unless `send_enabled=true`).
+- `prepare_pin_message` & `pin_message`: Confirmed pinning with dry-run protection.
+- `get_my_audit_log`: Cryptographic tamper-evident hash-chain audit log.
+- `disconnect_telegram_account` & `delete_telegram_account`: Account revocation and data deletion.
