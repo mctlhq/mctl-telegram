@@ -1,0 +1,7 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "mctl-telegram MCP Server",
+  "description": "Hosted Remote MCP Server for user-authorized Telegram account access, MTProto tools, OAuth 2.1 authentication, and security specifications.",
+  "folders": ["docs"],
+  "excludeFolders": ["cmd", "internal", "canary", "server", "local"]
+}
