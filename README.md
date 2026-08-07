@@ -20,7 +20,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 |--------------------------------------------|------------------------------------------------------------------------------------------------------|
 | `/healthz`, `/readyz`                      | Probes — `ok` 200.                                                                                   |
 | `/.well-known/oauth-protected-resource`    | RFC 9728 metadata declaring the authorization server for this deployment.                            |
-| `/mcp`                                     | MCP Streamable HTTP endpoint. Auth: `Authorization: Bearer <JWT>`.                                   |
+| `/mcp`                                     | MCP Streamable HTTP endpoint. Auth: `Authorization: Bearer <JWT>`. 401 responses include `WWW-Authenticate` pointing to `/.well-known/oauth-protected-resource/mcp` (RFC 9728 discovery). |
 
 ## MCP tools
 

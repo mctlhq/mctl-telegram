@@ -20,15 +20,34 @@ type ResourceMetadata struct {
 	MCPPath string
 }
 
-func (rm ResourceMetadata) wwwAuthenticate(requestPath string) string {
-	if rm.BaseURL == "" {
-		return `Bearer realm="mctl-telegram"`
+// wwwAuthenticate builds the Bearer challenge for a 401. Extra RFC 6750 §3
+// auth-param strings (e.g. `error="invalid_token"`) are appended in order, so
+// the whole challenge grammar stays owned by this one function.
+func (rm ResourceMetadata) wwwAuthenticate(requestPath string, params ...string) string {
+	challenge := `Bearer realm="mctl-telegram"`
+	if rm.BaseURL != "" {
+		metadataURL := strings.TrimRight(rm.BaseURL, "/") + "/.well-known/oauth-protected-resource"
+		if rm.MCPPath != "" && (requestPath == rm.MCPPath || strings.HasPrefix(requestPath, rm.MCPPath+"/")) {
+			metadataURL += rm.MCPPath
+		}
+		challenge += `, resource_metadata="` + metadataURL + `"`
 	}
-	metadataURL := strings.TrimRight(rm.BaseURL, "/") + "/.well-known/oauth-protected-resource"
-	if rm.MCPPath != "" && (requestPath == rm.MCPPath || strings.HasPrefix(requestPath, rm.MCPPath+"/")) {
-		metadataURL += rm.MCPPath
+	for _, p := range params {
+		challenge += ", " + p
 	}
-	return `Bearer realm="mctl-telegram", resource_metadata="` + metadataURL + `"`
+	return challenge
+}
+
+// bearerErrorCode maps an authentication failure to its RFC 6750 §3.1 error
+// code. A request whose Authorization header does not even use the Bearer
+// scheme is a malformed request, not a bad token; everything else reaching
+// this point is a token that failed to verify (expired, bad signature, wrong
+// audience) and must tell the client to re-run the OAuth flow.
+func bearerErrorCode(err error) string {
+	if classifyAuthError(err.Error()) == "bearer_scheme_error" {
+		return `error="invalid_request"`
+	}
+	return `error="invalid_token"`
 }
 
 // Middleware authenticates each request through the provider. When required is
@@ -47,6 +66,7 @@ func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 				if m != nil {
 					m.AuthFailuresTotal.WithLabelValues(classifyAuthError(err.Error()), providerLabel).Inc()
 				}
+				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path, bearerErrorCode(err)))
 				writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 				return
 			}
