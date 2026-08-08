@@ -1,0 +1,17 @@
+name: Agy PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  agy-review:
+    uses: mctlhq/.github/.github/workflows/agy-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      conventions: |
+        Focus on: Go MTProto/gotd concurrency and session handling safety, OAuth 2.1 JWT token lifecycle & refresh token rotation, encryption-at-rest of Telegram session blobs, strict enforcement of `ALLOW_SEND` send-gate invariants, DNS-rebinding protection on `/mcp` endpoints, database migration and query safety (pgx/sqlite), and missing test coverage for changed behavior.
