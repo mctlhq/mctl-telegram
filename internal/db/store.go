@@ -99,6 +99,10 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 		return 0, errors.New("telegram id must be positive")
 	}
 	syntheticLogin := fmt.Sprintf("tg:%d", tgID)
+	effectiveUsername := username
+	if effectiveUsername == "" {
+		effectiveUsername = displayName
+	}
 	// Insert-or-no-op. ON CONFLICT covers both the telegram_login_id unique
 	// partial index and the legacy github_login UNIQUE constraint — we use
 	// the unqualified DO NOTHING form which fires on any conflict.
@@ -106,7 +110,7 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 		`INSERT INTO users(github_login, provider, telegram_login_id, telegram_username, telegram_display_name)
 		 VALUES($1,$2,$3,$4,$5)
 		 ON CONFLICT DO NOTHING`,
-		syntheticLogin, "tg-mcp", tgID, nullable(username), nullable(displayName),
+		syntheticLogin, "tg-mcp", tgID, nullable(effectiveUsername), nullable(displayName),
 	); err != nil {
 		return 0, fmt.Errorf("insert user by tg_id: %w", err)
 	}
@@ -134,7 +138,7 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 			`UPDATE users SET telegram_username = COALESCE(NULLIF($1,''), telegram_username),
 			                  telegram_display_name = COALESCE(NULLIF($2,''), telegram_display_name)
 			 WHERE id = $3`,
-			username, displayName, id,
+			effectiveUsername, displayName, id,
 		)
 	}
 	return id, nil
