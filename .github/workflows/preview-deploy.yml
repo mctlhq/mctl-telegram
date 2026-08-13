@@ -15,12 +15,20 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Uses mctl-agents, the backend-only automation App — deliberately
+      # NOT MCTL App (secrets.APP_ID). MCTL App is the App customers install
+      # themselves from mctl.ai/#request-access, and it is being narrowed to
+      # contents:read + metadata:read so its published least-privilege
+      # description is actually true (mctlhq/mctl-gitops#761). A GitHub App's
+      # permissions apply to every installation alike, so anything needing
+      # write — like actions:write on mctl-gitops to dispatch below — has to
+      # live on the internal App instead.
       - name: Generate Platform App token
         id: app
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.AGENTS_APP_ID }}
+          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
 
