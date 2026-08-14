@@ -1924,9 +1924,25 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 // forms — "localhost", IPv4 "127.0.0.1", and IPv6 "::1" — under http (no
 // TLS required) so a native client on an IPv6-only host is not locked out.
 func (s *Server) validateImplicitRedirectURI(raw string) error {
+	// A backslash is not a valid URI character, and parsers disagree on it:
+	// some read it as a path separator, others as part of userinfo. That
+	// disagreement is what turns a host allowlist into an open redirect, since
+	// the host approved here need not be the host a browser dials. Reject
+	// before parsing so the two can never diverge.
+	if strings.ContainsRune(raw, '\\') {
+		return errors.New("redirect_uri must not contain a backslash")
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("redirect_uri %q is not a valid URL: %w", raw, err)
+	}
+	// Userinfo has no place in a redirect target, and accepting it defeats the
+	// host checks below: https://evil.com@claude.ai/cb and
+	// http://evil.com@localhost/cb both parse with an approved host while
+	// reading as evil.com to anything that splits on the first '@' or renders
+	// the URL to a user.
+	if u.User != nil {
+		return errors.New("redirect_uri must not contain userinfo")
 	}
 	if u.Scheme != "https" {
 		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
@@ -1962,7 +1978,10 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 // url.Hostname() strips the brackets around IPv6 literals so we compare
 // against the bare "::1" string, not "[::1]".
 func isLoopbackHost(h string) bool {
-	switch h {
+	// Host names are case-insensitive (RFC 3986 §3.2.2) but url.Parse preserves
+	// whatever case it was given, so a client emitting "LOCALHOST" would
+	// otherwise be turned away.
+	switch strings.ToLower(h) {
 	case "localhost", "127.0.0.1", "::1":
 		return true
 	}
@@ -2018,34 +2037,12 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 	if !s.cfg.AllowImplicitClient {
 		return fmt.Errorf("unknown client_id %q (call /oauth/register first)", clientID)
 	}
-	u, err := url.Parse(redirectURI)
-	if err != nil {
-		return fmt.Errorf("redirect_uri is not a valid URL: %w", err)
-	}
-	// http:// is acceptable only for loopback addresses (RFC 8252 §7.3 —
-	// including IPv6 ::1 for native clients on IPv6-only hosts).
-	if u.Scheme != "https" {
-		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
-			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
-		}
-	}
-	host := u.Hostname()
-	hostWithPort := u.Host
-	for _, allowed := range s.cfg.AllowedImplicitHosts {
-		if strings.Contains(allowed, ":") {
-			if hostWithPort == allowed {
-				return nil
-			}
-		} else {
-			if host == allowed {
-				return nil
-			}
-		}
-	}
-	if isLoopbackHost(host) {
-		return nil
-	}
-	return fmt.Errorf("redirect_uri host %q is not in the implicit-client allowlist", host)
+	// One policy, one implementation. This branch and POST /oauth/register used
+	// to carry near-identical copies of the same checks, which is how the first
+	// version of this hardening left a hole: tightening only this copy still let
+	// a caller register the spoofed URI, after which the exact-match path above
+	// waved it through without ever re-running these checks.
+	return s.validateImplicitRedirectURI(redirectURI)
 }
 
 // pkceVerify checks that SHA256(verifier) base64url-encoded equals challenge.
