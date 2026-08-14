@@ -7,7 +7,7 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
 ## Stack
 - Go 1.26, `net/http` + `chi` router, `gotd/td` MTProto client, `mark3labs/mcp-go`
 - Structured logging with `slog` (JSON handler + redaction handler)
-- Multi-stage Docker (`golang:1.26.5-alpine` → `alpine:3.20`), non-root user 1000
+- Multi-stage Docker (`golang:1.26.6-alpine` → `alpine:3.20`), non-root user 1000
 - SQLite (local dev) or Postgres (production)
 
 ## Key paths
