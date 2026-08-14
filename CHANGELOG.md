@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.47.0](https://github.com/mctlhq/mctl-telegram/compare/0.46.0...0.47.0) (2026-08-14)
+
+
+### Features
+
+* **agent:** add TEST-ONLY crash-after-reserve hook for the random_id drill ([2b519dd](https://github.com/mctlhq/mctl-telegram/commit/2b519dda08710f4373b0d78744fda0b9740e4560))
+* **agent:** add TEST-ONLY crash-after-reserve hook for the random_id drill ([51b7215](https://github.com/mctlhq/mctl-telegram/commit/51b7215eb23dffcf198cd20a2a273e800385d25e))
+* **db:** use display name as fallback for telegram_username ([545b572](https://github.com/mctlhq/mctl-telegram/commit/545b5723d4c93b31620ebc7c89e810a79d395bcb))
+* **db:** use display name as fallback for telegram_username ([19fdc52](https://github.com/mctlhq/mctl-telegram/commit/19fdc52a6435a2143a2b62f50c19b59300f37952))
+* **docs:** add context7.json configuration for AI search indexer ([61f7090](https://github.com/mctlhq/mctl-telegram/commit/61f70904c9acc24510f2a2f48666a692dbf71d68))
+* **docs:** add context7.json configuration for AI search indexer ([d0fd962](https://github.com/mctlhq/mctl-telegram/commit/d0fd962a0a72fe78473a7b4f956d7bd491e085f2))
+
+
+### Bug Fixes
+
+* **agent:** stop trusting msg.Out for Saved Messages live-push commands ([a49a0b9](https://github.com/mctlhq/mctl-telegram/commit/a49a0b9570e9544f619a3a339bf756fa6664aa78))
+* **agent:** stop trusting msg.Out for Saved Messages live-push commands ([59c0ec4](https://github.com/mctlhq/mctl-telegram/commit/59c0ec4d9bfe659a6be635a980d50d6fdd5434a5))
+* **auth:** emit WWW-Authenticate resource_metadata on invalid token ([170002a](https://github.com/mctlhq/mctl-telegram/commit/170002ae8f6f4564ed8bca540756345d5eea06b4))
+* **auth:** emit WWW-Authenticate resource_metadata on invalid token ([b27f706](https://github.com/mctlhq/mctl-telegram/commit/b27f7060a3cb90a54f6b781939d0163cfedeb0bb))
+* **oauth:** reject userinfo and backslash in implicit redirect URIs ([#377](https://github.com/mctlhq/mctl-telegram/issues/377)) ([dba713e](https://github.com/mctlhq/mctl-telegram/commit/dba713ee767d2490c44d963e55d704a52f29675a))
+
 ## [0.46.0](https://github.com/mctlhq/mctl-telegram/compare/0.45.0...0.46.0) (2026-07-31)
 
 
