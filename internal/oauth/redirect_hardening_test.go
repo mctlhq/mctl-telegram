@@ -78,3 +78,37 @@ func TestValidateClientStillScopesRegisteredURIsToTheirClient(t *testing.T) {
 		t.Errorf("unexpected error for unregistered client: %v", err)
 	}
 }
+
+// The register endpoint is the other door into the same policy. Hardening only
+// the implicit branch of validateClient left this bypass: register the spoofed
+// URI, and validateClient's exact-match path for registered clients then
+// accepts it verbatim without re-running any host check.
+func TestValidateImplicitRedirectURIRejectsTheSameShapes(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.AllowImplicitClient = true
+		c.AllowedImplicitHosts = []string{"claude.ai"}
+	})
+
+	for _, uri := range []string{
+		"https://evil.com@claude.ai/cb",
+		"http://evil.com@localhost/cb",
+		"http://user:pass@127.0.0.1/cb",
+		`http://evil.com\@localhost/cb`,
+		"http://evil.com%5C@localhost/cb",
+		"https://evil.com/cb",
+	} {
+		if err := srv.validateImplicitRedirectURI(uri); err == nil {
+			t.Errorf("validateImplicitRedirectURI accepted %q — registerable, then exact-matched at authorize", uri)
+		}
+	}
+
+	for _, uri := range []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"http://localhost:3118/callback",
+		"http://LOCALHOST:3118/callback",
+	} {
+		if err := srv.validateImplicitRedirectURI(uri); err != nil {
+			t.Errorf("validateImplicitRedirectURI rejected %q: %v", uri, err)
+		}
+	}
+}
