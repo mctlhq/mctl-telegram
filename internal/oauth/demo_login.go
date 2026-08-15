@@ -269,7 +269,7 @@ var demoHead = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Connect Telegram</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  ` + ui.FaviconLink + `
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + demoExtraCSS + `</style>
 </head>
 <body>

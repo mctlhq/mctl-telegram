@@ -107,15 +107,16 @@ const enableExtraCSS = `
 `
 
 // enableHead / enableFoot wrap every screen, sharing the mctl design tokens,
-// component CSS, and auth-card CSS with the rest of the site. All inlined so
-// the strict CSP can forbid every external source.
+// component CSS, and auth-card CSS with the rest of the site. CSS is inlined so
+// the strict CSP can forbid every external stylesheet. The tab icon is the
+// one CDN fetch, allow-listed on img-src.
 var enableHead = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Enable message access</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  ` + ui.FaviconLink + `
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + `</style>
 </head>
 <body>
@@ -351,10 +352,10 @@ func renderEnable(w http.ResponseWriter, status int, t *template.Template, data 
 	// server-validated, pre-registered redirect_uri — so 'self' https: does not
 	// widen the real trust boundary. (Tightening to the exact client origin per
 	// flow is a possible follow-up.)
-	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'"
+	csp := "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self' https:; base-uri 'none'"
 	if nonce != "" {
 		csp = "default-src 'none'; script-src 'nonce-" + nonce +
-			"'; style-src 'unsafe-inline'; form-action 'self' https:; base-uri 'none'"
+			"'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self' https:; base-uri 'none'"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", csp)
