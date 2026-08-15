@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.49.0](https://github.com/mctlhq/mctl-telegram/compare/0.48.0...0.49.0) (2026-08-15)
+
+
+### Features
+
+* **ui:** Onest, terracotta default, remove accent picker ([b54ef4d](https://github.com/mctlhq/mctl-telegram/commit/b54ef4dc299e06da2ff76f03a6cae348fa868693))
+* **ui:** remove the header accent color picker ([2b63717](https://github.com/mctlhq/mctl-telegram/commit/2b637179a1ae5076d784f0ed1518a324db6e40ad))
+
+
+### Bug Fixes
+
+* replace leftover cyan local favicon with terracotta T ([a6882cf](https://github.com/mctlhq/mctl-telegram/commit/a6882cfdd9376fb81b3d076c5a63928b45fe9b30))
+* replace leftover cyan local favicon with terracotta T ([7655beb](https://github.com/mctlhq/mctl-telegram/commit/7655beb295bf02dfcceb65ef6df298d0aa9f21da))
+
 ## [0.48.0](https://github.com/mctlhq/mctl-telegram/compare/0.47.0...0.48.0) (2026-08-15)
 
 
