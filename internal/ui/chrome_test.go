@@ -24,6 +24,7 @@ func TestFullChrome(t *testing.T) {
 		`class="topbar"`,
 		"accent-swatch",
 		"ui.mctl.ai/mctl.css",
+		"ui.mctl.ai/brand/favicon-telegram.svg",
 		"<footer>",
 		"https://tg.mctl.ai",
 		`<a href="/docs" class="active">docs</a>`,
@@ -45,10 +46,13 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
-	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script"} {
+	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`} {
 		if strings.Contains(out, bad) {
 			t.Errorf("lite (strict-CSP) page must not contain %q", bad)
 		}
+	}
+	if !strings.Contains(out, "ui.mctl.ai/brand/favicon-telegram.svg") {
+		t.Error("lite page missing CDN favicon")
 	}
 	if !strings.Contains(out, `class="topbar"`) {
 		t.Error("lite page missing topbar")

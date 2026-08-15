@@ -35,6 +35,9 @@ func TestRenderEnablePassword_NonceScopedScript(t *testing.T) {
 	if nonce == "" {
 		t.Fatalf("CSP has no script-src nonce: %q", csp)
 	}
+	if !strings.Contains(csp, "img-src https://ui.mctl.ai") {
+		t.Fatalf("CSP must allow the CDN favicon: %q", csp)
+	}
 	if strings.Contains(csp, "script-src 'unsafe-inline'") {
 		t.Fatalf("CSP must not allow unsafe-inline scripts: %q", csp)
 	}
@@ -89,5 +92,8 @@ func TestRenderEnable_NonPasswordScreensHaveNoScriptSrc(t *testing.T) {
 	renderEnablePhone(rec, enablePhonePage{})
 	if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "script-src") {
 		t.Fatalf("phone screen must forbid scripts entirely, got CSP: %q", csp)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "img-src https://ui.mctl.ai") {
+		t.Fatalf("phone screen CSP must allow the CDN favicon: %q", csp)
 	}
 }

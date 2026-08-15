@@ -10,9 +10,10 @@
 //     the light/dark + accent toggle JS (the choice persists in localStorage;
 //     it defaults to the OS preference until the user flips it).
 //   - "lite"  — OAuth-flow pages served under a strict CSP
-//     (default-src 'none'; style-src 'unsafe-inline'). No external resources
-//     and no JS: same palette via inlined tokens, theme follows the OS via a
-//     prefers-color-scheme fallback baked into tokens.css.
+//     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
+//     No external CSS/JS: same palette via inlined tokens, theme follows the OS
+//     via a prefers-color-scheme fallback baked into tokens.css. The tab icon
+//     is the only CDN fetch (favicon-telegram.svg).
 package ui
 
 import (
@@ -43,6 +44,12 @@ type Data struct {
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
 }
 
+// FaviconLink is the shared tab icon pointing at the design-CDN terracotta T
+// badge. Content pages and strict-CSP OAuth heads both concatenate this so the
+// URL lives in one place. Those CSP pages must allow https://ui.mctl.ai on img-src.
+const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl.ai/brand/favicon-telegram.svg">
+<link rel="apple-touch-icon" href="https://ui.mctl.ai/brand/favicon-telegram.svg">`
+
 // Shared template defines. CSS/JS are concatenated in as literal template text
 // (they contain no {{ }} actions), so there is no escaping concern.
 var defs = `
@@ -50,7 +57,7 @@ var defs = `
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="mctl-telegram">
@@ -127,7 +134,7 @@ var defs = `
 {{define "ui_head_lite"}}<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+` + FaviconLink + `
 <style>` + tokensCSS + componentsCSS + `</style>{{end}}
 
 {{define "ui_topbar_lite"}}` + topbarLiteHTML + `{{end}}

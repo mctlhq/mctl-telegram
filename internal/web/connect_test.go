@@ -120,6 +120,9 @@ func TestHandleConnect_CSPPresent(t *testing.T) {
 	if !strings.Contains(csp, "default-src 'none'") {
 		t.Errorf("landing page CSP should start with default-src 'none': %q", csp)
 	}
+	if !strings.Contains(csp, "img-src https://ui.mctl.ai") {
+		t.Errorf("landing page CSP must allow the CDN favicon: %q", csp)
+	}
 }
 
 // TestHandleConnectDone_CSPPresent confirms that the success/error pages also
@@ -138,6 +141,9 @@ func TestHandleConnectDone_CSPPresent(t *testing.T) {
 	}
 	if strings.Contains(csp, "script-src") {
 		t.Errorf("done page CSP should not include script-src (no inline script): %q", csp)
+	}
+	if !strings.Contains(csp, "img-src https://ui.mctl.ai") {
+		t.Errorf("done page CSP must allow the CDN favicon: %q", csp)
 	}
 }
 
