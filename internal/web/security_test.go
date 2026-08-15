@@ -35,7 +35,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Session TTL",
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
-		"accent-swatch",
+		`class="theme-toggle"`,
 		`<a href="/security" class="active">security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
@@ -69,7 +69,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
-		"accent-swatch",
+		`class="theme-toggle"`,
 		`<a href="/privacy" class="active">privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,

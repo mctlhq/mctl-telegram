@@ -1,15 +1,11 @@
   /*
-   * Inline fallback for the mctl design tokens — keeps the page readable and
-   * theme/accent switching functional if ui.mctl.ai/mctl.css fails to load.
-   * When the CDN stylesheet loads it is sourced AFTER this block and overrides
-   * every token (equal specificity, later wins). Mirrors mctl.css.
+   * Inline fallback for the mctl design tokens — keeps the page readable if
+   * ui.mctl.ai/mctl.css fails to load. When the CDN stylesheet loads it is
+   * sourced AFTER this block and overrides every token (equal specificity,
+   * later wins). Default accent is terracotta; there is no accent picker.
    */
   :root {
     --mctl-accent-terracotta-primary: #e25a3c;
-    --mctl-accent-cyan-primary: #1ab3c7;
-    --mctl-accent-lime-primary: #bdf24a;
-    --mctl-accent-vermilion-primary: #e25a3c;
-    --mctl-accent-lilac-primary: #b07aff;
     --mctl-radius-sm: 2px;
     --mctl-radius-md: 4px;
     --mctl-radius-lg: 8px;
@@ -27,16 +23,6 @@
     --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
     --accent: #b83d28; --accent-highlight: #9a3220;
   }
-  [data-accent='terracotta'],
-  [data-accent='vermilion'] { --accent: #e25a3c; --accent-highlight: #ff8a6a; }
-  [data-accent='cyan']      { --accent: #1ab3c7; --accent-highlight: #5ed4e0; }
-  [data-accent='lime']      { --accent: #bdf24a; --accent-highlight: #dcff8c; }
-  [data-accent='lilac']     { --accent: #b07aff; --accent-highlight: #d6b3ff; }
-  [data-theme='light'][data-accent='terracotta'],
-  [data-theme='light'][data-accent='vermilion'] { --accent: #b83d28; --accent-highlight: #9a3220; }
-  [data-theme='light'][data-accent='cyan']      { --accent: #0e7a8a; --accent-highlight: #0a5c68; }
-  [data-theme='light'][data-accent='lime']      { --accent: #6b8f14; --accent-highlight: #547110; }
-  [data-theme='light'][data-accent='lilac']     { --accent: #6b3cc4; --accent-highlight: #552e9e; }
   /*
    * No-JS fallback for strict-CSP pages (OAuth flow) that cannot run the
    * pre-paint theme script: follow the OS preference. Only applies when no

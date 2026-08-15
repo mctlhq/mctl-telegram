@@ -22,7 +22,6 @@ func TestFullChrome(t *testing.T) {
 
 	for _, s := range []string{
 		`class="topbar"`,
-		"accent-swatch",
 		"ui.mctl.ai/mctl.css",
 		"family=Onest",
 		"JetBrains+Mono",
@@ -36,14 +35,18 @@ func TestFullChrome(t *testing.T) {
 		// Light/dark toggle — content pages can flip the theme.
 		`class="theme-toggle"`,
 		`aria-label="Toggle theme"`,
+		"#e25a3c",
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
 		}
 	}
-	for _, bad := range []string{"family=Geist", "'Geist'", "#00e5ff"} {
+	for _, bad := range []string{
+		"family=Geist", "'Geist'", "#00e5ff",
+		"accent-swatch", "accent-picker", "data-pick",
+	} {
 		if strings.Contains(out, bad) {
-			t.Errorf("full page still has stale design token %q", bad)
+			t.Errorf("full page still has stale chrome %q", bad)
 		}
 	}
 }
@@ -53,7 +56,7 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
-	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`} {
+	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("lite (strict-CSP) page must not contain %q", bad)
 		}

@@ -1,8 +1,8 @@
   /*
    * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css).
    * The landing keeps its own internal variable names but aliases them onto the
-   * mctl semantic tokens, so dark/light flips and accent swaps are handled by
-   * mctl.css's [data-theme] / [data-accent] layers automatically.
+   * mctl semantic tokens, so dark/light flips are handled by mctl.css's
+   * [data-theme] layer automatically. Accent is terracotta from the design system.
    */
   :root {
     --bg:            var(--surface-bg);
@@ -430,39 +430,6 @@
   }
 
   .muted { color: var(--muted); font-size: 13px; }
-
-  /* ===== Accent picker ===== */
-  .accent-picker {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px;
-    border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-md);
-    background: var(--surface);
-  }
-  .accent-swatch {
-    width: 16px; height: 16px;
-    padding: 0;
-    border: 1px solid color-mix(in srgb, var(--swatch) 50%, transparent);
-    border-radius: var(--mctl-radius-sm);
-    background: var(--swatch);
-    cursor: pointer;
-    transition: transform .12s, box-shadow .12s;
-  }
-  .accent-swatch:hover { transform: scale(1.12); }
-  .accent-swatch[data-pick="cyan"]      { --swatch: var(--mctl-accent-cyan-primary); }
-  .accent-swatch[data-pick="lime"]      { --swatch: var(--mctl-accent-lime-primary); }
-  .accent-swatch[data-pick="vermilion"] { --swatch: var(--mctl-accent-vermilion-primary); }
-  .accent-swatch[data-pick="lilac"]     { --swatch: var(--mctl-accent-lilac-primary); }
-  :root:not([data-accent]) .accent-swatch[data-pick="vermilion"],
-  :root[data-accent="terracotta"] .accent-swatch[data-pick="vermilion"],
-  :root[data-accent="vermilion"] .accent-swatch[data-pick="vermilion"],
-  :root[data-accent="cyan"]      .accent-swatch[data-pick="cyan"],
-  :root[data-accent="lime"]      .accent-swatch[data-pick="lime"],
-  :root[data-accent="lilac"]     .accent-swatch[data-pick="lilac"] {
-    box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--swatch);
-  }
 
   /* ===== Light/dark toggle ===== */
   .theme-toggle {
