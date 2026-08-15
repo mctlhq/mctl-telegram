@@ -26,12 +26,8 @@
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --accent:  color-mix(in srgb, var(--mctl-accent-cyan-primary) 46%, #000);
     --code-fg: var(--accent);
   }
-  :root[data-theme="light"][data-accent="lime"]      { --accent: color-mix(in srgb, var(--mctl-accent-lime-primary) 42%, #000); }
-  :root[data-theme="light"][data-accent="vermilion"] { --accent: color-mix(in srgb, var(--mctl-accent-vermilion-primary) 70%, #000); }
-  :root[data-theme="light"][data-accent="lilac"]     { --accent: color-mix(in srgb, var(--mctl-accent-lilac-primary) 64%, #000); }
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -459,10 +455,11 @@
   .accent-swatch[data-pick="lime"]      { --swatch: var(--mctl-accent-lime-primary); }
   .accent-swatch[data-pick="vermilion"] { --swatch: var(--mctl-accent-vermilion-primary); }
   .accent-swatch[data-pick="lilac"]     { --swatch: var(--mctl-accent-lilac-primary); }
-  :root:not([data-accent]) .accent-swatch[data-pick="cyan"],
+  :root:not([data-accent]) .accent-swatch[data-pick="vermilion"],
+  :root[data-accent="terracotta"] .accent-swatch[data-pick="vermilion"],
+  :root[data-accent="vermilion"] .accent-swatch[data-pick="vermilion"],
   :root[data-accent="cyan"]      .accent-swatch[data-pick="cyan"],
   :root[data-accent="lime"]      .accent-swatch[data-pick="lime"],
-  :root[data-accent="vermilion"] .accent-swatch[data-pick="vermilion"],
   :root[data-accent="lilac"]     .accent-swatch[data-pick="lilac"] {
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--swatch);
   }

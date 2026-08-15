@@ -8,11 +8,11 @@
     try { localStorage.setItem('mctl-theme', next); } catch (e) {}
   }
 
-  // Accent picker: sets data-accent (cyan is the mctl default — no attribute),
-  // persists in localStorage.
+  // Accent picker: sets data-accent (terracotta/vermilion is the mctl default
+  // — no attribute), persists in localStorage.
   function setAccent(name) {
     var root = document.documentElement;
-    if (name === 'cyan') {
+    if (name === 'terracotta' || name === 'vermilion') {
       root.removeAttribute('data-accent');
     } else {
       root.setAttribute('data-accent', name);

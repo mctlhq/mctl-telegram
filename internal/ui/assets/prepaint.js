@@ -13,7 +13,7 @@
       t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     }
     root.setAttribute('data-theme', t);
-    if (a === 'lime' || a === 'vermilion' || a === 'lilac') {
+    if (a === 'cyan' || a === 'lime' || a === 'lilac') {
       root.setAttribute('data-accent', a);
     }
   })();

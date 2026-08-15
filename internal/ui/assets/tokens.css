@@ -5,9 +5,10 @@
    * every token (equal specificity, later wins). Mirrors mctl.css.
    */
   :root {
-    --mctl-accent-cyan-primary: #00e5ff;
+    --mctl-accent-terracotta-primary: #e25a3c;
+    --mctl-accent-cyan-primary: #1ab3c7;
     --mctl-accent-lime-primary: #bdf24a;
-    --mctl-accent-vermilion-primary: #ff5a36;
+    --mctl-accent-vermilion-primary: #e25a3c;
     --mctl-accent-lilac-primary: #b07aff;
     --mctl-radius-sm: 2px;
     --mctl-radius-md: 4px;
@@ -15,19 +16,27 @@
     --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
     --surface-line: #1f242b; --surface-line-strong: #2a313a;
     --surface-fg: #e6e7e9; --surface-fg-muted: #a4a8ae; --surface-fg-subtle: #6b7079;
-    --accent: #00e5ff; --accent-highlight: #7df2ff;
+    --accent: #e25a3c; --accent-highlight: #ff8a6a;
     --status-ok: #7cf2a4; --status-warn: #f5a524; --status-bad: #ff6b6b;
-    --font-display: 'Geist', system-ui, -apple-system, sans-serif;
+    --font-display: 'Onest', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   }
   [data-theme='light'] {
-    --surface-bg: #f1ede4; --surface-elevated: #f1ede4; --surface-card: #f1ede4;
-    --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
+    --surface-bg: #f1ede4; --surface-elevated: #f7f4ec; --surface-card: #fffdf8;
+    --surface-line: #d8d2c4; --surface-line-strong: #c4bcae;
     --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
+    --accent: #b83d28; --accent-highlight: #9a3220;
   }
+  [data-accent='terracotta'],
+  [data-accent='vermilion'] { --accent: #e25a3c; --accent-highlight: #ff8a6a; }
+  [data-accent='cyan']      { --accent: #1ab3c7; --accent-highlight: #5ed4e0; }
   [data-accent='lime']      { --accent: #bdf24a; --accent-highlight: #dcff8c; }
-  [data-accent='vermilion'] { --accent: #ff5a36; --accent-highlight: #ff8a6a; }
   [data-accent='lilac']     { --accent: #b07aff; --accent-highlight: #d6b3ff; }
+  [data-theme='light'][data-accent='terracotta'],
+  [data-theme='light'][data-accent='vermilion'] { --accent: #b83d28; --accent-highlight: #9a3220; }
+  [data-theme='light'][data-accent='cyan']      { --accent: #0e7a8a; --accent-highlight: #0a5c68; }
+  [data-theme='light'][data-accent='lime']      { --accent: #6b8f14; --accent-highlight: #547110; }
+  [data-theme='light'][data-accent='lilac']     { --accent: #6b3cc4; --accent-highlight: #552e9e; }
   /*
    * No-JS fallback for strict-CSP pages (OAuth flow) that cannot run the
    * pre-paint theme script: follow the OS preference. Only applies when no
@@ -36,9 +45,9 @@
   @media (prefers-color-scheme: light) {
     :root:not([data-theme]) {
       color-scheme: light;
-      --surface-bg: #f1ede4; --surface-elevated: #f1ede4; --surface-card: #f1ede4;
-      --surface-line: #d8d2c4; --surface-line-strong: #d8d2c4;
+      --surface-bg: #f1ede4; --surface-elevated: #f7f4ec; --surface-card: #fffdf8;
+      --surface-line: #d8d2c4; --surface-line-strong: #c4bcae;
       --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
-      --accent: #0094a8; --accent-highlight: #00b3cc;
+      --accent: #b83d28; --accent-highlight: #9a3220;
     }
   }

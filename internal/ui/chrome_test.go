@@ -24,6 +24,8 @@ func TestFullChrome(t *testing.T) {
 		`class="topbar"`,
 		"accent-swatch",
 		"ui.mctl.ai/mctl.css",
+		"family=Onest",
+		"JetBrains+Mono",
 		"<footer>",
 		"https://tg.mctl.ai",
 		`<a href="/docs" class="active">docs</a>`,
@@ -36,6 +38,11 @@ func TestFullChrome(t *testing.T) {
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
+		}
+	}
+	for _, bad := range []string{"family=Geist", "'Geist'", "#00e5ff"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("full page still has stale design token %q", bad)
 		}
 	}
 }
@@ -52,5 +59,16 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 	}
 	if !strings.Contains(out, `class="topbar"`) {
 		t.Error("lite page missing topbar")
+	}
+	if !strings.Contains(out, "'Onest'") {
+		t.Error("lite fallback tokens must use Onest")
+	}
+	if !strings.Contains(out, "#e25a3c") {
+		t.Error("lite fallback tokens must default to terracotta")
+	}
+	for _, bad := range []string{"'Geist'", "#00e5ff"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("lite fallback still has stale design token %q", bad)
+		}
 	}
 }
