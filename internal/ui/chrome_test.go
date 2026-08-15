@@ -22,8 +22,9 @@ func TestFullChrome(t *testing.T) {
 
 	for _, s := range []string{
 		`class="topbar"`,
-		"accent-swatch",
 		"ui.mctl.ai/mctl.css",
+		"family=Onest",
+		"JetBrains+Mono",
 		"ui.mctl.ai/brand/favicon-telegram.svg",
 		"<footer>",
 		"https://tg.mctl.ai",
@@ -34,9 +35,18 @@ func TestFullChrome(t *testing.T) {
 		// Light/dark toggle — content pages can flip the theme.
 		`class="theme-toggle"`,
 		`aria-label="Toggle theme"`,
+		"#e25a3c",
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
+		}
+	}
+	for _, bad := range []string{
+		"family=Geist", "'Geist'", "#00e5ff",
+		"accent-swatch", "accent-picker", "data-pick",
+	} {
+		if strings.Contains(out, bad) {
+			t.Errorf("full page still has stale chrome %q", bad)
 		}
 	}
 }
@@ -46,7 +56,7 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
-	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`} {
+	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("lite (strict-CSP) page must not contain %q", bad)
 		}
@@ -56,5 +66,16 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 	}
 	if !strings.Contains(out, `class="topbar"`) {
 		t.Error("lite page missing topbar")
+	}
+	if !strings.Contains(out, "'Onest'") {
+		t.Error("lite fallback tokens must use Onest")
+	}
+	if !strings.Contains(out, "#e25a3c") {
+		t.Error("lite fallback tokens must default to terracotta")
+	}
+	for _, bad := range []string{"'Geist'", "#00e5ff"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("lite fallback still has stale design token %q", bad)
+		}
 	}
 }
