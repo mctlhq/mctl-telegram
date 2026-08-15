@@ -247,7 +247,8 @@ func connectRandomToken(n int) string {
 
 // The connect pages share the lite (strict-CSP) chrome from internal/ui:
 // inlined design tokens + component CSS + auth-card CSS, the static topbar,
-// and the footer. No external resources or JS, matching the existing CSP.
+// and the footer. No external CSS/JS, matching the existing CSP. The tab icon
+// loads from ui.mctl.ai (allow-listed on img-src).
 
 var connectHead = `<!doctype html>
 <html lang="en">
@@ -255,7 +256,7 @@ var connectHead = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Connect Telegram account</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  ` + ui.FaviconLink + `
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + `</style>
 </head>
 <body>
@@ -352,7 +353,7 @@ func renderConnect(w http.ResponseWriter, status int, t *template.Template, data
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	const csp = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"
+	const csp = "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self'; base-uri 'none'"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Cache-Control", "no-store")
