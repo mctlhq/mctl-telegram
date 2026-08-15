@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.48.0](https://github.com/mctlhq/mctl-telegram/compare/0.47.0...0.48.0) (2026-08-15)
+
+
+### Features
+
+* **ui:** load the telegram favicon from the design CDN ([e467a45](https://github.com/mctlhq/mctl-telegram/commit/e467a458013704172c055d2f485e245d2bf09cdc))
+* **ui:** load the telegram favicon from the design CDN ([fd1a27c](https://github.com/mctlhq/mctl-telegram/commit/fd1a27c61c92367cac02b837894fd9b9626ee701))
+
+
+### Bug Fixes
+
+* cache-bust the CDN telegram favicon ([dc321e0](https://github.com/mctlhq/mctl-telegram/commit/dc321e0f2bb4b03d46ebe84e0a6f828b60fb8156))
+
 ## [0.47.0](https://github.com/mctlhq/mctl-telegram/compare/0.46.0...0.47.0) (2026-08-14)
 
 
