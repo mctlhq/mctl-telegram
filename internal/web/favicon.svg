@@ -1,5 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none">
-  <rect width="32" height="32" rx="7" fill="#0a0b0d"/>
-  <rect x="6.5" y="6.5" width="19" height="19" rx="3.5" stroke="#00e5ff" stroke-width="2.4"/>
-  <rect x="12" y="12" width="8" height="8" rx="1.5" fill="#00e5ff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 512 512">
+  <!-- Baked terracotta hex + T badge. Same geometry as brand/hex.svg. -->
+  <!-- Dark #e25a3c / light #b83d28. Readable at 16px via filled hex + cutout. -->
+  <title>MCTL Telegram</title>
+  <style>
+    .brand { color: #e25a3c; }
+    @media (prefers-color-scheme: light) {
+      .brand { color: #b83d28; }
+    }
+  </style>
+  <defs>
+    <mask id="cut">
+      <path d="M256 60L435.263 158V354L256 452L76.7372 354V158L256 60Z" fill="#fff"/>
+      <text x="256" y="256" dy=".36em" text-anchor="middle"
+        font-family="Onest, system-ui, -apple-system, 'Segoe UI', sans-serif"
+        font-weight="700" font-size="250" fill="#000">T</text>
+    </mask>
+  </defs>
+  <path class="brand" d="M256 60L435.263 158V354L256 452L76.7372 354V158L256 60Z" fill="currentColor" mask="url(#cut)"/>
 </svg>
