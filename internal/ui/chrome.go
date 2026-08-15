@@ -47,8 +47,7 @@ type Data struct {
 // FaviconLink is the shared tab icon pointing at the design-CDN terracotta T
 // badge. Content pages and strict-CSP OAuth heads both concatenate this so the
 // URL lives in one place. Those CSP pages must allow https://ui.mctl.ai on img-src.
-const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl.ai/brand/favicon-telegram.svg">
-<link rel="apple-touch-icon" href="https://ui.mctl.ai/brand/favicon-telegram.svg">`
+const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl.ai/brand/favicon-telegram.svg?v=9dc770313d10">`
 
 // Shared template defines. CSS/JS are concatenated in as literal template text
 // (they contain no {{ }} actions), so there is no escaping concern.
