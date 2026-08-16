@@ -298,3 +298,85 @@ func TestMatchUsername(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderUnreadTargets_UsersAndChatsBeforeChannels(t *testing.T) {
+	targets := []unreadTarget{
+		{hint: &Dialog{ID: "channel:1", Type: "channel"}},
+		{hint: &Dialog{ID: "user:1", Type: "user"}},
+		{hint: &Dialog{ID: "channel:2", Type: "channel"}},
+		{hint: &Dialog{ID: "chat:1", Type: "chat"}},
+		{hint: &Dialog{ID: "user:2", Type: "user"}},
+	}
+	got := orderUnreadTargets(targets)
+	want := []string{"user:1", "chat:1", "user:2", "channel:1", "channel:2"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (channels must not be dropped)", len(got), len(want))
+	}
+	for i, id := range want {
+		if got[i].hint.ID != id {
+			t.Errorf("index %d: got %s, want %s", i, got[i].hint.ID, id)
+		}
+	}
+}
+
+func TestOrderUnreadTargets_EmptyAndSingleUnchanged(t *testing.T) {
+	if got := orderUnreadTargets(nil); got != nil {
+		t.Errorf("nil: got %#v", got)
+	}
+	one := []unreadTarget{{hint: &Dialog{ID: "channel:1", Type: "channel"}}}
+	got := orderUnreadTargets(one)
+	if len(got) != 1 || got[0].hint.ID != "channel:1" {
+		t.Errorf("single: got %#v", got)
+	}
+}
+
+func TestOrderUnreadTargets_LimitFillsHighPriorityFirst(t *testing.T) {
+	// Mixed Telegram dialog order: a broadcast channel with 10k unread is
+	// listed first. The default limit of 50 would previously be consumed
+	// entirely by that channel (per-dialog cap 50). After reordering, the
+	// DM is fetched first and leftover capacity still goes to the channel.
+	targets := []unreadTarget{
+		{hint: &Dialog{ID: "channel:news", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 10000}},
+		{hint: &Dialog{ID: "user:alice", Type: "user"}, dialog: &tg.Dialog{UnreadCount: 3}},
+		{hint: &Dialog{ID: "chat:group", Type: "chat"}, dialog: &tg.Dialog{UnreadCount: 2}},
+		{hint: &Dialog{ID: "channel:other", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 40}},
+	}
+	ordered := orderUnreadTargets(targets)
+	limit := 50
+	type take struct {
+		id string
+		n  int
+	}
+	var plan []take
+	remaining := limit
+	for _, tgt := range ordered {
+		if remaining <= 0 {
+			break
+		}
+		n := tgt.dialog.UnreadCount
+		if n > 50 {
+			n = 50
+		}
+		if n > remaining {
+			n = remaining
+		}
+		plan = append(plan, take{id: tgt.hint.ID, n: n})
+		remaining -= n
+	}
+	want := []take{
+		{id: "user:alice", n: 3},
+		{id: "chat:group", n: 2},
+		{id: "channel:news", n: 45},
+	}
+	if len(plan) != len(want) {
+		t.Fatalf("plan = %+v, want %+v", plan, want)
+	}
+	for i := range want {
+		if plan[i] != want[i] {
+			t.Errorf("index %d: got %+v, want %+v", i, plan[i], want[i])
+		}
+	}
+	if remaining != 0 {
+		t.Errorf("remaining = %d, want 0 (channel leftover filled the rest)", remaining)
+	}
+}
