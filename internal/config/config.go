@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+// maxOAUTHAccessTokenTTL is the ceiling on OAUTH_ACCESS_TOKEN_TTL. 24h is
+// already far longer than an access token needs to live given that clients
+// renew silently with the refresh_token grant; it is set here only to leave
+// room for a deployment that wants a whole working day without a renewal,
+// not because any value near it is a good idea. Refresh tokens are the
+// long-lived half of the pair and are bounded separately by
+// OAUTH_REFRESH_TOKEN_TTL.
+const maxOAUTHAccessTokenTTL = 24 * time.Hour
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -253,6 +262,24 @@ func Load() (*Config, error) {
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
+	}
+	// An access token is the credential an attacker gets to keep when one
+	// leaks, and its TTL is the only thing bounding how long they keep it.
+	// This variable had no ceiling, so a deployment could — and did — set
+	// 8760h: tg-preview minted admin-scoped tokens valid for a year, one
+	// escaped into chat logs and on-disk client configs, and nothing about
+	// the config looked wrong because nothing checked it. Reject rather than
+	// clamp, matching the fail-closed validation above: silently shortening
+	// a lifetime an operator deliberately asked for would hide the mistake
+	// instead of correcting it. Long-lived credentials have a separate,
+	// bounded path (POST /api/agent/token, capped at maxAgentTokenTTL).
+	if c.OAUTHAccessTokenTTL > maxOAUTHAccessTokenTTL {
+		return nil, fmt.Errorf("OAUTH_ACCESS_TOKEN_TTL must not exceed %v, got %v — "+
+			"clients renew silently with the refresh_token grant, so a long access "+
+			"token buys nothing and only widens the window on a leak", maxOAUTHAccessTokenTTL, c.OAUTHAccessTokenTTL)
+	}
+	if c.OAUTHAccessTokenTTL <= 0 {
+		return nil, fmt.Errorf("OAUTH_ACCESS_TOKEN_TTL must be positive, got %v", c.OAUTHAccessTokenTTL)
 	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
