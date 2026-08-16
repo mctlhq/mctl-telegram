@@ -51,8 +51,18 @@ type Config struct {
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
 	OAUTHAllowImplicitClient bool          // accept unregistered client_ids (eases Claude.ai onboarding)
-	AutoApproveClients       bool          // open registration: every widget login auto-gets the client tier
-	DigestHourUTC            int           // UTC hour (0-23) for the daily new-client digest; default 9
+	// OAUTHAllowedImplicitHosts is the redirect_uri hostname allowlist applied
+	// both to unregistered client_ids and to every redirect_uri supplied at
+	// RFC 7591 dynamic registration. Empty ⇒ the built-in default in
+	// internal/oauth (claude.ai, claude.com, chatgpt.com, localhost,
+	// 127.0.0.1) applies, so an unset variable changes nothing.
+	//
+	// Configurable because onboarding a new MCP client (an AI assistant with
+	// its own hosted callback domain) is otherwise a code change and a
+	// release for what is a deployment-level trust decision.
+	OAUTHAllowedImplicitHosts []string
+	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
+	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -246,6 +256,7 @@ func Load() (*Config, error) {
 	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
+	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
