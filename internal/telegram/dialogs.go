@@ -41,8 +41,15 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 
 	users, chats, dialogs := decodeDialogsResult(res)
 	seedPeerCache(cache, userID, users, chats)
-	out := make([]Dialog, 0, len(dialogs))
+	return dialogEntries(dialogs, users, chats, dialogsTopMessages(res), query), nil
+}
 
+// dialogEntries maps MessagesGetDialogs dialogs (plus the sibling message
+// objects) into []Dialog. LastMessageDate is taken from the top-message
+// object when present; missing or undated messages leave the zero time.
+func dialogEntries(dialogs []tg.DialogClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass, messages []tg.MessageClass, query string) []Dialog {
+	dates := topMessageDates(messages)
+	out := make([]Dialog, 0, len(dialogs))
 	for _, dc := range dialogs {
 		d, ok := dc.(*tg.Dialog)
 		if !ok {
@@ -52,13 +59,16 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 		if entry == nil {
 			continue
 		}
+		if ts, ok := lastMessageDateFor(d, dates); ok {
+			entry.LastMessageDate = ts
+		}
 		if query != "" && !strings.Contains(strings.ToLower(entry.Title), strings.ToLower(query)) &&
 			!strings.Contains(strings.ToLower(entry.Username), strings.ToLower(query)) {
 			continue
 		}
 		out = append(out, *entry)
 	}
-	return out, nil
+	return out
 }
 
 // ResolveUserPeerFromDialogs recovers a hash-bearing InputPeerUser when a
@@ -111,6 +121,77 @@ func decodeDialogsResult(r tg.MessagesDialogsClass) (users map[int64]*tg.User, c
 		// nothing
 	}
 	return users, chats, dialogs
+}
+
+func dialogsTopMessages(r tg.MessagesDialogsClass) []tg.MessageClass {
+	switch v := r.(type) {
+	case *tg.MessagesDialogs:
+		return v.Messages
+	case *tg.MessagesDialogsSlice:
+		return v.Messages
+	default:
+		return nil
+	}
+}
+
+type topMessageKey struct {
+	peer string
+	id   int
+}
+
+func peerClassKey(p tg.PeerClass) string {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		return fmt.Sprintf("user:%d", v.UserID)
+	case *tg.PeerChat:
+		return fmt.Sprintf("chat:%d", v.ChatID)
+	case *tg.PeerChannel:
+		return fmt.Sprintf("channel:%d", v.ChannelID)
+	default:
+		return ""
+	}
+}
+
+// topMessageDates maps (peer, message id) to the message Date from a
+// MessagesGetDialogs result. Message IDs are not globally unique (each
+// channel has its own id space), so the peer is part of the key. Messages
+// with Date==0 are skipped so callers do not invent timestamps.
+func topMessageDates(messages []tg.MessageClass) map[topMessageKey]time.Time {
+	out := make(map[topMessageKey]time.Time, len(messages))
+	for _, m := range messages {
+		id, date, peer, ok := messageIDDatePeer(m)
+		if !ok || date == 0 {
+			continue
+		}
+		key := peerClassKey(peer)
+		if key == "" {
+			continue
+		}
+		out[topMessageKey{peer: key, id: id}] = time.Unix(int64(date), 0).UTC()
+	}
+	return out
+}
+
+func messageIDDatePeer(m tg.MessageClass) (id, date int, peer tg.PeerClass, ok bool) {
+	switch v := m.(type) {
+	case *tg.Message:
+		return v.ID, v.Date, v.PeerID, true
+	case *tg.MessageService:
+		return v.ID, v.Date, v.PeerID, true
+	default:
+		return 0, 0, nil, false
+	}
+}
+
+func lastMessageDateFor(d *tg.Dialog, dates map[topMessageKey]time.Time) (time.Time, bool) {
+	if d == nil || d.TopMessage == 0 {
+		return time.Time{}, false
+	}
+	ts, ok := dates[topMessageKey{peer: peerClassKey(d.Peer), id: d.TopMessage}]
+	if !ok || ts.IsZero() {
+		return time.Time{}, false
+	}
+	return ts, true
 }
 
 func fillUserChatIndex(users map[int64]*tg.User, chats map[int64]tg.ChatClass, us []tg.UserClass, cs []tg.ChatClass) {
