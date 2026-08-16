@@ -925,8 +925,8 @@ func TestToolGetUnreadMessages_DescriptionMentionsPeerPriority(t *testing.T) {
 	tool, _ := s.toolGetUnreadMessages()
 	desc := tool.Description
 	for _, want := range []string{
-		"DMs and chats (including groups)",
-		"fill limit before any channel",
+		"DMs and chats (including groups and megagroup/supergroups)",
+		"fill limit before any broadcast channel",
 		"last-priority",
 		"When peer is set",
 	} {

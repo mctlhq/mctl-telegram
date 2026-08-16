@@ -299,11 +299,39 @@ func TestMatchUsername(t *testing.T) {
 	}
 }
 
+func TestIsBroadcastChannel(t *testing.T) {
+	chats := map[int64]tg.ChatClass{
+		10: &tg.Chat{ID: 10, Title: "Legacy group"},
+		20: &tg.Channel{ID: 20, Title: "News", Broadcast: true},
+		30: &tg.Channel{ID: 30, Title: "Team", Megagroup: true},
+		40: &tg.Channel{ID: 40, Title: "Huge", Megagroup: true, Gigagroup: true},
+	}
+	cases := []struct {
+		name string
+		peer tg.PeerClass
+		want bool
+	}{
+		{name: "user", peer: &tg.PeerUser{UserID: 1}, want: false},
+		{name: "legacy chat", peer: &tg.PeerChat{ChatID: 10}, want: false},
+		{name: "broadcast channel", peer: &tg.PeerChannel{ChannelID: 20}, want: true},
+		{name: "megagroup", peer: &tg.PeerChannel{ChannelID: 30}, want: false},
+		{name: "gigagroup", peer: &tg.PeerChannel{ChannelID: 40}, want: false},
+		{name: "unknown channel", peer: &tg.PeerChannel{ChannelID: 99}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isBroadcastChannel(tc.peer, chats); got != tc.want {
+				t.Errorf("isBroadcastChannel = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOrderUnreadTargets_UsersAndChatsBeforeChannels(t *testing.T) {
 	targets := []unreadTarget{
-		{hint: &Dialog{ID: "channel:1", Type: "channel"}},
+		{hint: &Dialog{ID: "channel:1", Type: "channel"}, broadcast: true},
 		{hint: &Dialog{ID: "user:1", Type: "user"}},
-		{hint: &Dialog{ID: "channel:2", Type: "channel"}},
+		{hint: &Dialog{ID: "channel:2", Type: "channel"}, broadcast: true},
 		{hint: &Dialog{ID: "chat:1", Type: "chat"}},
 		{hint: &Dialog{ID: "user:2", Type: "user"}},
 	}
@@ -311,6 +339,26 @@ func TestOrderUnreadTargets_UsersAndChatsBeforeChannels(t *testing.T) {
 	want := []string{"user:1", "chat:1", "user:2", "channel:1", "channel:2"}
 	if len(got) != len(want) {
 		t.Fatalf("len = %d, want %d (channels must not be dropped)", len(got), len(want))
+	}
+	for i, id := range want {
+		if got[i].hint.ID != id {
+			t.Errorf("index %d: got %s, want %s", i, got[i].hint.ID, id)
+		}
+	}
+}
+
+func TestOrderUnreadTargets_MegagroupStaysHighPriority(t *testing.T) {
+	// dialogFromPeer labels every PeerChannel as Type "channel". A megagroup
+	// must still sit with DMs, not with broadcast channels.
+	targets := []unreadTarget{
+		{hint: &Dialog{ID: "channel:news", Type: "channel"}, broadcast: isBroadcastChannel(&tg.PeerChannel{ChannelID: 20}, map[int64]tg.ChatClass{20: &tg.Channel{ID: 20, Broadcast: true}})},
+		{hint: &Dialog{ID: "channel:team", Type: "channel"}, broadcast: isBroadcastChannel(&tg.PeerChannel{ChannelID: 30}, map[int64]tg.ChatClass{30: &tg.Channel{ID: 30, Megagroup: true}})},
+		{hint: &Dialog{ID: "user:1", Type: "user"}},
+	}
+	got := orderUnreadTargets(targets)
+	want := []string{"channel:team", "user:1", "channel:news"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
 	}
 	for i, id := range want {
 		if got[i].hint.ID != id {
@@ -336,10 +384,10 @@ func TestOrderUnreadTargets_LimitFillsHighPriorityFirst(t *testing.T) {
 	// entirely by that channel (per-dialog cap 50). After reordering, the
 	// DM is fetched first and leftover capacity still goes to the channel.
 	targets := []unreadTarget{
-		{hint: &Dialog{ID: "channel:news", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 10000}},
+		{hint: &Dialog{ID: "channel:news", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 10000}, broadcast: true},
 		{hint: &Dialog{ID: "user:alice", Type: "user"}, dialog: &tg.Dialog{UnreadCount: 3}},
 		{hint: &Dialog{ID: "chat:group", Type: "chat"}, dialog: &tg.Dialog{UnreadCount: 2}},
-		{hint: &Dialog{ID: "channel:other", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 40}},
+		{hint: &Dialog{ID: "channel:other", Type: "channel"}, dialog: &tg.Dialog{UnreadCount: 40}, broadcast: true},
 	}
 	ordered := orderUnreadTargets(targets)
 	limit := 50
