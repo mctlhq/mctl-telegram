@@ -50,6 +50,47 @@ func TestLoadDBPoolEnvVars(t *testing.T) {
 	}
 }
 
+func TestLoadOAuthAllowedImplicitHosts(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{
+			name: "unset leaves the list empty so internal/oauth applies its default",
+			env:  "",
+			want: nil,
+		},
+		{
+			name: "comma-separated hosts are split",
+			env:  "claude.ai,chatgpt.com,antigravity.google",
+			want: []string{"claude.ai", "chatgpt.com", "antigravity.google"},
+		},
+		{
+			name: "surrounding whitespace is trimmed",
+			env:  " claude.ai , antigravity.google ",
+			want: []string{"claude.ai", "antigravity.google"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OAUTH_ALLOWED_IMPLICIT_HOSTS", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if len(cfg.OAUTHAllowedImplicitHosts) != len(tc.want) {
+				t.Fatalf("OAUTHAllowedImplicitHosts = %#v, want %#v", cfg.OAUTHAllowedImplicitHosts, tc.want)
+			}
+			for i, want := range tc.want {
+				if cfg.OAUTHAllowedImplicitHosts[i] != want {
+					t.Errorf("host[%d] = %q, want %q", i, cfg.OAUTHAllowedImplicitHosts[i], want)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadAPIRateLimitEnvVars(t *testing.T) {
 	tests := []struct {
 		name      string

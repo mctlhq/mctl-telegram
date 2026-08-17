@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.50.0](https://github.com/mctlhq/mctl-telegram/compare/0.49.0...0.50.0) (2026-08-16)
+
+
+### Features
+
+* **oauth:** make the implicit-host allowlist configurable ([#394](https://github.com/mctlhq/mctl-telegram/issues/394)) ([3513176](https://github.com/mctlhq/mctl-telegram/commit/35131762a926aab167ebd84f316b9d7e8dd51f6a))
+
 ## [0.49.0](https://github.com/mctlhq/mctl-telegram/compare/0.48.0...0.49.0) (2026-08-15)
 
 

@@ -683,6 +683,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,
 		CodeTTL:                  cfg.OAUTHCodeTTL,
 		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
+		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,
 		UseDBForOAuth:            useDBForOAuth,

@@ -244,6 +244,8 @@ func (s *Server) toolGetUnreadMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		mcplib.WithOutputSchema[messagesResult](),
 		mcplib.WithDescription(`Fetch unread messages, optionally scoped to one peer.
 
+When peer is omitted, DMs and chats (including groups and megagroup/supergroups) are fetched first and fill limit before any broadcast channel unreads. Broadcast channels are last-priority, not excluded: leftover limit is filled from those dialogs. When peer is set (user/chat/channel), only that peer is fetched.
+
 Inputs:
   peer — optional: "@username", "user:<id>", "chat:<id>", "channel:<id>".
   limit — int, default 50, max 200.
