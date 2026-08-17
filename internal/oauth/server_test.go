@@ -795,6 +795,91 @@ func TestRegister_AcceptsChatGPTRedirect(t *testing.T) {
 	}
 }
 
+// TestRegister_DefaultImplicitHostsAccepted pins the whole built-in default
+// list, not just chatgpt.com above. Every other test in this file sets
+// AllowedImplicitHosts explicitly, so before this test a deployment running
+// with the variable unset — which is every deployment today — had no coverage
+// of the list it actually uses.
+func TestRegister_DefaultImplicitHostsAccepted(t *testing.T) {
+	for _, redirect := range []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://claude.com/api/mcp/auth_callback",
+		"https://chatgpt.com/connector_platform_oauth_redirect",
+		"http://localhost:6274/oauth/callback",
+		"http://127.0.0.1:6274/oauth/callback",
+	} {
+		t.Run(redirect, func(t *testing.T) {
+			srv := newTestServer(t)
+			mux := newMockRouter()
+			srv.Register(mux)
+			rec := postRegisterJSON(t, mux, `{"client_name":"c","redirect_uris":["`+redirect+`"]}`)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRegister_ConfiguredImplicitHostsReplaceDefault covers the
+// OAUTH_ALLOWED_IMPLICIT_HOSTS path: a host supplied by configuration is
+// accepted, and — the part that is easy to get wrong when editing a
+// deployment — supplying the variable replaces the built-in default outright
+// instead of extending it.
+func TestRegister_ConfiguredImplicitHostsReplaceDefault(t *testing.T) {
+	withHosts := func(c *Config) {
+		c.AllowedImplicitHosts = []string{"antigravity.google"}
+	}
+
+	t.Run("configured host accepted", func(t *testing.T) {
+		srv := newTestServer(t, withHosts)
+		mux := newMockRouter()
+		srv.Register(mux)
+		rec := postRegisterJSON(t, mux, `{"client_name":"antigravity","redirect_uris":["https://antigravity.google/oauth/callback"]}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("default host no longer accepted", func(t *testing.T) {
+		srv := newTestServer(t, withHosts)
+		mux := newMockRouter()
+		srv.Register(mux)
+		rec := postRegisterJSON(t, mux, `{"client_name":"claude","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`)
+		if rec.Code == http.StatusCreated {
+			t.Fatal("configured allowlist extended the default instead of replacing it")
+		}
+	})
+
+	t.Run("untrusted host still rejected", func(t *testing.T) {
+		srv := newTestServer(t, withHosts)
+		mux := newMockRouter()
+		srv.Register(mux)
+		rec := postRegisterJSON(t, mux, `{"client_name":"evil","redirect_uris":["https://attacker.example/cb"]}`)
+		if rec.Code == http.StatusCreated {
+			t.Fatal("registration accepted an attacker-hosted redirect_uri")
+		}
+	})
+
+	t.Run("loopback accepted despite not being listed", func(t *testing.T) {
+		srv := newTestServer(t, withHosts)
+		mux := newMockRouter()
+		srv.Register(mux)
+		rec := postRegisterJSON(t, mux, `{"client_name":"cli","redirect_uris":["http://127.0.0.1:51234/callback"]}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func postRegisterJSON(t *testing.T, mux *mockRouter, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.serve("POST", "/oauth/register", rec, req)
+	return rec
+}
+
 func TestRegister_CapEvictsOldest(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.MaxRegisteredClients = 2 })
 	mux := newMockRouter()

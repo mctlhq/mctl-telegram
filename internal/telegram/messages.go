@@ -180,7 +180,9 @@ func sanitizeFileName(name string) string {
 }
 
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
-// `limit` total unread messages, scoped to one peer if provided.
+// `limit` total unread messages, scoped to one peer if provided. When peer
+// is omitted, users, legacy chats, and megagroup/supergroups are fetched
+// first; broadcast channels fill any leftover limit.
 func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
 	msgs, _, err := GetUnreadMessagesRaw(ctx, c, peerSpec, limit)
 	return msgs, err
@@ -204,12 +206,7 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 
-	type target struct {
-		input  tg.InputPeerClass
-		dialog *tg.Dialog
-		hint   *Dialog
-	}
-	var targets []target
+	var targets []unreadTarget
 
 	var peerFound bool // true if peerSpec matched a dialog entry (even with 0 unread)
 	for _, dc := range dialogs {
@@ -236,7 +233,12 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 		if input == nil {
 			continue
 		}
-		targets = append(targets, target{input: input, dialog: d, hint: hint})
+		targets = append(targets, unreadTarget{
+			input:     input,
+			dialog:    d,
+			hint:      hint,
+			broadcast: isBroadcastChannel(d.Peer, chats),
+		})
 	}
 
 	// Peer explicitly requested but absent from the dialog list → actionable error.
@@ -246,6 +248,13 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 			return nil, nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
 		}
 		return []Message{}, nil, nil
+	}
+
+	// Default (unscoped) fetch: DMs and groups first so a broadcast
+	// channel with tens of thousands of unread cannot starve the limit.
+	// Broadcast channels stay in the list and fill leftover capacity.
+	if peerSpec == "" {
+		targets = orderUnreadTargets(targets)
 	}
 
 	out := make([]Message, 0, limit)
@@ -273,6 +282,54 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 		rawOut = append(rawOut, raw...)
 	}
 	return out, rawOut, nil
+}
+
+type unreadTarget struct {
+	input     tg.InputPeerClass
+	dialog    *tg.Dialog
+	hint      *Dialog
+	broadcast bool // true for broadcast channels, not megagroup/supergroups
+}
+
+// isBroadcastChannel reports whether p is a broadcast channel. Legacy chats
+// (PeerChat) and megagroup/supergroups (Channel.Megagroup) are groups and
+// return false. dialogFromPeer maps every PeerChannel to Type "channel", so
+// callers must not use hint.Type to decide unread priority.
+func isBroadcastChannel(p tg.PeerClass, chats map[int64]tg.ChatClass) bool {
+	v, ok := p.(*tg.PeerChannel)
+	if !ok {
+		return false
+	}
+	c, ok := chats[v.ChannelID]
+	if !ok {
+		return true
+	}
+	ch, ok := c.(*tg.Channel)
+	if !ok {
+		return true
+	}
+	return !ch.Megagroup
+}
+
+// orderUnreadTargets puts DMs and groups (legacy chats and megagroups)
+// ahead of broadcast channels, preserving relative order within each
+// bucket. Used only for the unscoped get_unread_messages path so broadcast
+// channels cannot consume the entire limit before a DM is considered.
+// Channels are not dropped.
+func orderUnreadTargets(targets []unreadTarget) []unreadTarget {
+	if len(targets) < 2 {
+		return targets
+	}
+	high := make([]unreadTarget, 0, len(targets))
+	low := make([]unreadTarget, 0)
+	for _, t := range targets {
+		if t.broadcast {
+			low = append(low, t)
+			continue
+		}
+		high = append(high, t)
+	}
+	return append(high, low...)
 }
 
 func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) tg.InputPeerClass {
