@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+// maxOAUTHAccessTokenTTL is the ceiling on OAUTH_ACCESS_TOKEN_TTL. 24h is
+// already far longer than an access token needs to live given that clients
+// renew silently with the refresh_token grant; it is set here only to leave
+// room for a deployment that wants a whole working day without a renewal,
+// not because any value near it is a good idea. Refresh tokens are the
+// long-lived half of the pair and are bounded separately by
+// OAUTH_REFRESH_TOKEN_TTL.
+const maxOAUTHAccessTokenTTL = 24 * time.Hour
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -51,8 +60,18 @@ type Config struct {
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
 	OAUTHAllowImplicitClient bool          // accept unregistered client_ids (eases Claude.ai onboarding)
-	AutoApproveClients       bool          // open registration: every widget login auto-gets the client tier
-	DigestHourUTC            int           // UTC hour (0-23) for the daily new-client digest; default 9
+	// OAUTHAllowedImplicitHosts is the redirect_uri hostname allowlist applied
+	// both to unregistered client_ids and to every redirect_uri supplied at
+	// RFC 7591 dynamic registration. Empty ⇒ the built-in default in
+	// internal/oauth (claude.ai, claude.com, chatgpt.com, localhost,
+	// 127.0.0.1) applies, so an unset variable changes nothing.
+	//
+	// Configurable because onboarding a new MCP client (an AI assistant with
+	// its own hosted callback domain) is otherwise a code change and a
+	// release for what is a deployment-level trust decision.
+	OAUTHAllowedImplicitHosts []string
+	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
+	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -244,8 +263,27 @@ func Load() (*Config, error) {
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
+	// An access token is the credential an attacker gets to keep when one
+	// leaks, and its TTL is the only thing bounding how long they keep it.
+	// This variable had no ceiling, so a deployment could — and did — set
+	// 8760h: tg-preview minted admin-scoped tokens valid for a year, one
+	// escaped into chat logs and on-disk client configs, and nothing about
+	// the config looked wrong because nothing checked it. Reject rather than
+	// clamp, matching the fail-closed validation above: silently shortening
+	// a lifetime an operator deliberately asked for would hide the mistake
+	// instead of correcting it. Long-lived credentials have a separate,
+	// bounded path (POST /api/agent/token, capped at maxAgentTokenTTL).
+	if c.OAUTHAccessTokenTTL > maxOAUTHAccessTokenTTL {
+		return nil, fmt.Errorf("OAUTH_ACCESS_TOKEN_TTL must not exceed %v, got %v — "+
+			"clients renew silently with the refresh_token grant, so a long access "+
+			"token buys nothing and only widens the window on a leak", maxOAUTHAccessTokenTTL, c.OAUTHAccessTokenTTL)
+	}
+	if c.OAUTHAccessTokenTTL <= 0 {
+		return nil, fmt.Errorf("OAUTH_ACCESS_TOKEN_TTL must be positive, got %v", c.OAUTHAccessTokenTTL)
+	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
+	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {

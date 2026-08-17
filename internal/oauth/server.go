@@ -195,6 +195,15 @@ type Config struct {
 	// chatgpt.com, localhost, 127.0.0.1) is used. The check is exact-match
 	// on the URL's Host (including any port); never substring-match.
 	//
+	// In the server binary this is populated from OAUTH_ALLOWED_IMPLICIT_HOSTS
+	// (comma-separated), so onboarding a new MCP client is a deployment
+	// change rather than a code change. Note that supplying the variable
+	// replaces the default outright rather than extending it: a deployment
+	// that adds a host must restate the ones it still wants.
+	//
+	// Loopback redirects are accepted regardless of this list (see
+	// isLoopbackHost), so CLI clients binding an ephemeral port need no entry.
+	//
 	// AllowedImplicitHosts is also applied to redirect_uris supplied at
 	// RFC 7591 dynamic registration, so a malicious /oauth/register call
 	// cannot smuggle in a phishing destination by bypassing the implicit
