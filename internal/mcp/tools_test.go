@@ -855,11 +855,11 @@ func TestToolGetMessages_FetchMediaTrue_HostedModeUsesRawPath(t *testing.T) {
 
 func TestIntSliceArg(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    map[string]any
-		key     string
-		want    []int
-		wantOK  bool
+		name   string
+		args   map[string]any
+		key    string
+		want   []int
+		wantOK bool
 	}{
 		{
 			name:   "key absent",
@@ -917,5 +917,21 @@ func TestIntSliceArg(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestToolGetUnreadMessages_DescriptionMentionsPeerPriority(t *testing.T) {
+	s := &Server{}
+	tool, _ := s.toolGetUnreadMessages()
+	desc := tool.Description
+	for _, want := range []string{
+		"DMs and chats (including groups and megagroup/supergroups)",
+		"fill limit before any broadcast channel",
+		"last-priority",
+		"When peer is set",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("get_unread_messages description missing %q\n%s", want, desc)
+		}
 	}
 }
