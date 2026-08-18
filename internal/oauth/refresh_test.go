@@ -245,6 +245,60 @@ func TestToken_RefreshReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	}
 }
 
+// TestToken_RefreshGraceWindow_ToleratesSlowClient confirms the widened
+// grace window (5m, was 30s) recovers a replay that arrives well past the
+// old boundary but still within the new one — the fix for a real incident
+// (2026-08-18) where a client presented an already-rotated token minutes
+// after rotation and had its whole refresh-token family killed as "reuse"
+// even though nothing malicious happened.
+func TestToken_RefreshGraceWindow_ToleratesSlowClient(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	refreshForm := url.Values{}
+	refreshForm.Set("grant_type", "refresh_token")
+	refreshForm.Set("refresh_token", original)
+	refreshForm.Set("client_id", "claude.ai")
+
+	rec := doTokenRequest(t, mux, refreshForm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode rotated resp: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	// Past the old 30s window, still within the new 5m window.
+	srv.clock = func() time.Time { return time.Now().Add(2 * time.Minute) }
+
+	rec2 := doTokenRequest(t, mux, refreshForm)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("replay at 2m (within widened 5m grace window) was rejected: %d %s", rec2.Code, rec2.Body.String())
+	}
+	var replayed map[string]any
+	if err := json.NewDecoder(rec2.Body).Decode(&replayed); err != nil {
+		t.Fatalf("decode grace replay resp: %v", err)
+	}
+	if replayed["refresh_token"] != rotatedTok {
+		t.Errorf("grace replay refresh_token = %v, want %v (the already-committed successor)",
+			replayed["refresh_token"], rotatedTok)
+	}
+
+	// The family must still be alive, not revoked as reuse.
+	nextForm := url.Values{}
+	nextForm.Set("grant_type", "refresh_token")
+	nextForm.Set("refresh_token", rotatedTok)
+	nextForm.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, nextForm); rec.Code != http.StatusOK {
+		t.Errorf("rotation on grace-replayed successor failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestToken_RefreshGraceWindow_ExpiredSuccessorRejected ensures a grace
 // replay never hands back a successor that is itself already past its own
 // absolute expiry, even though the rotation itself is still within the
