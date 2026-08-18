@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.50.1](https://github.com/mctlhq/mctl-telegram/compare/0.50.0...0.50.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **config:** cap OAUTH_ACCESS_TOKEN_TTL ([#398](https://github.com/mctlhq/mctl-telegram/issues/398)) ([78b3fc6](https://github.com/mctlhq/mctl-telegram/commit/78b3fc62d28684aae47d6b23c664214fe38c00e2))
+* **mcp:** prioritize DMs in unread fetch and set last_message_date ([#396](https://github.com/mctlhq/mctl-telegram/issues/396)) ([dca0996](https://github.com/mctlhq/mctl-telegram/commit/dca0996d822b17e6abb172cff9f8b48602117e46))
+
 ## [0.50.0](https://github.com/mctlhq/mctl-telegram/compare/0.49.0...0.50.0) (2026-08-16)
 
 
