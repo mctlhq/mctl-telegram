@@ -1491,14 +1491,29 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 // real wall-clock time.
 //
 // Originally 30s, sized only for concurrent-request races and lost HTTP
-// responses (PR #343). Widened to 5m 2026-08-18: a client (OpenAI Codex,
-// via the MCP OAuth client registered on mctl-telegram) presented an
-// already-rotated token ~70 minutes after rotation and was treated as
-// reuse, killing its entire refresh-token family — that gap is unrelated
-// to an actual attack, just a client that hadn't picked up its rotated
-// token yet. 5m still catches genuine reuse quickly while giving slower or
-// briefly-offline clients more room than a bare request-race window.
-var rotationGraceWindow = 5 * time.Minute
+// responses (PR #343). Widened to 24h 2026-08-19 (first attempt widened to
+// 5m only, which a review correctly flagged as still two orders of
+// magnitude short of the reported gap): a client (OpenAI Codex, via the
+// MCP OAuth client registered on mctl-telegram) presented an already-
+// rotated token ~70 minutes after rotation and was treated as reuse,
+// killing its entire refresh-token family — that gap is unrelated to an
+// actual attack, just a client that hadn't picked up its rotated token
+// yet. 24h matches the #398 OAUTH_ACCESS_TOKEN_TTL ceiling, so it does not
+// introduce a new outer bound to the platform's existing tolerance for
+// stale credentials.
+//
+// Trade-off, deliberately accepted: this proportionally widens the window
+// during which an attacker holding a stolen predecessor refresh token can
+// still redeem it for the live successor via the grace-recovery path in
+// attemptGraceRecovery (previously up to 30s, now up to 24h). Reuse
+// detection still fires for any presentation past this window, and for any
+// case where the grace-recovery lookup itself fails (e.g. the successor
+// was already consumed by a further rotation) — see handleTokenRefresh.
+// If this trade-off proves too permissive in practice, the fix is to gate
+// recovery on the successor's own liveness (has it been rotated further?)
+// instead of, or in addition to, a wall-clock window — tracked as a
+// possible follow-up, not implemented here to keep this change minimal.
+var rotationGraceWindow = 24 * time.Hour
 
 // graceRecoveryOutcome distinguishes what handleTokenRefresh should do next
 // after attemptGraceRecovery runs.
