@@ -19,7 +19,7 @@ require (
 	golang.org/x/term v0.45.0
 	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v2 v2.4.0
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 	rsc.io/qr v0.2.0
 )
 
