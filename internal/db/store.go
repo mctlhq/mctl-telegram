@@ -68,11 +68,6 @@ func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
 	return s
 }
 
-// IsAbsoluteTTLExempt reports whether a Telegram id is exempt.
-func (s *Store) IsAbsoluteTTLExempt(telegramUserID int64) bool {
-	return s.ttlExempt[telegramUserID]
-}
-
 // ReconcileTTLExemptions converges existing rows onto the current exemption
 // list. Call it after Migrate: the migration backfills expires_at on every
 // run, which deliberately re-arms the TTL for an identity that has been
