@@ -80,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer rawDB.Close()
-	if err := db.Migrate(ctx, rawDB); err != nil {
+	if err := db.Migrate(ctx, rawDB, cfg.SessionTTLExemptTGIDs...); err != nil {
 		slog.Error("db migrate", "err", err)
 		os.Exit(1)
 	}
@@ -98,9 +98,11 @@ func main() {
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m).
 		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
-	// Runs after Migrate on purpose: the migration backfills expires_at on
-	// every boot, which re-arms the TTL for an identity dropped from the
-	// exemption list, and this clears it again for the ones still on it.
+	// Runs after Migrate on purpose. Migrate owns the re-arm direction — an
+	// identity dropped from the list is no longer excluded from its backfill,
+	// so it gets its deadline back — while this clears the deadline for rows
+	// that are newly exempt. Only ever widening a lifetime here, so unlike the
+	// backfill it cannot expose an already-past deadline to another replica.
 	if cleared, err := store.ReconcileTTLExemptions(ctx); err != nil {
 		slog.Error("reconcile session ttl exemptions", "err", err)
 		os.Exit(1)

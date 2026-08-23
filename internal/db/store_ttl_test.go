@@ -8,8 +8,6 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
-
-	"github.com/mctlhq/mctl-telegram/internal/crypto"
 )
 
 func TestCheckSessionValid_NoSession(t *testing.T) {
@@ -352,7 +350,7 @@ func TestSweepAbsoluteSessionsSkipsExempt(t *testing.T) {
 // exemption must apply at insert time, not only after the next restart.
 func TestSaveSessionExemptIdentityHasNoDeadline(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStoreWithCrypto(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
 	uid, err := s.EnsureUser(ctx, "ttl-save", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
@@ -380,7 +378,7 @@ func TestSaveSessionExemptIdentityHasNoDeadline(t *testing.T) {
 // sweeper: no absolute-expiry rejection for an exempt identity.
 func TestCheckSessionValidAcceptsExempt(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStoreWithCrypto(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
 	uid, err := s.EnsureUser(ctx, "ttl-check", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
@@ -393,15 +391,60 @@ func TestCheckSessionValidAcceptsExempt(t *testing.T) {
 	}
 }
 
-// newTestStoreWithCrypto is newTestStore plus a plaintext crypto, so tests can
-// exercise SaveSession (which always seals the blob).
-func newTestStoreWithCrypto(t *testing.T) *Store {
-	t.Helper()
+// TestMigrateLeavesExemptRowsNull is the multi-replica race guard. Migrate runs
+// on every boot; if its backfill re-armed an exempt row, the deadline it writes
+// for an identity already past the 90-day mark is in the past immediately, and
+// another replica's sweeper tick or an inline CheckSessionValid could revoke
+// the row before this replica reaches ReconcileTTLExemptions — which only
+// clears expires_at and never touches revoked_at. That would reproduce #409 on
+// a routine rolling restart, so the intermediate state must never exist.
+func TestMigrateLeavesExemptRowsNull(t *testing.T) {
+	ctx := context.Background()
 	s := newTestStore(t)
-	crypt, err := crypto.New(nil)
+	uid, err := s.EnsureUser(ctx, "ttl-race", "", "test")
 	if err != nil {
-		t.Fatalf("crypto.New: %v", err)
+		t.Fatalf("ensure user: %v", err)
 	}
-	s.Crypt = crypt
-	return s
+	seedAccountForTelegramID(t, s, uid, 210408407, nil)
+	seedAccountForTelegramID(t, s, uid, 999000111, nil)
+
+	if err := Migrate(ctx, s.DB, 210408407); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if got := expiresAtFor(t, s, 210408407); got.Valid {
+		t.Errorf("exempt row must stay NULL through Migrate, got %v", got.Time)
+	}
+	if got := expiresAtFor(t, s, 999000111); !got.Valid {
+		t.Error("a non-exempt NULL row must still be backfilled")
+	}
+}
+
+// TestIdleTTLStillAppliesToExempt pins the promise in #409: the exemption lifts
+// only the absolute ceiling. An exempt identity nobody has used for longer than
+// the idle TTL is still retired.
+func TestIdleTTLStillAppliesToExempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	uid, err := s.EnsureUser(ctx, "ttl-idle-exempt", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,NULL)`,
+		uid, 210408407, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rows, err := s.SweepIdleSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep idle: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("idle sweep revoked %d rows, want 1 — the exemption must not cover idle expiry", rows)
+	}
 }
