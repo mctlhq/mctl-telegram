@@ -80,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer rawDB.Close()
-	if err := db.Migrate(ctx, rawDB); err != nil {
+	if err := db.Migrate(ctx, rawDB, cfg.SessionTTLExemptTGIDs...); err != nil {
 		slog.Error("db migrate", "err", err)
 		os.Exit(1)
 	}
@@ -96,7 +96,20 @@ func main() {
 	// before any goroutine or handler is started.
 	m := metrics.New()
 
-	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	store := db.NewStore(rawDB, cryp).WithMetrics(m).
+		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
+	// Runs after Migrate on purpose. Migrate owns the re-arm direction — an
+	// identity dropped from the list is no longer excluded from its backfill,
+	// so it gets its deadline back — while this clears the deadline for rows
+	// that are newly exempt. Only ever widening a lifetime here, so unlike the
+	// backfill it cannot expose an already-past deadline to another replica.
+	if cleared, err := store.ReconcileTTLExemptions(ctx); err != nil {
+		slog.Error("reconcile session ttl exemptions", "err", err)
+		os.Exit(1)
+	} else if cleared > 0 {
+		slog.Info("session ttl exemptions applied",
+			"rows_cleared", cleared, "identities", len(cfg.SessionTTLExemptTGIDs))
+	}
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
