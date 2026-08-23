@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -19,6 +20,10 @@ type Store struct {
 	DB      *sql.DB
 	Crypt   *crypto.AESGCM
 	metrics *metrics.Registry
+
+	// ttlExempt holds Telegram ids whose sessions never hit the absolute TTL.
+	// Read-only after construction; see WithAbsoluteTTLExempt.
+	ttlExempt map[int64]bool
 
 	// Cached dialect probe (see isPostgres in agent_jobs.go). Only the job
 	// claim query needs the distinction (FOR UPDATE SKIP LOCKED). pgResolved
@@ -42,6 +47,61 @@ type AccountInfo struct {
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
 	return &Store{DB: db, Crypt: c}
+}
+
+// WithAbsoluteTTLExempt marks Telegram ids whose sessions are not subject to
+// the absolute TTL. Returns the receiver for chaining.
+//
+// The exemption is expressed as expires_at IS NULL on the row rather than as
+// an extra predicate in every query: "no absolute expiry" is already what NULL
+// means to CheckSessionValid, SweepAbsoluteSessions and ListIdentities alike,
+// so nothing downstream has to learn about exempt identities.
+func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
+	if len(ids) == 0 {
+		s.ttlExempt = nil
+		return s
+	}
+	s.ttlExempt = make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		s.ttlExempt[id] = true
+	}
+	return s
+}
+
+// IsAbsoluteTTLExempt reports whether a Telegram id is exempt.
+func (s *Store) IsAbsoluteTTLExempt(telegramUserID int64) bool {
+	return s.ttlExempt[telegramUserID]
+}
+
+// ReconcileTTLExemptions converges existing rows onto the current exemption
+// list. Call it after Migrate: the migration backfills expires_at on every
+// run, which deliberately re-arms the TTL for an identity that has been
+// removed from the list, and this clears it again for the ones still on it.
+// Returns the number of rows cleared.
+func (s *Store) ReconcileTTLExemptions(ctx context.Context) (int64, error) {
+	if len(s.ttlExempt) == 0 {
+		return 0, nil
+	}
+	ids := make([]int64, 0, len(s.ttlExempt))
+	for id := range s.ttlExempt {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var total int64
+	for _, id := range ids {
+		res, err := s.DB.ExecContext(ctx,
+			`UPDATE telegram_accounts SET expires_at = NULL
+			 WHERE telegram_user_id = $1 AND expires_at IS NOT NULL`,
+			id,
+		)
+		if err != nil {
+			return total, fmt.Errorf("clear absolute ttl for %d: %w", id, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
 }
 
 // WithMetrics wires a *metrics.Registry so session lifecycle events are
@@ -348,7 +408,12 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return fmt.Errorf("revoke prior: %w", err)
 	}
 	now := time.Now().UTC()
-	expires := now.Add(absoluteSessionTTL)
+	// An exempt identity gets a NULL expires_at, which every absolute-TTL
+	// reader already treats as "never expires" — see WithAbsoluteTTLExempt.
+	var expires any = now.Add(absoluteSessionTTL)
+	if s.ttlExempt[telegramUserID] {
+		expires = nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at, send_enabled)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,

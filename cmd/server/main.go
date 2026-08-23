@@ -96,7 +96,18 @@ func main() {
 	// before any goroutine or handler is started.
 	m := metrics.New()
 
-	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	store := db.NewStore(rawDB, cryp).WithMetrics(m).
+		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
+	// Runs after Migrate on purpose: the migration backfills expires_at on
+	// every boot, which re-arms the TTL for an identity dropped from the
+	// exemption list, and this clears it again for the ones still on it.
+	if cleared, err := store.ReconcileTTLExemptions(ctx); err != nil {
+		slog.Error("reconcile session ttl exemptions", "err", err)
+		os.Exit(1)
+	} else if cleared > 0 {
+		slog.Info("session ttl exemptions applied",
+			"rows_cleared", cleared, "identities", len(cfg.SessionTTLExemptTGIDs))
+	}
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
