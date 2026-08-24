@@ -56,9 +56,11 @@ failure pushes `0` and increments
 
 ## Mitigation
 
-- **Token expired** — rotate the canary bearer in the
-  `mctl-telegram-canary` Secret (key `bearer_token`). The next
-  CronJob run will pick it up; no Deployment restart required.
+- **Token expired** — mint a new token via `POST
+  /api/mcp/worker-token` (admin-scoped, requires `admin:users`; see
+  `internal/workertoken`) and put it in the `mctl-telegram-canary`
+  Secret's `bearer_token` key. The next CronJob run will pick it up;
+  no CronJob or Deployment change is needed.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
   own once Telegram lifts the rate limit. Consider widening the
   CronJob `schedule` if it keeps recurring.
