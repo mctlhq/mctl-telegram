@@ -86,14 +86,16 @@ type workerTokenResponse struct {
 // revocation list identify "this credential was minted by the bounded
 // worker path" versus a normal user session. Because /mcp's OAUTH_JWT_AUDIENCE
 // defaults to "" (audience check disabled) and OAUTH_JWT_AUDIENCE_REQUIRED
-// defaults to false, this works with no config change today — but if an
-// operator later tightens OAUTH_JWT_AUDIENCE to a single fixed value for
-// defense-in-depth, that value MUST include "mcp-worker-ro" or every
-// already-minted worker token starts failing at /mcp. Keep this in lockstep
-// with cmd/server/main.go's selectProvider / cfg.OAUTHJWTAudience, the same
-// way selectBridgeIssuer/selectAgentIssuer's doc comments flag their own
-// issuer lockstep requirement.
-func NewHandler(secret []byte, issuer string) http.HandlerFunc {
+// defaults to false, this works with no config change today. When an
+// operator does tighten OAUTH_JWT_AUDIENCE for defense-in-depth, the /mcp
+// provider requires every token's aud list to CONTAIN that configured value
+// (localjwt.CheckAudience), so mcpAudience — cfg.OAUTHJWTAudience at the
+// wiring site — is included alongside "mcp-worker-ro" whenever it is set,
+// the same way oauth.Server.mintAccessToken carries cfg.JWTAudience. Keep
+// this in lockstep with cmd/server/main.go's selectProvider /
+// cfg.OAUTHJWTAudience, the same way selectBridgeIssuer/selectAgentIssuer's
+// doc comments flag their own issuer lockstep requirement.
+func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
@@ -139,11 +141,15 @@ func NewHandler(secret []byte, issuer string) http.HandlerFunc {
 			}
 		}
 
+		audience := []string{"mcp-worker-ro"}
+		if mcpAudience != "" {
+			audience = append(audience, mcpAudience)
+		}
 		tok, err := signer.Mint(localjwt.Claims{
 			Subject:    "tg:" + strconv.FormatInt(req.TelegramID, 10),
 			TelegramID: req.TelegramID,
 			Scopes:     scopes,
-			Audience:   []string{"mcp-worker-ro"},
+			Audience:   audience,
 		}, ttl)
 		if err != nil {
 			slog.Error("worker token: sign failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)

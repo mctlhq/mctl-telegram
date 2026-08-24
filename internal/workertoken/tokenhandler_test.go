@@ -40,7 +40,7 @@ func decodeJWTPayload(t *testing.T, token string) string {
 // T1: default request (no scopes, no ttl_hours) mints a token with exactly
 // allowedReadOnlyScopes and TTL defaultWorkerTokenTTL.
 func TestNewHandler_DefaultScopesAndTTL(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := adminRequest(`{"telegram_id":924671154}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -80,7 +80,7 @@ func TestNewHandler_DefaultScopesAndTTL(t *testing.T) {
 func TestNewHandler_RejectsWriteScope(t *testing.T) {
 	for _, scope := range []string{"telegram:messages:send", "telegram:messages:pin", "admin:users", "bogus:scope"} {
 		t.Run(scope, func(t *testing.T) {
-			h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+			h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 			req := adminRequest(`{"telegram_id":42,"scopes":["` + scope + `"]}`)
 			rec := httptest.NewRecorder()
 			h(rec, req)
@@ -101,7 +101,7 @@ func TestNewHandler_RejectsWriteScope(t *testing.T) {
 // T3: non-admin authenticated identity gets 403; unauthenticated request
 // gets 401.
 func TestNewHandler_RejectsNonAdmin(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/worker-token", bytes.NewBufferString(`{"telegram_id":42}`))
 	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: 1, TelegramID: 42}))
 	rec := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestNewHandler_RejectsNonAdmin(t *testing.T) {
 }
 
 func TestNewHandler_RejectsAnonymous(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/worker-token", bytes.NewBufferString(`{"telegram_id":42}`))
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -122,7 +122,7 @@ func TestNewHandler_RejectsAnonymous(t *testing.T) {
 }
 
 func TestNewHandler_RejectsMissingTelegramID(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := adminRequest(`{}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -134,7 +134,7 @@ func TestNewHandler_RejectsMissingTelegramID(t *testing.T) {
 // T4: ttl_hours above the ceiling is clamped to maxWorkerTokenTTL; ttl_hours
 // within range is honored exactly.
 func TestNewHandler_TTLClamp(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := adminRequest(`{"telegram_id":42,"ttl_hours":100000}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -156,7 +156,7 @@ func TestNewHandler_TTLClamp(t *testing.T) {
 }
 
 func TestNewHandler_TTLWithinRangeHonored(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := adminRequest(`{"telegram_id":42,"ttl_hours":48}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -180,7 +180,7 @@ func TestNewHandler_TTLWithinRangeHonored(t *testing.T) {
 // Explicit scopes within the allowlist (a strict subset) are honored as
 // requested rather than silently expanded to the full default set.
 func TestNewHandler_ExplicitSubsetScopeHonored(t *testing.T) {
-	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	req := adminRequest(`{"telegram_id":42,"scopes":["telegram:dialogs:read"]}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -197,5 +197,39 @@ func TestNewHandler_ExplicitSubsetScopeHonored(t *testing.T) {
 	}
 	if strings.Contains(payload, `"telegram:messages:read"`) {
 		t.Fatalf("payload must not silently include the non-requested default scope: %s", payload)
+	}
+}
+
+// T8: when the wiring passes a configured /mcp audience (OAUTH_JWT_AUDIENCE),
+// the minted token's aud list carries it alongside "mcp-worker-ro" — otherwise
+// localjwt.CheckAudience on the shared /mcp provider would reject every
+// worker token the moment an operator sets that config.
+func TestNewHandler_IncludesConfiguredMCPAudience(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "https://mcp.example.com")
+	req := adminRequest(`{"telegram_id":924671154}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	payload := decodeJWTPayload(t, resp.WorkerToken)
+	if !strings.Contains(payload, `"mcp-worker-ro"`) || !strings.Contains(payload, `"https://mcp.example.com"`) {
+		t.Fatalf("payload aud must carry both the marker and the configured audience: %s", payload)
+	}
+}
+
+// T9: trailing data after a valid JSON body is rejected, matching
+// decodeStrict's documented contract.
+func TestNewHandler_RejectsTrailingBodyData(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":924671154}{"telegram_id":1}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for trailing body data, body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -453,7 +453,7 @@ func main() {
 	// on the agent feature despite the name.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
-			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg)))
+			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
