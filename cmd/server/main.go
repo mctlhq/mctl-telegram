@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 )
@@ -437,6 +438,22 @@ func main() {
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
 			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
+	}
+
+	// Read-only MCP worker token endpoint: an admin mints a bounded,
+	// read-only-scoped bearer token (aud=mcp-worker-ro) for a headless MCP
+	// worker such as the canary. Unlike the agent/bridge pair above, the
+	// minted token is verified by the same plain MCP `provider` already
+	// mounted at /mcp (see internal/workertoken.NewHandler's doc comment for
+	// why no dedicated auth.Provider is needed) — it just carries a
+	// restricted scope set and a bounded TTL, with per-tool requireScope
+	// enforcement doing the rest. Gated on OAUTH_JWT_SECRET like the two
+	// mints above; reuses selectAgentIssuer since it already computes "the
+	// issuer this deployment's locally-issued JWTs use" with no dependency
+	// on the agent feature despite the name.
+	if secret := cfg.OAUTHJWTSecret; secret != "" {
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
+			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.

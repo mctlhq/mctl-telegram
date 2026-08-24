@@ -935,3 +935,27 @@ func TestToolGetUnreadMessages_DescriptionMentionsPeerPriority(t *testing.T) {
 		}
 	}
 }
+
+// TestRequireScope_ReadOnlyWorkerTokenCannotSend documents the invariant
+// internal/workertoken's bounded MCP worker-token mint path relies on: a
+// token carrying only the read-only allowlist scopes
+// (telegram:dialogs:read, telegram:messages:read) already passes
+// requireScope for read tools and already fails it for the send/pin gate,
+// regardless of how the token was minted. This test should already pass
+// without any change to this package — it exists to catch a future
+// regression in requireScope itself, not to introduce new behavior.
+func TestRequireScope_ReadOnlyWorkerTokenCannotSend(t *testing.T) {
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:dialogs:read", "telegram:messages:read"}}
+	if err := requireScope(id, "telegram:dialogs:read"); err != nil {
+		t.Errorf("requireScope(telegram:dialogs:read) = %v, want nil", err)
+	}
+	if err := requireScope(id, "telegram:messages:read"); err != nil {
+		t.Errorf("requireScope(telegram:messages:read) = %v, want nil", err)
+	}
+	if err := requireScope(id, "telegram:messages:send"); err == nil {
+		t.Error("requireScope(telegram:messages:send) = nil, want error for a read-only-scoped identity")
+	}
+	if err := requireScope(id, "telegram:messages:pin"); err == nil {
+		t.Error("requireScope(telegram:messages:pin) = nil, want error for a read-only-scoped identity")
+	}
+}
