@@ -10,6 +10,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +30,14 @@ var version = "dev"
 
 // config holds all runtime configuration sourced from environment variables.
 type config struct {
-	baseURL      string
-	bearerToken  string
-	tgUserID     string
-	timeout      time.Duration
-	mcpPath      string
-	probeUnread  bool
-	pushgateway  string
-	metricsAddr  string
+	baseURL     string
+	bearerToken string
+	tgUserID    string
+	timeout     time.Duration
+	mcpPath     string
+	probeUnread bool
+	pushgateway string
+	metricsAddr string
 }
 
 // canaryMetrics holds the three Prometheus metric families for the canary.
@@ -44,7 +45,10 @@ type canaryMetrics struct {
 	success      prometheus.Gauge
 	duration     prometheus.Histogram
 	stepFailures *prometheus.CounterVec
-	registry     *prometheus.Registry
+	// tokenExpiresIn is created in newCanaryMetrics but registered in run(),
+	// once there is a real deadline to report — see the rationale there.
+	tokenExpiresIn prometheus.Gauge
+	registry       *prometheus.Registry
 }
 
 // loadConfig reads and validates environment variables. It returns an error
@@ -116,14 +120,49 @@ func newCanaryMetrics() *canaryMetrics {
 		Help: "1 if the named step failed in the last canary run, 0 if it succeeded. Pushgateway replace semantics mean this reflects the most recent run only; use the instant value (> 0) rather than rate() for triage queries.",
 	}, []string{"step"})
 
+	// Deliberately NOT registered here. A registered gauge that is never set
+	// pushes 0, and 0 on this metric reads as "the token expired" — the exact
+	// false alarm the metric exists to avoid. run() registers it only once it
+	// has a real deadline to report; when the token carries no readable exp
+	// the series is simply absent, which the CanaryAbsent-style alert already
+	// covers.
+	tokenExpiresIn := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_telegram_canary_token_expires_in_seconds",
+		Help: "Seconds until CANARY_BEARER_TOKEN expires. Negative once past exp. Absent when the token carries no readable exp claim.",
+	})
+
 	reg.MustRegister(success, duration, stepFailures)
 
 	return &canaryMetrics{
-		success:      success,
-		duration:     duration,
-		stepFailures: stepFailures,
-		registry:     reg,
+		success:        success,
+		duration:       duration,
+		stepFailures:   stepFailures,
+		tokenExpiresIn: tokenExpiresIn,
+		registry:       reg,
 	}
+}
+
+// tokenExpiry reads the exp claim out of a JWT WITHOUT verifying it. The
+// canary holds no signing key and has no business validating its own
+// credential — the server does that on every call, and a forged exp would only
+// mislead this one gauge. Returns ok=false for anything unparseable so the
+// caller can leave the metric absent rather than publish a wrong deadline.
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
 // oauthMetadataResponse contains the fields we validate in the OAuth AS metadata.
@@ -273,10 +312,10 @@ func initMCPSession(ctx context.Context, client *http.Client, baseURL, mcpPath, 
 
 // jsonRPCResponse is used to decode the MCP endpoint response.
 type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
-	Result  *mcpToolResult  `json:"result,omitempty"`
+	JSONRPC string         `json:"jsonrpc"`
+	ID      int            `json:"id"`
+	Error   *jsonRPCError  `json:"error,omitempty"`
+	Result  *mcpToolResult `json:"result,omitempty"`
 }
 
 // jsonRPCError represents a JSON-RPC 2.0 error object.
@@ -380,6 +419,28 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 	log := slog.Default()
 	start := time.Now()
 	ok := true
+
+	// Report how much life the bearer token has left. Since mctl-telegram#412
+	// the token is deliberately bounded (30d default, 90d ceiling), which turns
+	// expiry from a distant problem into a scheduled one: the canary cannot
+	// renew itself yet (#421), so without this gauge the first symptom would be
+	// a permanently red canary on the expiry date.
+	if exp, okExp := tokenExpiry(cfg.bearerToken); okExp {
+		// Register, not MustRegister: registration happens here rather than at
+		// construction, so a second run() against the same registry — a daemon
+		// loop, or simply two calls in one test — would otherwise panic on
+		// duplicate registration. An already-registered gauge is the expected
+		// steady state, not an error.
+		if regErr := met.registry.Register(met.tokenExpiresIn); regErr != nil {
+			if _, dup := regErr.(prometheus.AlreadyRegisteredError); !dup {
+				log.Error("token expiry metric registration failed", "err", regErr)
+			}
+		}
+		met.tokenExpiresIn.Set(time.Until(exp).Seconds())
+		log.Info("token lifetime", "expires_at", exp.Format(time.RFC3339))
+	} else {
+		log.Warn("token lifetime unknown, expiry metric omitted")
+	}
 
 	client := &http.Client{Timeout: cfg.timeout}
 

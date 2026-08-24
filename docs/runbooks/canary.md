@@ -56,11 +56,22 @@ failure pushes `0` and increments
 
 ## Mitigation
 
-- **Token expired** — mint a new token via `POST
+- **Token expiring / expired** — you should hear about this a week
+  early: `mctl_telegram_canary_token_expires_in_seconds` reports the
+  remaining lifetime on every run and `MctlTelegramCanaryTokenExpiring`
+  fires under 7 days. Mint a new token via `POST
   /api/mcp/worker-token` (admin-scoped, requires `admin:users`; see
   `internal/workertoken`) and put it in the `mctl-telegram-canary`
   Secret's `bearer_token` key. The next CronJob run will pick it up;
   no CronJob or Deployment change is needed.
+
+  The metric is **absent**, not zero, when the token carries no
+  readable `exp` claim — an opaque or malformed credential leaves the
+  series out entirely rather than publishing a 0 that would read as
+  "already expired". A canary that is failing with no expiry series is
+  therefore an auth problem, not an expiry one.
+
+  The canary cannot renew itself yet; that is mctl-telegram#421.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
   own once Telegram lifts the rate limit. Consider widening the
   CronJob `schedule` if it keeps recurring.
