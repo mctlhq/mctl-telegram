@@ -362,9 +362,9 @@ func main() {
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,
-	// /oauth/register, and /.well-known/oauth-authorization-server. The
-	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
-	// to api.mctl.ai as before.
+	// /oauth/revoke, /oauth/register, and
+	// /.well-known/oauth-authorization-server. The shared-hmac-legacy path
+	// leaves these unmounted — Claude.ai then talks to api.mctl.ai as before.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
 		oauthSrv, err := registerOAuth(ctx, cfg, store, mux, m)
 		if err != nil {
