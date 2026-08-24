@@ -124,6 +124,8 @@ Set it as `OAUTH_JWT_SIGNING_KEY` in your environment. In local development any 
 
 Access tokens are intentionally short-lived (`OAUTH_ACCESS_TOKEN_TTL`, default 1h). Clients renew them silently with the OAuth 2.1 `refresh_token` grant: the `/oauth/token` endpoint accepts `grant_type=refresh_token` and returns a new access token plus a rotated refresh token, with no Telegram sign-in interaction. Refresh tokens are opaque, stored SHA-256-hashed, and rotated on every use; replaying an already-rotated token revokes the whole token family.
 
+A refresh token (and its whole rotation family) can be revoked on demand with `POST /oauth/revoke` (RFC 7009; advertised as `revocation_endpoint` in `/.well-known/oauth-authorization-server`). Access tokens are not individually revocable within their TTL — see [SECURITY.md](SECURITY.md) for that trade-off.
+
 ### Docker
 
 ```bash

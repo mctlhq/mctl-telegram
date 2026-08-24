@@ -128,6 +128,54 @@ func TestRefreshToken_RevokeFamily(t *testing.T) {
 	}
 }
 
+// TestRefreshToken_RevokeFamily_ExplicitRevoke exercises the reason string
+// an operator-initiated POST /oauth/revoke call uses (as opposed to the
+// "reuse_detected" reason used internally by reuse detection), and confirms
+// an unrelated family is left untouched by the revoke.
+func TestRefreshToken_RevokeFamily_ExplicitRevoke(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 10, "erin", "Erin")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	target := RefreshToken{FamilyID: "target-fam", UserID: uid, ClientID: "c", TelegramID: 10, ExpiresAt: time.Now().Add(time.Hour)}
+	other := RefreshToken{FamilyID: "other-fam", UserID: uid, ClientID: "c", TelegramID: 10, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := s.SaveRefreshToken(ctx, "target-tok", target); err != nil {
+		t.Fatalf("save target: %v", err)
+	}
+	if err := s.SaveRefreshToken(ctx, "other-tok", other); err != nil {
+		t.Fatalf("save other: %v", err)
+	}
+
+	n, err := s.RevokeRefreshTokenFamily(ctx, "target-fam", "explicit_revoke")
+	if err != nil {
+		t.Fatalf("revoke family: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("revoked %d rows, want 1", n)
+	}
+
+	got, err := s.LookupRefreshToken(ctx, "target-tok")
+	if err != nil {
+		t.Fatalf("lookup target-tok: %v", err)
+	}
+	if !got.Revoked() {
+		t.Error("target-tok not revoked")
+	}
+	if got.RevokedReason != "explicit_revoke" {
+		t.Errorf("target-tok revoked_reason = %q, want \"explicit_revoke\"", got.RevokedReason)
+	}
+
+	untouched, err := s.LookupRefreshToken(ctx, "other-tok")
+	if err != nil {
+		t.Fatalf("lookup other-tok: %v", err)
+	}
+	if untouched.Revoked() {
+		t.Error("unrelated family's token was revoked")
+	}
+}
+
 func TestRefreshToken_SweepExpired(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
