@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.53.0](https://github.com/mctlhq/mctl-telegram/compare/0.52.1...0.53.0) (2026-08-24)
+
+
+### Features
+
+* **canary:** report how much life the bearer token has left ([ed6d73d](https://github.com/mctlhq/mctl-telegram/commit/ed6d73df5a2260609c75f8d3e935b95a7c33ac2e))
+
+
+### Bug Fixes
+
+* **canary:** tolerate re-registration and cover the happy path ([67060dc](https://github.com/mctlhq/mctl-telegram/commit/67060dcdf770c6d8deed0991be35731848299eb6))
+
 ## [0.52.1](https://github.com/mctlhq/mctl-telegram/compare/0.52.0...0.52.1) (2026-08-24)
 
 
