@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -425,3 +427,75 @@ func TestRunMetricsListDialogsFailure(t *testing.T) {
 // branch). Requires extracting the push-and-exit logic from main() into a testable
 // function and stubbing the Pushgateway HTTP client.
 // Tracking: https://github.com/mctlhq/mctl-telegram/issues/TBD
+
+// TestTokenExpiry covers the claim-reading helper behind
+// mctl_telegram_canary_token_expires_in_seconds. Anything unparseable must
+// report ok=false so the caller leaves the gauge unregistered: a registered
+// gauge that is never set pushes 0, and 0 on this metric means "expired".
+func TestTokenExpiry(t *testing.T) {
+	mk := func(payload string) string {
+		return "h." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".s"
+	}
+
+	tests := []struct {
+		name  string
+		token string
+		want  int64 // unix seconds; 0 means "expect ok=false"
+	}{
+		{"valid exp", mk(`{"exp":1790000000,"sub":"tg:1"}`), 1790000000},
+		{"already expired still reported", mk(`{"exp":1000000000}`), 1000000000},
+		{"no exp claim", mk(`{"sub":"tg:1"}`), 0},
+		{"zero exp", mk(`{"exp":0}`), 0},
+		{"negative exp", mk(`{"exp":-5}`), 0},
+		{"not a jwt", "opaque-token", 0},
+		{"two segments", "h.e", 0},
+		// Second segment is a perfectly valid claims payload — only the missing
+		// third segment makes this not a JWT, so the length check is what has to
+		// reject it.
+		{"two segments with valid payload", "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"exp":1790000000}`)), 0},
+		{"payload not base64", "h.!!!.s", 0},
+		{"payload not json", mk(`not json`), 0},
+		{"empty", "", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tokenExpiry(tt.token)
+			if tt.want == 0 {
+				if ok {
+					t.Fatalf("expected ok=false, got %v", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("expected ok=true")
+			}
+			if got.Unix() != tt.want {
+				t.Errorf("exp = %d, want %d", got.Unix(), tt.want)
+			}
+		})
+	}
+}
+
+// TestTokenExpiryGaugeAbsentWhenUnreadable pins the registration behaviour
+// itself: an unreadable token must leave the series out of the push entirely,
+// not publish a zero that alerting would read as an expired credential.
+func TestTokenExpiryGaugeAbsentWhenUnreadable(t *testing.T) {
+	met := newCanaryMetrics()
+	run(context.Background(), &config{
+		baseURL:     "http://127.0.0.1:1",
+		bearerToken: "opaque-token",
+		timeout:     10 * time.Millisecond,
+		mcpPath:     "/mcp",
+	}, met)
+
+	families, err := met.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() == "mctl_telegram_canary_token_expires_in_seconds" {
+			t.Fatal("gauge must stay unregistered when exp is unreadable")
+		}
+	}
+}

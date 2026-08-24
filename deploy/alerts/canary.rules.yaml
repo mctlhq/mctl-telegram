@@ -55,3 +55,30 @@ spec:
               15 minutes. Pushgateway may be down or the metric group was
               deleted. Check Pushgateway health and CronJob pod logs.
               Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md
+        - alert: MctlTelegramCanaryTokenExpiring
+          # Fires once the bearer token has under 7 days left. Since
+          # mctl-telegram#412 the token is deliberately bounded (30d default,
+          # 90d ceiling) and the canary cannot renew itself yet (#421), so
+          # expiry is a scheduled outage that needs a human with an
+          # admin:users login. Seven days is chosen to survive a week of
+          # leave, not to be a tight deadline.
+          #
+          # No absent() companion here on purpose: the series is intentionally
+          # absent when the token carries no readable exp claim, and
+          # MctlTelegramCanaryAbsent already covers "the canary stopped
+          # reporting at all".
+          expr: mctl_telegram_canary_token_expires_in_seconds < 7 * 24 * 3600
+          for: 10m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram canary token expires in under 7 days"
+            description: >
+              CANARY_BEARER_TOKEN has less than 7 days of life left
+              ({{ $value | humanizeDuration }} remaining). When it expires the
+              canary goes red and stays red until the token is reminted. Remint
+              with POST /api/mcp/worker-token (admin:users scope required) and
+              write the result into the mctl-telegram-canary Secret in the labs
+              namespace.
+              Runbook: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbooks/canary.md
