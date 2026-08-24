@@ -900,15 +900,21 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
+	idlePredicate := `(last_used_at IS NOT NULL AND last_used_at < $2)`
+	args := []any{now, idleCutoff}
+	if clause, exemptArgs := s.ttlExemptClause(3); clause != "" {
+		idlePredicate = `(last_used_at IS NOT NULL AND last_used_at < $2 AND telegram_user_id NOT IN ` + clause + `)`
+		args = append(args, exemptArgs...)
+	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
 		   AND (
 		     (expires_at IS NOT NULL AND expires_at < $1)
-		     OR (last_used_at IS NOT NULL AND last_used_at < $2)
+		     OR `+idlePredicate+`
 		   )`,
-		now, idleCutoff,
+		args...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("sweep sessions: %w", err)
