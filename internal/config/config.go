@@ -122,10 +122,10 @@ type Config struct {
 	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
 
 	// SessionTTLExemptTGIDs lists Telegram ids whose MTProto session is not
-	// subject to the 90-day absolute TTL — long-lived operator and service
-	// identities that must never require an interactive phone+SMS reconnect.
-	// The 30-day idle TTL still applies to them: an account nobody uses for a
-	// month is still retired. SESSION_TTL_EXEMPT_TG_IDS, comma-separated.
+	// subject to the 90-day absolute TTL or the 30-day idle TTL — long-lived
+	// operator and service identities that must never require an interactive
+	// phone+SMS reconnect, even if left unused for a month or more.
+	// SESSION_TTL_EXEMPT_TG_IDS, comma-separated.
 	SessionTTLExemptTGIDs []int64
 	// ToolFilter restricts which MCP tools are registered at startup.
 	// "all" (default) registers every tool; "read-only" registers only tools
