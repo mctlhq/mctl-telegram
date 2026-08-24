@@ -726,6 +726,7 @@ func (s *Server) Register(mux Router) {
 	// the token exchange, are what tie the callback to a real authorize request.
 	mux.Get("/oauth/telegram/callback", s.handleTelegramCallback)
 	mux.Post("/oauth/token", s.handleToken)
+	mux.Post("/oauth/revoke", s.handleRevoke)
 	mux.Post("/oauth/register", s.handleClientRegistration)
 	// In-browser "enable message access" flow. Public (no auth gate): the
 	// caller's identity is carried by the unguessable "es" token minted at
@@ -752,14 +753,16 @@ type Router interface {
 
 func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *http.Request) {
 	body := map[string]any{
-		"issuer":                                s.cfg.Issuer,
-		"authorization_endpoint":                s.cfg.Issuer + "/oauth/authorize",
-		"token_endpoint":                        s.cfg.Issuer + "/oauth/token",
-		"registration_endpoint":                 s.cfg.Issuer + "/oauth/register",
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
+		"issuer":                                     s.cfg.Issuer,
+		"authorization_endpoint":                     s.cfg.Issuer + "/oauth/authorize",
+		"token_endpoint":                             s.cfg.Issuer + "/oauth/token",
+		"registration_endpoint":                      s.cfg.Issuer + "/oauth/register",
+		"revocation_endpoint":                        s.cfg.Issuer + "/oauth/revoke",
+		"response_types_supported":                   []string{"code"},
+		"grant_types_supported":                      []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":           []string{"S256"},
+		"token_endpoint_auth_methods_supported":      []string{"none"},
+		"revocation_endpoint_auth_methods_supported": []string{"none"},
 		// scopes_supported intentionally omits admin:users — that scope is
 		// implicit-privileged (granted by ResolveScopes based on
 		// TG_LOGIN_ADMINS membership, not negotiable via DCR). Advertising
@@ -1716,6 +1719,68 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeTokenJSON(w, tok, newRefresh, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
+}
+
+// handleRevoke implements RFC 7009 token revocation for refresh tokens.
+// Access tokens are not revocable by this endpoint or by any other means
+// short of rotating OAUTH_JWT_SIGNING_KEY — see SECURITY.md. Presenting an
+// access token (or any other unrecognized value) as `token` here simply
+// falls into the "unknown token" branch below and is a no-op.
+//
+// Response shape deliberately makes "unknown token" and "known token
+// belonging to a different client_id" indistinguishable (both 200, empty
+// body): RFC 7009 SS2.1 requires that this endpoint not let a caller who
+// cannot prove ownership of a token learn whether it exists at all. Only a
+// genuine store error (lookup or revoke) maps to a non-200 response — a
+// false 200 on a failed revoke would be worse than a visible error, since
+// the caller would believe a leaked token was cut off when it was not.
+func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeTokenError(w, "invalid_request", "could not parse form", http.StatusBadRequest)
+		return
+	}
+	token := r.FormValue("token")
+	clientID := r.FormValue("client_id")
+	if token == "" || clientID == "" {
+		writeTokenError(w, "invalid_request", "token and client_id are required", http.StatusBadRequest)
+		return
+	}
+	// token_type_hint (RFC 7009 SS2.1) is accepted but not required or
+	// validated: only refresh tokens are revocable here, so any hint value
+	// — including "access_token" — still routes through the same
+	// refresh-token lookup and correctly falls into the "unknown token"
+	// branch if the presented value isn't one.
+	rt, err := s.store.LookupRefreshToken(r.Context(), token)
+	if errors.Is(err, db.ErrRefreshTokenNotFound) {
+		// Unknown token is success per RFC 7009 SS2.2.
+		writeRevokeSuccess(w)
+		return
+	}
+	if err != nil {
+		writeTokenError(w, "server_error", "could not look up token", http.StatusInternalServerError)
+		return
+	}
+	if rt.ClientID != clientID {
+		// Same response as "unknown" so this endpoint cannot be used to
+		// fingerprint another client's tokens (RFC 7009 SS2.1).
+		writeRevokeSuccess(w)
+		return
+	}
+	// Revoking an already-revoked family is a no-op inside
+	// RevokeRefreshTokenFamily (it only touches rows WHERE revoked_at IS
+	// NULL), so a repeat revoke of the same token is naturally idempotent.
+	if _, err := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID, "explicit_revoke"); err != nil {
+		writeTokenError(w, "server_error", "could not revoke token", http.StatusInternalServerError)
+		return
+	}
+	writeRevokeSuccess(w)
+}
+
+// writeRevokeSuccess writes the RFC 7009 SS2.2 success response: HTTP 200
+// with an empty body.
+func writeRevokeSuccess(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
 }
 
 // mintAccessToken signs a localjwt access token for the given Telegram

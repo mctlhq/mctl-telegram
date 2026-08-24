@@ -65,6 +65,7 @@ Notes:
 * Implicit client IDs are accepted only when the `redirect_uri` host appears in the implicit-host allowlist and the scheme is `https://` (or loopback `http://` per RFC 8252). This prevents the OAuth flow from being abused as an open redirector. The same allowlist is applied to every `redirect_uri` supplied at RFC 7591 dynamic registration, so a client cannot smuggle in a phishing destination by registering first. The list is set with `OAUTH_ALLOWED_IMPLICIT_HOSTS` (comma-separated hostnames); unset, it defaults to `claude.ai, claude.com, chatgpt.com, localhost, 127.0.0.1`. Setting it replaces that default rather than extending it. Loopback hosts are accepted regardless of the list.
 * Scope assignment is identity-based: Telegram IDs in `TG_LOGIN_ADMINS` are granted platform-admin scopes; other identities receive only their configured access tier.
 * `TELEGRAM_OIDC_CLIENT_SECRET` is sensitive on the same tier as `OAUTH_JWT_SIGNING_KEY` and is never logged.
+* **Access tokens are not individually revocable within their TTL.** An access token is a self-contained, bearer-valid JWT: `/mcp` accepts it purely from signature, issuer, and expiry, with no per-token denylist or storage lookup. The only way to invalidate an issued-but-unexpired access token early is rotating `OAUTH_JWT_SIGNING_KEY`, which invalidates every user's access tokens at once — there is no way to kill a single leaked access token in isolation. The accepted mitigation is keeping `OAUTH_ACCESS_TOKEN_TTL` short (see the `#398` 24h ceiling); a leaked access token is only ever live for that window. This is a deliberate, reviewed trade-off, not an oversight — see "Refresh tokens" below for the token that *is* individually revocable.
 
 ### Refresh tokens
 
@@ -75,6 +76,7 @@ The `/oauth/token` endpoint supports `grant_type=refresh_token` so a client can 
 * **Rotated on every use.** Each refresh revokes the presented token and issues a replacement.
 * **Reuse detection.** Replaying an already-rotated token revokes the entire token family.
 * **Bounded lifetime.** Absolute expiry is `OAUTH_REFRESH_TOKEN_TTL` (default 30 days); a background sweeper deletes expired rows.
+* **Explicitly revocable.** `POST /oauth/revoke` (RFC 7009, advertised as `revocation_endpoint` in `/.well-known/oauth-authorization-server`) lets a caller revoke a refresh token's whole family on demand — the same family-revoke mechanism reuse detection already uses internally, now reachable without waiting for a reuse event. This is how an operator cuts off a leaked *refresh* token without rotating `OAUTH_JWT_SIGNING_KEY` for every user; it does not affect any access token already issued from that family (see above).
 
 ## Legacy mode: `AUTH_MODE=shared-hmac-legacy`
 

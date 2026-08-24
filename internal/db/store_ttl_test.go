@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -213,5 +214,436 @@ func TestSaveSession_StampsLastUsedAndExpires(t *testing.T) {
 	}
 	if expires.Sub(lastUsed) < 89*24*time.Hour {
 		t.Fatalf("expires - last_used should be ~90 days, got %v", expires.Sub(lastUsed))
+	}
+}
+
+// seedAccountForTelegramID inserts a finalised session row for a specific
+// Telegram id, so the exemption (which is keyed on telegram_user_id) applies.
+func seedAccountForTelegramID(t *testing.T, s *Store, userID, tgID int64, expiresAt *time.Time) {
+	t.Helper()
+	now := time.Now().UTC()
+	if _, err := s.DB.ExecContext(context.Background(),
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,$5)`,
+		userID, tgID, []byte("blob"), now, expiresAt,
+	); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+}
+
+func expiresAtFor(t *testing.T, s *Store, tgID int64) sql.NullTime {
+	t.Helper()
+	var got sql.NullTime
+	if err := s.DB.QueryRowContext(context.Background(),
+		`SELECT expires_at FROM telegram_accounts WHERE telegram_user_id = $1`, tgID,
+	).Scan(&got); err != nil {
+		t.Fatalf("read expires_at for %d: %v", tgID, err)
+	}
+	return got
+}
+
+// TestReconcileTTLExemptions covers both directions: an exempt identity has its
+// absolute deadline cleared, a non-exempt one keeps it.
+func TestReconcileTTLExemptions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "ttl-user", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deadline := time.Now().UTC().Add(30 * 24 * time.Hour)
+	seedAccountForTelegramID(t, s, uid, 210408407, &deadline)
+	seedAccountForTelegramID(t, s, uid, 999000111, &deadline)
+
+	s = s.WithAbsoluteTTLExempt([]int64{210408407})
+	cleared, err := s.ReconcileTTLExemptions(ctx)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared = %d, want 1", cleared)
+	}
+	if got := expiresAtFor(t, s, 210408407); got.Valid {
+		t.Errorf("exempt identity must have NULL expires_at, got %v", got.Time)
+	}
+	if got := expiresAtFor(t, s, 999000111); !got.Valid {
+		t.Error("non-exempt identity must keep its absolute deadline")
+	}
+
+	// Idempotent: a second pass has nothing left to clear.
+	if again, err := s.ReconcileTTLExemptions(ctx); err != nil || again != 0 {
+		t.Errorf("second pass cleared = %d err = %v, want 0/nil", again, err)
+	}
+}
+
+// TestReconcileTTLExemptionsIsReversible pins the escape hatch: dropping an id
+// from the list must let the Migrate backfill re-arm its TTL, otherwise an
+// exemption granted once could never be taken back.
+func TestReconcileTTLExemptionsIsReversible(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "ttl-reversible", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deadline := time.Now().UTC().Add(30 * 24 * time.Hour)
+	seedAccountForTelegramID(t, s, uid, 210408407, &deadline)
+
+	if _, err := s.WithAbsoluteTTLExempt([]int64{210408407}).ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := expiresAtFor(t, s, 210408407); got.Valid {
+		t.Fatal("precondition: expires_at should be NULL")
+	}
+
+	// Identity removed from the list, then the boot sequence runs again.
+	s = s.WithAbsoluteTTLExempt(nil)
+	if err := Migrate(ctx, s.DB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := expiresAtFor(t, s, 210408407); !got.Valid {
+		t.Error("dropping an identity from the list must re-arm its absolute TTL")
+	}
+}
+
+// TestSweepAbsoluteSessionsSkipsExempt is the payoff: the sweeper that revoked
+// the operator's session on 2026-08-23 must walk past an exempt identity even
+// when its original deadline is long past.
+func TestSweepAbsoluteSessionsSkipsExempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "ttl-sweep", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	seedAccountForTelegramID(t, s, uid, 210408407, &past)
+	seedAccountForTelegramID(t, s, uid, 999000111, &past)
+
+	s = s.WithAbsoluteTTLExempt([]int64{210408407})
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rows, err := s.SweepAbsoluteSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("sweep revoked %d rows, want 1 (only the non-exempt one)", rows)
+	}
+
+	var revoked sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked_at: %v", err)
+	}
+	if revoked.Valid {
+		t.Error("exempt session must survive the absolute sweep")
+	}
+}
+
+// TestSaveSessionExemptIdentityHasNoDeadline covers a fresh connect: the
+// exemption must apply at insert time, not only after the next restart.
+func TestSaveSessionExemptIdentityHasNoDeadline(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
+	uid, err := s.EnsureUser(ctx, "ttl-save", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.SaveSession(ctx, uid, []byte("blob"), 210408407, "Op", "op"); err != nil {
+		t.Fatalf("save exempt session: %v", err)
+	}
+	if got := expiresAtFor(t, s, 210408407); got.Valid {
+		t.Errorf("exempt identity must be inserted with NULL expires_at, got %v", got.Time)
+	}
+
+	uid2, err := s.EnsureUser(ctx, "ttl-save-other", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.SaveSession(ctx, uid2, []byte("blob"), 999000111, "Other", "other"); err != nil {
+		t.Fatalf("save normal session: %v", err)
+	}
+	if got := expiresAtFor(t, s, 999000111); !got.Valid {
+		t.Error("a normal identity must still get an absolute deadline")
+	}
+}
+
+// TestCheckSessionValidAcceptsExempt proves the read path agrees with the
+// sweeper: no absolute-expiry rejection for an exempt identity.
+func TestCheckSessionValidAcceptsExempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
+	uid, err := s.EnsureUser(ctx, "ttl-check", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.SaveSession(ctx, uid, []byte("blob"), 210408407, "Op", "op"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := s.CheckSessionValid(ctx, uid); err != nil {
+		t.Errorf("exempt session must validate, got %v", err)
+	}
+}
+
+// TestMigrateLeavesExemptRowsNull is the multi-replica race guard. Migrate runs
+// on every boot; if its backfill re-armed an exempt row, the deadline it writes
+// for an identity already past the 90-day mark is in the past immediately, and
+// another replica's sweeper tick or an inline CheckSessionValid could revoke
+// the row before this replica reaches ReconcileTTLExemptions — which only
+// clears expires_at and never touches revoked_at. That would reproduce #409 on
+// a routine rolling restart, so the intermediate state must never exist.
+func TestMigrateLeavesExemptRowsNull(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "ttl-race", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	seedAccountForTelegramID(t, s, uid, 210408407, nil)
+	seedAccountForTelegramID(t, s, uid, 999000111, nil)
+
+	if err := Migrate(ctx, s.DB, 210408407); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if got := expiresAtFor(t, s, 210408407); got.Valid {
+		t.Errorf("exempt row must stay NULL through Migrate, got %v", got.Time)
+	}
+	if got := expiresAtFor(t, s, 999000111); !got.Valid {
+		t.Error("a non-exempt NULL row must still be backfilled")
+	}
+}
+
+// TestSweepIdleSessionsSkipsExempt pins the fix for #413: the exemption now
+// lifts both the absolute ceiling and the idle TTL. An exempt identity
+// nobody has used for longer than the idle TTL must survive the idle sweep.
+func TestSweepIdleSessionsSkipsExempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	uid, err := s.EnsureUser(ctx, "ttl-idle-exempt", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,NULL)`,
+		uid, 210408407, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rows, err := s.SweepIdleSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep idle: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("idle sweep revoked %d rows, want 0 — exempt identities must survive the idle sweep", rows)
+	}
+	var revoked sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked_at: %v", err)
+	}
+	if revoked.Valid {
+		t.Error("exempt session must survive the idle sweep")
+	}
+}
+
+// TestSweepIdleSessionsTwoSided proves SweepIdleSessions and the exempt list
+// agree on exactly the rows they should: an exempt identity and a
+// non-exempt identity both stale past the idle TTL, only the non-exempt one
+// gets revoked.
+func TestSweepIdleSessionsTwoSided(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	uid, err := s.EnsureUser(ctx, "ttl-idle-two-sided", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+	seedAccountForTelegramID(t, s, uid, 210408407, nil)
+	seedAccountForTelegramID(t, s, uid, 999000111, nil)
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET last_used_at = $1`, stale,
+	); err != nil {
+		t.Fatalf("stale last_used_at: %v", err)
+	}
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	rows, err := s.SweepIdleSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep idle: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("idle sweep revoked %d rows, want 1 (only the non-exempt one)", rows)
+	}
+
+	var exemptRevoked, otherRevoked sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+	).Scan(&exemptRevoked); err != nil {
+		t.Fatalf("read exempt revoked_at: %v", err)
+	}
+	if exemptRevoked.Valid {
+		t.Error("exempt identity must survive the idle sweep")
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 999000111`,
+	).Scan(&otherRevoked); err != nil {
+		t.Fatalf("read non-exempt revoked_at: %v", err)
+	}
+	if !otherRevoked.Valid {
+		t.Error("non-exempt identity with the same staleness must be revoked")
+	}
+}
+
+// TestCheckSessionValidAcceptsExemptIdle mirrors
+// TestCheckSessionValidAcceptsExempt for the idle side: an exempt identity
+// with a stale last_used_at must still validate, while a non-exempt
+// identity with the same staleness is rejected with ReasonIdle.
+func TestCheckSessionValidAcceptsExemptIdle(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+
+	exemptUID, err := s.EnsureUser(ctx, "ttl-check-idle-exempt", "", "test")
+	if err != nil {
+		t.Fatalf("ensure exempt user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,NULL)`,
+		exemptUID, 210408407, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed exempt: %v", err)
+	}
+	if _, err := s.CheckSessionValid(ctx, exemptUID); err != nil {
+		t.Errorf("exempt session with stale last_used_at must validate, got %v", err)
+	}
+
+	otherUID, err := s.EnsureUser(ctx, "ttl-check-idle-other", "", "test")
+	if err != nil {
+		t.Fatalf("ensure non-exempt user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,NULL)`,
+		otherUID, 999000111, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed non-exempt: %v", err)
+	}
+	reason, err := s.CheckSessionValid(ctx, otherUID)
+	if !errors.Is(err, ErrSessionExpired) || reason != ReasonIdle {
+		t.Errorf("non-exempt stale session should reject with ReasonIdle, got reason=%q err=%v", reason, err)
+	}
+}
+
+// TestSweepExpiredSessionsSkipsIdleExempt guards the deprecated combined
+// sweep: WithAbsoluteTTLExempt promises exemption from both TTLs with no
+// caveat, so SweepExpiredSessions must honor the idle exemption too, even
+// though the production sweeper no longer calls it. Absolute expiry is
+// covered by expires_at IS NULL after ReconcileTTLExemptions; the idle half
+// needs the same NOT IN exclusion as SweepIdleSessions.
+func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	exempt, err := s.EnsureUser(ctx, "combined-exempt", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	plain, err := s.EnsureUser(ctx, "combined-plain", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,NULL)`,
+		exempt, 210408407, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed exempt: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,$5)`,
+		plain, 111, []byte("blob"), stale, time.Now().UTC().Add(60*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed plain: %v", err)
+	}
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rows, err := s.SweepExpiredSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("combined sweep revoked %d rows, want 1 (only the non-exempt idle row)", rows)
+	}
+	var revoked sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read revoked_at: %v", err)
+	}
+	if revoked.Valid {
+		t.Error("exempt session must survive the combined sweep")
+	}
+}
+
+// TestSweepIdleSessionsSkipsMultipleExempt exercises ttlExemptClause with
+// more than one id: the multi-placeholder fragment ($3,$4) and the
+// sorted-by-id argument order both get real query traffic here.
+func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
+	ctx := context.Background()
+	// Deliberately unsorted input; ttlExemptClause must sort ids itself.
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407, 924671154})
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	seed := func(name string, tgID int64) {
+		uid, err := s.EnsureUser(ctx, name, "", "test")
+		if err != nil {
+			t.Fatalf("ensure user %s: %v", name, err)
+		}
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
+			 VALUES($1,$2,$3,$4,NULL)`,
+			uid, tgID, []byte("blob"), stale,
+		); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	seed("multi-exempt-a", 924671154)
+	seed("multi-exempt-b", 210408407)
+	seed("multi-plain", 222)
+	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rows, err := s.SweepIdleSessions(ctx)
+	if err != nil {
+		t.Fatalf("sweep idle: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("idle sweep revoked %d rows, want 1 (only the non-exempt row)", rows)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts
+		 WHERE telegram_user_id IN (210408407, 924671154) AND revoked_at IS NOT NULL`,
+	).Scan(&count); err != nil {
+		t.Fatalf("count revoked exempts: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("%d exempt sessions revoked by multi-id sweep, want 0", count)
 	}
 }

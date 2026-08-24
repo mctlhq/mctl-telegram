@@ -120,6 +120,13 @@ type Config struct {
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
 	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
+
+	// SessionTTLExemptTGIDs lists Telegram ids whose MTProto session is not
+	// subject to the 90-day absolute TTL or the 30-day idle TTL — long-lived
+	// operator and service identities that must never require an interactive
+	// phone+SMS reconnect, even if left unused for a month or more.
+	// SESSION_TTL_EXEMPT_TG_IDS, comma-separated.
+	SessionTTLExemptTGIDs []int64
 	// ToolFilter restricts which MCP tools are registered at startup.
 	// "all" (default) registers every tool; "read-only" registers only tools
 	// annotated with ReadOnlyHint=true. Set via MCP_TOOL_FILTER.
@@ -295,6 +302,7 @@ func Load() (*Config, error) {
 		}
 	}
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
+	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 

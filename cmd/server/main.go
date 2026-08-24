@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 )
@@ -80,7 +81,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer rawDB.Close()
-	if err := db.Migrate(ctx, rawDB); err != nil {
+	if err := db.Migrate(ctx, rawDB, cfg.SessionTTLExemptTGIDs...); err != nil {
 		slog.Error("db migrate", "err", err)
 		os.Exit(1)
 	}
@@ -96,7 +97,20 @@ func main() {
 	// before any goroutine or handler is started.
 	m := metrics.New()
 
-	store := db.NewStore(rawDB, cryp).WithMetrics(m)
+	store := db.NewStore(rawDB, cryp).WithMetrics(m).
+		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
+	// Runs after Migrate on purpose. Migrate owns the re-arm direction — an
+	// identity dropped from the list is no longer excluded from its backfill,
+	// so it gets its deadline back — while this clears the deadline for rows
+	// that are newly exempt. Only ever widening a lifetime here, so unlike the
+	// backfill it cannot expose an already-past deadline to another replica.
+	if cleared, err := store.ReconcileTTLExemptions(ctx); err != nil {
+		slog.Error("reconcile session ttl exemptions", "err", err)
+		os.Exit(1)
+	} else if cleared > 0 {
+		slog.Info("session ttl exemptions applied",
+			"rows_cleared", cleared, "identities", len(cfg.SessionTTLExemptTGIDs))
+	}
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
@@ -349,9 +363,9 @@ func main() {
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,
-	// /oauth/register, and /.well-known/oauth-authorization-server. The
-	// shared-hmac-legacy path leaves these unmounted — Claude.ai then talks
-	// to api.mctl.ai as before.
+	// /oauth/revoke, /oauth/register, and
+	// /.well-known/oauth-authorization-server. The shared-hmac-legacy path
+	// leaves these unmounted — Claude.ai then talks to api.mctl.ai as before.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
 		oauthSrv, err := registerOAuth(ctx, cfg, store, mux, m)
 		if err != nil {
@@ -424,6 +438,22 @@ func main() {
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
 			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
+	}
+
+	// Read-only MCP worker token endpoint: an admin mints a bounded,
+	// read-only-scoped bearer token (aud=mcp-worker-ro) for a headless MCP
+	// worker such as the canary. Unlike the agent/bridge pair above, the
+	// minted token is verified by the same plain MCP `provider` already
+	// mounted at /mcp (see internal/workertoken.NewHandler's doc comment for
+	// why no dedicated auth.Provider is needed) — it just carries a
+	// restricted scope set and a bounded TTL, with per-tool requireScope
+	// enforcement doing the rest. Gated on OAUTH_JWT_SECRET like the two
+	// mints above; reuses selectAgentIssuer since it already computes "the
+	// issuer this deployment's locally-issued JWTs use" with no dependency
+	// on the agent feature despite the name.
+	if secret := cfg.OAUTHJWTSecret; secret != "" {
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
+			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.

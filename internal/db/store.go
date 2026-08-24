@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,10 @@ type Store struct {
 	DB      *sql.DB
 	Crypt   *crypto.AESGCM
 	metrics *metrics.Registry
+
+	// ttlExempt holds Telegram ids whose sessions never hit the absolute or
+	// idle TTL. Read-only after construction; see WithAbsoluteTTLExempt.
+	ttlExempt map[int64]bool
 
 	// Cached dialect probe (see isPostgres in agent_jobs.go). Only the job
 	// claim query needs the distinction (FOR UPDATE SKIP LOCKED). pgResolved
@@ -42,6 +48,86 @@ type AccountInfo struct {
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
 	return &Store{DB: db, Crypt: c}
+}
+
+// WithAbsoluteTTLExempt marks Telegram ids whose sessions are not subject to
+// the absolute TTL or the idle TTL. Returns the receiver for chaining.
+//
+// The absolute-TTL exemption is expressed as expires_at IS NULL on the row
+// rather than as an extra predicate in every query: "no absolute expiry" is
+// already what NULL means to CheckSessionValid, SweepAbsoluteSessions and
+// ListIdentities alike, so nothing downstream has to learn about exempt
+// identities. The idle-TTL exemption cannot use the same trick (last_used_at
+// is overwritten on every use, see MarkLastUsed), so CheckSessionValid,
+// SweepIdleSessions and ListIdentities instead evaluate this map (via
+// ttlExemptClause for the set-based queries) as a real predicate on every
+// check.
+func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
+	if len(ids) == 0 {
+		s.ttlExempt = nil
+		return s
+	}
+	s.ttlExempt = make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		s.ttlExempt[id] = true
+	}
+	return s
+}
+
+// ReconcileTTLExemptions converges existing rows onto the current exemption
+// list. Call it after Migrate: the migration backfills expires_at on every
+// run, which deliberately re-arms the TTL for an identity that has been
+// removed from the list, and this clears it again for the ones still on it.
+// Returns the number of rows cleared.
+func (s *Store) ReconcileTTLExemptions(ctx context.Context) (int64, error) {
+	if len(s.ttlExempt) == 0 {
+		return 0, nil
+	}
+	ids := make([]int64, 0, len(s.ttlExempt))
+	for id := range s.ttlExempt {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var total int64
+	for _, id := range ids {
+		res, err := s.DB.ExecContext(ctx,
+			`UPDATE telegram_accounts SET expires_at = NULL
+			 WHERE telegram_user_id = $1 AND expires_at IS NOT NULL`,
+			id,
+		)
+		if err != nil {
+			return total, fmt.Errorf("clear absolute ttl for %d: %w", id, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+// ttlExemptClause returns a SQL fragment ("" if no ids are exempt) plus its
+// bind args, so callers can splice "AND telegram_user_id NOT IN (...)" (or
+// the inverted "OR telegram_user_id IN (...)" form for ListIdentities) into
+// a query that already has argIdx-1 placeholders bound. Placeholders start
+// at argIdx and count up by one per exempt id. Ids are sorted so the
+// generated SQL text (and therefore the prepared-statement cache key) is
+// stable across calls, mirroring ReconcileTTLExemptions.
+func (s *Store) ttlExemptClause(argIdx int) (fragment string, args []any) {
+	if len(s.ttlExempt) == 0 {
+		return "", nil
+	}
+	ids := make([]int64, 0, len(s.ttlExempt))
+	for id := range s.ttlExempt {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	placeholders := make([]string, len(ids))
+	args = make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", argIdx+i)
+		args[i] = id
+	}
+	return "(" + strings.Join(placeholders, ",") + ")", args
 }
 
 // WithMetrics wires a *metrics.Registry so session lifecycle events are
@@ -252,19 +338,23 @@ func (s *Store) GetAccessTier(ctx context.Context, tgID int64) (string, error) {
 func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
-	rows, err := s.DB.QueryContext(ctx,
-		`SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
-		        u.access_tier, u.created_at,
-		        EXISTS(SELECT 1 FROM telegram_accounts ta
-		               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
-		                 AND ta.telegram_user_id IS NOT NULL
-		                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
-		                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2))
-		   FROM users u
-		  WHERE u.telegram_login_id IS NOT NULL
-		  ORDER BY u.id DESC`,
-		now, idleCutoff,
-	)
+	query := `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
+	        u.access_tier, u.created_at,
+	        EXISTS(SELECT 1 FROM telegram_accounts ta
+	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+	                 AND ta.telegram_user_id IS NOT NULL
+	                 AND (ta.expires_at IS NULL OR ta.expires_at > $1)
+	                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $2`
+	args := []any{now, idleCutoff}
+	if clause, exemptArgs := s.ttlExemptClause(3); clause != "" {
+		query += " OR ta.telegram_user_id IN " + clause
+		args = append(args, exemptArgs...)
+	}
+	query += `))
+	   FROM users u
+	  WHERE u.telegram_login_id IS NOT NULL
+	  ORDER BY u.id DESC`
+	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list identities: %w", err)
 	}
@@ -348,7 +438,12 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return fmt.Errorf("revoke prior: %w", err)
 	}
 	now := time.Now().UTC()
-	expires := now.Add(absoluteSessionTTL)
+	// An exempt identity gets a NULL expires_at, which every absolute-TTL
+	// reader already treats as "never expires" — see WithAbsoluteTTLExempt.
+	var expires any = now.Add(absoluteSessionTTL)
+	if s.ttlExempt[telegramUserID] {
+		expires = nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at, send_enabled)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -786,7 +881,7 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 		_, _ = s.RevokeActiveSession(ctx, userID, "absolute_expiry")
 		return ReasonAbsolute, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonAbsolute)
 	}
-	if lastUsed.Valid && now.Sub(lastUsed.Time) > idleSessionTTL {
+	if lastUsed.Valid && !s.ttlExempt[tgUserID.Int64] && now.Sub(lastUsed.Time) > idleSessionTTL {
 		_, _ = s.RevokeActiveSession(ctx, userID, "idle_expiry")
 		return ReasonIdle, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonIdle)
 	}
@@ -805,15 +900,21 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
+	idlePredicate := `(last_used_at IS NOT NULL AND last_used_at < $2)`
+	args := []any{now, idleCutoff}
+	if clause, exemptArgs := s.ttlExemptClause(3); clause != "" {
+		idlePredicate = `(last_used_at IS NOT NULL AND last_used_at < $2 AND telegram_user_id NOT IN ` + clause + `)`
+		args = append(args, exemptArgs...)
+	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
 		   AND (
 		     (expires_at IS NOT NULL AND expires_at < $1)
-		     OR (last_used_at IS NOT NULL AND last_used_at < $2)
+		     OR `+idlePredicate+`
 		   )`,
-		now, idleCutoff,
+		args...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("sweep sessions: %w", err)
@@ -829,14 +930,17 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts
+	query := `UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
 		   AND last_used_at IS NOT NULL
-		   AND last_used_at < $2`,
-		now, idleCutoff,
-	)
+		   AND last_used_at < $2`
+	args := []any{now, idleCutoff}
+	if clause, exemptArgs := s.ttlExemptClause(3); clause != "" {
+		query += " AND telegram_user_id NOT IN " + clause
+		args = append(args, exemptArgs...)
+	}
+	res, err := s.DB.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("sweep idle sessions: %w", err)
 	}

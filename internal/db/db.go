@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -53,7 +54,20 @@ func Open(ctx context.Context, dsn string, maxOpenConns, maxIdleConns int) (*sql
 }
 
 // Migrate applies the schema for whichever dialect Open chose. Idempotent.
-func Migrate(ctx context.Context, dbConn *sql.DB) error {
+// Migrate brings the schema up to date. ttlExemptTelegramIDs, when given,
+// are excluded from the expires_at backfill below: those identities are meant
+// to carry NULL (no absolute expiry), and re-arming them here — even for the
+// few lines until ReconcileTTLExemptions clears it again — is visible to every
+// other replica sharing this database. For an identity already past the
+// original 90-day mark the backfilled deadline is in the past the instant it
+// is written, so a concurrent sweeper tick or an inline CheckSessionValid on
+// another replica could revoke the row for good, reproducing #409 on a routine
+// rolling restart. Excluding them here means the intermediate state never
+// exists.
+//
+// Passing no ids re-arms every NULL row, which is exactly how an identity
+// dropped from the exemption list gets its TTL back.
+func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64) error {
 	// We re-probe by issuing one driver-specific NOOP. SQLite parses `SELECT 1`
 	// fine on both; we detect Postgres by `current_database()` which only
 	// exists there. Cleaner than threading the driver name through callers.
@@ -197,18 +211,29 @@ func Migrate(ctx context.Context, dbConn *sql.DB) error {
 		 SET last_used_at = connected_at
 		 WHERE last_used_at IS NULL`,
 	}
+	// Keep exempt identities out of the backfill — see the doc comment.
+	exemptClause := ""
+	if len(ttlExemptTelegramIDs) > 0 {
+		lits := make([]string, 0, len(ttlExemptTelegramIDs))
+		for _, id := range ttlExemptTelegramIDs {
+			// Integers only: formatted, never interpolated from user input.
+			lits = append(lits, strconv.FormatInt(id, 10))
+		}
+		exemptClause = "\n\t\t\t   AND (telegram_user_id IS NULL OR telegram_user_id NOT IN (" +
+			strings.Join(lits, ",") + "))"
+	}
 	if pg {
 		backfill = append(backfill,
 			`UPDATE telegram_accounts
 			 SET expires_at = connected_at + INTERVAL '90 days'
-			 WHERE expires_at IS NULL`,
+			 WHERE expires_at IS NULL`+exemptClause,
 		)
 	} else {
 		// SQLite has no INTERVAL syntax; use the datetime() function.
 		backfill = append(backfill,
 			`UPDATE telegram_accounts
 			 SET expires_at = datetime(connected_at, '+90 days')
-			 WHERE expires_at IS NULL`,
+			 WHERE expires_at IS NULL`+exemptClause,
 		)
 	}
 	for _, s := range backfill {
