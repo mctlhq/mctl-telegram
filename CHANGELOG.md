@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.1](https://github.com/mctlhq/mctl-telegram/compare/0.52.0...0.52.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **oauth:** keep refresh rotation grace window at 1m, lock in reuse semantics ([#401](https://github.com/mctlhq/mctl-telegram/issues/401)) ([8f54e47](https://github.com/mctlhq/mctl-telegram/commit/8f54e47c6164a3586b1c44b5da4650675e2a1a01))
+
 ## [0.52.0](https://github.com/mctlhq/mctl-telegram/compare/0.51.0...0.52.0) (2026-08-24)
 
 
