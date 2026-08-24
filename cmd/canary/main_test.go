@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -497,5 +498,49 @@ func TestTokenExpiryGaugeAbsentWhenUnreadable(t *testing.T) {
 		if f.GetName() == "mctl_telegram_canary_token_expires_in_seconds" {
 			t.Fatal("gauge must stay unregistered when exp is unreadable")
 		}
+	}
+}
+
+// TestTokenExpiryGaugePresentWhenReadable is the happy-path counterpart to
+// TestTokenExpiryGaugeAbsentWhenUnreadable: a readable exp must actually reach
+// the registry with the right remaining lifetime, even when every probe fails.
+// The gauge is set before any probing precisely so an outage still reports how
+// much credential life is left.
+func TestTokenExpiryGaugePresentWhenReadable(t *testing.T) {
+	exp := time.Now().Add(48 * time.Hour).Unix()
+	token := "h." + base64.RawURLEncoding.EncodeToString(
+		[]byte(`{"exp":`+strconv.FormatInt(exp, 10)+`}`)) + ".s"
+
+	met := newCanaryMetrics()
+	cfg := &config{
+		baseURL:     "http://127.0.0.1:1",
+		bearerToken: token,
+		timeout:     10 * time.Millisecond,
+		mcpPath:     "/mcp",
+	}
+
+	// Twice on purpose: registration happens inside run(), so a second call
+	// must not panic on duplicate registration.
+	run(context.Background(), cfg, met)
+	run(context.Background(), cfg, met)
+
+	families, err := met.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var got float64
+	found := false
+	for _, f := range families {
+		if f.GetName() == "mctl_telegram_canary_token_expires_in_seconds" {
+			found = true
+			got = f.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	if !found {
+		t.Fatal("expiry gauge missing for a readable token")
+	}
+	// ~48h, allowing for the run's own wall-clock cost.
+	if got < 47*3600 || got > 48*3600 {
+		t.Errorf("gauge = %.0fs, want ~%ds", got, 48*3600)
 	}
 }

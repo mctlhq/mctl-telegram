@@ -45,7 +45,8 @@ type canaryMetrics struct {
 	success      prometheus.Gauge
 	duration     prometheus.Histogram
 	stepFailures *prometheus.CounterVec
-	// tokenExpiresIn is registered lazily — see newCanaryMetrics.
+	// tokenExpiresIn is created in newCanaryMetrics but registered in run(),
+	// once there is a real deadline to report — see the rationale there.
 	tokenExpiresIn prometheus.Gauge
 	registry       *prometheus.Registry
 }
@@ -425,7 +426,16 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 	// renew itself yet (#421), so without this gauge the first symptom would be
 	// a permanently red canary on the expiry date.
 	if exp, okExp := tokenExpiry(cfg.bearerToken); okExp {
-		met.registry.MustRegister(met.tokenExpiresIn)
+		// Register, not MustRegister: registration happens here rather than at
+		// construction, so a second run() against the same registry — a daemon
+		// loop, or simply two calls in one test — would otherwise panic on
+		// duplicate registration. An already-registered gauge is the expected
+		// steady state, not an error.
+		if regErr := met.registry.Register(met.tokenExpiresIn); regErr != nil {
+			if _, dup := regErr.(prometheus.AlreadyRegisteredError); !dup {
+				log.Error("token expiry metric registration failed", "err", regErr)
+			}
+		}
 		met.tokenExpiresIn.Set(time.Until(exp).Seconds())
 		log.Info("token lifetime", "expires_at", exp.Format(time.RFC3339))
 	} else {
