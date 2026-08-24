@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.51.0](https://github.com/mctlhq/mctl-telegram/compare/0.50.1...0.51.0) (2026-08-23)
+
+
+### Features
+
+* **session:** exempt named identities from the absolute session TTL ([ed1ad65](https://github.com/mctlhq/mctl-telegram/commit/ed1ad6503af4c04ccbb85d8b65f4ad49688f67c2))
+
+
+### Bug Fixes
+
+* **session:** keep exempt rows out of the Migrate backfill ([b9e4739](https://github.com/mctlhq/mctl-telegram/commit/b9e47397ea5d62260436fea3f63ad4bf908e4409))
+
 ## [0.50.1](https://github.com/mctlhq/mctl-telegram/compare/0.50.0...0.50.1) (2026-08-18)
 
 
