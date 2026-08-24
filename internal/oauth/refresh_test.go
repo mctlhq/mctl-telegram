@@ -221,12 +221,12 @@ func TestToken_RefreshReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	}
 	rotatedTok, _ := rotated["refresh_token"].(string)
 
-	// Advance the server's clock past the grace window. RevokedAt is
+	// Advance the server's clock past the grace window (1m). RevokedAt is
 	// stamped with real time.Now() in the store layer, independent of
 	// srv.clock — pushing srv.clock into the future is what moves the
 	// comparison past the window without a real sleep (same pattern as
 	// TestToken_RefreshRejectsExpiredToken above).
-	srv.clock = func() time.Time { return time.Now().Add(time.Hour) }
+	srv.clock = func() time.Time { return time.Now().Add(2 * time.Minute) }
 
 	// Reusing the original (now-rotated) token past the grace window must
 	// be rejected.
@@ -242,6 +242,98 @@ func TestToken_RefreshReuseAfterGraceWindow_RevokesFamily(t *testing.T) {
 	reuseForm.Set("client_id", "claude.ai")
 	if rec := doTokenRequest(t, mux, reuseForm); rec.Code == http.StatusOK {
 		t.Fatal("token family was not revoked after reuse detection")
+	}
+}
+
+// TestToken_RefreshGraceWindow_ReportedIncidentGapIsTreatedAsReuse confirms
+// the deliberate final decision on the 2026-08-18 incident: a replay ~70
+// minutes after rotation (the exact gap a client — OpenAI Codex, via
+// mctl-telegram's MCP OAuth client — hit in production) is a client bug,
+// not a network race, and must still be treated as reuse and kill the
+// family. Two earlier widenings (5m, then 24h) were tried and reverted:
+// claude[bot] flagged 5m as not covering the gap; agy's pilot review then
+// flagged 24h as handing an attacker holding a stolen predecessor token a
+// full day to redeem it via grace-recovery, correctly reframing the 70m
+// gap as "client failed to persist its rotated token," which should force
+// re-authentication, not be tolerated server-side. This test locks in that
+// outcome so a future change doesn't silently re-widen the window to
+// accommodate the same client bug.
+func TestToken_RefreshGraceWindow_ReportedIncidentGapIsTreatedAsReuse(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	refreshForm := url.Values{}
+	refreshForm.Set("grant_type", "refresh_token")
+	refreshForm.Set("refresh_token", original)
+	refreshForm.Set("client_id", "claude.ai")
+
+	rec := doTokenRequest(t, mux, refreshForm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode rotated resp: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	// The reported incident gap: ~70 minutes, well past the 1m window.
+	srv.clock = func() time.Time { return time.Now().Add(70 * time.Minute) }
+
+	if rec := doTokenRequest(t, mux, refreshForm); rec.Code == http.StatusOK {
+		t.Fatal("replaying a rotated token 70m later (the reported incident gap) was accepted — should be treated as reuse")
+	}
+
+	// Reuse detection must revoke the whole family: the freshly rotated
+	// token must be dead too, forcing the client to re-authenticate.
+	reuseForm := url.Values{}
+	reuseForm.Set("grant_type", "refresh_token")
+	reuseForm.Set("refresh_token", rotatedTok)
+	reuseForm.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, reuseForm); rec.Code == http.StatusOK {
+		t.Fatal("token family was not revoked after the 70m replay")
+	}
+}
+
+// TestToken_RefreshGraceWindow_JustPast1mStillRevokesFamily confirms reuse
+// detection fires just past the (short, deliberately kept) 1m boundary.
+func TestToken_RefreshGraceWindow_JustPast1mStillRevokesFamily(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	resp := authCodeTokens(t, srv, mux)
+	original, _ := resp["refresh_token"].(string)
+
+	refreshForm := url.Values{}
+	refreshForm.Set("grant_type", "refresh_token")
+	refreshForm.Set("refresh_token", original)
+	refreshForm.Set("client_id", "claude.ai")
+
+	rec := doTokenRequest(t, mux, refreshForm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&rotated); err != nil {
+		t.Fatalf("decode rotated resp: %v", err)
+	}
+	rotatedTok, _ := rotated["refresh_token"].(string)
+
+	srv.clock = func() time.Time { return time.Now().Add(time.Minute + 5*time.Second) }
+
+	if rec := doTokenRequest(t, mux, refreshForm); rec.Code == http.StatusOK {
+		t.Fatal("reusing a rotated refresh token just past the 1m grace window was accepted")
+	}
+
+	reuseForm := url.Values{}
+	reuseForm.Set("grant_type", "refresh_token")
+	reuseForm.Set("refresh_token", rotatedTok)
+	reuseForm.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, reuseForm); rec.Code == http.StatusOK {
+		t.Fatal("token family was not revoked after reuse detection past the 1m window")
 	}
 }
 

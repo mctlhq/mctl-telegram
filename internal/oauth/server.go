@@ -1492,7 +1492,23 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 // handleTokenRefresh) rather than reuse. A package-level var, not a const,
 // so tests can advance the server clock past the window without sleeping
 // real wall-clock time.
-var rotationGraceWindow = 30 * time.Second
+//
+// Originally, and deliberately kept at, 30s-to-1m: sized only for
+// concurrent-request races and lost HTTP responses (PR #343). 2026-08-19:
+// briefly widened to 5m, then 24h, to tolerate a client (OpenAI Codex, via
+// the MCP OAuth client registered on mctl-telegram) that presented an
+// already-rotated token ~70 minutes after rotation and had its whole
+// refresh-token family killed as reuse. Reverted after review (agy pilot
+// finding, confirmed correct): rotation-based reuse detection exists
+// specifically to bound how long a stolen predecessor refresh token is
+// redeemable via attemptGraceRecovery's grace-recovery path. A 70-minute
+// gap is a client bug — it failed to persist its rotated token and kept
+// presenting the stale one — not a network race, and the fix for that is
+// forcing the client to re-authenticate, not widening the server's
+// tolerance for stale (and, if stolen, already-compromised) credentials
+// to hours. Set to 1m: the top of PR #343's original network-race
+// justification, no wider.
+var rotationGraceWindow = time.Minute
 
 // graceRecoveryOutcome distinguishes what handleTokenRefresh should do next
 // after attemptGraceRecovery runs.
