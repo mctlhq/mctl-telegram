@@ -18,12 +18,13 @@ jobs:
       id-token: write
     with:
       sensitive-paths: '^internal/(auth|crypto|db|mcp|telegram)/'
-      # dependabot is listed so its PRs get reviewed automatically.
+      # dependabot and mctl-agents are listed so their PRs get reviewed
+      # automatically.
       # Without it claude-code-action hard-fails with "Workflow initiated
       # by non-human actor", and since branch protection requires an
       # approving review, dependabot PRs then sit unmergeable until a
       # maintainer triggers a review by hand.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot"
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents"
       conventions: |
         Follow the conventions in this repository's CLAUDE.md (Go style,
         conventional commits, English only, no emoji).

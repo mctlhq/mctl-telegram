@@ -407,6 +407,46 @@ func TestListIdentities_PartialSessionNotCounted(t *testing.T) {
 	}
 }
 
+// TestListIdentities_ExemptIdleSurvives checks ListIdentities agrees with
+// CheckSessionValid/SweepIdleSessions on the idle-TTL exemption: an exempt
+// identity with a stale last_used_at still reports HasSession=true, while a
+// non-exempt identity with the same staleness reports HasSession=false.
+func TestListIdentities_ExemptIdleSurvives(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
+
+	exemptUID, _ := s.EnsureUserByTelegramID(ctx, 210408407, "exempt", "Exempt")
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1,$2,$3,$4,NULL)`,
+		exemptUID, 210408407, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed exempt: %v", err)
+	}
+	otherUID, _ := s.EnsureUserByTelegramID(ctx, 999000111, "other", "Other")
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1,$2,$3,$4,NULL)`,
+		otherUID, 999000111, []byte("blob"), stale,
+	); err != nil {
+		t.Fatalf("seed non-exempt: %v", err)
+	}
+
+	rows, err := s.ListIdentities(ctx)
+	if err != nil {
+		t.Fatalf("ListIdentities: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, r := range rows {
+		got[r.TelegramID] = r.HasSession
+	}
+	if !got[210408407] {
+		t.Error("exempt identity with stale last_used_at must report HasSession=true")
+	}
+	if got[999000111] {
+		t.Error("non-exempt identity with stale last_used_at must report HasSession=false")
+	}
+}
+
 // TestUserIDByTelegramID covers the read-only lookup: a hit returns the row
 // id, a miss returns ErrUserNotFound without creating a row.
 func TestUserIDByTelegramID(t *testing.T) {
