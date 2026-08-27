@@ -72,8 +72,9 @@ failure pushes `0` and increments
   therefore an auth problem, not an expiry one.
 
 - **Renewal stopped working** — the canary renews its own token when
-  less than `CANARY_TOKEN_RENEW_THRESHOLD` (10 days by default) of life
-  remains, by calling `POST /api/mcp/worker-token/renew` and patching the
+  less than a third of its lifetime remains (derived from the token's own
+  `iat`/`exp`, so a 30-day token renews with 10 days left and a 90-day one
+  with 30; `CANARY_TOKEN_RENEW_THRESHOLD` overrides it), by calling `POST /api/mcp/worker-token/renew` and patching the
   result back into the Secret. A failure there is deliberately **not** a
   red canary: the run continues on the still-valid token and only
   increments `mctl_telegram_canary_step_failure_total{step="token_renew"}`,

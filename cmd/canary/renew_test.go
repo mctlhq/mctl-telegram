@@ -370,3 +370,50 @@ func TestRun_RenewalFailureDoesNotFailTheRun(t *testing.T) {
 		t.Fatalf("expiry gauge = %v (present=%v); it must keep reporting the OLD deadline so the alert still fires", v, ok)
 	}
 }
+
+// jwtWithIatExp builds a token carrying both claims, so the threshold can be
+// derived from its actual lifetime.
+func jwtWithIatExp(iat, exp time.Time) string {
+	payload, _ := json.Marshal(map[string]int64{"iat": iat.Unix(), "exp": exp.Unix()})
+	return "aGRy." + base64.RawURLEncoding.EncodeToString(payload) + ".c2ln"
+}
+
+// The threshold must track the token's own lifetime. Hardcoding a duration
+// copied from the server would drift silently the moment the server's TTL
+// changed, and cmd/canary cannot import the constant to stay in sync.
+func TestRenewThreshold_DerivedFromTokenLifetime(t *testing.T) {
+	rc := &renewConfig{enabled: true}
+	now := time.Now()
+
+	for _, tc := range []struct {
+		name     string
+		lifetime time.Duration
+		want     time.Duration
+	}{
+		{"30-day token", 30 * 24 * time.Hour, 10 * 24 * time.Hour},
+		{"90-day token", 90 * 24 * time.Hour, 30 * 24 * time.Hour},
+		{"3-day token", 72 * time.Hour, 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renewThreshold(rc, jwtWithIatExp(now, now.Add(tc.lifetime)))
+			if got != tc.want {
+				t.Fatalf("threshold = %v, want %v (a third of the token's own life)", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenewThreshold_FallsBackWithoutIat(t *testing.T) {
+	rc := &renewConfig{enabled: true}
+	if got := renewThreshold(rc, jwtWithExp(time.Now().Add(30*24*time.Hour))); got != defaultRenewThreshold {
+		t.Fatalf("threshold = %v, want the fixed default %v", got, defaultRenewThreshold)
+	}
+}
+
+func TestRenewThreshold_ExplicitOverrideWins(t *testing.T) {
+	rc := &renewConfig{enabled: true, threshold: 48 * time.Hour, thresholdExplicit: true}
+	now := time.Now()
+	if got := renewThreshold(rc, jwtWithIatExp(now, now.Add(90*24*time.Hour))); got != 48*time.Hour {
+		t.Fatalf("threshold = %v, want the operator's explicit 48h", got)
+	}
+}

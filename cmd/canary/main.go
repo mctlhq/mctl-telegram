@@ -453,8 +453,8 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 		// its own expiry mid-run. It is fail-open by design: on any error the
 		// run continues with the existing token, which is still valid — the
 		// threshold guarantees that. See renew.go for why that is safe.
-		if cfg.renew != nil && cfg.renew.enabled && time.Until(exp) < cfg.renew.threshold {
-			log.Info("token renewal due", "expires_at", exp.Format(time.RFC3339), "threshold", cfg.renew.threshold)
+		if threshold := renewThresholdFor(cfg); threshold > 0 && time.Until(exp) < threshold {
+			log.Info("token renewal due", "expires_at", exp.Format(time.RFC3339), "threshold", threshold)
 			if newTok, newExp, err := renewToken(ctx, cfg, log); err != nil {
 				log.Error("probe failed", "step", "token_renew", "err", err)
 				met.stepFailures.WithLabelValues("token_renew").Inc()

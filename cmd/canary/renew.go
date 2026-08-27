@@ -44,10 +44,21 @@ import (
 // gauge, both of which alert long before the token actually lapses.
 
 const (
-	// defaultRenewThreshold is a third of the 30-day default token TTL. A
-	// third leaves roughly ten days and ~1400 further CronJob ticks to notice
-	// and fix a broken renewal before the credential actually expires, which
-	// is what makes fail-open the safe choice above.
+	// renewAtFraction is the share of a token's total lifetime that must
+	// remain before renewal is attempted. A third leaves ~1400 further
+	// CronJob ticks to notice and fix a broken renewal before the credential
+	// actually expires, which is what makes fail-open the safe choice above.
+	//
+	// Deriving this from the token's OWN lifetime rather than hardcoding a
+	// duration keeps the canary correct if the server's TTL ever changes.
+	// cmd/canary has no imports from internal/ by design, so a constant
+	// copied from workertoken.defaultWorkerTokenTTL could drift silently and
+	// leave the probe renewing at the wrong point in its credential's life.
+	renewAtFraction = 3
+
+	// defaultRenewThreshold applies only when the token's lifetime cannot be
+	// measured because it carries no iat claim. It matches a third of the
+	// 30-day default TTL.
 	defaultRenewThreshold = 10 * 24 * time.Hour
 )
 
@@ -72,11 +83,14 @@ type renewResponse struct {
 // Kubernetes (locally, in tests, from a laptop) without pretending it can
 // write a Secret.
 type renewConfig struct {
-	enabled    bool
-	threshold  time.Duration
-	secretName string
-	secretKey  string
-	namespace  string
+	enabled bool
+	// threshold is meaningful only when thresholdExplicit is set; otherwise
+	// renewThreshold derives it from the token itself.
+	threshold         time.Duration
+	thresholdExplicit bool
+	secretName        string
+	secretKey         string
+	namespace         string
 }
 
 // loadRenewConfig reads the renewal settings. An unset CANARY_TOKEN_SECRET_NAME
@@ -123,6 +137,7 @@ func loadRenewConfig() (*renewConfig, error) {
 			return nil, fmt.Errorf("CANARY_TOKEN_RENEW_THRESHOLD must be positive, got %q", s)
 		}
 		rc.threshold = d
+		rc.thresholdExplicit = true
 	}
 
 	return rc, nil
@@ -271,4 +286,59 @@ func renewToken(ctx context.Context, cfg *config, log *slog.Logger) (string, tim
 	// the field than to argue with the analyser about it.
 	log.Info("renewed token persisted", "secret", cfg.renew.namespace+"/"+cfg.renew.secretName)
 	return tok, exp, nil
+}
+
+// renewThreshold returns how much remaining life should trigger a renewal.
+//
+// An explicit CANARY_TOKEN_RENEW_THRESHOLD always wins. Otherwise the value is
+// a fraction of this token's own lifetime, read from its iat and exp, so a
+// change to the server's TTL is picked up without touching the canary. Tokens
+// with no readable iat fall back to the fixed default.
+func renewThreshold(rc *renewConfig, token string) time.Duration {
+	if rc.thresholdExplicit {
+		return rc.threshold
+	}
+	iat, ok := tokenIssuedAt(token)
+	if !ok {
+		return defaultRenewThreshold
+	}
+	exp, ok := tokenExpiry(token)
+	if !ok {
+		return defaultRenewThreshold
+	}
+	lifetime := exp.Sub(iat)
+	if lifetime <= 0 {
+		return defaultRenewThreshold
+	}
+	return lifetime / renewAtFraction
+}
+
+// tokenIssuedAt reads the iat claim without verifying the token, for the same
+// reason tokenExpiry does: the canary holds no signing key, and the server
+// checks the credential on every call.
+func tokenIssuedAt(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Iat int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Iat <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Iat, 0).UTC(), true
+}
+
+// renewThresholdFor returns the renewal threshold for cfg, or zero when
+// renewal is switched off.
+func renewThresholdFor(cfg *config) time.Duration {
+	if cfg.renew == nil || !cfg.renew.enabled {
+		return 0
+	}
+	return renewThreshold(cfg.renew, cfg.bearerToken)
 }
