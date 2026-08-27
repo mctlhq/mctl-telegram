@@ -141,15 +141,20 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			}
 		}
 
-		audience := []string{"mcp-worker-ro"}
+		audience := []string{workerAudience}
 		if mcpAudience != "" {
 			audience = append(audience, mcpAudience)
 		}
+		// OriginalIssuedAt anchors the renewal chain (see NewRenewHandler's
+		// maxRenewalChain). Setting it here, at the one point where a human
+		// admin is in the loop, is what lets the renew path extend this
+		// credential without extending it forever.
 		tok, err := signer.Mint(localjwt.Claims{
-			Subject:    "tg:" + strconv.FormatInt(req.TelegramID, 10),
-			TelegramID: req.TelegramID,
-			Scopes:     scopes,
-			Audience:   audience,
+			Subject:          "tg:" + strconv.FormatInt(req.TelegramID, 10),
+			TelegramID:       req.TelegramID,
+			Scopes:           scopes,
+			Audience:         audience,
+			OriginalIssuedAt: time.Now().Unix(),
 		}, ttl)
 		if err != nil {
 			slog.Error("worker token: sign failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)

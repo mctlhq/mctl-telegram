@@ -71,7 +71,35 @@ failure pushes `0` and increments
   "already expired". A canary that is failing with no expiry series is
   therefore an auth problem, not an expiry one.
 
-  The canary cannot renew itself yet; that is mctl-telegram#421.
+- **Renewal stopped working** — the canary renews its own token when
+  less than `CANARY_TOKEN_RENEW_THRESHOLD` (10 days by default) of life
+  remains, by calling `POST /api/mcp/worker-token/renew` and patching the
+  result back into the Secret. A failure there is deliberately **not** a
+  red canary: the run continues on the still-valid token and only
+  increments `mctl_telegram_canary_step_failure_total{step="token_renew"}`,
+  so watch that series rather than `mctl_telegram_canary_success`:
+
+  ```promql
+  mctl_telegram_canary_step_failure_total{step="token_renew"} > 0
+  ```
+
+  The pod log carries the reason verbatim, including the server's own
+  message. Two failures are worth naming:
+  - `PATCH secret returned HTTP 403 ... is forbidden` — the ServiceAccount
+    or its Role/RoleBinding is missing. Renewal is enabled by
+    `CANARY_TOKEN_SECRET_NAME`; if that is set without the RBAC, every
+    run past the threshold logs this.
+  - `renewal window exhausted; an administrator must mint a new worker
+    token` — the credential has hit its absolute ceiling of one year from
+    the moment a human first minted it. Renewal deliberately cannot lift
+    this; mint a fresh token through `POST /api/mcp/worker-token` as
+    above. This is the one scheduled manual step that remains, and the
+    expiry gauge plus `MctlTelegramCanaryTokenExpiring` give the usual
+    week of warning before it bites.
+
+  Renewal never changes identity or scopes — the endpoint copies both from
+  the presented token — so a renewed canary keeps probing as the same
+  account with the same read-only rights.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
   own once Telegram lifts the rate limit. Consider widening the
   CronJob `schedule` if it keeps recurring.

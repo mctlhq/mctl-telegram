@@ -38,6 +38,9 @@ type config struct {
 	probeUnread bool
 	pushgateway string
 	metricsAddr string
+	// renew is nil when the caller built a config by hand (tests); run()
+	// treats nil and disabled identically.
+	renew *renewConfig
 }
 
 // canaryMetrics holds the three Prometheus metric families for the canary.
@@ -95,6 +98,12 @@ func loadConfig() (*config, error) {
 	if cfg.metricsAddr == "" {
 		cfg.metricsAddr = ":9090"
 	}
+
+	renewCfg, err := loadRenewConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg.renew = renewCfg
 
 	return cfg, nil
 }
@@ -438,6 +447,23 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 		}
 		met.tokenExpiresIn.Set(time.Until(exp).Seconds())
 		log.Info("token lifetime", "expires_at", exp.Format(time.RFC3339))
+
+		// Renew before the credential gets close to lapsing (#421). This runs
+		// first so the rest of the probe uses the fresh token and cannot race
+		// its own expiry mid-run. It is fail-open by design: on any error the
+		// run continues with the existing token, which is still valid — the
+		// threshold guarantees that. See renew.go for why that is safe.
+		if cfg.renew != nil && cfg.renew.enabled && time.Until(exp) < cfg.renew.threshold {
+			log.Info("token renewal due", "expires_at", exp.Format(time.RFC3339), "threshold", cfg.renew.threshold)
+			if newTok, newExp, err := renewToken(ctx, cfg, log); err != nil {
+				log.Error("probe failed", "step", "token_renew", "err", err)
+				met.stepFailures.WithLabelValues("token_renew").Inc()
+			} else {
+				cfg.bearerToken = newTok
+				met.tokenExpiresIn.Set(time.Until(newExp).Seconds())
+				log.Info("probe ok", "step", "token_renew", "expires_at", newExp.Format(time.RFC3339))
+			}
+		}
 	} else {
 		log.Warn("token lifetime unknown, expiry metric omitted")
 	}

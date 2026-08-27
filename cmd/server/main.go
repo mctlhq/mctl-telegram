@@ -454,6 +454,13 @@ func main() {
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
 			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+		// Self-renewal for an already-issued worker token. Same middleware,
+		// no admin scope: the handler mints only for the identity already
+		// proven by the presented token, so it grants a headless worker the
+		// ability to outlive its own TTL without granting it the ability to
+		// mint credentials for anyone else. See workertoken.NewRenewHandler.
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token/renew",
+			workertoken.NewRenewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
