@@ -264,6 +264,11 @@ func renewToken(ctx context.Context, cfg *config, log *slog.Logger) (string, tim
 	if err := persistToken(persistCtx, cfg.renew, cfg.timeout, tok); err != nil {
 		return "", time.Time{}, fmt.Errorf("persist renewed token to secret %s/%s: %w", cfg.renew.namespace, cfg.renew.secretName, err)
 	}
-	log.Info("renewed token persisted", "secret", cfg.renew.namespace+"/"+cfg.renew.secretName, "key", cfg.renew.secretKey)
+	// The Secret's name is worth logging; the key name inside it is not. It
+	// is a constant the CronJob already declares, adds nothing to an
+	// operator reading this line, and CodeQL flags any value reached through
+	// a field named secretKey as a clear-text-logging risk. Cheaper to drop
+	// the field than to argue with the analyser about it.
+	log.Info("renewed token persisted", "secret", cfg.renew.namespace+"/"+cfg.renew.secretName)
 	return tok, exp, nil
 }
