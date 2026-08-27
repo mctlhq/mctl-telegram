@@ -417,3 +417,26 @@ func TestRenewThreshold_ExplicitOverrideWins(t *testing.T) {
 		t.Fatalf("threshold = %v, want the operator's explicit 48h", got)
 	}
 }
+
+// A token whose exp precedes its iat yields a nonsensical lifetime. Deriving
+// a threshold from it would produce a negative one, and a negative threshold
+// silently disables renewal — the failure would look like "renewal never
+// runs" with nothing logged.
+func TestRenewThreshold_FallsBackOnNonPositiveLifetime(t *testing.T) {
+	rc := &renewConfig{enabled: true}
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		iat, exp time.Time
+	}{
+		{"exp before iat", now, now.Add(-time.Hour)},
+		{"exp equals iat", now, now},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renewThreshold(rc, jwtWithIatExp(tc.iat, tc.exp))
+			if got != defaultRenewThreshold {
+				t.Fatalf("threshold = %v, want the fixed default %v", got, defaultRenewThreshold)
+			}
+		})
+	}
+}
