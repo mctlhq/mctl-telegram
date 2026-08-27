@@ -29,14 +29,22 @@ import (
 // "tg:<telegram_id>" so an external observer can tell the identity provider
 // at a glance.
 type Claims struct {
-	Issuer           string          `json:"iss"`
-	Subject          string          `json:"sub"`
-	TelegramID       int64           `json:"tg_id"`
-	TelegramUsername string          `json:"tg_username,omitempty"`
-	Groups           []string        `json:"groups,omitempty"`
-	Scopes           []string        `json:"scopes,omitempty"`
-	IssuedAt         int64           `json:"iat"`
-	ExpiresAt        int64           `json:"exp"`
+	Issuer           string   `json:"iss"`
+	Subject          string   `json:"sub"`
+	TelegramID       int64    `json:"tg_id"`
+	TelegramUsername string   `json:"tg_username,omitempty"`
+	Groups           []string `json:"groups,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	IssuedAt         int64    `json:"iat"`
+	ExpiresAt        int64    `json:"exp"`
+	// OriginalIssuedAt anchors a renewable credential to the moment a human
+	// first minted it, surviving every subsequent renewal. Without it a
+	// renew endpoint that copies claims forward extends a credential without
+	// bound: each renewal is individually within maxWorkerTokenTTL, yet the
+	// chain never has to end. Only internal/workertoken sets and enforces it
+	// today; tokens minted before it existed simply omit it, and readers are
+	// expected to fall back to IssuedAt (see workertoken.originAnchor).
+	OriginalIssuedAt int64           `json:"orig_iat,omitempty"`
 	AudienceRaw      json.RawMessage `json:"aud,omitempty"`
 	Audience         []string        `json:"-"`
 }

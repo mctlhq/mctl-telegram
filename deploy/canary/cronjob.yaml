@@ -1,3 +1,16 @@
+# NOT THE DEPLOYED MANIFEST. Nothing applies this file.
+#
+# The canary that actually runs in production is rendered from
+# mctl-gitops/platform-gitops/services/labs/mctl-telegram/values.yaml and is
+# named labs-mctl-telegram-canary (every 10 minutes, not suspended). This file
+# is a reference/local-dev copy that drifted: it still carries suspend:true and
+# a */2 schedule from a debugging session that ended long ago.
+#
+# Keeping that straight matters. On 2026-08-27 a design proposal for
+# mctl-telegram#421 read this file, concluded it was the deployment, and put
+# the canary's ServiceAccount and RBAC here — where they would have applied to
+# nothing while every symptom looked correct. Change the gitops values.yaml,
+# not this file, for anything that must take effect.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
