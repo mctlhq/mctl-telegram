@@ -318,10 +318,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
-	text := action.Payload
-	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
-		text = text + sep + profile.DisclosureText
-	}
+	text := appendDisclosure(action.Payload, profile.DisclosureText)
 	reason, blocked, err := e.restrictedFieldBlocks(ctx, action, text)
 	if err != nil {
 		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
@@ -684,4 +681,32 @@ func defaultRandomID() (int64, error) {
 		return 0, err
 	}
 	return int64(binary.LittleEndian.Uint64(b[:])), nil
+}
+
+// appendDisclosure adds the profile's disclosure line to a draft, unless the
+// draft already ends with it.
+//
+// The guard is not paranoia. The agent is shown the conversation history, and
+// once a few of its own replies are in there every one of them ends with the
+// disclosure — so the model reads it as part of the house style and writes it
+// into the draft itself. The executor then appended a second copy, and the
+// recipient saw the line twice.
+//
+// This stayed hidden while the disclosure was a long formal English sentence,
+// which a model answering in Russian had no reason to reproduce. Shortening it
+// to a short signature ("— ИИ-ассистент") made imitation the likely outcome
+// rather than an unlikely one, and the duplicate showed up in the first
+// conversation long enough to have history worth imitating.
+//
+// Suffix match after trimming trailing space: a draft that merely mentions the
+// disclosure mid-text still gets the real one appended at the end, which is
+// where a reader looks for it.
+func appendDisclosure(payload, disclosure string) string {
+	if disclosure == "" {
+		return payload
+	}
+	if strings.HasSuffix(strings.TrimRight(payload, " \t\r\n"), strings.TrimSpace(disclosure)) {
+		return payload
+	}
+	return payload + policy.DisclosureSep + disclosure
 }
