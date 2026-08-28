@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -318,10 +319,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		}
 		return fmt.Errorf("policy denies at send time: %s", strings.Join(result.Reasons, "; "))
 	}
-	text := action.Payload
-	if sep := policy.DisclosureSep; profile.DisclosureText != "" {
-		text = text + sep + profile.DisclosureText
-	}
+	text := appendDisclosure(action.Payload, profile.DisclosureText)
 	reason, blocked, err := e.restrictedFieldBlocks(ctx, action, text)
 	if err != nil {
 		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
@@ -684,4 +682,47 @@ func defaultRandomID() (int64, error) {
 		return 0, err
 	}
 	return int64(binary.LittleEndian.Uint64(b[:])), nil
+}
+
+// appendDisclosure adds the profile's disclosure line to a draft, unless the
+// draft already ends with it as its own line.
+//
+// The guard is not paranoia. The agent is shown the conversation history, and
+// once a few of its own replies are in there every one of them ends with the
+// disclosure — so the model reads it as part of the house style and writes it
+// into the draft itself. The executor then appended a second copy, and the
+// recipient saw the line twice.
+//
+// This stayed hidden while the disclosure was a long formal English sentence,
+// which a model answering in Russian had no reason to reproduce. Shortening it
+// to a short signature ("— ИИ-ассистент") made imitation the likely outcome
+// rather than an unlikely one, and the duplicate showed up in the first
+// conversation long enough to have history worth imitating.
+//
+// Three details matter, each of which a looser check gets wrong:
+//
+//   - The match requires the separator, not just the text. A disclosure can be
+//     an ordinary phrase ("I'm an AI assistant."), and a draft ending "It is
+//     false that I'm an AI assistant." must still receive the real line —
+//     otherwise suppressing the append would strip the unambiguous positive
+//     disclosure the executor is there to guarantee.
+//   - Trailing whitespace is trimmed Unicode-aware. Localized model output can
+//     end in a non-breaking space, which an ASCII cutset leaves in place; the
+//     suffix check would then miss and produce the exact duplicate this
+//     function exists to prevent.
+//   - A blank disclosure returns the payload untouched. Without that,
+//     TrimSpace yields "" and HasSuffix(x, "") is true for every payload, so a
+//     whitespace-only disclosure would silently suppress the append for all
+//     messages. policy.Evaluate already denies such a profile before this is
+//     reached, so this is a guard against a future caller, not a live path.
+func appendDisclosure(payload, disclosure string) string {
+	want := strings.TrimSpace(disclosure)
+	if want == "" {
+		return payload
+	}
+	trimmed := strings.TrimRightFunc(payload, unicode.IsSpace)
+	if trimmed == want || strings.HasSuffix(trimmed, policy.DisclosureSep+want) {
+		return payload
+	}
+	return payload + policy.DisclosureSep + disclosure
 }
