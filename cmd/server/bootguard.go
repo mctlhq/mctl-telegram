@@ -62,6 +62,16 @@ func insecureAuth(cfg *config.Config) bool {
 // localEnvNames are the ENV values the boot guard accepts as "this is a
 // developer's own machine". The empty string is included: it is the default
 // in internal/config, and what a bare `go run ./cmd/server` sees.
+//
+// Including "" is a deliberate, documented residual risk (see SECURITY.md's
+// "Authentication-required mode"): config alone cannot distinguish "a
+// developer never set ENV" from "ops never wired ENV", so an unset ENV is
+// treated exactly like an explicit local tier. A deployment that leaves ENV
+// unset AND binds ADDR to loopback (e.g. behind an in-pod reverse proxy or
+// sidecar) therefore still boots with an insecure auth mode or a missing
+// ENCRYPTION_KEY — the loopback bind is the only thing between it and an
+// exposed admin bypass. Real deployments must set ENV; the intentionality of
+// this gap is pinned by TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed.
 var localEnvNames = []string{"", "local", "local-dev", "localdev", "dev", "development", "test", "ci"}
 
 // isLocalEnv reports whether env names a local development tier, compared

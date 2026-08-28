@@ -162,3 +162,30 @@ func TestCheckBootGuardNonLocalEnvBootsWhenConfiguredCorrectly(t *testing.T) {
 		t.Fatalf("correctly configured deployment must boot on any ENV, got err: %v", err)
 	}
 }
+
+func TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed(t *testing.T) {
+	// Residual risk, pinned deliberately (see SECURITY.md's
+	// "Authentication-required mode" and localEnvNames): an unset ENV is
+	// indistinguishable from "developer machine" at the config layer, so a
+	// loopback-bound pod that never sets ENV boots even with the local-dev
+	// auth bypass and no ENCRYPTION_KEY. The loopback bind is the only gate
+	// left in that case. If this ever needs to fail closed instead, ENV must
+	// first become a required/validated field in internal/config — changing
+	// only this test would break every bare `go run ./cmd/server`.
+	cfg := &config.Config{
+		Environment:  "", // ENV unset, exactly as a bare `go run` sees it
+		Addr:         "127.0.0.1:8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("unset ENV on a loopback bind is intentionally allowed, got err: %v", err)
+	}
+
+	// The same insecure config with a non-loopback bind must still be fatal:
+	// the allowance above is scoped to loopback, not to an unset ENV.
+	cfg.Addr = "0.0.0.0:8080"
+	if err := checkBootGuard(cfg); err == nil {
+		t.Fatal("unset ENV on a public bind with local-dev auth must be fatal")
+	}
+}
