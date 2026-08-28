@@ -12,7 +12,7 @@ Requirements:
 Run the server locally:
 
 ```bash
-ADDR=:8080 \
+ADDR=127.0.0.1:8080 \
 AUTH_MODE=local-dev AUTH_REQUIRED=false \
 OPERATOR_GITHUB_LOGIN=your-github-handle \
 DATABASE_URL='file:./mctl-telegram.db?_pragma=journal_mode(WAL)' \

@@ -62,6 +62,10 @@ func main() {
 		slog.Error("config load", "err", err)
 		os.Exit(1)
 	}
+	if err := checkBootGuard(cfg); err != nil {
+		slog.Error("boot guard", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("starting",
 		"auth_mode", cfg.AuthMode,
 		"auth_required", cfg.AuthRequired,

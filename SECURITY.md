@@ -108,6 +108,7 @@ The tool exposes no trusted client-controlled bypass for these gates. Any condit
 
 * `AUTH_REQUIRED=false` is for local development only. A deployed pod MUST set `AUTH_REQUIRED=true` and a production auth mode.
 * `local-dev` returns a fixed platform-admin identity and MUST NOT be reachable from a non-localhost production interface.
+* This posture is enforced, not just documented: `cmd/server/bootguard.go`'s `checkBootGuard` runs at the start of `main()` and fatally exits before the database is opened or the listener is bound whenever `AUTH_MODE=local-dev`/`AUTH_REQUIRED=false` or a missing `ENCRYPTION_KEY` is paired with a non-loopback `ADDR` or `ENV=production`.
 
 ## Rate limiting
 

@@ -30,10 +30,18 @@ type Config struct {
 	// must match one of these entries (scheme://host[:port]) or the request is
 	// rejected with 403. Set via ALLOWED_ORIGINS (comma-separated); defaults to
 	// the PUBLIC_BASE_URL origin.
-	AllowedOrigins     []string
-	AuthMode           string
-	AuthRequired       bool
-	OperatorLogin      string
+	AllowedOrigins []string
+	AuthMode       string
+	AuthRequired   bool
+	OperatorLogin  string
+	// Environment names the deployment tier this process is running in
+	// (e.g. "production"). Sourced from ENV, empty otherwise. Not consumed
+	// by any subsystem here — it feeds cmd/server's boot guard
+	// (checkBootGuard in cmd/server/bootguard.go), which compares it
+	// case-insensitively against "production" to decide whether an
+	// insecure-auth or missing-encryption-key boot must be fatal regardless
+	// of the configured listen address.
+	Environment        string
 	DatabaseURL        string
 	OAUTHJWTSecret     string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
 	OAUTHJWTAudience   string // expected `aud` claim; empty disables the check
@@ -201,6 +209,7 @@ func Load() (*Config, error) {
 		AuthMode:                   authMode,
 		AuthRequired:               envBool("AUTH_REQUIRED", false),
 		OperatorLogin:              envOr("OPERATOR_GITHUB_LOGIN", "operator"),
+		Environment:                envOr("ENV", ""),
 		DatabaseURL:                envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
 		OAUTHJWTSecret:             jwtSigningKey(authMode),
 		OAUTHJWTAudience:           os.Getenv("OAUTH_JWT_AUDIENCE"),
