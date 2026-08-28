@@ -8,6 +8,18 @@ services:
       - .env
     environment:
       DATABASE_URL: postgres://mctl:${POSTGRES_PASSWORD:-mctl}@db:5432/mctl_telegram?sslmode=disable
+      # The container must bind all interfaces for the "8080:8080" port
+      # publish below to reach it, so it can never be a loopback ADDR — this
+      # overrides .env.example's loopback-by-default ADDR (see that file's
+      # comment). A bind-all ADDR is treated as non-loopback by
+      # cmd/server/bootguard.go's boot guard, so AUTH_MODE/AUTH_REQUIRED are
+      # pinned here to a real auth mode rather than left to inherit
+      # whatever's in .env; ENCRYPTION_KEY and OAUTH_JWT_SIGNING_KEY are
+      # secrets and must still be set in .env (see .env.example) or the
+      # guard refuses to start the container.
+      ADDR: ":8080"
+      AUTH_MODE: local-jwt
+      AUTH_REQUIRED: "true"
     depends_on:
       db:
         condition: service_healthy

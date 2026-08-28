@@ -1,0 +1,191 @@
+package main
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/config"
+)
+
+func TestCheckBootGuardLoopbackLocalDevOK(t *testing.T) {
+	cfg := &config.Config{
+		Addr:         "127.0.0.1:8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("loopback local-dev should be allowed, got err: %v", err)
+	}
+}
+
+func TestCheckBootGuardPublicBindLocalDevFatal(t *testing.T) {
+	cfg := &config.Config{
+		Addr:         "0.0.0.0:8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	err := checkBootGuard(cfg)
+	if err == nil {
+		t.Fatal("public bind with local-dev auth should be fatal")
+	}
+	if !strings.Contains(err.Error(), "AUTH_MODE") {
+		t.Errorf("error message should mention AUTH_MODE, got: %s", err.Error())
+	}
+}
+
+func TestCheckBootGuardEmptyHostTreatedAsPublicFatal(t *testing.T) {
+	cfg := &config.Config{
+		Addr:         ":8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	if err := checkBootGuard(cfg); err == nil {
+		t.Fatal("empty-host ADDR (bind-all) with local-dev auth should be fatal")
+	}
+}
+
+func TestCheckBootGuardProductionNoKeyFatal(t *testing.T) {
+	cfg := &config.Config{
+		Environment:  "production",
+		Addr:         "127.0.0.1:8080",
+		AuthMode:     "local-jwt",
+		AuthRequired: true,
+	}
+	err := checkBootGuard(cfg)
+	if err == nil {
+		t.Fatal("production without ENCRYPTION_KEY should be fatal regardless of ADDR")
+	}
+	if !strings.Contains(err.Error(), "ENCRYPTION_KEY") {
+		t.Errorf("error message should mention ENCRYPTION_KEY, got: %s", err.Error())
+	}
+}
+
+func TestCheckBootGuardProductionCaseInsensitive(t *testing.T) {
+	for _, env := range []string{"production", "Production", "PRODUCTION"} {
+		cfg := &config.Config{
+			Environment:  env,
+			Addr:         "127.0.0.1:8080",
+			AuthMode:     "local-jwt",
+			AuthRequired: true,
+		}
+		if err := checkBootGuard(cfg); err == nil {
+			t.Errorf("ENV=%q without ENCRYPTION_KEY should be fatal", env)
+		}
+	}
+}
+
+func TestCheckBootGuardBothProblemsReportedTogether(t *testing.T) {
+	cfg := &config.Config{
+		Addr:         "0.0.0.0:8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	err := checkBootGuard(cfg)
+	if err == nil {
+		t.Fatal("expected a fatal error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_MODE") || !strings.Contains(err.Error(), "ENCRYPTION_KEY") {
+		t.Errorf("error message should report both problems together, got: %s", err.Error())
+	}
+}
+
+func TestCheckBootGuardCorrectlyConfiguredPublicBindOK(t *testing.T) {
+	cfg := &config.Config{
+		Addr:          "0.0.0.0:8080",
+		AuthMode:      "local-jwt",
+		AuthRequired:  true,
+		EncryptionKey: make([]byte, 32),
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("correctly configured deployment on a public bind must not be blocked, got err: %v", err)
+	}
+}
+
+func TestCheckBootGuardIPv6AndHostnameLoopback(t *testing.T) {
+	cases := []struct {
+		addr     string
+		loopback bool
+	}{
+		{"[::1]:8080", true},
+		{"localhost:8080", true},
+		{"internal.example:8080", false},
+	}
+	for _, tc := range cases {
+		got := isLoopbackAddr(tc.addr)
+		if got != tc.loopback {
+			t.Errorf("isLoopbackAddr(%q) = %v, want %v", tc.addr, got, tc.loopback)
+		}
+	}
+}
+
+func TestCheckBootGuardNearMissProductionEnvFatal(t *testing.T) {
+	// ENV is free-text with no enum validation, so a deployment that labels
+	// its tier anything other than "production" must still be guarded.
+	for _, env := range []string{"prod", "PROD", "prd", "staging", "PRODUCTION_ENV", "eu-prod-1"} {
+		cfg := &config.Config{
+			Environment:  env,
+			Addr:         "127.0.0.1:8080",
+			AuthMode:     "local-jwt",
+			AuthRequired: true,
+		}
+		if err := checkBootGuard(cfg); err == nil {
+			t.Errorf("ENV=%q without ENCRYPTION_KEY should be fatal", env)
+		}
+	}
+}
+
+func TestCheckBootGuardLocalEnvNamesAllowed(t *testing.T) {
+	for _, env := range []string{"", "local", "local-dev", "localdev", "dev", "Development", "TEST", "ci", "  dev  "} {
+		cfg := &config.Config{
+			Environment:  env,
+			Addr:         "127.0.0.1:8080",
+			AuthMode:     "local-dev",
+			AuthRequired: false,
+		}
+		if err := checkBootGuard(cfg); err != nil {
+			t.Errorf("ENV=%q on a loopback bind is local dev and must boot, got err: %v", env, err)
+		}
+	}
+}
+
+func TestCheckBootGuardNonLocalEnvBootsWhenConfiguredCorrectly(t *testing.T) {
+	// Failing closed on an unrecognized ENV must not block a real, correctly
+	// configured deployment — only an insecure one.
+	cfg := &config.Config{
+		Environment:   "prod",
+		Addr:          "0.0.0.0:8080",
+		AuthMode:      "local-jwt",
+		AuthRequired:  true,
+		EncryptionKey: make([]byte, 32),
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("correctly configured deployment must boot on any ENV, got err: %v", err)
+	}
+}
+
+func TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed(t *testing.T) {
+	// Residual risk, pinned deliberately (see SECURITY.md's
+	// "Authentication-required mode" and localEnvNames): an unset ENV is
+	// indistinguishable from "developer machine" at the config layer, so a
+	// loopback-bound pod that never sets ENV boots even with the local-dev
+	// auth bypass and no ENCRYPTION_KEY. The loopback bind is the only gate
+	// left in that case. If this ever needs to fail closed instead, ENV must
+	// first become a required/validated field in internal/config — changing
+	// only this test would break every bare `go run ./cmd/server`.
+	cfg := &config.Config{
+		Environment:  "", // ENV unset, exactly as a bare `go run` sees it
+		Addr:         "127.0.0.1:8080",
+		AuthMode:     "local-dev",
+		AuthRequired: false,
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("unset ENV on a loopback bind is intentionally allowed, got err: %v", err)
+	}
+
+	// The same insecure config with a non-loopback bind must still be fatal:
+	// the allowance above is scoped to loopback, not to an unset ENV.
+	cfg.Addr = "0.0.0.0:8080"
+	if err := checkBootGuard(cfg); err == nil {
+		t.Fatal("unset ENV on a public bind with local-dev auth must be fatal")
+	}
+}
