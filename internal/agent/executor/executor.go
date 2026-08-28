@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -684,7 +685,7 @@ func defaultRandomID() (int64, error) {
 }
 
 // appendDisclosure adds the profile's disclosure line to a draft, unless the
-// draft already ends with it.
+// draft already ends with it as its own line.
 //
 // The guard is not paranoia. The agent is shown the conversation history, and
 // once a few of its own replies are in there every one of them ends with the
@@ -698,14 +699,29 @@ func defaultRandomID() (int64, error) {
 // rather than an unlikely one, and the duplicate showed up in the first
 // conversation long enough to have history worth imitating.
 //
-// Suffix match after trimming trailing space: a draft that merely mentions the
-// disclosure mid-text still gets the real one appended at the end, which is
-// where a reader looks for it.
+// Three details matter, each of which a looser check gets wrong:
+//
+//   - The match requires the separator, not just the text. A disclosure can be
+//     an ordinary phrase ("I'm an AI assistant."), and a draft ending "It is
+//     false that I'm an AI assistant." must still receive the real line —
+//     otherwise suppressing the append would strip the unambiguous positive
+//     disclosure the executor is there to guarantee.
+//   - Trailing whitespace is trimmed Unicode-aware. Localized model output can
+//     end in a non-breaking space, which an ASCII cutset leaves in place; the
+//     suffix check would then miss and produce the exact duplicate this
+//     function exists to prevent.
+//   - A blank disclosure returns the payload untouched. Without that,
+//     TrimSpace yields "" and HasSuffix(x, "") is true for every payload, so a
+//     whitespace-only disclosure would silently suppress the append for all
+//     messages. policy.Evaluate already denies such a profile before this is
+//     reached, so this is a guard against a future caller, not a live path.
 func appendDisclosure(payload, disclosure string) string {
-	if disclosure == "" {
+	want := strings.TrimSpace(disclosure)
+	if want == "" {
 		return payload
 	}
-	if strings.HasSuffix(strings.TrimRight(payload, " \t\r\n"), strings.TrimSpace(disclosure)) {
+	trimmed := strings.TrimRightFunc(payload, unicode.IsSpace)
+	if trimmed == want || strings.HasSuffix(trimmed, policy.DisclosureSep+want) {
 		return payload
 	}
 	return payload + policy.DisclosureSep + disclosure
