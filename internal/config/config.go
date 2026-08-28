@@ -37,10 +37,11 @@ type Config struct {
 	// Environment names the deployment tier this process is running in
 	// (e.g. "production"). Sourced from ENV, empty otherwise. Not consumed
 	// by any subsystem here — it feeds cmd/server's boot guard
-	// (checkBootGuard in cmd/server/bootguard.go), which compares it
-	// case-insensitively against "production" to decide whether an
-	// insecure-auth or missing-encryption-key boot must be fatal regardless
-	// of the configured listen address.
+	// (checkBootGuard in cmd/server/bootguard.go), which fails closed: any
+	// value it does not recognize case-insensitively as a local development
+	// tier (see localEnvNames there) makes an insecure-auth or
+	// missing-encryption-key boot fatal regardless of the configured listen
+	// address.
 	Environment        string
 	DatabaseURL        string
 	OAUTHJWTSecret     string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY

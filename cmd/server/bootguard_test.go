@@ -117,3 +117,48 @@ func TestCheckBootGuardIPv6AndHostnameLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckBootGuardNearMissProductionEnvFatal(t *testing.T) {
+	// ENV is free-text with no enum validation, so a deployment that labels
+	// its tier anything other than "production" must still be guarded.
+	for _, env := range []string{"prod", "PROD", "prd", "staging", "PRODUCTION_ENV", "eu-prod-1"} {
+		cfg := &config.Config{
+			Environment:  env,
+			Addr:         "127.0.0.1:8080",
+			AuthMode:     "local-jwt",
+			AuthRequired: true,
+		}
+		if err := checkBootGuard(cfg); err == nil {
+			t.Errorf("ENV=%q without ENCRYPTION_KEY should be fatal", env)
+		}
+	}
+}
+
+func TestCheckBootGuardLocalEnvNamesAllowed(t *testing.T) {
+	for _, env := range []string{"", "local", "local-dev", "localdev", "dev", "Development", "TEST", "ci", "  dev  "} {
+		cfg := &config.Config{
+			Environment:  env,
+			Addr:         "127.0.0.1:8080",
+			AuthMode:     "local-dev",
+			AuthRequired: false,
+		}
+		if err := checkBootGuard(cfg); err != nil {
+			t.Errorf("ENV=%q on a loopback bind is local dev and must boot, got err: %v", env, err)
+		}
+	}
+}
+
+func TestCheckBootGuardNonLocalEnvBootsWhenConfiguredCorrectly(t *testing.T) {
+	// Failing closed on an unrecognized ENV must not block a real, correctly
+	// configured deployment — only an insecure one.
+	cfg := &config.Config{
+		Environment:   "prod",
+		Addr:          "0.0.0.0:8080",
+		AuthMode:      "local-jwt",
+		AuthRequired:  true,
+		EncryptionKey: make([]byte, 32),
+	}
+	if err := checkBootGuard(cfg); err != nil {
+		t.Fatalf("correctly configured deployment must boot on any ENV, got err: %v", err)
+	}
+}

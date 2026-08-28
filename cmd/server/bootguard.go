@@ -12,17 +12,17 @@ import (
 // "Authentication-required mode" section into an enforced, fatal boot-time
 // check: a wide-open combination (local-dev auth bypass and/or no session
 // encryption) must never boot on an interface anything other than the
-// operator's own loopback, and must never boot at all in production
-// regardless of ADDR.
+// operator's own loopback, and must never boot at all on a deployment tier
+// that is not a recognized local one, regardless of ADDR.
 //
 // It performs no I/O and no DNS resolution — it is a pure function of the
 // already-loaded config, matching the selectProvider/selectBridgeProvider
 // pattern in main.go that main_test.go already exercises without booting a
 // server.
 func checkBootGuard(cfg *config.Config) error {
-	exposed := isProductionEnv(cfg.Environment) || !isLoopbackAddr(cfg.Addr)
+	exposed := !isLocalEnv(cfg.Environment) || !isLoopbackAddr(cfg.Addr)
 	if !exposed {
-		// Loopback bind outside production is today's documented local-dev
+		// Loopback bind on a local ENV is today's documented local-dev
 		// posture (see README.md/CONTRIBUTING.md Quick Start) and stays
 		// unchanged.
 		return nil
@@ -39,12 +39,12 @@ func checkBootGuard(cfg *config.Config) error {
 	}
 	if len(problems) == 0 {
 		// A correctly configured deployment (real auth mode + encryption
-		// key) is allowed on a public bind or in production.
+		// key) is allowed on a public bind or any deployment tier.
 		return nil
 	}
 
 	return fmt.Errorf(
-		"refusing to start: ADDR=%q ENV=%q is not a loopback/non-production bind, and: %s "+
+		"refusing to start: ADDR=%q ENV=%q is not a loopback bind on a recognized local development tier, and: %s "+
 			"(bind ADDR to a loopback address such as 127.0.0.1:8080 for local development, "+
 			"or fix the listed setting(s) for a real deployment)",
 		cfg.Addr, cfg.Environment, strings.Join(problems, "; "))
@@ -59,11 +59,33 @@ func insecureAuth(cfg *config.Config) bool {
 	return strings.EqualFold(cfg.AuthMode, "local-dev") || !cfg.AuthRequired
 }
 
-// isProductionEnv reports whether env names a production deployment tier,
-// compared case-insensitively (consistent with how AUTH_MODE is compared
-// elsewhere in this file).
-func isProductionEnv(env string) bool {
-	return strings.EqualFold(env, "production")
+// localEnvNames are the ENV values the boot guard accepts as "this is a
+// developer's own machine". The empty string is included: it is the default
+// in internal/config, and what a bare `go run ./cmd/server` sees.
+var localEnvNames = []string{"", "local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+
+// isLocalEnv reports whether env names a local development tier, compared
+// case-insensitively after trimming surrounding whitespace (consistent with
+// how AUTH_MODE is compared elsewhere in this file).
+//
+// ENV is free-text — internal/config sources it straight from the environment
+// with no enum validation — so this deliberately fails CLOSED, exactly as
+// isLoopbackAddr does below: an unrecognized value such as "prod", "prd",
+// "staging" or "PRODUCTION_ENV" is not known to be a developer machine, so it
+// is treated as a real deployment where the checks above apply. Recognizing
+// only an exact "production" spelling would mean a deployment that labels its
+// tier any other way silently skips this clause — the "safety net that is not
+// one" failure mode this guard exists to prevent. Widening the guard is safe
+// in the other direction: a correctly configured deployment (real auth mode +
+// encryption key) still boots on any ENV.
+func isLocalEnv(env string) bool {
+	env = strings.TrimSpace(env)
+	for _, name := range localEnvNames {
+		if strings.EqualFold(env, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // isLoopbackAddr reports whether addr (an ADDR-shaped host:port, as passed
