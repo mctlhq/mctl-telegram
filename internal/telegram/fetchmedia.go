@@ -35,6 +35,14 @@ var (
 // tight.
 const maxFetchRedirects = 5
 
+// cgnatBlock is the RFC 6598 carrier-grade-NAT range (100.64.0.0/10).
+// Not covered by net.IP.IsPrivate(), which only recognizes RFC 1918 and
+// IPv6 ULA — CGNAT is a distinct IANA special-purpose allocation. In
+// cluster/cloud environments this range can route to internal
+// infrastructure, so it must be treated the same as the private-use
+// ranges for the SSRF guard's purposes.
+var cgnatBlock = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
 // lookupIPFunc resolves a hostname to its candidate addresses. Overridable in
 // tests so redirect/oversize/timeout behavior can be exercised against an
 // httptest.Server without weakening the production IP guard.
@@ -61,14 +69,15 @@ func defaultLookupIP(ctx context.Context, host string) ([]net.IP, error) {
 // covers the well-known 169.254.169.254 cloud-metadata address — called out
 // explicitly here given its history as an SSRF target even though it is just
 // another link-local address), RFC 1918 / ULA private-use ranges, the
-// unspecified address, and multicast.
+// unspecified address, multicast, and RFC 6598 CGNAT (100.64.0.0/10).
 func isDisallowedIP(ip net.IP) bool {
 	return ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsPrivate() ||
 		ip.IsUnspecified() ||
-		ip.IsMulticast()
+		ip.IsMulticast() ||
+		cgnatBlock.Contains(ip)
 }
 
 // resolveAllowedIP resolves host and returns the first address that is not
