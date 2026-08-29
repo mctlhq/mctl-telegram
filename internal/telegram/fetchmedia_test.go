@@ -62,6 +62,10 @@ func TestIsDisallowedIP(t *testing.T) {
 		{"192.168.1.5", true},
 		{"0.0.0.0", true},
 		{"224.0.0.1", true}, // multicast
+		{"100.64.0.1", true},      // CGNAT (RFC 6598), inside 100.64.0.0/10
+		{"100.127.255.254", true}, // CGNAT, top boundary of the /10
+		{"100.63.255.255", false}, // just below the CGNAT range
+		{"100.128.0.0", false},    // just above the CGNAT range
 		{"93.184.216.1", false},
 		{"8.8.8.8", false},
 	}
@@ -110,6 +114,28 @@ func TestFetchGuardedURL_DisallowedIP_Direct(t *testing.T) {
 func TestFetchGuardedURL_DisallowedIP_ViaHostname(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	dialed := false
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = true
+		return nil, errors.New("should never dial")
+	}
+	_, _, err := fetchGuardedURL(context.Background(), "https://evil.internal/f.jpg", 1024, time.Second, lookup, dial, nil)
+	if !errors.Is(err, ErrFetchDisallowedIP) {
+		t.Fatalf("err = %v, want ErrFetchDisallowedIP", err)
+	}
+	if dialed {
+		t.Error("dial must not be attempted once the resolved address is disallowed")
+	}
+}
+
+// TestFetchGuardedURL_DisallowedIP_CGNATViaHostname mirrors
+// TestFetchGuardedURL_DisallowedIP_ViaHostname but resolves to a CGNAT
+// (RFC 6598) address, proving the 100.64.0.0/10 rejection happens through
+// the actual resolve-then-check path, not just the isDisallowedIP table.
+func TestFetchGuardedURL_DisallowedIP_CGNATViaHostname(t *testing.T) {
+	lookup := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("100.64.0.1")}, nil
 	}
 	dialed := false
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
