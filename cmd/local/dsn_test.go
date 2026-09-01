@@ -40,6 +40,19 @@ func TestSQLiteDSN(t *testing.T) {
 			want: "file:///Users/Jane%20Doe/.config/state.db",
 		},
 		{
+			// A colon is legal in a POSIX filename. Without the separator
+			// requirement this would be read as drive "a:" and silently
+			// promoted to an absolute path.
+			name: "posix relative path with a colon is not a drive path",
+			path: "a:b/state.db",
+			want: "file:///a:b/state.db",
+		},
+		{
+			name: "bare drive root",
+			path: `C:\`,
+			want: "file:///C:/",
+		},
+		{
 			name: "query and fragment characters are escaped, not parsed",
 			path: "/Users/od#d?ball/state.db",
 			want: "file:///Users/od%23d%3Fball/state.db",

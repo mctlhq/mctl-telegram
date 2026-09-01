@@ -273,11 +273,22 @@ func sqliteDSN(path string) string {
 }
 
 // hasWindowsDriveLetter reports whether p begins with a drive specifier such
-// as "C:".
+// as "C:", "C:/" or `C:\`.
+//
+// The drive letter must be followed by a separator or by nothing at all. A
+// colon is a legal character in a POSIX filename, so a relative path like
+// "a:b/foo" would otherwise be mistaken for a drive path and have a leading
+// slash prepended — quietly turning a relative path into an absolute one.
+// Today the only caller passes an absolute path derived from
+// os.UserHomeDir(), so that case is unreachable; requiring the separator
+// keeps it unreachable if the helper is ever reused.
 func hasWindowsDriveLetter(p string) bool {
 	if len(p) < 2 || p[1] != ':' {
 		return false
 	}
 	c := p[0]
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	return len(p) == 2 || p[2] == '/' || p[2] == '\\'
 }
