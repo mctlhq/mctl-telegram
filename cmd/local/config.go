@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -234,4 +236,59 @@ func encryptionKeyHex(key []byte) string {
 		out[i*2+1] = hextable[b&0xf]
 	}
 	return string(out)
+}
+
+// sqliteDSN turns a filesystem path into the "file:" URI that the SQLite
+// driver expects.
+//
+// The path cannot simply be concatenated after "file:". On Windows it looks
+// like `C:\Users\me\.config\mctl-telegram-local\state.db`: the backslashes are
+// not URI path separators and the drive colon is read as the start of a URI
+// authority, so the driver is handed a path that does not exist and the daemon
+// fails at its very first step. The same concatenation is also wrong on any
+// platform once the path contains a character that means something in a URI —
+// a space, a '#' or a '?' in a user's home directory is enough.
+//
+// Building the URI properly fixes both: separators are normalised to forward
+// slashes, a drive-letter path gets the leading slash that makes
+// `file:///C:/Users/...` a valid absolute file URI, and url.URL escapes the
+// rest.
+func sqliteDSN(path string) string {
+	p := filepath.ToSlash(path)
+	// filepath.ToSlash only rewrites the separator of the platform it runs on,
+	// so on a POSIX build it leaves a Windows path untouched. Recognising the
+	// drive-letter prefix lets the conversion — and its test — be the same
+	// everywhere. A POSIX absolute path starts with "/" and never matches, so
+	// a backslash that is genuinely part of a Unix filename survives.
+	if hasWindowsDriveLetter(p) {
+		p = strings.ReplaceAll(p, `\`, "/")
+	}
+	// `C:/Users/...` must become `/C:/Users/...`, otherwise "C:" parses as a
+	// scheme-relative authority rather than as part of the path.
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	u := url.URL{Scheme: "file", Path: p}
+	return u.String()
+}
+
+// hasWindowsDriveLetter reports whether p begins with a drive specifier such
+// as "C:", "C:/" or `C:\`.
+//
+// The drive letter must be followed by a separator or by nothing at all. A
+// colon is a legal character in a POSIX filename, so a relative path like
+// "a:b/foo" would otherwise be mistaken for a drive path and have a leading
+// slash prepended — quietly turning a relative path into an absolute one.
+// Today the only caller passes an absolute path derived from
+// os.UserHomeDir(), so that case is unreachable; requiring the separator
+// keeps it unreachable if the helper is ever reused.
+func hasWindowsDriveLetter(p string) bool {
+	if len(p) < 2 || p[1] != ':' {
+		return false
+	}
+	c := p[0]
+	if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	return len(p) == 2 || p[2] == '/' || p[2] == '\\'
 }
