@@ -193,6 +193,75 @@ Submission notes:
 - If you enable real sends later, keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
 - Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 
+## Local Bridge daemon (`cmd/local`, beta)
+
+Local Bridge keeps the MTProto session on the user's own machine; `tg.mctl.ai`
+becomes a relay that forwards MCP tool calls down a websocket to a local
+daemon. The mode is enabled per account by an operator — nothing in the service
+writes `telegram_accounts.mode` — and the account must already have completed a
+normal hosted login, because the row the flip updates is created by that login.
+
+Build and run:
+
+```sh
+go build -o mctl-telegram-local ./cmd/local
+./mctl-telegram-local init                       # TG_API_ID / TG_API_HASH / passphrase
+./mctl-telegram-local login --phone +1...        # writes the session to the local DB
+./mctl-telegram-local connect --token <mcp-jwt> --server https://tg.mctl.ai
+./mctl-telegram-local daemon
+```
+
+`--server` is required on the first `connect`: `init` does not ask for it, so
+the config starts with an empty server URL.
+
+### Running the daemon unattended
+
+The daemon is meant for an always-on machine, so it must start without a
+terminal. Two environment variables supply the passphrase:
+
+| Variable | Meaning |
+|---|---|
+| `MCTL_LOCAL_PASSPHRASE_FILE` | Path to a file containing the passphrase. Takes precedence. |
+| `MCTL_LOCAL_PASSPHRASE`      | The passphrase itself. |
+
+**Prefer the file.** A launchd plist lives in `~/Library/LaunchAgents` and is
+world-readable, and a systemd unit's `Environment=` lines are visible through
+`systemctl show`, so a passphrase written into the service definition is
+readable by every local account. A path to a `0600` file is not. Store the file
+without a trailing newline, or accept that one is trimmed.
+
+macOS keychain is **not** an option here: the login keychain is locked outside
+a GUI session, so `security find-generic-password` fails for a LaunchDaemon at
+boot exactly as it does over SSH.
+
+A minimal LaunchAgent:
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/Users/you/mctl-local/mctl-telegram-local</string>
+  <string>daemon</string>
+</array>
+<key>EnvironmentVariables</key>
+<dict>
+  <key>MCTL_LOCAL_PASSPHRASE_FILE</key>
+  <string>/Users/you/mctl-local/passphrase</string>
+</dict>
+<key>KeepAlive</key><true/>
+<key>RunAtLoad</key><true/>
+```
+
+### Limitations
+
+- Five tools are unsupported in local mode — `edit_message`, `delete_messages`,
+  `forward_messages`, `search_messages`, `set_reaction` — as is
+  `fetch_media=true`; use `prepare_get_media` + `get_media` instead.
+- One account per machine: the config path is fixed and a second `init`
+  overwrites the first.
+- The relay Hub is in-process, so the service must run at a single replica.
+- Switching to local mode stops the server from using its stored session; it
+  does not delete it. See the trust-model notes on `/security`.
+
 ## Operations: Canary account
 
 The synthetic canary probe (`cmd/canary`) verifies the live service end-to-end. It requires a dedicated Telegram test account — **not the operator's personal account** — to avoid false-positive FLOOD_WAIT interference.

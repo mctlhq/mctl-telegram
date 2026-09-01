@@ -300,9 +300,27 @@ func runDaemonCmd() {
 		die(err)
 	}
 
-	expiry, expiryErr := bridgeTokenExpiry(bt)
-	if expiryErr == nil && time.Until(expiry) <= 5*time.Minute {
-		die(fmt.Errorf("bridge token expires soon or is expired (expires %s). Run `mctl-telegram-local connect --token <new-token>` to refresh", expiry.Format(time.RFC3339)))
+	// A stale bridge token is not a reason to refuse to start. The connect
+	// loop already mints a fresh one from the stored MCP token when the
+	// current one is close to expiring (see runDaemon), and the bridge token
+	// lives an hour while the MCP token lives months — so any restart more
+	// than an hour after the last `connect` used to fail for a condition the
+	// process could resolve by itself. That is precisely the restart a
+	// service manager performs after a reboot.
+	//
+	// Refresh here instead, and only give up when the refresh itself fails,
+	// which is the case a human genuinely has to act on.
+	if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
+		slog.Info("bridge token expired or expiring; refreshing before start",
+			"expires_at", expiry.Format(time.RFC3339))
+		refreshed, refreshErr := refreshBridgeToken(context.Background(), cfg, bt)
+		if refreshErr != nil {
+			die(fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
+				"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
+				expiry.Format(time.RFC3339), refreshErr))
+		}
+		bt = refreshed
+		slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
 	}
 
 	key := promptPassphrase("Passphrase: ")
@@ -353,6 +371,10 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		_ = rawDB.Close()
 		die(fmt.Errorf("migrate local db: %w", err))
 	}
+	if err := restrictDBPerms(dbPath); err != nil {
+		_ = rawDB.Close()
+		die(err)
+	}
 
 	var keyBytes []byte
 	if keyHex != "" {
@@ -380,18 +402,98 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 	return store, func() { _ = rawDB.Close() }, uid
 }
 
-// promptPassphrase reads a passphrase without echo from the terminal.
+// Environment variables that supply the passphrase without a terminal.
+//
+// The daemon is meant to run unattended on an always-on machine, and
+// term.ReadPassword needs a TTY that launchd and systemd do not provide, so
+// without one of these the daemon simply cannot be started by a service
+// manager.
+//
+// The file form is the one to recommend. A launchd plist lives in
+// ~/Library/LaunchAgents and is world-readable, and a systemd unit's
+// Environment= lines are readable via `systemctl show`, so putting the
+// passphrase directly in the service definition publishes it to every local
+// account. A path to a 0600 file does not.
+const (
+	passphraseEnv     = "MCTL_LOCAL_PASSPHRASE"
+	passphraseFileEnv = "MCTL_LOCAL_PASSPHRASE_FILE"
+)
+
+// passphraseFromEnv returns the passphrase supplied out of band and whether
+// one was supplied at all. The file form wins when both are set.
+//
+// getenv and readFile are parameters so the whole decision — including its
+// failure paths — is testable without touching process state or the
+// filesystem. promptPassphrase supplies the real ones.
+func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte, error)) ([]byte, bool, error) {
+	if path := getenv(passphraseFileEnv); path != "" {
+		data, err := readFile(path)
+		if err != nil {
+			return nil, true, fmt.Errorf("read %s: %w", passphraseFileEnv, err)
+		}
+		// A passphrase written with a text editor or with `echo` picks up a
+		// trailing newline that is not part of it. Trimming here avoids a
+		// key-check failure whose message would blame the passphrase rather
+		// than the newline.
+		pw := bytes.TrimRight(data, "\r\n")
+		if len(pw) == 0 {
+			return nil, true, fmt.Errorf("%s (%s) contains no passphrase", passphraseFileEnv, path)
+		}
+		return pw, true, nil
+	}
+	if pw := getenv(passphraseEnv); pw != "" {
+		return []byte(pw), true, nil
+	}
+	return nil, false, nil
+}
+
+// restrictDBPerms narrows the local database to owner-only.
+//
+// Every file this command writes itself is created 0600, but the database is
+// created by the SQLite driver under the process umask — 0644 on a default
+// macOS or Linux account. The rows inside are sealed with the Argon2id key, so
+// a readable file is not an immediate compromise; it does hand any other local
+// account the ciphertext to attack the passphrase offline at its leisure,
+// which is a different and much weaker guarantee than the one the 0600 on
+// config.json implies.
+//
+// The -wal and -shm sidecars carry the same page contents and are recreated by
+// the driver whenever the database is opened, so narrowing them once at
+// creation would not hold; this runs on every open. They may legitimately not
+// exist yet, and that is not an error.
+func restrictDBPerms(dbPath string) error {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict permissions on %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// promptPassphrase reads a passphrase without echo from the terminal, unless
+// one was supplied through the environment.
 func promptPassphrase(prompt string) []byte {
+	pw, supplied, err := passphraseFromEnv(os.Getenv, os.ReadFile)
+	if err != nil {
+		die(err)
+	}
+	if supplied {
+		return pw
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		die(fmt.Errorf("no terminal to read the passphrase from; set %s (path to a 0600 file, preferred) or %s",
+			passphraseFileEnv, passphraseEnv))
+	}
 	fmt.Print(prompt)
-	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	typed, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
 		die(fmt.Errorf("read passphrase: %w", err))
 	}
-	if len(pw) == 0 {
+	if len(typed) == 0 {
 		die(errors.New("passphrase must not be empty"))
 	}
-	return pw
+	return typed
 }
 
 // mustDeriveKey wraps deriveKey and dies on error.
