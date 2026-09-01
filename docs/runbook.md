@@ -1031,7 +1031,7 @@ sum(increase(mctl_login_phone_step_total[15m])) by (result)
 Correlate with flood-wait:
 
 ```promql
-sum(rate(mctl_telegram_flood_wait_total[15m]))
+sum(rate(mctl_telegram_flood_wait_events_total[15m]))
 ```
 
 Localise the hang in the logs — the pair of breadcrumbs is the whole
@@ -1123,7 +1123,7 @@ sum(increase(mctl_login_phone_step_total{result="timeout"}[30m]))
 
 1. **Check flood-wait first** — it is the one cause with a local remedy
    (reduce concurrent login pressure), and it is visible in
-   `mctl_telegram_flood_wait_total`.
+   `mctl_telegram_flood_wait_events_total`.
 2. **Otherwise wait it out.** Telegram-side latency is not actionable from
    here. Restarting the pod does not help and drops in-flight logins.
 3. **If the p95 sits above 60 s**, expect timeouts and pre-empt user reports.
