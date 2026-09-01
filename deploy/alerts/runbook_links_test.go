@@ -44,9 +44,12 @@ func TestRunbookURLsResolve(t *testing.T) {
 		t.Fatal("no *.rules.yaml files found; this test is in the wrong directory")
 	}
 
-	// Cache anchors per target document so a runbook is read once however many
-	// alerts point into it.
+	// Cache per target document so a runbook is read once however many alerts
+	// point into it. A document that could not be read is cached as a nil map
+	// alongside its error, so every alert pointing at it is reported rather
+	// than only the first one to reach it.
 	anchors := map[string]map[string]bool{}
+	readErr := map[string]error{}
 
 	for _, ruleFile := range rules {
 		raw, err := os.ReadFile(ruleFile)
@@ -66,17 +69,21 @@ func TestRunbookURLsResolve(t *testing.T) {
 			if _, ok := anchors[docPath]; !ok {
 				doc, err := os.ReadFile(docPath)
 				if err != nil {
-					t.Errorf("%s: runbook_url %q points at a file that does not exist: %v", ruleFile, url, err)
 					anchors[docPath] = nil
-					continue
+					readErr[docPath] = err
+				} else {
+					found := map[string]bool{}
+					for _, a := range anchorRe.FindAllStringSubmatch(string(doc), -1) {
+						found[a[1]] = true
+					}
+					anchors[docPath] = found
 				}
-				found := map[string]bool{}
-				for _, a := range anchorRe.FindAllStringSubmatch(string(doc), -1) {
-					found[a[1]] = true
-				}
-				anchors[docPath] = found
 			}
-			if anchors[docPath] == nil || !hasAnchor {
+			if err := readErr[docPath]; err != nil {
+				t.Errorf("%s: runbook_url %q points at a file that does not exist: %v", ruleFile, url, err)
+				continue
+			}
+			if !hasAnchor {
 				continue
 			}
 			if !anchors[docPath][anchor] {
