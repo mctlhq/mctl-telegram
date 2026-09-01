@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.55.0](https://github.com/mctlhq/mctl-telegram/compare/0.54.0...0.55.0) (2026-09-01)
+
+
+### Features
+
+* **local:** let the daemon start unattended ([#450](https://github.com/mctlhq/mctl-telegram/issues/450)) ([d951571](https://github.com/mctlhq/mctl-telegram/commit/d9515713326bf8160a18e3eaed9eb601a8e5ecab))
+* **release:** publish mctl-telegram-local binaries with each release ([a14d70e](https://github.com/mctlhq/mctl-telegram/commit/a14d70e6f505104bf90cb48ecd50f5cee373df69))
+
+
+### Bug Fixes
+
+* **local:** build the SQLite DSN as a URI instead of concatenating ([bf6cea7](https://github.com/mctlhq/mctl-telegram/commit/bf6cea779fadfb00e9d0a7bbd35a1bbbde1447f9))
+* **local:** require a separator after the drive letter ([07474fb](https://github.com/mctlhq/mctl-telegram/commit/07474fba861f80cb1b99d0ce50d537f91accecbe))
+
 ## [0.54.0](https://github.com/mctlhq/mctl-telegram/compare/0.53.0...0.54.0) (2026-09-01)
 
 
