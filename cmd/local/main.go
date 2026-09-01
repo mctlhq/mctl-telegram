@@ -362,7 +362,7 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		die(err)
 	}
 
-	dsn := "file:" + dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	dsn := sqliteDSN(dbPath) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	rawDB, err := db.Open(ctx, dsn, 0, 0)
 	if err != nil {
 		die(fmt.Errorf("open local db: %w", err))
