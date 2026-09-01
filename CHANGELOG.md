@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.54.0](https://github.com/mctlhq/mctl-telegram/compare/0.53.0...0.54.0) (2026-09-01)
+
+
+### Features
+
+* **agents:** issue-426-boot-guard-refuse-to-start-in-local-dev ([616659f](https://github.com/mctlhq/mctl-telegram/commit/616659f804a676a0ba7c2910981cc631164b260c))
+* **agents:** issue-427-ssrf-block-cgnat-100-64-0-0-10-in-isdisa ([786f0a6](https://github.com/mctlhq/mctl-telegram/commit/786f0a671db7f6c05753c15a37176bdf9e8f1709))
+* **canary:** let the canary renew its own bearer token ([#424](https://github.com/mctlhq/mctl-telegram/issues/424)) ([d055366](https://github.com/mctlhq/mctl-telegram/commit/d05536672fde21a4d747ed44c6f9070bdede607c))
+
+
+### Bug Fixes
+
+* address review findings ([5491796](https://github.com/mctlhq/mctl-telegram/commit/5491796033628e33ab0092b0fe76363c12cc3fcc))
+* address review findings ([29317c0](https://github.com/mctlhq/mctl-telegram/commit/29317c05f92ff597d43fa7ec8d0d5c9e1cf2cf8a))
+* **agent:** stop appending the disclosure twice ([#430](https://github.com/mctlhq/mctl-telegram/issues/430)) ([4ea8259](https://github.com/mctlhq/mctl-telegram/commit/4ea82599bee8053e84658fd1df6b63f9d3882ed1))
+* **docs:** name the real flood-wait metric and allow derived series ([456fc51](https://github.com/mctlhq/mctl-telegram/commit/456fc516d938445c00cca02cb3fcca1df9f7da6e))
+
 ## [0.53.0](https://github.com/mctlhq/mctl-telegram/compare/0.52.1...0.53.0) (2026-08-24)
 
 
