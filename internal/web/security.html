@@ -116,9 +116,10 @@
   </ul>
 
   <h2>Local Bridge mode</h2>
-  <p>When an account is set to <code>mode='local'</code>, its MTProto session lives on the user's machine instead of the hosted server:</p>
+  <p>When an account is set to <code>mode='local'</code>, the MTProto session it uses lives on the user's machine rather than in the hosted session pool, and this server acts as a relay. The mode is currently enabled by an operator on request; it is not self-serve.</p>
   <ul>
-    <li><strong>Session bytes are not stored on the server.</strong> <code>session_encrypted</code> is NULL for local-mode accounts.</li>
+    <li><strong>The server stops using its copy of the session, but does not delete it.</strong> <code>session_encrypted</code> is declared <code>NOT NULL</code> and is never cleared, so the sealed session stored when the account was first connected remains in the database. Local mode stops the server from borrowing it; it does not erase it. Revoking it is not an alternative: a revoked account reverts to hosted mode and the bridge then refuses the daemon. To render the stored copy useless, terminate that session from your own Telegram client (Settings &rarr; Devices); the stored bytes then hold a dead authorization key.</li>
+    <li><strong>New Telegram traffic originates from your machine.</strong> Once a daemon is connected, tool calls are dispatched over the relay to it and the MTProto connection to Telegram is made by your daemon using the session on your disk. The <code>call_path</code> audit column records which route each call took.</li>
     <li><strong>Tool arguments and responses still pass through relay memory.</strong> The relay can see plaintext while routing the call and does not provide end-to-end encryption from the MCP client to the daemon.</li>
     <li><strong>Audit content remains metadata-only.</strong> The <code>call_path</code> marks local relay calls, while message bodies are excluded from audit rows and stdout.</li>
     <li><strong>Communication Agent limitation.</strong> A hosted listener requires an active server-side Telegram client. Do not assume Local Bridge automatically provides the same always-on listener semantics without an explicitly deployed local listener path.</li>
