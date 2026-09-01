@@ -52,3 +52,64 @@ jobs:
             -f image_tag="$TAG" \
             -f team_name=labs \
             -f component_name=mctl-telegram
+
+      # The Local Bridge daemon is the one artefact a user has to run on their
+      # own machine, and until now every release shipped `assets: []` — the
+      # landing page advertised the mode while the only way to obtain the
+      # binary was `go build`.
+      #
+      # These steps run last on purpose: the deploy dispatch above is what
+      # gets the new server image moving, and a five-target build should not
+      # sit in front of it. Publishing from here rather than from a workflow
+      # triggered by `release: published` is also deliberate — the release is
+      # created with the default GITHUB_TOKEN, and releases created that way
+      # do not raise events that start other workflows, so a `release`-
+      # triggered job would never run at all.
+      #
+      # No CGO is involved (modernc.org/sqlite is pure Go), so a single runner
+      # cross-compiles every target.
+      - name: Check out the released tag
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Set up Go
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+
+      - name: Build mctl-telegram-local for every supported target
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          VERSION: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            out="dist/mctl-telegram-local-${VERSION}-${goos}-${goarch}${ext}"
+            echo "building $out"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/local
+          done
+          # Checksums are the only integrity signal these binaries carry. They
+          # are neither notarised for macOS nor signed for Windows, so the
+          # person downloading one has to clear the quarantine attribute or
+          # dismiss SmartScreen by hand. Say so in the docs; do not let the
+          # existence of a download imply otherwise.
+          ( cd dist && sha256sum mctl-telegram-local-* > SHA256SUMS.txt )
+          cat dist/SHA256SUMS.txt
+
+      - name: Attach the binaries to the release
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber
+
