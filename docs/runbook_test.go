@@ -53,8 +53,27 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 			continue
 		}
 		seen[name] = true
-		if !strings.Contains(metricsSource, name) {
-			t.Errorf("metric name %q found in runbook.md but not in internal/metrics/metrics.go", name)
+		if strings.Contains(metricsSource, baseSeriesName(name)) {
+			continue
+		}
+		t.Errorf("metric name %q found in runbook.md but not in internal/metrics/metrics.go", name)
+	}
+}
+
+// histogramSuffixes are the series Prometheus derives from a single registered
+// histogram or summary. Only the base name appears in metrics.go, but a
+// histogram_quantile query cannot be written without the _bucket series, so a
+// correct runbook necessarily names one that the registry source never spells
+// out. Stripping the suffix keeps the check on the registered metric.
+var histogramSuffixes = []string{"_bucket", "_count", "_sum"}
+
+// baseSeriesName maps a derived series back to the metric it belongs to.
+// Names that carry no derived suffix are returned unchanged.
+func baseSeriesName(name string) string {
+	for _, suffix := range histogramSuffixes {
+		if trimmed, ok := strings.CutSuffix(name, suffix); ok {
+			return trimmed
 		}
 	}
+	return name
 }

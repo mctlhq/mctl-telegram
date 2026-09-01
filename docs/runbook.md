@@ -18,6 +18,9 @@ Canary incidents are out of scope here; see
 - [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
 - [SloBurnRate — SLO error-budget burn-rate alerts](#sloburnrate)
+- [MctlTelegramLoginSendCodeStalls — logins stalling at SendCode](#mctltelegramloginsendcodestalls)
+- [MctlTelegramLoginSlow — SendCode p95 above 30s](#mctltelegramloginslow)
+- [MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting](#mctlbridgedaemonsflapping)
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
 - [Communication Agent operations](#communication-agent-operations)
@@ -975,6 +978,275 @@ Open a postmortem if:
 
 See [docs/slo.md](slo.md) for the full error-budget policy and recovery
 criteria.
+
+---
+
+<a id="mctltelegramloginsendcodestalls"></a>
+## MctlTelegramLoginSendCodeStalls — logins stalling at SendCode
+
+### Symptom
+
+- Alert `MctlTelegramLoginSendCodeStalls` fires with severity **warning** when
+  at least 2 `enable_access` phone steps hit the SendCode wait timeout within
+  15 minutes.
+- Users report that the in-browser login spins on the phone-number screen and
+  never reaches the code screen.
+
+The counter behind it is `mctl_login_phone_step_total{result="timeout"}`,
+incremented when the handler's own `enableSendCodeWait` ceiling of **90 s**
+expires before Telegram's `SendCode` returns
+(`internal/oauth/enable_access.go:40,443`). A `timeout` is therefore always a
+server-side abandonment, never a user closing the tab.
+
+### Likely causes
+
+- **Telegram is slow or refusing `SendCode` for this datacenter.** The usual
+  cause. It typically shows up as a simultaneous rise in
+  `result="error"` on other flows.
+- **Flood-wait against the shared `TG_API_ID`.** All logins authenticate under
+  one app id (`internal/telegram/clientpool.go:89`), so a burst of login
+  attempts can put the whole deployment into flood-wait.
+- **Egress network problems from the pod.** Connect, not `SendCode`, is the
+  step that hangs; the "telegram login: connecting" breadcrumb appears without
+  the matching "connection established".
+- **A deploy mid-flight.** `strategy: Recreate` means the pod is gone for a
+  few seconds; any flow waiting on `SendCode` at that moment is counted as a
+  timeout on the next scrape.
+
+### Diagnostic queries
+
+Timeout rate against total phone steps:
+
+```promql
+sum(increase(mctl_login_phone_step_total{result="timeout"}[15m]))
+  / sum(increase(mctl_login_phone_step_total[15m]))
+```
+
+Split by outcome, to separate a stall from an RPC error:
+
+```promql
+sum(increase(mctl_login_phone_step_total[15m])) by (result)
+```
+
+Correlate with flood-wait:
+
+```promql
+sum(rate(mctl_telegram_flood_wait_events_total[15m]))
+```
+
+Localise the hang in the logs — the pair of breadcrumbs is the whole
+diagnosis:
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=30m \
+  | grep -E 'telegram login: (connecting|connection established)|enable: telegram login failed'
+```
+
+"connecting" with no "connection established" is a network or datacenter
+problem. Both present, followed by the deferred failure line, means
+`SendCode` itself is slow — see `MctlTelegramLoginSlow` below.
+
+### Mitigation
+
+1. **Confirm it is not a deploy.** Check the rollout history; if the timeouts
+   line up with a `Recreate` cycle, the alert is an artefact and clears on its
+   own.
+2. **If flood-wait is elevated**, there is nothing to fix in the service —
+   logins will recover as the wait expires. Do not restart the pod; a restart
+   drops every in-flight login and produces a fresh batch of timeouts.
+3. **If connect never completes**, check egress from the pod to Telegram's
+   datacenters and the NetworkPolicy on the namespace.
+4. **If only `SendCode` is slow**, follow `MctlTelegramLoginSlow`.
+
+### Escalation
+
+- **Warning**: investigate within 30 minutes. Logins are the entry point for
+  new users, so a sustained stall is a silent acquisition outage.
+- Escalate to the platform team if pod egress is implicated.
+
+### Postmortem trigger
+
+Open a postmortem if the timeout ratio stays above 20% of phone steps for
+more than an hour, or if any user-reported login failure is traced to a cause
+other than Telegram-side slowness.
+
+---
+
+<a id="mctltelegramloginslow"></a>
+## MctlTelegramLoginSlow — SendCode p95 above 30s
+
+### Symptom
+
+- Alert `MctlTelegramLoginSlow` fires with severity **warning** when the p95 of
+  `mctl_login_phone_to_code_duration_seconds` exceeds **30 s** over a 30-minute
+  window, sustained for 10 minutes.
+- Logins still succeed, but slowly. This alert is the leading indicator for
+  `MctlTelegramLoginSendCodeStalls`: the histogram buckets stop at 90 s
+  precisely because that is the `enableSendCodeWait` ceiling
+  (`internal/metrics/metrics.go:118-127`), so a p95 climbing through 45 s means
+  timeouts are the next thing to happen.
+
+Note that the histogram observes **successful phone steps only**
+(`metrics.go:136-145`), so a rising p95 is not diluted by failures — it is
+genuinely the healthy path getting slower.
+
+### Likely causes
+
+Same set as `MctlTelegramLoginSendCodeStalls`, differing in degree rather than
+kind: Telegram-side latency, flood-wait pressure on the shared `TG_API_ID`,
+or degraded egress. A healthy `SendCode` lands in the low single digits of
+seconds, so a p95 above 30 s is already an order of magnitude off.
+
+### Diagnostic queries
+
+The alert expression itself:
+
+```promql
+histogram_quantile(0.95,
+  sum(rate(mctl_login_phone_to_code_duration_seconds_bucket[30m])) by (le))
+```
+
+Where the distribution sits, to distinguish "everything is slow" from "a tail
+is stuck":
+
+```promql
+sum(rate(mctl_login_phone_to_code_duration_seconds_bucket[30m])) by (le)
+```
+
+Whether timeouts have started:
+
+```promql
+sum(increase(mctl_login_phone_step_total{result="timeout"}[30m]))
+```
+
+### Mitigation
+
+1. **Check flood-wait first** — it is the one cause with a local remedy
+   (reduce concurrent login pressure), and it is visible in
+   `mctl_telegram_flood_wait_events_total`.
+2. **Otherwise wait it out.** Telegram-side latency is not actionable from
+   here. Restarting the pod does not help and drops in-flight logins.
+3. **If the p95 sits above 60 s**, expect timeouts and pre-empt user reports.
+
+### Escalation
+
+- **Warning**: investigate within 1 hour. Escalate together with
+  `MctlTelegramLoginSendCodeStalls` if both are firing — that combination is a
+  login outage in progress, not a latency blip.
+
+### Postmortem trigger
+
+Open a postmortem if the p95 stays above 45 s for more than 2 hours, or if it
+crosses into sustained timeouts.
+
+---
+
+<a id="mctlbridgedaemonsflapping"></a>
+## MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting
+
+### Symptom
+
+- Alert `MctlBridgeDaemonsFlapping` fires with severity **warning** when
+  `mctl_bridge_active_daemons` changes more than 20 times in 10 minutes.
+- The gauge is incremented on `Register` and decremented on `Unregister`
+  (`internal/bridge/hub.go`), so a change count is a connect/disconnect count.
+  With a handful of daemons connected, 20 transitions in 10 minutes is a loop,
+  not normal churn.
+
+Local Bridge is operator-enabled and currently has very few accounts, so this
+alert is expected to be silent. If it fires, one specific daemon is almost
+certainly responsible.
+
+### Likely causes
+
+- **Bridge-token expiry loop.** The bridge token has a 1 h TTL
+  (`internal/bridge/tokenhandler.go`). The daemon re-exchanges its stored MCP
+  token before expiry; if that MCP token has itself expired, every reconnect
+  fails authentication and retries. This is the most likely cause, because
+  there is no supported way to issue a long-lived MCP token today — an OAuth
+  access token lives at most 24 h, so a daemon configured with one will start
+  flapping when it lapses.
+- **The account is no longer in local mode.** `/bridge` refuses any account
+  whose `mode` is not `'local'` (`internal/bridge/server.go:65-75`), and
+  `GetAccountMode` reports `'hosted'` for a revoked account
+  (`internal/db/store.go:1091`). The idle sweeper revokes accounts that have
+  not been used, and **bridge calls do not stamp `last_used_at`** — only
+  `Pool.Borrow` does — so an actively used local account can be revoked out
+  from under its daemon and start flapping. Check `ttlExemptClause`
+  (`store.go:905-907,938-941`) before looking anywhere else.
+- **Two daemons for one account.** The Hub keeps one connection per user;
+  a second daemon displaces the first, which reconnects, which displaces the
+  second. Two machines running `daemon` against the same config produce a
+  steady oscillation.
+- **A relay rollout.** The Hub is in-process, so every daemon reconnects when
+  the pod restarts. A single burst around a deploy is expected and clears.
+- **Network instability on the daemon host.** A laptop sleeping and waking, or
+  a flaky uplink, produces the same signature from one user.
+
+### Diagnostic queries
+
+Current daemon count and its transition rate:
+
+```promql
+mctl_bridge_active_daemons
+changes(mctl_bridge_active_daemons[10m])
+```
+
+Whether calls are failing while the daemon flaps:
+
+```promql
+sum(increase(mctl_bridge_calls_total[15m])) by (status)
+```
+
+Registration and refusal breadcrumbs — this is where the account id appears:
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=30m \
+  | grep -Ei 'bridge|daemon'
+```
+
+Confirm the account is still eligible, and that traffic is actually taking the
+bridge:
+
+```sql
+SELECT user_id, mode, revoked_at, last_used_at
+FROM telegram_accounts WHERE mode = 'local';
+
+SELECT call_path, COUNT(*) FROM audit_logs
+WHERE created_at >= NOW() - INTERVAL '1 hour'
+GROUP BY call_path;
+```
+
+### Mitigation
+
+1. **If the account row shows `revoked_at IS NOT NULL`**, the sweeper has
+   taken it. Clear the revocation, set `mode='local'` again, and add the
+   account to the TTL exemption list — otherwise this recurs in 30 days.
+2. **If the daemon's token has lapsed**, re-issue the MCP token and re-run
+   `mctl-telegram-local connect --token <t>` on the user's machine. Until a
+   supported long-lived token exists, record the issue date so the next lapse
+   is predictable rather than a surprise.
+3. **If two daemons are running**, stop one. There is no server-side way to
+   tell them apart; ask the user which hosts have the config directory.
+4. **If it coincides with a rollout**, no action — confirm the gauge settles
+   within a few minutes of the pod becoming ready.
+5. **Do not restart the relay to "reset" a flapping daemon.** A restart
+   disconnects every daemon and produces exactly the signature the alert
+   watches for.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Local Bridge is beta and
+  operator-enabled, so the blast radius is the individual users who have it.
+- Escalate only if the flapping coincides with relay errors affecting hosted
+  accounts, which would point at the Hub rather than at one daemon.
+
+### Postmortem trigger
+
+Open a postmortem if a local-mode account was revoked by the idle sweeper
+while in active use — that is the known correctness gap described in
+`internal/bridge/DESIGN.md`, and each occurrence is evidence for fixing it
+rather than re-applying the exemption.
 
 ---
 
