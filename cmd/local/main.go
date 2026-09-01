@@ -371,6 +371,10 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		_ = rawDB.Close()
 		die(fmt.Errorf("migrate local db: %w", err))
 	}
+	if err := restrictDBPerms(dbPath); err != nil {
+		_ = rawDB.Close()
+		die(err)
+	}
 
 	var keyBytes []byte
 	if keyHex != "" {
@@ -441,6 +445,29 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 		return []byte(pw), true, nil
 	}
 	return nil, false, nil
+}
+
+// restrictDBPerms narrows the local database to owner-only.
+//
+// Every file this command writes itself is created 0600, but the database is
+// created by the SQLite driver under the process umask — 0644 on a default
+// macOS or Linux account. The rows inside are sealed with the Argon2id key, so
+// a readable file is not an immediate compromise; it does hand any other local
+// account the ciphertext to attack the passphrase offline at its leisure,
+// which is a different and much weaker guarantee than the one the 0600 on
+// config.json implies.
+//
+// The -wal and -shm sidecars carry the same page contents and are recreated by
+// the driver whenever the database is opened, so narrowing them once at
+// creation would not hold; this runs on every open. They may legitimately not
+// exist yet, and that is not an error.
+func restrictDBPerms(dbPath string) error {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict permissions on %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // promptPassphrase reads a passphrase without echo from the terminal, unless
