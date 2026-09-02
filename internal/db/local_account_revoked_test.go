@@ -122,3 +122,35 @@ func TestActionableAccountPicksTheSameRowAsGetAccountMode(t *testing.T) {
 		t.Error("IsSendEnabled read the older local row instead of the newer hosted one GetAccountMode chose")
 	}
 }
+
+// TestSameSecondRowsResolveByID pins the tiebreaker. connected_at defaults to
+// CURRENT_TIMESTAMP, which SQLite resolves to whole seconds, so two rows
+// written in the same second compare equal on it. The design relies on "a
+// fresh hosted login inserts a newer connected_at and therefore wins", which
+// without a tiebreaker is decided arbitrarily — an account could read as local
+// immediately after reconnecting to hosted. Both rows here are inserted with
+// the column default, exactly as the real login path does.
+func TestSameSecondRowsResolveByID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "same-second", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	for _, mode := range []string{ModeLocal, ModeHosted} {
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode)
+			 VALUES($1,$2,$3,$4)`,
+			uid, 700000204, []byte("blob"), mode,
+		); err != nil {
+			t.Fatalf("seed %s row: %v", mode, err)
+		}
+	}
+	mode, err := s.GetAccountMode(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetAccountMode: %v", err)
+	}
+	if mode != ModeHosted {
+		t.Errorf("GetAccountMode = %q, want %q — the later-inserted row must win even when connected_at ties", mode, ModeHosted)
+	}
+}

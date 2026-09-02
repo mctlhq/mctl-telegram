@@ -793,11 +793,19 @@ func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (
 // gone), a local row may (its vestigial hosted session is irrelevant to a
 // bridge account, which is the whole point of mode surviving revocation).
 //
+// The id DESC tiebreaker is not cosmetic. connected_at defaults to
+// CURRENT_TIMESTAMP, which SQLite resolves to whole seconds, so two rows
+// written in the same second compare equal and LIMIT 1 picks arbitrarily.
+// The design this implements rests on "a fresh hosted login always inserts a
+// newer connected_at and therefore wins", which is false without a tiebreaker
+// -- an account could read as local right after reconnecting to hosted. id is
+// monotonic per insert, so it orders what the timestamp cannot.
+//
 // Selecting by id rather than repeating ORDER BY ... LIMIT 1 in each WHERE
 // matters: filtering first and ordering second can land on an OLDER row than
 // GetAccountMode chose, which is how these queries silently disagree about
 // which account they are talking about.
-const currentAccountRow = `SELECT id FROM telegram_accounts WHERE user_id = $1 ORDER BY connected_at DESC LIMIT 1`
+const currentAccountRow = `SELECT id FROM telegram_accounts WHERE user_id = $1 ORDER BY connected_at DESC, id DESC LIMIT 1`
 
 // actionableAccount is currentAccountRow plus the legitimacy test.
 const actionableAccount = `id = (` + currentAccountRow + `) AND (revoked_at IS NULL OR mode = 'local')`
@@ -1191,7 +1199,7 @@ func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT mode FROM telegram_accounts
 		 WHERE user_id = $1
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&mode)
 	if errors.Is(err, sql.ErrNoRows) {
