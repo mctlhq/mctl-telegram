@@ -1004,6 +1004,80 @@ The user must have an active session. New accounts are send-enabled by default; 
 	return tool, handler
 }
 
+// toolSetAccountMode switches a user's active Telegram session between
+// "hosted" (server-side MTProto) and "local" (Local Bridge). This replaces
+// the one-shot gitops Job that used to run a manual UPDATE against
+// telegram_accounts.mode, making the switch an auditable runtime call.
+func (s *Server) toolSetAccountMode() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("set_account_mode",
+		mcplib.WithTitleAnnotation("Set a user's Telegram account mode"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[setAccountModeResult](),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Switch a Telegram
+user's active session between "hosted" (server-side MTProto, default) and "local" (Local Bridge:
+MTProto runs on the user's own machine, tg.mctl.ai relays only).
+
+Inputs:
+  telegram_id — int, required. The Telegram user id (see list_telegram_identities).
+  mode        — string, required. "local" or "hosted".
+
+The user must have an active session (a completed hosted login) before mode can be changed.
+Setting mode="local" for a telegram_id that is not in SESSION_TTL_EXEMPT_TG_IDS is refused: without
+that exemption, SweepIdleSessions revokes the account 30 days after Local Bridge traffic stops
+refreshing last_used_at (bridge calls never stamp it), which silently reverts the account to
+hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then retry.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
+			mcplib.Description("Telegram user id to change the mode for (required).")),
+		mcplib.WithString("mode",
+			mcplib.Required(),
+			mcplib.Description(`"local" or "hosted" (required).`)),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		mode := stringArg(args, "mode", "")
+		if tgID <= 0 {
+			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		if mode != db.ModeLocal && mode != db.ModeHosted {
+			return mcplib.NewToolResultError(`mode must be "local" or "hosted"`), nil
+		}
+		if mode == db.ModeLocal && !s.Store.IsModeExempt(tgID) {
+			return toolErr("telegram id %d is not in SESSION_TTL_EXEMPT_TG_IDS — setting mode=local "+
+				"without that exemption will silently revert to hosted after 30 days idle "+
+				"(Local Bridge calls do not refresh last_used_at); add it to "+
+				"SESSION_TTL_EXEMPT_TG_IDS first, then retry", tgID), nil
+		}
+		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
+		if err != nil {
+			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
+			if errors.Is(err, db.ErrUserNotFound) {
+				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
+			}
+			return toolErr("set_account_mode: %v", err), nil
+		}
+		rows, err := s.Store.SetAccountMode(ctx, targetUID, mode)
+		s.audit(ctx, id, "set_account_mode", "", err, startedAt)
+		if err != nil {
+			return toolErr("set_account_mode: %v", err), nil
+		}
+		if rows == 0 {
+			return toolErr("no active Telegram session for telegram id %d — they must connect an "+
+				"account first", tgID), nil
+		}
+		return jsonResult(setAccountModeResult{TelegramID: tgID, Mode: mode, OK: true})
+	}
+	return tool, handler
+}
+
 // toolGetUserAuditLog is the admin counterpart of get_my_audit_log: it reads
 // the audit rows of any user, resolved by Telegram id.
 func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
@@ -1314,6 +1388,13 @@ type setAccountSendResult struct {
 	TelegramID  int64 `json:"telegram_id"`
 	SendEnabled bool  `json:"send_enabled"`
 	OK          bool  `json:"ok"`
+}
+
+// setAccountModeResult is the success payload of set_account_mode.
+type setAccountModeResult struct {
+	TelegramID int64  `json:"telegram_id"`
+	Mode       string `json:"mode"`
+	OK         bool   `json:"ok"`
 }
 
 // revokeSessionResult is the success payload of revoke_telegram_session.

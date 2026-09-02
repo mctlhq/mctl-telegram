@@ -368,6 +368,71 @@ func TestIsSendEnabled_DefaultFalseAndRespectsFlag(t *testing.T) {
 	}
 }
 
+// TestSetAccountMode mirrors the SetSendEnabled coverage: a real update on an
+// active session row, and a silent zero-rows-affected result when the user
+// has no active session.
+func TestSetAccountMode(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "grace", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	// No account at all -> zero rows affected, no error.
+	rows, err := s.SetAccountMode(ctx, uid, ModeLocal)
+	if err != nil {
+		t.Fatalf("set mode, no account: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("expected 0 rows affected with no account, got %d", rows)
+	}
+
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted) VALUES($1, $2)`,
+		uid, []byte("blob"),
+	); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	rows, err = s.SetAccountMode(ctx, uid, ModeLocal)
+	if err != nil {
+		t.Fatalf("set mode: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 row affected, got %d", rows)
+	}
+	var mode string
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&mode); err != nil {
+		t.Fatalf("query mode: %v", err)
+	}
+	if mode != ModeLocal {
+		t.Fatalf("mode = %q, want %q", mode, ModeLocal)
+	}
+
+	rows, err = s.SetAccountMode(ctx, uid, ModeHosted)
+	if err != nil {
+		t.Fatalf("set mode back: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 row affected, got %d", rows)
+	}
+}
+
+// TestIsModeExempt covers both an id present in and an id absent from the
+// TTL exemption list a store was constructed with.
+func TestIsModeExempt(t *testing.T) {
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	if !s.IsModeExempt(210408407) {
+		t.Error("expected exempt id to report true")
+	}
+	if s.IsModeExempt(999000111) {
+		t.Error("expected non-exempt id to report false")
+	}
+}
+
 // TestListIdentities_PartialSessionNotCounted checks that a mid-login session
 // row (telegram_user_id NULL, as inserted by UpdateSessionBlob) is NOT
 // reported as has_session — only a finalised SaveSession row counts.
