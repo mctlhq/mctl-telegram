@@ -6,10 +6,21 @@ calls from your assistant, but instead of opening Telegram itself it forwards
 each call over a websocket to a daemon running on your machine, and that daemon
 talks to Telegram.
 
-The mode is in beta and is enabled per account by an operator, using the
-`set_account_mode` admin tool (`mode="local"`). This document describes what
-it actually does today, including the parts that are unfinished, so you can
-decide whether it fits your workflow before you set it up.
+The mode is in beta and is enabled per account by an operator. There are two
+ways in, and which one you take decides whether this server ever holds a copy
+of your Telegram session:
+
+- **A new account, provisioned straight into local mode** — the operator calls
+  `provision_local_account`, and the account is created with no server-side
+  session at all. No hosted login happens, so there is nothing here to store.
+- **An existing hosted account, migrated** — the operator calls
+  `set_account_mode` with `mode="local"`. The sealed session stored when you
+  first connected stays in our database; local mode stops the server from using
+  it, but does not erase it.
+
+This document describes what the mode actually does today, including the parts
+that are unfinished, so you can decide whether it fits your workflow before you
+set it up.
 
 ## What it changes, and what it does not
 
@@ -39,18 +50,11 @@ daemon. You do not need to remove and re-add the connector.
 
 ## Before you start
 
-**You need an account that is already connected to tg.mctl.ai.** Local mode is
-a migration, not a way to sign up without the server. The `set_account_mode`
-tool requires an active `telegram_accounts` row, created by an ordinary hosted
-login, so if the account has never connected, there is nothing to flip.
-Connect it normally first.
-
-**Your telegram_id needs the idle/absolute TTL exemption first.** The operator
-must add it to `SESSION_TTL_EXEMPT_TG_IDS` (a gitops config change) before
-calling `set_account_mode` with `mode="local"` — the tool refuses the switch
-otherwise, because `SweepIdleSessions` would otherwise revert a non-exempt
-account to hosted 30 days after Local Bridge traffic stops refreshing
-`last_used_at`.
+**You do not need a hosted login first.** An account can be provisioned
+directly into local mode, in which case tg.mctl.ai never holds a session for
+it. If you already have a hosted account and want to move it, that works too —
+the operator migrates it with `set_account_mode` — but starting fresh is the
+option that leaves nothing behind here.
 
 **You need a machine that stays on.** The daemon must be reachable for a tool
 call to succeed; when it is not, calls fail with a clear error rather than
@@ -347,7 +351,15 @@ an alert on our side. If you move the daemon to another machine, stop the old
 one.
 
 **Enabling and disabling the mode is an operator action.** The operator calls
-the admin-only `set_account_mode` tool; there is no self-serve switch yet.
+`provision_local_account` for a new account or `set_account_mode` for an
+existing one; both are admin-only, and there is no self-serve switch yet.
+
+**Between enabling the mode and starting the daemon, your tools will fail.**
+The relay refuses a daemon whose account is not already in local mode, so the
+mode has to be switched first. In the gap your assistant gets a clear
+`local-bridge daemon not connected` error rather than a hang, and the error
+clears as soon as the daemon connects. Plan the switch for a moment when you
+are ready to run `daemon`, not hours before.
 
 ## Security notes
 
@@ -358,6 +370,19 @@ contents:
 - `config.json` holds your `api_hash` in plaintext.
 - `bridge_token.json` holds both your MCP token and the current bridge token in
   plaintext. Anyone who can read it can act as your account until those expire.
+  Be aware of what that means today: an individual token cannot be withdrawn
+  before it expires, so tell the operator immediately if you think the file was
+  exposed. Ask for a 30-day token rather than the 90-day maximum — until
+  revocation exists, that bound is the containment.
+
+**What the server keeps depends on how the account became local.** An account
+provisioned directly into local mode has no stored session here, ever. An
+account migrated from a hosted login keeps the sealed session from when it
+first connected: the server stops using it, but it is still in the database.
+Revoking that hosted session does not disable local mode or disconnect your
+daemon. To make the stored copy useless, end that session from your own
+Telegram client (Settings -> Devices); the stored bytes then hold a dead
+authorization key.
 
 The MCP token is long-lived — months, typically. Nothing warns you as it
 approaches expiry: the first symptom is the daemon reconnecting in a loop. Note
