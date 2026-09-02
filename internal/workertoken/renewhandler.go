@@ -38,6 +38,14 @@ const maxRenewalChain = 365 * 24 * time.Hour
 // session for a long-lived headless credential.
 const workerAudience = "mcp-worker-ro"
 
+// workerBridgeAudience is the audience value that marks a token as minted
+// by this package with purpose "local-bridge" — a send-and-pin-capable
+// worker token for a Local Bridge daemon. Like workerAudience, only tokens
+// carrying it (or workerAudience) may be renewed, and which of the two is
+// present determines which allowlist (allowedReadOnlyScopes vs
+// allowedLocalBridgeScopes) governs the defense-in-depth scope check below.
+const workerBridgeAudience = "mcp-worker-bridge"
+
 // renewWorkerTokenRequest is the POST /api/mcp/worker-token/renew body. The
 // body is optional; an empty request renews at defaultWorkerTokenTTL.
 //
@@ -101,7 +109,21 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			return
 		}
 
-		if !hasAudience(claims.Audience, workerAudience) {
+		var (
+			marker        string
+			allowlist     []string
+			allowlistName string
+		)
+		switch {
+		case hasAudience(claims.Audience, workerAudience):
+			marker = workerAudience
+			allowlist = allowedReadOnlyScopes
+			allowlistName = "read-only"
+		case hasAudience(claims.Audience, workerBridgeAudience):
+			marker = workerBridgeAudience
+			allowlist = allowedLocalBridgeScopes
+			allowlistName = "local-bridge"
+		default:
 			writeJSONError(w, http.StatusForbidden, "token is not a worker token")
 			return
 		}
@@ -109,14 +131,14 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			writeJSONError(w, http.StatusForbidden, "token carries no telegram identity")
 			return
 		}
-		// Defense in depth: a worker token should never hold a write scope,
-		// but if one ever did, renewal must not be the path that perpetuates
-		// it.
+		// Defense in depth: a worker token should never hold a scope outside
+		// its purpose's allowlist, but if one ever did, renewal must not be
+		// the path that perpetuates it.
 		for _, s := range claims.Scopes {
-			if !isAllowedReadOnlyScope(s) {
-				slog.Warn("worker token renew: refusing token with non-read-only scope",
-					"target_tg_id", claims.TelegramID, "scope", s)
-				writeJSONError(w, http.StatusForbidden, "token carries a scope outside the read-only allowlist")
+			if !isAllowedScope(s, allowlist) {
+				slog.Warn("worker token renew: refusing token with scope outside allowlist",
+					"target_tg_id", claims.TelegramID, "scope", s, "purpose_audience", marker)
+				writeJSONError(w, http.StatusForbidden, "token carries a scope outside the "+allowlistName+" allowlist")
 				return
 			}
 		}
@@ -161,9 +183,11 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 		// Rebuild the audience from configuration rather than copying the
 		// presented token's, so a deployment that later sets
 		// OAUTH_JWT_AUDIENCE does not keep reissuing tokens without it. The
-		// worker marker is always present, which is what keeps the renewed
-		// token renewable in turn.
-		audience := []string{workerAudience}
+		// purpose marker present on the presented token (workerAudience or
+		// workerBridgeAudience) is always carried forward, which is what
+		// keeps the renewed token renewable in turn and preserves its
+		// purpose.
+		audience := []string{marker}
 		if mcpAudience != "" {
 			audience = append(audience, mcpAudience)
 		}
@@ -179,15 +203,17 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			writeJSONError(w, http.StatusInternalServerError, "failed to renew worker token")
 			return
 		}
+		expiresAt := now.Add(ttl).UTC().Format(time.RFC3339)
 		slog.Info("worker token renewed",
 			"target_tg_id", claims.TelegramID,
 			"scopes", claims.Scopes,
 			"ttl", ttl,
+			"expires_at", expiresAt,
 			"original_issued_at", origin.UTC().Format(time.RFC3339),
 			"chain_deadline", deadline.UTC().Format(time.RFC3339))
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: tok,
-			ExpiresAt:   now.Add(ttl).UTC().Format(time.RFC3339),
+			ExpiresAt:   expiresAt,
 		})
 	}
 }

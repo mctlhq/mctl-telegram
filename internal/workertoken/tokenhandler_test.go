@@ -233,3 +233,126 @@ func TestNewHandler_RejectsTrailingBodyData(t *testing.T) {
 		t.Fatalf("status = %d, want 400 for trailing body data, body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestNewHandler_LocalBridgePurposeDefaultScopes: purpose "local-bridge"
+// with no scopes field mints exactly allowedLocalBridgeScopes (all four)
+// with aud containing "mcp-worker-bridge".
+func TestNewHandler_LocalBridgePurposeDefaultScopes(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":924671154,"purpose":"local-bridge"}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	payload := decodeJWTPayload(t, resp.WorkerToken)
+	if !strings.Contains(payload, `"aud":"mcp-worker-bridge"`) {
+		t.Fatalf("payload missing aud=mcp-worker-bridge: %s", payload)
+	}
+	for _, scope := range allowedLocalBridgeScopes {
+		if !strings.Contains(payload, `"`+scope+`"`) {
+			t.Fatalf("payload missing default local-bridge scope %q: %s", scope, payload)
+		}
+	}
+}
+
+// TestNewHandler_LocalBridgePurposeExplicitSubset: purpose "local-bridge"
+// with an explicit scope subset is honored, mirroring
+// TestNewHandler_ExplicitSubsetScopeHonored for the read-only path.
+func TestNewHandler_LocalBridgePurposeExplicitSubset(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":42,"purpose":"local-bridge","scopes":["telegram:messages:send"]}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	payload := decodeJWTPayload(t, resp.WorkerToken)
+	if !strings.Contains(payload, `"telegram:messages:send"`) {
+		t.Fatalf("payload missing requested scope: %s", payload)
+	}
+	if strings.Contains(payload, `"telegram:messages:pin"`) || strings.Contains(payload, `"telegram:dialogs:read"`) {
+		t.Fatalf("payload must not silently include non-requested scopes: %s", payload)
+	}
+}
+
+// TestNewHandler_LocalBridgePurposeRejectsUnknownScope: purpose
+// "local-bridge" with a scope outside allowedLocalBridgeScopes is rejected
+// with 400, mirroring TestNewHandler_RejectsWriteScope's shape.
+func TestNewHandler_LocalBridgePurposeRejectsUnknownScope(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":42,"purpose":"local-bridge","scopes":["admin:users"]}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestNewHandler_RejectsUnknownPurpose: purpose "bogus" is rejected with 400.
+func TestNewHandler_RejectsUnknownPurpose(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":42,"purpose":"bogus"}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestNewHandler_NoPurposeUnchanged: a request identical to today's (no
+// purpose field) still yields allowedReadOnlyScopes and aud containing
+// "mcp-worker-ro" — regression guard for backward compatibility.
+func TestNewHandler_NoPurposeUnchanged(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":924671154}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	payload := decodeJWTPayload(t, resp.WorkerToken)
+	if !strings.Contains(payload, `"aud":"mcp-worker-ro"`) {
+		t.Fatalf("payload missing aud=mcp-worker-ro: %s", payload)
+	}
+	if strings.Contains(payload, `"telegram:messages:send"`) || strings.Contains(payload, `"telegram:messages:pin"`) {
+		t.Fatalf("payload must not carry write scopes when purpose is omitted: %s", payload)
+	}
+}
+
+// TestNewHandler_LocalBridgePurposeRespectsTTLBounds: TTL clamping and
+// defaulting behave identically for purpose "local-bridge" as for the
+// read-only path, mirroring TestNewHandler_TTLClamp.
+func TestNewHandler_LocalBridgePurposeRespectsTTLBounds(t *testing.T) {
+	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+	req := adminRequest(`{"telegram_id":42,"purpose":"local-bridge","ttl_hours":100000}`)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, resp.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expires_at: %v", err)
+	}
+	wantExpiry := time.Now().Add(maxWorkerTokenTTL)
+	if diff := wantExpiry.Sub(expiresAt); diff < -time.Minute || diff > time.Minute {
+		t.Fatalf("ttl_hours=100000 expires_at %v not clamped to ceiling %v", expiresAt, wantExpiry)
+	}
+}
