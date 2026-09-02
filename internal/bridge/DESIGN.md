@@ -148,11 +148,13 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    to read-only scopes (`internal/workertoken/tokenhandler.go:50-53`),
    so it cannot carry send. Today the only route is hand-signing an
    HS256 token with `OAUTH_JWT_SIGNING_KEY`.
-5. **No self-serve enablement.** Nothing in the codebase ever writes
-   `mode='local'`. There is a `GetAccountMode` reader and no
-   `SetAccountMode` writer; `toolSetAccountSend`
-   (`internal/mcp/tools.go:952-1005`) is the shape such a writer would
-   take. Enablement is an operator UPDATE.
+5. **No self-serve enablement.** Enablement is still an admin MCP tool call,
+   not something a user can trigger themselves. Two admin tools now write
+   `mode='local'`: `set_account_mode` (`internal/mcp/tools.go:1011-1094`)
+   flips an existing hosted row, and `provision_local_account`
+   (`internal/mcp/tools.go`, added for issue #468) creates a fresh
+   local-only row for a Telegram id that has never completed a hosted
+   login, with `session_encrypted` left `NULL`.
 6. **Five tools are unsupported in local mode** and return an explicit
    error rather than routing to the bridge: `edit_message`,
    `delete_messages`, `forward_messages`, `search_messages`,
@@ -166,18 +168,25 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 
 ### Correctness gaps
 
-1. **Revoking the hosted session and running local mode are mutually
-   exclusive.** `GetAccountMode` returns `"hosted"` whenever
-   `revoked_at IS NOT NULL` (`store.go:1091`), and `/bridge` then
-   refuses the daemon. So a user cannot both clear their server-side
-   session and use the bridge. See the trust-model section.
-2. **The idle sweeper silently breaks local accounts.** Bridge calls
-   never touch `last_used_at` — only `Pool.Borrow` does
-   (`clientpool.go:167,460`) — so `SweepIdleSessions`
-   (`store.go:929-951`) revokes an actively used local account after the
-   idle TTL, which by (1) reverts it to hosted mode with no working
-   session. Until bridge calls stamp `last_used_at`, every local account
-   must be listed in `ttlExemptClause` (`store.go:905-907,938-941`).
+1. **Fixed (issue #468). Revoking the hosted session and running local
+   mode used to be mutually exclusive.** `GetAccountMode` used to return
+   `"hosted"` whenever `revoked_at IS NOT NULL`, so revoking a local
+   account's session (idle/absolute TTL, explicit disconnect) silently
+   reverted it to hosted mode and `/bridge` then refused the daemon.
+   `GetAccountMode` (`internal/db/store.go`) no longer filters on
+   `revoked_at`: mode is read as a property of the account row, so a
+   revoked session no longer changes what mode the row reports.
+2. **Fixed (issue #468). The idle sweeper used to silently break local
+   accounts.** Bridge calls never touch `last_used_at` — only
+   `Pool.Borrow` does (`clientpool.go:167,460`) — so `SweepIdleSessions`
+   used to revoke an actively used local account after the idle TTL
+   unless its Telegram id was manually added to
+   `SESSION_TTL_EXEMPT_TG_IDS`. `SweepIdleSessions` and
+   `SweepAbsoluteSessions` (`internal/db/store.go`) now carry an
+   `AND mode <> 'local'` predicate, so local-mode rows are excluded from
+   both sweeps unconditionally — the exemption list is no longer required
+   for Local Bridge accounts (it remains available for its original,
+   unrelated use: long-lived hosted operator/service identities).
 3. **`bridge_token_hash` is never written**, so nothing ties a
    registered daemon to a specific issued token.
 4. **The relay must run at one replica.** The Hub is in-process, so a
@@ -205,15 +214,21 @@ the Telegram identity. Removed from #138 for the same reason.
 
 ## Trust-model notes (mirrored on /security)
 
-- **The server keeps the hosted session bytes.** `session_encrypted` is
-  declared `NOT NULL` in both dialects (`db.go:301,361`) and no code
-  path ever clears it; every write stores a real sealed blob
-  (`store.go:448,524,542,552`). Switching to local mode stops the server
-  from *using* that session; it does not delete it, and by the
-  correctness gap above it cannot be revoked without leaving local mode.
-  A user who wants the stored blob rendered useless should terminate
-  that session from their own Telegram client (Settings → Devices),
-  which leaves a dead auth key in the database.
+- **Whether the server ever held the session bytes depends on how the
+  account became local.** `session_encrypted` is nullable
+  (`internal/db/db.go`, made nullable for issue #468). An account
+  provisioned directly as local-only via `provision_local_account` has
+  `session_encrypted = NULL` from insert — the server never holds a copy
+  of that session at all. An account migrated from an existing hosted
+  login via `set_account_mode` keeps the sealed blob stored when it first
+  connected; switching to local mode stops the server from *using* that
+  session, it does not delete it, and clearing it is explicitly out of
+  scope for #468. Revoking a migrated account's hosted session no longer
+  reverts it to hosted mode (correctness gap 1 above is fixed) — the
+  stored blob simply becomes vestigial. A user who wants a migrated
+  account's stored blob rendered useless should terminate that session
+  from their own Telegram client (Settings → Devices), which leaves a
+  dead auth key in the database.
 - **The relay sees MCP payloads.** It has to, in order to route them.
   Message bodies pass through relay memory for the duration of a call.
   This is not end-to-end encryption.

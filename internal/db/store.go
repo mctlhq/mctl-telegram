@@ -74,14 +74,6 @@ func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
 	return s
 }
 
-// IsModeExempt reports whether tgID is on the idle/absolute TTL exemption
-// list. set_account_mode uses this to refuse mode="local" for an account
-// that would otherwise be silently reverted to hosted by SweepIdleSessions
-// once Local Bridge traffic stops refreshing last_used_at.
-func (s *Store) IsModeExempt(tgID int64) bool {
-	return s.ttlExempt[tgID]
-}
-
 // ReconcileTTLExemptions converges existing rows onto the current exemption
 // list. Call it after Migrate: the migration backfills expires_at on every
 // run, which deliberately re-arms the TTL for an identity that has been
@@ -510,7 +502,7 @@ func (s *Store) LoadSessionWithID(ctx context.Context, userID int64) ([]byte, in
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, session_encrypted FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&rowID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -518,6 +510,16 @@ func (s *Store) LoadSessionWithID(ctx context.Context, userID int64) ([]byte, in
 	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("query session: %w", err)
+	}
+	// An account provisioned directly as local-only has no server-held
+	// session: session_encrypted is NULL. Its row is not revoked, so it
+	// matches the query above and reaches here with an empty blob. Report
+	// that the same way as "this user has no row at all" — attempting to
+	// decrypt it makes an account that never had a session look like one
+	// whose session is corrupt, which is a different and alarming thing.
+	// SaveSession always writes a sealed blob, so empty means absent.
+	if len(blob) == 0 {
+		return nil, 0, nil
 	}
 	pt, err := s.Crypt.OpenForUser(blob, userID)
 	if err != nil {
@@ -701,7 +703,14 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 }
 
 // GetActiveAccount returns the active telegram account for a user, or
-// Connected=false if none. Used by GET /api/account.
+// Connected=false if none. Used by GET /api/account and the
+// /telegram/connect/manage dashboard.
+//
+// Uses the same row and the same legitimacy test as GetAccountMode. Without
+// that, a migrated local account whose vestigial hosted session was revoked
+// reports Connected=false in the UI while the bridge is serving its calls --
+// and the remedy the page then offers is a hosted re-login, which inserts a
+// fresh hosted row and takes the account out of local mode.
 func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInfo, error) {
 	var (
 		displayName sql.NullString
@@ -710,9 +719,7 @@ func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInf
 		connectedAt time.Time
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT display_name, username, send_enabled, connected_at FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		`SELECT display_name, username, send_enabled, connected_at FROM telegram_accounts WHERE `+actionableAccount,
 		userID,
 	).Scan(&displayName, &username, &sendEnabled, &connectedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -736,9 +743,7 @@ func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInf
 func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 	var enabled bool
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT send_enabled FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		`SELECT send_enabled FROM telegram_accounts WHERE `+actionableAccount,
 		userID,
 	).Scan(&enabled)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -759,8 +764,7 @@ func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 // it provisions the session first.
 func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET send_enabled = $2
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		`UPDATE telegram_accounts SET send_enabled = $2 WHERE `+actionableAccount,
 		userID, enabled,
 	)
 	if err != nil {
@@ -778,8 +782,7 @@ func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) 
 // from a silent no-op, matching SetSendEnabled.
 func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET mode = $2
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		`UPDATE telegram_accounts SET mode = $2 WHERE `+actionableAccount,
 		userID, mode,
 	)
 	if err != nil {
@@ -789,6 +792,77 @@ func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (
 	return n, nil
 }
 
+// currentAccountRow selects the row GetAccountMode answers about: the user's
+// most recent account row, revoked or not. The predicate that follows decides
+// whether it may be acted on -- a revoked hosted row may not (its session is
+// gone), a local row may (its vestigial hosted session is irrelevant to a
+// bridge account, which is the whole point of mode surviving revocation).
+//
+// The id DESC tiebreaker is not cosmetic. connected_at defaults to
+// CURRENT_TIMESTAMP, which SQLite resolves to whole seconds, so two rows
+// written in the same second compare equal and LIMIT 1 picks arbitrarily.
+// The design this implements rests on "a fresh hosted login always inserts a
+// newer connected_at and therefore wins", which is false without a tiebreaker
+// -- an account could read as local right after reconnecting to hosted. id is
+// monotonic per insert, so it orders what the timestamp cannot.
+//
+// Selecting by id rather than repeating ORDER BY ... LIMIT 1 in each WHERE
+// matters: filtering first and ordering second can land on an OLDER row than
+// GetAccountMode chose, which is how these queries silently disagree about
+// which account they are talking about.
+const currentAccountRow = `SELECT id FROM telegram_accounts WHERE user_id = $1 ORDER BY connected_at DESC, id DESC LIMIT 1`
+
+// actionableAccount is currentAccountRow plus the legitimacy test.
+const actionableAccount = `id = (` + currentAccountRow + `) AND (revoked_at IS NULL OR mode = 'local')`
+
+// ErrAccountAlreadyActive is returned by ProvisionLocalAccount when the
+// target user already has an active (non-revoked) telegram_accounts row.
+// Provisioning is only for brand-new accounts; migrating an existing one
+// (hosted or local) to local mode is SetAccountMode's job.
+var ErrAccountAlreadyActive = errors.New("account already active")
+
+// ProvisionLocalAccount creates a local-only telegram_accounts row for a
+// user who has never completed a hosted login: session_encrypted is left
+// NULL (there is no server-held session to store), mode is 'local' from
+// insert, and last_used_at/expires_at stay NULL since there is no session
+// for the idle/absolute TTL sweepers to measure -- the sweepers instead
+// exclude mode = 'local' rows outright (see SweepIdleSessions).
+//
+// Refuses with ErrAccountAlreadyActive if the user already has an active
+// row, so an existing hosted account is not silently duplicated -- the
+// caller should point the operator at set_account_mode for migrating an
+// existing account instead.
+//
+// The check and the insert are one statement rather than a SELECT followed
+// by an INSERT, so there is no window between them inside this call. That is
+// not the same as being safe against two concurrent calls: under READ
+// COMMITTED both can still evaluate NOT EXISTS as true and both insert. A
+// transaction does not close that either, which an earlier version of this
+// comment wrongly claimed. Closing it properly needs a partial unique index
+// on (user_id) WHERE revoked_at IS NULL, which cannot be added blind because
+// it would fail to build if any user already has two active rows. Provisioning
+// is an operator action taken once per account, so the residual race is
+// accepted and named here rather than papered over.
+func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, displayName, username string) error {
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, mode, send_enabled)
+		 SELECT $1,$2,$3,$4,NULL,$5,$6
+		 WHERE NOT EXISTS (SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
+		userID, tgID, nullable(displayName), nullable(username), ModeLocal, false,
+	)
+	if err != nil {
+		return fmt.Errorf("insert local account: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("insert local account: %w", err)
+	}
+	if n == 0 {
+		return ErrAccountAlreadyActive
+	}
+	return nil
+}
+
 // ToggleSendEnabled atomically inverts send_enabled on the user's active
 // session row. Using a single UPDATE avoids the read-modify-write race that
 // exists when callers read IsSendEnabled and then call SetSendEnabled in two
@@ -796,8 +870,7 @@ func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (
 func (s *Store) ToggleSendEnabled(ctx context.Context, userID int64) (bool, error) {
 	var newVal bool
 	err := s.DB.QueryRowContext(ctx,
-		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled
-		 WHERE user_id = $1 AND revoked_at IS NULL
+		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled WHERE `+actionableAccount+`
 		 RETURNING send_enabled`,
 		userID,
 	).Scan(&newVal)
@@ -885,7 +958,7 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT last_used_at, expires_at, telegram_user_id FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&lastUsed, &expires, &tgUserID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -945,6 +1018,7 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND (
 		     (expires_at IS NOT NULL AND expires_at < $1)
 		     OR `+idlePredicate+`
@@ -968,6 +1042,7 @@ func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	query := `UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND last_used_at IS NOT NULL
 		   AND last_used_at < $2`
 	args := []any{now, idleCutoff}
@@ -996,6 +1071,7 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND expires_at IS NOT NULL
 		   AND expires_at < $1`,
 		now,
@@ -1111,16 +1187,24 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	return out, nil
 }
 
-// GetAccountMode returns the mode ('hosted' or 'local') for the user's active
-// account. Returns "hosted" and no error when the user has no active account
-// (safe default that keeps the existing hosted-mode behaviour for users who
-// haven't been migrated to Local Bridge).
+// GetAccountMode returns the mode ('hosted' or 'local') for the user's most
+// recent account row. Returns "hosted" and no error when the user has no
+// account row at all (safe default that keeps the existing hosted-mode
+// behaviour for users who haven't been migrated to Local Bridge).
+//
+// Deliberately does not filter on revoked_at IS NULL: mode is a property of
+// the account row, not of whether its embedded hosted session is still
+// considered fresh. Revoking a hosted session (idle/absolute TTL sweep,
+// explicit disconnect) must not make a local-mode account look hosted again
+// -- see the mctl-telegram issue-468 proposal. connected_at DESC LIMIT 1
+// still means a fresh hosted SaveSession (which always inserts a new row)
+// wins over any older revoked row for the same user.
 func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error) {
 	var mode string
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT mode FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 WHERE user_id = $1
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&mode)
 	if errors.Is(err, sql.ErrNoRows) {

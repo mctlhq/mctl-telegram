@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -691,7 +692,12 @@ func TestToolSetAccountMode_NoActiveSession(t *testing.T) {
 	}
 }
 
-func TestToolSetAccountMode_RefusesLocalWithoutTTLExemption(t *testing.T) {
+// set_account_mode(mode="local") must succeed even when the target telegram
+// id carries no SESSION_TTL_EXEMPT_TG_IDS entry: the sweeper now excludes
+// mode='local' rows by construction (see TestSweepIdleSessionsSkipsLocalMode
+// in internal/db), so the exemption-list refusal that used to guard this is
+// gone.
+func TestToolSetAccountMode_NoLongerRequiresTTLExemption(t *testing.T) {
 	ctx := context.Background()
 	store := newToolsTestStore(t)
 	uid := seedAccountWithSession(t, store, 779, false)
@@ -707,11 +713,8 @@ func TestToolSetAccountMode_RefusesLocalWithoutTTLExemption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected Go error: %v", err)
 	}
-	if !result.IsError {
-		t.Fatal("expected refusal for mode=local without TTL exemption")
-	}
-	if !strings.Contains(contentText(result), "SESSION_TTL_EXEMPT_TG_IDS") {
-		t.Errorf("expected error to mention SESSION_TTL_EXEMPT_TG_IDS, got: %s", contentText(result))
+	if result.IsError {
+		t.Fatalf("mode=local must not require TTL exemption, got tool error: %s", contentText(result))
 	}
 	var mode string
 	if err := store.DB.QueryRowContext(ctx,
@@ -719,8 +722,8 @@ func TestToolSetAccountMode_RefusesLocalWithoutTTLExemption(t *testing.T) {
 	).Scan(&mode); err != nil {
 		t.Fatalf("query mode: %v", err)
 	}
-	if mode != "hosted" {
-		t.Errorf("mode must remain unchanged after refusal, got %q", mode)
+	if mode != "local" {
+		t.Errorf("mode not persisted: got %q, want local", mode)
 	}
 }
 
@@ -745,11 +748,6 @@ func TestToolSetAccountMode_AuditsRefusals(t *testing.T) {
 			name:    "invalid mode",
 			args:    map[string]any{"telegram_id": float64(781), "mode": "bogus"},
 			wantErr: `mode must be "local" or "hosted"`,
-		},
-		{
-			name:    "local without TTL exemption",
-			args:    map[string]any{"telegram_id": float64(781), "mode": "local"},
-			wantErr: "SESSION_TTL_EXEMPT_TG_IDS",
 		},
 	}
 	for _, tc := range cases {
@@ -868,6 +866,144 @@ func TestToolSetAccountMode_HostedNeverRequiresExemption(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("mode=hosted must not require TTL exemption, got tool error: %s", contentText(result))
+	}
+}
+
+func TestToolProvisionLocalAccount_RequiresAdminScope(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolProvisionLocalAccount()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "provision_local_account",
+		Arguments: map[string]any{"telegram_id": float64(790)},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected scope rejection for identity without admin:users")
+	}
+}
+
+// TestToolProvisionLocalAccount_HappyPath covers task 4's DoD: a Telegram id
+// with no prior users/telegram_accounts row succeeds and returns
+// {telegram_id, mode:"local", ok:true}, with no server-side session stored.
+func TestToolProvisionLocalAccount_HappyPath(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolProvisionLocalAccount()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "provision_local_account",
+		Arguments: map[string]any{
+			"telegram_id":  float64(790),
+			"display_name": "Fresh Local",
+			"username":     "freshlocal",
+		},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got tool error: %s", contentText(result))
+	}
+	var out map[string]any
+	if jsonErr := json.Unmarshal([]byte(contentText(result)), &out); jsonErr != nil {
+		t.Fatalf("result is not JSON: %v", jsonErr)
+	}
+	if out["telegram_id"] != float64(790) || out["mode"] != "local" || out["ok"] != true {
+		t.Errorf("unexpected response: %v", out)
+	}
+	var (
+		mode    string
+		session sql.NullString
+	)
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT mode, session_encrypted FROM telegram_accounts WHERE telegram_user_id = 790`,
+	).Scan(&mode, &session); err != nil {
+		t.Fatalf("query row: %v", err)
+	}
+	if mode != "local" {
+		t.Errorf("mode = %q, want local", mode)
+	}
+	if session.Valid {
+		t.Errorf("session_encrypted = %q, want NULL", session.String)
+	}
+}
+
+// TestToolProvisionLocalAccount_RefusesExistingAccount covers task 4's DoD:
+// calling the tool again for the same telegram id refuses with a message
+// pointing at set_account_mode.
+func TestToolProvisionLocalAccount_RefusesExistingAccount(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	seedAccountWithSession(t, store, 791, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolProvisionLocalAccount()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "provision_local_account",
+		Arguments: map[string]any{"telegram_id": float64(791)},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected refusal for an already-active account")
+	}
+	if !strings.Contains(contentText(result), "set_account_mode") {
+		t.Errorf("expected error to point at set_account_mode, got: %s", contentText(result))
+	}
+}
+
+// TestToolProvisionLocalAccount_AuditsSuccessAndRefusal mirrors the
+// set_account_mode audit coverage: both a successful provision and a refused
+// one must leave an audit_logs row.
+func TestToolProvisionLocalAccount_AuditsSuccessAndRefusal(t *testing.T) {
+	const adminUID int64 = 1
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: adminUID, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolProvisionLocalAccount()
+
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "provision_local_account",
+		Arguments: map[string]any{"telegram_id": float64(792)},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected the provision to succeed: %s", contentText(result))
+	}
+	tool, status, errMsg := latestAudit(t, store, adminUID)
+	if tool != "provision_local_account" || status != "ok" || errMsg != "" {
+		t.Errorf("audit = (%q, %q, %q), want (provision_local_account, ok, \"\")", tool, status, errMsg)
+	}
+
+	result, err = handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "provision_local_account",
+		Arguments: map[string]any{"telegram_id": float64(792)},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected refusal on the second provision for the same id")
+	}
+	tool, status, errMsg = latestAudit(t, store, adminUID)
+	if tool != "provision_local_account" || status != "error" {
+		t.Errorf("audit = (%q, %q, %q), want (provision_local_account, error, ...)", tool, status, errMsg)
 	}
 }
 
