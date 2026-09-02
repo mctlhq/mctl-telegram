@@ -230,7 +230,7 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	backfill := []string{
 		`UPDATE telegram_accounts
 		 SET last_used_at = connected_at
-		 WHERE last_used_at IS NULL`,
+		 WHERE last_used_at IS NULL AND mode <> 'local'`,
 	}
 	// Keep exempt identities out of the backfill — see the doc comment.
 	exemptClause := ""
@@ -247,14 +247,14 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		backfill = append(backfill,
 			`UPDATE telegram_accounts
 			 SET expires_at = connected_at + INTERVAL '90 days'
-			 WHERE expires_at IS NULL`+exemptClause,
+			 WHERE expires_at IS NULL AND mode <> 'local'`+exemptClause,
 		)
 	} else {
 		// SQLite has no INTERVAL syntax; use the datetime() function.
 		backfill = append(backfill,
 			`UPDATE telegram_accounts
 			 SET expires_at = datetime(connected_at, '+90 days')
-			 WHERE expires_at IS NULL`+exemptClause,
+			 WHERE expires_at IS NULL AND mode <> 'local'`+exemptClause,
 		)
 	}
 	for _, s := range backfill {

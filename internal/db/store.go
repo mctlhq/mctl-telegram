@@ -502,7 +502,7 @@ func (s *Store) LoadSessionWithID(ctx context.Context, userID int64) ([]byte, in
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, session_encrypted FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&rowID, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -703,7 +703,14 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 }
 
 // GetActiveAccount returns the active telegram account for a user, or
-// Connected=false if none. Used by GET /api/account.
+// Connected=false if none. Used by GET /api/account and the
+// /telegram/connect/manage dashboard.
+//
+// Uses the same row and the same legitimacy test as GetAccountMode. Without
+// that, a migrated local account whose vestigial hosted session was revoked
+// reports Connected=false in the UI while the bridge is serving its calls --
+// and the remedy the page then offers is a hosted re-login, which inserts a
+// fresh hosted row and takes the account out of local mode.
 func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInfo, error) {
 	var (
 		displayName sql.NullString
@@ -712,9 +719,7 @@ func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInf
 		connectedAt time.Time
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT display_name, username, send_enabled, connected_at FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		`SELECT display_name, username, send_enabled, connected_at FROM telegram_accounts WHERE `+actionableAccount,
 		userID,
 	).Scan(&displayName, &username, &sendEnabled, &connectedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -953,7 +958,7 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT last_used_at, expires_at, telegram_user_id FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
 	).Scan(&lastUsed, &expires, &tgUserID)
 	if errors.Is(err, sql.ErrNoRows) {

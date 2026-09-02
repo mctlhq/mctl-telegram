@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -152,5 +153,66 @@ func TestSameSecondRowsResolveByID(t *testing.T) {
 	}
 	if mode != ModeHosted {
 		t.Errorf("GetAccountMode = %q, want %q — the later-inserted row must win even when connected_at ties", mode, ModeHosted)
+	}
+}
+
+// TestGetActiveAccountFollowsTheSameRow guards the UI surface. /api/account
+// and the manage dashboard read GetActiveAccount; if it disagrees with
+// GetAccountMode, a working bridge account is shown as disconnected and the
+// page offers a hosted re-login — which inserts a fresh hosted row and takes
+// the account out of local mode, destroying the setup it was trying to repair.
+func TestGetActiveAccountFollowsTheSameRow(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid := seedModedAccount(t, s, "active-revoked-local", 700000205, ModeLocal, true, true)
+
+	info, err := s.GetActiveAccount(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetActiveAccount: %v", err)
+	}
+	if !info.Connected {
+		t.Error("GetActiveAccount reports Connected=false for a revoked local account that GetAccountMode calls local")
+	}
+
+	// A revoked hosted account must still read as disconnected.
+	uid2 := seedModedAccount(t, s, "active-revoked-hosted", 700000206, ModeHosted, true, true)
+	info2, err := s.GetActiveAccount(ctx, uid2)
+	if err != nil {
+		t.Fatalf("GetActiveAccount: %v", err)
+	}
+	if info2.Connected {
+		t.Error("GetActiveAccount reports Connected=true for a revoked hosted account")
+	}
+}
+
+// TestMigrateLeavesLocalLifecycleColumnsNull pins the invariant
+// ProvisionLocalAccount's doc comment states. Migrate runs on every server
+// start, and its backfill fills last_used_at/expires_at for rows that have
+// none — which is every provisioned local account, by design. The sweepers
+// exclude local rows independently, so this is currently invisible; the point
+// is that the columns must not acquire a session lifecycle a sessionless
+// account does not have, because CheckSessionValid reads them without a mode
+// filter.
+func TestMigrateLeavesLocalLifecycleColumnsNull(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "migrate-twice", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.ProvisionLocalAccount(ctx, uid, 700000207, "", ""); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := Migrate(ctx, s.DB, 700000207); err != nil {
+		t.Fatalf("second Migrate: %v", err)
+	}
+	var lastUsed, expires sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT last_used_at, expires_at FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&lastUsed, &expires); err != nil {
+		t.Fatalf("read lifecycle columns: %v", err)
+	}
+	if lastUsed.Valid || expires.Valid {
+		t.Errorf("after a restart the local row has last_used_at=%v expires_at=%v, want both NULL", lastUsed, expires)
 	}
 }
