@@ -40,7 +40,11 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.6.0"
+// version is stamped at build time with -ldflags "-X main.version=<tag>". The
+// fallback matters: a binary built with a plain `go build` says so, instead of
+// claiming a release number it does not correspond to. The published builds
+// carry the release tag, so a bug report names a build that can be found.
+var version = "dev"
 
 const usage = `mctl-telegram-local — Local Bridge daemon for mctl-telegram
 
@@ -57,6 +61,11 @@ Subcommands:
 `
 
 func main() {
+	// Before anything creates a file: the config, the bridge token and the
+	// session database are all owner-only, and the umask is what guarantees
+	// that at creation rather than a moment later.
+	restrictUmask()
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
