@@ -86,11 +86,21 @@ func (s *Store) RevokeWorkerTokensForTelegramID(ctx context.Context, telegramID 
 }
 
 // IsWorkerTokenRevoked reports whether jti is individually denylisted, or
-// telegramID carries a blanket revocation recorded at or before issuedAt.
-// Used directly by tests and as the ground truth localjwt.RevocationCache
-// caches; request-path verification goes through the cache, not this method,
-// so a jti-bearing request never pays a DB round trip on the common
-// (cache-warm) path.
+// telegramID carries a blanket revocation recorded at or after issuedAt --
+// that is, a revocation that postdates the token covers it.
+//
+// Request-path verification does not come through here: localjwt's
+// RevocationCache loads whole rows via ListWorkerTokenRevocations and compares
+// instants in Go, so a jti-bearing request never pays a DB round trip on the
+// cache-warm path. This method exists for callers that want a direct answer.
+//
+// issuedAt is normalised to UTC before the comparison. SQLite compares
+// DATETIME values as text, and the stored revoked_at is written in UTC, so a
+// caller passing a local-zone time would have its offset compared as if it
+// were part of the clock reading: a +02:00 instant reads as two hours later
+// than the same moment in UTC and a genuine revocation silently answers
+// false. Failing open on a timezone is not an acceptable mode for this
+// question.
 func (s *Store) IsWorkerTokenRevoked(ctx context.Context, jti string, telegramID int64, issuedAt time.Time) (bool, error) {
 	var exists bool
 	if err := s.DB.QueryRowContext(ctx,
@@ -99,7 +109,7 @@ func (s *Store) IsWorkerTokenRevoked(ctx context.Context, jti string, telegramID
 			WHERE jti = $1
 			   OR (jti IS NULL AND telegram_id = $2 AND revoked_at >= $3)
 		 )`,
-		jti, telegramID, issuedAt,
+		jti, telegramID, issuedAt.UTC(),
 	).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check worker token revocation: %w", err)
 	}

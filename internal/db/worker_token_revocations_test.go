@@ -158,3 +158,40 @@ func TestRevokeWorkerTokensForTelegramID_RequiresTelegramID(t *testing.T) {
 		t.Error("expected an error when telegram_id is <= 0")
 	}
 }
+
+// TestIsWorkerTokenRevoked_NonUTCIssuedAt pins the normalisation. SQLite
+// compares DATETIME values as text and revoked_at is stored in UTC, so a
+// caller passing the same instant in another zone would have its offset read
+// as part of the clock value — a genuine revocation then answers false, which
+// is the wrong direction to fail in.
+//
+// The location is fixed here rather than taken from the environment on
+// purpose: this bug is invisible when TZ=UTC, which is what CI runs, so a test
+// that used time.Now() in the ambient zone would pass on the broken code
+// everywhere it mattered.
+func TestIsWorkerTokenRevoked_NonUTCIssuedAt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	const tgID = 700000301
+
+	if err := s.RevokeWorkerTokensForTelegramID(ctx, tgID, "test", 0); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	// One instant, three spellings. All must give the same answer.
+	base := time.Now().UTC().Add(-time.Hour)
+	for _, loc := range []*time.Location{
+		time.UTC,
+		time.FixedZone("plus2", 2*60*60),
+		time.FixedZone("minus5", -5*60*60),
+	} {
+		issued := base.In(loc)
+		revoked, err := s.IsWorkerTokenRevoked(ctx, "no-such-jti", tgID, issued)
+		if err != nil {
+			t.Fatalf("IsWorkerTokenRevoked(%s): %v", loc, err)
+		}
+		if !revoked {
+			t.Errorf("issuedAt in %s: revoked=false, want true — the revocation postdates the token regardless of how the instant is spelled", loc)
+		}
+	}
+}
