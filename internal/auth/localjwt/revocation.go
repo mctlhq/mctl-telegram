@@ -41,11 +41,17 @@ type RevocationCache struct {
 	ttl   time.Duration
 	now   func() time.Time
 
-	mu          sync.Mutex
-	populated   bool
-	lastRefresh time.Time
-	jtis        map[string]struct{}
-	blanket     map[int64]time.Time // telegram_id -> most recent blanket revoked_at
+	mu        sync.Mutex
+	populated bool
+	// lastRefresh is when the applied snapshot finished loading; it drives
+	// the TTL. readStartedAt is when that same snapshot's read BEGAN, and is
+	// what decides whether an arriving snapshot is newer than the applied
+	// one. The two are different clocks and the distinction is load-bearing:
+	// see refresh.
+	lastRefresh   time.Time
+	readStartedAt time.Time
+	jtis          map[string]struct{}
+	blanket       map[int64]time.Time // telegram_id -> most recent blanket revoked_at
 }
 
 // NewRevocationCache returns a RevocationCache backed by store, refreshing at
@@ -122,6 +128,10 @@ func (c *RevocationCache) Refresh(ctx context.Context) error {
 // same idempotent read twice, which is harmless for a single-digit-row
 // table and simpler than adding a singleflight for it.
 func (c *RevocationCache) refresh(ctx context.Context) error {
+	// Stamped before the read, not after: a snapshot's freshness is decided
+	// by when it looked at the database, not by when its query happened to
+	// return.
+	readStartedAt := c.now()
 	rows, err := c.store.ListWorkerTokenRevocations(ctx)
 	if err != nil {
 		return fmt.Errorf("refresh worker token revocation cache: %w", err)
@@ -138,10 +148,26 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 		}
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Discard a snapshot that read the database no later than the applied
+	// one did. Without this, a slow lazy refresh that started before a
+	// revocation was recorded can land after the forced refresh that
+	// followed it, overwrite the denylist with pre-revocation data, and
+	// stamp lastRefresh so the cache looks current — handing a just-evicted
+	// daemon a clean reconnect for a whole TTL window. That is precisely the
+	// containment this cache exists to provide.
+	//
+	// The comparison is between read-start times. Comparing an arriving
+	// snapshot's start against the applied one's completion would get this
+	// backwards in the other direction: a read that began earlier but
+	// finished later would look newer, and would discard the fresher one.
+	if c.populated && !c.readStartedAt.Before(readStartedAt) {
+		return nil
+	}
 	c.jtis = jtis
 	c.blanket = blanket
 	c.populated = true
+	c.readStartedAt = readStartedAt
 	c.lastRefresh = c.now()
-	c.mu.Unlock()
 	return nil
 }

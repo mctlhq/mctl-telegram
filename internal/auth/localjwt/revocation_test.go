@@ -3,6 +3,8 @@ package localjwt
 import (
 	"context"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -222,5 +224,128 @@ func TestNewRevocationCache_ClampsTTL(t *testing.T) {
 	c = NewRevocationCache(store, time.Hour)
 	if c.ttl != MaxRevocationCacheTTL {
 		t.Errorf("ttl above the max should clamp to MaxRevocationCacheTTL, got %v", c.ttl)
+	}
+}
+
+// TestRevocationCache_StaleSnapshotDoesNotOverwriteNewer reproduces the
+// ordering of a race rather than the race itself: a lazy refresh that began
+// before a revocation was recorded, but whose database read returns after the
+// forced refresh that followed the revocation.
+//
+// If the later-arriving-but-older snapshot is applied, it overwrites the
+// denylist with pre-revocation data AND stamps the cache as freshly loaded, so
+// a daemon evicted moments earlier reconnects cleanly for a whole TTL window —
+// defeating the containment the forced refresh exists to provide.
+//
+// The clock is scripted so the second refresh reports a read-start that
+// precedes the applied one's; the store is emptied first so the stale snapshot
+// carries visibly different data. Without that, the test would pass whether or
+// not the guard exists.
+func TestRevocationCache_StaleSnapshotDoesNotOverwriteNewer(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	if err := store.RevokeWorkerToken(ctx, "jti-race", 99, "leak", 1); err != nil {
+		t.Fatalf("seed revocation: %v", err)
+	}
+
+	var clock atomic.Int64
+	clock.Store(100)
+	base := time.Unix(0, 0)
+	cache := NewRevocationCache(store, time.Minute)
+	cache.now = func() time.Time { return base.Add(time.Duration(clock.Load()) * time.Second) }
+
+	// Applied snapshot: read starts at t=100 and sees the revocation.
+	if revoked, err := cache.IsRevoked(ctx, "jti-race", 99, time.Now()); err != nil || !revoked {
+		t.Fatalf("initial populate should see the revocation: revoked=%v err=%v", revoked, err)
+	}
+
+	// The world the stale reader saw: no revocation yet.
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM worker_token_revocations`); err != nil {
+		t.Fatalf("clear revocations: %v", err)
+	}
+
+	// A refresh whose read began at t=50 — before the applied one — lands now.
+	clock.Store(50)
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("late refresh: %v", err)
+	}
+
+	clock.Store(101) // still within the TTL, so no further reload is triggered
+	revoked, err := cache.IsRevoked(ctx, "jti-race", 99, time.Now())
+	if err != nil {
+		t.Fatalf("IsRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("a snapshot that read the database earlier overwrote a newer one; the revoked credential would be accepted again")
+	}
+}
+
+// scriptedClock returns each value once, in order, so a single refresh can be
+// given a read-start and a completion time that differ.
+type scriptedClock struct {
+	mu     sync.Mutex
+	values []time.Time
+	i      int
+}
+
+func (s *scriptedClock) next() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.i >= len(s.values) {
+		return s.values[len(s.values)-1]
+	}
+	v := s.values[s.i]
+	s.i++
+	return v
+}
+
+// TestRevocationCache_FreshSnapshotWinsOverLateStaleOne pins the half of the
+// guard that a completion-time comparison gets wrong.
+//
+// The obvious form of this check — discard if the applied snapshot COMPLETED
+// at or after our read began — is right about the stale-overwrites-fresh case
+// but wrong here: a read that started earlier and finished later stamps a
+// completion time that makes a genuinely newer snapshot look obsolete, so the
+// newer one is thrown away and the revocation it carries never lands. The
+// guard therefore compares read-START times.
+//
+// Timeline (all via the scripted clock): applied snapshot reads at t=10; a
+// stale snapshot reads at t=50 and lands at t=101; the snapshot that actually
+// saw the revocation reads at t=100 and lands at t=102. The last one must win.
+func TestRevocationCache_FreshSnapshotWinsOverLateStaleOne(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Unix(0, 0)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	clock := &scriptedClock{values: []time.Time{
+		at(10), at(11), // applied snapshot: empty store
+		at(50), at(101), // stale snapshot: still empty, lands late
+		at(100), at(102), // the snapshot that sees the revocation
+		at(103), // the IsRevoked staleness check below
+	}}
+	cache := NewRevocationCache(store, time.Minute)
+	cache.now = clock.next
+
+	if err := cache.Refresh(ctx); err != nil { // reads at t=10
+		t.Fatalf("initial refresh: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil { // reads at t=50, lands at t=101
+		t.Fatalf("stale refresh: %v", err)
+	}
+
+	if err := store.RevokeWorkerToken(ctx, "jti-late", 5, "leak", 1); err != nil {
+		t.Fatalf("seed revocation: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil { // reads at t=100, lands at t=102
+		t.Fatalf("fresh refresh: %v", err)
+	}
+
+	revoked, err := cache.IsRevoked(ctx, "jti-late", 5, at(0))
+	if err != nil {
+		t.Fatalf("IsRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("the snapshot that read the database last was discarded because an older read finished after it started; the revocation never took effect")
 	}
 }
