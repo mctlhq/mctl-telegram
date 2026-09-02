@@ -75,6 +75,45 @@ func TestProvisionLocalAccount_RefusesExistingActiveAccount(t *testing.T) {
 // TestGetAccountMode_HostedBehaviorUnchanged pins that narrowing
 // GetAccountMode's query (dropping the revoked_at IS NULL predicate) does
 // not change any existing hosted-path result.
+// TestLoadSession_ProvisionedLocalReadsAsAbsent pins the requirement that a
+// NULL session_encrypted is treated as "no server-side session, without
+// error". A provisioned local row is not revoked, so it matches every hosted
+// reader's `revoked_at IS NULL` filter and reaches the decrypt step with an
+// empty blob. Without the guard that produced "decrypt session: empty blob",
+// which makes an account that never had a session indistinguishable from one
+// whose session is corrupt. The assertion is a comparison against a user with
+// no row at all, so it fails if the two ever diverge again.
+func TestLoadSession_ProvisionedLocalReadsAsAbsent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	uid, err := s.EnsureUser(ctx, "load-provisioned-local", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.ProvisionLocalAccount(ctx, uid, 700000099, "", ""); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	blob, rowID, err := s.LoadSessionWithID(ctx, uid)
+	if err != nil {
+		t.Fatalf("LoadSessionWithID on a sessionless local account: %v, want no error", err)
+	}
+	if len(blob) != 0 || rowID != 0 {
+		t.Errorf("blob=%v rowID=%d, want empty/0 for an account with no server-held session", blob, rowID)
+	}
+
+	// The behaviour to match: a user with no telegram_accounts row at all.
+	bare, err := s.EnsureUser(ctx, "load-no-row", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	blob2, rowID2, err2 := s.LoadSessionWithID(ctx, bare)
+	if err2 != nil || len(blob2) != 0 || rowID2 != 0 {
+		t.Fatalf("baseline changed: blob=%v rowID=%d err=%v", blob2, rowID2, err2)
+	}
+}
+
 func TestGetAccountMode_HostedBehaviorUnchanged(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

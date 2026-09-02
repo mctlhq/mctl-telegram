@@ -519,6 +519,16 @@ func (s *Store) LoadSessionWithID(ctx context.Context, userID int64) ([]byte, in
 	if err != nil {
 		return nil, 0, fmt.Errorf("query session: %w", err)
 	}
+	// An account provisioned directly as local-only has no server-held
+	// session: session_encrypted is NULL. Its row is not revoked, so it
+	// matches the query above and reaches here with an empty blob. Report
+	// that the same way as "this user has no row at all" — attempting to
+	// decrypt it makes an account that never had a session look like one
+	// whose session is corrupt, which is a different and alarming thing.
+	// SaveSession always writes a sealed blob, so empty means absent.
+	if len(blob) == 0 {
+		return nil, 0, nil
+	}
 	pt, err := s.Crypt.OpenForUser(blob, userID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("decrypt session: %w", err)
