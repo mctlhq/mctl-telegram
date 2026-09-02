@@ -1163,9 +1163,15 @@ certainly responsible.
   (`internal/bridge/tokenhandler.go`). The daemon re-exchanges its stored MCP
   token before expiry; if that MCP token has itself expired, every reconnect
   fails authentication and retries. This is the most likely cause, because
-  there is no supported way to issue a long-lived MCP token today — an OAuth
-  access token lives at most 24 h, so a daemon configured with one will start
-  flapping when it lapses.
+  an OAuth access token lives at most 24 h, so a daemon configured with one
+  will start flapping when it lapses — the supported credential is instead a
+  worker token minted via `POST /api/mcp/worker-token` with
+  `{"telegram_id": ..., "purpose": "local-bridge"}`
+  (`internal/workertoken`), which the daemon can self-renew via
+  `POST /api/mcp/worker-token/renew`. Check the most recent "worker token
+  minted"/"worker token renewed" log line's `expires_at` field for this
+  account first — it is a five-second way to confirm or rule out this cause
+  before digging further.
 - **The account is no longer in local mode.** `/bridge` refuses any account
   whose `mode` is not `'local'` (`internal/bridge/server.go:65-75`), and
   `GetAccountMode` reports `'hosted'` for a revoked account

@@ -101,6 +101,75 @@ func TestRenew_HappyPathPreservesIdentityAndScopes(t *testing.T) {
 	}
 }
 
+// bridgeClaims is workerClaims's local-bridge counterpart: aud=["mcp-worker-bridge"]
+// carrying the full send/pin-capable scope set.
+func bridgeClaims() localjwt.Claims {
+	return localjwt.Claims{
+		Subject:          "tg:924671154",
+		TelegramID:       924671154,
+		Scopes:           []string{"telegram:messages:send", "telegram:messages:pin"},
+		Audience:         []string{workerBridgeAudience},
+		OriginalIssuedAt: time.Now().Unix(),
+	}
+}
+
+// TestRenew_LocalBridgeTokenRenewsWithSendScope: a token minted with
+// aud=["mcp-worker-bridge"] and send/pin scopes renews successfully and the
+// renewed token preserves those scopes — this is the test that would fail
+// against the pre-fix code (the old defense-in-depth check would reject it).
+func TestRenew_LocalBridgeTokenRenewsWithSendScope(t *testing.T) {
+	tok := mintFor(t, bridgeClaims(), time.Hour)
+	rec := doRenew(t, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp workerTokenResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	claims, err := localjwt.Verify(resp.WorkerToken, []byte(testWorkerHMACSecret), testWorkerIssuerURL)
+	if err != nil {
+		t.Fatalf("renewed token does not verify: %v", err)
+	}
+	if strings.Join(claims.Scopes, ",") != "telegram:messages:send,telegram:messages:pin" {
+		t.Fatalf("scopes changed: %v", claims.Scopes)
+	}
+	if !hasAudience(claims.Audience, workerBridgeAudience) {
+		t.Fatalf("renewed token lost the bridge audience, so it could not be renewed again: %v", claims.Audience)
+	}
+}
+
+// TestRenew_LocalBridgeTokenRejectsScopeOutsideBridgeAllowlist: a token
+// carrying aud=["mcp-worker-bridge"] plus a scope outside
+// allowedLocalBridgeScopes is refused renewal, mirroring
+// TestRenew_RejectsScopeOutsideAllowlist for the new allowlist.
+func TestRenew_LocalBridgeTokenRejectsScopeOutsideBridgeAllowlist(t *testing.T) {
+	c := bridgeClaims()
+	c.Scopes = []string{"telegram:messages:send", "admin:users"}
+	rec := doRenew(t, mintFor(t, c, time.Hour), "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "local-bridge allowlist") {
+		t.Fatalf("unhelpful error body: %s", rec.Body.String())
+	}
+}
+
+// TestRenew_ReadOnlyTokenStillRejectsSendScope: regression — a token with
+// aud=["mcp-worker-ro"] carrying "telegram:messages:send" is still refused
+// renewal, proving the audience-to-allowlist mapping did not cross-wire.
+func TestRenew_ReadOnlyTokenStillRejectsSendScope(t *testing.T) {
+	c := workerClaims()
+	c.Scopes = []string{"telegram:dialogs:read", "telegram:messages:send"}
+	rec := doRenew(t, mintFor(t, c, time.Hour), "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "read-only allowlist") {
+		t.Fatalf("unhelpful error body: %s", rec.Body.String())
+	}
+}
+
 // R2: the endpoint must refuse any token that is not a worker token. Without
 // this an ordinary interactive session could be traded for a headless
 // credential, since the generic audience policy is disabled by default.
@@ -112,6 +181,7 @@ func TestRenew_RejectsNonWorkerAudience(t *testing.T) {
 		{"no audience", nil},
 		{"agent audience", []string{"agent"}},
 		{"bridge audience", []string{"bridge"}},
+		{"local-bridge-shaped but wrong string", []string{"mcp-worker-bridge-typo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := workerClaims()
@@ -319,5 +389,28 @@ func TestRenew_CarriesConfiguredMCPAudience(t *testing.T) {
 	}
 	if !hasAudience(claims.Audience, workerAudience) || !hasAudience(claims.Audience, "https://tg.test/mcp") {
 		t.Fatalf("audience = %v, want both the worker marker and the configured MCP audience", claims.Audience)
+	}
+}
+
+// TestRenew_LogsPurposeAndExpiry is the renewal counterpart of
+// TestNewHandler_LogsPurposeAndExpiry: a renewed credential must be as
+// greppable as a freshly minted one, otherwise the audit trail goes blind
+// after the first renewal.
+func TestRenew_LogsPurposeAndExpiry(t *testing.T) {
+	buf := captureLogs(t)
+	tok := mintFor(t, bridgeClaims(), time.Hour)
+	rec := doRenew(t, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, `"purpose":"local-bridge"`) {
+		t.Errorf("renew log missing purpose=local-bridge: %s", logged)
+	}
+	if !strings.Contains(logged, `"audience_marker":"`+workerBridgeAudience+`"`) {
+		t.Errorf("renew log missing audience_marker: %s", logged)
+	}
+	if !strings.Contains(logged, `"expires_at":`) {
+		t.Errorf("renew log missing expires_at: %s", logged)
 	}
 }

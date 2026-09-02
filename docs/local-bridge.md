@@ -180,6 +180,15 @@ from your connector will not do: those live one hour, and the daemon needs a
 credential it can keep re-exchanging. Ask for one when your account is enabled
 for local mode.
 
+An operator mints it with `POST /api/mcp/worker-token` using
+`{"telegram_id": ..., "purpose": "local-bridge"}` — this grants the
+`telegram:messages:send`/`telegram:messages:pin` scopes the daemon needs
+for `send_message`/`pin_message` to work, in addition to the read-only
+scopes. The daemon can renew this token itself before it expires via
+`POST /api/mcp/worker-token/renew`, so re-minting is only needed once the
+renewal window itself is exhausted. There is no need to hand-sign a JWT
+with `OAUTH_JWT_SIGNING_KEY` for this.
+
 **One caveat about that command.** `--token` is currently the only way to pass
 the token, so it appears in the process argument list and is readable by other
 local accounts through `ps` for as long as the command runs — a second or two.

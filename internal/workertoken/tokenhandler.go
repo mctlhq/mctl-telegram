@@ -1,9 +1,17 @@
-// Package workertoken mints bounded, read-only bearer tokens for headless MCP
-// workers (the canary, and any future non-interactive read-only client). It
-// exists to replace hand-signing a year-long JWT with OAUTH_JWT_SIGNING_KEY
-// for that use case: this path is admin-scoped, restricted to a fixed
-// allowlist of read-only scopes, bounded by a TTL ceiling, and logged the
-// same way every other admin mint is logged.
+// Package workertoken mints bounded bearer tokens for headless MCP workers.
+// It exists to replace hand-signing a year-long JWT with OAUTH_JWT_SIGNING_KEY
+// for that use case: every path here is admin-scoped, restricted to a fixed
+// scope allowlist, bounded by a TTL ceiling, and logged the same way every
+// other admin mint is logged.
+//
+// Two purposes are minted, and they are not equivalent. The default (empty)
+// purpose is read-only — the canary and any other non-interactive reader —
+// and is restricted to allowedReadOnlyScopes. Purpose "local-bridge" mints
+// the credential a Local Bridge daemon runs under, so it may additionally
+// carry send and pin scopes (allowedLocalBridgeScopes). Naming the purpose
+// is what makes granting write capability a deliberate request rather than
+// a default, which is why an unrecognized purpose is rejected instead of
+// falling back to read-only.
 //
 // This is intentionally its own package rather than living in internal/
 // agentapi: the agent-token handler there is one admin action inside the
@@ -52,6 +60,18 @@ var allowedReadOnlyScopes = []string{
 	"telegram:messages:read",
 }
 
+// allowedLocalBridgeScopes is the fixed allowlist for worker tokens minted
+// with purpose "local-bridge". Deliberately a separate literal from
+// DCRNegotiableScopes, for the same reason allowedReadOnlyScopes is: this
+// is an admin-mint validation list, not a DCR-advertisement list, and the
+// two must not silently drift together.
+var allowedLocalBridgeScopes = []string{
+	"telegram:dialogs:read",
+	"telegram:messages:read",
+	"telegram:messages:send",
+	"telegram:messages:pin",
+}
+
 // mintWorkerTokenRequest is the POST /api/mcp/worker-token request body.
 type mintWorkerTokenRequest struct {
 	// TelegramID is the TARGET account the minted token authenticates as,
@@ -59,10 +79,18 @@ type mintWorkerTokenRequest struct {
 	// admin provisions a credential for a deployed worker, not for
 	// themselves.
 	TelegramID int64 `json:"telegram_id"`
-	// Scopes, if supplied, must be a subset of allowedReadOnlyScopes. Omit
-	// to get the default read-only scope set.
+	// Scopes, if supplied, must be a subset of the allowlist selected by
+	// Purpose. Omit to get that purpose's default scope set.
 	Scopes   []string `json:"scopes,omitempty"`
 	TTLHours int      `json:"ttl_hours,omitempty"`
+	// Purpose selects which allowlist/default/audience marker this mint
+	// uses. Empty (the default) is today's read-only path, unchanged:
+	// allowedReadOnlyScopes, "mcp-worker-ro". "local-bridge" opts into
+	// allowedLocalBridgeScopes (read + send + pin), "mcp-worker-bridge" —
+	// for a Local Bridge daemon's MCP token, which is also the credential a
+	// user's send_message/pin_message calls run under. Any other value is
+	// rejected with 400 rather than silently falling back to read-only.
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // workerTokenResponse is the JSON body returned by POST /api/mcp/worker-token.
@@ -122,13 +150,35 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			return
 		}
 
+		var (
+			allowlist      []string
+			defaultScopes  []string
+			audienceMarker string
+			allowlistName  string
+		)
+		switch req.Purpose {
+		case "":
+			allowlist = allowedReadOnlyScopes
+			defaultScopes = allowedReadOnlyScopes
+			audienceMarker = workerAudience
+			allowlistName = "read-only"
+		case "local-bridge":
+			allowlist = allowedLocalBridgeScopes
+			defaultScopes = allowedLocalBridgeScopes
+			audienceMarker = workerBridgeAudience
+			allowlistName = "local-bridge"
+		default:
+			writeJSONError(w, http.StatusBadRequest, "unknown purpose: "+req.Purpose)
+			return
+		}
+
 		scopes := req.Scopes
 		if len(scopes) == 0 {
-			scopes = allowedReadOnlyScopes
+			scopes = defaultScopes
 		}
 		for _, s := range scopes {
-			if !isAllowedReadOnlyScope(s) {
-				writeJSONError(w, http.StatusBadRequest, "scope not in read-only allowlist: "+s)
+			if !isAllowedScope(s, allowlist) {
+				writeJSONError(w, http.StatusBadRequest, "scope not in "+allowlistName+" allowlist: "+s)
 				return
 			}
 		}
@@ -141,7 +191,7 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			}
 		}
 
-		audience := []string{workerAudience}
+		audience := []string{audienceMarker}
 		if mcpAudience != "" {
 			audience = append(audience, mcpAudience)
 		}
@@ -161,16 +211,23 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to issue worker token")
 			return
 		}
-		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl)
+		expiresAt := time.Now().Add(ttl).UTC().Format(time.RFC3339)
+		// purpose is its own field, not left to be inferred from the scope
+		// list: docs/runbook.md points an operator at this line to tell a
+		// send-capable Local Bridge credential from a read-only one, and
+		// that has to be greppable rather than reconstructed.
+		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl, "expires_at", expiresAt,
+			"purpose", allowlistName, "audience_marker", audienceMarker)
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: tok,
-			ExpiresAt:   time.Now().Add(ttl).UTC().Format(time.RFC3339),
+			ExpiresAt:   expiresAt,
 		})
 	}
 }
 
-func isAllowedReadOnlyScope(scope string) bool {
-	for _, s := range allowedReadOnlyScopes {
+// isAllowedScope reports whether scope is a member of allowlist.
+func isAllowedScope(scope string, allowlist []string) bool {
+	for _, s := range allowlist {
 		if s == scope {
 			return true
 		}
