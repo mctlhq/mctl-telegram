@@ -74,6 +74,14 @@ func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
 	return s
 }
 
+// IsModeExempt reports whether tgID is on the idle/absolute TTL exemption
+// list. set_account_mode uses this to refuse mode="local" for an account
+// that would otherwise be silently reverted to hosted by SweepIdleSessions
+// once Local Bridge traffic stops refreshing last_used_at.
+func (s *Store) IsModeExempt(tgID int64) bool {
+	return s.ttlExempt[tgID]
+}
+
 // ReconcileTTLExemptions converges existing rows onto the current exemption
 // list. Call it after Migrate: the migration backfills expires_at on every
 // run, which deliberately re-arms the TTL for an identity that has been
@@ -269,6 +277,14 @@ func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, erro
 const (
 	TierNone   = "none"
 	TierClient = "client"
+)
+
+// Account modes stored in telegram_accounts.mode. ModeHosted is the default:
+// the server holds the MTProto session. ModeLocal routes calls to a Local
+// Bridge daemon on the user's own machine instead.
+const (
+	ModeLocal  = "local"
+	ModeHosted = "hosted"
 )
 
 // IdentityRow is the admin-facing projection of a users row: who has
@@ -749,6 +765,25 @@ func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) 
 	)
 	if err != nil {
 		return 0, fmt.Errorf("set send_enabled: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// SetAccountMode flips telegram_accounts.mode ('hosted' or 'local') on the
+// user's active session row. Used by the set_account_mode admin tool so
+// enabling Local Bridge for an account is a runtime call instead of a
+// one-shot gitops Job. Returns the number of rows affected (0 when the
+// user has no active session) so the caller can distinguish a real update
+// from a silent no-op, matching SetSendEnabled.
+func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET mode = $2
+		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID, mode,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("set account mode: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil

@@ -33,6 +33,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"revoke_telegram_session", first(s.toolRevokeSession()), false, true, false},
 		{"set_telegram_access", first(s.toolSetAccess()), false, true, false},
 		{"set_account_send", first(s.toolSetAccountSend()), false, true, false},
+		{"set_account_mode", first(s.toolSetAccountMode()), false, true, false},
 		{"send_message", first(s.toolSendMessage()), false, true, true},
 		{"send_media", first(s.toolSendMedia()), false, true, true},
 		{"pin_message", first(s.toolPinMessage()), false, true, true},

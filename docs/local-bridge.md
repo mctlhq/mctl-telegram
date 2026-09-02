@@ -6,9 +6,10 @@ calls from your assistant, but instead of opening Telegram itself it forwards
 each call over a websocket to a daemon running on your machine, and that daemon
 talks to Telegram.
 
-The mode is in beta and is enabled per account by an operator. This document
-describes what it actually does today, including the parts that are unfinished,
-so you can decide whether it fits your workflow before you set it up.
+The mode is in beta and is enabled per account by an operator, using the
+`set_account_mode` admin tool (`mode="local"`). This document describes what
+it actually does today, including the parts that are unfinished, so you can
+decide whether it fits your workflow before you set it up.
 
 ## What it changes, and what it does not
 
@@ -39,9 +40,17 @@ daemon. You do not need to remove and re-add the connector.
 ## Before you start
 
 **You need an account that is already connected to tg.mctl.ai.** Local mode is
-a migration, not a way to sign up without the server. The database row the
-operator flips is created by an ordinary hosted login, so if the account has
-never connected, there is nothing to flip. Connect it normally first.
+a migration, not a way to sign up without the server. The `set_account_mode`
+tool requires an active `telegram_accounts` row, created by an ordinary hosted
+login, so if the account has never connected, there is nothing to flip.
+Connect it normally first.
+
+**Your telegram_id needs the idle/absolute TTL exemption first.** The operator
+must add it to `SESSION_TTL_EXEMPT_TG_IDS` (a gitops config change) before
+calling `set_account_mode` with `mode="local"` — the tool refuses the switch
+otherwise, because `SweepIdleSessions` would otherwise revert a non-exempt
+account to hosted 30 days after Local Bridge traffic stops refreshing
+`last_used_at`.
 
 **You need a machine that stays on.** The daemon must be reachable for a tool
 call to succeed; when it is not, calls fail with a clear error rather than
@@ -328,8 +337,8 @@ reconnects and displaces the second; the result is a reconnect loop that trips
 an alert on our side. If you move the daemon to another machine, stop the old
 one.
 
-**Enabling and disabling the mode is an operator action.** Nothing in the
-service writes the mode column, so there is no self-serve switch yet.
+**Enabling and disabling the mode is an operator action.** The operator calls
+the admin-only `set_account_mode` tool; there is no self-serve switch yet.
 
 ## Security notes
 

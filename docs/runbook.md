@@ -1220,8 +1220,10 @@ GROUP BY call_path;
 ### Mitigation
 
 1. **If the account row shows `revoked_at IS NOT NULL`**, the sweeper has
-   taken it. Clear the revocation, set `mode='local'` again, and add the
-   account to the TTL exemption list — otherwise this recurs in 30 days.
+   taken it. Add the account's telegram_id to `SESSION_TTL_EXEMPT_TG_IDS`
+   first — otherwise this recurs in 30 days — clear the revocation, then call
+   `set_account_mode` (`mode="local"`) to flip the mode back; the tool refuses
+   the flip until the exemption is in place.
 2. **If the daemon's token has lapsed**, re-issue the MCP token and re-run
    `mctl-telegram-local connect --token <t>` on the user's machine. Until a
    supported long-lived token exists, record the issue date so the next lapse

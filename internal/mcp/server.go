@@ -165,6 +165,7 @@ func (s *Server) HTTPHandler() http.Handler {
 	{t, h := s.toolListIdentities(); s.addTool(srv, t, h)}
 	{t, h := s.toolSetAccess(); s.addTool(srv, t, h)}
 	{t, h := s.toolSetAccountSend(); s.addTool(srv, t, h)}
+	{t, h := s.toolSetAccountMode(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetUserAuditLog(); s.addTool(srv, t, h)}
 	{t, h := s.toolRevokeSession(); s.addTool(srv, t, h)}
 	{t, h := s.toolEditMessage(); s.addTool(srv, t, h)}

@@ -513,6 +513,243 @@ func TestToolSetAccountSend_NoActiveSession(t *testing.T) {
 	}
 }
 
+func TestToolSetAccountMode_RequiresAdminScope(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(123), "mode": "hosted"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected scope rejection for identity without admin:users")
+	}
+}
+
+func TestToolSetAccountMode_HappyPath_Local(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t).WithAbsoluteTTLExempt([]int64{555})
+	uid := seedAccountWithSession(t, store, 555, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(555), "mode": "local"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got tool error: %s", contentText(result))
+	}
+	var out map[string]any
+	if jsonErr := json.Unmarshal([]byte(contentText(result)), &out); jsonErr != nil {
+		t.Fatalf("result is not JSON: %v", jsonErr)
+	}
+	if out["mode"] != "local" || out["ok"] != true {
+		t.Errorf("unexpected response: %v", out)
+	}
+	var mode string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&mode); err != nil {
+		t.Fatalf("query mode: %v", err)
+	}
+	if mode != "local" {
+		t.Errorf("mode not persisted: got %q, want local", mode)
+	}
+}
+
+func TestToolSetAccountMode_HappyPath_Hosted(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 556, false)
+	if _, err := store.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET mode = 'local' WHERE user_id = $1`, uid,
+	); err != nil {
+		t.Fatalf("seed local mode: %v", err)
+	}
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(556), "mode": "hosted"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got tool error: %s", contentText(result))
+	}
+	var out map[string]any
+	if jsonErr := json.Unmarshal([]byte(contentText(result)), &out); jsonErr != nil {
+		t.Fatalf("result is not JSON: %v", jsonErr)
+	}
+	if out["mode"] != "hosted" || out["ok"] != true {
+		t.Errorf("unexpected response: %v", out)
+	}
+	var mode string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&mode); err != nil {
+		t.Fatalf("query mode: %v", err)
+	}
+	if mode != "hosted" {
+		t.Errorf("mode not persisted: got %q, want hosted", mode)
+	}
+}
+
+func TestToolSetAccountMode_RejectsInvalidMode(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 557, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(557), "mode": "bogus"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected validation error for invalid mode")
+	}
+	var mode string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&mode); err != nil {
+		t.Fatalf("query mode: %v", err)
+	}
+	if mode != "hosted" {
+		t.Errorf("mode must remain unchanged (default hosted) after invalid input, got %q", mode)
+	}
+}
+
+func TestToolSetAccountMode_UserNotFound(t *testing.T) {
+	ctx := context.Background()
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(999999), "mode": "hosted"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for unknown telegram_id")
+	}
+}
+
+// A user with no active session row must get a clear error, not a silent
+// ok=true, for both mode values.
+func TestToolSetAccountMode_NoActiveSession(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t).WithAbsoluteTTLExempt([]int64{778})
+	if _, err := store.EnsureUserByTelegramID(ctx, 778, "nosess", "No Session"); err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+
+	for _, mode := range []string{"local", "hosted"} {
+		req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name:      "set_account_mode",
+			Arguments: map[string]any{"telegram_id": float64(778), "mode": mode},
+		}}
+		result, err := handler(ctx, req)
+		if err != nil {
+			t.Fatalf("mode=%s: unexpected Go error: %v", mode, err)
+		}
+		if !result.IsError {
+			t.Fatalf("mode=%s: expected tool error when user has no active session", mode)
+		}
+		if !strings.Contains(contentText(result), "no active Telegram session") {
+			t.Errorf("mode=%s: unexpected error text: %s", mode, contentText(result))
+		}
+	}
+}
+
+func TestToolSetAccountMode_RefusesLocalWithoutTTLExemption(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 779, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(779), "mode": "local"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected refusal for mode=local without TTL exemption")
+	}
+	if !strings.Contains(contentText(result), "SESSION_TTL_EXEMPT_TG_IDS") {
+		t.Errorf("expected error to mention SESSION_TTL_EXEMPT_TG_IDS, got: %s", contentText(result))
+	}
+	var mode string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&mode); err != nil {
+		t.Fatalf("query mode: %v", err)
+	}
+	if mode != "hosted" {
+		t.Errorf("mode must remain unchanged after refusal, got %q", mode)
+	}
+}
+
+func TestToolSetAccountMode_HostedNeverRequiresExemption(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 780, false)
+	if _, err := store.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET mode = 'local' WHERE user_id = $1`, uid,
+	); err != nil {
+		t.Fatalf("seed local mode: %v", err)
+	}
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	req := mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(780), "mode": "hosted"},
+	}}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("mode=hosted must not require TTL exemption, got tool error: %s", contentText(result))
+	}
+}
+
 // --- handler-level tests for the 5 new message-op tools ---
 
 func TestToolEditMessage_MissingArgs(t *testing.T) {
