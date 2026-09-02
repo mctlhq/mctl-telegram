@@ -26,6 +26,9 @@ func driverFor(dsn string) (driver string, isPg bool) {
 // DSNs and any unrecognized prefix; pgx/stdlib for `postgres://`.
 // maxOpenConns and maxIdleConns are Postgres-only tuning knobs; pass 0 to
 // keep the prior defaults (10 open, 2 idle). SQLite always uses 1 open conn.
+// Open makes exactly one connect-and-ping attempt and returns immediately on
+// failure; see OpenWithRetry for the bounded-retry variant used by the
+// server's startup path.
 func Open(ctx context.Context, dsn string, maxOpenConns, maxIdleConns int) (*sql.DB, error) {
 	driver, isPg := driverFor(dsn)
 	dbConn, err := sql.Open(driver, dsn)

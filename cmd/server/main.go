@@ -51,6 +51,17 @@ import (
 // Dockerfile), matching every other binary in this repo.
 var version = "dev"
 
+// dbConnectRetryInterval/dbConnectRetryTimeout bound the startup database
+// connection wait (see db.OpenWithRetry). A short fixed interval recovers
+// the common case (a netpol race that resolves in well under a second, per
+// mctl-gitops#866) almost as fast as a tight loop, while the total timeout
+// keeps a genuinely unreachable database failing fast on the order of
+// minutes, not hanging indefinitely.
+const (
+	dbConnectRetryInterval = 2 * time.Second
+	dbConnectRetryTimeout  = 2 * time.Minute
+)
+
 func main() {
 	inner := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -79,7 +90,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	rawDB, err := db.Open(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns)
+	rawDB, err := db.OpenWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns,
+		dbConnectRetryInterval, dbConnectRetryTimeout)
 	if err != nil {
 		slog.Error("db open", "err", err)
 		os.Exit(1)
