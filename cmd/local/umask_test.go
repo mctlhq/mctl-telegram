@@ -14,9 +14,14 @@ import (
 // driver creates the session database and its sidecars for us and we do not
 // control the mode it passes.
 func TestRestrictUmask(t *testing.T) {
-	// Umask is process-wide, so restore whatever the test binary started with.
+	// Umask is process-wide, so restore whatever the test binary started with
+	// rather than a guess at it. syscall.Umask returns the previous value, and
+	// restrictUmask does not, so read it by setting the value it will set:
+	// harmless, and it avoids assuming the process started at 0o022, which is
+	// true on a developer machine and not guaranteed in a container.
+	prev := syscall.Umask(0o077)
 	restrictUmask()
-	t.Cleanup(func() { syscall.Umask(0o022) })
+	t.Cleanup(func() { syscall.Umask(prev) })
 
 	path := filepath.Join(t.TempDir(), "created-by-a-library")
 	// 0666 is what a library that does not think about permissions passes.
