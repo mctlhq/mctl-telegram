@@ -8,6 +8,6 @@ package main
 // That is not equivalent protection, and pretending otherwise here would hide
 // the gap: on Windows the config, the bridge token and the session database
 // carry whatever ACL the user profile grants. Closing it means setting an
-// explicit ACL through golang.org/x/sys/windows. Tracked as gap 2a in
+// explicit ACL through golang.org/x/sys/windows. Tracked as gap 3 in
 // internal/bridge/DESIGN.md.
 func restrictUmask() {}

@@ -96,7 +96,7 @@ jobs:
             out="dist/mctl-telegram-local-${VERSION}-${goos}-${goarch}${ext}"
             echo "building $out"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "$out" ./cmd/local
+              go build -trimpath -ldflags="-s -w -X 'main.version=${VERSION}'" -o "$out" ./cmd/local
           done
           # Checksums are the only integrity signal these binaries carry. They
           # are neither notarised for macOS nor signed for Windows, so the

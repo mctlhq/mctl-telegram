@@ -130,7 +130,7 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    SmartScreen prompt on a double-click; fetching with `curl` and running
    from a terminal avoids both. Signing is a deliberate non-decision, not
    an oversight — see the note in #448.
-2a. **Windows file protection is unsolved.** The daemon writes its config,
+3. **Windows file protection is unsolved.** The daemon writes its config,
    bridge token and session database `0600` and sets a `0o077` umask, but
    NTFS ignores POSIX modes and inherits an ACL from the parent directory
    instead, so on Windows those files carry whatever the user profile
@@ -140,7 +140,7 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    then the Windows build is usable but its on-disk secrets — including
    both bearer tokens in `bridge_token.json` — are only as protected as
    the profile directory.
-3. **No long-lived MCP token to hand to `connect`.** The daemon
+4. **No long-lived MCP token to hand to `connect`.** The daemon
    re-exchanges the stored MCP token indefinitely, but OAuth access
    tokens live one hour (24 h ceiling), so an ordinary OAuth token
    produces a daemon that dies within the hour. The one endpoint that
@@ -148,19 +148,19 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    to read-only scopes (`internal/workertoken/tokenhandler.go:50-53`),
    so it cannot carry send. Today the only route is hand-signing an
    HS256 token with `OAUTH_JWT_SIGNING_KEY`.
-4. **No self-serve enablement.** Nothing in the codebase ever writes
+5. **No self-serve enablement.** Nothing in the codebase ever writes
    `mode='local'`. There is a `GetAccountMode` reader and no
    `SetAccountMode` writer; `toolSetAccountSend`
    (`internal/mcp/tools.go:952-1005`) is the shape such a writer would
    take. Enablement is an operator UPDATE.
-5. **Five tools are unsupported in local mode** and return an explicit
+6. **Five tools are unsupported in local mode** and return an explicit
    error rather than routing to the bridge: `edit_message`,
    `delete_messages`, `forward_messages`, `search_messages`,
    `set_reaction` (`internal/mcp/tools.go:1532,1588,1648,1707,1778`).
    Separately, `fetch_media=true` is refused on `get_unread_messages` and
    `get_messages` (`tools.go:279,496`) with a pointer to
    `prepare_get_media` + `get_media`, which the daemon does implement.
-6. **No hosted listener.** The Communication Agent's always-on listener
+7. **No hosted listener.** The Communication Agent's always-on listener
    needs a server-side Telegram client, which a local-mode account does
    not have.
 
