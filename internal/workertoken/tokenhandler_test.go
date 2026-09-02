@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -354,5 +355,55 @@ func TestNewHandler_LocalBridgePurposeRespectsTTLBounds(t *testing.T) {
 	wantExpiry := time.Now().Add(maxWorkerTokenTTL)
 	if diff := wantExpiry.Sub(expiresAt); diff < -time.Minute || diff > time.Minute {
 		t.Fatalf("ttl_hours=100000 expires_at %v not clamped to ceiling %v", expiresAt, wantExpiry)
+	}
+}
+
+// captureLogs installs a JSON slog handler for the duration of the test and
+// returns the buffer it writes to. The default logger is global, so the
+// tests using this must not run in parallel with anything that logs.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestNewHandler_LogsPurposeAndExpiry pins the two fields docs/runbook.md
+// tells an operator to read on this log line. Without purpose logged
+// explicitly, telling a send-capable Local Bridge credential from a
+// read-only one means reconstructing it from the scope list; without
+// expires_at, a months-long token's expiry is visible only in a response
+// body nobody keeps.
+func TestNewHandler_LogsPurposeAndExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		body        string
+		wantPurpose string
+		wantAudMark string
+	}{
+		{"read-only", `{"telegram_id":42}`, "read-only", workerAudience},
+		{"local-bridge", `{"telegram_id":42,"purpose":"local-bridge"}`, "local-bridge", workerBridgeAudience},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLogs(t)
+			h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
+			rec := httptest.NewRecorder()
+			h(rec, adminRequest(tc.body))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+			}
+			logged := buf.String()
+			if !strings.Contains(logged, `"purpose":"`+tc.wantPurpose+`"`) {
+				t.Errorf("mint log missing purpose=%q: %s", tc.wantPurpose, logged)
+			}
+			if !strings.Contains(logged, `"audience_marker":"`+tc.wantAudMark+`"`) {
+				t.Errorf("mint log missing audience_marker=%q: %s", tc.wantAudMark, logged)
+			}
+			if !strings.Contains(logged, `"expires_at":`) {
+				t.Errorf("mint log missing expires_at: %s", logged)
+			}
+		})
 	}
 }

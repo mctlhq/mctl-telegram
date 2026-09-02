@@ -204,11 +204,15 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			return
 		}
 		expiresAt := now.Add(ttl).UTC().Format(time.RFC3339)
+		// Same reasoning as the mint log: purpose is explicit so a renewed
+		// send-capable credential stays greppable, not inferred.
 		slog.Info("worker token renewed",
 			"target_tg_id", claims.TelegramID,
 			"scopes", claims.Scopes,
 			"ttl", ttl,
 			"expires_at", expiresAt,
+			"purpose", allowlistName,
+			"audience_marker", marker,
 			"original_issued_at", origin.UTC().Format(time.RFC3339),
 			"chain_deadline", deadline.UTC().Format(time.RFC3339))
 		writeJSON(w, http.StatusOK, workerTokenResponse{

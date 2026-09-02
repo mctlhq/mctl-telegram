@@ -391,3 +391,26 @@ func TestRenew_CarriesConfiguredMCPAudience(t *testing.T) {
 		t.Fatalf("audience = %v, want both the worker marker and the configured MCP audience", claims.Audience)
 	}
 }
+
+// TestRenew_LogsPurposeAndExpiry is the renewal counterpart of
+// TestNewHandler_LogsPurposeAndExpiry: a renewed credential must be as
+// greppable as a freshly minted one, otherwise the audit trail goes blind
+// after the first renewal.
+func TestRenew_LogsPurposeAndExpiry(t *testing.T) {
+	buf := captureLogs(t)
+	tok := mintFor(t, bridgeClaims(), time.Hour)
+	rec := doRenew(t, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, `"purpose":"local-bridge"`) {
+		t.Errorf("renew log missing purpose=local-bridge: %s", logged)
+	}
+	if !strings.Contains(logged, `"audience_marker":"`+workerBridgeAudience+`"`) {
+		t.Errorf("renew log missing audience_marker: %s", logged)
+	}
+	if !strings.Contains(logged, `"expires_at":`) {
+		t.Errorf("renew log missing expires_at: %s", logged)
+	}
+}

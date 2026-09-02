@@ -1,9 +1,17 @@
-// Package workertoken mints bounded, read-only bearer tokens for headless MCP
-// workers (the canary, and any future non-interactive read-only client). It
-// exists to replace hand-signing a year-long JWT with OAUTH_JWT_SIGNING_KEY
-// for that use case: this path is admin-scoped, restricted to a fixed
-// allowlist of read-only scopes, bounded by a TTL ceiling, and logged the
-// same way every other admin mint is logged.
+// Package workertoken mints bounded bearer tokens for headless MCP workers.
+// It exists to replace hand-signing a year-long JWT with OAUTH_JWT_SIGNING_KEY
+// for that use case: every path here is admin-scoped, restricted to a fixed
+// scope allowlist, bounded by a TTL ceiling, and logged the same way every
+// other admin mint is logged.
+//
+// Two purposes are minted, and they are not equivalent. The default (empty)
+// purpose is read-only — the canary and any other non-interactive reader —
+// and is restricted to allowedReadOnlyScopes. Purpose "local-bridge" mints
+// the credential a Local Bridge daemon runs under, so it may additionally
+// carry send and pin scopes (allowedLocalBridgeScopes). Naming the purpose
+// is what makes granting write capability a deliberate request rather than
+// a default, which is why an unrecognized purpose is rejected instead of
+// falling back to read-only.
 //
 // This is intentionally its own package rather than living in internal/
 // agentapi: the agent-token handler there is one admin action inside the
@@ -204,7 +212,12 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			return
 		}
 		expiresAt := time.Now().Add(ttl).UTC().Format(time.RFC3339)
-		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl, "expires_at", expiresAt)
+		// purpose is its own field, not left to be inferred from the scope
+		// list: docs/runbook.md points an operator at this line to tell a
+		// send-capable Local Bridge credential from a read-only one, and
+		// that has to be greppable rather than reconstructed.
+		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl, "expires_at", expiresAt,
+			"purpose", allowlistName, "audience_marker", audienceMarker)
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: tok,
 			ExpiresAt:   expiresAt,
