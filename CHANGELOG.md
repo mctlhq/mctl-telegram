@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.56.0](https://github.com/mctlhq/mctl-telegram/compare/0.55.1...0.56.0) (2026-09-02)
+
+
+### Features
+
+* **agents:** issue-458-feat-mcp-set-account-mode-so-enabling-lo ([#460](https://github.com/mctlhq/mctl-telegram/issues/460)) ([23079e0](https://github.com/mctlhq/mctl-telegram/commit/23079e0e9a4d7bc9f39d0df09aae87822c30d30c))
+
+
+### Bug Fixes
+
+* **mcp:** audit refused set_account_mode calls ([#462](https://github.com/mctlhq/mctl-telegram/issues/462)) ([f698db2](https://github.com/mctlhq/mctl-telegram/commit/f698db26934a10ffb670e35301fe68a605b4b1c5))
+
 ## [0.55.1](https://github.com/mctlhq/mctl-telegram/compare/0.55.0...0.55.1) (2026-09-02)
 
 
