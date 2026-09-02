@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.55.1](https://github.com/mctlhq/mctl-telegram/compare/0.55.0...0.55.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **local:** set the umask at startup and stamp the real version ([#453](https://github.com/mctlhq/mctl-telegram/issues/453)) ([0039b63](https://github.com/mctlhq/mctl-telegram/commit/0039b63b2c0a0f1df368d41b0e637aa08057c6da))
+
 ## [0.55.0](https://github.com/mctlhq/mctl-telegram/compare/0.54.0...0.55.0) (2026-09-01)
 
 
