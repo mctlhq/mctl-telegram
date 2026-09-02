@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.58.0](https://github.com/mctlhq/mctl-telegram/compare/0.57.0...0.58.0) (2026-09-02)
+
+
+### Features
+
+* **agents:** issue-466-fix-server-retry-the-initial-database-co ([#469](https://github.com/mctlhq/mctl-telegram/issues/469)) ([55b394f](https://github.com/mctlhq/mctl-telegram/commit/55b394fdc7c65623dfe4402fa46c4518d192b554))
+* **agents:** issue-468-feat-bridge-make-local-mode-a-first-clas ([#471](https://github.com/mctlhq/mctl-telegram/issues/471)) ([1539379](https://github.com/mctlhq/mctl-telegram/commit/15393798ad1a83f4ca1e313efdd3ff638c02f470))
+
 ## [0.57.0](https://github.com/mctlhq/mctl-telegram/compare/0.56.0...0.57.0) (2026-09-02)
 
 
