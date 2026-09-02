@@ -825,7 +825,7 @@ Inputs (all optional):
   limit  — int, default 50, max 500. Newest entries first.
   before — RFC3339 timestamp. When set, only entries strictly older than this are returned. Use the "ts" of the last entry from a previous page as the next "before" for keyset pagination.
 
-Output: JSON array of {ts, tool_name, peer_redacted, status, error}. Peer values are redacted by RedactPeer at write time, so dialog identifiers never appear here in clear text. Message bodies, phone numbers, and session bytes are never written to the table.
+Output: JSON array of {ts, tool_name, peer_redacted, status, error, call_path}. call_path is "local" for calls routed to a Local Bridge daemon and omitted for hosted calls. Peer values are redacted by RedactPeer at write time, so dialog identifiers never appear here in clear text. Message bodies, phone numbers, and session bytes are never written to the table.
 
 This tool is part of the self-service transparency surface — operators cannot disable it for an authenticated user.`),
 		mcplib.WithNumber("limit",
@@ -1022,7 +1022,7 @@ Inputs:
   limit       — int, optional, default 50, max 500. Newest entries first.
   before      — RFC3339 timestamp, optional. Only entries strictly older than this; use the "ts" of the last entry of a page as the next "before" for keyset pagination.
 
-Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error}], count}. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.`),
+Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error, call_path}], count}. call_path is "local" when the call was routed to the user's Local Bridge daemon and is omitted for ordinary hosted calls, so it is the way to confirm which route a call actually took. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.`),
 		mcplib.WithNumber("telegram_id",
 			mcplib.Required(),
 			mcplib.Description("Telegram user id whose audit log to read (required).")),
