@@ -123,11 +123,15 @@ should — also write it to a file:
 
 ```sh
 mkdir -p ~/mctl-local &&
-LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 40 > ~/mctl-local/passphrase &&
-chmod 600 ~/mctl-local/passphrase
+(umask 077 && LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 40 > ~/mctl-local/passphrase)
 ```
 
 Write it without a trailing newline, or rely on the daemon trimming one.
+
+The `umask 077` is not decoration. A plain redirection creates the file under
+your usual umask — world-readable on most systems — and a `chmod` on the next
+line closes that only after the passphrase is already on disk in the clear. The
+subshell means it is never created readable.
 
 `init` does not ask for the server address. That matters in step 3.
 
@@ -161,6 +165,16 @@ The MCP token is issued to you by an operator. An ordinary OAuth access token
 from your connector will not do: those live one hour, and the daemon needs a
 credential it can keep re-exchanging. Ask for one when your account is enabled
 for local mode.
+
+**One caveat about that command.** `--token` is currently the only way to pass
+the token, so it appears in the process argument list and is readable by other
+local accounts through `ps` for as long as the command runs — a second or two.
+On a single-user machine that is a small window; on a shared one, run `connect`
+when nobody else is logged in. Delete `mcp-token.txt` once `connect` has
+succeeded: the daemon stores its own copy in
+`~/.config/mctl-telegram-local/bridge_token.json`, and the file you pasted from
+is not read again. A `--token-file` option that avoids the argument list
+entirely is tracked in #454.
 
 ### 4. `daemon`
 
