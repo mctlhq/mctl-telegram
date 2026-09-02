@@ -191,12 +191,28 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 		if mcpAudience != "" {
 			audience = append(audience, mcpAudience)
 		}
+		// Jti is carried forward unchanged so revoking it also revokes every
+		// renewal of this credential. A token minted before Jti existed
+		// presents claims.Jti == "" — this is the one point where such a
+		// legacy token gains a jti, after which every subsequent renewal
+		// carries that value forward in turn.
+		jti := claims.Jti
+		if jti == "" {
+			var err error
+			jti, err = generateJti()
+			if err != nil {
+				slog.Error("worker token renew: jti generation failed", "target_tg_id", claims.TelegramID, "err", err)
+				writeJSONError(w, http.StatusInternalServerError, "failed to renew worker token")
+				return
+			}
+		}
 		tok, err := signer.Mint(localjwt.Claims{
 			Subject:          "tg:" + strconv.FormatInt(claims.TelegramID, 10),
 			TelegramID:       claims.TelegramID,
 			Scopes:           claims.Scopes,
 			Audience:         audience,
 			OriginalIssuedAt: origin.Unix(),
+			Jti:              jti,
 		}, ttl)
 		if err != nil {
 			slog.Error("worker token renew: sign failed", "target_tg_id", claims.TelegramID, "err", err)
@@ -205,7 +221,9 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 		}
 		expiresAt := now.Add(ttl).UTC().Format(time.RFC3339)
 		// Same reasoning as the mint log: purpose is explicit so a renewed
-		// send-capable credential stays greppable, not inferred.
+		// send-capable credential stays greppable, not inferred. jti is
+		// logged so a revocation issued against the original mint's jti is
+		// still traceable through every renewal in the audit trail.
 		slog.Info("worker token renewed",
 			"target_tg_id", claims.TelegramID,
 			"scopes", claims.Scopes,
@@ -214,7 +232,8 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			"purpose", allowlistName,
 			"audience_marker", marker,
 			"original_issued_at", origin.UTC().Format(time.RFC3339),
-			"chain_deadline", deadline.UTC().Format(time.RFC3339))
+			"chain_deadline", deadline.UTC().Format(time.RFC3339),
+			"jti", jti)
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: tok,
 			ExpiresAt:   expiresAt,

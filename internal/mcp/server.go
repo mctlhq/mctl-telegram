@@ -169,6 +169,7 @@ func (s *Server) HTTPHandler() http.Handler {
 	{t, h := s.toolProvisionLocalAccount(); s.addTool(srv, t, h)}
 	{t, h := s.toolGetUserAuditLog(); s.addTool(srv, t, h)}
 	{t, h := s.toolRevokeSession(); s.addTool(srv, t, h)}
+	{t, h := s.toolRevokeWorkerToken(); s.addTool(srv, t, h)}
 	{t, h := s.toolEditMessage(); s.addTool(srv, t, h)}
 	{t, h := s.toolDeleteMessages(); s.addTool(srv, t, h)}
 	{t, h := s.toolForwardMessages(); s.addTool(srv, t, h)}

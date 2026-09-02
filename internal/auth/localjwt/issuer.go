@@ -47,6 +47,15 @@ type Claims struct {
 	OriginalIssuedAt int64           `json:"orig_iat,omitempty"`
 	AudienceRaw      json.RawMessage `json:"aud,omitempty"`
 	Audience         []string        `json:"-"`
+	// Jti is a unique per-credential identifier. Only internal/workertoken
+	// sets it (at mint) and carries it forward unchanged across every
+	// subsequent renewal, so revoking a jti also revokes all of that
+	// credential's renewals. Interactive tokens never carry one, which is
+	// also the gate Provider.Authenticate uses to skip the revocation-cache
+	// lookup entirely for the common case (see RevocationCache). Tokens
+	// minted before this field existed simply omit it and are never
+	// denylist-checked until their next renewal mints one for them.
+	Jti string `json:"jti,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -176,6 +185,13 @@ type Provider struct {
 	ExpectedAudience string
 	AudienceRequired bool
 	Store            *db.Store
+	// RevocationCache, when non-nil, is consulted for every verified token
+	// that carries a non-empty Jti claim (worker tokens only). An
+	// interactive session's token has no jti and never reaches this check,
+	// so wiring this in adds no latency to the common case. nil (the
+	// zero-value default, e.g. for tests that construct a Provider without
+	// it) disables revocation enforcement entirely.
+	RevocationCache *RevocationCache
 }
 
 // ProviderConfig is the constructor input for NewProvider.
@@ -184,6 +200,8 @@ type ProviderConfig struct {
 	ExpectedIssuer   string
 	ExpectedAudience string
 	AudienceRequired bool
+	// RevocationCache is optional; see Provider.RevocationCache.
+	RevocationCache *RevocationCache
 }
 
 // NewProvider validates inputs and returns a Provider that will reject any
@@ -201,6 +219,7 @@ func NewProvider(store *db.Store, cfg ProviderConfig) (*Provider, error) {
 		ExpectedAudience: cfg.ExpectedAudience,
 		AudienceRequired: cfg.AudienceRequired,
 		Store:            store,
+		RevocationCache:  cfg.RevocationCache,
 	}, nil
 }
 
@@ -233,6 +252,22 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if err := CheckAudience(c.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
 		return nil, err
 	}
+	// Revocation check: only for tokens carrying a jti (worker tokens minted
+	// by internal/workertoken). An interactive session's token has no jti and
+	// skips this entirely — zero extra DB round trips for the common case.
+	// Placed before EnsureUserByTelegramID so a revoked token never touches
+	// the user-provisioning path. Fail closed: a cache error rejects the
+	// request rather than silently treating it as "not revoked" (see
+	// RevocationCache.IsRevoked).
+	if c.Jti != "" && p.RevocationCache != nil {
+		revoked, err := p.RevocationCache.IsRevoked(r.Context(), c.Jti, c.TelegramID, originAnchor(c))
+		if err != nil {
+			return nil, fmt.Errorf("check worker token revocation: %w", err)
+		}
+		if revoked {
+			return nil, errors.New("worker token revoked")
+		}
+	}
 	// Persist/find the user row by telegram id. EnsureUserByTelegramID is the
 	// canonical way to map a Telegram identity to an internal user id; legacy
 	// rows where the user predates the column get bound here on the first
@@ -250,6 +285,20 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		Groups:           c.Groups,
 		Scopes:           c.Scopes,
 	}, nil
+}
+
+// originAnchor returns the moment a credential's revocation-eligibility
+// window anchors to: OriginalIssuedAt when set, falling back to IssuedAt for
+// tokens minted before that claim existed. Deliberately duplicated from
+// internal/workertoken's identically-named/behaved helper rather than
+// imported: internal/workertoken already imports internal/auth/localjwt, and
+// importing the reverse would invert that dependency for the sake of one
+// four-line function.
+func originAnchor(c *Claims) time.Time {
+	if c.OriginalIssuedAt > 0 {
+		return time.Unix(c.OriginalIssuedAt, 0)
+	}
+	return time.Unix(c.IssuedAt, 0)
 }
 
 // audienceList normalises the polymorphic `aud` claim into a string slice.

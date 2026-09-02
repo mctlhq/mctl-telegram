@@ -407,7 +407,14 @@ func main() {
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
 	}
 
-	provider, err := selectProvider(cfg, store)
+	// Shared across every localjwt.Provider this process constructs (plain
+	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
+	// is rejected everywhere it could otherwise still authenticate, not just
+	// at /mcp. Cheap to share: the cache is read-mostly and its own mutex
+	// already makes it safe for concurrent use across providers.
+	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
+
+	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {
 		slog.Error("invalid AUTH_MODE; refusing to start", "err", err)
 		os.Exit(1)
@@ -483,7 +490,7 @@ func main() {
 	// Uses a separate provider that enforces aud=bridge so regular MCP
 	// tokens cannot be used to hijack the bridge channel.
 	hub := bridge.NewHub().WithMetrics(m)
-	bridgeProvider := selectBridgeProvider(cfg, store)
+	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
 	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 
 	// Communication-agent HTTP surface: off by default like every other
@@ -504,7 +511,7 @@ func main() {
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
-		agentProvider := selectAgentProvider(cfg, store)
+		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
 		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
@@ -628,7 +635,7 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 //     trust JWTs signed by api.mctl.ai via the shared OAUTH_JWT_SECRET.
 //     "shared-hmac" is accepted as an alias for the legacy mode for the
 //     duration of one minor release.
-func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) {
+func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) (auth.Provider, error) {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "local-jwt":
 		// Use the canonicalised issuer (trailing slash stripped) so the
@@ -643,6 +650,7 @@ func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) 
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: cfg.OAUTHJWTAudience,
 			AudienceRequired: cfg.OAUTHJWTAudReq,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("local-jwt init failed: %w", err)
@@ -796,7 +804,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 // `local` mode. Instead we return rejectAllProvider so every /bridge request
 // gets 401 and the operator sees the misconfiguration loudly. localdev
 // fallback is reserved for AUTH_MODE=local-dev (developer-only).
-func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
+func selectBridgeProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) auth.Provider {
 	mode := strings.ToLower(cfg.AuthMode)
 	switch mode {
 	case "local-jwt":
@@ -809,6 +817,7 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: "bridge",
 			AudienceRequired: true,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			slog.Error("bridge: local-jwt init failed; bridge endpoint disabled", "err", err)
@@ -860,7 +869,7 @@ func selectAgentIssuer(cfg *config.Config) string {
 // vice versa. Same fail-closed posture as selectBridgeProvider: a JWT-based
 // AUTH_MODE with no signing secret returns rejectAllProvider rather than
 // silently downgrading to localdev.
-func selectAgentProvider(cfg *config.Config, store *db.Store) auth.Provider {
+func selectAgentProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) auth.Provider {
 	mode := strings.ToLower(cfg.AuthMode)
 	switch mode {
 	case "local-jwt":
@@ -873,6 +882,7 @@ func selectAgentProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: "agent",
 			AudienceRequired: true,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			slog.Error("agent: local-jwt init failed; agent endpoint disabled", "err", err)

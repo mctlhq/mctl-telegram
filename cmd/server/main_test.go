@@ -10,7 +10,7 @@ import (
 func TestSelectProviderUnknownModeIsError(t *testing.T) {
 	for _, mode := range []string{"bogus", "BOGUS", "prod", "", "  "} {
 		cfg := &config.Config{AuthMode: mode}
-		p, err := selectProvider(cfg, nil)
+		p, err := selectProvider(cfg, nil, nil)
 		if err == nil {
 			t.Errorf("AUTH_MODE=%q: expected error, got provider %T", mode, p)
 		}
@@ -22,7 +22,7 @@ func TestSelectProviderUnknownModeIsError(t *testing.T) {
 
 func TestSelectProviderUnknownModeErrorMessage(t *testing.T) {
 	cfg := &config.Config{AuthMode: "BOGUS"}
-	_, err := selectProvider(cfg, nil)
+	_, err := selectProvider(cfg, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown AUTH_MODE")
 	}
@@ -38,7 +38,7 @@ func TestSelectProviderUnknownModeErrorMessage(t *testing.T) {
 
 func TestSelectProviderLocalDevSucceeds(t *testing.T) {
 	cfg := &config.Config{AuthMode: "local-dev", OperatorLogin: "testoperator"}
-	p, err := selectProvider(cfg, nil)
+	p, err := selectProvider(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("local-dev should succeed, got err: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestSelectProviderLocalJWTRequiresSecret(t *testing.T) {
 		OAUTHJWTSecret: "",
 		PublicBaseURL:  "https://example.com",
 	}
-	_, err := selectProvider(cfg, nil)
+	_, err := selectProvider(cfg, nil, nil)
 	if err == nil {
 		t.Fatal("local-jwt with empty secret should return error")
 	}
@@ -62,7 +62,7 @@ func TestSelectProviderLocalJWTRequiresSecret(t *testing.T) {
 func TestSelectProviderCaseInsensitive(t *testing.T) {
 	for _, mode := range []string{"LOCAL-DEV", "Local-Dev", "local-dev"} {
 		cfg := &config.Config{AuthMode: mode, OperatorLogin: "op"}
-		p, err := selectProvider(cfg, nil)
+		p, err := selectProvider(cfg, nil, nil)
 		if err != nil {
 			t.Errorf("AUTH_MODE=%q should succeed, got: %v", mode, err)
 		}

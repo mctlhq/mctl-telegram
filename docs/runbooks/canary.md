@@ -101,6 +101,13 @@ failure pushes `0` and increments
   Renewal never changes identity or scopes — the endpoint copies both from
   the presented token — so a renewed canary keeps probing as the same
   account with the same read-only rights.
+- **The canary's token itself leaked** (e.g. the `mctl-telegram-canary`
+  Secret was exposed) — revoke it with the `revoke_worker_token` MCP tool
+  (`admin:users` scope) by `jti` (from the most recent "worker token
+  minted"/"worker token renewed" log line) or by the canary's `telegram_id`,
+  then mint a fresh token and patch it into the Secret as above. See
+  [Revoking a leaked worker token](../runbook.md#revokingaleakedworkertoken)
+  in the main runbook for the full mechanics and the propagation-delay bound.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
   own once Telegram lifts the rate limit. Consider widening the
   CronJob `schedule` if it keeps recurring.

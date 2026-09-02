@@ -1279,6 +1279,109 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 	return tool, handler
 }
 
+// toolRevokeWorkerToken revokes a bounded MCP worker token (minted via
+// POST /api/mcp/worker-token, internal/workertoken) before its TTL expires —
+// the containment lever that did not previously exist: a leaked worker token
+// was otherwise valid and unstoppable for up to 90 days (longer once
+// renewal is taken into account), with the operator's only working recourse
+// being to rotate OAUTH_JWT_SIGNING_KEY and invalidate every user's token,
+// not just the compromised one.
+//
+// Exactly one of jti or telegram_id must be supplied:
+//   - jti revokes one specific token (and, since renewal carries the jti
+//     forward unchanged, every renewal of it) — use this when the leaked
+//     token itself (or its jti from a mint/renew log line) is in hand.
+//   - telegram_id revokes every worker token minted for that account up to
+//     this moment, known jti or not — use this when only the affected
+//     account is known. A token minted for the same id AFTER this call is
+//     unaffected (see docs/runbook.md).
+//
+// A revoked-by-jti request cannot also evict a live Local Bridge daemon
+// connection: eviction targets a specific account (Hub.Unregister(userID)),
+// and a bare jti carries no recoverable account linkage (there is
+// deliberately no registry of issued jti's — see design.md's open
+// questions). Only the telegram_id path attempts eviction; if a daemon for
+// that account is not currently connected, or the id has no local `users`
+// row (a worker token can be minted before anyone signs in interactively),
+// eviction is a no-op rather than an error.
+func (s *Server) toolRevokeWorkerToken() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("revoke_worker_token",
+		mcplib.WithTitleAnnotation("Revoke a worker MCP token"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[revokeWorkerTokenResult](),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Revoke a bounded worker token minted via POST /api/mcp/worker-token before its TTL expires — containment for a leaked credential.
+
+Inputs (exactly one required):
+  jti         — string. Revoke one specific token and every renewal of it (the jti is logged on every "worker token minted"/"worker token renewed" line).
+  telegram_id — int. Revoke every worker token minted for this Telegram id up to now, known jti or not. A token minted for this id after this call is unaffected.
+  reason      — string, optional. Recorded for audit only.
+
+Revocation takes effect for new requests within a bounded cache window (at most 15 seconds). Revoking by telegram_id also drops that account's currently-connected Local Bridge daemon, if any (Hub eviction); revoking by jti alone cannot, since a bare jti carries no recoverable account linkage.
+
+Output: JSON {jti, telegram_id, revoked, hub_evicted}.`),
+		mcplib.WithString("jti",
+			mcplib.Description("Revoke this specific token (and its renewals). Mutually exclusive with telegram_id.")),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Description("Revoke every worker token for this Telegram id. Mutually exclusive with jti.")),
+		mcplib.WithString("reason",
+			mcplib.Description("Optional free-text reason, recorded for audit only.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		args := req.GetArguments()
+		jti := stringArg(args, "jti", "")
+		tgID := int64(intArg(args, "telegram_id", 0))
+		reason := stringArg(args, "reason", "")
+		switch {
+		case jti == "" && tgID <= 0:
+			return mcplib.NewToolResultError("exactly one of jti or telegram_id is required"), nil
+		case jti != "" && tgID > 0:
+			return mcplib.NewToolResultError("jti and telegram_id are mutually exclusive"), nil
+		}
+
+		var revokedBy int64
+		if id != nil {
+			revokedBy = id.UserID
+		}
+
+		result := revokeWorkerTokenResult{Jti: jti, TelegramID: tgID}
+		var err error
+		if jti != "" {
+			err = s.Store.RevokeWorkerToken(ctx, jti, 0, reason, revokedBy)
+		} else {
+			err = s.Store.RevokeWorkerTokensForTelegramID(ctx, tgID, reason, revokedBy)
+		}
+		if err != nil {
+			s.audit(ctx, id, "revoke_worker_token", "", err, startedAt)
+			return toolErr("revoke_worker_token: %v", err), nil
+		}
+		result.Revoked = true
+
+		// Eviction: only possible on the telegram_id path — see the doc
+		// comment above for why a bare jti cannot recover an account to
+		// evict. Best-effort: an id with no `users` row (never signed in
+		// interactively) or no connected daemon just leaves HubEvicted
+		// false, not an error — record-then-evict already happened in the
+		// correct order (the revocation row above is committed first).
+		if tgID > 0 && s.Hub != nil {
+			if targetUID, uidErr := s.Store.UserIDByTelegramID(ctx, tgID); uidErr == nil && s.Hub.HasDaemon(targetUID) {
+				s.Hub.Unregister(targetUID)
+				result.HubEvicted = true
+			}
+		}
+
+		s.audit(ctx, id, "revoke_worker_token", "", nil, startedAt)
+		return jsonResult(result)
+	}
+	return tool, handler
+}
+
 // demoReviewerAccountMgmtRefusal is the user-facing message returned when the
 // pinned demo/reviewer identity attempts a destructive account-management tool
 // (disconnect/delete). The demo session is shared infrastructure for the
@@ -1485,6 +1588,17 @@ type provisionLocalAccountResult struct {
 type revokeSessionResult struct {
 	TelegramID int64 `json:"telegram_id"`
 	Revoked    bool  `json:"revoked"`
+}
+
+// revokeWorkerTokenResult is the success payload of revoke_worker_token.
+type revokeWorkerTokenResult struct {
+	Jti        string `json:"jti,omitempty"`
+	TelegramID int64  `json:"telegram_id,omitempty"`
+	Revoked    bool   `json:"revoked"`
+	// HubEvicted reports whether a currently-connected Local Bridge daemon
+	// for this account was dropped. Always false on the jti-only revoke
+	// path — see toolRevokeWorkerToken's doc comment.
+	HubEvicted bool `json:"hub_evicted"`
 }
 
 // jsonResult marshals v to a pretty-printed JSON text content block (for

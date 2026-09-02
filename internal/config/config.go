@@ -42,19 +42,27 @@ type Config struct {
 	// tier (see localEnvNames there) makes an insecure-auth or
 	// missing-encryption-key boot fatal regardless of the configured listen
 	// address.
-	Environment        string
-	DatabaseURL        string
-	OAUTHJWTSecret     string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
-	OAUTHJWTAudience   string // expected `aud` claim; empty disables the check
-	OAUTHJWTAudReq     bool   // when true, tokens without aud are rejected
-	TGAPIID            int
-	TGAPIHash          string
-	EncryptionKey      []byte
-	AllowSend          bool
-	IdleClientTimeout  time.Duration
-	RateLimitPerUser   int
-	AuditRetentionDays int
-	LogLevel           string
+	Environment      string
+	DatabaseURL      string
+	OAUTHJWTSecret   string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
+	OAUTHJWTAudience string // expected `aud` claim; empty disables the check
+	OAUTHJWTAudReq   bool   // when true, tokens without aud are rejected
+	// WorkerTokenRevocationCacheTTL bounds how long a worker-token jti
+	// denylist check may serve a stale in-memory snapshot before refreshing
+	// from worker_token_revocations. <=0 falls back to
+	// localjwt.DefaultRevocationCacheTTL (10s); any value above
+	// localjwt.MaxRevocationCacheTTL (15s) is clamped down to it there — a
+	// revocation nobody can rely on within a known window is not a
+	// containment control. Set via WORKER_TOKEN_REVOCATION_CACHE_TTL.
+	WorkerTokenRevocationCacheTTL time.Duration
+	TGAPIID                       int
+	TGAPIHash                     string
+	EncryptionKey                 []byte
+	AllowSend                     bool
+	IdleClientTimeout             time.Duration
+	RateLimitPerUser              int
+	AuditRetentionDays            int
+	LogLevel                      string
 	// Telegram-native OAuth (local-jwt mode):
 	TelegramLoginBotToken string  // bot token used to send the daily new-client digest
 	TGLoginAdmins         []int64 // allowlist of Telegram ids granted platform-admins scopes
@@ -204,43 +212,44 @@ type Config struct {
 func Load() (*Config, error) {
 	authMode := envOr("AUTH_MODE", "local-dev")
 	c := &Config{
-		Addr:                       envOr("ADDR", ":8080"),
-		PublicBaseURL:              envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
-		MCPPath:                    envOr("MCP_PATH", "/mcp"),
-		AuthMode:                   authMode,
-		AuthRequired:               envBool("AUTH_REQUIRED", false),
-		OperatorLogin:              envOr("OPERATOR_GITHUB_LOGIN", "operator"),
-		Environment:                envOr("ENV", ""),
-		DatabaseURL:                envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
-		OAUTHJWTSecret:             jwtSigningKey(authMode),
-		OAUTHJWTAudience:           os.Getenv("OAUTH_JWT_AUDIENCE"),
-		OAUTHJWTAudReq:             envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
-		TGAPIHash:                  os.Getenv("TG_API_HASH"),
-		AllowSend:                  envBool("ALLOW_SEND", false),
-		IdleClientTimeout:          envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
-		RateLimitPerUser:           envInt("RATE_LIMIT_PER_USER", 30),
-		AuditRetentionDays:         envInt("AUDIT_RETENTION_DAYS", 90),
-		AgentRetentionDays:         envInt("AGENT_RETENTION_DAYS", 30),
-		AgentJobVisibility:         envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
-		AgentAllowLegacyCompletion: envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),
-		AgentApprovalTTL:           envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
-		AgentEnabled:               envBool("AGENT_ENABLED", false),
-		AgentKillSwitch:            envBool("AGENT_KILL_SWITCH", false),
-		AgentProfilePath:           os.Getenv("AGENT_PROFILE_PATH"),
-		AgentProfileOwnerTGID:      envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
-		AgentTestCrashAfterReserve: envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
-		LogLevel:                   envOr("LOG_LEVEL", "info"),
-		TelegramLoginBotToken:      os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
-		TelegramOIDCClientID:       os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
-		TelegramOIDCClientSecret:   os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
-		TelegramOIDCIssuerURL:      envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
-		TelegramOIDCRedirectURL:    os.Getenv("TELEGRAM_OIDC_REDIRECT_URL"),
-		OAUTHCodeTTL:               envDuration("OAUTH_CODE_TTL", 10*time.Minute),
-		OAUTHAccessTokenTTL:        envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
-		OAUTHRefreshTokenTTL:       envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
-		OAUTHAllowImplicitClient:   envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
-		AutoApproveClients:         envBool("AUTO_APPROVE_CLIENTS", false),
-		DigestHourUTC:              envInt("DIGEST_HOUR_UTC", 9),
+		Addr:                          envOr("ADDR", ":8080"),
+		PublicBaseURL:                 envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
+		MCPPath:                       envOr("MCP_PATH", "/mcp"),
+		AuthMode:                      authMode,
+		AuthRequired:                  envBool("AUTH_REQUIRED", false),
+		OperatorLogin:                 envOr("OPERATOR_GITHUB_LOGIN", "operator"),
+		Environment:                   envOr("ENV", ""),
+		DatabaseURL:                   envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
+		OAUTHJWTSecret:                jwtSigningKey(authMode),
+		OAUTHJWTAudience:              os.Getenv("OAUTH_JWT_AUDIENCE"),
+		OAUTHJWTAudReq:                envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
+		WorkerTokenRevocationCacheTTL: envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
+		TGAPIHash:                     os.Getenv("TG_API_HASH"),
+		AllowSend:                     envBool("ALLOW_SEND", false),
+		IdleClientTimeout:             envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
+		RateLimitPerUser:              envInt("RATE_LIMIT_PER_USER", 30),
+		AuditRetentionDays:            envInt("AUDIT_RETENTION_DAYS", 90),
+		AgentRetentionDays:            envInt("AGENT_RETENTION_DAYS", 30),
+		AgentJobVisibility:            envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
+		AgentAllowLegacyCompletion:    envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),
+		AgentApprovalTTL:              envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
+		AgentEnabled:                  envBool("AGENT_ENABLED", false),
+		AgentKillSwitch:               envBool("AGENT_KILL_SWITCH", false),
+		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
+		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
+		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
+		LogLevel:                      envOr("LOG_LEVEL", "info"),
+		TelegramLoginBotToken:         os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
+		TelegramOIDCClientID:          os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
+		TelegramOIDCClientSecret:      os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
+		TelegramOIDCIssuerURL:         envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
+		TelegramOIDCRedirectURL:       os.Getenv("TELEGRAM_OIDC_REDIRECT_URL"),
+		OAUTHCodeTTL:                  envDuration("OAUTH_CODE_TTL", 10*time.Minute),
+		OAUTHAccessTokenTTL:           envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
+		OAUTHRefreshTokenTTL:          envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
+		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
+		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
+		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
