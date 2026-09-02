@@ -41,9 +41,17 @@ func (s *Store) RevokeWorkerToken(ctx context.Context, jti string, telegramID in
 	now := time.Now().UTC()
 	if s.isPostgres(ctx) {
 		if _, err := s.DB.ExecContext(ctx,
+			// The ON CONFLICT target repeats the index predicate because the
+			// backing index is partial (jti IS NOT NULL, so blanket rows with a
+			// NULL jti do not collide with each other). Postgres matches an
+			// arbiter index by inferring it from the target, and a bare
+			// `ON CONFLICT (jti)` matches no index here: it fails at runtime with
+			// "there is no unique or exclusion constraint matching the ON CONFLICT
+			// specification". SQLite takes the INSERT OR IGNORE branch below and
+			// never exercises this statement, so tests alone do not catch it.
 			`INSERT INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
 			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (jti) DO NOTHING`,
+			 ON CONFLICT (jti) WHERE jti IS NOT NULL DO NOTHING`,
 			jti, telegramID, now, nullable(reason), nullableInt(revokedBy),
 		); err != nil {
 			return fmt.Errorf("revoke worker token: %w", err)

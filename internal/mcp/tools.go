@@ -1363,6 +1363,23 @@ Output: JSON {jti, telegram_id, revoked, hub_evicted}.`),
 		}
 		result.Revoked = true
 
+		// Force the denylist forward before evicting. Eviction makes the
+		// daemon reconnect within seconds, and that reconnect is
+		// authenticated against the RevocationCache — which refreshes on its
+		// own TTL, so a snapshot taken before this call would still accept
+		// the credential just revoked, and the evicted daemon would come
+		// straight back. Best-effort: a refresh failure is reported in the
+		// result rather than failing the revocation, which is already
+		// durably recorded and takes effect within the TTL regardless.
+		if s.RevocationCache != nil {
+			if refreshErr := s.RevocationCache.Refresh(ctx); refreshErr != nil {
+				slog.Warn("revoke_worker_token: denylist refresh failed; revocation still takes effect within the cache TTL",
+					"err", refreshErr)
+			} else {
+				result.DenylistRefreshed = true
+			}
+		}
+
 		// Eviction: only possible on the telegram_id path — see the doc
 		// comment above for why a bare jti cannot recover an account to
 		// evict. Best-effort: an id with no `users` row (never signed in
@@ -1599,6 +1616,11 @@ type revokeWorkerTokenResult struct {
 	// for this account was dropped. Always false on the jti-only revoke
 	// path — see toolRevokeWorkerToken's doc comment.
 	HubEvicted bool `json:"hub_evicted"`
+	// DenylistRefreshed reports whether the in-process revocation cache was
+	// forced current as part of this call. False means the revocation is
+	// recorded but takes effect only within the cache's TTL — which leaves
+	// an evicted daemon a window to reconnect with the revoked credential.
+	DenylistRefreshed bool `json:"denylist_refreshed"`
 }
 
 // jsonResult marshals v to a pretty-printed JSON text content block (for

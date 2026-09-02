@@ -105,6 +105,18 @@ func (c *RevocationCache) IsRevoked(ctx context.Context, jti string, telegramID 
 	return false, nil
 }
 
+// Refresh forces an immediate reload of the denylist, ignoring the TTL.
+//
+// Callers that have just recorded a revocation use this to close the window
+// the TTL would otherwise leave open. The concrete case is Local Bridge: the
+// revoke path evicts a connected daemon, the daemon reconnects within
+// seconds, and that reconnect is authenticated against this cache — against a
+// snapshot that predates the revocation, if nothing forced it forward. The
+// evicted credential would then simply reconnect with itself.
+func (c *RevocationCache) Refresh(ctx context.Context) error {
+	return c.refresh(ctx)
+}
+
 // refresh reloads the denylist from the store. Safe for concurrent callers:
 // a race between two callers both observing a stale cache just issues the
 // same idempotent read twice, which is harmless for a single-digit-row

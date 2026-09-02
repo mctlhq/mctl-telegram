@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -193,5 +194,52 @@ func TestIsWorkerTokenRevoked_NonUTCIssuedAt(t *testing.T) {
 		if !revoked {
 			t.Errorf("issuedAt in %s: revoked=false, want true — the revocation postdates the token regardless of how the instant is spelled", loc)
 		}
+	}
+}
+
+// TestRevokeWorkerToken_PostgresUpsert exercises the Postgres branch of
+// RevokeWorkerToken against a real server. The two dialects take different
+// statements — Postgres uses ON CONFLICT, SQLite INSERT OR IGNORE — so the
+// SQLite tests above cannot see a defect in the Postgres one, and this
+// statement's arbiter index is partial, which Postgres will not infer from a
+// bare ON CONFLICT (jti). Without the index predicate repeated in the
+// conflict target, production fails on the first revoke-by-jti with
+// "there is no unique or exclusion constraint matching the ON CONFLICT
+// specification" while every SQLite test stays green.
+//
+// Skipped unless TEST_DATABASE_URL points at a Postgres instance.
+func TestRevokeWorkerToken_PostgresUpsert(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	conn, err := Open(ctx, dsn, 0, 0)
+	if err != nil {
+		t.Skipf("postgres not available: %v", err)
+	}
+	defer conn.Close()
+	if err := Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	s := &Store{DB: conn}
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(ctx, `DELETE FROM worker_token_revocations WHERE jti LIKE 'pgtest-%'`)
+	})
+
+	const jti = "pgtest-jti-1"
+	if err := s.RevokeWorkerToken(ctx, jti, 0, "first", 0); err != nil {
+		t.Fatalf("first revoke: %v", err)
+	}
+	// Idempotent: revoking the same jti again must not error.
+	if err := s.RevokeWorkerToken(ctx, jti, 0, "second", 0); err != nil {
+		t.Fatalf("second revoke of the same jti: %v", err)
+	}
+	revoked, err := s.IsWorkerTokenRevoked(ctx, jti, 0, time.Now())
+	if err != nil {
+		t.Fatalf("IsWorkerTokenRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("jti not reported as revoked on Postgres")
 	}
 }

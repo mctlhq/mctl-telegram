@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -209,5 +210,94 @@ func TestToolRevokeWorkerToken_NoDaemonConnectedIsNoop(t *testing.T) {
 	}
 	if out["hub_evicted"] != false {
 		t.Errorf("expected hub_evicted=false with no daemon connected, got: %v", out)
+	}
+}
+
+// fakeRevocationCache records whether Refresh ran, and when relative to the
+// eviction it is supposed to precede.
+type fakeRevocationCache struct {
+	refreshed int
+	err       error
+	onRefresh func()
+}
+
+func (f *fakeRevocationCache) Refresh(context.Context) error {
+	f.refreshed++
+	if f.onRefresh != nil {
+		f.onRefresh()
+	}
+	return f.err
+}
+
+// TestToolRevokeWorkerToken_RefreshesDenylistBeforeEvicting closes the
+// reconnect race. Eviction makes the daemon reconnect within seconds, and that
+// reconnect is authenticated against the revocation cache; if the cache still
+// holds a snapshot from before this call, the credential just revoked is
+// accepted and the evicted daemon comes straight back. Ordering is asserted,
+// not just the call: refreshing after the eviction would leave exactly the
+// window this is meant to close.
+func TestToolRevokeWorkerToken_RefreshesDenylistBeforeEvicting(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	hub := bridge.NewHub()
+	const tgID = 900001
+	uid, uErr := store.EnsureUserByTelegramID(ctx, tgID, "evict-user", "Evict User")
+	if uErr != nil {
+		t.Fatalf("ensure user: %v", uErr)
+	}
+	hub.Register(uid)
+
+	var evictedBeforeRefresh bool
+	cache := &fakeRevocationCache{onRefresh: func() {
+		// Refresh must run while the daemon is still registered.
+		if !hub.HasDaemon(uid) {
+			evictedBeforeRefresh = true
+		}
+	}}
+
+	srv := &Server{Store: store, Hub: hub, RevocationCache: cache}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	_, handler := srv.toolRevokeWorkerToken()
+	result, err := handler(auth.With(ctx, id), mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "revoke_worker_token",
+		Arguments: map[string]any{"telegram_id": float64(tgID)},
+	}})
+	if err != nil || result.IsError {
+		t.Fatalf("revoke failed: err=%v result=%s", err, contentText(result))
+	}
+	if cache.refreshed != 1 {
+		t.Errorf("Refresh called %d times, want 1 — without it an evicted daemon reconnects against a stale denylist", cache.refreshed)
+	}
+	if evictedBeforeRefresh {
+		t.Error("the denylist was refreshed after eviction, which leaves the reconnect window open")
+	}
+	if hub.HasDaemon(uid) {
+		t.Error("daemon was not evicted")
+	}
+}
+
+// TestToolRevokeWorkerToken_RefreshFailureStillRevokes: the revocation is
+// already durable when the refresh runs, so a refresh error must not fail the
+// call — it only means the denylist catches up on its own TTL instead.
+func TestToolRevokeWorkerToken_RefreshFailureStillRevokes(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	cache := &fakeRevocationCache{err: errors.New("boom")}
+	srv := &Server{Store: store, RevocationCache: cache}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"admin:users"}}
+	_, handler := srv.toolRevokeWorkerToken()
+	result, err := handler(auth.With(ctx, id), mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "revoke_worker_token",
+		Arguments: map[string]any{"telegram_id": float64(900002)},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("a denylist refresh failure must not fail the revocation: %s", contentText(result))
+	}
+	revoked, qErr := store.IsWorkerTokenRevoked(ctx, "x", 900002, time.Now().Add(-time.Hour))
+	if qErr != nil || !revoked {
+		t.Errorf("revocation not recorded despite refresh failure: revoked=%v err=%v", revoked, qErr)
 	}
 }

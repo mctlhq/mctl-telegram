@@ -23,6 +23,15 @@ type Server struct {
 	// Limiter is the per-identity / per-peer write-action limiter.
 	// Optional: when nil, AllowPeer checks are skipped.
 	Limiter *audit.RateLimiter
+	// RevocationCache is the denylist snapshot the auth providers read. The
+	// revoke_worker_token tool forces it forward after recording a
+	// revocation so an evicted daemon cannot reconnect against a stale
+	// snapshot. When nil, revocation still takes effect within the cache's
+	// own TTL; only the immediate-reconnect window is left open.
+	RevocationCache interface {
+		Refresh(ctx context.Context) error
+	}
+
 	// Hub routes MCP tool calls to Local Bridge daemons. When nil, all
 	// tools fall back to Pool.Borrow (hosted mode only).
 	Hub *bridge.Hub
@@ -92,6 +101,15 @@ func (s *Server) WithHub(h *bridge.Hub) *Server {
 	return s
 }
 
+// WithRevocationCache wires the worker-token denylist so revoke_worker_token
+// can force it current before an evicted daemon gets a chance to reconnect.
+func (s *Server) WithRevocationCache(c interface {
+	Refresh(ctx context.Context) error
+}) *Server {
+	s.RevocationCache = c
+	return s
+}
+
 // WithMetrics wires a *metrics.Registry so tool invocations are counted and
 // their durations are histogrammed. Returns the receiver for chaining.
 func (s *Server) WithMetrics(m *metrics.Registry) *Server {
@@ -150,31 +168,106 @@ func (s *Server) HTTPHandler() http.Handler {
 		v,
 		mcpserver.WithToolCapabilities(true),
 	)
-	{t, h := s.toolListDialogs(); s.addTool(srv, t, h)}
-	{t, h := s.toolGetUnreadMessages(); s.addTool(srv, t, h)}
-	{t, h := s.toolGetMessages(); s.addTool(srv, t, h)}
-	{t, h := s.toolSendMessage(); s.addTool(srv, t, h)}
-	{t, h := s.toolPreparePinMessage(); s.addTool(srv, t, h)}
-	{t, h := s.toolPinMessage(); s.addTool(srv, t, h)}
-	{t, h := s.toolPrepareGetMedia(); s.addTool(srv, t, h)}
-	{t, h := s.toolGetMedia(); s.addTool(srv, t, h)}
-	{t, h := s.toolSendMedia(); s.addTool(srv, t, h)}
-	{t, h := s.toolDisconnectAccount(); s.addTool(srv, t, h)}
-	{t, h := s.toolDeleteAccount(); s.addTool(srv, t, h)}
-	{t, h := s.toolGetMyAuditLog(); s.addTool(srv, t, h)}
-	{t, h := s.toolListIdentities(); s.addTool(srv, t, h)}
-	{t, h := s.toolSetAccess(); s.addTool(srv, t, h)}
-	{t, h := s.toolSetAccountSend(); s.addTool(srv, t, h)}
-	{t, h := s.toolSetAccountMode(); s.addTool(srv, t, h)}
-	{t, h := s.toolProvisionLocalAccount(); s.addTool(srv, t, h)}
-	{t, h := s.toolGetUserAuditLog(); s.addTool(srv, t, h)}
-	{t, h := s.toolRevokeSession(); s.addTool(srv, t, h)}
-	{t, h := s.toolRevokeWorkerToken(); s.addTool(srv, t, h)}
-	{t, h := s.toolEditMessage(); s.addTool(srv, t, h)}
-	{t, h := s.toolDeleteMessages(); s.addTool(srv, t, h)}
-	{t, h := s.toolForwardMessages(); s.addTool(srv, t, h)}
-	{t, h := s.toolSearchMessages(); s.addTool(srv, t, h)}
-	{t, h := s.toolSetReaction(); s.addTool(srv, t, h)}
+	{
+		t, h := s.toolListDialogs()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetUnreadMessages()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetMessages()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSendMessage()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolPreparePinMessage()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolPinMessage()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolPrepareGetMedia()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetMedia()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSendMedia()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolDisconnectAccount()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolDeleteAccount()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetMyAuditLog()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolListIdentities()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSetAccess()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSetAccountSend()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSetAccountMode()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolProvisionLocalAccount()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetUserAuditLog()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolRevokeSession()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolRevokeWorkerToken()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolEditMessage()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolDeleteMessages()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolForwardMessages()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSearchMessages()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSetReaction()
+		s.addTool(srv, t, h)
+	}
 
 	return mcpserver.NewStreamableHTTPServer(
 		srv,

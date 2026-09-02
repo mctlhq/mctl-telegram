@@ -525,6 +525,10 @@ func main() {
 	// Wire the hub into the MCP server so tool calls for local-mode users
 	// are forwarded to their daemon instead of the hosted MTProto pool.
 	mcpSrv = mcpSrv.WithHub(hub)
+	// The revoke tool forces this forward before evicting a daemon, so the
+	// reconnect that eviction provokes cannot pass on a pre-revocation
+	// snapshot.
+	mcpSrv = mcpSrv.WithRevocationCache(workerTokenRevocationCache)
 
 	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
 	// runs, so unauthenticated humans still see instructions instead of
@@ -657,6 +661,13 @@ func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localj
 		}
 		return p, nil
 	case "shared-hmac", "shared-hmac-legacy":
+		// No revocation cache here, deliberately. This provider verifies
+		// JWTs signed by api.mctl.ai with the shared secret and issued by
+		// https://api.mctl.ai. A worker token is signed by this service's
+		// own key with its own issuer, so under this mode it fails
+		// verification before any denylist would be consulted — there is no
+		// worker token to revoke on this path. Wiring the cache in would add
+		// a lookup that can never match.
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
 			ExpectedIssuer:   "https://api.mctl.ai",
