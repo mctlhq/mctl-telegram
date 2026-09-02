@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Local Bridge: маршрут вызова после перевода аккаунта",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1300,
+      660
+    ],
+    "views": [
+      {
+        "id": "local-route",
+        "label": "Локальный маршрут",
+        "focus": [
+          "connector",
+          "relay",
+          "daemon",
+          "telegram"
+        ],
+        "note": "Основной путь: сессия на машине оператора, tg.mctl.ai только реле."
+      },
+      {
+        "id": "hosted-route",
+        "label": "Hosted-маршрут",
+        "focus": [
+          "connector",
+          "relay",
+          "pool",
+          "telegram"
+        ],
+        "note": "Ветка по умолчанию: сервер открывает Telegram своей сессией."
+      },
+      {
+        "id": "evidence",
+        "label": "Доказательство маршрута",
+        "focus": [
+          "relay",
+          "accounts",
+          "audit"
+        ],
+        "note": "mode решает маршрут, call_path его фиксирует."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "connector",
+      "type": "external",
+      "label": "Claude connector",
+      "sublabel": "MCP-клиент",
+      "pos": [
+        40,
+        330
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "tg.mctl.ai",
+      "sublabel": "Go, одна реплика",
+      "tag": "Bridge Hub в процессе",
+      "pos": [
+        300,
+        326
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "backend",
+      "label": "mctl-telegram-local",
+      "sublabel": "Mac mini, launchd",
+      "tag": "Tailscale",
+      "pos": [
+        700,
+        326
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "telegram",
+      "type": "external",
+      "label": "Telegram",
+      "sublabel": "MTProto",
+      "pos": [
+        1090,
+        330
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "pool",
+      "type": "backend",
+      "label": "Hosted client pool",
+      "sublabel": "серверные сессии",
+      "pos": [
+        1090,
+        130
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "vault",
+      "type": "security",
+      "label": "Vault",
+      "sublabel": "через External Secrets",
+      "pos": [
+        40,
+        540
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "accounts",
+      "type": "database",
+      "label": "telegram_accounts",
+      "sublabel": "колонка mode",
+      "pos": [
+        300,
+        540
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "audit",
+      "type": "database",
+      "label": "audit_logs",
+      "sublabel": "call_path",
+      "pos": [
+        540,
+        540
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "session",
+      "type": "database",
+      "label": "state.db",
+      "sublabel": "AES-GCM, права 0600",
+      "pos": [
+        740,
+        540
+      ],
+      "size": [
+        180,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Kubernetes mctl-preprod · namespace labs",
+      "wraps": [
+        "relay",
+        "pool"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Машина оператора",
+      "wraps": [
+        "daemon",
+        "session"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "shared-pg · platform-db",
+      "wraps": [
+        "accounts",
+        "audit"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "call-in",
+      "from": "connector",
+      "to": "relay",
+      "label": "MCP по HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mode-lookup",
+      "from": "relay",
+      "to": "accounts",
+      "label": "читает mode",
+      "labelDy": 60
+    },
+    {
+      "id": "bridge-ws",
+      "from": "relay",
+      "to": "daemon",
+      "label": "websocket /bridge",
+      "variant": "emphasis"
+    },
+    {
+      "id": "local-mtproto",
+      "from": "daemon",
+      "to": "telegram",
+      "label": "MTProto с машины оператора",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-pool",
+      "from": "relay",
+      "to": "pool",
+      "label": "mode=hosted",
+      "variant": "dashed"
+    },
+    {
+      "id": "hosted-mtproto",
+      "from": "pool",
+      "to": "telegram",
+      "label": "MTProto с сервера",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 60
+    },
+    {
+      "id": "session-read",
+      "from": "daemon",
+      "to": "session",
+      "label": "сессия только на диске",
+      "labelDy": 60,
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "audit-write",
+      "from": "relay",
+      "to": "audit",
+      "label": "call_path=local|hosted"
+    },
+    {
+      "id": "secrets",
+      "from": "vault",
+      "to": "relay",
+      "label": "TG_API_ID, ключ подписи",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Локальный маршрут",
+      "items": [
+        "Реле не открывает Telegram: вызов уходит по websocket на демон",
+        "Демон держит сессию у себя и сам ходит в Telegram",
+        "Демон недоступен — вызов вернёт ошибку, а не уйдёт на сервер"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Секреты и включение",
+      "items": [
+        "Vault: platform/mctl-telegram/api, /oauth, /local-bridge-pilot",
+        "Парольная фраза — файл 0600 по MCTL_LOCAL_PASSPHRASE_FILE",
+        "mode='local' ставит разовый Job из mctl-gitops: писателя в сервисе нет"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Чем доказывается",
+      "items": [
+        "call_path в audit_logs — единственное надёжное свидетельство",
+        "mctl_bridge_active_daemons, mctl_bridge_calls_total",
+        "Алерт MctlBridgeDaemonsFlapping ловит цикл переподключений"
+      ]
+    }
+  ]
+}

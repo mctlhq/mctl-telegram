@@ -10,6 +10,17 @@ The mode is in beta and is enabled per account by an operator. This document
 describes what it actually does today, including the parts that are unfinished,
 so you can decide whether it fits your workflow before you set it up.
 
+![Маршрут вызова: локальный путь через демон и hosted-ветка через серверный пул](img/local-bridge.svg)
+
+The diagram is generated from `img/local-bridge.architecture.json` with
+[Archify](https://github.com/tt-a1i/archify) — edit the JSON and re-render
+rather than editing the SVG, otherwise the two drift apart:
+
+```sh
+node ~/.agents/skills/archify/bin/archify.mjs deliver architecture \
+  docs/img/local-bridge.architecture.json /tmp/local-bridge.html --quality showcase
+```
+
 ## What it changes, and what it does not
 
 **Telegram traffic originates from your machine.** Once the daemon is
