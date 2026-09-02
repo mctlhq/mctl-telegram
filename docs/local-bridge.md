@@ -294,10 +294,21 @@ The MCP token is long-lived — months, typically. Nothing warns you as it
 approaches expiry: the first symptom is the daemon reconnecting in a loop. Note
 the expiry date somewhere you will see it.
 
-There is currently no way to confirm from the API which route a call took. The
-server records it in the audit table as `call_path`, but the audit tools do not
-expose that field, so verifying that traffic really went through your machine
-means reading your daemon's log for the matching `dispatch` line.
+You can confirm which route a call actually took. `get_my_audit_log` and
+`GET /api/account/audit` return a `call_path` field per entry: `"local"` when
+the call was routed to your daemon, absent when it was served by the hosted
+session pool. That is the authoritative record — the server writes it — and it
+is worth checking once after the switch:
+
+```
+23:45:41  list_dialogs  status=ok     call_path=(absent — hosted)
+23:48:29  list_dialogs  status=error  call_path=local
+23:50:00  list_dialogs  status=ok     call_path=local
+```
+
+The error in the middle is the expected one: the account was already in local
+mode while the daemon was not yet running. Your daemon's own log shows the
+matching `dispatch` line for each successful call.
 
 ## Troubleshooting
 
