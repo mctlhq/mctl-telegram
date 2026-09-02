@@ -1023,11 +1023,9 @@ Inputs:
   telegram_id — int, required. The Telegram user id (see list_telegram_identities).
   mode        — string, required. "local" or "hosted".
 
-The user must have an active session (a completed hosted login) before mode can be changed.
-Setting mode="local" for a telegram_id that is not in SESSION_TTL_EXEMPT_TG_IDS is refused: without
-that exemption, SweepIdleSessions revokes the account 30 days after Local Bridge traffic stops
-refreshing last_used_at (bridge calls never stamp it), which silently reverts the account to
-hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then retry.`),
+The user must have an active session (a completed hosted login) before mode can be changed. Use
+provision_local_account instead to create a fresh local-only account for a Telegram id that has
+never completed a hosted login.`),
 		mcplib.WithNumber("telegram_id",
 			mcplib.Required(),
 			mcplib.Description("Telegram user id to change the mode for (required).")),
@@ -1061,12 +1059,6 @@ hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then r
 		if mode != db.ModeLocal && mode != db.ModeHosted {
 			return refuse(`mode must be "local" or "hosted"`), nil
 		}
-		if mode == db.ModeLocal && !s.Store.IsModeExempt(tgID) {
-			return refuse("telegram id %d is not in SESSION_TTL_EXEMPT_TG_IDS — setting mode=local "+
-				"without that exemption will silently revert to hosted after 30 days idle "+
-				"(Local Bridge calls do not refresh last_used_at); add it to "+
-				"SESSION_TTL_EXEMPT_TG_IDS first, then retry", tgID), nil
-		}
 		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
 		if err != nil {
 			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
@@ -1089,6 +1081,76 @@ hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then r
 		}
 		s.audit(ctx, id, "set_account_mode", "", nil, startedAt)
 		return jsonResult(setAccountModeResult{TelegramID: tgID, Mode: mode, OK: true})
+	}
+	return tool, handler
+}
+
+// toolProvisionLocalAccount creates a local-only telegram_accounts row for a
+// Telegram id that has never completed a hosted login, so a Local Bridge
+// account can exist without the server ever holding a copy of the session.
+// This is a distinct operation from set_account_mode, which requires a
+// pre-existing active (hosted) row to flip.
+func (s *Server) toolProvisionLocalAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("provision_local_account",
+		mcplib.WithTitleAnnotation("Provision a Local Bridge account"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[provisionLocalAccountResult](),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Create a fresh "local"
+mode Telegram account (Local Bridge: MTProto runs on the user's own machine, tg.mctl.ai relays
+only) for a Telegram id that has never completed a hosted login. The resulting row has no
+server-side session (session_encrypted is NULL) and is immune to the idle/absolute session-TTL
+sweepers by construction.
+
+Inputs:
+  telegram_id  — int, required. The Telegram user id to provision.
+  display_name — string, optional.
+  username     — string, optional.
+
+Refuses if the Telegram id already has an active telegram_accounts row (hosted or local) — use
+set_account_mode to migrate an existing account instead.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
+			mcplib.Description("Telegram user id to provision a local account for (required).")),
+		mcplib.WithString("display_name",
+			mcplib.Description("Optional display name to store on the new row.")),
+		mcplib.WithString("username",
+			mcplib.Description("Optional Telegram username to store on the new row.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		refuse := func(format string, a ...any) *mcplib.CallToolResult {
+			err := errors.New(formatErr(format, a...))
+			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
+			return mcplib.NewToolResultError(err.Error())
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		if tgID <= 0 {
+			return refuse("telegram_id is required and must be a positive integer"), nil
+		}
+		displayName := stringArg(args, "display_name", "")
+		username := stringArg(args, "username", "")
+		targetUID, err := s.Store.EnsureUserByTelegramID(ctx, tgID, username, displayName)
+		if err != nil {
+			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
+			return toolErr("provision_local_account: %v", err), nil
+		}
+		if err := s.Store.ProvisionLocalAccount(ctx, targetUID, tgID, displayName, username); err != nil {
+			if errors.Is(err, db.ErrAccountAlreadyActive) {
+				return refuse("telegram id %d already has an active account — use set_account_mode "+
+					"to migrate an existing account to local mode instead", tgID), nil
+			}
+			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
+			return toolErr("provision_local_account: %v", err), nil
+		}
+		s.audit(ctx, id, "provision_local_account", "", nil, startedAt)
+		return jsonResult(provisionLocalAccountResult{TelegramID: tgID, Mode: db.ModeLocal, OK: true})
 	}
 	return tool, handler
 }
@@ -1407,6 +1469,13 @@ type setAccountSendResult struct {
 
 // setAccountModeResult is the success payload of set_account_mode.
 type setAccountModeResult struct {
+	TelegramID int64  `json:"telegram_id"`
+	Mode       string `json:"mode"`
+	OK         bool   `json:"ok"`
+}
+
+// provisionLocalAccountResult is the success payload of provision_local_account.
+type provisionLocalAccountResult struct {
 	TelegramID int64  `json:"telegram_id"`
 	Mode       string `json:"mode"`
 	OK         bool   `json:"ok"`

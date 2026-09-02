@@ -205,6 +205,17 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 			return fmt.Errorf("drop not null on users.github_login: %w", err)
 		}
 	}
+	// Drop the NOT NULL constraint on telegram_accounts.session_encrypted:
+	// local-only accounts (provisioned via ProvisionLocalAccount, never
+	// completing a hosted login) have no server-side session to store. Same
+	// idempotent, additive pattern as the github_login change above.
+	if pg {
+		if _, err := dbConn.ExecContext(ctx,
+			`ALTER TABLE telegram_accounts ALTER COLUMN session_encrypted DROP NOT NULL`,
+		); err != nil {
+			return fmt.Errorf("drop not null on telegram_accounts.session_encrypted: %w", err)
+		}
+	}
 	// Backfill: rows that pre-date the columns get last_used_at = connected_at
 	// and expires_at = connected_at + 90 days. We do this on every Migrate run
 	// rather than as a one-shot script because the platform's gitops loop is
@@ -301,7 +312,7 @@ func sqliteSchema() []string {
 			telegram_user_id INTEGER,
 			display_name TEXT,
 			username TEXT,
-			session_encrypted BLOB NOT NULL,
+			session_encrypted BLOB,
 			send_enabled INTEGER NOT NULL DEFAULT 0,
 			connected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			revoked_at DATETIME,

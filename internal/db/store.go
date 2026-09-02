@@ -789,6 +789,53 @@ func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (
 	return n, nil
 }
 
+// ErrAccountAlreadyActive is returned by ProvisionLocalAccount when the
+// target user already has an active (non-revoked) telegram_accounts row.
+// Provisioning is only for brand-new accounts; migrating an existing one
+// (hosted or local) to local mode is SetAccountMode's job.
+var ErrAccountAlreadyActive = errors.New("account already active")
+
+// ProvisionLocalAccount creates a local-only telegram_accounts row for a
+// user who has never completed a hosted login: session_encrypted is left
+// NULL (there is no server-held session to store), mode is 'local' from
+// insert, and last_used_at/expires_at stay NULL since there is no session
+// for the idle/absolute TTL sweepers to measure -- the sweepers instead
+// exclude mode = 'local' rows outright (see SweepIdleSessions).
+//
+// Refuses with ErrAccountAlreadyActive if the user already has an active
+// row, so an existing hosted account is not silently duplicated -- the
+// caller should point the operator at set_account_mode for migrating an
+// existing account instead. The existence check and insert run in one
+// transaction so two concurrent calls cannot both pass the check.
+func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, displayName, username string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
+		userID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check existing account: %w", err)
+	}
+	if exists {
+		return ErrAccountAlreadyActive
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, mode, send_enabled)
+		 VALUES($1,$2,$3,$4,NULL,$5,$6)`,
+		userID, tgID, nullable(displayName), nullable(username), ModeLocal, false,
+	); err != nil {
+		return fmt.Errorf("insert local account: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ToggleSendEnabled atomically inverts send_enabled on the user's active
 // session row. Using a single UPDATE avoids the read-modify-write race that
 // exists when callers read IsSendEnabled and then call SetSendEnabled in two
@@ -945,6 +992,7 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND (
 		     (expires_at IS NOT NULL AND expires_at < $1)
 		     OR `+idlePredicate+`
@@ -968,6 +1016,7 @@ func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	query := `UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND last_used_at IS NOT NULL
 		   AND last_used_at < $2`
 	args := []any{now, idleCutoff}
@@ -996,6 +1045,7 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 		`UPDATE telegram_accounts
 		 SET revoked_at = $1
 		 WHERE revoked_at IS NULL
+		   AND mode <> 'local'
 		   AND expires_at IS NOT NULL
 		   AND expires_at < $1`,
 		now,
@@ -1111,15 +1161,23 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	return out, nil
 }
 
-// GetAccountMode returns the mode ('hosted' or 'local') for the user's active
-// account. Returns "hosted" and no error when the user has no active account
-// (safe default that keeps the existing hosted-mode behaviour for users who
-// haven't been migrated to Local Bridge).
+// GetAccountMode returns the mode ('hosted' or 'local') for the user's most
+// recent account row. Returns "hosted" and no error when the user has no
+// account row at all (safe default that keeps the existing hosted-mode
+// behaviour for users who haven't been migrated to Local Bridge).
+//
+// Deliberately does not filter on revoked_at IS NULL: mode is a property of
+// the account row, not of whether its embedded hosted session is still
+// considered fresh. Revoking a hosted session (idle/absolute TTL sweep,
+// explicit disconnect) must not make a local-mode account look hosted again
+// -- see the mctl-telegram issue-468 proposal. connected_at DESC LIMIT 1
+// still means a fresh hosted SaveSession (which always inserts a new row)
+// wins over any older revoked row for the same user.
 func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error) {
 	var mode string
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT mode FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
+		 WHERE user_id = $1
 		 ORDER BY connected_at DESC LIMIT 1`,
 		userID,
 	).Scan(&mode)
