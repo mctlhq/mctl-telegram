@@ -1041,17 +1041,28 @@ hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then r
 		if err := requireScope(id, "admin:users"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
+		// refuse audits a refused call and returns it. Past the scope gate
+		// every exit from this handler is audited, not only the ones that
+		// reach the database: a refused attempt to move an account to local
+		// mode is exactly the event an operator needs in audit_logs, and
+		// auditing only the successful write would leave a caller repeatedly
+		// probing the TTL-exemption gate with no trail at all.
+		refuse := func(format string, a ...any) *mcplib.CallToolResult {
+			err := errors.New(formatErr(format, a...))
+			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
+			return mcplib.NewToolResultError(err.Error())
+		}
 		args := req.GetArguments()
 		tgID := int64(intArg(args, "telegram_id", 0))
 		mode := stringArg(args, "mode", "")
 		if tgID <= 0 {
-			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+			return refuse("telegram_id is required and must be a positive integer"), nil
 		}
 		if mode != db.ModeLocal && mode != db.ModeHosted {
-			return mcplib.NewToolResultError(`mode must be "local" or "hosted"`), nil
+			return refuse(`mode must be "local" or "hosted"`), nil
 		}
 		if mode == db.ModeLocal && !s.Store.IsModeExempt(tgID) {
-			return toolErr("telegram id %d is not in SESSION_TTL_EXEMPT_TG_IDS — setting mode=local "+
+			return refuse("telegram id %d is not in SESSION_TTL_EXEMPT_TG_IDS — setting mode=local "+
 				"without that exemption will silently revert to hosted after 30 days idle "+
 				"(Local Bridge calls do not refresh last_used_at); add it to "+
 				"SESSION_TTL_EXEMPT_TG_IDS first, then retry", tgID), nil
@@ -1065,14 +1076,18 @@ hosted with a dead daemon. Add the id to SESSION_TTL_EXEMPT_TG_IDS first, then r
 			return toolErr("set_account_mode: %v", err), nil
 		}
 		rows, err := s.Store.SetAccountMode(ctx, targetUID, mode)
-		s.audit(ctx, id, "set_account_mode", "", err, startedAt)
 		if err != nil {
+			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
 			return toolErr("set_account_mode: %v", err), nil
 		}
+		// rows == 0 means the UPDATE matched nothing, so the mode did not
+		// change. Auditing before this check recorded that refusal as
+		// status="ok" — a row claiming a flip that never happened.
 		if rows == 0 {
-			return toolErr("no active Telegram session for telegram id %d — they must connect an "+
+			return refuse("no active Telegram session for telegram id %d — they must connect an "+
 				"account first", tgID), nil
 		}
+		s.audit(ctx, id, "set_account_mode", "", nil, startedAt)
 		return jsonResult(setAccountModeResult{TelegramID: tgID, Mode: mode, OK: true})
 	}
 	return tool, handler

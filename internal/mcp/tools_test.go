@@ -724,6 +724,127 @@ func TestToolSetAccountMode_RefusesLocalWithoutTTLExemption(t *testing.T) {
 	}
 }
 
+// Every refused set_account_mode call must leave an audit_logs row. The tool
+// flips MTProto session routing for another user, so a caller repeatedly
+// probing the TTL-exemption gate — or feeding it junk — must not be invisible
+// to whoever reads the audit log afterwards. The subtest table walks the
+// refusal paths that return before the database is ever touched.
+func TestToolSetAccountMode_AuditsRefusals(t *testing.T) {
+	const adminUID int64 = 1
+	cases := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{
+			name:    "invalid telegram_id",
+			args:    map[string]any{"telegram_id": float64(0), "mode": "hosted"},
+			wantErr: "telegram_id is required",
+		},
+		{
+			name:    "invalid mode",
+			args:    map[string]any{"telegram_id": float64(781), "mode": "bogus"},
+			wantErr: `mode must be "local" or "hosted"`,
+		},
+		{
+			name:    "local without TTL exemption",
+			args:    map[string]any{"telegram_id": float64(781), "mode": "local"},
+			wantErr: "SESSION_TTL_EXEMPT_TG_IDS",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newToolsTestStore(t)
+			seedAccountWithSession(t, store, 781, false)
+			srv := &Server{Store: store}
+			id := &auth.Identity{UserID: adminUID, Scopes: []string{"admin:users"}}
+			ctx = auth.With(ctx, id)
+			_, handler := srv.toolSetAccountMode()
+			result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+				Name:      "set_account_mode",
+				Arguments: tc.args,
+			}})
+			if err != nil {
+				t.Fatalf("unexpected Go error: %v", err)
+			}
+			if !result.IsError {
+				t.Fatal("expected a refusal")
+			}
+			tool, status, errMsg := latestAudit(t, store, adminUID)
+			if tool != "set_account_mode" {
+				t.Errorf("audit tool_name = %q, want set_account_mode", tool)
+			}
+			if status != "error" {
+				t.Errorf("audit status = %q, want error", status)
+			}
+			if !strings.Contains(errMsg, tc.wantErr) {
+				t.Errorf("audit error = %q, want it to contain %q", errMsg, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A telegram_id whose UPDATE matches no row changed nothing, so it must be
+// audited as an error. The first implementation audited before checking the
+// affected-row count, writing status="ok" for a flip that never happened.
+func TestToolSetAccountMode_AuditsNoActiveSessionAsError(t *testing.T) {
+	const adminUID int64 = 1
+	ctx := context.Background()
+	store := newToolsTestStore(t).WithAbsoluteTTLExempt([]int64{782})
+	if _, err := store.EnsureUserByTelegramID(ctx, 782, "nosess2", "No Session"); err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: adminUID, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(782), "mode": "local"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected a refusal when no active session exists")
+	}
+	_, status, errMsg := latestAudit(t, store, adminUID)
+	if status != "error" {
+		t.Errorf("audit status = %q, want error — a no-op must not be recorded as a successful flip", status)
+	}
+	if !strings.Contains(errMsg, "no active Telegram session") {
+		t.Errorf("audit error = %q, want it to name the missing session", errMsg)
+	}
+}
+
+// The counterpart of the refusal tests: an accepted flip must still audit as
+// ok, so a change that audits everything as an error would fail here.
+func TestToolSetAccountMode_AuditsSuccessAsOK(t *testing.T) {
+	const adminUID int64 = 1
+	ctx := context.Background()
+	store := newToolsTestStore(t).WithAbsoluteTTLExempt([]int64{783})
+	seedAccountWithSession(t, store, 783, false)
+	srv := &Server{Store: store}
+	id := &auth.Identity{UserID: adminUID, Scopes: []string{"admin:users"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSetAccountMode()
+	result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name:      "set_account_mode",
+		Arguments: map[string]any{"telegram_id": float64(783), "mode": "local"},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected the flip to succeed: %s", contentText(result))
+	}
+	tool, status, errMsg := latestAudit(t, store, adminUID)
+	if tool != "set_account_mode" || status != "ok" || errMsg != "" {
+		t.Errorf("audit = (%q, %q, %q), want (set_account_mode, ok, \"\")", tool, status, errMsg)
+	}
+}
+
 func TestToolSetAccountMode_HostedNeverRequiresExemption(t *testing.T) {
 	ctx := context.Background()
 	store := newToolsTestStore(t)
