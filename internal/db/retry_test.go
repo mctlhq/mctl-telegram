@@ -110,6 +110,83 @@ func TestOpenWithRetry_SQLiteSkipsLoop(t *testing.T) {
 	}
 }
 
+// slowOpener blocks on every attempt until its context is done, standing in
+// for a dial into a host that blackholes packets instead of refusing them —
+// where a real connect blocks for the OS TCP timeout, on the order of a
+// minute.
+type slowOpener struct {
+	block time.Duration
+	calls int
+}
+
+func (s *slowOpener) open(ctx context.Context, _ string, _, _ int) (*sql.DB, error) {
+	s.calls++
+	select {
+	case <-time.After(s.block):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return nil, errFakeUnreachable
+}
+
+// TestOpenWithRetry_SlowAttemptRespectsDeadline pins the bound to the whole
+// call, not just to the waits between attempts. If the attempt runs on the
+// parent context instead of the deadline-bounded one, the select cannot fire
+// until the attempt returns and a single slow dial overruns the budget —
+// measured at 3x before this was fixed.
+func TestOpenWithRetry_SlowAttemptRespectsDeadline(t *testing.T) {
+	s := &slowOpener{block: 2 * time.Second}
+	timeout := 100 * time.Millisecond
+
+	start := time.Now()
+	_, err := openWithRetry(context.Background(), pgDSN, 0, 0,
+		time.Millisecond, timeout, testLogger(&bytes.Buffer{}), s.open)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("openWithRetry: expected error, got nil")
+	}
+	if elapsed > timeout+500*time.Millisecond {
+		t.Errorf("elapsed = %v, want the attempt itself bounded by timeout %v", elapsed, timeout)
+	}
+}
+
+// failThenBlockOpener reports a real database error on its first attempt and
+// then blocks, so the deadline cuts a later attempt short and that attempt
+// reports the expiry rather than anything about the database.
+type failThenBlockOpener struct{ calls int }
+
+func (f *failThenBlockOpener) open(ctx context.Context, _ string, _, _ int) (*sql.DB, error) {
+	f.calls++
+	if f.calls == 1 {
+		return nil, fmt.Errorf("attempt %d: %w", f.calls, errFakeUnreachable)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestOpenWithRetry_DeadlineDoesNotOverwriteLastError guards the rule that
+// only an error saying something about the database is kept. Once the
+// deadline cuts an attempt short the driver reports the expiry itself, and
+// recording that would collapse the give-up error back into
+// context.DeadlineExceeded — losing the real cause the operator needs, which
+// is the whole reason this loop preserves it.
+func TestOpenWithRetry_DeadlineDoesNotOverwriteLastError(t *testing.T) {
+	f := &failThenBlockOpener{}
+	_, err := openWithRetry(context.Background(), pgDSN, 0, 0,
+		time.Millisecond, 150*time.Millisecond, testLogger(&bytes.Buffer{}), f.open)
+
+	if err == nil {
+		t.Fatal("openWithRetry: expected error, got nil")
+	}
+	if !errors.Is(err, errFakeUnreachable) {
+		t.Errorf("error = %v, want it to still wrap the database error from the first attempt", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, must not collapse into context.DeadlineExceeded once a later attempt is cut short by the deadline", err)
+	}
+}
+
 func TestOpenWithRetry_CtxCancelReturnsPromptly(t *testing.T) {
 	f := &fakeOpener{failCount: -1} // always fails
 	ctx, cancel := context.WithCancel(context.Background())

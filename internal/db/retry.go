@@ -56,12 +56,27 @@ func openWithRetry(
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		dbConn, err := open(ctx, dsn, maxOpenConns, maxIdleConns)
+		// The attempt itself runs on deadlineCtx, not ctx. Open's only use of
+		// the context is PingContext, and a dial into a host that blackholes
+		// packets (no RST) blocks for the OS-level TCP connect timeout — on
+		// the order of a minute. With the parent ctx the select below cannot
+		// fire until that returns, so a single attempt overruns the whole
+		// bound: measured at 3x the budget with one slow attempt. Bounding
+		// the attempt keeps `timeout` an actual ceiling. Open does not retain
+		// the context past the ping, so the returned *sql.DB is unaffected by
+		// the cancel on the way out.
+		dbConn, err := open(deadlineCtx, dsn, maxOpenConns, maxIdleConns)
 		if err == nil {
 			logger.Info("db reachable", "attempts", attempt)
 			return dbConn, nil
 		}
-		lastErr = err
+		// Keep the last error that says something about the database. Once
+		// deadlineCtx expires mid-attempt the driver reports the expiry
+		// itself, and recording that would collapse the give-up error back
+		// into context.DeadlineExceeded — the exact loss this loop avoids.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			lastErr = err
+		}
 		logger.Warn("db not reachable yet, retrying", "err", err, "attempt", attempt, "wait", interval)
 
 		select {
@@ -74,6 +89,11 @@ func openWithRetry(
 				// collapsing it into context.DeadlineExceeded, which would
 				// discard exactly the diagnostic this change exists to
 				// produce.
+				if lastErr == nil {
+					// Every attempt was cut short by the deadline before the
+					// driver could report anything of its own.
+					return nil, fmt.Errorf("db not reachable after %s: %w", timeout, deadlineCtx.Err())
+				}
 				return nil, fmt.Errorf("db not reachable after %s: %w", timeout, lastErr)
 			}
 			// Shutdown (SIGINT/SIGTERM) canceled the parent ctx: return
