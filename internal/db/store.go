@@ -74,14 +74,6 @@ func (s *Store) WithAbsoluteTTLExempt(ids []int64) *Store {
 	return s
 }
 
-// IsModeExempt reports whether tgID is on the idle/absolute TTL exemption
-// list. set_account_mode uses this to refuse mode="local" for an account
-// that would otherwise be silently reverted to hosted by SweepIdleSessions
-// once Local Bridge traffic stops refreshing last_used_at.
-func (s *Store) IsModeExempt(tgID int64) bool {
-	return s.ttlExempt[tgID]
-}
-
 // ReconcileTTLExemptions converges existing rows onto the current exemption
 // list. Call it after Migrate: the migration backfills expires_at on every
 // run, which deliberately re-arms the TTL for an identity that has been
@@ -746,9 +738,7 @@ func (s *Store) GetActiveAccount(ctx context.Context, userID int64) (*AccountInf
 func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 	var enabled bool
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT send_enabled FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC LIMIT 1`,
+		`SELECT send_enabled FROM telegram_accounts WHERE `+actionableAccount,
 		userID,
 	).Scan(&enabled)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -769,8 +759,7 @@ func (s *Store) IsSendEnabled(ctx context.Context, userID int64) (bool, error) {
 // it provisions the session first.
 func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET send_enabled = $2
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		`UPDATE telegram_accounts SET send_enabled = $2 WHERE `+actionableAccount,
 		userID, enabled,
 	)
 	if err != nil {
@@ -788,8 +777,7 @@ func (s *Store) SetSendEnabled(ctx context.Context, userID int64, enabled bool) 
 // from a silent no-op, matching SetSendEnabled.
 func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET mode = $2
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		`UPDATE telegram_accounts SET mode = $2 WHERE `+actionableAccount,
 		userID, mode,
 	)
 	if err != nil {
@@ -798,6 +786,21 @@ func (s *Store) SetAccountMode(ctx context.Context, userID int64, mode string) (
 	n, _ := res.RowsAffected()
 	return n, nil
 }
+
+// currentAccountRow selects the row GetAccountMode answers about: the user's
+// most recent account row, revoked or not. The predicate that follows decides
+// whether it may be acted on -- a revoked hosted row may not (its session is
+// gone), a local row may (its vestigial hosted session is irrelevant to a
+// bridge account, which is the whole point of mode surviving revocation).
+//
+// Selecting by id rather than repeating ORDER BY ... LIMIT 1 in each WHERE
+// matters: filtering first and ordering second can land on an OLDER row than
+// GetAccountMode chose, which is how these queries silently disagree about
+// which account they are talking about.
+const currentAccountRow = `SELECT id FROM telegram_accounts WHERE user_id = $1 ORDER BY connected_at DESC LIMIT 1`
+
+// actionableAccount is currentAccountRow plus the legitimacy test.
+const actionableAccount = `id = (` + currentAccountRow + `) AND (revoked_at IS NULL OR mode = 'local')`
 
 // ErrAccountAlreadyActive is returned by ProvisionLocalAccount when the
 // target user already has an active (non-revoked) telegram_accounts row.
@@ -815,33 +818,34 @@ var ErrAccountAlreadyActive = errors.New("account already active")
 // Refuses with ErrAccountAlreadyActive if the user already has an active
 // row, so an existing hosted account is not silently duplicated -- the
 // caller should point the operator at set_account_mode for migrating an
-// existing account instead. The existence check and insert run in one
-// transaction so two concurrent calls cannot both pass the check.
+// existing account instead.
+//
+// The check and the insert are one statement rather than a SELECT followed
+// by an INSERT, so there is no window between them inside this call. That is
+// not the same as being safe against two concurrent calls: under READ
+// COMMITTED both can still evaluate NOT EXISTS as true and both insert. A
+// transaction does not close that either, which an earlier version of this
+// comment wrongly claimed. Closing it properly needs a partial unique index
+// on (user_id) WHERE revoked_at IS NULL, which cannot be added blind because
+// it would fail to build if any user already has two active rows. Provisioning
+// is an operator action taken once per account, so the residual race is
+// accepted and named here rather than papered over.
 func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, displayName, username string) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var exists bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
-		userID,
-	).Scan(&exists); err != nil {
-		return fmt.Errorf("check existing account: %w", err)
-	}
-	if exists {
-		return ErrAccountAlreadyActive
-	}
-	if _, err := tx.ExecContext(ctx,
+	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, mode, send_enabled)
-		 VALUES($1,$2,$3,$4,NULL,$5,$6)`,
+		 SELECT $1,$2,$3,$4,NULL,$5,$6
+		 WHERE NOT EXISTS (SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
 		userID, tgID, nullable(displayName), nullable(username), ModeLocal, false,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("insert local account: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("insert local account: %w", err)
+	}
+	if n == 0 {
+		return ErrAccountAlreadyActive
 	}
 	return nil
 }
@@ -853,8 +857,7 @@ func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, d
 func (s *Store) ToggleSendEnabled(ctx context.Context, userID int64) (bool, error) {
 	var newVal bool
 	err := s.DB.QueryRowContext(ctx,
-		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled
-		 WHERE user_id = $1 AND revoked_at IS NULL
+		`UPDATE telegram_accounts SET send_enabled = NOT send_enabled WHERE `+actionableAccount+`
 		 RETURNING send_enabled`,
 		userID,
 	).Scan(&newVal)

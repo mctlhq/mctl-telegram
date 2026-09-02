@@ -421,18 +421,6 @@ func TestSetAccountMode(t *testing.T) {
 	}
 }
 
-// TestIsModeExempt covers both an id present in and an id absent from the
-// TTL exemption list a store was constructed with.
-func TestIsModeExempt(t *testing.T) {
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
-	if !s.IsModeExempt(210408407) {
-		t.Error("expected exempt id to report true")
-	}
-	if s.IsModeExempt(999000111) {
-		t.Error("expected non-exempt id to report false")
-	}
-}
-
 // TestListIdentities_PartialSessionNotCounted checks that a mid-login session
 // row (telegram_user_id NULL, as inserted by UpdateSessionBlob) is NOT
 // reported as has_session — only a finalised SaveSession row counts.

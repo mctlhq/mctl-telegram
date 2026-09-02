@@ -211,6 +211,13 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	// idempotent, additive pattern as the github_login change above.
 	if pg {
 		if _, err := dbConn.ExecContext(ctx,
+			// Postgres only. An existing local-dev SQLite database keeps
+			// session_encrypted NOT NULL forever: SQLite has no ALTER COLUMN
+			// and CREATE TABLE IF NOT EXISTS does not revisit an existing
+			// table, so the relaxed definition below reaches fresh databases
+			// only. Provisioning a local-only account against such a database
+			// fails with a NOT NULL constraint error; recreate the dev
+			// database. Production is Postgres, so this affects no deployment.
 			`ALTER TABLE telegram_accounts ALTER COLUMN session_encrypted DROP NOT NULL`,
 		); err != nil {
 			return fmt.Errorf("drop not null on telegram_accounts.session_encrypted: %w", err)
