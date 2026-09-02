@@ -63,14 +63,24 @@ Download the build for your platform from the
 against `SHA256SUMS.txt`:
 
 ```sh
-VERSION=0.55.0
+VERSION=0.56.0
 BASE=https://github.com/mctlhq/mctl-telegram/releases/download/$VERSION
-curl -fsSLO "$BASE/mctl-telegram-local-$VERSION-darwin-arm64"
-curl -fsSLO "$BASE/SHA256SUMS.txt"
-shasum -a 256 -c SHA256SUMS.txt --ignore-missing
-chmod +x mctl-telegram-local-$VERSION-darwin-arm64
+mkdir -p ~/mctl-local/logs && cd ~/mctl-local &&
+curl -fsSLO "$BASE/mctl-telegram-local-$VERSION-darwin-arm64" &&
+curl -fsSLO "$BASE/SHA256SUMS.txt" &&
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing &&
+chmod +x mctl-telegram-local-$VERSION-darwin-arm64 &&
 mv mctl-telegram-local-$VERSION-darwin-arm64 mctl-telegram-local
 ```
+
+The `&&` matter. `shasum -c` exits non-zero on a mismatch but prints its
+complaint and moves on if the commands are merely listed one after another, so
+an unchained sequence installs a corrupted or tampered binary and tells you
+only in a line you have already scrolled past.
+
+`~/mctl-local` is where this guide keeps the binary, the passphrase file and
+the daemon's log; `~/.config/mctl-telegram-local` is where the daemon itself
+keeps its config and session, and it creates that one for you.
 
 Builds are published for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
 `linux/arm64` and `windows/amd64`. Check which one you need before downloading —
@@ -112,7 +122,8 @@ in a password manager, and — if you plan to run the daemon unattended, which y
 should — also write it to a file:
 
 ```sh
-LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 40 > ~/mctl-local/passphrase
+mkdir -p ~/mctl-local &&
+LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 40 > ~/mctl-local/passphrase &&
 chmod 600 ~/mctl-local/passphrase
 ```
 
@@ -214,9 +225,14 @@ secret and does not work.
 ```
 
 ```sh
+mkdir -p ~/mctl-local/logs
 launchctl load -w ~/Library/LaunchAgents/ai.mctl.telegram-local.plist
 launchctl list | grep ai.mctl.telegram-local
 ```
+
+The log directory must exist before loading: launchd does not create the
+parent of `StandardOutPath`, and a job whose output cannot be opened fails to
+start with a bare exit code rather than a message explaining it.
 
 A **LaunchAgent runs inside your login session**, so after a reboot it starts
 only once someone logs in. On a headless machine that means enabling automatic
@@ -236,6 +252,12 @@ tail -f ~/mctl-local/logs/daemon.log
 
 ### systemd (Linux)
 
+This is a **user** unit — put it in `~/.config/systemd/user/mctl-telegram-local.service`,
+not in `/etc/systemd/system/`. A system unit runs as root by default, which
+would give the daemon, and anything that can read its unit file, more privilege
+over your Telegram session than it needs. `WantedBy=default.target` below is
+the user-unit target, and would be wrong for a system unit.
+
 ```ini
 [Unit]
 Description=mctl-telegram Local Bridge daemon
@@ -243,14 +265,24 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/home/you/mctl-local/mctl-telegram-local daemon
-Environment=MCTL_LOCAL_PASSPHRASE_FILE=/home/you/mctl-local/passphrase
+ExecStart=%h/mctl-local/mctl-telegram-local daemon
+Environment=MCTL_LOCAL_PASSPHRASE_FILE=%h/mctl-local/passphrase
 Restart=on-failure
 RestartSec=30
 
 [Install]
 WantedBy=default.target
 ```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now mctl-telegram-local
+loginctl enable-linger "$USER"   # start at boot, without waiting for a login
+journalctl --user -u mctl-telegram-local -f
+```
+
+`enable-linger` is the part people miss: without it a user unit stops when
+your last session ends and does not come back until you log in again.
 
 ## Limitations
 
