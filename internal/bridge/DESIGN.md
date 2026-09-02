@@ -121,15 +121,25 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 
 ### Blocking a user, in the order a user hits them
 
-1. **No user-facing documentation.** Tracked in #444. The landing copy
-   advertises the mode and points at a repository that does not describe
-   it.
-2. **No released binary.** `cmd/local` is not built by CI and no release
-   carries a `mctl-telegram-local` asset; users must `go build`. Windows
-   cross-compiles today, but the SQLite DSN is assembled by string
-   concatenation (`main.go:347`) and a Windows path carries a drive
-   colon and backslashes, so the first Windows run is expected to fail
-   at opening the local database.
+1. **No user-facing documentation.** Closed by #444: `docs/local-bridge.md`
+   is the guide, and the landing copy links it.
+2. **No released binary.** Closed by #448: every release now carries
+   builds for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
+   `linux/arm64` and `windows/amd64` plus `SHA256SUMS.txt`. They are
+   unsigned, so macOS quarantines a browser download and Windows shows a
+   SmartScreen prompt on a double-click; fetching with `curl` and running
+   from a terminal avoids both. Signing is a deliberate non-decision, not
+   an oversight — see the note in #448.
+2a. **Windows file protection is unsolved.** The daemon writes its config,
+   bridge token and session database `0600` and sets a `0o077` umask, but
+   NTFS ignores POSIX modes and inherits an ACL from the parent directory
+   instead, so on Windows those files carry whatever the user profile
+   grants. `cmd/local/umask_windows.go` is a deliberate no-op for the same
+   reason. Closing this means setting an explicit ACL through
+   `golang.org/x/sys/windows`, and it has not been done or tested. Until
+   then the Windows build is usable but its on-disk secrets — including
+   both bearer tokens in `bridge_token.json` — are only as protected as
+   the profile directory.
 3. **No long-lived MCP token to hand to `connect`.** The daemon
    re-exchanges the stored MCP token indefinitely, but OAuth access
    tokens live one hour (24 h ceiling), so an ordinary OAuth token
