@@ -63,7 +63,8 @@ Download the build for your platform from the
 against `SHA256SUMS.txt`:
 
 ```sh
-VERSION=0.56.0
+VERSION=$(curl -fsSL https://api.github.com/repos/mctlhq/mctl-telegram/releases/latest \
+  | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
 BASE=https://github.com/mctlhq/mctl-telegram/releases/download/$VERSION
 mkdir -p ~/mctl-local/logs && cd ~/mctl-local &&
 curl -fsSLO "$BASE/mctl-telegram-local-$VERSION-darwin-arm64" &&
@@ -77,6 +78,10 @@ The `&&` matter. `shasum -c` exits non-zero on a mismatch but prints its
 complaint and moves on if the commands are merely listed one after another, so
 an unchained sequence installs a corrupted or tampered binary and tells you
 only in a line you have already scrolled past.
+
+`VERSION` is read from the releases API rather than written out, so this block
+does not rot. A version pinned in prose is wrong from the next release onward,
+and the reader has no way to tell whether the number is deliberate or stale.
 
 `~/mctl-local` is where this guide keeps the binary, the passphrase file and
 the daemon's log; `~/.config/mctl-telegram-local` is where the daemon itself
