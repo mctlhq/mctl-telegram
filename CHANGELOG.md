@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.57.0](https://github.com/mctlhq/mctl-telegram/compare/0.56.0...0.57.0) (2026-09-02)
+
+
+### Features
+
+* **agents:** issue-459-feat-workertoken-mint-local-bridge-token ([#463](https://github.com/mctlhq/mctl-telegram/issues/463)) ([ffd053c](https://github.com/mctlhq/mctl-telegram/commit/ffd053caf94144001516589dd6529882edbd6925))
+
 ## [0.56.0](https://github.com/mctlhq/mctl-telegram/compare/0.55.1...0.56.0) (2026-09-02)
 
 
