@@ -361,6 +361,22 @@ func sqliteSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// Worker token revocations (jti denylist). A row with jti set is a
+		// single-token revocation; a row with jti NULL is a blanket
+		// revocation for telegram_id (every worker token for that id issued
+		// at or before revoked_at). Expected to hold single-digit rows —
+		// see internal/auth/localjwt.RevocationCache, which caches this
+		// table rather than querying it per request.
+		`CREATE TABLE IF NOT EXISTS worker_token_revocations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			jti TEXT,
+			telegram_id INTEGER NOT NULL,
+			revoked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			reason TEXT,
+			revoked_by INTEGER
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_token_revocations_jti ON worker_token_revocations(jti) WHERE jti IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_token_revocations_tg ON worker_token_revocations(telegram_id)`,
 	}
 }
 
@@ -461,5 +477,17 @@ func pgSchema() []string {
 		`CREATE INDEX IF NOT EXISTS idx_oauth_pending_auth_created_at ON oauth_pending_auth(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_created_at ON oauth_auth_codes(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_client_regs_created_at ON oauth_client_registrations(created_at)`,
+		// Worker token revocations (jti denylist) — see the sqliteSchema
+		// comment on this table for the row-shape explanation.
+		`CREATE TABLE IF NOT EXISTS worker_token_revocations (
+			id BIGSERIAL PRIMARY KEY,
+			jti TEXT,
+			telegram_id BIGINT NOT NULL,
+			revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			reason TEXT,
+			revoked_by BIGINT
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_token_revocations_jti ON worker_token_revocations(jti) WHERE jti IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_worker_token_revocations_tg ON worker_token_revocations(telegram_id)`,
 	}
 }

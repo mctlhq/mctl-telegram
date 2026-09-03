@@ -24,6 +24,9 @@
 package workertoken
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -195,16 +198,26 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 		if mcpAudience != "" {
 			audience = append(audience, mcpAudience)
 		}
+		jti, err := generateJti()
+		if err != nil {
+			slog.Error("worker token: jti generation failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to issue worker token")
+			return
+		}
 		// OriginalIssuedAt anchors the renewal chain (see NewRenewHandler's
 		// maxRenewalChain). Setting it here, at the one point where a human
 		// admin is in the loop, is what lets the renew path extend this
-		// credential without extending it forever.
+		// credential without extending it forever. Jti is generated fresh
+		// here too and carried forward unchanged by every renewal, so
+		// revoking it (see internal/mcp's revoke_worker_token tool) also
+		// revokes every renewal of this credential.
 		tok, err := signer.Mint(localjwt.Claims{
 			Subject:          "tg:" + strconv.FormatInt(req.TelegramID, 10),
 			TelegramID:       req.TelegramID,
 			Scopes:           scopes,
 			Audience:         audience,
 			OriginalIssuedAt: time.Now().Unix(),
+			Jti:              jti,
 		}, ttl)
 		if err != nil {
 			slog.Error("worker token: sign failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)
@@ -215,9 +228,11 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 		// purpose is its own field, not left to be inferred from the scope
 		// list: docs/runbook.md points an operator at this line to tell a
 		// send-capable Local Bridge credential from a read-only one, and
-		// that has to be greppable rather than reconstructed.
+		// that has to be greppable rather than reconstructed. jti is logged
+		// so an operator reading only the audit trail can still revoke this
+		// specific credential later.
 		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl, "expires_at", expiresAt,
-			"purpose", allowlistName, "audience_marker", audienceMarker)
+			"purpose", allowlistName, "audience_marker", audienceMarker, "jti", jti)
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: tok,
 			ExpiresAt:   expiresAt,
@@ -233,4 +248,17 @@ func isAllowedScope(scope string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// generateJti returns a 128-bit random, base64url-encoded token identifier.
+// 128 bits of crypto/rand entropy matches the style already used for signing
+// in this codebase and needs no new dependency; it is large enough that
+// collision is not a practical concern for the "single-digit to low-hundreds
+// of live worker tokens" scale this feature targets.
+func generateJti() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate jti: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }

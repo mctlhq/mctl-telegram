@@ -31,6 +31,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"disconnect_telegram_account", first(s.toolDisconnectAccount()), false, true, false},
 		{"delete_telegram_account", first(s.toolDeleteAccount()), false, true, false},
 		{"revoke_telegram_session", first(s.toolRevokeSession()), false, true, false},
+		{"revoke_worker_token", first(s.toolRevokeWorkerToken()), false, true, false},
 		{"set_telegram_access", first(s.toolSetAccess()), false, true, false},
 		{"set_account_send", first(s.toolSetAccountSend()), false, true, false},
 		{"set_account_mode", first(s.toolSetAccountMode()), false, true, false},

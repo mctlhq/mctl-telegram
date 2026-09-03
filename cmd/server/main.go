@@ -407,7 +407,14 @@ func main() {
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
 	}
 
-	provider, err := selectProvider(cfg, store)
+	// Shared across every localjwt.Provider this process constructs (plain
+	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
+	// is rejected everywhere it could otherwise still authenticate, not just
+	// at /mcp. Cheap to share: the cache is read-mostly and its own mutex
+	// already makes it safe for concurrent use across providers.
+	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
+
+	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {
 		slog.Error("invalid AUTH_MODE; refusing to start", "err", err)
 		os.Exit(1)
@@ -463,27 +470,37 @@ func main() {
 	// mounted at /mcp (see internal/workertoken.NewHandler's doc comment for
 	// why no dedicated auth.Provider is needed) — it just carries a
 	// restricted scope set and a bounded TTL, with per-tool requireScope
-	// enforcement doing the rest. Gated on OAUTH_JWT_SECRET like the two
-	// mints above; reuses selectAgentIssuer since it already computes "the
-	// issuer this deployment's locally-issued JWTs use" with no dependency
-	// on the agent feature despite the name.
+	// enforcement doing the rest. Reuses selectAgentIssuer since it already
+	// computes "the issuer this deployment's locally-issued JWTs use" with no
+	// dependency on the agent feature despite the name.
+	//
+	// Gated on OAUTH_JWT_SECRET like the two mints above AND on
+	// workerTokenMintable: a mode whose provider cannot consult the
+	// revocation denylist must not hand out a credential that can never be
+	// taken back (issue #472).
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
-			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
-		// Self-renewal for an already-issued worker token. Same middleware,
-		// no admin scope: the handler mints only for the identity already
-		// proven by the presented token, so it grants a headless worker the
-		// ability to outlive its own TTL without granting it the ability to
-		// mint credentials for anyone else. See workertoken.NewRenewHandler.
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token/renew",
-			workertoken.NewRenewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+		if workerTokenMintable(cfg) {
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
+				workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+			// Self-renewal for an already-issued worker token. Same
+			// middleware, no admin scope: the handler mints only for the
+			// identity already proven by the presented token, so it grants a
+			// headless worker the ability to outlive its own TTL without
+			// granting it the ability to mint credentials for anyone else.
+			// See workertoken.NewRenewHandler.
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token/renew",
+				workertoken.NewRenewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+		} else {
+			slog.Warn("worker token endpoints not mounted: this AUTH_MODE cannot enforce worker-token revocation; use AUTH_MODE=local-jwt to mint worker tokens",
+				"auth_mode", cfg.AuthMode)
+		}
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
 	// Uses a separate provider that enforces aud=bridge so regular MCP
 	// tokens cannot be used to hijack the bridge channel.
 	hub := bridge.NewHub().WithMetrics(m)
-	bridgeProvider := selectBridgeProvider(cfg, store)
+	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
 	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 
 	// Communication-agent HTTP surface: off by default like every other
@@ -504,7 +521,7 @@ func main() {
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
-		agentProvider := selectAgentProvider(cfg, store)
+		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
 		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
@@ -518,6 +535,10 @@ func main() {
 	// Wire the hub into the MCP server so tool calls for local-mode users
 	// are forwarded to their daemon instead of the hosted MTProto pool.
 	mcpSrv = mcpSrv.WithHub(hub)
+	// The revoke tool forces this forward before evicting a daemon, so the
+	// reconnect that eviction provokes cannot pass on a pre-revocation
+	// snapshot.
+	mcpSrv = mcpSrv.WithRevocationCache(workerTokenRevocationCache)
 
 	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
 	// runs, so unauthenticated humans still see instructions instead of
@@ -628,7 +649,7 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 //     trust JWTs signed by api.mctl.ai via the shared OAUTH_JWT_SECRET.
 //     "shared-hmac" is accepted as an alias for the legacy mode for the
 //     duration of one minor release.
-func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) {
+func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) (auth.Provider, error) {
 	switch strings.ToLower(cfg.AuthMode) {
 	case "local-jwt":
 		// Use the canonicalised issuer (trailing slash stripped) so the
@@ -643,12 +664,30 @@ func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) 
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: cfg.OAUTHJWTAudience,
 			AudienceRequired: cfg.OAUTHJWTAudReq,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("local-jwt init failed: %w", err)
 		}
 		return p, nil
 	case "shared-hmac", "shared-hmac-legacy":
+		// No revocation cache here: sharedhmac.Provider has no jti or
+		// denylist concept to wire one into.
+		//
+		// That is precisely why worker-token minting is refused under this
+		// mode (see workerTokenMintable and its mount site in main). Do NOT
+		// read this as "a worker token cannot reach this provider": under
+		// shared-hmac, selectAgentIssuer stamps the very same
+		// "https://api.mctl.ai" issuer that ExpectedIssuer checks below, both
+		// sides use cfg.OAUTHJWTSecret, and the minted aud already includes
+		// cfg.OAUTHJWTAudience — so such a token verifies fine here and
+		// resolves (via EnsureUser on the same synthetic subject) to the same
+		// users.id as the real account. It would carry no scopes, so
+		// requireScope-gated tools reject it, but the no-scope
+		// disconnect_telegram_account/delete_telegram_account tools would
+		// not. An already-minted token from an older build therefore remains
+		// unrevokable on this path; containment for it is to stop minting new
+		// ones and to move the deployment to AUTH_MODE=local-jwt.
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
 			ExpectedIssuer:   "https://api.mctl.ai",
@@ -664,6 +703,21 @@ func selectProvider(cfg *config.Config, store *db.Store) (auth.Provider, error) 
 	default:
 		return nil, fmt.Errorf("unknown AUTH_MODE %q: must be one of local-jwt, shared-hmac, local-dev", cfg.AuthMode)
 	}
+}
+
+// workerTokenMintable reports whether this deployment verifies plain MCP
+// bearer tokens with a provider that consults the worker-token denylist.
+//
+// Only local-jwt does: selectProvider wires the RevocationCache into
+// localjwt.Provider and nowhere else. Under shared-hmac/shared-hmac-legacy a
+// minted worker token still verifies (same issuer, same secret, same
+// audience — see selectProvider's shared-hmac case) but reaches
+// sharedhmac.Provider, which has no revocation concept, so revoke_worker_token
+// would report success while the credential kept working until its TTL ran
+// out. local-dev does not verify tokens at all. Refusing the mint in those
+// modes is the containment: no unrevokable worker token is ever issued.
+func workerTokenMintable(cfg *config.Config) bool {
+	return strings.ToLower(cfg.AuthMode) == "local-jwt"
 }
 
 // selectAuthServer returns the canonical authorization server URL for this
@@ -796,7 +850,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 // `local` mode. Instead we return rejectAllProvider so every /bridge request
 // gets 401 and the operator sees the misconfiguration loudly. localdev
 // fallback is reserved for AUTH_MODE=local-dev (developer-only).
-func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
+func selectBridgeProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) auth.Provider {
 	mode := strings.ToLower(cfg.AuthMode)
 	switch mode {
 	case "local-jwt":
@@ -809,6 +863,7 @@ func selectBridgeProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: "bridge",
 			AudienceRequired: true,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			slog.Error("bridge: local-jwt init failed; bridge endpoint disabled", "err", err)
@@ -860,7 +915,7 @@ func selectAgentIssuer(cfg *config.Config) string {
 // vice versa. Same fail-closed posture as selectBridgeProvider: a JWT-based
 // AUTH_MODE with no signing secret returns rejectAllProvider rather than
 // silently downgrading to localdev.
-func selectAgentProvider(cfg *config.Config, store *db.Store) auth.Provider {
+func selectAgentProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) auth.Provider {
 	mode := strings.ToLower(cfg.AuthMode)
 	switch mode {
 	case "local-jwt":
@@ -873,6 +928,7 @@ func selectAgentProvider(cfg *config.Config, store *db.Store) auth.Provider {
 			ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
 			ExpectedAudience: "agent",
 			AudienceRequired: true,
+			RevocationCache:  revocationCache,
 		})
 		if err != nil {
 			slog.Error("agent: local-jwt init failed; agent endpoint disabled", "err", err)
