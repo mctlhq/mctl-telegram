@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -179,4 +181,59 @@ func TestHub_WithMetrics_NoPanicOnRegisterUnregister(t *testing.T) {
 	// If the gauge double-decremented we'd go negative, but we can't
 	// easily read a prometheus.Gauge value without the dto package here.
 	// The test ensures no panics on all paths.
+}
+
+// counterValue reads a single labeled counter out of the registry. Needed
+// because the previous metrics test in this file could only assert "no
+// panic" — and a metric nobody reads is a metric that can silently stop
+// moving, which is how MctlBridgeDaemonsFlapping came to watch a signal that
+// could not fire.
+func counterValue(t *testing.T, m *metrics.Registry, userID string) float64 {
+	t.Helper()
+	c, err := m.BridgeConnectionsTotal.GetMetricWithLabelValues(userID)
+	if err != nil {
+		t.Fatalf("get counter: %v", err)
+	}
+	var out dto.Metric
+	if err := c.Write(&out); err != nil {
+		t.Fatalf("write metric: %v", err)
+	}
+	return out.GetCounter().GetValue()
+}
+
+// Every registration counts, including the one the gauge cannot see.
+//
+// A daemon that reconnects before the hub has noticed the old socket die
+// takes Register's eviction branch: the old entry is replaced and the gauge
+// stays at 1, net change zero. That is a reconnect, and a flap alert built on
+// the gauge is blind to it. The counter must not be.
+func TestHub_ConnectionsTotal_CountsEveryRegistration(t *testing.T) {
+	m := metrics.New()
+	h := NewHub().WithMetrics(m)
+
+	h.Register(10) // brand new: gauge 0 -> 1
+	if got := counterValue(t, m, "10"); got != 1 {
+		t.Fatalf("after first register: counter = %v, want 1", got)
+	}
+
+	h.Register(10) // eviction/replacement: gauge unchanged
+	if got := counterValue(t, m, "10"); got != 2 {
+		t.Fatalf("a reconnect that replaced a live entry was not counted: counter = %v, want 2", got)
+	}
+
+	h.Unregister(10)
+	h.Register(10) // clean disconnect then reconnect: gauge 0 -> 1 again
+	if got := counterValue(t, m, "10"); got != 3 {
+		t.Fatalf("after disconnect/reconnect: counter = %v, want 3", got)
+	}
+
+	// A different daemon has its own series, which is what lets the alert
+	// name the offender instead of the fleet.
+	h.Register(11)
+	if got := counterValue(t, m, "11"); got != 1 {
+		t.Fatalf("second daemon: counter = %v, want 1", got)
+	}
+	if got := counterValue(t, m, "10"); got != 3 {
+		t.Fatalf("second daemon's registration leaked into the first's series: counter = %v, want 3", got)
+	}
 }

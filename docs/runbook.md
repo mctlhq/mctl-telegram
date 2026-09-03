@@ -1146,12 +1146,24 @@ crosses into sustained timeouts.
 
 ### Symptom
 
-- Alert `MctlBridgeDaemonsFlapping` fires with severity **warning** when
-  `mctl_bridge_active_daemons` changes more than 20 times in 10 minutes.
-- The gauge is incremented on `Register` and decremented on `Unregister`
-  (`internal/bridge/hub.go`), so a change count is a connect/disconnect count.
-  With a handful of daemons connected, 20 transitions in 10 minutes is a loop,
-  not normal churn.
+- Alert `MctlBridgeDaemonsFlapping` fires with severity **warning** when a
+  single daemon registers more than 3 times in 10 minutes
+  (`increase(mctl_bridge_connections_total[10m]) > 3`). The alert carries the
+  `user_id` label, so it names the daemon rather than the fleet.
+- `mctl_bridge_connections_total` is incremented on every `Register`
+  (`internal/bridge/hub.go`). A healthy daemon registers exactly once per
+  relay rollout, so 4 in ten minutes is a loop, not churn.
+- **Why not the `mctl_bridge_active_daemons` gauge.** It cannot see a flap.
+  A reconnect that lands while the old entry is still registered replaces it
+  with net zero gauge change, and a disconnect/reconnect pair nets out to zero
+  over any window containing both. The previous expression,
+  `changes(mctl_bridge_active_daemons[10m]) > 20`, was worse than merely
+  insensitive: the daemon's reconnect backoff caps at 60s and only resets
+  after a session lasting 60s (`cmd/local/daemon.go`), so a genuinely flapping
+  daemon settles at ~10 cycles per 10 minutes = 20 changes — not `> 20`. The
+  alert fired for the first two minutes while the ladder was still climbing,
+  then **resolved itself once the flap became permanent**, which reads to an
+  operator as "it recovered".
 
 Local Bridge is operator-enabled and currently has very few accounts, so this
 alert is expected to be silent. If it fires, one specific daemon is almost
@@ -1195,8 +1207,12 @@ Current daemon count and its transition rate:
 
 ```promql
 mctl_bridge_active_daemons
-changes(mctl_bridge_active_daemons[10m])
+increase(mctl_bridge_connections_total[10m])
 ```
+
+The second query is the one the alert uses; per-daemon, so its output names
+the account. The gauge is still worth a glance for "is anything connected at
+all", but do not read a steady gauge as "not flapping" — see above.
 
 Whether calls are failing while the daemon flaps:
 
