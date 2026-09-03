@@ -235,7 +235,9 @@ The synthetic canary probe (`cmd/canary`) verifies the live service end-to-end. 
 
 4. Pass `tg_user_id` and `bearer_token` to the canary probe via environment variables or a Kubernetes Secret.
 
-5. Schedule the canary to run every two minutes against your deployment.
+5. Schedule the canary against your deployment. tg.mctl.ai runs it every ten
+   minutes; whatever interval you pick, size the alert windows against it —
+   a window that spans a single run turns one flap into a page.
 
 The canary pushes three Prometheus metric families to a Pushgateway:
 
@@ -246,8 +248,9 @@ The canary pushes three Prometheus metric families to a Pushgateway:
 The alert rules that actually fire live in mctl-gitops
 (`infra-components/observability/vm-rules/mctl-telegram-canary.yaml`), alongside
 the CronJob itself (`services/labs/mctl-telegram/values.yaml`). This repository
-keeps no copy: one drifted from the deployed version for months while looking
-maintained, so the deployment is the single source of truth.
+keeps no copy. The one it used to keep was still being edited in August while
+its pinned image tag stayed at a May release and its schedule at an interval
+production had already left behind — maintained in appearance, stale in fact.
 
 ## Contributing
 
