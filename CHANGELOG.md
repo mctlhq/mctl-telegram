@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.59.0](https://github.com/mctlhq/mctl-telegram/compare/0.58.0...0.59.0) (2026-09-03)
+
+
+### Features
+
+* **agents:** issue-472-fix-security-a-minted-worker-token-canno ([#474](https://github.com/mctlhq/mctl-telegram/issues/474)) ([ad86a65](https://github.com/mctlhq/mctl-telegram/commit/ad86a6557780c2261a613fd2d7eb53573ff53da0))
+* **mcp:** mint_worker_token, and one mint policy behind both transports ([#478](https://github.com/mctlhq/mctl-telegram/issues/478)) ([78da323](https://github.com/mctlhq/mctl-telegram/commit/78da3235d4bdb742219de47987ec810c41e81e34))
+* **web:** publish the Local Bridge guide at /docs/local-bridge ([#480](https://github.com/mctlhq/mctl-telegram/issues/480)) ([b4a009f](https://github.com/mctlhq/mctl-telegram/commit/b4a009fb21d17e5ec645996999c81c30f3dc7515))
+
+
+### Bug Fixes
+
+* **alerts:** MctlBridgeDaemonsFlapping watched a signal that could not fire ([#475](https://github.com/mctlhq/mctl-telegram/issues/475)) ([7d964f1](https://github.com/mctlhq/mctl-telegram/commit/7d964f1c809e3f99b99d9ff00d16e9554c95a16a))
+
 ## [0.58.0](https://github.com/mctlhq/mctl-telegram/compare/0.57.0...0.58.0) (2026-09-02)
 
 
