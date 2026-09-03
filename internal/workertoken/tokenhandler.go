@@ -26,14 +26,14 @@ package workertoken
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
-	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 )
 
 // defaultWorkerTokenTTL and maxWorkerTokenTTL bound the lifetime of a minted
@@ -127,10 +127,10 @@ type workerTokenResponse struct {
 // cfg.OAUTHJWTAudience, the same way selectBridgeIssuer/selectAgentIssuer's
 // doc comments flag their own issuer lockstep requirement.
 func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
-	signer, signerErr := localjwt.NewIssuer(secret, issuer)
+	minter, minterErr := NewMinter(secret, issuer, mcpAudience)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if signerErr != nil {
-			slog.Error("worker token: signer init failed", "err", signerErr)
+		if minterErr != nil {
+			slog.Error("worker token: signer init failed", "err", minterErr)
 			writeJSONError(w, http.StatusInternalServerError, "worker token signer not configured")
 			return
 		}
@@ -148,94 +148,33 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if req.TelegramID <= 0 {
-			writeJSONError(w, http.StatusBadRequest, "telegram_id required")
-			return
-		}
 
-		var (
-			allowlist      []string
-			defaultScopes  []string
-			audienceMarker string
-			allowlistName  string
-		)
-		switch req.Purpose {
-		case "":
-			allowlist = allowedReadOnlyScopes
-			defaultScopes = allowedReadOnlyScopes
-			audienceMarker = workerAudience
-			allowlistName = "read-only"
-		case "local-bridge":
-			allowlist = allowedLocalBridgeScopes
-			defaultScopes = allowedLocalBridgeScopes
-			audienceMarker = workerBridgeAudience
-			allowlistName = "local-bridge"
-		default:
-			writeJSONError(w, http.StatusBadRequest, "unknown purpose: "+req.Purpose)
-			return
-		}
-
-		scopes := req.Scopes
-		if len(scopes) == 0 {
-			scopes = defaultScopes
-		}
-		for _, s := range scopes {
-			if !isAllowedScope(s, allowlist) {
-				writeJSONError(w, http.StatusBadRequest, "scope not in "+allowlistName+" allowlist: "+s)
+		// Every policy decision — allowlists, defaults, TTL ceiling, audience
+		// marker, orig_iat and jti — lives in Minter.Mint, so this endpoint
+		// and the mint_worker_token MCP tool cannot drift apart. This
+		// function is now transport only: authenticate, decode, map errors.
+		mt, err := minter.Mint(MintRequest{
+			TelegramID: req.TelegramID,
+			Scopes:     req.Scopes,
+			TTLHours:   req.TTLHours,
+			Purpose:    req.Purpose,
+		})
+		if err != nil {
+			if errors.Is(err, ErrInvalidMintRequest) {
+				// Strip the sentinel's prefix so the wire message stays the
+				// one operators already know ("telegram_id required",
+				// "unknown purpose: x", "scope not in ... allowlist: y").
+				writeJSONError(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), ErrInvalidMintRequest.Error()+": "))
 				return
 			}
-		}
-
-		ttl := defaultWorkerTokenTTL
-		if req.TTLHours > 0 {
-			ttl = time.Duration(req.TTLHours) * time.Hour
-			if ttl > maxWorkerTokenTTL {
-				ttl = maxWorkerTokenTTL
-			}
-		}
-
-		audience := []string{audienceMarker}
-		if mcpAudience != "" {
-			audience = append(audience, mcpAudience)
-		}
-		jti, err := generateJti()
-		if err != nil {
-			slog.Error("worker token: jti generation failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)
+			slog.Error("worker token: mint failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to issue worker token")
 			return
 		}
-		// OriginalIssuedAt anchors the renewal chain (see NewRenewHandler's
-		// maxRenewalChain). Setting it here, at the one point where a human
-		// admin is in the loop, is what lets the renew path extend this
-		// credential without extending it forever. Jti is generated fresh
-		// here too and carried forward unchanged by every renewal, so
-		// revoking it (see internal/mcp's revoke_worker_token tool) also
-		// revokes every renewal of this credential.
-		tok, err := signer.Mint(localjwt.Claims{
-			Subject:          "tg:" + strconv.FormatInt(req.TelegramID, 10),
-			TelegramID:       req.TelegramID,
-			Scopes:           scopes,
-			Audience:         audience,
-			OriginalIssuedAt: time.Now().Unix(),
-			Jti:              jti,
-		}, ttl)
-		if err != nil {
-			slog.Error("worker token: sign failed", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "err", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to issue worker token")
-			return
-		}
-		expiresAt := time.Now().Add(ttl).UTC().Format(time.RFC3339)
-		// purpose is its own field, not left to be inferred from the scope
-		// list: docs/runbook.md points an operator at this line to tell a
-		// send-capable Local Bridge credential from a read-only one, and
-		// that has to be greppable rather than reconstructed. jti is logged
-		// so an operator reading only the audit trail can still revoke this
-		// specific credential later.
-		slog.Info("worker token minted", "admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "scopes", scopes, "ttl", ttl, "expires_at", expiresAt,
-			"purpose", allowlistName, "audience_marker", audienceMarker, "jti", jti)
+		LogMinted(id.UserID, "http", mt)
 		writeJSON(w, http.StatusOK, workerTokenResponse{
-			WorkerToken: tok,
-			ExpiresAt:   expiresAt,
+			WorkerToken: mt.Token,
+			ExpiresAt:   mt.ExpiresAt.Format(time.RFC3339),
 		})
 	}
 }
