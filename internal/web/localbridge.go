@@ -37,20 +37,29 @@ var localBridgeTmpl = ui.New("local-bridge", localBridgeHTML)
 // an init, so a rendering fault surfaces as a 500 on one page instead of
 // taking the whole server down at boot over a documentation page.
 var localBridgeBody = sync.OnceValues(func() (template.HTML, error) {
-	// No WithHardWraps: the source is hard-wrapped at ~78 columns for reading
-	// in a repository, and honouring those newlines turns every paragraph into
-	// a ragged column in the browser.
+	return renderMarkdown([]byte(localBridgeMD))
+})
+
+// renderMarkdown is the single markdown configuration this package uses, split
+// out so a test can exercise the real renderer on its own input instead of
+// asserting something about the document that happens to be embedded today.
+//
+// No WithHardWraps: the source is hard-wrapped at ~78 columns for reading in a
+// repository, and honouring those newlines turns every paragraph into a ragged
+// column in the browser.
+//
+// No WithUnsafe either, so raw HTML in the source is dropped rather than passed
+// through — goldmark replaces it with an HTML comment. The guide is edited like
+// any other file in the repository; a page that executes whatever markup lands
+// in a doc is a wider surface than a setup guide needs.
+func renderMarkdown(src []byte) (template.HTML, error) {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	var buf bytes.Buffer
-	if err := md.Convert([]byte(localBridgeMD), &buf); err != nil {
+	if err := md.Convert(src, &buf); err != nil {
 		return "", err
 	}
-	// The rendered HTML comes from a file in this repository, not from user
-	// input, so it is trusted markup by construction. goldmark is configured
-	// without WithUnsafe, so raw HTML in the source is escaped rather than
-	// passed through.
-	return template.HTML(buf.String()), nil //nolint:gosec // trusted repo content
-})
+	return template.HTML(buf.String()), nil //nolint:gosec // renderer drops raw HTML; see above
+}
 
 type localBridgeData struct {
 	ui.Data

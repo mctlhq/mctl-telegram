@@ -51,12 +51,29 @@ func TestLocalBridgeRenders(t *testing.T) {
 	}
 }
 
-// goldmark is configured without WithUnsafe, so raw HTML in the source is
-// escaped rather than passed through. That is deliberate: the guide is edited
-// like any other file, and a page that executes whatever markup lands in a doc
-// is a wider surface than a setup guide needs.
-func TestLocalBridgeDoesNotRenderRawHTML(t *testing.T) {
-	if strings.Contains(localBridgeMD, "<script") {
-		t.Fatal("the source doc contains a script tag; this test can no longer distinguish escaped from executed")
+// goldmark is configured without WithUnsafe, so raw HTML in the source never
+// reaches the page as markup. Asserting that today's document happens to
+// contain no markup would prove nothing about the renderer — it has to be fed
+// the markup and watched.
+//
+// What it actually does is drop it: both a raw HTML block and inline HTML
+// inside a paragraph are replaced by "<!-- raw HTML omitted -->", not escaped
+// into visible text. That is worth pinning, because a change to escaping would
+// be a visible change to the page, and a change to passing it through would be
+// a security one.
+func TestRenderMarkdown_NeutralisesRawHTML(t *testing.T) {
+	out, err := renderMarkdown([]byte(
+		"Intro paragraph.\n\n<script>alert(1)</script>\n\ntrailing <img src=x onerror=alert(1)> inline\n"))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	got := string(out)
+	for _, raw := range []string{"<script", "<img src=x", "onerror"} {
+		if strings.Contains(got, raw) {
+			t.Errorf("renderer passed through raw HTML %q:\n%s", raw, got)
+		}
+	}
+	if strings.Count(got, "raw HTML omitted") != 2 {
+		t.Errorf("expected both the block and the inline HTML dropped, got:\n%s", got)
 	}
 }
