@@ -76,6 +76,15 @@ type Registry struct {
 	// daemon websocket connections. Incremented on Hub.Register, decremented
 	// on Hub.Unregister / Hub.UnregisterSend.
 	BridgeActiveDaemons prometheus.Gauge
+
+	// BridgeConnectionsTotal counts daemon registrations, labeled by user id.
+	// A counter rather than the gauge because the gauge cannot see two of the
+	// three ways a daemon reconnects: a reconnect that lands while the old
+	// entry is still registered replaces it with net zero gauge change, and a
+	// disconnect/reconnect pair nets out to zero over any window that
+	// contains both. Being per-user also makes a flap alert independent of
+	// how many daemons happen to be connected, which a shared gauge is not.
+	BridgeConnectionsTotal *prometheus.CounterVec
 	// BridgeCallsTotal counts hub round-trips, labeled by tool and status
 	// ("ok" or "error"). Incremented by bridgeCall() in the MCP layer.
 	BridgeCallsTotal *prometheus.CounterVec
@@ -246,6 +255,13 @@ func New() *Registry {
 		Help: "Current number of Local Bridge daemon websocket connections registered with the Hub.",
 	})
 
+	r.BridgeConnectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_bridge_connections_total",
+		Help: "Total Local Bridge daemon registrations with the Hub, labeled by user id. " +
+			"Cardinality is bounded by the number of local-mode accounts, each of which an operator flips deliberately. " +
+			"A healthy daemon contributes one increment per server rollout; repeated increments are a reconnect loop.",
+	}, []string{"user_id"})
+
 	r.BridgeCallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_bridge_calls_total",
 		Help: "Total Local Bridge hub round-trips, labeled by tool name and status (ok or error).",
@@ -303,6 +319,7 @@ func New() *Registry {
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,
+		r.BridgeConnectionsTotal,
 		r.BridgeCallsTotal,
 		r.AgentEventsReceivedTotal,
 		r.AgentJobsTotal,

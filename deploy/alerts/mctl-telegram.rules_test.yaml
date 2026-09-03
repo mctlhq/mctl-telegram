@@ -1,0 +1,51 @@
+# promtool unit tests for deploy/alerts/mctl-telegram.rules.yaml.
+#
+# Run by the promtool-check job in .github/workflows/build.yml, which extracts
+# .spec from the PrometheusRule CRD into a bare rules file first.
+#
+# The point of these two cases is the pair, not either alone. Asserting only
+# that a rollout stays silent would have passed on the old, permanently-quiet
+# expression and proved nothing; asserting only that a flap fires would not
+# catch a threshold lowered until every deploy pages someone.
+rule_files:
+  - /tmp/rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # A flapping daemon at its steady-state backoff. cmd/local/daemon.go caps
+  # reconnect backoff at 60s and only resets the ladder after a session that
+  # lasts 60s, so a daemon that never holds a connection settles at one
+  # registration per minute — the exact rate the previous
+  # changes(mctl_bridge_active_daemons[10m]) > 20 expression could not reach.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_bridge_connections_total{user_id="6462"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MctlBridgeDaemonsFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              user_id: "6462"
+            exp_annotations:
+              summary: "mctl-telegram Local Bridge daemon 6462 is reconnecting in a loop"
+              # Trailing newline is real: the rule's description uses a `>`
+              # folded scalar, which keeps one. promtool compares the string
+              # exactly.
+              description: "Local Bridge daemon for user 6462 registered 10 times in the last 10 minutes. A healthy daemon registers once per server rollout. This may signal a looping reconnect, a token rotation problem, or network instability on the daemon host.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
+
+  # A server rollout: the daemon reconnects once. Observed on the 0.57.0
+  # deploy, 2026-09-02 — one disconnect, one reconnect 33s later. This must
+  # stay silent, and so must a second rollout inside the same window.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_bridge_connections_total{user_id="6462"}'
+        values: '0 0 0 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: MctlBridgeDaemonsFlapping
+        exp_alerts: []

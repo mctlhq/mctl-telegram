@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,12 +83,19 @@ func (h *Hub) Register(userID int64) chan Envelope {
 	if prev, ok := h.conn[userID]; ok {
 		close(prev.send)
 		// Eviction of an existing daemon: the gauge stays at 1 for this user
-		// because a new one is about to be registered. Net change = 0.
+		// because a new one is about to be registered. Net change = 0 — which
+		// is exactly why a flap alert cannot be built on the gauge. The
+		// counter below still counts this as a connection, because it is one.
 	} else {
 		// Brand-new connection for this user.
 		if h.metrics != nil {
 			h.metrics.BridgeActiveDaemons.Inc()
 		}
+	}
+	// Counted on every registration, both branches. A daemon in a reconnect
+	// loop increments this once per cycle no matter which branch it takes.
+	if h.metrics != nil {
+		h.metrics.BridgeConnectionsTotal.WithLabelValues(strconv.FormatInt(userID, 10)).Inc()
 	}
 	dc := &daemonConn{send: make(chan Envelope, 16)}
 	h.conn[userID] = dc
