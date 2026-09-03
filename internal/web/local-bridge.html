@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<style>
+  /* Prose styling for the rendered guide, built on the shared design tokens.
+     The markup below is produced by goldmark from docs/local-bridge.md, so
+     these selectors are plain elements rather than page-specific classes. */
+  .doc { max-width: 760px; }
+  .doc h1 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 34px; font-weight: 600; color: var(--text);
+    margin: 0 0 18px; letter-spacing: -.02em;
+  }
+  .doc h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
+  }
+  .doc h3 {
+    font-size: 16px; font-weight: 600; color: var(--text); margin: 28px 0 10px;
+  }
+  .doc p, .doc li { color: var(--text-dim); line-height: 1.65; }
+  .doc p { margin: 12px 0; }
+  .doc ul, .doc ol { padding-left: 22px; margin: 12px 0; }
+  .doc li { margin-bottom: 8px; }
+  .doc strong { color: var(--text); }
+  .doc a { color: var(--accent); }
+  .doc code {
+    font-family: var(--font-mono); font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; color: var(--text);
+  }
+  .doc pre {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 13px; color: var(--text);
+    line-height: 1.55;
+  }
+  .doc pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  .doc blockquote {
+    margin: 16px 0; padding: 2px 0 2px 16px;
+    border-left: 3px solid var(--border); color: var(--text-dim);
+  }
+  /* Wide tables swipe within their own box rather than widening the page. */
+  .doc table {
+    display: block; width: 100%; overflow-x: auto; border-collapse: collapse;
+    margin: 14px 0; font-size: 14px;
+  }
+  .doc td, .doc th {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    vertical-align: top; color: var(--text-dim);
+  }
+  .doc th { font-weight: 600; color: var(--text); white-space: nowrap; }
+  .doc hr { border: 0; border-top: 1px solid var(--border); margin: 32px 0; }
+  .doc-source { color: var(--text-dim); font-size: 13px; margin-top: 40px; }
+  @media (max-width: 640px) {
+    .doc h1 { font-size: 26px; }
+    .doc h2 { font-size: 18px; }
+    .doc table { font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <article class="doc">
+{{.Body}}
+    <p class="doc-source">
+      This page is rendered from
+      <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/local-bridge.md" target="_blank" rel="noopener">docs/local-bridge.md</a>
+      in the repository, so what you read here is the same text the code is developed against.
+    </p>
+  </article>
+
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
+</body>
+</html>
