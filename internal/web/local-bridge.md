@@ -1,0 +1,482 @@
+# Local Bridge
+
+Local Bridge is a deployment mode in which your Telegram session lives on a
+machine you control instead of on tg.mctl.ai. The server keeps routing MCP tool
+calls from your assistant, but instead of opening Telegram itself it forwards
+each call over a websocket to a daemon running on your machine, and that daemon
+talks to Telegram.
+
+The mode is in beta and is enabled per account by an operator. There are two
+ways in, and which one you take decides whether this server ever holds a copy
+of your Telegram session:
+
+- **A new account, provisioned straight into local mode** — the operator calls
+  `provision_local_account`, and the account is created with no server-side
+  session at all. No hosted login happens, so there is nothing here to store.
+- **An existing hosted account, migrated** — the operator calls
+  `set_account_mode` with `mode="local"`. The sealed session stored when you
+  first connected stays in our database; local mode stops the server from using
+  it, but does not erase it.
+
+This document describes what the mode actually does today, including the parts
+that are unfinished, so you can decide whether it fits your workflow before you
+set it up.
+
+## What it changes, and what it does not
+
+**Telegram traffic originates from your machine.** Once the daemon is
+connected, the MTProto connection to Telegram is made by your daemon using the
+session stored on your disk. Your assistant still talks to tg.mctl.ai, which
+still authenticates you and still writes an audit trail.
+
+**The relay still sees the payloads.** It has to, in order to route them. Tool
+arguments and results — including message text — pass through the relay's memory
+for the duration of a call. This is not end-to-end encryption between your
+assistant and your daemon, and no amount of local-mode configuration makes it
+one.
+
+**Your existing server-side session is not deleted.** Switching to local mode
+stops the server from using its stored copy; it does not erase it, and it
+cannot be revoked without leaving local mode (a revoked account reverts to
+hosted, and the bridge then refuses your daemon). If you want the stored copy to
+be worthless, terminate that session from your own Telegram client — Settings →
+Devices → find the session → terminate. The bytes remain in the database but
+hold a dead authorization key. Do this **after** your local login works, not
+before.
+
+**Your connector does not change.** The MCP endpoint is the same; the server
+decides per account whether a call goes to the hosted session pool or to your
+daemon. You do not need to remove and re-add the connector.
+
+## Before you start
+
+**You do not need a hosted login first.** An account can be provisioned
+directly into local mode, in which case tg.mctl.ai never holds a session for
+it. If you already have a hosted account and want to move it, that works too —
+the operator migrates it with `set_account_mode` — but starting fresh is the
+option that leaves nothing behind here.
+
+**You need a machine that stays on.** The daemon must be reachable for a tool
+call to succeed; when it is not, calls fail with a clear error rather than
+falling back to the server. A laptop that sleeps is a poor host. A small
+always-on machine is the right one.
+
+**You need your own Telegram API credentials.** Register an application at
+<https://my.telegram.org/apps> and use the `api_id` and `api_hash` it shows.
+Telegram issues one application per account and offers no way to delete it, so
+if you have registered one before, that page shows the existing credentials
+rather than a form. The credentials identify the *application*, not the account
+— one pair can authorize any Telegram account, which is how any third-party
+client works.
+
+## What the operator has to do (and when)
+
+Three of the steps below are ours, and none of them is self-service yet. They
+are listed here so you can see exactly where you have to wait for us, and so
+the operator has a checklist rather than a memory.
+
+| # | Step | Who | When |
+|---|------|-----|------|
+| 1 | `provision_local_account` (new account) or `set_account_mode mode="local"` (migration) | operator | before you run `connect` |
+| 2 | Mint the long-lived MCP token — `mint_worker_token` with `purpose="local-bridge"` | operator | before you run `connect` |
+| 3 | `set_account_send` to turn real sending on | operator | after step 1, before you expect a message to leave |
+
+**Step 3 is the one that gets missed, and it fails quietly.** A freshly
+provisioned local account has `send_enabled = false`. That does not produce an
+error — `send_message` returns a **successful dry-run preview** with the reason
+`per-account send_enabled=false`, because drafting-by-default is deliberate
+elsewhere in the product. So a first send looks like it worked, and nothing
+arrives. If your first test message never lands, read the `dry_run` field of the
+response before debugging anything else.
+
+All three steps are MCP tools now. Step 2 used to be a hand-assembled HTTP
+call; `POST /api/mcp/worker-token` still exists and issues exactly the same
+credential — the tool and the endpoint share one mint policy rather than each
+implementing it — so an operator can use either.
+
+Record what step 2 returns. `expires_at` is the only warning you will get: a
+worker token lives for up to 90 days and announces nothing as it ends, and the
+first symptom is the daemon reconnecting in a loop. `jti` is what revokes this
+specific token later; without it, containing a leak means revoking every token
+for the account.
+
+Two things that are **no longer** operator steps, in case you read an older
+description of this mode:
+
+- **No hosted login first.** A local account can be created directly (step 1),
+  so the server never holds a session for it.
+- **No TTL exemption.** Local accounts are excluded from the idle and absolute
+  session sweepers in the query itself, so nothing has to be added to an
+  exemption list and no account silently reverts to hosted after 30 days.
+
+## Install
+
+Download the build for your platform from the
+[releases page](https://github.com/mctlhq/mctl-telegram/releases) and check it
+against `SHA256SUMS.txt`:
+
+```sh
+VERSION=$(curl -fsSL https://api.github.com/repos/mctlhq/mctl-telegram/releases/latest \
+  | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+BASE=https://github.com/mctlhq/mctl-telegram/releases/download/$VERSION
+mkdir -p ~/mctl-local/logs && cd ~/mctl-local &&
+curl -fsSLO "$BASE/mctl-telegram-local-$VERSION-darwin-arm64" &&
+curl -fsSLO "$BASE/SHA256SUMS.txt" &&
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing &&
+chmod +x mctl-telegram-local-$VERSION-darwin-arm64 &&
+mv mctl-telegram-local-$VERSION-darwin-arm64 mctl-telegram-local
+```
+
+The `&&` matter. `shasum -c` exits non-zero on a mismatch but prints its
+complaint and moves on if the commands are merely listed one after another, so
+an unchained sequence installs a corrupted or tampered binary and tells you
+only in a line you have already scrolled past.
+
+`VERSION` is read from the releases API rather than written out, so this block
+does not rot. A version pinned in prose is wrong from the next release onward,
+and the reader has no way to tell whether the number is deliberate or stale.
+
+`~/mctl-local` is where this guide keeps the binary, the passphrase file and
+the daemon's log; `~/.config/mctl-telegram-local` is where the daemon itself
+keeps its config and session, and it creates that one for you.
+
+Builds are published for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
+`linux/arm64` and `windows/amd64`. Check which one you need before downloading —
+an Intel Mac needs `darwin-amd64` and will not run the `arm64` build.
+
+**The binaries are not signed.** Downloading with `curl` avoids the problem
+entirely: macOS attaches its quarantine attribute only to files a browser
+saved, so a `curl`-fetched binary runs without ceremony. If you did download
+through a browser, clear it with
+`xattr -d com.apple.quarantine mctl-telegram-local`. On Windows, running the
+`.exe` from a terminal does not trigger the SmartScreen prompt that
+double-clicking it would.
+
+Building from source works too and produces a binary with no quarantine
+attribute at all:
+
+```sh
+git clone https://github.com/mctlhq/mctl-telegram && cd mctl-telegram
+go build -o mctl-telegram-local ./cmd/local
+```
+
+## Set up
+
+Four commands, in order. Everything lives under
+`~/.config/mctl-telegram-local/`.
+
+### 1. `init`
+
+```sh
+./mctl-telegram-local init
+```
+
+Asks for your `TG_API_ID`, your `TG_API_HASH`, and a passphrase. The passphrase
+encrypts the local session database via Argon2id.
+
+**There is no recovery.** If you lose the passphrase, the stored session is
+unreadable and you start again from `login`. Generate a strong one and store it
+in a password manager, and — if you plan to run the daemon unattended, which you
+should — also write it to a file:
+
+```sh
+mkdir -p ~/mctl-local &&
+(umask 077 && LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 40 > ~/mctl-local/passphrase)
+```
+
+Write it without a trailing newline, or rely on the daemon trimming one.
+
+The `umask 077` is not decoration. A plain redirection creates the file under
+your usual umask — world-readable on most systems — and a `chmod` on the next
+line closes that only after the passphrase is already on disk in the clear. The
+subshell means it is never created readable.
+
+`init` does not ask for the server address. That matters in step 3.
+
+### 2. `login`
+
+```sh
+./mctl-telegram-local login --phone +1234567890
+```
+
+An ordinary Telegram login: it asks for the passphrase from step 1, then for the
+code Telegram sends, then for your cloud password if you have two-factor
+enabled. The code arrives inside Telegram when the account is signed in
+somewhere else, and by SMS when it is not.
+
+This creates a **second** session on your account, alongside the server's. Both
+are live until you terminate one.
+
+### 3. `connect`
+
+```sh
+./mctl-telegram-local connect --token "$(cat mcp-token.txt)" --server https://tg.mctl.ai
+```
+
+Exchanges a long-lived MCP token for a short-lived bridge token and saves both.
+
+**`--server` is required the first time.** `init` never asks for it, so the
+config starts with an empty server URL, and omitting the flag produces a request
+to a URL with no host.
+
+The MCP token is issued to you by an operator. An ordinary OAuth access token
+from your connector will not do: those live one hour, and the daemon needs a
+credential it can keep re-exchanging. Ask for one when your account is enabled
+for local mode.
+
+An operator mints it with the `mint_worker_token` MCP tool (or the equivalent
+`POST /api/mcp/worker-token`) using
+`telegram_id` and `purpose="local-bridge"` — this grants the
+`telegram:messages:send`/`telegram:messages:pin` scopes the daemon needs
+for `send_message`/`pin_message` to work, in addition to the read-only
+scopes. The daemon can renew this token itself before it expires via
+`POST /api/mcp/worker-token/renew`, so re-minting is only needed once the
+renewal window itself is exhausted. There is no need to hand-sign a JWT
+with `OAUTH_JWT_SIGNING_KEY` for this.
+
+**One caveat about that command.** `--token` is currently the only way to pass
+the token, so it appears in the process argument list and is readable by other
+local accounts through `ps` for as long as the command runs — a second or two.
+On a single-user machine that is a small window; on a shared one, run `connect`
+when nobody else is logged in. Delete `mcp-token.txt` once `connect` has
+succeeded: the daemon stores its own copy in
+`~/.config/mctl-telegram-local/bridge_token.json`, and the file you pasted from
+is not read again. A `--token-file` option that avoids the argument list
+entirely is tracked in #454.
+
+### 4. `daemon`
+
+```sh
+./mctl-telegram-local daemon
+```
+
+Connects to `wss://tg.mctl.ai/bridge` and serves calls. Until an operator has
+flipped your account to local mode, the bridge refuses the connection; until the
+daemon is running, your assistant's calls return
+`local-bridge daemon not connected`. Neither state loses your authorization or
+hangs — the errors are explicit and recoverable.
+
+## Running it unattended
+
+Run the daemon under a service manager, not in a terminal. It takes its
+passphrase from the environment when one is supplied:
+
+| Variable | Meaning |
+|---|---|
+| `MCTL_LOCAL_PASSPHRASE_FILE` | Path to a file holding the passphrase. Takes precedence. |
+| `MCTL_LOCAL_PASSPHRASE` | The passphrase itself. |
+
+**Use the file, not the value.** A launchd plist lives in
+`~/Library/LaunchAgents` and is world-readable; a systemd unit's `Environment=`
+lines are visible through `systemctl show`. A passphrase written into the
+service definition is therefore readable by every account on the machine, while
+a path to a `0600` file is not.
+
+**The macOS keychain is not an option.** The login keychain is locked outside a
+GUI session, so `security find-generic-password` fails for a service started at
+boot exactly as it fails over SSH. This looks like the obvious place to put the
+secret and does not work.
+
+### launchd (macOS)
+
+`~/Library/LaunchAgents/ai.mctl.telegram-local.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.mctl.telegram-local</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/mctl-local/mctl-telegram-local</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MCTL_LOCAL_PASSPHRASE_FILE</key>
+    <string>/Users/you/mctl-local/passphrase</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/you/mctl-local/logs/daemon.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/mctl-local/logs/daemon.log</string>
+</dict>
+</plist>
+```
+
+```sh
+mkdir -p ~/mctl-local/logs
+launchctl load -w ~/Library/LaunchAgents/ai.mctl.telegram-local.plist
+launchctl list | grep ai.mctl.telegram-local
+```
+
+The log directory must exist before loading: launchd does not create the
+parent of `StandardOutPath`, and a job whose output cannot be opened fails to
+start with a bare exit code rather than a message explaining it.
+
+A **LaunchAgent runs inside your login session**, so after a reboot it starts
+only once someone logs in. On a headless machine that means enabling automatic
+login — which in turn requires FileVault to be off, so the disk is unencrypted
+and anyone with physical access can read the passphrase file as the
+auto-logged-in user. That may be an acceptable trade for a machine in your
+office; it is a trade, not a detail. The alternative is a LaunchDaemon in
+`/Library/LaunchDaemons`, which starts at boot without a session but runs as
+root and needs absolute paths for everything.
+
+Test the restart path before trusting it:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/ai.mctl.telegram-local
+tail -f ~/mctl-local/logs/daemon.log
+```
+
+### systemd (Linux)
+
+This is a **user** unit — put it in `~/.config/systemd/user/mctl-telegram-local.service`,
+not in `/etc/systemd/system/`. A system unit runs as root by default, which
+would give the daemon, and anything that can read its unit file, more privilege
+over your Telegram session than it needs. `WantedBy=default.target` below is
+the user-unit target, and would be wrong for a system unit.
+
+```ini
+[Unit]
+Description=mctl-telegram Local Bridge daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/mctl-local/mctl-telegram-local daemon
+Environment=MCTL_LOCAL_PASSPHRASE_FILE=%h/mctl-local/passphrase
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now mctl-telegram-local
+loginctl enable-linger "$USER"   # start at boot, without waiting for a login
+journalctl --user -u mctl-telegram-local -f
+```
+
+`enable-linger` is the part people miss: without it a user unit stops when
+your last session ends and does not come back until you log in again.
+
+## Limitations
+
+These are current, not permanent, but plan around them today.
+
+**Five tools do not work in local mode** and return an explicit error rather
+than failing strangely: `edit_message`, `delete_messages`, `forward_messages`,
+`search_messages`, `set_reaction`. The daemon implements `list_dialogs`,
+`get_unread_messages`, `get_messages`, `send_message`, `send_media`,
+`prepare_get_media`, `get_media` and `pin_message`.
+
+**`fetch_media=true` is refused** on `get_messages` and `get_unread_messages`.
+Use `prepare_get_media` followed by `get_media` for each item instead.
+
+**No always-on listener.** The Communication Agent's hosted listener needs a
+server-side Telegram client, which a local-mode account does not have.
+
+**One account per machine.** The config path is fixed, and running `init` again
+overwrites the previous setup. Two accounts need two machines or two user
+accounts.
+
+**One daemon per account.** A second daemon displaces the first, which
+reconnects and displaces the second; the result is a reconnect loop that trips
+an alert on our side. If you move the daemon to another machine, stop the old
+one.
+
+**Enabling and disabling the mode is an operator action.** The operator calls
+`provision_local_account` for a new account or `set_account_mode` for an
+existing one; both are admin-only, and there is no self-serve switch yet.
+
+**Between enabling the mode and starting the daemon, your tools will fail.**
+The relay refuses a daemon whose account is not already in local mode, so the
+mode has to be switched first. In the gap your assistant gets a clear
+`local-bridge daemon not connected` error rather than a hang, and the error
+clears as soon as the daemon connects. Plan the switch for a moment when you
+are ready to run `daemon`, not hours before.
+
+## Security notes
+
+Everything the daemon writes is owner-only (`0600`), including the session
+database and its SQLite sidecar files. Two things are worth knowing about the
+contents:
+
+- `config.json` holds your `api_hash` in plaintext.
+- `bridge_token.json` holds both your MCP token and the current bridge token in
+  plaintext. Anyone who can read it can act as your account until they are
+  revoked. Tell the operator immediately if you think the file was exposed:
+  an individual token can now be withdrawn without waiting for it to expire
+  and without disturbing anyone else, but only once someone asks. The operator
+  revokes it by `jti` — the identifier recorded when the token was minted —
+  or, if that was not written down, by Telegram id, which kills every token
+  issued for the account up to that moment and drops a connected daemon along
+  with it. Either way you then need a fresh token and a `connect` before the
+  daemon works again.
+
+  A 30-day token rather than the 90-day maximum is still the better default.
+  Revocation is the response to a leak you noticed; a short lifetime is the
+  bound on one you did not.
+
+**What the server keeps depends on how the account became local.** An account
+provisioned directly into local mode has no stored session here, ever. An
+account migrated from a hosted login keeps the sealed session from when it
+first connected: the server stops using it, but it is still in the database.
+Revoking that hosted session does not disable local mode or disconnect your
+daemon. To make the stored copy useless, end that session from your own
+Telegram client (Settings -> Devices); the stored bytes then hold a dead
+authorization key.
+
+The MCP token is long-lived — months, typically. Nothing warns you as it
+approaches expiry: the first symptom is the daemon reconnecting in a loop. Note
+the expiry date somewhere you will see it.
+
+You can confirm which route a call actually took. `get_my_audit_log` and
+`GET /api/account/audit` return a `call_path` field per entry: `"local"` when
+the call was routed to your daemon, absent when it was served by the hosted
+session pool. That is the authoritative record — the server writes it — and it
+is worth checking once after the switch:
+
+```
+23:45:41  list_dialogs  status=ok     call_path=(absent — hosted)
+23:48:29  list_dialogs  status=error  call_path=local
+23:50:00  list_dialogs  status=ok     call_path=local
+```
+
+The error in the middle is the expected one: the account was already in local
+mode while the daemon was not yet running. Your daemon's own log shows the
+matching `dispatch` line for each successful call.
+
+## Troubleshooting
+
+**`local-bridge daemon not connected`** — the account is in local mode but no
+daemon is attached. Check the service is running and look at its log.
+
+**The daemon exits immediately at startup** — read the error. Two are common:
+the passphrase is wrong (or the file has a stray newline in an older build), and
+the MCP token has expired, which no longer resolves itself and needs a fresh
+`connect`.
+
+**Reconnect loop** — usually an expired MCP token, sometimes a second daemon
+running elsewhere. Both look identical from the server; check for the second
+daemon first, because it is the one you can rule out immediately.
+
+**The daemon starts by hand but not under launchd** — the passphrase is being
+prompted for. Confirm `MCTL_LOCAL_PASSPHRASE_FILE` is set in the service
+definition and points at a readable file.
+
+**Windows: `init` cannot read the passphrase** — run it in PowerShell rather
+than Git Bash; the no-echo prompt does not work under mintty.
+
+## Rolling back
+
+Ask the operator to move the account back to hosted mode. Calls resume through
+the server's own session, provided you did not terminate it from your Telegram
+client — if you did, you will need to reconnect the account normally. Stop the
+daemon once the switch is done.
