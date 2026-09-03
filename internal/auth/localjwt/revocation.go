@@ -161,7 +161,13 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	// snapshot's start against the applied one's completion would get this
 	// backwards in the other direction: a read that began earlier but
 	// finished later would look newer, and would discard the fresher one.
-	if c.populated && !c.readStartedAt.Before(readStartedAt) {
+	//
+	// Ties apply rather than discard. Two reads that began in the same clock
+	// tick are indistinguishable by timestamp, so the tie has to break one
+	// way by fiat; it breaks towards the later arrival because the caller
+	// that forces a refresh does so immediately after writing a revocation,
+	// and dropping that snapshot is the one outcome with a security cost.
+	if c.populated && c.readStartedAt.After(readStartedAt) {
 		return nil
 	}
 	c.jtis = jtis

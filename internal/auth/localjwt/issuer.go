@@ -53,10 +53,10 @@ type Claims struct {
 	// credential's renewals. Interactive tokens never carry one, which is
 	// part of the gate Provider.Authenticate uses to skip the
 	// revocation-cache lookup entirely for the common case (see
-	// isWorkerToken and RevocationCache). Tokens minted before this field
-	// existed simply omit it and are recognised by their worker audience
-	// instead, so a blanket revoke-by-telegram_id still reaches them even
-	// before their next renewal mints them a jti.
+	// needsRevocationCheck and RevocationCache). Tokens minted before this
+	// field existed simply omit it and are recognised by their worker
+	// audience instead, so a blanket revoke-by-telegram_id still reaches them
+	// even before their next renewal mints them a jti.
 	Jti string `json:"jti,omitempty"`
 }
 
@@ -254,21 +254,21 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if err := CheckAudience(c.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
 		return nil, err
 	}
-	// Revocation check: only for worker credentials (see isWorkerToken) —
-	// either a jti-bearing token minted by internal/workertoken, or a
-	// jti-less pre-jti one identified by its worker audience. An interactive
-	// session's token has neither and skips this entirely — zero extra DB
-	// round trips for the common case. Gating on "is this a worker token"
-	// rather than on jti presence is what makes a blanket revoke-by-
-	// telegram_id actually reach a jti-less legacy worker token, as
-	// revoke_worker_token's description promises ("known jti or not");
-	// keying it on c.Jti alone let such a token keep working for its whole
-	// (long) TTL after being reported revoked. Placed before
+	// Revocation check: for every non-interactive credential (see
+	// needsRevocationCheck) — a jti-bearing token, a jti-less pre-jti one
+	// identified by its worker audience, or a bridge/agent token derived from
+	// either. An interactive session's token has none of those and skips this
+	// entirely — zero extra DB round trips for the common case. Gating on
+	// "is this a non-interactive credential" rather than on jti presence is
+	// what makes a blanket revoke-by-telegram_id actually reach a jti-less
+	// legacy worker token, as revoke_worker_token's description promises
+	// ("known jti or not"); keying it on c.Jti alone let such a token keep
+	// working for its whole (long) TTL after being reported revoked. Placed before
 	// EnsureUserByTelegramID so a revoked token never touches the
 	// user-provisioning path. Fail closed: a cache error rejects the request
 	// rather than silently treating it as "not revoked" (see
 	// RevocationCache.IsRevoked).
-	if isWorkerToken(c) && p.RevocationCache != nil {
+	if needsRevocationCheck(c) && p.RevocationCache != nil {
 		revoked, err := p.RevocationCache.IsRevoked(r.Context(), c.Jti, c.TelegramID, originAnchor(c))
 		if err != nil {
 			return nil, fmt.Errorf("check worker token revocation: %w", err)
@@ -293,6 +293,8 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		Provider:         "tg-mcp",
 		Groups:           c.Groups,
 		Scopes:           c.Scopes,
+		Jti:              c.Jti,
+		OriginalIssuedAt: c.OriginalIssuedAt,
 	}, nil
 }
 
@@ -309,14 +311,36 @@ const workerAudience = "mcp-worker-ro"
 // internal/workertoken's workerBridgeAudience.
 const workerBridgeAudience = "mcp-worker-bridge"
 
-// isWorkerToken reports whether these claims belong to a worker credential —
-// i.e. whether Authenticate must consult the revocation denylist for them.
-// Two shapes qualify: a token carrying a jti (everything internal/workertoken
-// has minted since jti existed), and a jti-less token carrying either worker
-// audience — read-only or local-bridge (the hand-signed long-lived credentials
-// that predate jti — they have no individual identifier to denylist, but a
-// blanket revocation by telegram_id must still catch them).
-func isWorkerToken(c *Claims) bool {
+// derivedAudiences are the aud values of credentials this service mints *from*
+// an already-authenticated credential: the short-lived bridge token handed to
+// a Local Bridge daemon (internal/bridge.NewBridgeTokenHandler) and the agent
+// token an admin mints for a Telegram identity (internal/agentapi). They are
+// not worker tokens themselves, but they are non-interactive credentials
+// standing in for one, so a blanket revoke-by-telegram_id must reach them too.
+// Leaving them out is what let an evicted daemon reconnect with the bridge
+// token it already held: eviction dropped the socket, the reconnect skipped
+// the denylist entirely, and containment lasted until the token expired on
+// its own.
+var derivedAudiences = [...]string{"bridge", "agent"}
+
+// needsRevocationCheck reports whether Authenticate must consult the
+// revocation denylist for these claims. Three shapes qualify:
+//
+//   - a token carrying a jti — everything internal/workertoken has minted
+//     since jti existed, plus any credential derived from one (the derivation
+//     copies the parent's jti forward, so revoking the parent revokes the
+//     child);
+//   - a jti-less token carrying either worker audience, read-only or
+//     local-bridge — the hand-signed long-lived credentials that predate jti.
+//     They have no individual identifier to denylist, but a blanket
+//     revocation by telegram_id must still catch them;
+//   - a jti-less token carrying a derived audience — a bridge or agent token
+//     minted from a parent that itself predates jti, and so had no jti to
+//     pass down.
+//
+// An interactive session's token has none of these and skips the lookup
+// entirely, which is what keeps the common request path free of it.
+func needsRevocationCheck(c *Claims) bool {
 	if c == nil {
 		return false
 	}
@@ -326,6 +350,11 @@ func isWorkerToken(c *Claims) bool {
 	for _, a := range c.Audience {
 		if a == workerAudience || a == workerBridgeAudience {
 			return true
+		}
+		for _, d := range derivedAudiences {
+			if a == d {
+				return true
+			}
 		}
 	}
 	return false

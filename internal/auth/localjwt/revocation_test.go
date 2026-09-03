@@ -93,7 +93,7 @@ func TestProvider_UnrevokedJtiStillAuthenticates(t *testing.T) {
 // revocation-cache lookups. Proven behaviorally: RevocationCache is backed by
 // an already-closed store, so ANY lookup attempt returns an error; a no-jti
 // token must still authenticate successfully, which is only possible if
-// Authenticate's isWorkerToken guard skipped the cache entirely (an
+// Authenticate's needsRevocationCheck guard skipped the cache entirely (an
 // interactive token carries neither a jti nor the worker audience). Deleting
 // that guard makes this test fail because the broken cache would then be
 // consulted and its error would propagate.
@@ -418,7 +418,7 @@ func TestProvider_JtiLessWorkerTokenWithoutRevocationStillAuthenticates(t *testi
 	}
 }
 
-func TestIsWorkerToken(t *testing.T) {
+func TestNeedsRevocationCheck(t *testing.T) {
 	cases := []struct {
 		name string
 		c    *Claims
@@ -431,12 +431,160 @@ func TestIsWorkerToken(t *testing.T) {
 		{"worker audience among others", &Claims{Audience: []string{"mctl", workerAudience}}, true},
 		{"bridge audience only", &Claims{Audience: []string{workerBridgeAudience}}, true},
 		{"bridge audience among others", &Claims{Audience: []string{"mctl", workerBridgeAudience}}, true},
-		{"unrelated audience", &Claims{Audience: []string{"bridge"}}, false},
+		{"derived bridge audience", &Claims{Audience: []string{"bridge"}}, true},
+		{"derived agent audience", &Claims{Audience: []string{"agent"}}, true},
+		{"unrelated audience", &Claims{Audience: []string{"mctl"}}, false},
 		{"bridge-shaped but wrong string", &Claims{Audience: []string{"mcp-worker-bridge-typo"}}, false},
 	}
 	for _, tc := range cases {
-		if got := isWorkerToken(tc.c); got != tc.want {
-			t.Errorf("%s: isWorkerToken = %v, want %v", tc.name, got, tc.want)
+		if got := needsRevocationCheck(tc.c); got != tc.want {
+			t.Errorf("%s: needsRevocationCheck = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A derived bridge token — the credential the Local Bridge daemon actually
+// presents at /bridge — must be reached by a blanket revoke-by-telegram_id.
+//
+// The daemon does not authenticate at /bridge with its worker token; it
+// exchanges that token for a short-lived one carrying aud="bridge" and no
+// jti. Recognising only the two worker audiences meant the bridge provider
+// skipped the denylist for exactly the credential that containment has to
+// stop: revoke_worker_token would write the row, evict the socket, and the
+// daemon would reconnect with the same token seconds later.
+func TestProvider_DerivedBridgeTokenCaughtByBlanketRevocation(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	if err := store.RevokeWorkerTokensForTelegramID(ctx, 88, "compromised", 1); err != nil {
+		t.Fatalf("seed blanket revocation: %v", err)
+	}
+	cache := NewRevocationCache(store, time.Minute)
+	p, err := NewProvider(store, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer,
+		ExpectedAudience: "bridge", RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject:    "tg:88",
+		TelegramID: 88,
+		Audience:   []string{"bridge"},
+		IssuedAt:   time.Now().Add(-30 * time.Minute).Unix(), // minted before the revocation
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if id, err := p.Authenticate(r); err == nil {
+		t.Fatalf("derived bridge token must be rejected after a blanket revoke, got identity %+v", id)
+	}
+}
+
+// The mirror: a bridge token for a telegram id nobody revoked still connects.
+// Widening the gate must widen what is *checked*, not reject every daemon.
+func TestProvider_DerivedBridgeTokenWithoutRevocationStillAuthenticates(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	cache := NewRevocationCache(store, time.Minute)
+	p, err := NewProvider(store, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer,
+		ExpectedAudience: "bridge", RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject: "tg:89", TelegramID: 89, Audience: []string{"bridge"},
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("unrevoked bridge token should authenticate: %v", err)
+	}
+	if id == nil || id.TelegramID != 89 {
+		t.Fatalf("unexpected identity: %+v", id)
+	}
+}
+
+// Authenticate must hand the credential's own revocation identity back to the
+// caller, because POST /api/bridge/token stamps it onto the child token it
+// mints. If Identity drops jti here, the derived bridge token is born without
+// one and revoking the parent by jti never reaches it.
+func TestProvider_IdentityCarriesCredentialRevocationClaims(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	cache := NewRevocationCache(store, time.Minute)
+	p, err := NewProvider(store, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer, RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject: "tg:90", TelegramID: 90,
+		Jti: "carry-me", OriginalIssuedAt: 1700000000,
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if id.Jti != "carry-me" {
+		t.Errorf("Identity.Jti = %q, want %q", id.Jti, "carry-me")
+	}
+	if id.OriginalIssuedAt != 1700000000 {
+		t.Errorf("Identity.OriginalIssuedAt = %d, want %d", id.OriginalIssuedAt, 1700000000)
+	}
+}
+
+// Two refreshes whose reads begin in the same clock tick are indistinguishable
+// by timestamp, so the tie has to break one way by fiat. It breaks towards the
+// later arrival: the caller that forces a refresh does so immediately after
+// writing a revocation, and discarding that snapshot is the outcome with a
+// security cost — the just-evicted daemon reconnects cleanly for a whole TTL.
+//
+// Timeline: the applied snapshot reads at t=10 (empty store); the revocation
+// is recorded; a second refresh reads at t=10 as well and must win.
+func TestRevocationCache_TiedReadStartApplies(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Unix(0, 0)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	clock := &scriptedClock{values: []time.Time{
+		at(10), at(11), // applied snapshot: empty store
+		at(10), at(12), // forced refresh: same read-start tick, sees the revocation
+		at(13), // the IsRevoked staleness check below
+	}}
+	cache := NewRevocationCache(store, time.Minute)
+	cache.now = clock.next
+
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+	if err := store.RevokeWorkerToken(ctx, "jti-tied", 6, "leak", 1); err != nil {
+		t.Fatalf("seed revocation: %v", err)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("forced refresh: %v", err)
+	}
+
+	revoked, err := cache.IsRevoked(ctx, "jti-tied", 6, at(0))
+	if err != nil {
+		t.Fatalf("IsRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("a forced refresh that began in the same clock tick as the applied snapshot was discarded; the revocation it carried never took effect")
 	}
 }

@@ -21,6 +21,16 @@ type Identity struct {
 	Provider         string
 	Groups           []string
 	Scopes           []string
+	// Jti and OriginalIssuedAt carry the *credential's* revocation identity,
+	// not the user's. They are populated by the local-jwt provider from the
+	// verified token's claims and exist so that a handler which mints a
+	// derived credential from this one (POST /api/bridge/token) can stamp the
+	// child with its parent's identity. Without that, revoking the parent
+	// leaves every child it already spawned valid for the child's whole TTL —
+	// which is exactly the containment gap revoke_worker_token exists to
+	// close. Empty/zero for credentials that carry neither claim.
+	Jti              string
+	OriginalIssuedAt int64
 }
 
 func (i *Identity) HasScope(s string) bool {

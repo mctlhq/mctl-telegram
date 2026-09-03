@@ -107,3 +107,88 @@ func TestBridgeToken_AnonymousReturns401(t *testing.T) {
 		t.Fatalf("expected 401 anonymous, got %d", rec.Code)
 	}
 }
+
+// TestBridgeToken_CarriesParentRevocationIdentity pins the containment
+// invariant: a bridge token is a delegation of the credential that asked for
+// it, so it must inherit that credential's jti and orig_iat. Without the
+// inheritance, revoking the parent worker token leaves every bridge token it
+// already spawned valid for the rest of bridgeTokenTTL — so evicting a
+// compromised daemon only makes it reconnect, and revoke_worker_token's
+// promise of immediate containment is false for up to an hour.
+func TestBridgeToken_CarriesParentRevocationIdentity(t *testing.T) {
+	id := &auth.Identity{
+		UserID:           7,
+		Subject:          "tg:7",
+		TelegramID:       7,
+		Jti:              "parent-jti-abc",
+		OriginalIssuedAt: 1700000000,
+	}
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
+	req = req.WithContext(auth.With(context.Background(), id))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handler status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		BridgeToken string `json:"bridge_token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	parts := strings.Split(resp.BridgeToken, ".")
+	if len(parts) != 3 {
+		t.Fatalf("malformed JWT: %q", resp.BridgeToken)
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims struct {
+		Jti      string `json:"jti"`
+		OrigIat  int64  `json:"orig_iat"`
+		Audience string `json:"aud"`
+	}
+	if err := json.Unmarshal(body, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v (%s)", err, body)
+	}
+	if claims.Jti != "parent-jti-abc" {
+		t.Errorf("bridge token jti = %q, want the parent's %q — revoking the parent would not reach this token", claims.Jti, "parent-jti-abc")
+	}
+	if claims.OrigIat != 1700000000 {
+		t.Errorf("bridge token orig_iat = %d, want the parent's %d — a blanket revocation would anchor this token to its mint instead of to when the credential chain started", claims.OrigIat, 1700000000)
+	}
+	if claims.Audience != "bridge" {
+		t.Errorf("bridge token aud = %q, want \"bridge\"", claims.Audience)
+	}
+}
+
+// TestBridgeToken_OmitsRevocationClaimsForInteractiveParent is the other half
+// of the pair: an interactive session carries neither claim, and the derived
+// token must not invent them. A fabricated jti would denylist-match nothing
+// and a fabricated orig_iat would misdate the credential chain.
+func TestBridgeToken_OmitsRevocationClaimsForInteractiveParent(t *testing.T) {
+	id := &auth.Identity{UserID: 8, Subject: "tg:8", TelegramID: 8}
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
+	req = req.WithContext(auth.With(context.Background(), id))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handler status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		BridgeToken string `json:"bridge_token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	body, err := base64.RawURLEncoding.DecodeString(strings.Split(resp.BridgeToken, ".")[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if strings.Contains(string(body), `"jti"`) || strings.Contains(string(body), `"orig_iat"`) {
+		t.Errorf("derived token invented revocation claims for an interactive parent: %s", body)
+	}
+}

@@ -76,6 +76,16 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string)
 			TelegramUsername: id.TelegramUsername,
 			Groups:           id.Groups,
 			Audience:         []string{"bridge"},
+			// Carry the parent credential's revocation identity into the
+			// child. A bridge token is a delegation of the MCP token that
+			// requested it, so revoking that token must revoke the bridge
+			// tokens it already spawned — otherwise dropping a compromised
+			// daemon's socket only makes it reconnect, and containment waits
+			// out bridgeTokenTTL. orig_iat travels with jti so the blanket
+			// revoke-by-telegram_id path still anchors the child to when the
+			// credential chain actually started, not to this mint.
+			Jti:              id.Jti,
+			OriginalIssuedAt: id.OriginalIssuedAt,
 		}, bridgeTokenTTL)
 		if err != nil {
 			slog.Error("bridge token: sign failed", "user_id", id.UserID, "err", err)

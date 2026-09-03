@@ -1304,11 +1304,27 @@ neither.
   linkage, so if the leaked credential's daemon is still connected, prefer
   the `telegram_id` form (or revoke by `jti` and separately ask the user to
   restart/disconnect the daemon).
+- Reaches the **derived** credentials a worker token has already spawned, not
+  just the worker token itself. A Local Bridge daemon does not present its
+  worker token at `/bridge`; it exchanges it at `POST /api/bridge/token` for a
+  short-lived token with `aud="bridge"`. That child inherits the parent's
+  `jti` and `orig_iat`, so revoking the parent by `jti` kills the children it
+  already handed out, and a blanket `telegram_id` revocation reaches even a
+  child whose parent predates `jti` (recognised by the derived audience —
+  `internal/auth/localjwt.needsRevocationCheck`). Without the inheritance,
+  eviction only made a compromised daemon reconnect, and containment waited
+  out the child's remaining hour.
 - `POST /api/mcp/worker-token/renew` for a revoked token is rejected with 401
   by the same auth middleware every other endpoint runs through — the renew
   handler itself never needs its own revocation check.
-- Interactive (non-worker) sessions are entirely unaffected: they carry no
-  `jti` and never reach the revocation check.
+- Interactive (non-worker) sessions on `/mcp` are entirely unaffected: they
+  carry no `jti` and no worker audience, so they never reach the revocation
+  check. One deliberate exception: a bridge token derived from an interactive
+  session carries `aud="bridge"` and *is* checked, so a blanket `telegram_id`
+  revocation also drops that account's daemon. That is the intended reading of
+  "revoke everything for this identity" — a containment call should not leave
+  a live bridge behind because the daemon happened to be started from a
+  browser session.
 - Revocation is one-directional. If a blanket `telegram_id` revocation was a
   mistake, mint a fresh worker token for that account rather than trying to
   "un-revoke" — old tokens for the id stay dead, the new one works.
