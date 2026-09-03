@@ -218,6 +218,7 @@ func TestMintWorkerToken_HTTPAndToolIssueTheSameCredential(t *testing.T) {
 			var httpResp struct {
 				WorkerToken string `json:"worker_token"`
 				ExpiresAt   string `json:"expires_at"`
+				Jti         string `json:"jti"`
 			}
 			if err := json.NewDecoder(rec.Body).Decode(&httpResp); err != nil {
 				t.Fatalf("decode http response: %v", err)
@@ -230,6 +231,18 @@ func TestMintWorkerToken_HTTPAndToolIssueTheSameCredential(t *testing.T) {
 			httpClaims, err := localjwt.Verify(httpResp.WorkerToken, []byte(mintTestSecret), mintTestIssuer)
 			if err != nil {
 				t.Fatalf("verify http token: %v", err)
+			}
+
+			// The jti is the only handle that revokes this one token, and
+			// it cannot be read back out of the token by the operator
+			// holding it. A transport that omits it leaves "revoke every
+			// token for this account" as the only remaining move, so both
+			// have to hand it over.
+			if httpResp.Jti == "" || httpResp.Jti != httpClaims.Jti {
+				t.Errorf("http jti = %q, want the issued token's jti %q", httpResp.Jti, httpClaims.Jti)
+			}
+			if viaTool.Jti == "" || viaTool.Jti != toolClaims.Jti {
+				t.Errorf("tool jti = %q, want the issued token's jti %q", viaTool.Jti, toolClaims.Jti)
 			}
 
 			if !sameStrings(toolClaims.Scopes, httpClaims.Scopes) {

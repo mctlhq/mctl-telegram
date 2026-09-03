@@ -97,9 +97,13 @@ type mintWorkerTokenRequest struct {
 }
 
 // workerTokenResponse is the JSON body returned by POST /api/mcp/worker-token.
+// Jti is part of the deliverable, not decoration: it is what revokes this
+// one token later, it cannot be recovered from the token afterwards, and
+// without it the only revocation left is "every token for this account".
 type workerTokenResponse struct {
 	WorkerToken string `json:"worker_token"`
 	ExpiresAt   string `json:"expires_at"`
+	Jti         string `json:"jti"`
 }
 
 // NewHandler returns the http.HandlerFunc for POST /api/mcp/worker-token.
@@ -175,6 +179,7 @@ func NewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, workerTokenResponse{
 			WorkerToken: mt.Token,
 			ExpiresAt:   mt.ExpiresAt.Format(time.RFC3339),
+			Jti:         mt.Jti,
 		})
 	}
 }
