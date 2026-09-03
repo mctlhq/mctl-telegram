@@ -201,3 +201,53 @@ func TestGetMySendStatus_NoStoreSaysSoInsteadOfGuessing(t *testing.T) {
 		t.Errorf("reason = %q, want it to name the unavailable store", r)
 	}
 }
+
+// An identity that has never linked a Telegram account is a normal case, not a
+// failure: GetActiveAccount reports Connected=false for it. The tool must
+// answer with the status, not with an error.
+func TestGetMySendStatus_NoAccountYetIsAnswered(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(context.Background(), 4949, "nobody", "No Account")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	srv := &Server{AllowSend: true, Store: store}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendStatus(t, callSendStatus(t, srv, id))
+	if out["connected"] != false {
+		t.Errorf("connected = %v, want false", out["connected"])
+	}
+	if out["can_send"] != false {
+		t.Errorf("can_send = %v, want false", out["can_send"])
+	}
+}
+
+// When an identity-level condition already settles the verdict, an unreadable
+// account row must not suppress the answer — send_message would still report
+// the real reason, and a status that returned an infrastructure error instead
+// would diverge from it. The account fields are then omitted rather than
+// reported as false, since "off" and "unknown" are different answers.
+func TestGetMySendStatus_SettledVerdictSurvivesAnUnreadableAccountRow(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedHostedAccount(t, store, 5050, true)
+	if err := store.DB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	srv := &Server{AllowSend: true, Store: store}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:read"}} // no send scope
+
+	out := parseSendStatus(t, callSendStatus(t, srv, id))
+	if out["can_send"] != false {
+		t.Fatalf("can_send = %v, want false", out["can_send"])
+	}
+	if r, _ := out["reason"].(string); !strings.Contains(r, "telegram:messages:send scope") {
+		t.Errorf("reason = %q, want the missing-scope reason rather than a database error", r)
+	}
+	if _, present := out["send_enabled"]; present {
+		t.Errorf("send_enabled present (%v) despite an unreadable row — absent means unknown, false would be a claim", out["send_enabled"])
+	}
+	if _, present := out["connected"]; present {
+		t.Errorf("connected present (%v) despite an unreadable row", out["connected"])
+	}
+}

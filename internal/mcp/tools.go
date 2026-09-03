@@ -825,8 +825,13 @@ type sendStatusResult struct {
 	Reason          string `json:"reason,omitempty"`
 	ServerAllowSend bool   `json:"server_allow_send"`
 	HasSendScope    bool   `json:"has_send_scope"`
-	SendEnabled     bool   `json:"send_enabled"`
-	Connected       bool   `json:"connected"`
+	// SendEnabled and Connected are pointers so "we could not read the account
+	// row" is expressible as absence rather than as a confident false. That
+	// case is reachable: when an identity-level condition already decides the
+	// verdict, a failed read must not suppress the answer, but it must not be
+	// reported as "your account flag is off" either.
+	SendEnabled *bool `json:"send_enabled,omitempty"`
+	Connected   *bool `json:"connected,omitempty"`
 }
 
 // toolGetMySendStatus reports whether a real send would happen, without sending.
@@ -858,6 +863,8 @@ error — so a blocked account looks, from the outside, exactly like a message
 that was never answered.
 
 Output: {can_send, reason, server_allow_send, has_send_scope, send_enabled, connected}.
+"send_enabled" and "connected" are omitted entirely when the account row could
+not be read — absent means unknown, never "off".
 "reason" names the first failing condition and is empty when can_send is true;
 the three booleans report the conditions separately, since only one of them is
 usually yours to fix. send_enabled defaults to false on a newly connected
@@ -879,31 +886,54 @@ disable it for an authenticated user. It takes no inputs.`),
 			ServerAllowSend: s.AllowSend,
 			HasSendScope:    id.HasScope("telegram:messages:send"),
 		}
+		// The identity-level conditions are settled first, exactly as
+		// send_message settles them: an account with no send scope must be told
+		// so, and must be told so even when the database is unreachable —
+		// otherwise the status answers with an infrastructure error while
+		// send_message answers with the real reason, which is the divergence
+		// this tool exists to rule out.
+		decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.DemoReviewerTGID)
+
 		// The account row is read exactly once, and both the verdict and the
-		// booleans reported next to it are derived from that single snapshot.
-		// Reading it twice — once here and once inside evaluateSendGate — would
-		// let a concurrent set_account_send toggle land between the two reads
-		// and produce a self-contradicting answer: can_send=false because
-		// send_enabled was false, printed beside send_enabled=true. A status
-		// that contradicts itself is exactly the failure this tool exists to
-		// prevent.
+		// booleans reported next to it come from that single snapshot. Reading
+		// it twice — once here and once inside evaluateSendGate — would let a
+		// concurrent set_account_send toggle land between the two reads and
+		// produce a self-contradicting answer: can_send=false because
+		// send_enabled was false, printed beside send_enabled=true.
+		//
+		// A row that does not exist is not an error: GetActiveAccount reports
+		// Connected=false for an identity that has never linked an account.
+		var acct *db.AccountInfo
 		if s.Store != nil {
-			// A failed read is reported, never flattened into "false". A
-			// status tool that answers "disabled" when it actually could not
-			// tell would send the caller to fix a flag that may already be on.
-			acct, err := s.Store.GetActiveAccount(ctx, id.UserID)
-			if err != nil {
+			a, err := s.Store.GetActiveAccount(ctx, id.UserID)
+			switch {
+			case err != nil && !decided:
+				// The verdict depends on the flag we just failed to read.
+				// Answering "disabled" here would send the caller to turn on
+				// something that may already be on.
 				return toolErr("get_my_send_status: %v", err), nil
+			case err != nil:
+				// The verdict is already settled without the row, so the
+				// answer still stands; the account fields are simply omitted
+				// rather than reported as false.
+				slog.Warn("get_my_send_status: account read failed; reporting the verdict without account fields",
+					"user_id", id.UserID, "err", err)
+			default:
+				acct = a
 			}
-			out.Connected = acct.Connected
-			out.SendEnabled = acct.SendEnabled
 		}
-		if decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.DemoReviewerTGID); decided {
+		if acct != nil {
+			connected, sendEnabled := acct.Connected, acct.SendEnabled
+			out.Connected, out.SendEnabled = &connected, &sendEnabled
+		}
+
+		switch {
+		case decided:
 			out.CanSend, out.Reason = canSend, reason
-		} else if s.Store == nil {
+		case acct == nil:
 			out.CanSend, out.Reason = false, "store unavailable — cannot verify per-account send_enabled"
-		} else {
-			out.CanSend, out.Reason = evaluateSendGateAccountFlag(out.SendEnabled)
+		default:
+			out.CanSend, out.Reason = evaluateSendGateAccountFlag(acct.SendEnabled)
 		}
 		return jsonResult(out)
 	}
