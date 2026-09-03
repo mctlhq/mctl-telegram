@@ -456,3 +456,41 @@ func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
 		t.Fatalf("retry did not resolve to the live device: got %q want %q", third, second)
 	}
 }
+
+// A revoke that lands between RegisterDevice's insert and its read-back must
+// surface as ErrDeviceRevokedConcurrently, not as a bare sql.ErrNoRows
+// wrapped in "read back". The interleaving is forced with an AFTER INSERT
+// trigger, which revokes the freshly inserted row before control returns to
+// the read-back -- the same observable ordering a concurrent RevokeDevice
+// produces, without needing two connections to race.
+func TestRegisterDevice_RevokedBetweenInsertAndReadBack(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1100, "dave", "Dave")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`CREATE TRIGGER revoke_right_after_insert AFTER INSERT ON local_bridge_devices
+		 BEGIN
+		   UPDATE local_bridge_devices SET revoked_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+		 END`,
+	); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.DB.ExecContext(context.Background(),
+			`DROP TRIGGER IF EXISTS revoke_right_after_insert`); err != nil {
+			t.Fatalf("drop trigger: %v", err)
+		}
+	})
+
+	_, err = s.RegisterDevice(ctx, uid, "dave-laptop", "idem-raced-revoke")
+	if !errors.Is(err, ErrDeviceRevokedConcurrently) {
+		t.Fatalf("expected ErrDeviceRevokedConcurrently, got %v", err)
+	}
+	// The generic read-back wrapper must not be what the caller sees.
+	if strings.Contains(err.Error(), "no rows in result set") {
+		t.Fatalf("raw sql.ErrNoRows leaked to the caller: %v", err)
+	}
+}

@@ -404,6 +404,20 @@ func sqliteSchema() []string {
 		// handed back the revoked device_id forever. Dropped and recreated
 		// under a new name so existing deployments migrate on boot; the DROP
 		// is a no-op on every run after the first.
+		//
+		// Dropping in place is safe here only because this service deploys
+		// stop-before-start: platform-gitops pins mctl-telegram to
+		// strategy: Recreate with a single replica, because MTProto auth
+		// keys must never be opened by overlapping pods. No pre-#490
+		// instance is ever running against the migrated schema. Under a
+		// rolling deployment it would not be safe: an old pod's ON CONFLICT
+		// names the wider predicate (idempotency_key IS NOT NULL), which
+		// does not imply this index's narrower one, so Postgres would find
+		// no arbiter index and fail every registration with "no unique or
+		// exclusion constraint matching the ON CONFLICT specification".
+		// The same asymmetry makes this migration forward-only: rolling the
+		// image back to a pre-#490 build after it has run breaks device
+		// registration until the old index is recreated by hand.
 		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
@@ -544,6 +558,20 @@ func pgSchema() []string {
 		// handed back the revoked device_id forever. Dropped and recreated
 		// under a new name so existing deployments migrate on boot; the DROP
 		// is a no-op on every run after the first.
+		//
+		// Dropping in place is safe here only because this service deploys
+		// stop-before-start: platform-gitops pins mctl-telegram to
+		// strategy: Recreate with a single replica, because MTProto auth
+		// keys must never be opened by overlapping pods. No pre-#490
+		// instance is ever running against the migrated schema. Under a
+		// rolling deployment it would not be safe: an old pod's ON CONFLICT
+		// names the wider predicate (idempotency_key IS NOT NULL), which
+		// does not imply this index's narrower one, so Postgres would find
+		// no arbiter index and fail every registration with "no unique or
+		// exclusion constraint matching the ON CONFLICT specification".
+		// The same asymmetry makes this migration forward-only: rolling the
+		// image back to a pre-#490 build after it has run breaks device
+		// registration until the old index is recreated by hand.
 		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,

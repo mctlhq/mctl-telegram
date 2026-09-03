@@ -14,6 +14,13 @@ import (
 // device id.
 var ErrDeviceNotFound = errors.New("local bridge device not found")
 
+// ErrDeviceRevokedConcurrently is returned by RegisterDevice when the row
+// owning the supplied idempotency key was revoked between the insert and the
+// read-back. It is a distinct condition from any other read-back failure:
+// nothing is wrong with the request, and retrying with a fresh idempotency
+// key succeeds.
+var ErrDeviceRevokedConcurrently = errors.New("local bridge device revoked concurrently with registration")
+
 // Device is one row of local_bridge_devices: a durable record of a single
 // Local Bridge daemon installation, distinct from the account-wide
 // telegram_accounts.mode flag. Nothing in this issue reads or writes it from
@@ -97,6 +104,19 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 		 WHERE user_id = $1 AND idempotency_key = $2 AND revoked_at IS NULL`,
 		userID, idempotencyKey,
 	).Scan(&existing); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The key had a live row when the statement above ran and has
+			// none now: a revoke landed in between. Wrapping the insert and
+			// this read-back in one transaction does NOT close that window
+			// -- under READ COMMITTED each statement takes a fresh snapshot,
+			// and on the retry path the insert is a conflict no-op that
+			// leaves the pre-existing row unlocked, so a revoke committed
+			// between the two is still visible here. Name the condition
+			// instead of surfacing a bare "sql: no rows in result set", so
+			// the caller can retry with a fresh key rather than treating a
+			// benign race as a database fault.
+			return "", ErrDeviceRevokedConcurrently
+		}
 		return "", fmt.Errorf("register device: read back: %w", err)
 	}
 	return existing, nil
