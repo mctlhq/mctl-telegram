@@ -53,12 +53,13 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 			// The ON CONFLICT target repeats the index predicate because the
 			// backing index is partial (idempotency_key IS NOT NULL) -- see
 			// RevokeWorkerToken's comment on the same pitfall. A bare
-			// ON CONFLICT (idempotency_key) matches no index and fails at
-			// runtime on Postgres; SQLite's INSERT OR IGNORE branch below
-			// never exercises this statement.
+			// ON CONFLICT (user_id, idempotency_key) matches no index and
+			// fails at runtime on Postgres; SQLite's INSERT OR IGNORE branch
+			// below never exercises this statement. The conflict target is
+			// the pair, not the key alone — see the index comment in db.go.
 			`INSERT INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
 			userID, deviceID, nullable(label), nullable(idempotencyKey),
 		); err != nil {
 			return "", fmt.Errorf("register device: %w", err)
@@ -79,11 +80,14 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 	}
 	// The insert may have been a no-op (idempotency_key conflict): read back
 	// whichever row actually owns this idempotency_key, which is the
-	// caller's original registration when this is a retry.
+	// caller's original registration when this is a retry. Filtered by
+	// user_id as well as the key, so this can only ever return a row
+	// belonging to the caller — a second layer behind the scoped unique
+	// index, not a substitute for it.
 	var existing string
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT device_id FROM local_bridge_devices WHERE idempotency_key = $1`,
-		idempotencyKey,
+		`SELECT device_id FROM local_bridge_devices WHERE user_id = $1 AND idempotency_key = $2`,
+		userID, idempotencyKey,
 	).Scan(&existing); err != nil {
 		return "", fmt.Errorf("register device: read back: %w", err)
 	}
@@ -155,7 +159,7 @@ func (s *Store) TouchDeviceLastSeen(ctx context.Context, deviceID string) error 
 	}
 	now := time.Now().UTC()
 	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE local_bridge_devices SET last_seen_at = $1 WHERE device_id = $2`,
+		`UPDATE local_bridge_devices SET last_seen_at = $1 WHERE device_id = $2 AND revoked_at IS NULL`,
 		now, deviceID,
 	); err != nil {
 		return fmt.Errorf("touch device last seen: %w", err)

@@ -393,7 +393,11 @@ func sqliteSchema() []string {
 			revoked_reason TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_device_id ON local_bridge_devices(device_id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		// Scoped to (user_id, idempotency_key), not idempotency_key alone:
+		// the key is client-supplied, so a global unique index lets one
+		// user's retry token collide with another's, silently dropping the
+		// second registration.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }
@@ -521,7 +525,11 @@ func pgSchema() []string {
 			revoked_reason TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_device_id ON local_bridge_devices(device_id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		// Scoped to (user_id, idempotency_key), not idempotency_key alone:
+		// the key is client-supplied, so a global unique index lets one
+		// user's retry token collide with another's, silently dropping the
+		// second registration.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }

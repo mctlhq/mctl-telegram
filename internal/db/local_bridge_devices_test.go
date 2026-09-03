@@ -275,3 +275,122 @@ func TestRegisterDevice_PostgresUpsert(t *testing.T) {
 		t.Errorf("device_id %q does not have the expected dev_ prefix", first)
 	}
 }
+
+// Two DIFFERENT users supplying the same idempotency key must each get their
+// own device. The key is client-supplied (a daemon generates it and retries
+// with it after a network timeout), so nothing stops two accounts from
+// choosing the same string. Before the (user_id, idempotency_key) scoping,
+// the unique index was global: the second user's INSERT was silently dropped
+// and the read-back handed them the FIRST user's device_id, misattributing
+// device identity across accounts with a nil error.
+func TestRegisterDevice_IdempotencyKeyIsScopedPerUser(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, err := s.EnsureUserByTelegramID(ctx, 1008, "alice2", "Alice Two")
+	if err != nil {
+		t.Fatalf("ensure alice: %v", err)
+	}
+	bob, err := s.EnsureUserByTelegramID(ctx, 1009, "bob2", "Bob Two")
+	if err != nil {
+		t.Fatalf("ensure bob: %v", err)
+	}
+
+	aliceDev, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key")
+	if err != nil {
+		t.Fatalf("alice RegisterDevice: %v", err)
+	}
+	bobDev, err := s.RegisterDevice(ctx, bob, "bob-laptop", "shared-key")
+	if err != nil {
+		t.Fatalf("bob RegisterDevice: %v", err)
+	}
+
+	if aliceDev == bobDev {
+		t.Fatalf("cross-user collision: bob received alice's device_id %q", bobDev)
+	}
+
+	// Each device must belong to the user who registered it -- an id that
+	// differs but resolves to the wrong account would be just as wrong.
+	for _, tc := range []struct {
+		name     string
+		deviceID string
+		wantUser int64
+	}{
+		{"alice", aliceDev, alice},
+		{"bob", bobDev, bob},
+	} {
+		d, err := s.GetDevice(ctx, tc.deviceID)
+		if err != nil {
+			t.Fatalf("GetDevice(%s): %v", tc.name, err)
+		}
+		if d.UserID != tc.wantUser {
+			t.Errorf("%s device belongs to user %d, want %d", tc.name, d.UserID, tc.wantUser)
+		}
+	}
+
+	// Each user's own retry still collapses onto their own row.
+	aliceRetry, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key")
+	if err != nil {
+		t.Fatalf("alice retry: %v", err)
+	}
+	if aliceRetry != aliceDev {
+		t.Errorf("alice retry returned %q, want her original %q", aliceRetry, aliceDev)
+	}
+
+	var count int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM local_bridge_devices WHERE idempotency_key = $1`, "shared-key",
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected one row per user for the shared key, got %d", count)
+	}
+}
+
+// TouchDeviceLastSeen's doc comment promises a call against an
+// already-revoked device affects zero rows. Without the revoked_at IS NULL
+// guard the UPDATE still landed, so a revoked daemon that kept sending
+// heartbeats would keep looking active to any staleness logic built on
+// last_seen_at.
+func TestTouchDeviceLastSeen_NoOpOnRevokedDevice(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1010, "heidi", "Heidi")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	dev, err := s.RegisterDevice(ctx, uid, "heidi-laptop", "")
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	if err := s.TouchDeviceLastSeen(ctx, dev); err != nil {
+		t.Fatalf("first touch: %v", err)
+	}
+	before, err := s.GetDevice(ctx, dev)
+	if err != nil {
+		t.Fatalf("GetDevice before revoke: %v", err)
+	}
+	if before.LastSeenAt == nil {
+		t.Fatal("last_seen_at not set by the pre-revoke touch")
+	}
+
+	if err := s.RevokeDevice(ctx, dev, "test"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+
+	// A revoked daemon keeps sending heartbeats: still not an error at this
+	// layer, but it must not move last_seen_at.
+	if err := s.TouchDeviceLastSeen(ctx, dev); err != nil {
+		t.Fatalf("touch after revoke: %v", err)
+	}
+	after, err := s.GetDevice(ctx, dev)
+	if err != nil {
+		t.Fatalf("GetDevice after revoke: %v", err)
+	}
+	if after.LastSeenAt == nil {
+		t.Fatal("last_seen_at was cleared, expected it to be left untouched")
+	}
+	if !after.LastSeenAt.Equal(*before.LastSeenAt) {
+		t.Errorf("last_seen_at moved on a revoked device: %v -> %v", *before.LastSeenAt, *after.LastSeenAt)
+	}
+}
