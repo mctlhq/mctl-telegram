@@ -28,6 +28,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"list_telegram_identities", first(s.toolListIdentities()), true, false, false},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog()), true, false, false},
 		{"get_my_audit_log", first(s.toolGetMyAuditLog()), true, false, false},
+		{"get_my_send_status", first(s.toolGetMySendStatus()), true, false, false},
 		{"disconnect_telegram_account", first(s.toolDisconnectAccount()), false, true, false},
 		{"delete_telegram_account", first(s.toolDeleteAccount()), false, true, false},
 		{"revoke_telegram_session", first(s.toolRevokeSession()), false, true, false},
