@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -161,5 +162,42 @@ func TestGetMySendStatus_RequiresAuthentication(t *testing.T) {
 	srv := &Server{AllowSend: true, Store: newToolsTestStore(t)}
 	if res := callSendStatus(t, srv, nil); !res.IsError {
 		t.Fatalf("expected an error without an identity, got: %s", contentText(res))
+	}
+}
+
+// The reviewer/demo identity is forced to preview-only ahead of every other
+// check. The status must say so — and must still report the account flag
+// truthfully, since a true send_enabled next to can_send=false is not a
+// contradiction here: a different condition is what blocks the send.
+func TestGetMySendStatus_DemoReviewerIsPreviewOnly(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedHostedAccount(t, store, 4848, true)
+	srv := &Server{AllowSend: true, Store: store, DemoReviewerTGID: 4848}
+	id := &auth.Identity{UserID: uid, TelegramID: 4848, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendStatus(t, callSendStatus(t, srv, id))
+	if out["can_send"] != false {
+		t.Errorf("can_send = %v, want false for the reviewer identity", out["can_send"])
+	}
+	if r, _ := out["reason"].(string); !strings.Contains(r, "preview-only") {
+		t.Errorf("reason = %q, want the reviewer preview-only reason", r)
+	}
+	if out["send_enabled"] != true {
+		t.Errorf("send_enabled = %v, want true — the flag is on; the reviewer rule is what blocks", out["send_enabled"])
+	}
+}
+
+// Without a store the tool must say it could not verify the account flag,
+// rather than reporting a confident "not enabled".
+func TestGetMySendStatus_NoStoreSaysSoInsteadOfGuessing(t *testing.T) {
+	srv := &Server{AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendStatus(t, callSendStatus(t, srv, id))
+	if out["can_send"] != false {
+		t.Errorf("can_send = %v, want false", out["can_send"])
+	}
+	if r, _ := out["reason"].(string); !strings.Contains(r, "store unavailable") {
+		t.Errorf("reason = %q, want it to name the unavailable store", r)
 	}
 }

@@ -875,13 +875,18 @@ disable it for an authenticated user. It takes no inputs.`),
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
-		canSend, reason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		out := sendStatusResult{
-			CanSend:         canSend,
-			Reason:          reason,
 			ServerAllowSend: s.AllowSend,
 			HasSendScope:    id.HasScope("telegram:messages:send"),
 		}
+		// The account row is read exactly once, and both the verdict and the
+		// booleans reported next to it are derived from that single snapshot.
+		// Reading it twice — once here and once inside evaluateSendGate — would
+		// let a concurrent set_account_send toggle land between the two reads
+		// and produce a self-contradicting answer: can_send=false because
+		// send_enabled was false, printed beside send_enabled=true. A status
+		// that contradicts itself is exactly the failure this tool exists to
+		// prevent.
 		if s.Store != nil {
 			// A failed read is reported, never flattened into "false". A
 			// status tool that answers "disabled" when it actually could not
@@ -892,6 +897,13 @@ disable it for an authenticated user. It takes no inputs.`),
 			}
 			out.Connected = acct.Connected
 			out.SendEnabled = acct.SendEnabled
+		}
+		if decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.DemoReviewerTGID); decided {
+			out.CanSend, out.Reason = canSend, reason
+		} else if s.Store == nil {
+			out.CanSend, out.Reason = false, "store unavailable — cannot verify per-account send_enabled"
+		} else {
+			out.CanSend, out.Reason = evaluateSendGateAccountFlag(out.SendEnabled)
 		}
 		return jsonResult(out)
 	}
@@ -1502,8 +1514,31 @@ func isDemoReviewer(id *auth.Identity, demoReviewerTGID int64) bool {
 }
 
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64) (real bool, reason string) {
+	if decided, r, reason := evaluateSendGateBeforeAccount(id, allowSend, demoReviewerTGID); decided {
+		return r, reason
+	}
+	if store == nil {
+		return false, "store unavailable — cannot verify per-account send_enabled"
+	}
+	enabled, err := store.IsSendEnabled(ctx, id.UserID)
+	if err != nil {
+		return false, "failed to check per-account send_enabled — defaulting to dry-run"
+	}
+	return evaluateSendGateAccountFlag(enabled)
+}
+
+// evaluateSendGateBeforeAccount decides every condition that can be settled
+// without reading the account row, in the order evaluateSendGate applies them.
+// It is split out so a caller that has already read the row — get_my_send_status
+// — can reach the same verdict from one snapshot instead of issuing a second
+// query whose result could disagree with the first under a concurrent
+// set_account_send toggle.
+//
+// decided=false means the identity-level conditions all passed and only the
+// per-account flag is left to check.
+func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReviewerTGID int64) (decided, real bool, reason string) {
 	if id == nil {
-		return false, "no authenticated identity (send requires auth)"
+		return true, false, "no authenticated identity (send requires auth)"
 	}
 	// Reviewer/demo account: force a dry-run preview unconditionally, ahead of
 	// every other check, so the reviewer always sees the preview-only reason
@@ -1514,21 +1549,21 @@ func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, a
 	// identity is the only dependable way to keep the App Directory reviewer's
 	// sends preview-only.
 	if isDemoReviewer(id, demoReviewerTGID) {
-		return false, "reviewer/demo account — sending is preview-only; no message is delivered"
+		return true, false, "reviewer/demo account — sending is preview-only; no message is delivered"
 	}
 	if !allowSend {
-		return false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
+		return true, false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
 	}
 	if !id.HasScope("telegram:messages:send") {
-		return false, "identity missing telegram:messages:send scope"
+		return true, false, "identity missing telegram:messages:send scope"
 	}
-	if store == nil {
-		return false, "store unavailable — cannot verify per-account send_enabled"
-	}
-	enabled, err := store.IsSendEnabled(ctx, id.UserID)
-	if err != nil {
-		return false, "failed to check per-account send_enabled — defaulting to dry-run"
-	}
+	return false, false, ""
+}
+
+// evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
+// final verdict. Both callers go through it so the wording of the last
+// remaining reason has exactly one source.
+func evaluateSendGateAccountFlag(enabled bool) (real bool, reason string) {
 	if !enabled {
 		return false, "per-account send_enabled=false — contact the operator to enable real sends for your account"
 	}
