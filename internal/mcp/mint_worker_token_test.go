@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -274,4 +275,50 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// errMinter fails every mint the way an internal fault would: not wrapping
+// ErrInvalidMintRequest, so it takes the "ours, not the caller's" branch.
+type errMinter struct{ err error }
+
+func (m errMinter) Mint(workertoken.MintRequest) (*workertoken.Minted, error) { return nil, m.err }
+
+// An internal mint failure has two audiences with opposite needs. The caller
+// gets a sanitised sentence, because the internals of a signing failure are
+// not theirs to act on. The auditor asking why a mint failed gets the cause,
+// because "failed to issue worker token" answers nothing. Asserting only the
+// first half is what let the audit row quietly degrade to the sanitised text.
+func TestToolMintWorkerToken_InternalFailureSanitisesCallerButAuditsCause(t *testing.T) {
+	const cause = "sign worker token: hsm unreachable"
+	srv := &Server{Store: newToolsTestStore(t), WorkerTokenMinter: errMinter{err: errors.New(cause)}}
+	result := callMint(t, srv, []string{"admin:users"}, map[string]any{"telegram_id": float64(42)})
+	if !result.IsError {
+		t.Fatal("expected an error result on internal mint failure")
+	}
+	msg := ""
+	for _, c := range result.Content {
+		if tc, ok := c.(mcplib.TextContent); ok {
+			msg += tc.Text
+		}
+	}
+	if !strings.Contains(msg, "failed to issue worker token") {
+		t.Fatalf("caller message = %q, want the generic sentence", msg)
+	}
+	if strings.Contains(msg, "hsm unreachable") {
+		t.Fatalf("caller message leaks internals: %q", msg)
+	}
+
+	var status, auditMsg string
+	err := srv.Store.DB.QueryRowContext(context.Background(),
+		`SELECT status, error FROM audit_logs WHERE tool_name = $1 ORDER BY id DESC LIMIT 1`,
+		"mint_worker_token").Scan(&status, &auditMsg)
+	if err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if status != "error" {
+		t.Fatalf("audit status = %q, want error", status)
+	}
+	if !strings.Contains(auditMsg, "hsm unreachable") {
+		t.Fatalf("audit row = %q, want the underlying cause", auditMsg)
+	}
 }

@@ -1733,15 +1733,18 @@ Returns an error if this deployment cannot enforce worker-token revocation (AUTH
 			if errors.Is(err, workertoken.ErrInvalidMintRequest) {
 				return refuse("%s", strings.TrimPrefix(err.Error(), workertoken.ErrInvalidMintRequest.Error()+": ")), nil
 			}
-			// Generic to the caller, detailed to the log — matching the HTTP
-			// transport, which hides this class behind "failed to issue
-			// worker token". A caller-caused rejection above says exactly
-			// what was wrong because the caller can act on it; a signing or
-			// jti-generation failure is ours, and the operator reading a
-			// tool result cannot do anything with the internals. The audit
-			// entry that refuse() writes still carries the real error.
+			// Generic to the caller, detailed to the log and the audit trail
+			// — matching the HTTP transport, which hides this class behind
+			// "failed to issue worker token". A caller-caused rejection
+			// above says exactly what was wrong because the caller can act
+			// on it; a signing or jti-generation failure is ours, and the
+			// operator reading a tool result cannot do anything with the
+			// internals. refuse() is deliberately not used here: it audits
+			// whatever it returns, and an auditor asking why a mint failed
+			// needs the cause, not the sanitised sentence.
 			slog.Error("mint_worker_token: mint failed", "admin_user_id", id.UserID, "target_tg_id", tgID, "err", err)
-			return refuse("failed to issue worker token"), nil
+			s.audit(ctx, id, "mint_worker_token", "", err, startedAt)
+			return mcplib.NewToolResultError("failed to issue worker token"), nil
 		}
 		workertoken.LogMinted(id.UserID, "mcp", mt)
 		s.audit(ctx, id, "mint_worker_token", "", nil, startedAt)
