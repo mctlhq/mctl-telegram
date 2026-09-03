@@ -429,7 +429,10 @@ func TestIsWorkerToken(t *testing.T) {
 		{"jti only", &Claims{Jti: "abc"}, true},
 		{"worker audience only", &Claims{Audience: []string{workerAudience}}, true},
 		{"worker audience among others", &Claims{Audience: []string{"mctl", workerAudience}}, true},
+		{"bridge audience only", &Claims{Audience: []string{workerBridgeAudience}}, true},
+		{"bridge audience among others", &Claims{Audience: []string{"mctl", workerBridgeAudience}}, true},
 		{"unrelated audience", &Claims{Audience: []string{"bridge"}}, false},
+		{"bridge-shaped but wrong string", &Claims{Audience: []string{"mcp-worker-bridge-typo"}}, false},
 	}
 	for _, tc := range cases {
 		if got := isWorkerToken(tc.c); got != tc.want {

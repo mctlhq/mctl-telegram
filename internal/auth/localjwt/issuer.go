@@ -303,13 +303,19 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 // constant. Keep in lockstep with internal/workertoken's workerAudience.
 const workerAudience = "mcp-worker-ro"
 
+// workerBridgeAudience is the aud value internal/workertoken stamps instead of
+// workerAudience on local-bridge credentials (purpose="local-bridge"). Same
+// duplication rationale as workerAudience above. Keep in lockstep with
+// internal/workertoken's workerBridgeAudience.
+const workerBridgeAudience = "mcp-worker-bridge"
+
 // isWorkerToken reports whether these claims belong to a worker credential —
 // i.e. whether Authenticate must consult the revocation denylist for them.
 // Two shapes qualify: a token carrying a jti (everything internal/workertoken
-// has minted since jti existed), and a jti-less token carrying the worker
-// audience (the hand-signed long-lived credentials that predate jti — they
-// have no individual identifier to denylist, but a blanket revocation by
-// telegram_id must still catch them).
+// has minted since jti existed), and a jti-less token carrying either worker
+// audience — read-only or local-bridge (the hand-signed long-lived credentials
+// that predate jti — they have no individual identifier to denylist, but a
+// blanket revocation by telegram_id must still catch them).
 func isWorkerToken(c *Claims) bool {
 	if c == nil {
 		return false
@@ -318,7 +324,7 @@ func isWorkerToken(c *Claims) bool {
 		return true
 	}
 	for _, a := range c.Audience {
-		if a == workerAudience {
+		if a == workerAudience || a == workerBridgeAudience {
 			return true
 		}
 	}
