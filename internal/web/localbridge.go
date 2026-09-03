@@ -70,21 +70,25 @@ type localBridgeData struct {
 // Anonymous-accessible: it is the page a prospective user reads before
 // deciding whether the mode is worth the machine it needs.
 func LocalBridge(publicBaseURL string, showManage bool) http.HandlerFunc {
+	// Everything except the rendered body is deployment-fixed, so it is built
+	// once here, matching Docs and the other page constructors. The body stays
+	// inside the request path only because rendering it can fail, and a
+	// documentation page is not worth refusing to boot over.
+	data := localBridgeData{Data: ui.Data{
+		Title:         "mctl-telegram — Local Bridge setup guide",
+		Description:   "How to run Local Bridge: keep your Telegram session on your own machine and let tg.mctl.ai act only as a relay. Install, set up, limitations, and how to roll back.",
+		NavActive:     "docs",
+		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		ShowManage:    showManage,
+	}}
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := localBridgeBody()
 		if err != nil {
 			http.Error(w, "render markdown: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		chromePage(localBridgeTmpl, "local-bridge", localBridgeData{
-			Data: ui.Data{
-				Title:         "mctl-telegram — Local Bridge setup guide",
-				Description:   "How to run Local Bridge: keep your Telegram session on your own machine and let tg.mctl.ai act only as a relay. Install, set up, limitations, and how to roll back.",
-				NavActive:     "docs",
-				PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
-				ShowManage:    showManage,
-			},
-			Body: body,
-		})(w, r)
+		page := data
+		page.Body = body
+		chromePage(localBridgeTmpl, "local-bridge", page)(w, r)
 	}
 }
