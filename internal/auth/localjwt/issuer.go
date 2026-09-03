@@ -58,6 +58,15 @@ type Claims struct {
 	// audience instead, so a blanket revoke-by-telegram_id still reaches them
 	// even before their next renewal mints them a jti.
 	Jti string `json:"jti,omitempty"`
+	// DeviceID optionally scopes a credential to one Local Bridge device
+	// registry row (internal/db.local_bridge_devices, added in issue-481).
+	// No caller sets it yet -- it exists so a future sub-issue can mint a
+	// device-scoped credential without changing Mint/Verify again. Mint
+	// omits it from the token body when empty (omitempty) and Verify
+	// leaves it as the empty string for every token minted before this
+	// field existed, since encoding/json silently skips an absent key on
+	// decode. Same recipe as OriginalIssuedAt/Jti above.
+	DeviceID string `json:"device_id,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
