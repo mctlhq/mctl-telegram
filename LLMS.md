@@ -12,7 +12,7 @@
 
 ## Tool Surface (14 MCP Tools)
 
-### User Tools (9)
+### User Tools (10)
 - `list_dialogs`: List account dialogs with optional query filter.
 - `get_unread_messages`: Retrieve unread messages per peer.
 - `get_messages`: Retrieve recent message history.
@@ -20,6 +20,7 @@
 - `prepare_pin_message`: Generate one-shot confirmation ID for pin.
 - `pin_message`: Pin/unpin message using confirmation ID.
 - `get_my_audit_log`: Cryptographic tamper-evident hash-chain audit log for user actions.
+- `get_my_send_status`: Report whether sending is really enabled for this account, without sending anything.
 - `disconnect_telegram_account`: Soft-revoke session and stop MTProto client.
 - `delete_telegram_account`: Hard-delete per-user session blob.
 

@@ -814,6 +814,90 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 	return tool, handler
 }
 
+// sendStatusResult is the answer to "can I actually send?" — the question a
+// caller could previously only ask by attempting a send and reading dry_reason
+// off the preview, i.e. by performing the very action whose availability was in
+// doubt. Every component of the gate is reported separately, because the single
+// blocking reason names only the first check that failed and the caller usually
+// needs to know which of the three is theirs to fix.
+type sendStatusResult struct {
+	CanSend         bool   `json:"can_send"`
+	Reason          string `json:"reason,omitempty"`
+	ServerAllowSend bool   `json:"server_allow_send"`
+	HasSendScope    bool   `json:"has_send_scope"`
+	SendEnabled     bool   `json:"send_enabled"`
+	Connected       bool   `json:"connected"`
+}
+
+// toolGetMySendStatus reports whether a real send would happen, without sending.
+//
+// The verdict comes from evaluateSendGate — the same function send_message
+// consults — rather than from a re-implementation of the same rules here. That
+// is deliberate: a status tool that computed the answer independently could
+// drift from the behaviour it describes, and a status that disagrees with
+// reality is worse than no status at all.
+//
+// The per-peer rate limiter is intentionally not consulted. It is scoped to a
+// recipient this call does not have, and evaluating it debits a token from the
+// peer's hourly budget — a status check must not consume the allowance it
+// reports on.
+func (s *Server) toolGetMySendStatus() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_my_send_status",
+		mcplib.WithTitleAnnotation("Check whether your account can send"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[sendStatusResult](),
+		mcplib.WithDescription(`Report whether send_message would deliver a real message for your account, without sending anything.
+
+Sending is gated by three independent conditions, all of which must hold: the
+server-wide ALLOW_SEND flag, the telegram:messages:send scope on your identity,
+and the per-account send_enabled flag on your active session. When any one of
+them fails, send_message returns a dry-run preview (sent=false) instead of an
+error — so a blocked account looks, from the outside, exactly like a message
+that was never answered.
+
+Output: {can_send, reason, server_allow_send, has_send_scope, send_enabled, connected}.
+"reason" names the first failing condition and is empty when can_send is true;
+the three booleans report the conditions separately, since only one of them is
+usually yours to fix. send_enabled defaults to false on a newly connected
+account and is turned on either by the opt-in checkbox during the browser
+connect flow or on the /manage page.
+
+The per-peer rate limit is not evaluated here: it depends on the recipient, and
+checking it would spend part of that recipient's hourly budget.
+
+This tool is part of the self-service transparency surface — operators cannot
+disable it for an authenticated user. It takes no inputs.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		canSend, reason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		out := sendStatusResult{
+			CanSend:         canSend,
+			Reason:          reason,
+			ServerAllowSend: s.AllowSend,
+			HasSendScope:    id.HasScope("telegram:messages:send"),
+		}
+		if s.Store != nil {
+			// A failed read is reported, never flattened into "false". A
+			// status tool that answers "disabled" when it actually could not
+			// tell would send the caller to fix a flag that may already be on.
+			acct, err := s.Store.GetActiveAccount(ctx, id.UserID)
+			if err != nil {
+				return toolErr("get_my_send_status: %v", err), nil
+			}
+			out.Connected = acct.Connected
+			out.SendEnabled = acct.SendEnabled
+		}
+		return jsonResult(out)
+	}
+	return tool, handler
+}
+
 func (s *Server) toolGetMyAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_my_audit_log",
 		mcplib.WithTitleAnnotation("Read your own audit log"),
@@ -963,7 +1047,7 @@ Inputs:
   telegram_id — int, required. The Telegram user id (see list_telegram_identities).
   enabled     — bool, required. true enables real sends; false forces dry-run previews.
 
-The user must have an active session. New accounts are send-enabled by default; use enabled=false to revoke sending for a specific account without revoking its scope or session.`),
+The user must have an active session. New accounts are NOT send-enabled: SaveSession always inserts send_enabled=false, and it is turned on either by the opt-in checkbox in the browser connect flow or on the /manage page. So a false here is the default state, not evidence that someone revoked sending.`),
 		mcplib.WithNumber("telegram_id",
 			mcplib.Required(),
 			mcplib.Description("Telegram user id to enable/disable sending for (required).")),
