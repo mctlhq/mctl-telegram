@@ -1274,6 +1274,103 @@ rather than re-applying the exemption.
 
 ---
 
+<a id="revokingaleakedworkertoken"></a>
+## Revoking a leaked worker token
+
+A worker token minted via `POST /api/mcp/worker-token` (`internal/workertoken`)
+is a bounded but still send-capable credential (purpose `local-bridge` carries
+`telegram:messages:send`/`telegram:messages:pin`) that normally lives as a
+plaintext file on a user's or worker's machine. Before this feature, the only
+way to stop a single leaked worker token was `OAUTH_JWT_SIGNING_KEY` rotation
+— which invalidates every user's token, not just the compromised one. The
+`revoke_worker_token` MCP tool (`admin:users` scope, `internal/mcp/tools.go`)
+is the targeted alternative.
+
+### Which input to use
+
+- **`jti`** — revoke one specific token (and every renewal of it, since
+  `POST /api/mcp/worker-token/renew` carries the `jti` forward unchanged).
+  Use this when you have the token itself, or its `jti` from a
+  `"worker token minted"` / `"worker token renewed"` log line. Exactly this
+  token and its lineage stop working; a token minted for the same account
+  afterward is unaffected.
+- **`telegram_id`** — revoke every worker token minted for that account up to
+  the moment of the call, known `jti` or not. Use this when only the affected
+  account is known, not which specific token leaked — this is the more
+  common operator scenario, since there is deliberately no registry of every
+  issued `jti`. A token minted for this `telegram_id` **after** the call is
+  unaffected: mint a fresh one once the leak is contained, and it works
+  immediately even though the blanket revocation is still on record.
+
+Exactly one of the two is required; the tool rejects a call with both or
+neither.
+
+### What revoking does and does not do
+
+- Takes effect for new `/mcp`, `/api/bridge/token`, and `/bridge` requests
+  within the revocation cache's TTL (`WORKER_TOKEN_REVOCATION_CACHE_TTL`,
+  default 10s, hard ceiling 15s — see `internal/auth/localjwt.RevocationCache`).
+  It is not instantaneous.
+- Also calls `Hub.Unregister` for the target account when revoking by
+  `telegram_id`, dropping an already-open Local Bridge daemon connection
+  (`hub_evicted: true` in the tool's response) — without this, a daemon that
+  is already connected is never re-authenticated and would otherwise keep
+  serving calls until its socket happens to drop. Revoking by bare `jti`
+  cannot evict a connection: a `jti` alone carries no recoverable account
+  linkage, so if the leaked credential's daemon is still connected, prefer
+  the `telegram_id` form (or revoke by `jti` and separately ask the user to
+  restart/disconnect the daemon).
+- Reaches the **derived** credentials a worker token has already spawned, not
+  just the worker token itself. A Local Bridge daemon does not present its
+  worker token at `/bridge`; it exchanges it at `POST /api/bridge/token` for a
+  short-lived token with `aud="bridge"`. That child inherits the parent's
+  `jti` and `orig_iat`, so revoking the parent by `jti` kills the children it
+  already handed out, and a blanket `telegram_id` revocation reaches even a
+  child whose parent predates `jti` (recognised by the derived audience —
+  `internal/auth/localjwt.needsRevocationCheck`). Without the inheritance,
+  eviction only made a compromised daemon reconnect, and containment waited
+  out the child's remaining hour.
+- `POST /api/mcp/worker-token/renew` for a revoked token is rejected with 401
+  by the same auth middleware every other endpoint runs through — the renew
+  handler itself never needs its own revocation check.
+- Interactive (non-worker) sessions on `/mcp` are entirely unaffected: they
+  carry no `jti` and no worker audience, so they never reach the revocation
+  check. One deliberate exception: a bridge token derived from an interactive
+  session carries `aud="bridge"` and *is* checked, so a blanket `telegram_id`
+  revocation also drops that account's daemon. That is the intended reading of
+  "revoke everything for this identity" — a containment call should not leave
+  a live bridge behind because the daemon happened to be started from a
+  browser session.
+- Revocation is one-directional. If a blanket `telegram_id` revocation was a
+  mistake, mint a fresh worker token for that account rather than trying to
+  "un-revoke" — old tokens for the id stay dead, the new one works.
+- If the revocation table itself is unreachable, verification fails closed
+  (a `jti`-bearing request is rejected, not silently treated as valid) —
+  expect a burst of `worker token revoked`-shaped 401s from
+  `internal/auth/localjwt`'s revocation-cache error path during a database
+  outage, not a fail-open gap.
+
+### When this is not enough
+
+`revoke_worker_token` only covers worker tokens (this endpoint's JWT class).
+
+Revocation is enforced by `internal/auth/localjwt`'s provider, which is only
+wired under `AUTH_MODE=local-jwt`. The mint endpoints are therefore mounted
+only in that mode — under `shared-hmac`/`shared-hmac-legacy` (or `local-dev`)
+the server logs `worker token endpoints not mounted` at startup and
+`POST /api/mcp/worker-token` returns 404. If an operator needs worker tokens
+on a `shared-hmac` deployment, move it to `local-jwt` rather than re-enabling
+the mint: a token minted under `shared-hmac` verifies against
+`sharedhmac.Provider`, which has no denylist, so `revoke_worker_token` would
+report success while the credential kept working until its TTL expired.
+
+For a suspected compromise of the signing key itself, or to invalidate every
+credential across every user at once, the existing lever remains: rotate
+`OAUTH_JWT_SIGNING_KEY` (see the [JwtFailures](#jwtfailures) mitigation
+steps above).
+
+---
+
 <a id="canary"></a>
 ## Canary
 
