@@ -275,6 +275,37 @@ func TestRegisterDevice_PostgresUpsert(t *testing.T) {
 	if !strings.HasPrefix(first, "dev_") {
 		t.Errorf("device_id %q does not have the expected dev_ prefix", first)
 	}
+
+	// Re-registration after a revoke is the path this fix opened, and it is
+	// the half the arbiter check above cannot reach: it depends on the index
+	// predicate excluding revoked rows AND on the ON CONFLICT target naming
+	// that same predicate, character for character. Drift between the two
+	// compiles, passes every SQLite test in this file -- SQLite's branch never
+	// runs the ON CONFLICT statement at all -- and then fails here, which is
+	// the only place it can be caught before production.
+	if err := s.RevokeDevice(ctx, first, "test revoke"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+	replacement, err := s.RegisterDevice(ctx, uid, "pg-device", key)
+	if err != nil {
+		// A predicate mismatch surfaces as "there is no unique or exclusion
+		// constraint matching the ON CONFLICT specification"; a revoked row
+		// still occupying the index surfaces as a unique violation the
+		// ON CONFLICT no longer absorbs.
+		t.Fatalf("re-register after revoke on Postgres: %v", err)
+	}
+	if replacement == first {
+		t.Fatalf("re-registration returned the revoked device_id %q", replacement)
+	}
+	var revoked sql.NullTime
+	if err := conn.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, replacement,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read replacement: %v", err)
+	}
+	if revoked.Valid {
+		t.Fatalf("replacement device %q is already revoked", replacement)
+	}
 }
 
 // Two DIFFERENT users supplying the same idempotency key must each get their
