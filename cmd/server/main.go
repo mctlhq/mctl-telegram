@@ -470,20 +470,30 @@ func main() {
 	// mounted at /mcp (see internal/workertoken.NewHandler's doc comment for
 	// why no dedicated auth.Provider is needed) — it just carries a
 	// restricted scope set and a bounded TTL, with per-tool requireScope
-	// enforcement doing the rest. Gated on OAUTH_JWT_SECRET like the two
-	// mints above; reuses selectAgentIssuer since it already computes "the
-	// issuer this deployment's locally-issued JWTs use" with no dependency
-	// on the agent feature despite the name.
+	// enforcement doing the rest. Reuses selectAgentIssuer since it already
+	// computes "the issuer this deployment's locally-issued JWTs use" with no
+	// dependency on the agent feature despite the name.
+	//
+	// Gated on OAUTH_JWT_SECRET like the two mints above AND on
+	// workerTokenMintable: a mode whose provider cannot consult the
+	// revocation denylist must not hand out a credential that can never be
+	// taken back (issue #472).
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
-			workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
-		// Self-renewal for an already-issued worker token. Same middleware,
-		// no admin scope: the handler mints only for the identity already
-		// proven by the presented token, so it grants a headless worker the
-		// ability to outlive its own TTL without granting it the ability to
-		// mint credentials for anyone else. See workertoken.NewRenewHandler.
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token/renew",
-			workertoken.NewRenewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+		if workerTokenMintable(cfg) {
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
+				workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+			// Self-renewal for an already-issued worker token. Same
+			// middleware, no admin scope: the handler mints only for the
+			// identity already proven by the presented token, so it grants a
+			// headless worker the ability to outlive its own TTL without
+			// granting it the ability to mint credentials for anyone else.
+			// See workertoken.NewRenewHandler.
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token/renew",
+				workertoken.NewRenewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
+		} else {
+			slog.Warn("worker token endpoints not mounted: this AUTH_MODE cannot enforce worker-token revocation; use AUTH_MODE=local-jwt to mint worker tokens",
+				"auth_mode", cfg.AuthMode)
+		}
 	}
 
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
@@ -661,13 +671,23 @@ func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localj
 		}
 		return p, nil
 	case "shared-hmac", "shared-hmac-legacy":
-		// No revocation cache here, deliberately. This provider verifies
-		// JWTs signed by api.mctl.ai with the shared secret and issued by
-		// https://api.mctl.ai. A worker token is signed by this service's
-		// own key with its own issuer, so under this mode it fails
-		// verification before any denylist would be consulted — there is no
-		// worker token to revoke on this path. Wiring the cache in would add
-		// a lookup that can never match.
+		// No revocation cache here: sharedhmac.Provider has no jti or
+		// denylist concept to wire one into.
+		//
+		// That is precisely why worker-token minting is refused under this
+		// mode (see workerTokenMintable and its mount site in main). Do NOT
+		// read this as "a worker token cannot reach this provider": under
+		// shared-hmac, selectAgentIssuer stamps the very same
+		// "https://api.mctl.ai" issuer that ExpectedIssuer checks below, both
+		// sides use cfg.OAUTHJWTSecret, and the minted aud already includes
+		// cfg.OAUTHJWTAudience — so such a token verifies fine here and
+		// resolves (via EnsureUser on the same synthetic subject) to the same
+		// users.id as the real account. It would carry no scopes, so
+		// requireScope-gated tools reject it, but the no-scope
+		// disconnect_telegram_account/delete_telegram_account tools would
+		// not. An already-minted token from an older build therefore remains
+		// unrevokable on this path; containment for it is to stop minting new
+		// ones and to move the deployment to AUTH_MODE=local-jwt.
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
 			ExpectedIssuer:   "https://api.mctl.ai",
@@ -683,6 +703,21 @@ func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localj
 	default:
 		return nil, fmt.Errorf("unknown AUTH_MODE %q: must be one of local-jwt, shared-hmac, local-dev", cfg.AuthMode)
 	}
+}
+
+// workerTokenMintable reports whether this deployment verifies plain MCP
+// bearer tokens with a provider that consults the worker-token denylist.
+//
+// Only local-jwt does: selectProvider wires the RevocationCache into
+// localjwt.Provider and nowhere else. Under shared-hmac/shared-hmac-legacy a
+// minted worker token still verifies (same issuer, same secret, same
+// audience — see selectProvider's shared-hmac case) but reaches
+// sharedhmac.Provider, which has no revocation concept, so revoke_worker_token
+// would report success while the credential kept working until its TTL ran
+// out. local-dev does not verify tokens at all. Refusing the mint in those
+// modes is the containment: no unrevokable worker token is ever issued.
+func workerTokenMintable(cfg *config.Config) bool {
+	return strings.ToLower(cfg.AuthMode) == "local-jwt"
 }
 
 // selectAuthServer returns the canonical authorization server URL for this

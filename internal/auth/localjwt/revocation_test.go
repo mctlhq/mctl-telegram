@@ -93,8 +93,9 @@ func TestProvider_UnrevokedJtiStillAuthenticates(t *testing.T) {
 // revocation-cache lookups. Proven behaviorally: RevocationCache is backed by
 // an already-closed store, so ANY lookup attempt returns an error; a no-jti
 // token must still authenticate successfully, which is only possible if
-// Authenticate's c.Jti != "" guard skipped the cache entirely. Deleting that
-// guard makes this test fail because the broken cache would then be
+// Authenticate's isWorkerToken guard skipped the cache entirely (an
+// interactive token carries neither a jti nor the worker audience). Deleting
+// that guard makes this test fail because the broken cache would then be
 // consulted and its error would propagate.
 func TestProvider_NoJtiSkipsRevocationCacheEntirely(t *testing.T) {
 	healthyStore := newTestLocaljwtStore(t)
@@ -347,5 +348,92 @@ func TestRevocationCache_FreshSnapshotWinsOverLateStaleOne(t *testing.T) {
 	}
 	if !revoked {
 		t.Error("the snapshot that read the database last was discarded because an older read finished after it started; the revocation never took effect")
+	}
+}
+
+// A jti-less worker token — the hand-signed long-lived shape that predates
+// the jti claim — is still reached by a blanket revoke-by-telegram_id, which
+// is what revoke_worker_token's "known jti or not" wording promises. Gating
+// the denylist check on c.Jti alone let such a token keep authenticating for
+// its whole remaining TTL after the revocation was recorded.
+func TestProvider_JtiLessWorkerTokenCaughtByBlanketRevocation(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	if err := store.RevokeWorkerTokensForTelegramID(ctx, 77, "compromised", 1); err != nil {
+		t.Fatalf("seed blanket revocation: %v", err)
+	}
+	cache := NewRevocationCache(store, time.Minute)
+	p, err := NewProvider(store, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer, RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject:    "tg:77",
+		TelegramID: 77,
+		Audience:   []string{workerAudience},
+		IssuedAt:   time.Now().Add(-time.Hour).Unix(), // minted before the revocation
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	if id, err := p.Authenticate(r); err == nil {
+		t.Fatalf("jti-less worker token must be rejected after a blanket revoke, got identity %+v", id)
+	}
+}
+
+// The mirror of the case above: a jti-less worker token whose telegram id was
+// never blanket-revoked still authenticates. The audience-based gate must
+// widen *what gets checked*, not reject every pre-jti worker credential.
+func TestProvider_JtiLessWorkerTokenWithoutRevocationStillAuthenticates(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	cache := NewRevocationCache(store, time.Minute)
+	p, err := NewProvider(store, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer, RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{
+		Subject:    "tg:78",
+		TelegramID: 78,
+		Audience:   []string{workerAudience},
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("unrevoked jti-less worker token should authenticate: %v", err)
+	}
+	if id == nil || id.TelegramID != 78 {
+		t.Fatalf("unexpected identity: %+v", id)
+	}
+}
+
+func TestIsWorkerToken(t *testing.T) {
+	cases := []struct {
+		name string
+		c    *Claims
+		want bool
+	}{
+		{"nil", nil, false},
+		{"interactive", &Claims{Subject: "tg:1"}, false},
+		{"jti only", &Claims{Jti: "abc"}, true},
+		{"worker audience only", &Claims{Audience: []string{workerAudience}}, true},
+		{"worker audience among others", &Claims{Audience: []string{"mctl", workerAudience}}, true},
+		{"unrelated audience", &Claims{Audience: []string{"bridge"}}, false},
+	}
+	for _, tc := range cases {
+		if got := isWorkerToken(tc.c); got != tc.want {
+			t.Errorf("%s: isWorkerToken = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

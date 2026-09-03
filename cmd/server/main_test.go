@@ -71,3 +71,23 @@ func TestSelectProviderCaseInsensitive(t *testing.T) {
 		}
 	}
 }
+
+// Worker tokens may only be minted where the verifying provider consults the
+// revocation denylist — i.e. under local-jwt. Under shared-hmac the minted
+// token verifies against sharedhmac.Provider, which has no revocation
+// concept, so minting there would hand out a credential revoke_worker_token
+// cannot actually take back (issue #472).
+func TestWorkerTokenMintableOnlyUnderLocalJWT(t *testing.T) {
+	mintable := []string{"local-jwt", "LOCAL-JWT", "Local-JWT"}
+	for _, mode := range mintable {
+		if !workerTokenMintable(&config.Config{AuthMode: mode}) {
+			t.Errorf("AUTH_MODE=%q should allow worker-token minting", mode)
+		}
+	}
+	notMintable := []string{"shared-hmac", "shared-hmac-legacy", "SHARED-HMAC", "local-dev", ""}
+	for _, mode := range notMintable {
+		if workerTokenMintable(&config.Config{AuthMode: mode}) {
+			t.Errorf("AUTH_MODE=%q must not allow worker-token minting: revocation is unenforceable there", mode)
+		}
+	}
+}

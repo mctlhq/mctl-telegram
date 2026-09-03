@@ -1321,6 +1321,17 @@ neither.
 ### When this is not enough
 
 `revoke_worker_token` only covers worker tokens (this endpoint's JWT class).
+
+Revocation is enforced by `internal/auth/localjwt`'s provider, which is only
+wired under `AUTH_MODE=local-jwt`. The mint endpoints are therefore mounted
+only in that mode — under `shared-hmac`/`shared-hmac-legacy` (or `local-dev`)
+the server logs `worker token endpoints not mounted` at startup and
+`POST /api/mcp/worker-token` returns 404. If an operator needs worker tokens
+on a `shared-hmac` deployment, move it to `local-jwt` rather than re-enabling
+the mint: a token minted under `shared-hmac` verifies against
+`sharedhmac.Provider`, which has no denylist, so `revoke_worker_token` would
+report success while the credential kept working until its TTL expired.
+
 For a suspected compromise of the signing key itself, or to invalidate every
 credential across every user at once, the existing lever remains: rotate
 `OAUTH_JWT_SIGNING_KEY` (see the [JwtFailures](#jwtfailures) mitigation

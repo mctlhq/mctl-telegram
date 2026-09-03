@@ -51,10 +51,12 @@ type Claims struct {
 	// sets it (at mint) and carries it forward unchanged across every
 	// subsequent renewal, so revoking a jti also revokes all of that
 	// credential's renewals. Interactive tokens never carry one, which is
-	// also the gate Provider.Authenticate uses to skip the revocation-cache
-	// lookup entirely for the common case (see RevocationCache). Tokens
-	// minted before this field existed simply omit it and are never
-	// denylist-checked until their next renewal mints one for them.
+	// part of the gate Provider.Authenticate uses to skip the
+	// revocation-cache lookup entirely for the common case (see
+	// isWorkerToken and RevocationCache). Tokens minted before this field
+	// existed simply omit it and are recognised by their worker audience
+	// instead, so a blanket revoke-by-telegram_id still reaches them even
+	// before their next renewal mints them a jti.
 	Jti string `json:"jti,omitempty"`
 }
 
@@ -252,14 +254,21 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if err := CheckAudience(c.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
 		return nil, err
 	}
-	// Revocation check: only for tokens carrying a jti (worker tokens minted
-	// by internal/workertoken). An interactive session's token has no jti and
-	// skips this entirely — zero extra DB round trips for the common case.
-	// Placed before EnsureUserByTelegramID so a revoked token never touches
-	// the user-provisioning path. Fail closed: a cache error rejects the
-	// request rather than silently treating it as "not revoked" (see
+	// Revocation check: only for worker credentials (see isWorkerToken) —
+	// either a jti-bearing token minted by internal/workertoken, or a
+	// jti-less pre-jti one identified by its worker audience. An interactive
+	// session's token has neither and skips this entirely — zero extra DB
+	// round trips for the common case. Gating on "is this a worker token"
+	// rather than on jti presence is what makes a blanket revoke-by-
+	// telegram_id actually reach a jti-less legacy worker token, as
+	// revoke_worker_token's description promises ("known jti or not");
+	// keying it on c.Jti alone let such a token keep working for its whole
+	// (long) TTL after being reported revoked. Placed before
+	// EnsureUserByTelegramID so a revoked token never touches the
+	// user-provisioning path. Fail closed: a cache error rejects the request
+	// rather than silently treating it as "not revoked" (see
 	// RevocationCache.IsRevoked).
-	if c.Jti != "" && p.RevocationCache != nil {
+	if isWorkerToken(c) && p.RevocationCache != nil {
 		revoked, err := p.RevocationCache.IsRevoked(r.Context(), c.Jti, c.TelegramID, originAnchor(c))
 		if err != nil {
 			return nil, fmt.Errorf("check worker token revocation: %w", err)
@@ -285,6 +294,35 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		Groups:           c.Groups,
 		Scopes:           c.Scopes,
 	}, nil
+}
+
+// workerAudience is the aud value internal/workertoken stamps on every token
+// it mints. Deliberately duplicated rather than imported, for the same reason
+// as originAnchor below: internal/workertoken already imports this package,
+// and importing it back would invert that dependency for the sake of one
+// constant. Keep in lockstep with internal/workertoken's workerAudience.
+const workerAudience = "mcp-worker-ro"
+
+// isWorkerToken reports whether these claims belong to a worker credential —
+// i.e. whether Authenticate must consult the revocation denylist for them.
+// Two shapes qualify: a token carrying a jti (everything internal/workertoken
+// has minted since jti existed), and a jti-less token carrying the worker
+// audience (the hand-signed long-lived credentials that predate jti — they
+// have no individual identifier to denylist, but a blanket revocation by
+// telegram_id must still catch them).
+func isWorkerToken(c *Claims) bool {
+	if c == nil {
+		return false
+	}
+	if c.Jti != "" {
+		return true
+	}
+	for _, a := range c.Audience {
+		if a == workerAudience {
+			return true
+		}
+	}
+	return false
 }
 
 // originAnchor returns the moment a credential's revocation-eligibility

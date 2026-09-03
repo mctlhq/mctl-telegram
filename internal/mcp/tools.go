@@ -1315,7 +1315,7 @@ func (s *Server) toolRevokeWorkerToken() (mcplib.Tool, mcpserver.ToolHandlerFunc
 
 Inputs (exactly one required):
   jti         — string. Revoke one specific token and every renewal of it (the jti is logged on every "worker token minted"/"worker token renewed" line).
-  telegram_id — int. Revoke every worker token minted for this Telegram id up to now, known jti or not. A token minted for this id after this call is unaffected.
+  telegram_id — int. Revoke every worker token minted for this Telegram id up to now, known jti or not — a jti-less legacy worker token is recognised by its "mcp-worker-ro" audience and is covered too. A token minted for this id after this call is unaffected.
   reason      — string, optional. Recorded for audit only.
 
 Revocation takes effect for new requests within a bounded cache window (at most 15 seconds). Revoking by telegram_id also drops that account's currently-connected Local Bridge daemon, if any (Hub eviction); revoking by jti alone cannot, since a bare jti carries no recoverable account linkage.
