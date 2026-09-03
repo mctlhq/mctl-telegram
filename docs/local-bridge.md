@@ -402,11 +402,19 @@ contents:
 
 - `config.json` holds your `api_hash` in plaintext.
 - `bridge_token.json` holds both your MCP token and the current bridge token in
-  plaintext. Anyone who can read it can act as your account until those expire.
-  Be aware of what that means today: an individual token cannot be withdrawn
-  before it expires, so tell the operator immediately if you think the file was
-  exposed. Ask for a 30-day token rather than the 90-day maximum — until
-  revocation exists, that bound is the containment.
+  plaintext. Anyone who can read it can act as your account until they are
+  revoked. Tell the operator immediately if you think the file was exposed:
+  an individual token can now be withdrawn without waiting for it to expire
+  and without disturbing anyone else, but only once someone asks. The operator
+  revokes it by `jti` — the identifier recorded when the token was minted —
+  or, if that was not written down, by Telegram id, which kills every token
+  issued for the account up to that moment and drops a connected daemon along
+  with it. Either way you then need a fresh token and a `connect` before the
+  daemon works again.
+
+  A 30-day token rather than the 90-day maximum is still the better default.
+  Revocation is the response to a leak you noticed; a short lifetime is the
+  bound on one you did not.
 
 **What the server keeps depends on how the account became local.** An account
 provisioned directly into local mode has no stored session here, ever. An
