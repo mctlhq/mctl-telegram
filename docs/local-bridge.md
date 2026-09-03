@@ -69,6 +69,39 @@ rather than a form. The credentials identify the *application*, not the account
 — one pair can authorize any Telegram account, which is how any third-party
 client works.
 
+## What the operator has to do (and when)
+
+Three of the steps below are ours, and none of them is self-service yet. They
+are listed here so you can see exactly where you have to wait for us, and so
+the operator has a checklist rather than a memory.
+
+| # | Step | Who | When |
+|---|------|-----|------|
+| 1 | `provision_local_account` (new account) or `set_account_mode mode="local"` (migration) | operator | before you run `connect` |
+| 2 | Mint the long-lived MCP token — `POST /api/mcp/worker-token` with `{"telegram_id": ..., "purpose": "local-bridge"}` | operator | before you run `connect` |
+| 3 | `set_account_send` to turn real sending on | operator | after step 1, before you expect a message to leave |
+
+**Step 3 is the one that gets missed, and it fails quietly.** A freshly
+provisioned local account has `send_enabled = false`. That does not produce an
+error — `send_message` returns a **successful dry-run preview** with the reason
+`per-account send_enabled=false`, because drafting-by-default is deliberate
+elsewhere in the product. So a first send looks like it worked, and nothing
+arrives. If your first test message never lands, read the `dry_run` field of the
+response before debugging anything else.
+
+Step 2 has no MCP tool yet, so an operator makes the HTTP call by hand. That is
+tracked; until it lands, minting is a manual operator action with a few minutes
+of turnaround.
+
+Two things that are **no longer** operator steps, in case you read an older
+description of this mode:
+
+- **No hosted login first.** A local account can be created directly (step 1),
+  so the server never holds a session for it.
+- **No TTL exemption.** Local accounts are excluded from the idle and absolute
+  session sweepers in the query itself, so nothing has to be added to an
+  exemption list and no account silently reverts to hosted after 30 days.
+
 ## Install
 
 Download the build for your platform from the
@@ -369,11 +402,19 @@ contents:
 
 - `config.json` holds your `api_hash` in plaintext.
 - `bridge_token.json` holds both your MCP token and the current bridge token in
-  plaintext. Anyone who can read it can act as your account until those expire.
-  Be aware of what that means today: an individual token cannot be withdrawn
-  before it expires, so tell the operator immediately if you think the file was
-  exposed. Ask for a 30-day token rather than the 90-day maximum — until
-  revocation exists, that bound is the containment.
+  plaintext. Anyone who can read it can act as your account until they are
+  revoked. Tell the operator immediately if you think the file was exposed:
+  an individual token can now be withdrawn without waiting for it to expire
+  and without disturbing anyone else, but only once someone asks. The operator
+  revokes it by `jti` — the identifier recorded when the token was minted —
+  or, if that was not written down, by Telegram id, which kills every token
+  issued for the account up to that moment and drops a connected daemon along
+  with it. Either way you then need a fresh token and a `connect` before the
+  daemon works again.
+
+  A 30-day token rather than the 90-day maximum is still the better default.
+  Revocation is the response to a leak you noticed; a short lifetime is the
+  bound on one you did not.
 
 **What the server keeps depends on how the account became local.** An account
 provisioned directly into local mode has no stored session here, ever. An
