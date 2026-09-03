@@ -106,13 +106,7 @@ func (m *Minter) Mint(req MintRequest) (*Minted, error) {
 		}
 	}
 
-	ttl := defaultWorkerTokenTTL
-	if req.TTLHours > 0 {
-		ttl = time.Duration(req.TTLHours) * time.Hour
-		if ttl > maxWorkerTokenTTL {
-			ttl = maxWorkerTokenTTL
-		}
-	}
+	ttl := clampTTL(req.TTLHours)
 
 	audience := []string{audienceMarker}
 	if m.mcpAudience != "" {
@@ -170,4 +164,21 @@ func LogMinted(adminUserID int64, via string, mt *Minted) {
 		"audience_marker", mt.Audience[0],
 		"jti", mt.Jti,
 	)
+}
+
+// clampTTL turns an admin-supplied ttl_hours into a bounded lifetime.
+// The ceiling is compared in hours rather than against the product, because
+// time.Duration(hours) * time.Hour overflows int64 nanoseconds somewhere above
+// 2.5M hours and wraps negative — which sails past a "> maxWorkerTokenTTL"
+// check and mints a token that is already expired. A caller asking for an
+// absurd lifetime should get the ceiling, the same as one asking for a merely
+// excessive one.
+func clampTTL(hours int) time.Duration {
+	if hours <= 0 {
+		return defaultWorkerTokenTTL
+	}
+	if int64(hours) > int64(maxWorkerTokenTTL/time.Hour) {
+		return maxWorkerTokenTTL
+	}
+	return time.Duration(hours) * time.Hour
 }

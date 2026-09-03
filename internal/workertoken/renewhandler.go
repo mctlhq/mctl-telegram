@@ -151,13 +151,7 @@ func NewRenewHandler(secret []byte, issuer, mcpAudience string) http.HandlerFunc
 			}
 		}
 
-		ttl := defaultWorkerTokenTTL
-		if req.TTLHours > 0 {
-			ttl = time.Duration(req.TTLHours) * time.Hour
-			if ttl > maxWorkerTokenTTL {
-				ttl = maxWorkerTokenTTL
-			}
-		}
+		ttl := clampTTL(req.TTLHours)
 
 		// Enforce the absolute ceiling, and clamp rather than reject when the
 		// requested TTL would only overshoot it. Clamping matters: it means
