@@ -78,7 +78,7 @@ the operator has a checklist rather than a memory.
 | # | Step | Who | When |
 |---|------|-----|------|
 | 1 | `provision_local_account` (new account) or `set_account_mode mode="local"` (migration) | operator | before you run `connect` |
-| 2 | Mint the long-lived MCP token — `POST /api/mcp/worker-token` with `{"telegram_id": ..., "purpose": "local-bridge"}` | operator | before you run `connect` |
+| 2 | Mint the long-lived MCP token — `mint_worker_token` with `purpose="local-bridge"` | operator | before you run `connect` |
 | 3 | `set_account_send` to turn real sending on | operator | after step 1, before you expect a message to leave |
 
 **Step 3 is the one that gets missed, and it fails quietly.** A freshly
@@ -89,9 +89,16 @@ elsewhere in the product. So a first send looks like it worked, and nothing
 arrives. If your first test message never lands, read the `dry_run` field of the
 response before debugging anything else.
 
-Step 2 has no MCP tool yet, so an operator makes the HTTP call by hand. That is
-tracked; until it lands, minting is a manual operator action with a few minutes
-of turnaround.
+All three steps are MCP tools now. Step 2 used to be a hand-assembled HTTP
+call; `POST /api/mcp/worker-token` still exists and issues exactly the same
+credential — the tool and the endpoint share one mint policy rather than each
+implementing it — so an operator can use either.
+
+Record what step 2 returns. `expires_at` is the only warning you will get: a
+worker token lives for up to 90 days and announces nothing as it ends, and the
+first symptom is the daemon reconnecting in a loop. `jti` is what revokes this
+specific token later; without it, containing a leak means revoking every token
+for the account.
 
 Two things that are **no longer** operator steps, in case you read an older
 description of this mode:
@@ -217,8 +224,9 @@ from your connector will not do: those live one hour, and the daemon needs a
 credential it can keep re-exchanging. Ask for one when your account is enabled
 for local mode.
 
-An operator mints it with `POST /api/mcp/worker-token` using
-`{"telegram_id": ..., "purpose": "local-bridge"}` — this grants the
+An operator mints it with the `mint_worker_token` MCP tool (or the equivalent
+`POST /api/mcp/worker-token`) using
+`telegram_id` and `purpose="local-bridge"` — this grants the
 `telegram:messages:send`/`telegram:messages:pin` scopes the daemon needs
 for `send_message`/`pin_message` to work, in addition to the read-only
 scopes. The daemon can renew this token itself before it expires via
