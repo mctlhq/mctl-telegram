@@ -120,19 +120,34 @@ spec:
               degrading and will start timing out if this rises further.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramloginslow"
 
+        # Counts registrations per daemon, not transitions of a shared gauge.
+        # The previous form, changes(mctl_bridge_active_daemons[10m]) > 20,
+        # could not fire for a flapping daemon: the reconnect ladder in
+        # cmd/local/daemon.go caps at 60s and only resets after a session
+        # lasting 60s, so a genuinely flapping daemon settles at ~10 cycles
+        # per 10 minutes = 20 changes, which is not > 20. The alert therefore
+        # fired for the first two minutes, while the backoff was still
+        # climbing, and RESOLVED ITSELF once the flap became permanent —
+        # reading to an operator as "it recovered".
+        #
+        # Threshold justified against the mechanics rather than scaled by
+        # guesswork: a healthy daemon registers exactly once per server
+        # rollout, so 4 or more registrations in 10 minutes means either a
+        # reconnect loop or an implausible burst of deploys. A 60s-cycle flap
+        # produces ~10 and fires comfortably.
         - alert: MctlBridgeDaemonsFlapping
-          expr: changes(mctl_bridge_active_daemons[10m]) > 20
+          expr: increase(mctl_bridge_connections_total[10m]) > 3
           for: 0m
           labels:
             severity: warning
             service: mctl-telegram
           annotations:
-            summary: "mctl-telegram Local Bridge daemons flapping"
+            summary: "mctl-telegram Local Bridge daemon {{ $labels.user_id }} is reconnecting in a loop"
             description: >
-              The mctl_bridge_active_daemons gauge changed more than 20 times in the
-              last 10 minutes, indicating rapid connect/disconnect cycling. This may
-              signal a looping reconnect, a token rotation problem, or network
-              instability on a daemon host.
+              Local Bridge daemon for user {{ $labels.user_id }} registered
+              {{ $value | humanize }} times in the last 10 minutes. A healthy daemon
+              registers once per server rollout. This may signal a looping reconnect,
+              a token rotation problem, or network instability on the daemon host.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
 
     - name: mctl-telegram-agent
