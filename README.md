@@ -243,7 +243,11 @@ The canary pushes three Prometheus metric families to a Pushgateway:
 - `mctl_telegram_canary_duration_seconds` — wall-clock time of the run.
 - `mctl_telegram_canary_step_failure_total{step=}` — per-step failure counters.
 
-An alert rule template is provided in `deploy/alerts/canary.rules.yaml`.
+The alert rules that actually fire live in mctl-gitops
+(`infra-components/observability/vm-rules/mctl-telegram-canary.yaml`), alongside
+the CronJob itself (`services/labs/mctl-telegram/values.yaml`). This repository
+keeps no copy: one drifted from the deployed version for months while looking
+maintained, so the deployment is the single source of truth.
 
 ## Contributing
 

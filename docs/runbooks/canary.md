@@ -1,17 +1,27 @@
 # Runbook: `MctlTelegramCanaryFailing`
 
 The mctl-telegram synthetic canary CronJob has been reporting
-`mctl_telegram_canary_success = 0` for every scrape in the last 10
-minutes and the condition has persisted for at least 5 minutes.
+`mctl_telegram_canary_success = 0` for every scrape in the last 25
+minutes and the condition has persisted for at least 5 minutes. With a
+ten-minute probe interval that is roughly three consecutive failed runs,
+so a single flap does not reach this alert.
 
 User-visible impact: end-to-end Telegram tooling is likely broken for
 real users, even though individual components may be healthy.
 
 ## What the alert means
 
-The canary CronJob (`deploy/canary/cronjob.yaml`, schedule
-`*/2 * * * *`) runs `cmd/canary` against the production tg.mctl.ai
-endpoint. Each run exercises:
+The canary is deployed from mctl-gitops, not from this repository —
+`services/labs/mctl-telegram/values.yaml` renders the CronJob
+(`labs-mctl-telegram-canary`, schedule `*/10 * * * *`, running the same image
+tag as the service itself), and
+`infra-components/observability/vm-rules/mctl-telegram-canary.yaml` carries the
+alert rules. Check those files for the current values rather than trusting the
+numbers quoted here; this repository deliberately keeps no copy of either, and
+the schedule has already changed once.
+
+Each run of `cmd/canary` against the production tg.mctl.ai endpoint
+exercises:
 
 1. `oauth_metadata` — `GET /.well-known/oauth-authorization-server`
 2. `mcp_init` — MCP session initialization (`method: initialize`, obtains `Mcp-Session-Id`)
@@ -52,7 +62,7 @@ failure pushes `0` and increments
   `mctl_telegram_canary_step_failure_total{step="list_dialogs"}`).
 - **`get_unread_messages`** — the test peer was deleted or
   re-permissioned; usually not user-facing, can be hidden by setting
-  `CANARY_PROBE_UNREAD=false` on the CronJob while investigating.
+  `CANARY_PROBE_UNREAD=false` in the gitops values while investigating.
 
 ## Mitigation
 
@@ -109,17 +119,24 @@ failure pushes `0` and increments
   [Revoking a leaked worker token](../runbook.md#revokingaleakedworkertoken)
   in the main runbook for the full mechanics and the propagation-delay bound.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
-  own once Telegram lifts the rate limit. Consider widening the
-  CronJob `schedule` if it keeps recurring.
+  own once Telegram lifts the rate limit. If it keeps recurring, widen the
+  `schedule` in mctl-gitops — and resize the alert windows in the same change,
+  since `MctlTelegramCanaryFailing`, `MctlTelegramCanaryStale` and
+  `MctlTelegramCanaryAbsent` are all sized against the probe interval.
 - **Server outage** — follow the mctl-telegram main runbook for the
   failing component (pool exhaustion, FLOOD_WAIT, OAuth pending —
   see related alerts).
-- **Stop the canary while debugging** — suspend the CronJob:
+- **Stop the canary while debugging** — suspend the CronJob. Note the
+  deployed name is prefixed with the release: `labs-mctl-telegram-canary`,
+  not `mctl-telegram-canary`.
   ```sh
-  kubectl -n labs patch cronjob mctl-telegram-canary \
+  kubectl -n labs patch cronjob labs-mctl-telegram-canary \
     --type merge -p '{"spec":{"suspend":true}}'
   ```
-  Unsuspend after the underlying issue is resolved.
+  The object is managed by ArgoCD, so treat this as a short-lived measure: a
+  subsequent sync can revert it. To stop the canary for longer than an
+  investigation, set the suspend in mctl-gitops instead. Unsuspend after the
+  underlying issue is resolved.
 
 ## Escalation
 
