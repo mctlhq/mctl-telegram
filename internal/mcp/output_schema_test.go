@@ -30,6 +30,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"delete_telegram_account", first(s.toolDeleteAccount())},
 		{"revoke_telegram_session", first(s.toolRevokeSession())},
 		{"revoke_worker_token", first(s.toolRevokeWorkerToken())},
+		{"mint_worker_token", first(s.toolMintWorkerToken())},
 		{"set_telegram_access", first(s.toolSetAccess())},
 		{"set_account_send", first(s.toolSetAccountSend())},
 		{"set_account_mode", first(s.toolSetAccountMode())},

@@ -31,6 +31,10 @@ type Server struct {
 	RevocationCache interface {
 		Refresh(ctx context.Context) error
 	}
+	// WorkerTokenMinter issues Local Bridge / read-only worker credentials.
+	// nil in any deployment that must not mint one; see
+	// WithWorkerTokenMinter.
+	WorkerTokenMinter WorkerTokenMinter
 
 	// Hub routes MCP tool calls to Local Bridge daemons. When nil, all
 	// tools fall back to Pool.Borrow (hosted mode only).
@@ -107,6 +111,18 @@ func (s *Server) WithRevocationCache(c interface {
 	Refresh(ctx context.Context) error
 }) *Server {
 	s.RevocationCache = c
+	return s
+}
+
+// WithWorkerTokenMinter wires the worker-token mint policy so mint_worker_token
+// can issue a credential. Left nil when this deployment must not mint one —
+// cmd/server/main.go gates the HTTP endpoints on workerTokenMintable (only
+// AUTH_MODE=local-jwt can enforce revocation), and the tool is gated on the
+// same decision by simply not being given a minter. The tool then refuses,
+// rather than the deployment quietly gaining a mint path the HTTP surface
+// deliberately withholds.
+func (s *Server) WithWorkerTokenMinter(m WorkerTokenMinter) *Server {
+	s.WorkerTokenMinter = m
 	return s
 }
 
@@ -246,6 +262,10 @@ func (s *Server) HTTPHandler() http.Handler {
 	}
 	{
 		t, h := s.toolRevokeWorkerToken()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolMintWorkerToken()
 		s.addTool(srv, t, h)
 	}
 	{

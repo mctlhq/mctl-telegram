@@ -480,6 +480,16 @@ func main() {
 	// taken back (issue #472).
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		if workerTokenMintable(cfg) {
+			// One Minter, two transports. The MCP tool and the HTTP endpoint
+			// must issue identical credentials, so they share the policy
+			// object rather than each constructing one; and the tool is
+			// wired INSIDE this gate so a deployment that may not mint over
+			// HTTP cannot mint through MCP either.
+			if minter, err := workertoken.NewMinter([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience); err != nil {
+				slog.Error("worker token minter not configured; mint_worker_token will refuse", "err", err)
+			} else {
+				mcpSrv = mcpSrv.WithWorkerTokenMinter(minter)
+			}
 			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/mcp/worker-token",
 				workertoken.NewHandler([]byte(secret), selectAgentIssuer(cfg), cfg.OAUTHJWTAudience))
 			// Self-renewal for an already-issued worker token. Same

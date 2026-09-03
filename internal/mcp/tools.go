@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
 // FloodWait retry policy constants. Matching the design: up to 3 retries with
@@ -1621,6 +1623,141 @@ type revokeWorkerTokenResult struct {
 	// recorded but takes effect only within the cache's TTL — which leaves
 	// an evicted daemon a window to reconnect with the revoked credential.
 	DenylistRefreshed bool `json:"denylist_refreshed"`
+}
+
+// WorkerTokenMinter is the mint policy mint_worker_token drives. Declared as
+// an interface here, satisfied by *workertoken.Minter, so internal/mcp does
+// not import internal/workertoken and the tool can be tested against a fake
+// without a signing key.
+type WorkerTokenMinter interface {
+	Mint(req workertoken.MintRequest) (*workertoken.Minted, error)
+}
+
+// mintWorkerTokenResult is the success payload of mint_worker_token.
+//
+// ExpiresAt and Jti are part of the deliverable, not decoration. A worker
+// token lives for up to 90 days and warns nobody as it approaches its end —
+// the first symptom is a daemon reconnecting in a loop — so the expiry has to
+// be in front of the operator at the moment they hand the credential over.
+// The jti is what revokes it later, and it cannot be recovered from the token
+// afterwards unless someone wrote it down.
+type mintWorkerTokenResult struct {
+	TelegramID  int64    `json:"telegram_id"`
+	WorkerToken string   `json:"worker_token"`
+	ExpiresAt   string   `json:"expires_at"`
+	Jti         string   `json:"jti"`
+	Purpose     string   `json:"purpose"`
+	Scopes      []string `json:"scopes"`
+}
+
+// toolMintWorkerToken is the MCP half of POST /api/mcp/worker-token.
+//
+// Deliberately a transport over workertoken.Minter rather than a second
+// implementation: the scope allowlists, the TTL ceiling, the audience marker
+// and the orig_iat/jti anchoring are security policy, and a copy of them here
+// would let the HTTP endpoint's documented guarantees stop describing what
+// this tool actually issues.
+//
+// Refuses when no minter is wired. That is not a defensive nil check — it is
+// how the tool inherits cmd/server/main.go's workerTokenMintable gate: a
+// deployment whose auth mode cannot consult the revocation denylist must not
+// hand out a credential that can never be taken back, and it must not acquire
+// one through the MCP surface either.
+func (s *Server) toolMintWorkerToken() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("mint_worker_token",
+		mcplib.WithTitleAnnotation("Mint a worker MCP token"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[mintWorkerTokenResult](),
+		mcplib.WithDescription(`Admin only (requires the admin:users scope). Mint a bounded, long-lived MCP token for a headless worker or a Local Bridge daemon — the same credential POST /api/mcp/worker-token issues, from an ordinary admin session.
+
+Inputs:
+  telegram_id — int, required. The TARGET account the token authenticates as, not the caller.
+  purpose     — string, optional. Omit for a READ-ONLY token (dialogs+messages read). Pass "local-bridge" for a Local Bridge daemon's token, which additionally carries send and pin. Any other value is rejected; there is no silent fallback, so write capability is always an explicit request.
+  ttl_hours   — int, optional. Defaults to 30 days; clamped down to the 90-day ceiling.
+  scopes      — string, optional. Comma-separated subset of the purpose's allowlist. Omit for that purpose's defaults.
+
+Output: JSON {telegram_id, worker_token, expires_at, jti, purpose, scopes}.
+
+Record expires_at and jti. Nothing warns before a worker token expires — the first symptom is the daemon reconnecting in a loop — and jti is what revoke_worker_token needs to kill this credential and every renewal of it.
+
+Returns an error if this deployment cannot enforce worker-token revocation (AUTH_MODE other than local-jwt): an unrevokable long-lived credential is not issued.`),
+		mcplib.WithNumber("telegram_id",
+			mcplib.Required(),
+			mcplib.Description("Telegram user id the token authenticates as (required).")),
+		mcplib.WithString("purpose",
+			mcplib.Description(`Omit for read-only. "local-bridge" for a Local Bridge daemon token (adds send and pin).`)),
+		mcplib.WithNumber("ttl_hours",
+			mcplib.Description("Token lifetime in hours. Default 720 (30 days), clamped to 2160 (90 days).")),
+		mcplib.WithString("scopes",
+			mcplib.Description("Optional comma-separated scope subset. Omit for the purpose's defaults.")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "admin:users"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		// Every exit past the scope gate is audited, including refusals
+		// (#462): a refused mint is exactly as interesting to an auditor as
+		// a successful one.
+		refuse := func(format string, a ...any) *mcplib.CallToolResult {
+			err := errors.New(formatErr(format, a...))
+			s.audit(ctx, id, "mint_worker_token", "", err, startedAt)
+			return mcplib.NewToolResultError(err.Error())
+		}
+		if s.WorkerTokenMinter == nil {
+			return refuse("worker token minting is not available on this deployment: it cannot enforce revocation (requires AUTH_MODE=local-jwt)"), nil
+		}
+		args := req.GetArguments()
+		tgID := int64(intArg(args, "telegram_id", 0))
+		if tgID <= 0 {
+			return refuse("telegram_id is required and must be a positive integer"), nil
+		}
+		var scopes []string
+		if raw := strings.TrimSpace(stringArg(args, "scopes", "")); raw != "" {
+			for _, part := range strings.Split(raw, ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					scopes = append(scopes, p)
+				}
+			}
+		}
+		mt, err := s.WorkerTokenMinter.Mint(workertoken.MintRequest{
+			TelegramID: tgID,
+			Scopes:     scopes,
+			TTLHours:   intArg(args, "ttl_hours", 0),
+			Purpose:    stringArg(args, "purpose", ""),
+		})
+		if err != nil {
+			if errors.Is(err, workertoken.ErrInvalidMintRequest) {
+				return refuse("%s", strings.TrimPrefix(err.Error(), workertoken.ErrInvalidMintRequest.Error()+": ")), nil
+			}
+			// Generic to the caller, detailed to the log and the audit trail
+			// — matching the HTTP transport, which hides this class behind
+			// "failed to issue worker token". A caller-caused rejection
+			// above says exactly what was wrong because the caller can act
+			// on it; a signing or jti-generation failure is ours, and the
+			// operator reading a tool result cannot do anything with the
+			// internals. refuse() is deliberately not used here: it audits
+			// whatever it returns, and an auditor asking why a mint failed
+			// needs the cause, not the sanitised sentence.
+			slog.Error("mint_worker_token: mint failed", "admin_user_id", id.UserID, "target_tg_id", tgID, "err", err)
+			s.audit(ctx, id, "mint_worker_token", "", err, startedAt)
+			return mcplib.NewToolResultError("failed to issue worker token"), nil
+		}
+		workertoken.LogMinted(id.UserID, "mcp", mt)
+		s.audit(ctx, id, "mint_worker_token", "", nil, startedAt)
+		return jsonResult(mintWorkerTokenResult{
+			TelegramID:  mt.TelegramID,
+			WorkerToken: mt.Token,
+			ExpiresAt:   mt.ExpiresAt.Format(time.RFC3339),
+			Jti:         mt.Jti,
+			Purpose:     mt.Purpose,
+			Scopes:      mt.Scopes,
+		})
+	}
+	return tool, handler
 }
 
 // jsonResult marshals v to a pretty-printed JSON text content block (for
