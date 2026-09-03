@@ -377,6 +377,28 @@ func sqliteSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_token_revocations_jti ON worker_token_revocations(jti) WHERE jti IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_worker_token_revocations_tg ON worker_token_revocations(telegram_id)`,
+		// Local Bridge device registry (issue-481). One row per registered
+		// daemon installation, distinct from the account-wide
+		// telegram_accounts.mode flag. Additive only: nothing reads or
+		// writes this table yet (see internal/db/local_bridge_devices.go).
+		`CREATE TABLE IF NOT EXISTS local_bridge_devices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			device_id TEXT NOT NULL,
+			device_label TEXT,
+			idempotency_key TEXT,
+			registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at DATETIME,
+			revoked_at DATETIME,
+			revoked_reason TEXT
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_device_id ON local_bridge_devices(device_id)`,
+		// Scoped to (user_id, idempotency_key), not idempotency_key alone:
+		// the key is client-supplied, so a global unique index lets one
+		// user's retry token collide with another's, silently dropping the
+		// second registration.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }
 
@@ -489,5 +511,25 @@ func pgSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_token_revocations_jti ON worker_token_revocations(jti) WHERE jti IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_worker_token_revocations_tg ON worker_token_revocations(telegram_id)`,
+		// Local Bridge device registry (issue-481) -- see the sqliteSchema
+		// comment on this table for the column-shape rationale.
+		`CREATE TABLE IF NOT EXISTS local_bridge_devices (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			device_id TEXT NOT NULL,
+			device_label TEXT,
+			idempotency_key TEXT,
+			registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen_at TIMESTAMPTZ,
+			revoked_at TIMESTAMPTZ,
+			revoked_reason TEXT
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_device_id ON local_bridge_devices(device_id)`,
+		// Scoped to (user_id, idempotency_key), not idempotency_key alone:
+		// the key is client-supplied, so a global unique index lets one
+		// user's retry token collide with another's, silently dropping the
+		// second registration.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }
