@@ -59,7 +59,7 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 			// the pair, not the key alone — see the index comment in db.go.
 			`INSERT INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL DO NOTHING`,
 			userID, deviceID, nullable(label), nullable(idempotencyKey),
 		); err != nil {
 			return "", fmt.Errorf("register device: %w", err)
@@ -84,9 +84,17 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 	// user_id as well as the key, so this can only ever return a row
 	// belonging to the caller — a second layer behind the scoped unique
 	// index, not a substitute for it.
+	//
+	// revoked_at IS NULL matters as much as user_id: without it, re-running
+	// activation after a revoke returned the REVOKED device_id, and the
+	// unique index (then unscoped) refused to insert a replacement -- so a
+	// revoked device could never be re-registered with the same key, and the
+	// caller was handed a dead id it would go on to request credentials for.
+	// The index predicate above must stay in step with this WHERE clause.
 	var existing string
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT device_id FROM local_bridge_devices WHERE user_id = $1 AND idempotency_key = $2`,
+		`SELECT device_id FROM local_bridge_devices
+		 WHERE user_id = $1 AND idempotency_key = $2 AND revoked_at IS NULL`,
 		userID, idempotencyKey,
 	).Scan(&existing); err != nil {
 		return "", fmt.Errorf("register device: read back: %w", err)

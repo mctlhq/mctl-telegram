@@ -397,7 +397,15 @@ func sqliteSchema() []string {
 		// the key is client-supplied, so a global unique index lets one
 		// user's retry token collide with another's, silently dropping the
 		// second registration.
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		//
+		// Also scoped to live rows. The original predicate covered revoked
+		// rows too, which made revocation irreversible: the unique index
+		// blocked inserting a replacement, so RegisterDevice's read-back
+		// handed back the revoked device_id forever. Dropped and recreated
+		// under a new name so existing deployments migrate on boot; the DROP
+		// is a no-op on every run after the first.
+		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }
@@ -529,7 +537,15 @@ func pgSchema() []string {
 		// the key is client-supplied, so a global unique index lets one
 		// user's retry token collide with another's, silently dropping the
 		// second registration.
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idempotency_key ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+		//
+		// Also scoped to live rows. The original predicate covered revoked
+		// rows too, which made revocation irreversible: the unique index
+		// blocked inserting a replacement, so RegisterDevice's read-back
+		// handed back the revoked device_id forever. Dropped and recreated
+		// under a new name so existing deployments migrate on boot; the DROP
+		// is a no-op on every run after the first.
+		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
 	}
 }

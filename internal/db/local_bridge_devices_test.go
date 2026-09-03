@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -392,5 +393,66 @@ func TestTouchDeviceLastSeen_NoOpOnRevokedDevice(t *testing.T) {
 	}
 	if !after.LastSeenAt.Equal(*before.LastSeenAt) {
 		t.Errorf("last_seen_at moved on a revoked device: %v -> %v", *before.LastSeenAt, *after.LastSeenAt)
+	}
+}
+
+// A revoked device must not be resurrected by a retry, and revoking must not
+// permanently burn the idempotency key. Before the fix the read-back had no
+// revoked_at filter and the unique index covered revoked rows too, so
+// re-running activation after a revoke returned the REVOKED device_id and no
+// replacement row could ever be inserted -- the device was unusable and
+// unre-registerable at the same time, and issue #483 would have gone on to
+// mint credentials for the dead id.
+func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1099, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	const key = "idem-revoke-reuse"
+
+	first, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("first RegisterDevice: %v", err)
+	}
+	if err := s.RevokeDevice(ctx, first, "user revoked"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+
+	second, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("re-register after revoke: %v", err)
+	}
+	if second == first {
+		t.Fatalf("re-registration returned the revoked device_id %q", second)
+	}
+
+	// The replacement must be live, and the revoked row must stay revoked.
+	var revokedAt sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, second,
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("read replacement: %v", err)
+	}
+	if revokedAt.Valid {
+		t.Fatalf("replacement device %q is already revoked", second)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, first,
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	if !revokedAt.Valid {
+		t.Fatalf("original device %q lost its revocation", first)
+	}
+
+	// A retry after the replacement still collapses onto the live row.
+	third, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("retry after re-register: %v", err)
+	}
+	if third != second {
+		t.Fatalf("retry did not resolve to the live device: got %q want %q", third, second)
 	}
 }
