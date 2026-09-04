@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.60.1](https://github.com/mctlhq/mctl-telegram/compare/0.60.0...0.60.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **local:** name the missing server when daemon starts with none configured ([#502](https://github.com/mctlhq/mctl-telegram/issues/502)) ([aff2025](https://github.com/mctlhq/mctl-telegram/commit/aff20251523d06472ea7bb372bb1156a2b1319f5))
+
 ## [0.60.0](https://github.com/mctlhq/mctl-telegram/compare/0.59.0...0.60.0) (2026-09-04)
 
 
