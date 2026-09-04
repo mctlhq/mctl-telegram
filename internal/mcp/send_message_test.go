@@ -97,7 +97,7 @@ func TestToolSendMessage_LocalBridgeInjectsSendMode(t *testing.T) {
 	uid := seedLocalAccount(t, store, 909)
 
 	hub := bridge.NewHub()
-	send := hub.Register(uid)
+	send := hub.Register(uid, "")
 
 	gotMode := make(chan string, 1)
 	go func() {

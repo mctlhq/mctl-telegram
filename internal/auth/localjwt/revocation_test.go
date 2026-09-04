@@ -530,6 +530,7 @@ func TestProvider_IdentityCarriesCredentialRevocationClaims(t *testing.T) {
 	tok, err := iss.Mint(Claims{
 		Subject: "tg:90", TelegramID: 90,
 		Jti: "carry-me", OriginalIssuedAt: 1700000000,
+		DeviceID: "dev_carry_me_too",
 	}, time.Hour)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
@@ -545,6 +546,38 @@ func TestProvider_IdentityCarriesCredentialRevocationClaims(t *testing.T) {
 	}
 	if id.OriginalIssuedAt != 1700000000 {
 		t.Errorf("Identity.OriginalIssuedAt = %d, want %d", id.OriginalIssuedAt, 1700000000)
+	}
+	// issue-483 task 10: a token carrying device_id surfaces it on
+	// auth.Identity, the same way Jti/OriginalIssuedAt already do -- so
+	// POST /api/bridge/token can stamp it onto the child bridge token and
+	// Hub.EvictDevice can later find the right connection.
+	if id.DeviceID != "dev_carry_me_too" {
+		t.Errorf("Identity.DeviceID = %q, want %q", id.DeviceID, "dev_carry_me_too")
+	}
+}
+
+// A token with no device_id claim (every non-device credential shape) must
+// leave Identity.DeviceID empty, not some stale or zero-value placeholder
+// that could be mistaken for a real device binding.
+func TestProvider_IdentityDeviceIDEmptyWhenClaimAbsent(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	p, err := NewProvider(store, ProviderConfig{Secret: testSecret, ExpectedIssuer: testIssuer})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{Subject: "tg:91", TelegramID: 91}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(r)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if id.DeviceID != "" {
+		t.Errorf("Identity.DeviceID = %q, want empty", id.DeviceID)
 	}
 }
 

@@ -249,6 +249,14 @@ func (s *Server) HTTPHandler() http.Handler {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolSetSendConsent()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolRevokeLocalBridgeDevice()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolSetAccountMode()
 		s.addTool(srv, t, h)
 	}

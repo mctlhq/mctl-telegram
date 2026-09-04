@@ -31,6 +31,15 @@ type Identity struct {
 	// close. Empty/zero for credentials that carry neither claim.
 	Jti              string
 	OriginalIssuedAt int64
+	// DeviceID carries a self-service Local Bridge device credential's
+	// device binding (issue-483), populated from Claims.DeviceID by
+	// localjwt.Provider.Authenticate. Empty for every other credential
+	// shape (interactive session, admin-minted worker token). A handler
+	// that mints a derived credential from this one (POST /api/bridge/token)
+	// must copy it into the child so the /bridge websocket's identity names
+	// the device and Hub.EvictDevice can find it -- see
+	// internal/bridge/tokenhandler.go.
+	DeviceID string
 }
 
 func (i *Identity) HasScope(s string) bool {

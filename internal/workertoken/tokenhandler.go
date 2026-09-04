@@ -48,6 +48,20 @@ const (
 	maxWorkerTokenTTL     = 90 * 24 * time.Hour
 )
 
+// defaultDeviceCredentialTTL and maxDeviceCredentialTTL bound the lifetime of
+// a self-service Local Bridge device credential (issue-483), minted by
+// MintForDevice rather than Mint. Deliberately hours-scale and deliberately
+// distinct constants from defaultWorkerTokenTTL/maxWorkerTokenTTL: this
+// credential is refreshed by the device itself via PoP, not renewed by a
+// human admin, so it can safely live for hours rather than weeks -- and
+// SHOULD, so that a revoke-then-refresh window stays tight (see
+// design.md's "Exact TTL/ceiling numbers" open question, resolved as 6h
+// default / 24h ceiling).
+const (
+	defaultDeviceCredentialTTL = 6 * time.Hour
+	maxDeviceCredentialTTL     = 24 * time.Hour
+)
+
 // allowedReadOnlyScopes is the fixed allowlist a worker token's Scopes must
 // be a subset of. It is deliberately kept local to this package rather than
 // shared with internal/oauth/scopes.go's DCRNegotiableScopes: that list also

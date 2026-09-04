@@ -3,6 +3,8 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +24,18 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+// testDevicePubkeyB64 returns a syntactically valid (freshly generated),
+// base64-standard-encoded Ed25519 public key for tests that only care about
+// activate/start accepting device_pubkey, not about the specific bytes.
+func testDevicePubkeyB64(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate test device pubkey: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(pub)
+}
 
 // ----- shared harness -----
 
@@ -65,6 +79,7 @@ func activateStart(t *testing.T, ts *httptest.Server, client *http.Client, teleg
 		"telegram_id":             telegramID,
 		"device_registration_key": deviceKey,
 		"device_label":            "test-laptop",
+		"device_pubkey":           testDevicePubkeyB64(t),
 	})
 	resp, err := client.Post(ts.URL+"/api/local-bridge/activate/start", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -301,6 +316,56 @@ func TestActivation_HappyPath_ProvisionsAccountAndDevice(t *testing.T) {
 	}
 	if deviceCount != 1 {
 		t.Errorf("device rows for idempotency key = %d, want 1", deviceCount)
+	}
+
+	// T1 (issue-483): the approved activation's local_bridge_devices row
+	// carries a non-null device_pubkey.
+	var pubkey []byte
+	if err := srv.store.DB.QueryRow(
+		`SELECT device_pubkey FROM local_bridge_devices WHERE idempotency_key = $1`, "device-key-1",
+	).Scan(&pubkey); err != nil {
+		t.Fatalf("query device_pubkey: %v", err)
+	}
+	if len(pubkey) != ed25519.PublicKeySize {
+		t.Errorf("device_pubkey length = %d, want %d (ed25519.PublicKeySize)", len(pubkey), ed25519.PublicKeySize)
+	}
+}
+
+// T1 (issue-483): activation WITHOUT a device_pubkey is rejected at
+// activate/start with 400 and an error message that names the required
+// client upgrade -- not a generic 400. Validated by asserting on the
+// message text, not merely the status: a mutation that replaces the
+// message with a generic one must fail this test.
+func TestActivateStart_RequiresDevicePubkey(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t)
+	body := `{"telegram_id":210408407,"device_registration_key":"no-pubkey-key","device_label":"l"}`
+	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
+	r.RemoteAddr = "203.0.113.50:1000"
+	rec := httptest.NewRecorder()
+	srv.handleActivateStart(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var out map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if !strings.Contains(out["error"], "upgrade") || !strings.Contains(out["error"], "device_pubkey") {
+		t.Fatalf("error message = %q, want it to name the required client upgrade (mutation check: a generic 400 must fail this test)", out["error"])
+	}
+}
+
+// Malformed device_pubkey (wrong length after base64 decode) is rejected the
+// same way as a missing one.
+func TestActivateStart_RejectsMalformedDevicePubkey(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t)
+	body := `{"telegram_id":210408407,"device_registration_key":"bad-pubkey-key","device_label":"l","device_pubkey":"dG9vc2hvcnQ="}`
+	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
+	r.RemoteAddr = "203.0.113.51:1000"
+	rec := httptest.NewRecorder()
+	srv.handleActivateStart(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
@@ -1044,7 +1109,7 @@ func TestActivation_Deny_LeavesDatabaseUntouched(t *testing.T) {
 // recorder plus the minted device_code (empty when the request was refused).
 func startActivationFrom(t *testing.T, srv *Server, remoteAddr, regKey string) (*httptest.ResponseRecorder, string) {
 	t.Helper()
-	body := `{"telegram_id":210408407,"device_registration_key":"` + regKey + `","device_label":"l"}`
+	body := `{"telegram_id":210408407,"device_registration_key":"` + regKey + `","device_label":"l","device_pubkey":"` + testDevicePubkeyB64(t) + `"}`
 	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
 	r.RemoteAddr = remoteAddr
 	rec := httptest.NewRecorder()

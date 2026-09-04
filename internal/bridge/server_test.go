@@ -73,7 +73,7 @@ func testServer(t *testing.T, id *auth.Identity, mode accountModeFunc) (*httptes
 		if err != nil {
 			return
 		}
-		send := hub.Register(rid.UserID)
+		send := hub.Register(rid.UserID, "")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan struct{}, 2)

@@ -145,6 +145,114 @@ func (m *Minter) Mint(req MintRequest) (*Minted, error) {
 	}, nil
 }
 
+// DeviceMintRequest is the transport-independent form of a self-service
+// Local Bridge device-credential mint (issue-483). Unlike MintRequest, the
+// caller supplies Jti and OriginalIssuedAt directly rather than having Mint
+// generate them: a PoP refresh has to stamp the SAME lineage values every
+// time (local_bridge_devices.current_jti / credential_issued_at), and a
+// MintForDevice that generated its own would silently reintroduce a fresh
+// jti per refresh -- reopening exactly the "previous credential survives
+// revocation for its remaining TTL" gap this design exists to close. The
+// caller (internal/oauth's issuance/refresh handlers) passes a freshly
+// generated jti only at first issuance, and the stored one on every later
+// refresh.
+type DeviceMintRequest struct {
+	// TelegramID is the device's OWNING account -- the identity the minted
+	// credential authenticates as.
+	TelegramID int64
+	// DeviceID names the local_bridge_devices row this credential is bound
+	// to. Always stamped into Claims.DeviceID.
+	DeviceID string
+	// Scopes is the FULL, caller-computed scope set -- no purpose-default
+	// lookup here, unlike Mint. First issuance always passes
+	// allowedReadOnlyScopes regardless of the account's send_enabled value
+	// (T3); refresh derives it fresh from a live send_enabled read every
+	// call (T5). Every entry must be a member of allowedLocalBridgeScopes.
+	Scopes []string
+	// Jti is carried into the token UNCHANGED -- see the type doc comment.
+	// Required.
+	Jti string
+	// OriginalIssuedAt is carried into the token UNCHANGED -- the anchor
+	// written once at first issuance and read back from
+	// local_bridge_devices.credential_issued_at on every refresh. Required
+	// (non-zero).
+	OriginalIssuedAt time.Time
+	// TTLHours <= 0 means defaultDeviceCredentialTTL; anything above
+	// maxDeviceCredentialTTL/time.Hour is clamped down, matching Mint's
+	// clampTTL contract but against the device-scale ceiling.
+	TTLHours int
+}
+
+// MintForDevice issues a self-service Local Bridge device credential: an
+// hours-scale-TTL, device-bound token distinguishable at the audience level
+// from both admin-minted worker-token purposes (see workerDeviceAudience in
+// renewhandler.go). Shares allowedLocalBridgeScopes validation and most of
+// the Claims construction with Mint, but never calls NewHandler's admin-only
+// HTTP path and is reachable only from internal/oauth's PoP-gated issuance/
+// refresh endpoints.
+func (m *Minter) MintForDevice(req DeviceMintRequest) (*Minted, error) {
+	if req.TelegramID <= 0 {
+		return nil, fmt.Errorf("%w: telegram_id required", ErrInvalidMintRequest)
+	}
+	if req.DeviceID == "" {
+		return nil, fmt.Errorf("%w: device_id required", ErrInvalidMintRequest)
+	}
+	if req.Jti == "" {
+		return nil, fmt.Errorf("%w: jti required", ErrInvalidMintRequest)
+	}
+	if req.OriginalIssuedAt.IsZero() {
+		return nil, fmt.Errorf("%w: original_issued_at required", ErrInvalidMintRequest)
+	}
+	for _, s := range req.Scopes {
+		if !isAllowedScope(s, allowedLocalBridgeScopes) {
+			return nil, fmt.Errorf("%w: scope not in local-bridge allowlist: %s", ErrInvalidMintRequest, s)
+		}
+	}
+
+	ttl := clampDeviceTTL(req.TTLHours)
+
+	audience := []string{workerDeviceAudience}
+	if m.mcpAudience != "" {
+		audience = append(audience, m.mcpAudience)
+	}
+	tok, err := m.signer.Mint(localjwt.Claims{
+		Subject:          "tg:" + strconv.FormatInt(req.TelegramID, 10),
+		TelegramID:       req.TelegramID,
+		Scopes:           req.Scopes,
+		Audience:         audience,
+		OriginalIssuedAt: req.OriginalIssuedAt.Unix(),
+		Jti:              req.Jti,
+		DeviceID:         req.DeviceID,
+	}, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("sign device credential: %w", err)
+	}
+	issuedAt := m.now()
+	return &Minted{
+		TelegramID: req.TelegramID,
+		Token:      tok,
+		ExpiresAt:  issuedAt.Add(ttl).UTC(),
+		TTL:        ttl,
+		Jti:        req.Jti,
+		Scopes:     req.Scopes,
+		Purpose:    "local-bridge-device",
+		Audience:   audience,
+	}, nil
+}
+
+// clampDeviceTTL is clampTTL's device-credential-scale counterpart: same
+// overflow-safety reasoning (compare in hours, not the multiplied
+// nanosecond product), different ceiling.
+func clampDeviceTTL(hours int) time.Duration {
+	if hours <= 0 {
+		return defaultDeviceCredentialTTL
+	}
+	if int64(hours) > int64(maxDeviceCredentialTTL/time.Hour) {
+		return maxDeviceCredentialTTL
+	}
+	return time.Duration(hours) * time.Hour
+}
+
 // LogMinted writes the canonical "worker token minted" line. Shared so that a
 // token minted through the MCP tool is as findable in the logs as one minted
 // over HTTP — an operator greps for one string, not two. purpose is its own

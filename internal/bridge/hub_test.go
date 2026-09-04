@@ -18,7 +18,7 @@ func TestHub_RegisterAndUnregister(t *testing.T) {
 	if h.HasDaemon(42) {
 		t.Fatal("expected no daemon registered initially")
 	}
-	send := h.Register(42)
+	send := h.Register(42, "")
 	if !h.HasDaemon(42) {
 		t.Fatal("Register should make HasDaemon true")
 	}
@@ -34,8 +34,8 @@ func TestHub_RegisterAndUnregister(t *testing.T) {
 
 func TestHub_NewRegisterEvictsPrevious(t *testing.T) {
 	h := NewHub()
-	first := h.Register(42)
-	second := h.Register(42)
+	first := h.Register(42, "")
+	second := h.Register(42, "")
 	if first == second {
 		t.Fatal("new Register should hand out a fresh channel")
 	}
@@ -47,7 +47,7 @@ func TestHub_NewRegisterEvictsPrevious(t *testing.T) {
 
 func TestHub_CallReturnsResponse(t *testing.T) {
 	h := NewHub()
-	send := h.Register(7)
+	send := h.Register(7, "")
 
 	// Drive the "daemon" side from a goroutine: drain the send channel,
 	// echo the result back via Deliver with the same ID.
@@ -82,7 +82,7 @@ func TestHub_CallNoDaemonConnected(t *testing.T) {
 
 func TestHub_CallTimeoutWhenDaemonSilent(t *testing.T) {
 	h := NewHub()
-	send := h.Register(9)
+	send := h.Register(9, "")
 	// Drain the send channel so Call's send doesn't block forever,
 	// but don't reply — Call should time out via DeadlineCall.
 	go func() { <-send }()
@@ -104,14 +104,14 @@ func TestHub_CallTimeoutWhenDaemonSilent(t *testing.T) {
 
 func TestHub_DeliverWithoutPendingIsNoop(t *testing.T) {
 	h := NewHub()
-	h.Register(1)
+	h.Register(1, "")
 	// No pending call with this ID — Deliver should be a no-op, not panic.
 	h.Deliver(1, EncodeResponse("never-issued", nil))
 }
 
 func TestHub_CallOverloadedReturnsError(t *testing.T) {
 	h := NewHub()
-	send := h.Register(42)
+	send := h.Register(42, "")
 
 	// Drain the send channel so calls don't block on the send select, and
 	// signal each received envelope. Call increments pendingCount BEFORE it
@@ -164,18 +164,18 @@ func TestHub_WithMetrics_NoPanicOnRegisterUnregister(t *testing.T) {
 	h := NewHub().WithMetrics(m)
 
 	// Register a new user — gauge should go to 1.
-	h.Register(10)
+	h.Register(10, "")
 	// Re-register same user — gauge must stay at 1 (eviction, not add).
-	h.Register(10)
+	h.Register(10, "")
 	// Unregister — gauge should go back to 0.
 	h.Unregister(10)
 
 	// Register and unregister via UnregisterSend.
-	send := h.Register(11)
+	send := h.Register(11, "")
 	h.UnregisterSend(11, send)
 
 	// Stale UnregisterSend should be a no-op (channel mismatch).
-	h.Register(12)
+	h.Register(12, "")
 	h.UnregisterSend(12, send) // wrong channel; should not decrement
 	h.Unregister(12)
 	// If the gauge double-decremented we'd go negative, but we can't
@@ -211,29 +211,103 @@ func TestHub_ConnectionsTotal_CountsEveryRegistration(t *testing.T) {
 	m := metrics.New()
 	h := NewHub().WithMetrics(m)
 
-	h.Register(10) // brand new: gauge 0 -> 1
+	h.Register(10, "") // brand new: gauge 0 -> 1
 	if got := counterValue(t, m, "10"); got != 1 {
 		t.Fatalf("after first register: counter = %v, want 1", got)
 	}
 
-	h.Register(10) // eviction/replacement: gauge unchanged
+	h.Register(10, "") // eviction/replacement: gauge unchanged
 	if got := counterValue(t, m, "10"); got != 2 {
 		t.Fatalf("a reconnect that replaced a live entry was not counted: counter = %v, want 2", got)
 	}
 
 	h.Unregister(10)
-	h.Register(10) // clean disconnect then reconnect: gauge 0 -> 1 again
+	h.Register(10, "") // clean disconnect then reconnect: gauge 0 -> 1 again
 	if got := counterValue(t, m, "10"); got != 3 {
 		t.Fatalf("after disconnect/reconnect: counter = %v, want 3", got)
 	}
 
 	// A different daemon has its own series, which is what lets the alert
 	// name the offender instead of the fleet.
-	h.Register(11)
+	h.Register(11, "")
 	if got := counterValue(t, m, "11"); got != 1 {
 		t.Fatalf("second daemon: counter = %v, want 1", got)
 	}
 	if got := counterValue(t, m, "10"); got != 3 {
 		t.Fatalf("second daemon's registration leaked into the first's series: counter = %v, want 3", got)
+	}
+}
+
+// issue-483 task 11: EvictDevice closes and removes the connection when the
+// registered deviceID matches.
+func TestHub_EvictDevice_MatchingDeviceIsEvicted(t *testing.T) {
+	h := NewHub()
+	send := h.Register(42, "dev_target")
+	if !h.EvictDevice(42, "dev_target") {
+		t.Fatal("EvictDevice should have evicted the matching device")
+	}
+	if h.HasDaemon(42) {
+		t.Fatal("EvictDevice should remove the entry")
+	}
+	if _, ok := <-send; ok {
+		t.Fatal("send channel should be closed after EvictDevice")
+	}
+}
+
+// EvictDevice must refuse to evict a mismatched device: a revoke racing a
+// legitimate reconnect from a DIFFERENT, non-revoked device of the same
+// user must not evict that live session.
+func TestHub_EvictDevice_MismatchedDeviceIsRefused(t *testing.T) {
+	h := NewHub()
+	send := h.Register(42, "dev_other")
+	if h.EvictDevice(42, "dev_target") {
+		t.Fatal("EvictDevice should refuse a mismatched device_id")
+	}
+	if !h.HasDaemon(42) {
+		t.Fatal("the mismatched device's connection must remain registered")
+	}
+	select {
+	case _, ok := <-send:
+		if !ok {
+			t.Fatal("send channel was closed despite the device_id mismatch")
+		}
+	default:
+		// No frame queued and channel still open -- expected, connection is
+		// alive.
+	}
+}
+
+// EvictDevice is idempotent: a repeated call after the connection is already
+// gone (or already replaced) is a no-op returning false, not a panic or an
+// error.
+func TestHub_EvictDevice_Idempotent(t *testing.T) {
+	h := NewHub()
+	h.Register(42, "dev_target")
+	if !h.EvictDevice(42, "dev_target") {
+		t.Fatal("first EvictDevice should succeed")
+	}
+	if h.EvictDevice(42, "dev_target") {
+		t.Fatal("second EvictDevice on an already-gone connection should return false, not evict again")
+	}
+}
+
+// A connection with no device binding (empty deviceID, e.g. a legacy/admin
+// bridge token) is never evicted by EvictDevice.
+func TestHub_EvictDevice_EmptyDeviceIDNeverMatches(t *testing.T) {
+	h := NewHub()
+	h.Register(42, "")
+	if h.EvictDevice(42, "") {
+		t.Fatal("EvictDevice must never match on an empty device_id")
+	}
+	if !h.HasDaemon(42) {
+		t.Fatal("the no-device-binding connection must remain registered")
+	}
+}
+
+// EvictDevice on an unregistered user is a no-op.
+func TestHub_EvictDevice_NoConnection(t *testing.T) {
+	h := NewHub()
+	if h.EvictDevice(999, "dev_target") {
+		t.Fatal("EvictDevice on an unregistered user should return false")
 	}
 }

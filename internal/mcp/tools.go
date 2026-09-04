@@ -1132,6 +1132,162 @@ The user must have an active session. New accounts are NOT send-enabled: SaveSes
 	return tool, handler
 }
 
+// setSendConsentResult is the success payload of set_send_consent.
+type setSendConsentResult struct {
+	SendEnabled bool `json:"send_enabled"`
+	OK          bool `json:"ok"`
+}
+
+// toolSetSendConsent lets the AUTHENTICATED CALLER grant or revoke their own
+// account's send capability (issue-483) -- the owner-facing counterpart of
+// the admin toolSetAccountSend. Unlike that tool, it takes no telegram_id:
+// it always acts on auth.From(ctx).UserID, so there is no target to get
+// wrong and no admin-style "target" argument for a caller to abuse.
+//
+// Gated on account:manage, NOT on "authenticated at all": a device
+// credential authenticates as its owner's UserID, so an open gate would let
+// a stolen device credential re-grant itself the send consent its owner
+// just revoked. account:manage is deliberately excluded from every
+// worker/device mint allowlist (internal/workertoken's
+// allowedReadOnlyScopes/allowedLocalBridgeScopes) -- see
+// internal/oauth/scopes.go -- so no worker or device credential can ever
+// carry it (T2b).
+func (s *Server) toolSetSendConsent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("set_send_consent",
+		mcplib.WithTitleAnnotation("Grant or revoke your own Local Bridge send consent"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[setSendConsentResult](),
+		mcplib.WithDescription(`Grant or revoke YOUR OWN account's real-message-sending capability. Requires the account:manage scope (re-authorise if your session predates this tool). Always acts on the caller's own account -- there is no telegram_id argument, so this tool cannot target another account.
+
+Inputs:
+  enabled — bool, required. true enables real sends for your account; false forces dry-run previews.
+
+This is the owner-facing counterpart of the admin set_account_send tool (which remains unchanged, admin:users-gated, for operator recovery). A Local Bridge device's next credential refresh reflects this change; a device's ALREADY-open connection is gated live on this same flag at the point of send, not merely at token mint.`),
+		mcplib.WithBoolean("enabled",
+			mcplib.Required(),
+			mcplib.Description("true to enable real sends on your own account, false to force dry-run (required).")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		enabled := boolArg(req.GetArguments(), "enabled", false)
+		rows, err := s.Store.SetSendEnabled(ctx, id.UserID, enabled)
+		s.audit(ctx, id, "set_send_consent", "", err, startedAt)
+		if err != nil {
+			return toolErr("set_send_consent: %v", err), nil
+		}
+		if rows == 0 {
+			return toolErr("no active Telegram session for your account — connect an account first"), nil
+		}
+		return jsonResult(setSendConsentResult{SendEnabled: enabled, OK: true})
+	}
+	return tool, handler
+}
+
+// revokeLocalBridgeDeviceResult is the success payload of
+// revoke_local_bridge_device.
+type revokeLocalBridgeDeviceResult struct {
+	DeviceID          string `json:"device_id"`
+	Revoked           bool   `json:"revoked"`
+	DenylistRefreshed bool   `json:"denylist_refreshed"`
+	HubEvicted        bool   `json:"hub_evicted"`
+}
+
+// toolRevokeLocalBridgeDevice lets the AUTHENTICATED OWNER revoke one of
+// their own Local Bridge devices (issue-483): marks the device row revoked,
+// denylists its entire credential lineage (current_jti) in the same
+// transaction the revocation is recorded in, forces the revocation cache
+// forward synchronously, then actively evicts any live /bridge websocket
+// for that device -- in that order, matching design.md's "Revocation"
+// section.
+//
+// Gated on account:manage (like set_send_consent) in addition to the
+// ownership check: without the scope gate, a compromised device credential
+// could revoke its owner's OTHER, legitimate devices.
+func (s *Server) toolRevokeLocalBridgeDevice() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("revoke_local_bridge_device",
+		mcplib.WithTitleAnnotation("Revoke one of your own Local Bridge devices"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[revokeLocalBridgeDeviceResult](),
+		mcplib.WithDescription(`Revoke a Local Bridge device belonging to YOUR OWN account. Requires the account:manage scope. Immediately rejects any subsequent credential issuance/refresh for that device_id, denylists its entire credential lineage (so any already-minted worker/bridge token from it is rejected within 15s), and actively disconnects a live /bridge connection for that device in this same call.
+
+Inputs:
+  device_id — string, required. The device to revoke (see the device_id printed by the Local Bridge activate command).
+
+A device_id belonging to a DIFFERENT account is refused without revealing whether it exists. Safe to call again on an already-revoked device -- it repairs a partial revocation rather than reporting a no-op.`),
+		mcplib.WithString("device_id",
+			mcplib.Required(),
+			mcplib.Description("The device_id to revoke (required).")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		deviceID := stringArg(req.GetArguments(), "device_id", "")
+		if deviceID == "" {
+			return mcplib.NewToolResultError("device_id is required"), nil
+		}
+
+		// Ownership check: refuse a device belonging to a different account
+		// WITHOUT revealing whether the id exists at all for that other
+		// account (T7) -- both "not found" and "wrong owner" collapse to
+		// the same generic refusal.
+		device, err := s.Store.GetDevice(ctx, deviceID)
+		if err != nil || device.UserID != id.UserID {
+			refuseErr := errors.New("no such device on your account")
+			s.audit(ctx, id, "revoke_local_bridge_device", "", refuseErr, startedAt)
+			return mcplib.NewToolResultError(refuseErr.Error()), nil
+		}
+
+		// Steps 1+2 (revoke + denylist) are one DB transaction; jti is read
+		// from the row the transaction itself locks, not from the ownership
+		// read above -- see RevokeDeviceAndDenylist's doc comment for why
+		// that ordering matters (T6d).
+		jti, err := s.Store.RevokeDeviceAndDenylist(ctx, deviceID, id.TelegramID, "owner revoked", id.UserID)
+		if err != nil {
+			s.audit(ctx, id, "revoke_local_bridge_device", "", err, startedAt)
+			return toolErr("revoke_local_bridge_device: %v", err), nil
+		}
+		result := revokeLocalBridgeDeviceResult{DeviceID: deviceID, Revoked: true}
+
+		// Step 3: force the revocation cache forward synchronously, same
+		// reasoning as revoke_worker_token -- an evicted daemon reconnects
+		// within seconds, and that reconnect must not be authenticated
+		// against a pre-revocation cache snapshot. Best-effort: the
+		// revocation itself is already durably recorded regardless.
+		if jti != "" && s.RevocationCache != nil {
+			if refreshErr := s.RevocationCache.Refresh(ctx); refreshErr != nil {
+				slog.Warn("revoke_local_bridge_device: denylist refresh failed; revocation still takes effect within the cache TTL",
+					"device_id", deviceID, "err", refreshErr)
+			} else {
+				result.DenylistRefreshed = true
+			}
+		}
+
+		// Step 4: actively evict a live /bridge connection for this device,
+		// outside the transaction (a websocket is not transactional) and
+		// safe to repeat (T6b/T6c).
+		if s.Hub != nil {
+			if s.Hub.EvictDevice(id.UserID, deviceID) {
+				result.HubEvicted = true
+			}
+		}
+
+		s.audit(ctx, id, "revoke_local_bridge_device", "", nil, startedAt)
+		return jsonResult(result)
+	}
+	return tool, handler
+}
+
 // toolSetAccountMode switches a user's active Telegram session between
 // "hosted" (server-side MTProto) and "local" (Local Bridge). This replaces
 // the one-shot gitops Job that used to run a manual UPDATE against

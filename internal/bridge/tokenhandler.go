@@ -86,6 +86,16 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string)
 			// credential chain actually started, not to this mint.
 			Jti:              id.Jti,
 			OriginalIssuedAt: id.OriginalIssuedAt,
+			// DeviceID (issue-483): a bridge token minted from a device-bound
+			// credential must carry the device_id into the child too, for the
+			// same stated reason Jti/OriginalIssuedAt are copied above -- the
+			// child is a delegation of the parent. Without this line the
+			// daemon connects to the Hub with an empty deviceID,
+			// hub.EvictDevice matches nothing, and device revocation
+			// "succeeds" while the revoked daemon stays connected for the
+			// bridge token's full 1-hour TTL. Empty when id.DeviceID is empty
+			// (every non-device credential), same as the other two fields.
+			DeviceID: id.DeviceID,
 		}, bridgeTokenTTL)
 		if err != nil {
 			slog.Error("bridge token: sign failed", "user_id", id.UserID, "err", err)

@@ -46,6 +46,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
 // Server wires the OAuth endpoints. Construct with New, mount handlers with
@@ -80,8 +81,27 @@ type Server struct {
 	// activationFails is the failed-submission rate limiter shared by the
 	// user_code form and the consent endpoint, keyed by the client IP derived
 	// via clientIP (trusted-proxy-aware). Read/written under mu, swept
-	// alongside the activations.
+	// alongside the activations. Issue-483 extends this same limiter/budget
+	// to a failed PoP verification at the device credential/refresh
+	// endpoints (local_bridge_credential.go), sharing one posture across
+	// every unauthenticated-but-secret-bearing endpoint in this file.
 	activationFails map[string]*activationFailWindow
+
+	// deviceNonces is the in-memory, TTL-bounded, capacity-bounded PoP nonce
+	// store for self-service Local Bridge device issuance/refresh
+	// (issue-483), keyed by device_id -- one live (unconsumed) nonce per
+	// device at a time; minting a new one for the same device_id supersedes
+	// whatever was pending. See local_bridge_credential.go. Mirrors
+	// s.activations's map/eviction-cap/sweep discipline rather than adding a
+	// database table -- nonces live for seconds, so a lost nonce on pod
+	// restart costs one retried call.
+	deviceNonces map[string]*deviceNonce
+	// deviceMinter issues self-service Local Bridge device credentials
+	// (workertoken.MintForDevice), built once at New() from the same
+	// signing secret/issuer/audience as every other token this service
+	// mints. Never used for the admin worker-token mint path -- that stays
+	// entirely inside internal/workertoken's own admin-gated handler.
+	deviceMinter *workertoken.Minter
 
 	// loginFn performs the Telegram MTProto phone -> code -> 2FA login. It is
 	// a field (not a direct telegram.Login call) so tests can substitute a
@@ -317,6 +337,18 @@ type Config struct {
 	// ActivationFailWindow is the sliding window ActivationFailBudget is
 	// measured over. Defaults to 10 minutes.
 	ActivationFailWindow time.Duration
+
+	// DeviceNonceTTL bounds how long a self-service Local Bridge PoP nonce
+	// (issue-483) stays valid after minting. Short and single-use by design
+	// -- a device mints one, signs it immediately, and presents it once.
+	// Defaults to 30 seconds.
+	DeviceNonceTTL time.Duration
+	// MaxPendingDeviceNonces caps the in-memory device-nonce map. The nonce
+	// mint endpoint is unauthenticated (possession of an unguessable
+	// device_id, not identity), so without a bound a flood of distinct
+	// device_id values could grow process memory. Oldest-evict on insert
+	// when full, mirroring MaxPendingActivations. Defaults to 5000.
+	MaxPendingDeviceNonces int
 	// TrustedProxyCIDRs is the trust boundary the Local Bridge activation
 	// rate limiter's client-IP derivation depends on (see clientIP in
 	// local_bridge_activate.go): a forwarding header (X-Forwarded-For) is
@@ -472,6 +504,12 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	if cfg.ActivationFailWindow <= 0 {
 		cfg.ActivationFailWindow = 10 * time.Minute
 	}
+	if cfg.DeviceNonceTTL <= 0 {
+		cfg.DeviceNonceTTL = 30 * time.Second
+	}
+	if cfg.MaxPendingDeviceNonces == 0 {
+		cfg.MaxPendingDeviceNonces = 5000
+	}
 	if cfg.TrustedProxyCIDRs == nil {
 		cfg.TrustedProxyCIDRs = trustedProxyCIDRsFromEnv()
 	}
@@ -504,6 +542,18 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			return nil, err
 		}
 	}
+	// deviceMinter shares this service's own signing secret/issuer/audience
+	// with every other locally-issued token (mintAccessToken, the bridge
+	// token handler, etc.) -- issue-483's device credentials are minted by
+	// the same server that mints everything else, just through a narrower,
+	// PoP-gated policy (workertoken.MintForDevice) instead of the admin-only
+	// HTTP mint path. NewMinter's own validation (non-empty secret/issuer)
+	// can only fail here if cfg.JWTSecret/cfg.Issuer were empty, both of
+	// which are already rejected above.
+	deviceMinter, err := workertoken.NewMinter(cfg.JWTSecret, cfg.Issuer, cfg.JWTAudience)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: device credential minter: %w", err)
+	}
 	s := &Server{
 		cfg:                   cfg,
 		issuer:                issuer,
@@ -519,6 +569,8 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		activationsByState:    map[string]*localBridgeActivation{},
 		activationsByUserCode: map[string]*localBridgeActivation{},
 		activationFails:       map[string]*activationFailWindow{},
+		deviceNonces:          map[string]*deviceNonce{},
+		deviceMinter:          deviceMinter,
 		loginFn:               telegram.Login,
 	}
 	if cfg.DemoReviewerEnabled {
@@ -781,6 +833,14 @@ func (s *Server) sweep(now time.Time) {
 			delete(s.activationFails, k)
 		}
 	}
+	// Device PoP nonces (issue-483). expiresAt is set at mint time from
+	// DeviceNonceTTL, so this is a plain expiry check, not a createdAt/TTL
+	// recomputation.
+	for k, n := range s.deviceNonces {
+		if now.After(n.expiresAt) {
+			delete(s.deviceNonces, k)
+		}
+	}
 }
 
 // cancelEnableFlow best-effort cancels the background login goroutine of an
@@ -824,6 +884,14 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			"telegram:messages:send",
 			"telegram:messages:pin",
 			"admin:users",
+			// account:manage (issue-483): an admin is also a Local Bridge
+			// owner of their own account, so they get the same self-service
+			// consent/revocation tools a client-tier owner gets -- on top
+			// of, not instead of, admin:users's operator-recovery path
+			// (set_account_send / revoke_local_bridge_device-for-any-user
+			// stays admin:users-only; see design.md's open question on
+			// admin-initiated device revocation).
+			"account:manage",
 		}, nil
 	}
 	isClient, err := s.isClientTier(ctx, tgID)
@@ -836,6 +904,12 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
+			// account:manage (issue-483): lets a client-tier owner call
+			// set_send_consent / revoke_local_bridge_device for their OWN
+			// account without admin:users. Deliberately never granted to a
+			// worker or device credential -- see scopes.go's comment on
+			// this scope and internal/workertoken's allowlists.
+			"account:manage",
 		}, nil
 	}
 	return nil, nil, nil
@@ -903,6 +977,14 @@ func (s *Server) Register(mux Router) {
 	mux.Post("/local-bridge/activate", s.handleActivateVerify)
 	mux.Post("/local-bridge/activate/consent", s.handleActivateConsent)
 	mux.Post("/api/local-bridge/activate/poll", s.handleActivatePoll)
+	// Self-service device credential issuance/refresh (issue-483). All three
+	// are unauthenticated-but-device_id-scoped, like /activate/start: the
+	// device_id is a 128-bit crypto/rand value, so this is "possession of
+	// the id" gated further by Ed25519 proof of possession, not "no auth at
+	// all". See local_bridge_credential.go.
+	mux.Post("/api/local-bridge/devices/{device_id}/nonce", s.handleDeviceNonce)
+	mux.Post("/api/local-bridge/devices/{device_id}/credential", s.handleDeviceCredential)
+	mux.Post("/api/local-bridge/devices/{device_id}/refresh", s.handleDeviceRefresh)
 }
 
 // Router is the minimum chi.Router surface we depend on. Lets us write
