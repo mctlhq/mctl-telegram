@@ -1,26 +1,28 @@
 package main
 
 // activate.go implements the `activate` subcommand: the CLI side of
-// self-service Local Bridge device activation (issue #482). It persists a
-// local device_registration_key, starts an activation against the server,
-// prints the verification_uri and user_code (never a URL carrying either),
-// and polls until the browser-driven flow resolves to done or denied.
-//
-// This command does not by itself make the daemon runnable: activation only
-// gets the account into local mode with a registered device
-// (send_enabled=false throughout). An operator (or a future self-service
-// step, issue #483) still has to mint a bridge token before `connect`/
-// `daemon` work.
+// self-service Local Bridge device activation (issue #482) and, once the
+// browser-driven leg completes, the self-service device credential
+// bootstrap (issue #483) that makes the daemon runnable with zero operator
+// action (issue #484). It persists a local Ed25519 device identity, starts
+// an activation against the server, prints the verification_uri and
+// user_code (never a URL carrying either), polls until the browser-driven
+// flow resolves to done or denied, and then walks the PoP nonce/sign/
+// credential round trip that turns a bare activation into a connect-ready
+// device credential.
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -92,7 +94,7 @@ func runActivate(args []string) {
 		die(errors.New("no server configured -- pass --server or run `mctl-telegram-local connect --server <url> --token <t>` first"))
 	}
 
-	deviceKey, err := loadOrCreateDeviceKey()
+	rec, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
 		die(err)
 	}
@@ -103,11 +105,15 @@ func runActivate(args []string) {
 		}
 	}
 
-	deviceID, err := runActivateFlow(context.Background(), os.Stdout, srv, *telegramID, deviceKey, deviceLabel)
+	deviceID, err := runActivateFlow(context.Background(), os.Stdout, srv, *telegramID, rec.DeviceRegistrationKey, deviceLabel, pub)
 	switch {
 	case err == nil:
 		fmt.Printf("\nDevice activated (device_id=%s).\n", deviceID)
-		fmt.Println("An operator still needs to issue this device a token (or, once available, a self-service credential step lands in a later release) before `connect`/`daemon` will work.")
+		if bootErr := bootstrapDeviceCredential(context.Background(), srv, deviceID, priv, pub); bootErr != nil {
+			fmt.Fprintln(os.Stderr, bootErr)
+			os.Exit(1)
+		}
+		fmt.Println("Device is fully activated and ready. Run `mctl-telegram-local daemon` next.")
 	case errors.Is(err, errActivationDenied):
 		fmt.Fprintf(os.Stderr, "Activation was not completed: %v\n", err)
 		os.Exit(1)
@@ -128,8 +134,8 @@ func runActivate(args []string) {
 // Never constructs or prints a URL that carries user_code or device_code —
 // that would defeat the whole point of the short human-typed code (see
 // design.md's "resolved open question" on verification_uri_complete).
-func runActivateFlow(ctx context.Context, out io.Writer, server string, telegramID int64, deviceKey, deviceLabel string) (deviceID string, err error) {
-	start, err := activateStartRequest(ctx, server, telegramID, deviceKey, deviceLabel)
+func runActivateFlow(ctx context.Context, out io.Writer, server string, telegramID int64, deviceKey, deviceLabel string, pub ed25519.PublicKey) (deviceID string, err error) {
+	start, err := activateStartRequest(ctx, server, telegramID, deviceKey, deviceLabel, pub)
 	if err != nil {
 		return "", fmt.Errorf("start activation: %w", err)
 	}
@@ -190,11 +196,12 @@ func runActivateFlow(ctx context.Context, out io.Writer, server string, telegram
 	}
 }
 
-func activateStartRequest(ctx context.Context, server string, telegramID int64, deviceKey, deviceLabel string) (*activateStartResponse, error) {
+func activateStartRequest(ctx context.Context, server string, telegramID int64, deviceKey, deviceLabel string, pub ed25519.PublicKey) (*activateStartResponse, error) {
 	body, err := json.Marshal(map[string]any{
 		"telegram_id":             telegramID,
 		"device_registration_key": deviceKey,
 		"device_label":            deviceLabel,
+		"device_pubkey":           base64.StdEncoding.EncodeToString(pub),
 	})
 	if err != nil {
 		return nil, err
@@ -268,4 +275,192 @@ func activatePollRequest(ctx context.Context, server, deviceCode string) (*activ
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	return &out, nil
+}
+
+// ----- post-activation device credential bootstrap (issue #483 self-service
+// issuance, wired up by issue #484) -----
+
+// devicePoPRequest is the body of both /credential and /refresh: the nonce
+// obtained from /nonce, and an Ed25519 signature over
+// device_id + "." + nonce, base64 (standard, padded) encoded. Mirrors
+// internal/oauth/local_bridge_credential.go's devicePoPRequest exactly.
+type devicePoPRequest struct {
+	Nonce     string `json:"nonce"`
+	Signature string `json:"signature"`
+}
+
+// deviceNonceResponse mirrors handleDeviceNonce's response shape.
+type deviceNonceResponse struct {
+	Nonce     string `json:"nonce"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+// deviceCredentialResponse mirrors the shared response shape of
+// /credential and /refresh (internal/oauth/local_bridge_credential.go's
+// deviceCredentialResponse).
+type deviceCredentialResponse struct {
+	WorkerToken string `json:"worker_token"`
+	ExpiresAt   string `json:"expires_at"`
+	Jti         string `json:"jti"`
+}
+
+// fetchDeviceNonce calls the unauthenticated, device_id-scoped
+// POST /api/local-bridge/devices/{device_id}/nonce.
+func fetchDeviceNonce(ctx context.Context, server, deviceID string) (*deviceNonceResponse, error) {
+	reqURL := strings.TrimRight(server, "/") + "/api/local-bridge/devices/" + url.PathEscape(deviceID) + "/nonce"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out deviceNonceResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if out.Nonce == "" {
+		return nil, errors.New("server returned an empty nonce")
+	}
+	return &out, nil
+}
+
+// signDevicePoP signs deviceID+"."+nonce with priv and base64 (standard)
+// encodes the result, matching verifyDevicePoP's exact expected wire
+// format (internal/oauth/local_bridge_credential.go).
+func signDevicePoP(deviceID, nonce string, priv ed25519.PrivateKey) string {
+	sig := ed25519.Sign(priv, []byte(deviceID+"."+nonce))
+	return base64.StdEncoding.EncodeToString(sig)
+}
+
+// postDevicePoP POSTs {nonce, signature} to
+// /api/local-bridge/devices/{device_id}/{path} (path is "credential" or
+// "refresh") and returns the raw status code and body. Callers decide what
+// a given status means: 200 succeeds, 409 has its own recovery meaning at
+// /credential, and anything else is a hard failure whose body is worth
+// reporting verbatim.
+func postDevicePoP(ctx context.Context, server, deviceID, path, nonce, sig string) (status int, body []byte, err error) {
+	reqBody, err := json.Marshal(devicePoPRequest{Nonce: nonce, Signature: sig})
+	if err != nil {
+		return 0, nil, err
+	}
+	reqURL := strings.TrimRight(server, "/") + "/api/local-bridge/devices/" + url.PathEscape(deviceID) + "/" + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode, body, nil
+}
+
+// obtainDeviceCredentialViaPoP runs one full nonce -> sign -> POST round
+// trip against either /credential (path="credential", first issuance) or
+// /refresh (path="refresh", every later call). Returns the parsed
+// credential on 200; on any other status returns the raw status/body so the
+// caller can decide what it means (409 at /credential means "already
+// claimed", handled by the caller; any other status is a hard failure).
+func obtainDeviceCredentialViaPoP(ctx context.Context, server, deviceID, path string, priv ed25519.PrivateKey) (cred *deviceCredentialResponse, status int, body []byte, err error) {
+	nr, err := fetchDeviceNonce(ctx, server, deviceID)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("fetch nonce: %w", err)
+	}
+	sig := signDevicePoP(deviceID, nr.Nonce, priv)
+	status, body, err = postDevicePoP(ctx, server, deviceID, path, nr.Nonce, sig)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	if status != http.StatusOK {
+		return nil, status, body, nil
+	}
+	var out deviceCredentialResponse
+	if jerr := json.Unmarshal(body, &out); jerr != nil || out.WorkerToken == "" || out.ExpiresAt == "" || out.Jti == "" {
+		return nil, status, body, fmt.Errorf("server returned an incomplete or invalid credential response")
+	}
+	return &out, status, body, nil
+}
+
+// bootstrapDeviceCredential runs the post-activation credential bootstrap
+// (design.md, "cmd/local activate", steps 4-6): nonce -> sign -> POST
+// /credential. On 200 it merges the returned credential into the device
+// record. On 409 (lineage already claimed) it checks whether the record
+// already carries a usable credential for THIS device -- if so, the run is
+// a no-op success ("already activated"); otherwise it is the half-claimed
+// lineage case, and recovery goes through the /refresh PoP flow, which
+// authenticates by possession alone and needs no existing credential. Any
+// other failure -- including a failing repair refresh -- returns an error
+// naming the device as already activated and the credential step as
+// retryable, and never writes a partial/error body into the credential
+// fields.
+func bootstrapDeviceCredential(ctx context.Context, server, deviceID string, priv ed25519.PrivateKey, pub ed25519.PublicKey) error {
+	cred, status, body, err := obtainDeviceCredentialViaPoP(ctx, server, deviceID, "credential", priv)
+	if err != nil {
+		return fmt.Errorf("device %s was activated, but the credential step failed and can be retried by running `mctl-telegram-local activate` again: %w", deviceID, err)
+	}
+
+	switch status {
+	case http.StatusOK:
+		if _, mErr := mergeDeviceCredential(pub, deviceID, cred.WorkerToken, cred.ExpiresAt, cred.Jti); mErr != nil {
+			return fmt.Errorf("device %s was activated and issued a credential, but saving it locally failed and can be retried by running `mctl-telegram-local activate` again: %w", deviceID, mErr)
+		}
+		return nil
+
+	case http.StatusConflict:
+		// Lineage already claimed. Two causes look identical from here: a
+		// prior run's credential really was issued and persisted usably (a
+		// no-op re-run), or the server claimed the lineage and this machine
+		// has nothing usable to show for it (a crash or network drop
+		// between the claim and the write). See design.md's "two causes
+		// that look identical".
+		dir, derr := configDirPath()
+		if derr != nil {
+			return derr
+		}
+		var alreadyGood bool
+		lockErr := withDeviceRecordLock(dir, deviceLockTimeout, func() error {
+			rec, rerr := readDeviceRecord()
+			if rerr != nil {
+				return rerr
+			}
+			alreadyGood = rec.DeviceID == deviceID && deviceCredentialUsable(rec)
+			return nil
+		})
+		if lockErr != nil {
+			return lockErr
+		}
+		if alreadyGood {
+			return nil
+		}
+
+		// Half-claimed lineage: recover via /refresh, which needs only
+		// possession of the device key, not an existing credential.
+		refreshCred, refreshStatus, refreshBody, refreshErr := obtainDeviceCredentialViaPoP(ctx, server, deviceID, "refresh", priv)
+		if refreshErr != nil {
+			return fmt.Errorf("device %s was activated, but recovering its credential via refresh failed and can be retried by running `mctl-telegram-local activate` again: %w", deviceID, refreshErr)
+		}
+		if refreshStatus != http.StatusOK || refreshCred == nil {
+			return fmt.Errorf("device %s was activated, but its credential could not be recovered via refresh (server returned %d: %s) -- run `mctl-telegram-local activate` again to retry", deviceID, refreshStatus, strings.TrimSpace(string(refreshBody)))
+		}
+		if _, mErr := mergeDeviceCredential(pub, deviceID, refreshCred.WorkerToken, refreshCred.ExpiresAt, refreshCred.Jti); mErr != nil {
+			return fmt.Errorf("device %s's credential was recovered via refresh, but saving it locally failed and can be retried by running `mctl-telegram-local activate` again: %w", deviceID, mErr)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("device %s was activated, but the credential step failed (server returned %d: %s) and can be retried by running `mctl-telegram-local activate` again", deviceID, status, strings.TrimSpace(string(body)))
+	}
 }

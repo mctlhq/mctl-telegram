@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,6 +16,27 @@ import (
 	"testing"
 	"time"
 )
+
+// testKeypair generates a fresh Ed25519 keypair for tests that need a
+// device_pubkey but don't care about its actual value.
+func testKeypair(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	return priv, pub
+}
+
+// testSharedPub is a fixed Ed25519 public key for tests that need to pass
+// something to runActivateFlow but don't care about its value.
+var testSharedPub = func() ed25519.PublicKey {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return pub
+}()
 
 // withFastPolling replaces activateSleep/activateNow with no-op/deterministic
 // stand-ins for the duration of a test, so the poll loop does not wait on
@@ -60,6 +84,18 @@ func TestRunActivateFlow_HappyPath(t *testing.T) {
 		if req["device_registration_key"] == "" || req["device_registration_key"] == nil {
 			t.Error("device_registration_key missing from start request")
 		}
+		// Task 2's DoD: device_pubkey must be present and correctly base64
+		// (standard) encoded in the outgoing request body.
+		pkB64, _ := req["device_pubkey"].(string)
+		if pkB64 == "" {
+			t.Error("device_pubkey missing from start request")
+		}
+		decoded, decErr := base64.StdEncoding.DecodeString(pkB64)
+		if decErr != nil {
+			t.Errorf("device_pubkey is not valid standard base64: %v", decErr)
+		} else if !bytes.Equal(decoded, testSharedPub) {
+			t.Errorf("device_pubkey decodes to %x, want %x", decoded, []byte(testSharedPub))
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"device_code":      "dc-happy",
 			"user_code":        "AAAA-BBBB",
@@ -85,7 +121,7 @@ func TestRunActivateFlow_HappyPath(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 210408407, "test-device-key", "test-laptop")
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 210408407, "test-device-key", "test-laptop", testSharedPub)
 	if err != nil {
 		t.Fatalf("runActivateFlow: %v", err)
 	}
@@ -130,7 +166,7 @@ func TestRunActivateFlow_Denied(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label", testSharedPub)
 	if !errors.Is(err, errActivationDenied) {
 		t.Fatalf("err = %v, want errActivationDenied", err)
 	}
@@ -158,7 +194,7 @@ func TestRunActivateFlow_TimesOut(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label", testSharedPub)
 	if !errors.Is(err, errActivationTimedOut) {
 		t.Fatalf("err = %v, want errActivationTimedOut", err)
 	}
@@ -182,37 +218,58 @@ func TestRunActivateFlow_UnknownDeviceCodeReportsExpired(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	_, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label", testSharedPub)
 	if !errors.Is(err, errActivationTimedOut) {
 		t.Fatalf("err = %v, want errActivationTimedOut", err)
 	}
 }
 
-func TestLoadOrCreateDeviceKey_PersistsAndReuses(t *testing.T) {
+// TestLoadOrCreateDeviceIdentity_PersistsAndReuses covers task 1's DoD and
+// T25: a fresh config directory produces a keypair on first invocation, and
+// a second invocation reuses the SAME keypair and device_registration_key
+// (no regeneration, no rotation) rather than generating a new one.
+func TestLoadOrCreateDeviceIdentity_PersistsAndReuses(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	key1, err := loadOrCreateDeviceKey()
+	rec1, priv1, pub1, err := loadOrCreateDeviceIdentity()
 	if err != nil {
-		t.Fatalf("loadOrCreateDeviceKey: %v", err)
+		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
 	}
-	if key1 == "" {
-		t.Fatal("empty device key generated")
+	if rec1.DeviceRegistrationKey == "" {
+		t.Fatal("empty device_registration_key generated")
 	}
-	key2, err := loadOrCreateDeviceKey()
+	if len(priv1) != ed25519.PrivateKeySize {
+		t.Fatalf("priv1 has length %d, want %d", len(priv1), ed25519.PrivateKeySize)
+	}
+	if len(pub1) != ed25519.PublicKeySize {
+		t.Fatalf("pub1 has length %d, want %d", len(pub1), ed25519.PublicKeySize)
+	}
+
+	rec2, priv2, pub2, err := loadOrCreateDeviceIdentity()
 	if err != nil {
-		t.Fatalf("loadOrCreateDeviceKey (second call): %v", err)
+		t.Fatalf("loadOrCreateDeviceIdentity (second call): %v", err)
 	}
-	if key1 != key2 {
-		t.Errorf("device key not reused across calls: %q != %q", key1, key2)
+	if rec1.DeviceRegistrationKey != rec2.DeviceRegistrationKey {
+		t.Errorf("device_registration_key not reused across calls: %q != %q", rec1.DeviceRegistrationKey, rec2.DeviceRegistrationKey)
+	}
+	if !bytes.Equal(pub1, pub2) {
+		t.Errorf("public key bytes not reused across calls: %x != %x", []byte(pub1), []byte(pub2))
+	}
+	if !bytes.Equal(priv1, priv2) {
+		t.Errorf("private key bytes not reused across calls: %x != %x", []byte(priv1), []byte(priv2))
 	}
 
 	p, err := deviceKeyFilePath()
 	if err != nil {
 		t.Fatalf("deviceKeyFilePath: %v", err)
 	}
-	if _, statErr := os.Stat(p); statErr != nil {
-		t.Errorf("device key file not created at %s: %v", p, statErr)
+	info, statErr := os.Stat(p)
+	if statErr != nil {
+		t.Fatalf("device identity file not created at %s: %v", p, statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("device identity file has mode %04o, want 0600", got)
 	}
 }
 
@@ -247,7 +304,7 @@ func TestRunActivateFlow_TransientServerErrorRecovers(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label", testSharedPub)
 	if err != nil {
 		t.Fatalf("runActivateFlow: %v", err)
 	}
@@ -292,7 +349,7 @@ func TestRunActivateFlow_TransientNetworkErrorRecovers(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label", testSharedPub)
 	if err != nil {
 		t.Fatalf("runActivateFlow: %v", err)
 	}
@@ -329,7 +386,7 @@ func TestRunActivateFlow_CancelledContextStopsRetrying(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	_, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label")
+	_, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label", testSharedPub)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
