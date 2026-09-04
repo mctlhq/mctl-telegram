@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -1032,5 +1033,157 @@ func TestActivation_Deny_LeavesDatabaseUntouched(t *testing.T) {
 	status, poll := activatePoll(t, ts, client, start["device_code"].(string))
 	if status != http.StatusOK || poll["status"] != "denied" {
 		t.Errorf("poll after deny = %d %#v, want denied", status, poll)
+	}
+}
+
+// ----- capacity policy: a flood may only ever displace its own activations -----
+
+// startActivationFrom drives POST /api/local-bridge/activate/start directly
+// against the handler with a chosen peer address, and returns the response
+// recorder plus the minted device_code (empty when the request was refused).
+func startActivationFrom(t *testing.T, srv *Server, remoteAddr, regKey string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	body := `{"telegram_id":210408407,"device_registration_key":"` + regKey + `","device_label":"l"}`
+	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
+	r.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	srv.handleActivateStart(rec, r)
+	if rec.Code != http.StatusOK {
+		return rec, ""
+	}
+	var out struct {
+		DeviceCode string `json:"device_code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	return rec, out.DeviceCode
+}
+
+// The activation map is capacity-bounded because /activate/start is
+// unauthenticated. With a plain oldest-evict that bound was itself the attack:
+// a flood from one address pushed OTHER users' in-flight activations out, and
+// their correctly typed verification codes came back as unknown in the middle
+// of signing in. Capacity must only ever be reclaimed from the requester.
+func TestActivateStart_FloodCannotEvictAnotherClient(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t, func(c *Config) {
+		c.MaxPendingActivations = 4
+		c.MaxActivationsPerIP = 4
+	})
+
+	// A legitimate user starts first, and is therefore the oldest entry --
+	// exactly what a plain oldest-evict would sacrifice.
+	_, victim := startActivationFrom(t, srv, "203.0.113.7:1000", "victim-key")
+	if victim == "" {
+		t.Fatal("victim activation was refused")
+	}
+
+	// The attacker floods well past the global cap from a single address.
+	for i := 0; i < 40; i++ {
+		rec, code := startActivationFrom(t, srv, "198.51.100.9:2000", fmt.Sprintf("flood-%d", i))
+		if code == "" && rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("refusal %d used status %d, want 503", i, rec.Code)
+		}
+	}
+
+	srv.mu.Lock()
+	_, stillThere := srv.activations[victim]
+	attacker, _ := srv.activationsForIPLocked("198.51.100.9")
+	srv.mu.Unlock()
+	if !stillThere {
+		t.Fatal("the flood evicted the victim's activation; capacity must only be reclaimed from the requester")
+	}
+	if attacker > 4 {
+		t.Fatalf("attacker holds %d activations, above its per-IP cap of 4", attacker)
+	}
+}
+
+// The other half of the same property: when the map is globally full of OTHER
+// clients' activations, a newcomer holding none of them is refused outright.
+// Evicting a stranger to make room is exactly what must not happen.
+func TestActivateStart_RefusesRatherThanEvictingStrangers(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t, func(c *Config) {
+		c.MaxPendingActivations = 5
+		c.MaxActivationsPerIP = 5
+	})
+
+	held := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		_, code := startActivationFrom(t, srv, fmt.Sprintf("203.0.113.%d:1000", i+1), fmt.Sprintf("k%d", i))
+		if code == "" {
+			t.Fatalf("start %d was refused while the map still had room", i)
+		}
+		held = append(held, code)
+	}
+
+	rec, code := startActivationFrom(t, srv, "198.51.100.9:2000", "newcomer")
+	if code != "" {
+		t.Fatal("a newcomer was admitted into a full map, which means somebody else was evicted")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("refusal status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got == "" {
+		t.Error("refusal carried no Retry-After header")
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	for i, c := range held {
+		if _, ok := srv.activations[c]; !ok {
+			t.Errorf("activation %d was evicted to admit the newcomer", i)
+		}
+	}
+}
+
+// A single client is also capped in how much of the map it can occupy, so it
+// cannot fill the map first and starve everyone arriving after it. Asking for
+// one more than the cap recycles that client's OWN oldest activation.
+func TestActivateStart_PerIPCapRecyclesOwnOldest(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t, func(c *Config) {
+		c.MaxPendingActivations = 100
+		c.MaxActivationsPerIP = 2
+	})
+
+	_, first := startActivationFrom(t, srv, "203.0.113.7:1000", "k1")
+	_, second := startActivationFrom(t, srv, "203.0.113.7:1001", "k2")
+	_, third := startActivationFrom(t, srv, "203.0.113.7:1002", "k3")
+	if first == "" || second == "" || third == "" {
+		t.Fatal("a start within the per-IP cap was refused")
+	}
+
+	srv.mu.Lock()
+	_, haveFirst := srv.activations[first]
+	_, haveSecond := srv.activations[second]
+	_, haveThird := srv.activations[third]
+	n, _ := srv.activationsForIPLocked("203.0.113.7")
+	srv.mu.Unlock()
+
+	if haveFirst {
+		t.Error("the client's own oldest activation was not recycled at the per-IP cap")
+	}
+	if !haveSecond || !haveThird {
+		t.Error("the two most recent activations for this client should have survived")
+	}
+	if n > 2 {
+		t.Errorf("client holds %d activations, above the per-IP cap of 2", n)
+	}
+}
+
+// The failed-submission limiter map is written from an unauthenticated path
+// for whatever key clientIP derives, so it needs its own bound: a spread-out
+// source never trips the per-key budget and would otherwise grow it without
+// limit between sweeps.
+func TestActivationFailLimiter_MapIsBounded(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t, func(c *Config) {
+		c.MaxActivationFailKeys = 8
+	})
+	for i := 0; i < 200; i++ {
+		srv.recordActivationFailure(fmt.Sprintf("203.0.113.%d", i%254))
+	}
+	srv.mu.Lock()
+	n := len(srv.activationFails)
+	srv.mu.Unlock()
+	if n > 8 {
+		t.Fatalf("activationFails holds %d keys, above the configured bound of 8", n)
 	}
 }

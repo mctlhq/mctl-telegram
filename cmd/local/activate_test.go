@@ -205,3 +205,118 @@ func TestLoadOrCreateDeviceKey_PersistsAndReuses(t *testing.T) {
 		t.Errorf("device key file not created at %s: %v", p, statErr)
 	}
 }
+
+// A 5xx from the server is transient: an ingress returning 502 during a
+// rollout, or any temporary 500, says nothing about the activation, which
+// lives on the server and is still waiting for the browser leg. The flow must
+// wait it out. Before this, every non-200 was read as "expired" and the CLI
+// abandoned a sign-in the user had already half-completed.
+func TestRunActivateFlow_TransientServerErrorRecovers(t *testing.T) {
+	withFastPolling(t)
+
+	var polls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-bridge/activate/start", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_code": "dc-5xx", "user_code": "IIII-JJJJ",
+			"verification_uri": "https://tg.test/local-bridge/activate",
+			"expires_in":       600, "interval": 5,
+		})
+	})
+	mux.HandleFunc("/api/local-bridge/activate/poll", func(w http.ResponseWriter, r *http.Request) {
+		switch polls.Add(1) {
+		case 1:
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		case 2:
+			http.Error(w, "internal", http.StatusInternalServerError)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "done", "device_id": "dev_after_5xx"})
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	var out bytes.Buffer
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	if err != nil {
+		t.Fatalf("runActivateFlow: %v", err)
+	}
+	if deviceID != "dev_after_5xx" {
+		t.Fatalf("device_id = %q, want dev_after_5xx", deviceID)
+	}
+	if got := polls.Load(); got < 3 {
+		t.Fatalf("polled %d times, expected the two failures to be retried", got)
+	}
+}
+
+// The same for a transport-level failure: a dropped connection, a DNS blip or
+// the client timeout. The activation is untouched on the server, so the flow
+// keeps polling rather than exiting.
+func TestRunActivateFlow_TransientNetworkErrorRecovers(t *testing.T) {
+	withFastPolling(t)
+
+	var polls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-bridge/activate/start", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_code": "dc-net", "user_code": "KKKK-LLLL",
+			"verification_uri": "https://tg.test/local-bridge/activate",
+			"expires_in":       600, "interval": 5,
+		})
+	})
+	mux.HandleFunc("/api/local-bridge/activate/poll", func(w http.ResponseWriter, r *http.Request) {
+		if polls.Add(1) == 1 {
+			// Hijack and close without a response: the client sees a
+			// transport error, not an HTTP status.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "done", "device_id": "dev_after_reset"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	var out bytes.Buffer
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 1, "key", "label")
+	if err != nil {
+		t.Fatalf("runActivateFlow: %v", err)
+	}
+	if deviceID != "dev_after_reset" {
+		t.Fatalf("device_id = %q, want dev_after_reset", deviceID)
+	}
+}
+
+// A cancelled context must still stop the flow immediately, rather than being
+// swallowed by the retry path added above.
+func TestRunActivateFlow_CancelledContextStopsRetrying(t *testing.T) {
+	withFastPolling(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/local-bridge/activate/start", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_code": "dc-cancel", "user_code": "MMMM-NNNN",
+			"verification_uri": "https://tg.test/local-bridge/activate",
+			"expires_in":       600, "interval": 5,
+		})
+	})
+	mux.HandleFunc("/api/local-bridge/activate/poll", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out bytes.Buffer
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label"); err == nil {
+		t.Fatal("expected an error once the context was cancelled")
+	}
+}

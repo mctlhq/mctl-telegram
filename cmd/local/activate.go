@@ -140,7 +140,17 @@ func runActivateFlow(ctx context.Context, out io.Writer, server string, telegram
 		activateSleep(interval)
 		poll, err := activatePollRequest(ctx, server, start.DeviceCode)
 		if err != nil {
-			return "", fmt.Errorf("poll activation: %w", err)
+			// A failed poll says nothing about the activation, which lives on
+			// the server and is still waiting for the browser leg. A dropped
+			// connection, a DNS blip or the 15s client timeout used to kill
+			// the CLI outright and strand a sign-in the user had already
+			// half-completed. Keep polling; the deadline above is what ends
+			// the flow, and ctx cancellation still stops it immediately.
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			fmt.Fprintf(out, "Still waiting (%v); retrying...\n", err)
+			continue
 		}
 		switch poll.Status {
 		case "pending":
@@ -222,8 +232,18 @@ func activatePollRequest(ctx context.Context, server, deviceCode string) (*activ
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	// Only 400 is terminal. The poll handler answers 400 for both "device_code
+	// is required" and "unknown or expired device_code", and nothing else it
+	// can return means the activation is gone. Treating every non-200 as
+	// "expired" threw the activation away on a 502 from the ingress during a
+	// rollout, or on any transient 500 -- the user's browser leg was still
+	// perfectly valid and the server still held the activation. Anything else
+	// is reported as an error so the caller can wait it out.
+	if resp.StatusCode == http.StatusBadRequest {
 		return &activatePollResponse{Status: "expired", Reason: strings.TrimSpace(string(respBody))}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	var out activatePollResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {

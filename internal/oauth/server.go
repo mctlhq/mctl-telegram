@@ -287,6 +287,19 @@ type Config struct {
 	// Oldest-evict on insert, mirroring MaxPendingAuth/MaxPendingEnable.
 	// Defaults to 5000.
 	MaxPendingActivations int
+	// MaxActivationsPerIP caps how many live activations a single
+	// rate-limiter key (see TrustedProxyCIDRs) may hold at once. It is what
+	// keeps MaxPendingActivations from becoming an eviction weapon: without
+	// it, an unauthenticated flood from one address fills the map and pushes
+	// other users' in-flight activations out mid-sign-in. Asking for one more
+	// than this recycles the requester's own oldest activation. Defaults
+	// to 16 -- far above any real CLI, which holds one at a time and retries.
+	MaxActivationsPerIP int
+	// MaxActivationFailKeys caps the failed-submission rate-limiter map.
+	// Entries are created for whatever key clientIP derives, from an
+	// unauthenticated path, so a spread-out source would otherwise grow it
+	// unboundedly between sweeps. Defaults to MaxPendingActivations.
+	MaxActivationFailKeys int
 	// ActivationTTL bounds how long a Local Bridge activation (device_code,
 	// user_code, and — once resolved — its outcome) stays reachable before
 	// the sweeper drops it. Measured from the activation's createdAt, so a
@@ -443,6 +456,12 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.MaxPendingActivations == 0 {
 		cfg.MaxPendingActivations = 5000
+	}
+	if cfg.MaxActivationsPerIP == 0 {
+		cfg.MaxActivationsPerIP = 16
+	}
+	if cfg.MaxActivationFailKeys == 0 {
+		cfg.MaxActivationFailKeys = cfg.MaxPendingActivations
 	}
 	if cfg.ActivationTTL <= 0 {
 		cfg.ActivationTTL = 10 * time.Minute

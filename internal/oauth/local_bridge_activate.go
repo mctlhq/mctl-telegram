@@ -86,6 +86,12 @@ type localBridgeActivation struct {
 	deviceCode string // keys Server.activations
 	createdAt  time.Time
 
+	// startIP is the rate-limiter key (see Server.clientIP) of whoever
+	// called /activate/start. It exists only so the capacity policy in
+	// handleActivateStart can tell one client's activations from another's;
+	// nothing else reads it, and it is never surfaced to a browser.
+	startIP string
+
 	claimedTGID int64
 	// deviceRegKey is the CLI-supplied device_registration_key. It is ONLY
 	// ever used as RegisterDevice's idempotency key -- never confused with
@@ -293,6 +299,25 @@ func hostPart(hostport string) string {
 	return h
 }
 
+// activationsForIPLocked reports how many live activations were started from
+// ip, and which of them is the oldest. Both answers come from one pass; the
+// capacity policy in handleActivateStart needs them together. Must be called
+// with s.mu held.
+func (s *Server) activationsForIPLocked(ip string) (int, *localBridgeActivation) {
+	var count int
+	var oldest *localBridgeActivation
+	for _, a := range s.activations {
+		if a.startIP != ip {
+			continue
+		}
+		count++
+		if oldest == nil || a.createdAt.Before(oldest.createdAt) {
+			oldest = a
+		}
+	}
+	return count, oldest
+}
+
 // ----- failed-submission rate limiter -----
 
 // activationFailBudgetSpent reports whether ip's failed-submission budget is
@@ -321,6 +346,27 @@ func (s *Server) recordActivationFailure(ip string) {
 	now := s.clock()
 	w, ok := s.activationFails[ip]
 	if !ok || now.Sub(w.startedAt) > s.cfg.ActivationFailWindow {
+		// New key: bound the limiter map before adding to it. Every sibling
+		// map on Server carries an explicit cap because it is written from an
+		// unauthenticated path, and this one is no different -- a failure is
+		// recorded for whatever key clientIP derives, so a spread-out source
+		// grows it without ever tripping the per-key budget. The sweeper
+		// prunes expired windows on its own schedule; this is the bound that
+		// holds between sweeps. Evicting the oldest window can only ever
+		// forgive past failures, never manufacture them.
+		if s.cfg.MaxActivationFailKeys > 0 && !ok &&
+			len(s.activationFails) >= s.cfg.MaxActivationFailKeys {
+			var oldestKey string
+			var oldest *activationFailWindow
+			for k, fw := range s.activationFails {
+				if oldest == nil || fw.startedAt.Before(oldest.startedAt) {
+					oldestKey, oldest = k, fw
+				}
+			}
+			if oldest != nil {
+				delete(s.activationFails, oldestKey)
+			}
+		}
 		w = &activationFailWindow{startedAt: now}
 		s.activationFails[ip] = w
 	}
@@ -464,29 +510,53 @@ func (s *Server) handleActivateStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := s.clientIP(r)
 	act := &localBridgeActivation{
 		deviceCode:   randomToken(32),
 		claimedTGID:  req.TelegramID,
 		deviceRegKey: key,
 		deviceLabel:  req.DeviceLabel,
 		createdAt:    s.clock(),
+		startIP:      ip,
 		status:       statusPending,
 	}
 
 	s.mu.Lock()
 	// Bound the activation map. /activate/start is unauthenticated; without
 	// a cap an attacker could grow process memory by calling it repeatedly.
-	// Oldest-evict on insert mirrors MaxPendingAuth/MaxPendingEnable.
-	if s.cfg.MaxPendingActivations > 0 && len(s.activations) >= s.cfg.MaxPendingActivations {
-		var oldest *localBridgeActivation
-		for _, a := range s.activations {
-			if oldest == nil || a.createdAt.Before(oldest.createdAt) {
-				oldest = a
-			}
+	//
+	// A plain oldest-evict is not enough, and the difference is not a memory
+	// concern but a denial of service against legitimate users: an
+	// unauthenticated flood from one address would push OTHER users'
+	// in-flight activations out of the map, and their correctly typed
+	// verification codes would start coming back as unknown in the middle of
+	// signing in. So capacity is only ever reclaimed from the requesting
+	// client. Two rules, in order:
+	//
+	//  1. A single client may hold at most MaxActivationsPerIP live
+	//     activations; asking for one more recycles that client's own oldest.
+	//     A CLI that retries never trips this -- it is dozens, not one.
+	//  2. When the map is globally full, evict the requester's own oldest if
+	//     it has one, and otherwise refuse the request. Refusing the flood is
+	//     correct; evicting a stranger mid-sign-in is not.
+	count, oldestOwn := s.activationsForIPLocked(ip)
+	freed := false
+	if s.cfg.MaxActivationsPerIP > 0 && count >= s.cfg.MaxActivationsPerIP && oldestOwn != nil {
+		s.dropActivation(oldestOwn)
+		freed = true
+	}
+	// Only when rule 1 has not already made room -- otherwise a request that
+	// trips both rules would recycle two of the client's activations for the
+	// one slot it needs.
+	if !freed && s.cfg.MaxPendingActivations > 0 && len(s.activations) >= s.cfg.MaxPendingActivations {
+		if oldestOwn == nil {
+			s.mu.Unlock()
+			w.Header().Set("Retry-After", "30")
+			s.writeActivateError(w, http.StatusServiceUnavailable,
+				"too many activations in progress, try again shortly")
+			return
 		}
-		if oldest != nil {
-			s.dropActivation(oldest)
-		}
+		s.dropActivation(oldestOwn)
 	}
 	userCode, err := s.mintUserCodeLocked()
 	if err != nil {
