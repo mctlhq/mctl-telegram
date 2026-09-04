@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -54,15 +55,37 @@ const (
 	tokenRefreshAdv = 5 * time.Minute
 )
 
-// refreshBridgeToken exchanges bt.MCPToken for a fresh bridge token and
-// persists it. Returns the new bridgeTokenFile on success.
-func refreshBridgeToken(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile) (*bridgeTokenFile, error) {
+// The out-of-band send-scope refresh that used to live here has been removed:
+// it could never run. The send gate is evaluated SERVER-side, and when it
+// refuses, internal/mcp returns the dry-run preview to the MCP client
+// directly without contacting the daemon at all (see tools.go's
+// "Draft-by-default" branch). A call only reaches the daemon once the gate has
+// already passed, with mode="send" set — so the daemon never observes a
+// refusal, and a daemon-side "notice the refusal and refresh" mechanism has
+// nothing to notice. Keeping it would have meant the documentation promising
+// a mechanism that cannot fire.
+//
+// What a consent GRANT actually waits for is the credential the MCP client
+// presents carrying telegram:messages:send, which it gains at its next
+// refresh. A consent REVOKE needs nothing: the live send_enabled read refuses
+// the next send whatever any credential says.
+
+// exchangeForBridgeToken presents bearerToken to POST /api/bridge/token and
+// returns the resulting aud=bridge token. Shared by refreshBridgeToken
+// (bearer = the stored legacy MCPToken) and refreshDeviceCredential (bearer
+// = a freshly PoP-minted device worker_token) -- see
+// internal/bridge/tokenhandler.go's NewBridgeTokenHandler, which accepts
+// any credential the auth middleware admits and forwards DeviceID/Jti/
+// OriginalIssuedAt from the presented credential into the child token, so a
+// device revocation reaches the bridge token too. Does not persist
+// anything -- callers decide what, if anything, gets saved to disk.
+func exchangeForBridgeToken(ctx context.Context, cfg *localConfig, bearerToken string) (*bridgeTokenFile, error) {
 	tokenURL := strings.TrimRight(cfg.Server, "/") + "/api/bridge/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+bt.MCPToken)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -84,40 +107,179 @@ func refreshBridgeToken(ctx context.Context, cfg *localConfig, bt *bridgeTokenFi
 	if tok.BridgeToken == "" {
 		return nil, fmt.Errorf("server returned empty bridge_token")
 	}
-	newBT := &bridgeTokenFile{
-		MCPToken:    bt.MCPToken,
-		BridgeToken: tok.BridgeToken,
-		ExpiresAt:   tok.ExpiresAt,
+	return &bridgeTokenFile{BridgeToken: tok.BridgeToken, ExpiresAt: tok.ExpiresAt}, nil
+}
+
+// refreshBridgeToken exchanges bt.MCPToken for a fresh bridge token and
+// persists it to bridge_token.json. Returns the new bridgeTokenFile on
+// success. This is the legacy bearer-only path -- unchanged behavior, now
+// implemented on top of the exchange step it shares with the device-signed
+// path.
+func refreshBridgeToken(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile) (*bridgeTokenFile, error) {
+	newBT, err := exchangeForBridgeToken(ctx, cfg, bt.MCPToken)
+	if err != nil {
+		return nil, err
 	}
+	newBT.MCPToken = bt.MCPToken
 	if err := saveBridgeToken(newBT); err != nil {
 		return nil, fmt.Errorf("save refreshed token: %w", err)
 	}
 	return newBT, nil
 }
 
+// refreshDeviceCredential mints a fresh PoP nonce, signs it, calls
+// POST /api/local-bridge/devices/{device_id}/refresh, and immediately
+// exchanges the returned worker_token for an aud=bridge token via the same
+// POST /api/bridge/token exchange refreshBridgeToken uses -- see
+// design.md's "cmd/local daemon", which is explicit that this reuses that
+// exchange unchanged; the only new code is minting the *input* to it via
+// PoP instead of a static bearer token.
+//
+// On success it also merges the new credential fields into the on-disk
+// device record (locked + re-validated -- see mergeDeviceCredential) so a
+// process restart picks up the refreshed credential instead of racing the
+// server for another one on its next attempt. bridge_token.json (the
+// legacy path's artifact) is never touched by this path -- the returned
+// bridgeTokenFile is used in memory only, mirroring how the legacy path's
+// result is used by daemonSession.
+func refreshDeviceCredential(ctx context.Context, cfg *localConfig, deviceID string, priv ed25519.PrivateKey) (*bridgeTokenFile, error) {
+	cred, status, body, err := obtainDeviceCredentialViaPoP(ctx, cfg.Server, deviceID, "refresh", priv)
+	if err != nil {
+		return nil, fmt.Errorf("refresh device credential: %w", err)
+	}
+	if status != http.StatusOK || cred == nil {
+		return nil, fmt.Errorf("device refresh: server returned %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("device refresh: could not derive public key from private key")
+	}
+	if _, mErr := mergeDeviceCredential(pub, deviceID, cred.WorkerToken, cred.ExpiresAt, cred.Jti); mErr != nil {
+		// Non-fatal: the daemon can keep running on the in-memory bridge
+		// token even if persisting the refreshed credential failed (e.g. a
+		// concurrent activate holds the lock past the timeout). The next
+		// refresh attempt will try again.
+		slog.Warn("failed to persist refreshed device credential locally; continuing with in-memory token", "err", mErr)
+	}
+	return exchangeForBridgeToken(ctx, cfg, cred.WorkerToken)
+}
+
+// selectDeviceCredentialSource decides which refresh path an attempt should
+// use, per design.md's "cmd/local daemon" / task 5's DoD: the branch is on
+// the DEVICE CREDENTIAL, not on the device identity.
+//
+//   - No device record file, or one that fails to parse: the legacy bearer
+//     path applies, exactly as if no device files existed (rec == nil,
+//     err == nil).
+//   - A device record present but without a usable credential (a bare
+//     pre-#484 registration-key-only file, or an interrupted activation):
+//     also the legacy path (rec == nil, err == nil) -- design.md is explicit
+//     that "the identity file alone means activation was attempted, never
+//     that the device is provisioned".
+//   - A device record with a usable-looking credential but UNUSABLE signing
+//     key material: this must stop the daemon rather than being silently
+//     downgraded to the legacy path (design.md's "Alternatives": a broken
+//     device-signed refresh must fail loudly, not quietly swap to a bearer
+//     token that might not even exist) -- returns a non-nil error naming
+//     `activate` as the fix.
+//   - A device record with both a usable credential and usable key
+//     material: the device-signed path applies (rec, priv both non-nil).
+func selectDeviceCredentialSource() (rec *deviceRecord, priv ed25519.PrivateKey, err error) {
+	rec, err = loadDeviceRecordIfPresent()
+	if err != nil || rec == nil {
+		return nil, nil, nil
+	}
+	if !deviceCredentialUsable(rec) {
+		return nil, nil, nil
+	}
+	p, _, ok := deviceIdentityUsable(rec.PrivateKey, rec.PublicKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("device credential is present but its signing key material is unusable -- run `mctl-telegram-local activate` to repair it")
+	}
+	return rec, p, nil
+}
+
 // runDaemon runs the persistent websocket loop against the bridge server.
-// It reloads the bridge token on every attempt (picks up a freshly rotated
-// token) and reconnects with exponential backoff when the connection drops.
-// The backoff resets to base after a session that ran long enough to indicate
-// healthy connectivity, so routine network blips don't compound delays.
-func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64) error {
+// On every connection attempt it picks the device-signed refresh path when
+// a usable device credential is on disk, or the legacy bearer path
+// otherwise (see selectDeviceCredentialSource), and reconnects with
+// exponential backoff when the connection drops. The backoff resets to base
+// after a session that ran long enough to indicate healthy connectivity, so
+// routine network blips don't compound delays.
+//
+// The device-signed path refreshes UNCONDITIONALLY on every attempt rather
+// than only when nearing expiry: the /nonce, /credential and /refresh
+// routes require no live credential, so a daemon whose worker token expired
+// while the machine was asleep still refreshes normally, and this is one
+// extra round trip per session start, not per call.
+//
+// primed carries a credential the caller has ALREADY refreshed — runDaemonCmd
+// refreshes once before prompting for the passphrase, so that a revoked or
+// unusable device fails before the user types anything. Without threading it
+// through, the first loop iteration would refresh again immediately: two PoP
+// round trips on every start, for one connection.
+func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64, primed *bridgeTokenFile) error {
 	backoff := reconnectBase
 	for {
-		bt, err := loadBridgeToken()
-		if err != nil {
-			return fmt.Errorf("load bridge token: %w", err)
+		rec, priv, selErr := selectDeviceCredentialSource()
+		if selErr != nil {
+			return selErr
 		}
-		if expiry, expErr := bridgeTokenExpiry(bt); expErr == nil && !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
-			slog.Info("bridge token nearing expiry, refreshing", "expires_at", expiry.Format(time.RFC3339))
-			if newBT, refreshErr := refreshBridgeToken(ctx, cfg, bt); refreshErr != nil {
-				slog.Warn("bridge token refresh failed; attempting to connect anyway", "err", refreshErr)
-			} else {
-				bt = newBT
-				slog.Info("bridge token refreshed", "expires_at", newBT.ExpiresAt)
+
+		var bt *bridgeTokenFile
+		switch {
+		case primed != nil:
+			// Consumed once: every later iteration is a genuine reconnect and
+			// must fetch a current credential of its own.
+			bt = primed
+			primed = nil
+		case rec != nil:
+			newBT, refreshErr := refreshDeviceCredential(ctx, cfg, rec.DeviceID, priv)
+			if refreshErr != nil {
+				// Back off and retry rather than exiting. This runs on every
+				// reconnect, so the failure it sees most often is the same
+				// network trouble that dropped the connection in the first
+				// place -- DNS, a timeout, the server restarting. Returning
+				// here would turn a transient blip into a dead service that
+				// only a human restart brings back, which is exactly what the
+				// reconnect loop exists to prevent. A genuinely revoked device
+				// also ends up here and also keeps retrying; what tells an
+				// operator that is the server's refusal in the logs, not a
+				// crashed daemon.
+				slog.Warn("device credential refresh failed; retrying",
+					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				backoff *= 2
+				if backoff > reconnectMax {
+					backoff = reconnectMax
+				}
+				continue
+			}
+			bt = newBT
+			slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
+		default:
+			var err error
+			bt, err = loadBridgeToken()
+			if err != nil {
+				return fmt.Errorf("load bridge token: %w", err)
+			}
+			if expiry, expErr := bridgeTokenExpiry(bt); expErr == nil && !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
+				slog.Info("bridge token nearing expiry, refreshing", "expires_at", expiry.Format(time.RFC3339))
+				if newBT, refreshErr := refreshBridgeToken(ctx, cfg, bt); refreshErr != nil {
+					slog.Warn("bridge token refresh failed; attempting to connect anyway", "err", refreshErr)
+				} else {
+					bt = newBT
+					slog.Info("bridge token refreshed", "expires_at", newBT.ExpiresAt)
+				}
 			}
 		}
+
 		sessionStart := time.Now()
-		err = daemonSession(ctx, cfg, bt, pool, userID)
+		err := daemonSession(ctx, cfg, bt, pool, userID)
 		if err == nil || ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -243,7 +405,7 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 				go func(e bridge.Envelope) {
 					callCtx, callCancel := context.WithTimeout(sessionCtx, bridge.DeadlineFor(e.Tool))
 					defer callCancel()
-					resp := dispatchCall(callCtx, pool, userID, e)
+					resp := dispatchCall(callCtx, cfg, pool, userID, e)
 					if werr := wsjson.Write(ctx, conn, resp); werr != nil {
 						slog.Warn("write response failed", "id", e.ID, "err", werr)
 					}
@@ -382,7 +544,7 @@ func (s *localMediaStore) unclaim(confID string) {
 	s.mu.Unlock()
 }
 
-func dispatchCall(ctx context.Context, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
+func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64, env bridge.Envelope) bridge.Envelope {
 	slog.Info("dispatch", "tool", env.Tool, "id", env.ID)
 
 	var (

@@ -308,32 +308,55 @@ func runDaemonCmd() {
 		die(err)
 	}
 
-	bt, err := loadBridgeToken()
-	if err != nil {
-		die(err)
+	// Branch on which credential files are present -- design.md's "cmd/local
+	// daemon": a usable device credential means the device-signed path,
+	// which refreshes unconditionally (the PoP endpoints need no live
+	// credential); anything else falls back to the legacy bearer path,
+	// unchanged. A device record whose credential looks present but whose
+	// signing key material is unusable is a hard stop naming `activate`,
+	// never a silent downgrade to legacy.
+	var bt *bridgeTokenFile
+	rec, priv, selErr := selectDeviceCredentialSource()
+	if selErr != nil {
+		die(selErr)
 	}
-
-	// A stale bridge token is not a reason to refuse to start. The connect
-	// loop already mints a fresh one from the stored MCP token when the
-	// current one is close to expiring (see runDaemon), and the bridge token
-	// lives an hour while the MCP token lives months — so any restart more
-	// than an hour after the last `connect` used to fail for a condition the
-	// process could resolve by itself. That is precisely the restart a
-	// service manager performs after a reboot.
-	//
-	// Refresh here instead, and only give up when the refresh itself fails,
-	// which is the case a human genuinely has to act on.
-	if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
-		slog.Info("bridge token expired or expiring; refreshing before start",
-			"expires_at", expiry.Format(time.RFC3339))
-		refreshed, refreshErr := refreshBridgeToken(context.Background(), cfg, bt)
+	if rec != nil {
+		refreshed, refreshErr := refreshDeviceCredential(context.Background(), cfg, rec.DeviceID, priv)
 		if refreshErr != nil {
-			die(fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
-				"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
-				expiry.Format(time.RFC3339), refreshErr))
+			die(fmt.Errorf("device credential refresh failed: %w\n"+
+				"If this device was revoked or its key material is compromised, run `mctl-telegram-local activate` to re-register it",
+				refreshErr))
 		}
 		bt = refreshed
-		slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
+		slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
+	} else {
+		bt, err = loadBridgeToken()
+		if err != nil {
+			die(err)
+		}
+
+		// A stale bridge token is not a reason to refuse to start. The connect
+		// loop already mints a fresh one from the stored MCP token when the
+		// current one is close to expiring (see runDaemon), and the bridge token
+		// lives an hour while the MCP token lives months — so any restart more
+		// than an hour after the last `connect` used to fail for a condition the
+		// process could resolve by itself. That is precisely the restart a
+		// service manager performs after a reboot.
+		//
+		// Refresh here instead, and only give up when the refresh itself fails,
+		// which is the case a human genuinely has to act on.
+		if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
+			slog.Info("bridge token expired or expiring; refreshing before start",
+				"expires_at", expiry.Format(time.RFC3339))
+			refreshed, refreshErr := refreshBridgeToken(context.Background(), cfg, bt)
+			if refreshErr != nil {
+				die(fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
+					"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
+					expiry.Format(time.RFC3339), refreshErr))
+			}
+			bt = refreshed
+			slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
+		}
 	}
 
 	key := promptPassphrase("Passphrase: ")
@@ -358,7 +381,7 @@ func runDaemonCmd() {
 	}()
 
 	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt, "user_id", uid)
-	if err := runDaemon(ctx, cfg, pool, uid); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runDaemon(ctx, cfg, pool, uid, bt); err != nil && !errors.Is(err, context.Canceled) {
 		die(err)
 	}
 	slog.Info("daemon stopped")

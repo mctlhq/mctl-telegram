@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -63,13 +65,38 @@ type bridgeTokenFile struct {
 	ExpiresAt   string `json:"expires_at"`
 }
 
-// deviceKeyFile is the persisted JSON at
-// ~/.config/mctl-telegram-local/device_key.json. DeviceRegistrationKey is an
-// opaque idempotency key (see internal/db/local_bridge_devices.go /
-// RegisterDevice) -- never a device id, which is server-generated and
-// returned only by a successful activation.
-type deviceKeyFile struct {
+// deviceRecord is the persisted JSON at
+// ~/.config/mctl-telegram-local/device_key.json (same path as the pre-#484
+// opaque-key-only file, for a smooth upgrade -- only the Go shape and the
+// concept it represents changed, from "device key" to "device identity").
+//
+// It holds EVERYTHING about this device's Local Bridge identity and,
+// once issued, its credential, in ONE record written atomically via
+// writeFileAtomic. See design.md's "One file, deliberately": splitting the
+// key material and the credential issued against it across two files is
+// what let them be written apart and end up naming different devices.
+type deviceRecord struct {
+	// DeviceRegistrationKey is RegisterDevice's idempotency key (see
+	// internal/db/local_bridge_devices.go) -- never a device id, which is
+	// server-generated and returned only by a successful activation.
 	DeviceRegistrationKey string `json:"device_registration_key"`
+
+	// PrivateKey is the Ed25519 SEED (ed25519.SeedSize == 32 bytes), base64
+	// standard encoded -- NEVER the 64-byte ed25519.PrivateKey. See
+	// deviceIdentityUsable for the exact validation this relies on.
+	PrivateKey string `json:"private_key,omitempty"`
+	// PublicKey is the Ed25519 public key (ed25519.PublicKeySize == 32
+	// bytes), base64 standard encoded.
+	PublicKey string `json:"public_key,omitempty"`
+
+	// The following four fields are populated once the post-activation
+	// credential bootstrap (or a later daemon refresh) succeeds. Empty
+	// until then -- an "identity-only" record (design.md's "interrupted
+	// activation" case).
+	DeviceID    string `json:"device_id,omitempty"`
+	WorkerToken string `json:"worker_token,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	Jti         string `json:"jti,omitempty"`
 }
 
 const (
@@ -77,7 +104,20 @@ const (
 	configFileName  = "config.json"
 	bridgeTokenName = "bridge_token.json"
 	deviceKeyName   = "device_key.json"
+	deviceLockName  = "device.lock"
 	dbFileName      = "state.db"
+)
+
+// deviceLockTimeout/deviceLockRetryInterval govern withDeviceRecordLock: wait
+// up to deviceLockTimeout, polling every deviceLockRetryInterval, before
+// reporting contention. Both holders (activate and a daemon refresh) only
+// ever hold the lock around a local file read-modify-write, so a short
+// timeout is enough to let a routine race resolve itself; see
+// withDeviceRecordLock's doc comment for why this waits rather than failing
+// fast.
+const (
+	deviceLockTimeout       = 5 * time.Second
+	deviceLockRetryInterval = 100 * time.Millisecond
 )
 
 func configDirPath() (string, error) {
@@ -112,49 +152,362 @@ func deviceKeyFilePath() (string, error) {
 	return filepath.Join(dir, deviceKeyName), nil
 }
 
-// loadOrCreateDeviceKey returns the persisted device_registration_key,
-// generating and saving a fresh one on first use. Reused on every subsequent
-// `activate` run so a retry (network failure, closed browser tab, or a
-// completely separate later run) resolves to the SAME local_bridge_devices
-// row instead of registering a duplicate device -- see RegisterDevice's
-// (user_id, idempotency_key) contract (issue #481).
-func loadOrCreateDeviceKey() (string, error) {
-	p, err := deviceKeyFilePath()
-	if err != nil {
-		return "", err
-	}
-	if data, err := os.ReadFile(p); err == nil {
-		var dk deviceKeyFile
-		if jerr := json.Unmarshal(data, &dk); jerr == nil && dk.DeviceRegistrationKey != "" {
-			return dk.DeviceRegistrationKey, nil
-		}
-		// Fall through and regenerate if the file is present but unreadable
-		// or empty -- better than refusing to activate at all.
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("read device key: %w", err)
-	}
-
+// generateDeviceRegistrationKey generates a fresh opaque 32-byte
+// idempotency key for RegisterDevice, matching the encoding the pre-#484
+// code used for its one and only key.
+func generateDeviceRegistrationKey() (string, error) {
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
-		return "", fmt.Errorf("generate device key: %w", err)
+		return "", fmt.Errorf("generate device registration key: %w", err)
 	}
-	key := base64.RawURLEncoding.EncodeToString(keyBytes)
+	return base64.RawURLEncoding.EncodeToString(keyBytes), nil
+}
 
+// deviceLockFilePath returns the lockfile path used by withDeviceRecordLock.
+func deviceLockFilePath(configDir string) string {
+	return filepath.Join(configDir, deviceLockName)
+}
+
+// withDeviceRecordLock acquires an exclusive lock on the device record --
+// an advisory flock (LockFileEx on Windows) on a lockfile in configDir, no
+// external dependency needed. The lock lives on the open handle rather than
+// on the file's existence, so the kernel releases it when the holder dies
+// however it dies; a leftover lockfile is inert -- runs fn, and releases the lock. Used by BOTH activate's record
+// read-modify-writes and the daemon's credential-merge writes (design.md,
+// "activate serialises its record writes").
+//
+// Acquisition WAITS, retrying every deviceLockRetryInterval until timeout
+// elapses, rather than failing fast: both holders only ever hold the lock
+// around a local file read-modify-write, so a routine daemon refresh racing
+// an activate run should simply wait a moment and succeed, not error out for
+// a reason the user cannot act on. Only report contention once the timeout
+// is exhausted.
+//
+// Critically, this must be called ONLY around the local file
+// read-modify-write -- NEVER across activate's unbounded browser-wait/poll
+// loop or any network round trip beyond what a single merge needs. That wait
+// ends when a human finishes signing in, or never, and holding a
+// cross-process lock across it would starve a running daemon's refresh until
+// its credential expired and its connection dropped.
+func withDeviceRecordLock(configDir string, timeout time.Duration, fn func() error) error {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	lockPath := deviceLockFilePath(configDir)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open device lock file: %w", err)
+	}
+	defer f.Close()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		got, err := lockFileExclusive(f)
+		if err != nil {
+			return fmt.Errorf("lock device record: %w", err)
+		}
+		if got {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("another activation or daemon refresh is already running (device lock held past %v) -- try again shortly", timeout)
+		}
+		time.Sleep(deviceLockRetryInterval)
+	}
+	// The lockfile itself is left in place deliberately: the lock lives on the
+	// open handle, not on the file's existence, so a leftover file is inert and
+	// removing it would only race a process that is holding it.
+	defer unlockFile(f)
+	return fn()
+}
+
+// readDeviceRecord reads the on-disk device record, returning an empty
+// (zero-value) record if the file does not exist or does not parse as JSON
+// -- callers that need to distinguish absent from corrupt for branching
+// purposes use loadDeviceRecordIfPresent instead. Unlocked -- callers that
+// mutate the result and write it back must wrap the whole
+// read-modify-write in withDeviceRecordLock.
+func readDeviceRecord() (*deviceRecord, error) {
+	p, err := deviceKeyFilePath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &deviceRecord{}, nil
+		}
+		return nil, fmt.Errorf("read device record: %w", err)
+	}
+	var rec deviceRecord
+	if jerr := json.Unmarshal(data, &rec); jerr != nil {
+		// Treated the same as an absent record: repaired in place rather
+		// than refusing to activate at all.
+		return &deviceRecord{}, nil
+	}
+	return &rec, nil
+}
+
+// loadDeviceRecordIfPresent reads the device record WITHOUT generating or
+// repairing anything, distinguishing "no file at all" (nil, nil -- legacy or
+// fresh install) from "file present but unparseable" (nil, err). The daemon
+// uses this rather than loadOrCreateDeviceIdentity because it must never
+// generate or rotate key material itself (design.md: "on unusable key
+// material it stops with a message naming activate").
+func loadDeviceRecordIfPresent() (*deviceRecord, error) {
+	p, err := deviceKeyFilePath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read device record: %w", err)
+	}
+	var rec deviceRecord
+	if jerr := json.Unmarshal(data, &rec); jerr != nil {
+		return nil, fmt.Errorf("parse device record: %w", jerr)
+	}
+	return &rec, nil
+}
+
+// writeDeviceRecord marshals and atomically persists rec at 0600. Unlocked
+// -- callers that need read-modify-write atomicity wrap this (and the
+// preceding read) in withDeviceRecordLock.
+func writeDeviceRecord(rec *deviceRecord) error {
 	dir, err := configDirPath()
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create config dir: %w", err)
+		return fmt.Errorf("create config dir: %w", err)
 	}
-	data, err := json.MarshalIndent(deviceKeyFile{DeviceRegistrationKey: key}, "", "  ")
+	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("marshal device key: %w", err)
+		return fmt.Errorf("marshal device record: %w", err)
 	}
 	if err := writeFileAtomic(filepath.Join(dir, deviceKeyName), data, 0o600); err != nil {
-		return "", fmt.Errorf("write device key: %w", err)
+		return fmt.Errorf("write device record: %w", err)
 	}
-	return key, nil
+	return nil
+}
+
+// deviceIdentityUsable reports whether privB64/pubB64 decode to a valid,
+// matching Ed25519 keypair -- see design.md's "Usable means" for the exact
+// checks and why each matters:
+//
+//   - both fields present (a pre-#484 record has neither)
+//   - valid base64
+//   - private decodes to EXACTLY ed25519.SeedSize (32) bytes -- NOT
+//     ed25519.PrivateKeySize (64), which would reject the very seed this
+//     design stores
+//   - public decodes to EXACTLY ed25519.PublicKeySize (32) bytes
+//   - the two halves are actually a pair: deriving the public key from the
+//     seed must equal the stored public key byte-for-byte
+//
+// Anything else is treated as unusable and MUST be regenerated rather than
+// passed to ed25519.Sign/Verify, which panic on a malformed key instead of
+// returning an error.
+func deviceIdentityUsable(privB64, pubB64 string) (priv ed25519.PrivateKey, pub ed25519.PublicKey, ok bool) {
+	if privB64 == "" || pubB64 == "" {
+		return nil, nil, false
+	}
+	seed, err := base64.StdEncoding.DecodeString(privB64)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return nil, nil, false
+	}
+	pubBytes, err := base64.StdEncoding.DecodeString(pubB64)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return nil, nil, false
+	}
+	derivedPriv := ed25519.NewKeyFromSeed(seed)
+	derivedPub, ok := derivedPriv.Public().(ed25519.PublicKey)
+	if !ok || !bytes.Equal(derivedPub, pubBytes) {
+		return nil, nil, false
+	}
+	return derivedPriv, derivedPub, true
+}
+
+// deviceCredentialUsable reports whether rec carries a complete,
+// well-formed device credential: device_id, worker_token, expires_at and
+// jti all present, and worker_token has the three-segment shape of a JWT.
+// This is a local shape check only, not an authentication decision -- the
+// server is the only party that verifies the token.
+func deviceCredentialUsable(rec *deviceRecord) bool {
+	if rec == nil {
+		return false
+	}
+	if rec.DeviceID == "" || rec.WorkerToken == "" || rec.ExpiresAt == "" || rec.Jti == "" {
+		return false
+	}
+	return strings.Count(rec.WorkerToken, ".") == 2
+}
+
+// deviceCredentialExpiry parses rec.ExpiresAt as RFC3339.
+func deviceCredentialExpiry(rec *deviceRecord) (time.Time, error) {
+	if rec == nil || rec.ExpiresAt == "" {
+		return time.Time{}, fmt.Errorf("device credential has no expiry")
+	}
+	t, err := time.Parse(time.RFC3339, rec.ExpiresAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse expires_at %q: %w", rec.ExpiresAt, err)
+	}
+	return t, nil
+}
+
+// loadOrCreateDeviceIdentity loads the persisted device record, repairing or
+// generating its Ed25519 key material as needed, and returns the
+// (possibly rewritten) record along with the parsed private/public key.
+// Every caller that needs to sign a PoP challenge goes through this rather
+// than reading the file directly, so the "usable or regenerate" rule in
+// design.md lives in exactly one place. Only `activate` calls this -- the
+// daemon must never generate or rotate key material itself, so it uses
+// loadDeviceRecordIfPresent instead.
+//
+// The read-modify-write is performed under the device lock so a concurrent
+// daemon merge cannot land a credential on a record this call is about to
+// replace.
+func loadOrCreateDeviceIdentity() (*deviceRecord, ed25519.PrivateKey, ed25519.PublicKey, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var (
+		rec  *deviceRecord
+		priv ed25519.PrivateKey
+		pub  ed25519.PublicKey
+	)
+	err = withDeviceRecordLock(dir, deviceLockTimeout, func() error {
+		var rerr error
+		rec, rerr = readDeviceRecord()
+		if rerr != nil {
+			return rerr
+		}
+
+		if p, u, ok := deviceIdentityUsable(rec.PrivateKey, rec.PublicKey); ok {
+			priv, pub = p, u
+			// Existing key material is usable -- nothing to repair or
+			// rewrite. A missing device_registration_key here would mean a
+			// hand-edited file; complete it without rotating (there is no
+			// prior registration to orphan).
+			if rec.DeviceRegistrationKey == "" {
+				regKey, rkErr := generateDeviceRegistrationKey()
+				if rkErr != nil {
+					return rkErr
+				}
+				rec.DeviceRegistrationKey = regKey
+				return writeDeviceRecord(rec)
+			}
+			return nil
+		}
+
+		// Key material is unusable: absent, undecodable, wrong length, or a
+		// non-matching pair. The pre-#484 (#482-era) case -- a record that
+		// never had Ed25519 fields at all -- is the exception to rotation:
+		// completing it in place binds device_registration_key to a public
+		// key for the FIRST time, so there is no existing row holding a
+		// DIFFERENT pubkey for the same key to collide with. See design.md's
+		// "The #482 case is the exception".
+		firstTime := rec.PrivateKey == "" && rec.PublicKey == ""
+
+		newPub, newPriv, genErr := ed25519.GenerateKey(rand.Reader)
+		if genErr != nil {
+			return fmt.Errorf("generate device keypair: %w", genErr)
+		}
+		priv, pub = newPriv, newPub
+		rec.PrivateKey = base64.StdEncoding.EncodeToString(newPriv.Seed())
+		rec.PublicKey = base64.StdEncoding.EncodeToString(newPub)
+
+		if !firstTime {
+			// Key material is being REPLACED, not supplied for the first
+			// time -- rotate the registration key (it is RegisterDevice's
+			// idempotency key, bound to the OLD public key) and drop any
+			// credential issued against the identity being discarded; see
+			// design.md's "Regenerating the keypair MUST also rotate
+			// device_registration_key".
+			regKey, rkErr := generateDeviceRegistrationKey()
+			if rkErr != nil {
+				return rkErr
+			}
+			rec.DeviceRegistrationKey = regKey
+			rec.DeviceID = ""
+			rec.WorkerToken = ""
+			rec.ExpiresAt = ""
+			rec.Jti = ""
+		} else if rec.DeviceRegistrationKey == "" {
+			regKey, rkErr := generateDeviceRegistrationKey()
+			if rkErr != nil {
+				return rkErr
+			}
+			rec.DeviceRegistrationKey = regKey
+		}
+		return writeDeviceRecord(rec)
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return rec, priv, pub, nil
+}
+
+// mergeDeviceCredential re-reads the on-disk record under the device lock,
+// re-validates that its public key still matches signingPub -- the key
+// whose private half signed the PoP operation that produced this credential
+// -- and, if so, merges {deviceID, workerToken, expiresAt, jti} into it and
+// writes it back atomically. See design.md's "Every writer re-validates the
+// identity before merging".
+//
+// The write is abandoned (merged=false, err=nil) when:
+//   - the on-disk public key no longer matches signingPub: a concurrent
+//     activate run replaced the identity, and this credential belongs to a
+//     device the current identity is no longer registered as; or
+//   - the on-disk record already carries a usable credential for the SAME
+//     device_id that expires LATER than the one being written (avoids a
+//     stale write clobbering a newer one).
+//
+// Every other case -- including a stored credential naming a DIFFERENT
+// device, or one that is not usable at all -- is replaced unconditionally,
+// regardless of its recorded expiry: stale data must never veto a write
+// that supersedes it.
+func mergeDeviceCredential(signingPub ed25519.PublicKey, deviceID, workerToken, expiresAt, jti string) (merged bool, err error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return false, err
+	}
+	lockErr := withDeviceRecordLock(dir, deviceLockTimeout, func() error {
+		rec, rerr := readDeviceRecord()
+		if rerr != nil {
+			return rerr
+		}
+		_, curPub, ok := deviceIdentityUsable(rec.PrivateKey, rec.PublicKey)
+		if !ok || !bytes.Equal(curPub, signingPub) {
+			// Identity moved out from under us (or was never usable to begin
+			// with) -- abandon the write rather than land a credential next
+			// to key material it was never issued for.
+			return nil
+		}
+		if rec.DeviceID == deviceID && deviceCredentialUsable(rec) {
+			curExpiry, cerr := deviceCredentialExpiry(rec)
+			newExpiry, nerr := time.Parse(time.RFC3339, expiresAt)
+			if cerr == nil && nerr == nil && curExpiry.After(newExpiry) {
+				// On-disk credential for the same device already expires
+				// later than the one we're about to write -- don't clobber
+				// a newer credential with a stale one.
+				return nil
+			}
+		}
+		rec.DeviceID = deviceID
+		rec.WorkerToken = workerToken
+		rec.ExpiresAt = expiresAt
+		rec.Jti = jti
+		merged = true
+		return writeDeviceRecord(rec)
+	})
+	if lockErr != nil {
+		return false, lockErr
+	}
+	return merged, nil
 }
 
 func dbFilePath() (string, error) {

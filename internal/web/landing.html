@@ -366,7 +366,8 @@
       </div>
       <p style="margin-top: 16px; font-size: 13.5px;">
         <strong>Optional:</strong> Local Bridge mode (beta, self-hosted) keeps the session on your own machine instead of this server.
-        It is not required for the ChatGPT App, and it is enabled per account on request rather than self-serve.
+        It is not required for the ChatGPT App, and it is self-service — run the CLI to activate it yourself. Migrating an
+        existing hosted account into this mode still uses <code>set_account_mode</code>.
         See the <a href="/docs/local-bridge">setup guide</a>.
       </p>
     </div>
@@ -408,7 +409,7 @@
       </div>
       <div class="faq-item">
         <dt>What is the Local Bridge?</dt>
-        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path, it needs a machine that stays on, and an operator enables it per account &mdash; it is not self-serve yet. The <a href="/docs/local-bridge">setup guide</a> covers what works today and what does not.</dd>
+        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path, and it needs a machine that stays on, but turning it on is self-service &mdash; run the CLI to activate it yourself. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code>. The <a href="/docs/local-bridge">setup guide</a> covers what works today and what does not.</dd>
       </div>
     </dl>
   </section>

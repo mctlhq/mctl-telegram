@@ -6,17 +6,12 @@ calls from your assistant, but instead of opening Telegram itself it forwards
 each call over a websocket to a daemon running on your machine, and that daemon
 talks to Telegram.
 
-The mode is in beta and is enabled per account by an operator. There are two
-ways in, and which one you take decides whether this server ever holds a copy
-of your Telegram session:
-
-- **A new account, provisioned straight into local mode** — the operator calls
-  `provision_local_account`, and the account is created with no server-side
-  session at all. No hosted login happens, so there is nothing here to store.
-- **An existing hosted account, migrated** — the operator calls
-  `set_account_mode` with `mode="local"`. The sealed session stored when you
-  first connected stays in our database; local mode stops the server from using
-  it, but does not erase it.
+Turning it on is self-service: run `mctl-telegram-local activate` and you end
+up with a connected, read-only daemon with no operator involved. Nobody has to
+flip a database flag, provision an account for you, or mint you a token first.
+The only case that still goes through an operator is migrating an **existing
+hosted** account into local mode — see "Operator: support and recovery only"
+below.
 
 This document describes what the mode actually does today, including the parts
 that are unfinished, so you can decide whether it fits your workflow before you
@@ -35,14 +30,16 @@ for the duration of a call. This is not end-to-end encryption between your
 assistant and your daemon, and no amount of local-mode configuration makes it
 one.
 
-**Your existing server-side session is not deleted.** Switching to local mode
-stops the server from using its stored copy; it does not erase it, and it
-cannot be revoked without leaving local mode (a revoked account reverts to
-hosted, and the bridge then refuses your daemon). If you want the stored copy to
-be worthless, terminate that session from your own Telegram client — Settings →
-Devices → find the session → terminate. The bytes remain in the database but
-hold a dead authorization key. Do this **after** your local login works, not
-before.
+**Your existing server-side session is not deleted (if you had one).**
+Running `activate` for a brand-new Telegram id never creates a server-side
+session in the first place — see below. But if you migrate an existing hosted
+account into local mode instead, switching stops the server from using its
+stored copy; it does not erase it, and it cannot be revoked without leaving
+local mode (a revoked account reverts to hosted, and the bridge then refuses
+your daemon). If you want the stored copy to be worthless, terminate that
+session from your own Telegram client — Settings → Devices → find the session
+→ terminate. The bytes remain in the database but hold a dead authorization
+key. Do this **after** your local login works, not before.
 
 **Your connector does not change.** The MCP endpoint is the same; the server
 decides per account whether a call goes to the hosted session pool or to your
@@ -50,11 +47,13 @@ daemon. You do not need to remove and re-add the connector.
 
 ## Before you start
 
-**You do not need a hosted login first.** An account can be provisioned
-directly into local mode, in which case tg.mctl.ai never holds a session for
-it. If you already have a hosted account and want to move it, that works too —
-the operator migrates it with `set_account_mode` — but starting fresh is the
-option that leaves nothing behind here.
+**You do not need a hosted login first.** Running `activate` for a brand-new
+Telegram id provisions the account directly into local mode, so tg.mctl.ai
+never holds a session for it. If you already have a hosted account and want to
+move it instead, that works too, but it is the one step in this whole flow
+that still needs an operator (`set_account_mode`) — starting fresh with
+`activate` is the option that leaves nothing behind here and needs nobody's
+help.
 
 **You need a machine that stays on.** The daemon must be reachable for a tool
 call to succeed; when it is not, calls fail with a clear error rather than
@@ -68,56 +67,6 @@ if you have registered one before, that page shows the existing credentials
 rather than a form. The credentials identify the *application*, not the account
 — one pair can authorize any Telegram account, which is how any third-party
 client works.
-
-## What the operator has to do (and when)
-
-**Step 1 is self-service for a brand-new account.** Run
-`mctl-telegram-local activate --telegram-id <your numeric Telegram id>`
-before asking an operator for anything: it prints a verification URL and a
-short code, you open the URL, type the code, sign in with Telegram, and
-approve the device from the consent screen it shows you. That alone gets you
-a `local`-mode account with a registered device — no operator call, and
-nothing is written to the database until you explicitly approve. It does
-**not** migrate an existing hosted account; if you already have one and want
-to move it, the operator still runs `set_account_mode mode="local"` for you.
-
-Steps 2 and 3 below are still ours, and neither is self-service yet. They are
-listed here so you can see exactly where you have to wait for us, and so the
-operator has a checklist rather than a memory.
-
-| # | Step | Who | When |
-|---|------|-----|------|
-| 1 | `mctl-telegram-local activate` (new account) — self-service; or `set_account_mode mode="local"` (migrating an existing hosted account) — still operator | you (new account) / operator (migration) | before you run `connect` |
-| 2 | Mint the long-lived MCP token — `mint_worker_token` with `purpose="local-bridge"` | operator | before you run `connect` |
-| 3 | `set_account_send` to turn real sending on | operator | after step 1, before you expect a message to leave |
-
-**Step 3 is the one that gets missed, and it fails quietly.** A freshly
-provisioned local account has `send_enabled = false`. That does not produce an
-error — `send_message` returns a **successful dry-run preview** with the reason
-`per-account send_enabled=false`, because drafting-by-default is deliberate
-elsewhere in the product. So a first send looks like it worked, and nothing
-arrives. If your first test message never lands, read the `dry_run` field of the
-response before debugging anything else.
-
-All three steps are MCP tools now. Step 2 used to be a hand-assembled HTTP
-call; `POST /api/mcp/worker-token` still exists and issues exactly the same
-credential — the tool and the endpoint share one mint policy rather than each
-implementing it — so an operator can use either.
-
-Record what step 2 returns. `expires_at` is the only warning you will get: a
-worker token lives for up to 90 days and announces nothing as it ends, and the
-first symptom is the daemon reconnecting in a loop. `jti` is what revokes this
-specific token later; without it, containing a leak means revoking every token
-for the account.
-
-Two things that are **no longer** operator steps, in case you read an older
-description of this mode:
-
-- **No hosted login first.** A local account can be created directly (step 1),
-  so the server never holds a session for it.
-- **No TTL exemption.** Local accounts are excluded from the idle and absolute
-  session sweepers in the query itself, so nothing has to be added to an
-  exemption list and no account silently reverts to hosted after 30 days.
 
 ## Install
 
@@ -148,7 +97,8 @@ and the reader has no way to tell whether the number is deliberate or stale.
 
 `~/mctl-local` is where this guide keeps the binary, the passphrase file and
 the daemon's log; `~/.config/mctl-telegram-local` is where the daemon itself
-keeps its config and session, and it creates that one for you.
+keeps its config, device identity and session, and it creates that one for
+you.
 
 Builds are published for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
 `linux/arm64` and `windows/amd64`. Check which one you need before downloading —
@@ -170,9 +120,10 @@ git clone https://github.com/mctlhq/mctl-telegram && cd mctl-telegram
 go build -o mctl-telegram-local ./cmd/local
 ```
 
-## Set up
+## Client / owner actions
 
-Four commands, in order. Everything lives under
+Five commands get you from nothing to a connected, sending-capable daemon,
+and every one of them is something you run yourself. Everything lives under
 `~/.config/mctl-telegram-local/`.
 
 ### 1. `init`
@@ -201,7 +152,9 @@ your usual umask — world-readable on most systems — and a `chmod` on the nex
 line closes that only after the passphrase is already on disk in the clear. The
 subshell means it is never created readable.
 
-`init` does not ask for the server address. That matters in step 3.
+`init` does not ask for the server address. `activate` and `daemon` default to
+whatever `server` is already in `config.json`, and `--server` overrides it —
+see step 3.
 
 ### 2. `login`
 
@@ -214,45 +167,46 @@ code Telegram sends, then for your cloud password if you have two-factor
 enabled. The code arrives inside Telegram when the account is signed in
 somewhere else, and by SMS when it is not.
 
-This creates a **second** session on your account, alongside the server's. Both
-are live until you terminate one.
+This creates a **second** session on your account, alongside any hosted one.
+Both are live until you terminate one.
 
-### 3. `connect`
+### 3. `activate`
 
 ```sh
-./mctl-telegram-local connect --token "$(cat mcp-token.txt)" --server https://tg.mctl.ai
+./mctl-telegram-local activate --telegram-id <your numeric Telegram id>
 ```
 
-Exchanges a long-lived MCP token for a short-lived bridge token and saves both.
+`--server <url>` overrides the server address from `config.json` (needed the
+first time, since `init` never asks for one), and `--label <name>` sets the
+device's human-readable label (defaults to your machine's hostname).
 
-**`--server` is required the first time.** `init` never asks for it, so the
-config starts with an empty server URL, and omitting the flag produces a request
-to a URL with no host.
+This is the step that used to end with "an operator still needs to issue this
+device a token." It no longer does. `activate`:
 
-The MCP token is issued to you by an operator. An ordinary OAuth access token
-from your connector will not do: those live one hour, and the daemon needs a
-credential it can keep re-exchanging. Ask for one when your account is enabled
-for local mode.
+1. Generates an Ed25519 keypair the first time it runs on this machine and
+   keeps it in `device_key.json`, `0600`, alongside the rest of your device's
+   identity. The private half never leaves your disk; every later step signs
+   with it locally and sends only the signature.
+2. Prints a verification URL and a short code. Open the URL, type the code,
+   sign in with Telegram, and approve the device from the consent screen it
+   shows you. Nothing is written to the database until you approve.
+3. Once you approve, immediately and automatically bootstraps a device
+   credential — no separate step, no token to copy from anywhere: it asks the
+   server for a one-time nonce, signs it with the private key from step 1, and
+   exchanges the signature for a worker credential, which it saves alongside
+   the device identity.
 
-An operator mints it with the `mint_worker_token` MCP tool (or the equivalent
-`POST /api/mcp/worker-token`) using
-`telegram_id` and `purpose="local-bridge"` — this grants the
-`telegram:messages:send`/`telegram:messages:pin` scopes the daemon needs
-for `send_message`/`pin_message` to work, in addition to the read-only
-scopes. The daemon can renew this token itself before it expires via
-`POST /api/mcp/worker-token/renew`, so re-minting is only needed once the
-renewal window itself is exhausted. There is no need to hand-sign a JWT
-with `OAUTH_JWT_SIGNING_KEY` for this.
+The command's last line tells you to run `daemon` next, because at that point
+you can. A brand-new Telegram id never touches a hosted session: it is
+provisioned directly into local mode, so `session_encrypted` for that account
+is `NULL` from the very first row.
 
-**One caveat about that command.** `--token` is currently the only way to pass
-the token, so it appears in the process argument list and is readable by other
-local accounts through `ps` for as long as the command runs — a second or two.
-On a single-user machine that is a small window; on a shared one, run `connect`
-when nobody else is logged in. Delete `mcp-token.txt` once `connect` has
-succeeded: the daemon stores its own copy in
-`~/.config/mctl-telegram-local/bridge_token.json`, and the file you pasted from
-is not read again. A `--token-file` option that avoids the argument list
-entirely is tracked in #454.
+**Re-running `activate` is safe.** It reuses the same keypair and device id it
+generated the first time, and if the credential step already succeeded it
+reports the device as already activated and exits 0 rather than re-minting.
+If a previous run was interrupted between registering the device and saving
+its credential, re-running repairs that instead of leaving you stuck — you
+never need to delete the config directory and start over.
 
 ### 4. `daemon`
 
@@ -260,11 +214,133 @@ entirely is tracked in #454.
 ./mctl-telegram-local daemon
 ```
 
-Connects to `wss://tg.mctl.ai/bridge` and serves calls. Until an operator has
-flipped your account to local mode, the bridge refuses the connection; until the
-daemon is running, your assistant's calls return
-`local-bridge daemon not connected`. Neither state loses your authorization or
-hangs — the errors are explicit and recoverable.
+Connects to `wss://tg.mctl.ai/bridge` and serves calls. If `activate` produced
+a device credential, `daemon` refreshes it itself on every connection attempt
+— proving possession of the private key each time, not presenting a bearer
+token that can go stale unattended — so there is nothing here to renew by
+hand. (If instead you set this machine up through the legacy `connect --token`
+path, see "Operator: support and recovery only" below; that path keeps working
+exactly as before.)
+
+Until the daemon is running, your assistant's calls return
+`local-bridge daemon not connected`. That error is explicit and recoverable —
+it clears as soon as the daemon connects — never a hang and never a loss of
+authorization.
+
+### 5. `set_send_consent` — turning sending on
+
+`activate` gets you a **read-only** daemon. That is deliberate and unconditional:
+the very first credential your device is issued carries only read scopes,
+regardless of any `send_enabled` value on the account, because activation and
+consent-to-send are two different decisions and this mode never conflates
+them. To let the daemon actually send or pin messages, call the
+`set_send_consent` MCP tool yourself, with `enabled: true`. It is gated on the
+`account:manage` scope, not on an admin scope, and it always acts on your own
+account — there is no `telegram_id` argument for it to get wrong, and nobody
+else can flip it for you.
+
+**What actually gates a real send**, in the order that matters, because
+getting this backwards in either direction is worse than saying nothing:
+
+- **Turning consent off** protects you on the very next send, with no
+  daemon action needed. `evaluateSendGate` reads `send_enabled` live from
+  your account row on every call — it is the authoritative check, and it is
+  already true before this proposal touched anything. If you revoke consent
+  mid-conversation, the very next `send_message` your daemon attempts comes
+  back a dry-run, whether or not the daemon's own credential has refreshed and
+  whether or not it is still connected. Nothing here evicts the daemon's
+  websocket connection on a consent change — that would overstate what
+  consent does and understate what device revocation (below) is for.
+- **Turning consent on** takes effect once the credential your MCP client
+  presents carries `telegram:messages:send`. That scope is derived from your
+  account's current `send_enabled` every time a device credential is issued or
+  refreshed, so it arrives on the next refresh — it is not baked in for the
+  life of the credential.
+
+  There is deliberately no mechanism that shortcuts this from the daemon's
+  side. The send gate is evaluated on the server, and when it refuses, the
+  server returns the dry-run preview to your MCP client directly; the daemon
+  is never contacted. A daemon that wanted to notice a refusal and refresh
+  early has nothing to notice — an earlier draft of this feature shipped
+  exactly that mechanism, and it could not fire. If you have just granted
+  consent and want to send immediately, refresh the credential your client
+  authenticates with rather than waiting for the scheduled refresh.
+- **No hosted login first.** A local account can be created directly by
+  `activate`, so the server never holds a session for it.
+- **No TTL exemption.** Local accounts are excluded from the idle and absolute
+  session sweepers in the query itself, so nothing has to be added to an
+  exemption list and no account silently reverts to hosted after 30 days.
+- **No operator-minted credential, and no operator flip to turn sending on.**
+  `activate` mints its own device credential end to end, and `set_send_consent`
+  lets you turn real sending on yourself. For an account onboarded through
+  `activate`, nobody but you ever has to touch `mint_worker_token` or the old
+  admin-only `set_account_send`.
+
+## Operator: support and recovery only
+
+Everything below this line is for migrating an account that predates this
+guide, or for recovering from something going wrong. None of it is part of
+onboarding a new account through `activate`.
+
+**`connect --token`** — the pre-#484 way to get a daemon running, kept
+working unmodified as a compatibility and recovery path:
+
+```sh
+./mctl-telegram-local connect --token "$(cat mcp-token.txt)" --server https://tg.mctl.ai
+```
+
+Exchanges a long-lived MCP token for a short-lived bridge token and saves
+both to `bridge_token.json`. `--server` is required the first time, for the
+same reason it is under `activate`. An operator mints the token with the
+`mint_worker_token` MCP tool (or the equivalent `POST /api/mcp/worker-token`)
+using `telegram_id` and `purpose="local-bridge"` — this grants the
+`telegram:messages:send`/`telegram:messages:pin` scopes in addition to the
+read-only ones, all in one static, long-lived credential rather than a
+refreshing device-bound one. The daemon repeatedly exchanges this same
+worker token for a fresh short-lived bridge token via
+`POST /api/bridge/token`, but the worker token's own expiry never moves —
+once it lapses (up to 90 days after minting), the fix is an operator
+re-minting a fresh one and you re-running `connect` with it, not anything
+the daemon can do by itself. `daemon` picks this bearer path automatically
+whenever there is no device credential on disk —
+you do not choose between the two paths yourself, the presence or absence of
+`activate`'s device files decides it.
+
+`--token` is currently the only way to pass the token, so it appears in the
+process argument list and is readable by other local accounts through `ps`
+for as long as the command runs — a second or two. On a single-user machine
+that is a small window; on a shared one, run `connect` when nobody else is
+logged in. A `--token-file` option that avoids the argument list entirely is
+tracked in #454.
+
+**`set_account_mode`** — migrates an **existing hosted** account into local
+mode. This is the one case `activate` genuinely cannot do by itself: it only
+knows how to provision a brand-new local-only account, never how to flip an
+account that already has a hosted session. An operator runs
+`set_account_mode` with `mode="local"` for you; the sealed session stored
+from your original hosted login stays in the database (see "What it changes,
+and what it does not" above), and you then run `activate` — or reuse an
+already-registered device — as normal.
+
+**`provision_local_account`** — the admin tool `activate`'s server-side flow
+now uses internally to create a fresh local-only row. It still exists as a
+standalone admin-only MCP tool for the rare recovery case where an operator
+needs to create that row directly (for example, scripting a batch migration,
+or recovering an account whose `activate` run cannot complete for some
+reason) — it is not part of the self-service path, and running `activate`
+never requires anyone to call it separately.
+
+**`revoke_local_bridge_device`** — the kill switch for a specific device,
+callable by the account owner (not admin-gated) with the same
+`account:manage` scope as `set_send_consent`. It revokes the device row,
+denylists its entire credential lineage (`current_jti`, which every refresh
+carries forward unchanged from first issuance — see "Security notes" below)
+so no future `/refresh` or reconnect for that device succeeds, and then
+actively evicts any live `/bridge` websocket connection the device currently
+holds. Use this — not `set_send_consent` — when a device's key material or
+credential might be compromised: revoking send consent stops that device
+from sending, but it stays connected and able to read; revoking the device
+disconnects and locks it out entirely.
 
 ## Running it unattended
 
@@ -401,51 +477,79 @@ reconnects and displaces the second; the result is a reconnect loop that trips
 an alert on our side. If you move the daemon to another machine, stop the old
 one.
 
-**Enabling and disabling the mode is an operator action.** The operator calls
-`provision_local_account` for a new account or `set_account_mode` for an
-existing one; both are admin-only, and there is no self-serve switch yet.
+**Migrating an existing hosted account, and reverting one back to hosted, are
+still operator actions.** `activate` provisions a *brand-new* local account by
+itself; it does not — and cannot — flip an account that already has a hosted
+session. Moving an existing account into local mode, or moving a local account
+back to hosted, both go through an operator (`set_account_mode`), covered in
+"Operator: support and recovery only" above.
 
-**Between enabling the mode and starting the daemon, your tools will fail.**
-The relay refuses a daemon whose account is not already in local mode, so the
-mode has to be switched first. In the gap your assistant gets a clear
-`local-bridge daemon not connected` error rather than a hang, and the error
-clears as soon as the daemon connects. Plan the switch for a moment when you
-are ready to run `daemon`, not hours before.
+**Between finishing `activate` (or an operator's `set_account_mode` migration)
+and starting the daemon, your tools will fail.** The relay refuses a daemon
+whose account is not already in local mode, so the mode switch has to land
+first — which it does automatically as part of `activate`, or as soon as the
+operator's `set_account_mode` call returns for a migration. In the gap your
+assistant gets a clear `local-bridge daemon not connected` error rather than a
+hang, and the error clears as soon as the daemon connects. Plan the switch for
+a moment when you are ready to run `daemon`, not hours before.
 
 ## Security notes
 
-Everything the daemon writes is owner-only (`0600`), including the session
-database and its SQLite sidecar files. Two things are worth knowing about the
-contents:
+Everything the daemon writes is owner-only (`0600`), including the device
+identity file, the session database and its SQLite sidecar files, and (for
+the legacy path) `bridge_token.json`. A few things are worth knowing in
+detail:
 
-- `config.json` holds your `api_hash` in plaintext.
-- `bridge_token.json` holds both your MCP token and the current bridge token in
-  plaintext. Anyone who can read it can act as your account until they are
-  revoked. Tell the operator immediately if you think the file was exposed:
-  an individual token can now be withdrawn without waiting for it to expire
-  and without disturbing anyone else, but only once someone asks. The operator
-  revokes it by `jti` — the identifier recorded when the token was minted —
-  or, if that was not written down, by Telegram id, which kills every token
-  issued for the account up to that moment and drops a connected daemon along
-  with it. Either way you then need a fresh token and a `connect` before the
-  daemon works again.
+**Device binding.** `activate` generates an Ed25519 keypair on your machine
+and never lets the private half leave it. Only the public key (sent once, at
+registration) and per-request signatures ever cross the network — the server
+verifies a signature but never possesses anything that could let it forge
+one. `device_key.json` holds the private key, the public key, and — once
+issued — your device's credential, all in one record so a reader never sees a
+credential naming a device whose key is not in the same file.
 
-  A 30-day token rather than the 90-day maximum is still the better default.
-  Revocation is the response to a leak you noticed; a short lifetime is the
-  bound on one you did not.
+**Read-only by default, always.** The first credential a newly registered
+device receives is read-only regardless of your account's `send_enabled`
+value — this has been true server-side since #483 and `activate` does not
+change it. Getting send capability is always the separate, explicit
+`set_send_consent` step described above.
 
-**What the server keeps depends on how the account became local.** An account
-provisioned directly into local mode has no stored session here, ever. An
-account migrated from a hosted login keeps the sealed session from when it
-first connected: the server stops using it, but it is still in the database.
-Revoking that hosted session does not disable local mode or disconnect your
-daemon. To make the stored copy useless, end that session from your own
-Telegram client (Settings -> Devices); the stored bytes then hold a dead
-authorization key.
+**Hours-scale TTL with automatic refresh.** A device-signed credential is
+issued for hours, not months, and both `activate`'s bootstrap and every
+`daemon` connection attempt refresh it via signed proof of possession — there
+is no bearer secret sitting in a file that has to be manually rotated before
+it expires, the way the legacy worker token does.
 
-The MCP token is long-lived — months, typically. Nothing warns you as it
-approaches expiry: the first symptom is the daemon reconnecting in a loop. Note
-the expiry date somewhere you will see it.
+**Revocation.** `revoke_local_bridge_device` denylists the device's entire
+credential lineage in one call: the `jti` claimed at first issuance is
+carried forward unchanged by every later refresh, precisely so that
+denylisting it kills every credential the device has ever held, not just its
+current one. A denylisted device is refused on its very next `/refresh` or
+reconnect attempt. If the device is already connected, revocation does not
+wait for that — the same call actively evicts its live `/bridge` websocket
+(`Hub.EvictDevice`), so a compromised, already-connected daemon is
+disconnected immediately, not merely locked out of renewing.
+
+**The legacy manually-minted worker-token path is compatibility only.** It
+remains fully supported — `connect --token`, `mint_worker_token`/
+`POST /api/mcp/worker-token`, and the daemon's bearer-only self-renewal all
+keep working exactly as before — but it is not how new onboarding happens.
+It exists for accounts set up before this guide's `activate` flow, and for
+operator-driven recovery. A worker token minted this way is long-lived (up to
+90 days) and announces nothing as it approaches expiry: the first symptom is
+the daemon reconnecting in a loop. An operator revokes it by `jti` — the
+identifier recorded when the token was minted — or, if that was not written
+down, by Telegram id, which kills every token issued for the account up to
+that moment and drops a connected daemon along with it.
+
+**What the server keeps depends on how the account became local.** An
+account onboarded through `activate` has no stored session here, ever. An
+account migrated from a hosted login via `set_account_mode` keeps the sealed
+session from when it first connected: the server stops using it, but it is
+still in the database. Revoking that hosted session does not disable local
+mode or disconnect your daemon. To make the stored copy useless, end that
+session from your own Telegram client (Settings → Devices); the stored bytes
+then hold a dead authorization key.
 
 You can confirm which route a call actually took. `get_my_audit_log` and
 `GET /api/account/audit` return a `call_path` field per entry: `"local"` when
@@ -468,14 +572,17 @@ matching `dispatch` line for each successful call.
 **`local-bridge daemon not connected`** — the account is in local mode but no
 daemon is attached. Check the service is running and look at its log.
 
-**The daemon exits immediately at startup** — read the error. Two are common:
-the passphrase is wrong (or the file has a stray newline in an older build), and
-the MCP token has expired, which no longer resolves itself and needs a fresh
-`connect`.
+**The daemon exits immediately at startup** — read the error. Common causes:
+the passphrase is wrong (or the file has a stray newline in an older build);
+a device credential's signing key material is unusable, in which case the
+error names `activate` as the fix, and you should re-run it rather than edit
+the device file by hand; or, on the legacy path, the MCP token has expired,
+which needs a fresh `connect`.
 
-**Reconnect loop** — usually an expired MCP token, sometimes a second daemon
-running elsewhere. Both look identical from the server; check for the second
-daemon first, because it is the one you can rule out immediately.
+**Reconnect loop** — usually an expired legacy MCP token (if you are on that
+path), sometimes a second daemon running elsewhere. Both look identical from
+the server; check for the second daemon first, because it is the one you can
+rule out immediately.
 
 **The daemon starts by hand but not under launchd** — the passphrase is being
 prompted for. Confirm `MCTL_LOCAL_PASSPHRASE_FILE` is set in the service
@@ -484,9 +591,24 @@ definition and points at a readable file.
 **Windows: `init` cannot read the passphrase** — run it in PowerShell rather
 than Git Bash; the no-echo prompt does not work under mintty.
 
+**My first send after granting consent didn't go through** — check the
+`dry_run` field of the response. If it is still a dry-run, the credential
+your MCP client presents has not picked up the send scope yet — it gains that
+at its next refresh (see `set_send_consent` above), and nothing on the
+daemon's side can hurry it, because the refusal is decided on the server and
+never reaches the daemon. Refresh that credential and try again. If the
+dry-run still doesn't clear, confirm `set_send_consent` actually reports
+`send_enabled: true` for your account.
+
 ## Rolling back
 
-Ask the operator to move the account back to hosted mode. Calls resume through
-the server's own session, provided you did not terminate it from your Telegram
-client — if you did, you will need to reconnect the account normally. Stop the
-daemon once the switch is done.
+For an account onboarded through `activate`: stop the daemon. There is
+currently no self-service way to flip the account back to hosted mode; ask an
+operator to run `set_account_mode mode="hosted"` if you need the account
+itself to revert, not just the daemon to stop.
+
+For an account migrated from hosted mode: ask the operator to move it back to
+hosted mode with `set_account_mode`. Calls resume through the server's own
+session, provided you did not terminate it from your Telegram client — if you
+did, you will need to reconnect the account normally. Stop the daemon once the
+switch is done.
