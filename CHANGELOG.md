@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.60.0](https://github.com/mctlhq/mctl-telegram/compare/0.59.0...0.60.0) (2026-09-04)
+
+
+### Features
+
+* **agents:** issue-481-feat-local-bridge-device-registry-and-an ([#486](https://github.com/mctlhq/mctl-telegram/issues/486)) ([cc57eab](https://github.com/mctlhq/mctl-telegram/commit/cc57eab3f13ed33a34d166201462c4dfa45f8292))
+* **agents:** issue-482-feat-local-bridge-self-service-device-ac ([#493](https://github.com/mctlhq/mctl-telegram/issues/493)) ([929a725](https://github.com/mctlhq/mctl-telegram/commit/929a725f4138f6a4e140050de12eb8b01cb5827e))
+* **agents:** issue-483-feat-local-bridge-owner-send-consent-dev ([#494](https://github.com/mctlhq/mctl-telegram/issues/494)) ([4d78224](https://github.com/mctlhq/mctl-telegram/commit/4d78224c0a281e98349a0d2f27dc1ac5aabd6953))
+* **agents:** issue-484-feat-local-bridge-local-activate-cli-dev ([#496](https://github.com/mctlhq/mctl-telegram/issues/496)) ([c055bf3](https://github.com/mctlhq/mctl-telegram/commit/c055bf3f128ce068eed0fef1aec658de23607493))
+* **mcp:** report send-gate status without attempting a send ([#488](https://github.com/mctlhq/mctl-telegram/issues/488)) ([6cff90a](https://github.com/mctlhq/mctl-telegram/commit/6cff90af09435e67865a48a1dc2458db820e0373))
+
+
+### Bug Fixes
+
+* **bridge:** close Hub.Call lifecycle race ([#497](https://github.com/mctlhq/mctl-telegram/issues/497)) ([f750138](https://github.com/mctlhq/mctl-telegram/commit/f7501380dd57e20d1497699beb54d82984520b2e))
+* **db:** revoking a Local Bridge device made it unre-registerable ([#490](https://github.com/mctlhq/mctl-telegram/issues/490)) ([1db3cb2](https://github.com/mctlhq/mctl-telegram/commit/1db3cb2379bbee92ebf58cc1b6b2e172b60578a3))
+* **release:** open release PRs with an App token, not GITHUB_TOKEN ([#498](https://github.com/mctlhq/mctl-telegram/issues/498)) ([3fd7810](https://github.com/mctlhq/mctl-telegram/commit/3fd78105a306ed6b3d9698a3f8054a27fa98a1e8))
+
 ## [0.59.0](https://github.com/mctlhq/mctl-telegram/compare/0.58.0...0.59.0) (2026-09-03)
 
 
