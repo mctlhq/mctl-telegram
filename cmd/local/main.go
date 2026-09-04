@@ -8,6 +8,7 @@
 // Subcommands:
 //
 //	init     — Create ~/.config/mctl-telegram-local/config.json.
+//	activate — Self-service device activation via Telegram OIDC (no operator step).
 //	login    — Interactive Telegram phone/code/2FA login.
 //	connect  — Exchange an MCP JWT for a short-lived bridge token.
 //	daemon   — Long-running websocket loop (reconnects automatically).
@@ -52,12 +53,13 @@ Usage:
   mctl-telegram-local <subcommand> [args]
 
 Subcommands:
-  init                 Initialise config (TG api_id, api_hash, passphrase).
-  login --phone <num>  Interactive Telegram login.
-  connect --token <t>  Exchange an MCP JWT for a bridge token and save it.
-  daemon               Start the long-running websocket relay daemon.
-  version              Print the binary version.
-  help                 Show this message.
+  init                       Initialise config (TG api_id, api_hash, passphrase).
+  activate --telegram-id <id> Self-service device activation (no operator step required).
+  login --phone <num>        Interactive Telegram login.
+  connect --token <t>        Exchange an MCP JWT for a bridge token and save it.
+  daemon                     Start the long-running websocket relay daemon.
+  version                    Print the binary version.
+  help                       Show this message.
 `
 
 func main() {
@@ -82,6 +84,8 @@ func main() {
 		fmt.Print(usage)
 	case "init":
 		runInit()
+	case "activate":
+		runActivate(os.Args[2:])
 	case "login":
 		runLogin(os.Args[2:])
 	case "connect":
