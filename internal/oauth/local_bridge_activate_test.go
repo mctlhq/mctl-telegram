@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -1231,4 +1232,79 @@ func TestActivateVerify_UserCodeIsNormalized(t *testing.T) {
 	if _, found := srv.activationsByUserCode[normalizeUserCode("ZZZZ-ZZZZ")]; found {
 		t.Error("an unrelated code resolved to the activation")
 	}
+}
+
+// A single customer is routinely handed a whole IPv6 /64, so counting exact v6
+// addresses hands one attacker 2^64 limiter keys while an IPv4 attacker gets
+// one. Both MaxActivationsPerIP and ActivationFailBudget are keyed off this,
+// so the /64 is what has to be scarce.
+func TestClientIP_IPv6IsKeyedByPrefix(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t)
+
+	keyFor := func(remote string) string {
+		r := httptest.NewRequest("POST", "/local-bridge/activate", nil)
+		r.RemoteAddr = remote
+		return srv.clientIP(r)
+	}
+
+	a := keyFor("[2001:db8:abcd:1234::1]:1111")
+	b := keyFor("[2001:db8:abcd:1234:ffff:ffff:ffff:fffe]:2222")
+	if a != b {
+		t.Errorf("two addresses in the same /64 got different keys: %q vs %q", a, b)
+	}
+	if c := keyFor("[2001:db8:abcd:9999::1]:3333"); c == a {
+		t.Errorf("a different /64 collapsed onto the same key %q", a)
+	}
+
+	// IPv4 keeps exact-address keying -- a /64 has no meaning there, and
+	// widening it would let one address speak for a whole network.
+	v4a := keyFor("203.0.113.10:1000")
+	v4b := keyFor("203.0.113.11:1000")
+	if v4a == v4b {
+		t.Errorf("two distinct IPv4 addresses collapsed onto one key %q", v4a)
+	}
+	if v4a != "203.0.113.10" {
+		t.Errorf("IPv4 key = %q, want the bare address", v4a)
+	}
+}
+
+// The rate limiter's whole trust boundary comes from this parser, so its
+// failure modes are security-relevant: silently trusting everything, or
+// silently trusting nothing, both break the keying above.
+func TestTrustedProxyCIDRsFromEnv(t *testing.T) {
+	t.Run("unset falls back to the in-cluster defaults", func(t *testing.T) {
+		os.Unsetenv("TRUSTED_PROXY_CIDRS")
+		got := trustedProxyCIDRsFromEnv()
+		if len(got) != len(defaultTrustedProxyCIDRs) {
+			t.Fatalf("got %d prefixes, want the %d defaults", len(got), len(defaultTrustedProxyCIDRs))
+		}
+		// The returned slice must not alias the package default: a caller
+		// mutating it would silently move the trust boundary for everyone.
+		if len(got) > 0 {
+			got[0] = netip.MustParsePrefix("0.0.0.0/0")
+			if defaultTrustedProxyCIDRs[0].String() == "0.0.0.0/0" {
+				t.Fatal("trustedProxyCIDRsFromEnv returned a slice aliasing the package defaults")
+			}
+		}
+	})
+
+	t.Run("empty means trust nothing, not trust the defaults", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXY_CIDRS", "")
+		if got := trustedProxyCIDRsFromEnv(); len(got) != 0 {
+			t.Fatalf("got %v, want an empty set -- an explicitly empty value is a deliberate opt-out", got)
+		}
+	})
+
+	t.Run("malformed entries are dropped, valid neighbours survive", func(t *testing.T) {
+		t.Setenv("TRUSTED_PROXY_CIDRS", " 10.0.0.0/8 ,not-a-cidr,,192.168.0.0/16 ,10.1.2.3")
+		got := trustedProxyCIDRsFromEnv()
+		var names []string
+		for _, p := range got {
+			names = append(names, p.String())
+		}
+		want := []string{"10.0.0.0/8", "192.168.0.0/16"}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Fatalf("got %v, want %v (a bare address is not a prefix and must be dropped)", names, want)
+		}
+	})
 }

@@ -286,11 +286,11 @@ func (s *Server) clientIP(r *http.Request) string {
 		return peer
 	}
 	if !s.peerIsTrustedProxy(peerAddr) {
-		return peerAddr.String()
+		return rateLimitKeyFor(peerAddr)
 	}
 	xff := r.Header.Get("X-Forwarded-For")
 	if xff == "" {
-		return peerAddr.String()
+		return rateLimitKeyFor(peerAddr)
 	}
 	parts := strings.Split(xff, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -300,12 +300,29 @@ func (s *Server) clientIP(r *http.Request) string {
 			continue
 		}
 		if !s.peerIsTrustedProxy(candAddr) {
-			return candAddr.String()
+			return rateLimitKeyFor(candAddr)
 		}
 	}
 	// The whole forwarded chain is inside the trusted set -- fall back to
 	// the immediate peer.
-	return peerAddr.String()
+	return rateLimitKeyFor(peerAddr)
+}
+
+// rateLimitKeyFor turns an address into the key the limiters count against.
+// An IPv4 address is its own key. An IPv6 address is keyed by its /64: a
+// single customer is routinely assigned that whole prefix, so counting exact
+// v6 addresses gives one attacker 2^64 free keys and makes both
+// MaxActivationsPerIP and ActivationFailBudget trivially bypassable by
+// rotating the source address per request -- while an IPv4 attacker gets one.
+// The /64 is the smallest unit that is actually scarce.
+func rateLimitKeyFor(addr netip.Addr) string {
+	if addr.Is4() || addr.Is4In6() {
+		return addr.Unmap().String()
+	}
+	if p, err := addr.Prefix(64); err == nil {
+		return p.String()
+	}
+	return addr.String()
 }
 
 func (s *Server) peerIsTrustedProxy(addr netip.Addr) bool {
