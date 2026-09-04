@@ -55,58 +55,6 @@ const (
 	tokenRefreshAdv = 5 * time.Minute
 )
 
-// ----- out-of-band send-scope refresh -----
-//
-// requirements.md's consent-timing criteria: revoking send consent takes
-// effect on the very next send with zero daemon action needed -- already
-// true today, because evaluateSendGate (internal/mcp/tools.go) reads
-// send_enabled live, server-side, before ever constructing the bridge call.
-// Granting consent is the harder direction: it must NOT force the owner to
-// wait for this daemon's next scheduled (near-expiry) credential refresh
-// before a send succeeds, but the mechanism that closes that gap must be
-// bounded so it cannot become an unbounded refresh loop for whoever
-// triggers a send.
-//
-// ARCHITECTURAL NOTE (read before changing this): Mode/DryReason arrive at
-// dispatchCall as a decision ALREADY MADE by the hosted server -- this
-// daemon has no visibility into which credential the calling MCP client
-// presented when evaluateSendGate ran, and cannot change that decision
-// after the fact for the call already in flight. What it CAN do is refresh
-// its own on-disk device record's worker_token (internal/workertoken's
-// MintForDevice stamps that token with BOTH the mcp-worker-device audience
-// used to exchange it for a bridge token AND the server's configured
-// mcpAudience -- see internal/workertoken/minter.go -- so the same token is
-// usable directly against the hosted MCP endpoint). In the zero-admin
-// activation flow this proposal ships, that worker_token is the credential
-// a user is expected to configure into their own MCP client (mirroring the
-// legacy bridgeTokenFile.MCPToken, which serves exactly this double duty
-// today: bearer for the MCP endpoint AND input to POST /api/bridge/token).
-// Refreshing it here is what lets its scope catch up with a recent
-// set_send_consent grant without waiting for the connection-level scheduled
-// refresh.
-//
-// This is a best-effort, cmd/local-only judgment call, not a guarantee: if
-// the calling MCP client authenticates with some OTHER credential entirely,
-// this local refresh has no effect on that credential's scope, and the send
-// stays a dry run until that credential is itself refreshed by whatever
-// issued it. Recorded here rather than hidden, per design.md's own
-// practice of naming what a mechanism does not cover.
-const outOfBandRefreshCooldown = 30 * time.Second
-
-var (
-	outOfBandRefreshMu   sync.Mutex
-	lastOutOfBandRefresh time.Time
-)
-
-func hasScope(scopes []string, want string) bool {
-	for _, s := range scopes {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
-
 // The out-of-band send-scope refresh that used to live here has been removed:
 // it could never run. The send gate is evaluated SERVER-side, and when it
 // refuses, internal/mcp returns the dry-run preview to the MCP client
@@ -288,7 +236,28 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 		case rec != nil:
 			newBT, refreshErr := refreshDeviceCredential(ctx, cfg, rec.DeviceID, priv)
 			if refreshErr != nil {
-				return fmt.Errorf("refresh device credential: %w", refreshErr)
+				// Back off and retry rather than exiting. This runs on every
+				// reconnect, so the failure it sees most often is the same
+				// network trouble that dropped the connection in the first
+				// place -- DNS, a timeout, the server restarting. Returning
+				// here would turn a transient blip into a dead service that
+				// only a human restart brings back, which is exactly what the
+				// reconnect loop exists to prevent. A genuinely revoked device
+				// also ends up here and also keeps retrying; what tells an
+				// operator that is the server's refusal in the logs, not a
+				// crashed daemon.
+				slog.Warn("device credential refresh failed; retrying",
+					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				backoff *= 2
+				if backoff > reconnectMax {
+					backoff = reconnectMax
+				}
+				continue
 			}
 			bt = newBT
 			slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)

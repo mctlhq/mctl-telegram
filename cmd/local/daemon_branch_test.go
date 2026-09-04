@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -152,4 +154,44 @@ func makeTestJWT(t *testing.T, scopes []string) string {
 	payloadJSON += `]}`
 	payload := base64.RawURLEncoding.EncodeToString([]byte(payloadJSON))
 	return header + "." + payload + ".sig"
+}
+
+// A failed refresh inside the reconnect loop must not kill the daemon. The
+// loop runs on every reconnect, so the failure it sees most often is the same
+// network trouble that dropped the connection — returning would turn a blip
+// into a dead service that only a human restart brings back.
+func TestRunDaemon_RefreshFailureRetriesInsteadOfExiting(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// A device record with usable key material and a usable credential, so the
+	// device-signed branch is the one taken -- pointed at a server that is not
+	// there, so every refresh attempt fails.
+	_, _, pub, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
+	}
+	future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	if _, err := mergeDeviceCredential(pub, "dev_unreachable", "a.b.c", future, "jti1"); err != nil {
+		t.Fatalf("mergeDeviceCredential: %v", err)
+	}
+
+	cfg := &localConfig{Server: "http://127.0.0.1:1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runDaemon(ctx, cfg, nil, 1, nil) }()
+
+	select {
+	case err := <-done:
+		// It must have stopped because the context ended, not because it gave
+		// up on the refresh.
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("daemon exited on a refresh failure instead of retrying: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDaemon did not return after its context ended")
+	}
 }
