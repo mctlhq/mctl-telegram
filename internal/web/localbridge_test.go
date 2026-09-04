@@ -61,6 +61,49 @@ func TestLocalBridgeRenders(t *testing.T) {
 // into visible text. That is worth pinning, because a change to escaping would
 // be a visible change to the page, and a change to passing it through would be
 // a security one.
+// TestPublicPages_NoStaleOperatorGateClaim is T14: with #484 shipped, no
+// public page may still claim Local Bridge requires an operator to enable it
+// per account, or that it is not self-serve -- those claims became false the
+// moment `activate` started bootstrapping its own device credential with zero
+// operator calls. This is a content assertion on purpose, the same class of
+// staleness internal/web/localbridge.go's own comment records for /security's
+// past false claim about session_encrypted. Validate by mutation: restoring
+// either sentence on / or /docs fails this test.
+func TestPublicPages_NoStaleOperatorGateClaim(t *testing.T) {
+	forbidden := []string{
+		"not self-serve",
+		"operator enables it per account",
+		"operator has to enable",
+		"enabled per account on request",
+	}
+
+	landingRec := httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).
+		ServeHTTP(landingRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if landingRec.Code != http.StatusOK {
+		t.Fatalf("GET /: status %d, body: %s", landingRec.Code, landingRec.Body.String())
+	}
+
+	docsRec := httptest.NewRecorder()
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).
+		ServeHTTP(docsRec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if docsRec.Code != http.StatusOK {
+		t.Fatalf("GET /docs: status %d, body: %s", docsRec.Code, docsRec.Body.String())
+	}
+
+	pages := map[string]string{
+		"/":     landingRec.Body.String(),
+		"/docs": docsRec.Body.String(),
+	}
+	for path, body := range pages {
+		for _, bad := range forbidden {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s still contains the stale claim %q -- Local Bridge is self-service since #484", path, bad)
+			}
+		}
+	}
+}
+
 func TestRenderMarkdown_NeutralisesRawHTML(t *testing.T) {
 	out, err := renderMarkdown([]byte(
 		"Intro paragraph.\n\n<script>alert(1)</script>\n\ntrailing <img src=x onerror=alert(1)> inline\n"))

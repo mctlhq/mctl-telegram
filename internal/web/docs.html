@@ -260,11 +260,13 @@ curl -s -X POST {{.MCPURL}} \
     <p>
       Local Bridge is an optional mode in which the Telegram session lives on a machine you
       control and this server forwards each tool call to a daemon running there, instead of
-      opening Telegram itself. It costs you a machine that stays on and an operator has to
-      enable it per account, so it is not part of the standard install path — but it is the
-      only mode in which this server never holds a usable copy of your session.
-      The <a href="/docs/local-bridge">setup guide</a> covers installation, what the operator
-      still does, the tools that are unavailable in this mode, and how to roll back.
+      opening Telegram itself. It costs you a machine that stays on, so it is not part of the
+      standard install path — but it is the only mode in which this server never holds a
+      usable copy of your session, and turning it on is self-service: the CLI walks you
+      through activation with no operator step. Migrating an existing hosted account into
+      this mode still uses <code>set_account_mode</code>.
+      The <a href="/docs/local-bridge">setup guide</a> covers installation, the tools that
+      are unavailable in this mode, and how to roll back.
     </p>
   </section>
 

@@ -32,11 +32,15 @@ forget the hosted one, and the relay still sees every payload it routes.
 
 ## Status in one line
 
-The server half is production-grade and deployed. The daemon is written
-and tested. What is missing is everything between the two and a user:
-there is no released binary, no user-facing documentation, and no way
-for a user to turn the mode on without an operator editing the database
-by hand.
+The server half is production-grade and deployed, and the CLI has caught up
+with it: `mctl-telegram-local activate` walks a user from nothing to a
+connected, read-only daemon with zero operator MCP tool calls, and
+`set_send_consent` lets the owner turn real sending on themselves. What
+remains is narrower than it used to be: Windows ACL hardening for on-disk
+secrets, and the correctness/cross-repo items below. The legacy
+`connect --token` path is intentionally still there, unmodified, for accounts
+onboarded before this and for operator-driven recovery -- see "Device-bound
+credential lifecycle".
 
 ## What is implemented
 
@@ -89,9 +93,9 @@ by hand.
   more than 20 times in 10 minutes — a looping reconnect. Its runbook
   section is `docs/runbook.md#mctlbridgedaemonsflapping`.
 
-### Daemon-side (`cmd/local`, ~1600 lines with tests)
+### Daemon-side (`cmd/local`, ~1600 lines with tests, plus #484's device-identity/credential additions)
 
-All four subcommands are implemented. This section previously described
+All five subcommands are implemented. This section previously described
 them as "scaffolded; implementations are deferred", which was wrong and
 was read as a status signal by people scoping the work.
 
@@ -101,17 +105,28 @@ was read as a status signal by people scoping the work.
    config directory with `0600`.
 2. **`login --phone`** (`main.go`) — interactive Telegram login writing
    the session to the local encrypted store rather than the server DB.
-3. **`connect --token`** (`main.go:212-288`) — exchanges an MCP JWT for
-   a bridge token via `POST /api/bridge/token` and persists **both** the
-   MCP token and the bridge token to `bridge_token.json`
-   (`main.go:270-277`, `config.go:143-165`). The earlier claim that the
-   bridge token is held in memory and lost on restart is false; the
-   design consequence is the opposite one, that two bearer tokens sit in
-   a plaintext JSON file on the user's disk.
-4. **`daemon`** (`daemon.go`) — connects `wss://tg.mctl.ai/bridge`,
-   answers pings, dispatches call envelopes to the local MTProto client
-   and re-exchanges the stored MCP token for a fresh bridge token before
-   expiry.
+3. **`activate --telegram-id`** (`activate.go`) — the self-service path
+   added by #484: generates an Ed25519 device identity on first run,
+   drives the browser-based Telegram sign-in/device-approval flow, and
+   bootstraps a device-bound credential via the PoP `/nonce` →
+   `/credential` round trip, all before it exits. See "Device-bound
+   credential lifecycle" below.
+4. **`connect --token`** (`main.go:212-288`) — the legacy, still-supported
+   path: exchanges an operator-minted MCP JWT for a bridge token via
+   `POST /api/bridge/token` and persists **both** the MCP token and the
+   bridge token to `bridge_token.json` (`main.go:270-277`,
+   `config.go:143-165`). The earlier claim that the bridge token is held in
+   memory and lost on restart is false; the design consequence is the
+   opposite one, that two bearer tokens sit in a plaintext JSON file on the
+   user's disk.
+5. **`daemon`** (`daemon.go`) — connects `wss://tg.mctl.ai/bridge`,
+   answers pings, and dispatches call envelopes to the local MTProto
+   client. On every connection attempt it picks a refresh mechanism based
+   on which credential files are on disk: a device-signed PoP refresh
+   (`refreshDeviceCredential`, #484) when `activate` produced a device
+   credential, or the original bearer-only re-exchange of the stored MCP
+   token (`refreshBridgeToken`) otherwise. It never mixes the two for one
+   config directory.
 
 The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 `get_unread_messages`, `get_messages`, `send_message`, `send_media`,
@@ -140,21 +155,36 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    then the Windows build is usable but its on-disk secrets — including
    both bearer tokens in `bridge_token.json` — are only as protected as
    the profile directory.
-4. **No long-lived MCP token to hand to `connect`.** The daemon
-   re-exchanges the stored MCP token indefinitely, but OAuth access
-   tokens live one hour (24 h ceiling), so an ordinary OAuth token
-   produces a daemon that dies within the hour. The one endpoint that
-   mints a long-lived token, `POST /api/mcp/worker-token`, is restricted
-   to read-only scopes (`internal/workertoken/tokenhandler.go:50-53`),
-   so it cannot carry send. Today the only route is hand-signing an
-   HS256 token with `OAUTH_JWT_SIGNING_KEY`.
-5. **No self-serve enablement.** Enablement is still an admin MCP tool call,
-   not something a user can trigger themselves. Two admin tools now write
-   `mode='local'`: `set_account_mode` (`internal/mcp/tools.go:1011-1094`)
-   flips an existing hosted row, and `provision_local_account`
+4. **Closed for the self-service path by #484; still open, deliberately, for
+   legacy `connect --token`.** `activate` never hands a user a token to
+   paste: it mints its own device-bound credential end to end through the
+   PoP `/nonce` → `/credential` round trip (see "Device-bound credential
+   lifecycle" below), so an account onboarded through `activate` never hits
+   this gap at all. It remains open for `connect --token`: an operator still
+   has to mint a long-lived credential via `mint_worker_token`/
+   `POST /api/mcp/worker-token` and hand it to the user out of band before
+   `connect` can do anything. (That endpoint's scopes are no longer
+   read-only-only, as this note originally said -- passing
+   `purpose="local-bridge"` now grants send/pin too -- but it is still a
+   single static bearer credential an operator has to mint and transmit,
+   which is exactly what the self-service path was built to avoid.) This
+   legacy route is retained on purpose, for pre-#484 accounts and
+   operator-driven recovery -- see "Legacy worker-token path" below.
+5. **Closed by #484.** Enablement used to be an admin MCP tool call, full
+   stop: `set_account_mode` (`internal/mcp/tools.go:1011-1094`) flips an
+   existing hosted row, and `provision_local_account`
    (`internal/mcp/tools.go`, added for issue #468) creates a fresh
    local-only row for a Telegram id that has never completed a hosted
-   login, with `session_encrypted` left `NULL`.
+   login. Both still exist and are both still admin-gated, but neither is
+   on the happy path any more: `mctl-telegram-local activate` now drives a
+   user through browser-based Telegram sign-in and device approval and
+   provisions the local-only row itself (internally, the same
+   `EnsureUserByTelegramID` + `ProvisionLocalAccount` sequence
+   `provision_local_account` exposes as a tool -- see
+   `internal/oauth/local_bridge_activate.go`), with zero admin MCP tool
+   calls involved. `set_account_mode` remains the only route for migrating
+   an *existing* hosted account, which `activate` cannot do and does not try
+   to.
 6. **Five tools are unsupported in local mode** and return an explicit
    error rather than routing to the bridge: `edit_message`,
    `delete_messages`, `forward_messages`, `search_messages`,
@@ -212,14 +242,67 @@ them means changing the token format for all mctl clients. The bridge
 token is minted by mctl-telegram, which is the only service that knows
 the Telegram identity. Removed from #138 for the same reason.
 
+## Device-bound credential lifecycle
+
+This is what `cmd/local activate`/`daemon` and the server's PoP-gated
+endpoints (`internal/oauth/local_bridge_credential.go`) do together, and it
+is the mechanism the "Closed by #484" notes above point at.
+
+1. **Bootstrap trust boundary.** The device generates its own Ed25519
+   keypair locally (`ed25519.GenerateKey`, `cmd/local/config.go`) the first
+   time `activate` runs on a machine. Only the public key -- sent once, at
+   `POST /api/local-bridge/activate/start` -- and per-request signatures
+   (`POST .../nonce` → sign → `POST .../credential` or `.../refresh`) ever
+   cross the network. The server records the public key and verifies
+   signatures against it; it never receives, stores, or needs the private
+   key, and therefore cannot forge a signature on the device's behalf.
+2. **First issuance vs. refresh.** `POST .../credential` (first issuance) is
+   unconditionally read-only: it mints scopes from the read-only allowlist
+   regardless of the account's `send_enabled` value at that moment
+   (`local_bridge_credential.go`'s own comment: "ALWAYS read-only at first
+   issuance"). `POST .../refresh` -- every later call -- re-derives scopes
+   from a live `IsSendEnabled` read every single time, so a `set_send_consent`
+   change is reflected on the device's very next refresh with no
+   re-activation step.
+3. **One-lineage-per-device invariant.** `current_jti`/`credential_issued_at`
+   are claimed exactly once, atomically, at first issuance
+   (`ClaimDeviceCredentialLineage`) and carried forward unchanged by every
+   later refresh -- a refresh never claims a new `jti` of its own. This is
+   deliberate: it is what lets a single `RevokeDeviceAndDenylist` call, keyed
+   on that one `jti`, invalidate every credential the device has ever held,
+   rather than only the one currently in its hands.
+4. **Revocation SLA.** For an already-connected daemon, revocation is
+   immediate: `revoke_local_bridge_device` calls `Hub.EvictDevice(userID,
+   deviceID)` in the same request that records the revocation, force-closing
+   the live `/bridge` websocket rather than waiting for it to notice on its
+   own. For any future connect or refresh attempt, revocation is immediate
+   once `RevokeDeviceAndDenylist`'s transaction commits: the denylist it
+   writes to is consulted on every PoP credential verification, so there is
+   no independent cache-TTL-style propagation delay to wait out on top of
+   the commit itself.
+
+### Legacy worker-token path (compatibility only)
+
+`mint_worker_token` / `POST /api/mcp/worker-token` still mint a single
+static bearer worker token (30-day default TTL, 90-day ceiling), and
+`connect --token` plus the daemon's unchanged bearer-only bridge-token
+re-exchange still consume it exactly as they did before #484. This path is
+kept for exactly two reasons: accounts onboarded before this change, and
+operator-driven recovery when the browser-driven `activate` flow cannot be
+completed for some reason. It is not part of new onboarding -- `activate`
+never hands a user a token to paste, by design, and nothing in this proposal
+removes or degrades the legacy path's own behavior.
+
 ## Trust-model notes (mirrored on /security)
 
 - **Whether the server ever held the session bytes depends on how the
   account became local.** `session_encrypted` is nullable
   (`internal/db/db.go`, made nullable for issue #468). An account
-  provisioned directly as local-only via `provision_local_account` has
-  `session_encrypted = NULL` from insert — the server never holds a copy
-  of that session at all. An account migrated from an existing hosted
+  provisioned directly as local-only -- via a user's own `activate` run
+  (the normal path since #484) or via the admin `provision_local_account`
+  tool (kept for operator-driven recovery) -- has `session_encrypted = NULL`
+  from insert — the server never holds a copy of that session at all. An
+  account migrated from an existing hosted
   login via `set_account_mode` keeps the sealed blob stored when it first
   connected; switching to local mode stops the server from *using* that
   session, it does not delete it, and clearing it is explicitly out of
@@ -240,10 +323,14 @@ the Telegram identity. Removed from #138 for the same reason.
 
 - New accounts default to `mode='hosted'`; the change is backward
   compatible.
-- An operator flips a row to `mode='local'` before the first `connect`;
-  the websocket registration ties the daemon to that row. Between the
-  flip and a running daemon the user's connector returns
+- A brand-new account reaches `mode='local'` by the user's own
+  `mctl-telegram-local activate` run -- no operator step -- before the first
+  `daemon`. An existing hosted account instead needs an operator to flip it
+  with `set_account_mode mode="local"`. Either way, the websocket
+  registration ties the daemon to that row, and between the flip (self- or
+  operator-driven) and a running daemon the user's connector returns
   "local-bridge daemon not connected" (`internal/mcp/tools.go:111-113`)
   rather than hanging or losing authorization.
-- Rollback is the same UPDATE with `mode='hosted'`, verified by a
-  subsequent call landing with `call_path='hosted'`.
+- Rollback is the same UPDATE with `mode='hosted'` (via `set_account_mode`;
+  there is no self-service equivalent), verified by a subsequent call
+  landing with `call_path='hosted'`.
