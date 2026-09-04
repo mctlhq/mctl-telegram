@@ -107,16 +107,12 @@ func runInit() {
 	apiID := promptInt(stdin, "TG_API_ID (from https://my.telegram.org/apps): ")
 	apiHash := promptStr(stdin, "TG_API_HASH: ")
 
-	fmt.Print("Passphrase (encrypts local session DB): ")
-	pass1, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	pass1, err := readPassword("Passphrase (encrypts local session DB): ")
 	if err != nil {
 		die(fmt.Errorf("read passphrase: %w", err))
 	}
 
-	fmt.Print("Confirm passphrase: ")
-	pass2, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	pass2, err := readPassword("Confirm passphrase: ")
 	if err != nil {
 		die(fmt.Errorf("read passphrase confirm: %w", err))
 	}
@@ -152,6 +148,17 @@ func runInit() {
 	dir, _ := configDirPath()
 	fmt.Printf("Initialized. Config saved to %s\n", filepath.Join(dir, configFileName))
 	fmt.Println("Run `mctl-telegram-local login --phone +1...` next.")
+}
+
+// readPassword prints prompt and reads a passphrase from the terminal without
+// echo. A package variable, like activateSleep, so the CLI/daemon end-to-end
+// test can answer the `init` prompts without a TTY; never reassigned outside
+// tests.
+var readPassword = func(prompt string) ([]byte, error) {
+	fmt.Print(prompt)
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	return pw, err
 }
 
 // ---- login ---------------------------------------------------------------
@@ -303,9 +310,22 @@ func runConnect(args []string) {
 // ---- daemon --------------------------------------------------------------
 
 func runDaemonCmd() {
+	if err := serveDaemon(context.Background()); err != nil {
+		die(err)
+	}
+}
+
+// serveDaemon is the whole of the `daemon` subcommand short of the exit code:
+// it loads the config, obtains a bridge credential, opens the local session
+// store and runs the websocket loop until parent is cancelled or a signal
+// arrives. It returns nil on a clean shutdown. runDaemonCmd is only the
+// process wrapper around it; the CLI/daemon end-to-end test calls this
+// directly so that a daemon "restart" is this function returning and being
+// called again on the same config directory.
+func serveDaemon(parent context.Context) error {
 	cfg, err := loadConfig()
 	if err != nil {
-		die(err)
+		return err
 	}
 
 	// Branch on which credential files are present -- design.md's "cmd/local
@@ -318,21 +338,21 @@ func runDaemonCmd() {
 	var bt *bridgeTokenFile
 	rec, priv, selErr := selectDeviceCredentialSource()
 	if selErr != nil {
-		die(selErr)
+		return selErr
 	}
 	if rec != nil {
-		refreshed, refreshErr := refreshDeviceCredential(context.Background(), cfg, rec.DeviceID, priv)
+		refreshed, refreshErr := refreshDeviceCredential(parent, cfg, rec.DeviceID, priv)
 		if refreshErr != nil {
-			die(fmt.Errorf("device credential refresh failed: %w\n"+
+			return fmt.Errorf("device credential refresh failed: %w\n"+
 				"If this device was revoked or its key material is compromised, run `mctl-telegram-local activate` to re-register it",
-				refreshErr))
+				refreshErr)
 		}
 		bt = refreshed
 		slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
 	} else {
 		bt, err = loadBridgeToken()
 		if err != nil {
-			die(err)
+			return err
 		}
 
 		// A stale bridge token is not a reason to refuse to start. The connect
@@ -348,11 +368,11 @@ func runDaemonCmd() {
 		if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
 			slog.Info("bridge token expired or expiring; refreshing before start",
 				"expires_at", expiry.Format(time.RFC3339))
-			refreshed, refreshErr := refreshBridgeToken(context.Background(), cfg, bt)
+			refreshed, refreshErr := refreshBridgeToken(parent, cfg, bt)
 			if refreshErr != nil {
-				die(fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
+				return fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
 					"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
-					expiry.Format(time.RFC3339), refreshErr))
+					expiry.Format(time.RFC3339), refreshErr)
 			}
 			bt = refreshed
 			slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
@@ -362,7 +382,7 @@ func runDaemonCmd() {
 	key := promptPassphrase("Passphrase: ")
 	keyHex := encryptionKeyHex(mustDeriveVerifiedKey(key, cfg))
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	store, closeDB, uid := openLocalStore(ctx, keyHex)
@@ -371,20 +391,27 @@ func runDaemonCmd() {
 	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store)
 	defer pool.Shutdown()
 
-	// Graceful shutdown on SIGINT/SIGTERM.
+	// Graceful shutdown on SIGINT/SIGTERM. Registered here, after the
+	// passphrase prompt, so a Ctrl-C at the prompt still ends the process
+	// the way it always has instead of being swallowed by the handler.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
-		sig := <-sigs
-		slog.Info("received signal, shutting down", "signal", sig)
-		cancel()
+		select {
+		case sig := <-sigs:
+			slog.Info("received signal, shutting down", "signal", sig)
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
 	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt, "user_id", uid)
 	if err := runDaemon(ctx, cfg, pool, uid, bt); err != nil && !errors.Is(err, context.Canceled) {
-		die(err)
+		return err
 	}
 	slog.Info("daemon stopped")
+	return nil
 }
 
 // ---- helpers -------------------------------------------------------------

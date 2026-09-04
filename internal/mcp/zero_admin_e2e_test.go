@@ -8,10 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +17,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
+	"github.com/mctlhq/mctl-telegram/internal/localbridgetest"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 )
 
@@ -45,24 +43,8 @@ import (
 //     against what the flow DID rather than against what this test happened
 //     to call.
 
-// e2eOIDC is the Telegram leg: it returns one canned verified identity, the
-// same shape the real Authenticator produces after checking the id_token.
-type e2eOIDC struct{ id telegramoidc.Identity }
-
-func (f *e2eOIDC) AuthCodeURL(state, nonce, codeChallenge string) string {
-	return "https://oauth.telegram.test/authorize?state=" + url.QueryEscape(state)
-}
-
-func (f *e2eOIDC) Exchange(ctx context.Context, code, codeVerifier, expectedNonce string) (*telegramoidc.Identity, error) {
-	out := f.id
-	return &out, nil
-}
-
-var (
-	e2eCSRFRe     = regexp.MustCompile(`name="csrf_token" value="([^"]*)"`)
-	e2eConsentRe  = regexp.MustCompile(`name="consent_token" value="([^"]*)"`)
-	e2eUserCodeRe = regexp.MustCompile(`name="user_code" value="([^"]*)"`)
-)
+// The Telegram leg and the human's browser are shared with cmd/local's
+// CLI/daemon end-to-end test; see internal/localbridgetest.
 
 func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	const tgID = int64(770000484)
@@ -72,7 +54,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	srv, err := oauth.New(ctx, oauth.Config{
 		Issuer:    "https://tg.test",
 		JWTSecret: []byte("e2e-secret-value-at-least-32-bytes!!"),
-		TelegramOIDC: &e2eOIDC{id: telegramoidc.Identity{
+		TelegramOIDC: &localbridgetest.OIDC{Identity: telegramoidc.Identity{
 			TelegramID: tgID, Username: "zeroadmin", FirstName: "Zero", LastName: "Admin",
 		}},
 		AccessTokenTTL: time.Hour,
@@ -86,10 +68,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	jar, _ := cookiejar.New(nil)
-	browser := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	browser := localbridgetest.NewBrowser(t)
 
 	// The invariant that must hold at EVERY step, not merely at the end.
 	assertNoServerSideSession := func(step string) {
@@ -142,48 +121,12 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	}
 	assertNoServerSideSession("after activate/start")
 
-	// The browser types the code.
-	formResp, err := browser.Get(ts.URL + "/local-bridge/activate")
-	if err != nil {
-		t.Fatalf("get form: %v", err)
-	}
-	formBody, _ := io.ReadAll(formResp.Body)
-	formResp.Body.Close()
-	csrf := string(e2eCSRFRe.FindSubmatch(formBody)[1])
-
-	verifyResp, err := browser.PostForm(ts.URL+"/local-bridge/activate", url.Values{
-		"user_code": {start.UserCode}, "csrf_token": {csrf},
-	})
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	verifyResp.Body.Close()
-	if verifyResp.StatusCode != http.StatusFound {
-		t.Fatalf("verify status=%d, want a redirect to Telegram", verifyResp.StatusCode)
-	}
-	loc, _ := url.Parse(verifyResp.Header.Get("Location"))
-	state := loc.Query().Get("state")
-
-	cbResp, err := browser.Get(ts.URL + "/oauth/telegram/callback?" + url.Values{
-		"state": {state}, "code": {"tg-code"},
-	}.Encode())
-	if err != nil {
-		t.Fatalf("callback: %v", err)
-	}
-	cbBody, _ := io.ReadAll(cbResp.Body)
-	cbResp.Body.Close()
-	consentTok := string(e2eConsentRe.FindSubmatch(cbBody)[1])
-	consentCode := string(e2eUserCodeRe.FindSubmatch(cbBody)[1])
+	// The browser types the code and signs in with Telegram.
+	consent := localbridgetest.SignIn(t, ts.URL, browser, start.UserCode)
 	assertNoServerSideSession("after the Telegram leg, before consent")
 
 	// Nothing is written until the signed-in browser explicitly approves.
-	approveResp, err := browser.PostForm(ts.URL+"/local-bridge/activate/consent", url.Values{
-		"user_code": {consentCode}, "consent_token": {consentTok}, "action": {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("consent: %v", err)
-	}
-	approveResp.Body.Close()
+	localbridgetest.Approve(t, ts.URL, browser, consent)
 
 	pollResp, err := browser.Post(ts.URL+"/api/local-bridge/activate/poll", "application/json",
 		strings.NewReader(`{"device_code":"`+start.DeviceCode+`"}`))
