@@ -13,9 +13,32 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # release-please has to open the release PR as somebody. The default
+      # GITHUB_TOKEN stopped being able to do that on 2026-09-03: the
+      # "Allow GitHub Actions to create and approve pull requests" setting is
+      # off at the org level, and every push to main since 0.59.0 failed with
+      # "GitHub Actions is not permitted to create or approve pull requests"
+      # — seven releases' worth of commits with no release PR. Minting a
+      # token from the mctl-agents App (contents + pull-requests write on
+      # every mctlhq repo) sidesteps that setting without turning it back
+      # on, and has a second effect we want anyway: a PR opened with an App
+      # token raises pull_request events, so the release PR gets the same
+      # CI as any other branch instead of the default token's silent one.
+      - name: Generate release token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AGENTS_APP_ID }}
+          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-telegram
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         with:
+          token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -61,10 +84,10 @@ jobs:
       # These steps run last on purpose: the deploy dispatch above is what
       # gets the new server image moving, and a five-target build should not
       # sit in front of it. Publishing from here rather than from a workflow
-      # triggered by `release: published` is also deliberate — the release is
-      # created with the default GITHUB_TOKEN, and releases created that way
-      # do not raise events that start other workflows, so a `release`-
-      # triggered job would never run at all.
+      # triggered by `release: published` is also deliberate: it keeps the
+      # binaries on the same run that cut the tag, so a failed build is
+      # visible next to the release it belongs to rather than in a second
+      # workflow nobody is watching.
       #
       # No CGO is involved (modernc.org/sqlite is pure Go), so a single runner
       # cross-compiles every target.
