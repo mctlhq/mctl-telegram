@@ -113,9 +113,55 @@ func (s *Server) handleDeviceNonce(w http.ResponseWriter, r *http.Request) {
 		s.writeActivateError(w, http.StatusForbidden, devicePoPGenericRejection)
 		return
 	}
+	// Resolve the device BEFORE minting anything. Without this the endpoint
+	// hands a nonce to any string at all, and the capacity bound below turns
+	// into the attack: an attacker cycling through random device_id values
+	// fills the map and then evicts a legitimate nonce with every further
+	// request, so no real device can ever complete a PoP round trip. Issuance
+	// and refresh both stop working, for everyone, from an unauthenticated
+	// endpoint. A device_id is 128 bits of crypto/rand, so requiring a real
+	// one is what makes the flood cost the attacker something.
+	//
+	// Failures here are indistinguishable from every other failure on this
+	// path, and are charged to the caller's budget: probing device_id values
+	// is exactly what the budget is for.
+	device, derr := s.store.GetDevice(r.Context(), deviceID)
+	known := derr == nil && device.RevokedAt == nil
+	if !known {
+		// Charge the probe. The response itself is unchanged -- see below.
+		s.recordActivationFailure(ip)
+	}
+
 	nonce := randomToken(24)
 	ttl := s.cfg.DeviceNonceTTL
 	now := s.clock()
+
+	if !known {
+		// An unknown or revoked device_id still gets a well-formed nonce, and
+		// it is deliberately NOT stored. Two properties have to hold at once
+		// and only this shape gives both:
+		//
+		//   - No oracle. Answering differently here would let an attacker
+		//     learn which device_id values exist from the nonce endpoint
+		//     alone, one step earlier than the credential endpoint, which
+		//     collapses "unknown device" and "wrong key" into one generic
+		//     rejection precisely so it cannot be told apart. The handed-out
+		//     nonce fails at that step exactly as it did before.
+		//   - No flood. Storing it is what made the capacity bound an attack:
+		//     an attacker cycling random device_id values filled the map and
+		//     then evicted a live nonce with every further request, so no real
+		//     device could complete a PoP round trip -- issuance and refresh
+		//     dead for everyone, from an unauthenticated endpoint. A
+		//     device_id is 128 bits of crypto/rand, so occupying a slot now
+		//     requires already knowing one.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nonce":      nonce,
+			"expires_in": int(ttl.Seconds()),
+		})
+		return
+	}
 
 	s.mu.Lock()
 	// Bound the map before adding to it -- this endpoint is unauthenticated
@@ -128,15 +174,27 @@ func (s *Server) handleDeviceNonce(w http.ResponseWriter, r *http.Request) {
 	// retried nonce mint, not a stranded multi-step flow.
 	if s.cfg.MaxPendingDeviceNonces > 0 && len(s.deviceNonces) >= s.cfg.MaxPendingDeviceNonces {
 		if _, exists := s.deviceNonces[deviceID]; !exists {
-			var oldestKey string
-			var oldest *deviceNonce
+			// Expired entries first: they are already dead and evicting one
+			// costs nobody anything. Only if none are expired is the map
+			// genuinely full, and then a newcomer is refused rather than
+			// allowed to displace a live nonce -- the same rule
+			// handleActivateStart follows, for the same reason. Evicting the
+			// global oldest instead would mean whoever asks last always wins,
+			// which is the flood's whole mechanism.
+			var evicted bool
 			for k, n := range s.deviceNonces {
-				if oldest == nil || n.createdAt.Before(oldest.createdAt) {
-					oldestKey, oldest = k, n
+				if now.After(n.expiresAt) {
+					delete(s.deviceNonces, k)
+					evicted = true
+					break
 				}
 			}
-			if oldest != nil {
-				delete(s.deviceNonces, oldestKey)
+			if !evicted {
+				s.mu.Unlock()
+				w.Header().Set("Retry-After", "5")
+				s.writeActivateError(w, http.StatusServiceUnavailable,
+					"too many device verifications in progress, try again shortly")
+				return
 			}
 		}
 	}

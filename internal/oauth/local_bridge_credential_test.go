@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -341,5 +342,86 @@ func TestDeviceCredential_IssuanceRacingRevocationLoses(t *testing.T) {
 	}
 	if d.CurrentJti != "" {
 		t.Fatal("a revoked device must not have claimed a lineage")
+	}
+}
+
+// The nonce map's capacity bound was itself the attack. /nonce is
+// unauthenticated, so an attacker cycling through random device_id values
+// filled the map and then evicted a live nonce with every further request:
+// no real device could complete a PoP round trip, and issuance and refresh
+// stopped working for everyone. A bogus device_id must therefore occupy no
+// slot at all. The flood comes from distinct source addresses, because a
+// single-address flood is already stopped by the per-IP failure budget --
+// the slot rule is what has to hold when that budget does not apply.
+func TestDeviceNonce_UnknownDeviceOccupiesNoSlot(t *testing.T) {
+	srv := newTestServer(t)
+	h := chiRouterFor(srv)
+	deviceID, priv := registerTestDevice(t, srv, 700000201)
+
+	// A legitimate device takes its nonce first, making it the oldest entry
+	// and therefore the first casualty of a global oldest-evict.
+	victimNonce := doDeviceNonce(t, h, deviceID)
+
+	for i := 0; i < 200; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST",
+			"/api/local-bridge/devices/dev_flood_"+randomToken(8)+"/nonce", nil)
+		req.RemoteAddr = fmt.Sprintf("203.0.%d.%d:1000", i/254, i%254)
+		h.ServeHTTP(rec, req)
+	}
+
+	srv.mu.Lock()
+	stored := len(srv.deviceNonces)
+	_, victimStillThere := srv.deviceNonces[deviceID]
+	srv.mu.Unlock()
+	if stored != 1 {
+		t.Errorf("nonce map holds %d entries after a 200-request flood, want 1", stored)
+	}
+	if !victimStillThere {
+		t.Fatal("the flood evicted a legitimate device's nonce")
+	}
+
+	// And the victim's nonce is still usable, which is the property that
+	// actually matters to them.
+	rec := doDeviceCredential(t, h, "credential", deviceID, victimNonce, signDevicePoP(priv, deviceID, victimNonce))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("victim's credential call after the flood = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Refusing to store a bogus id must not become an "does this device exist"
+// oracle: at equal rate-limiter state, a real device_id and a bogus one are
+// answered identically, so the distinction is only ever learned at the
+// credential step, where it already collapses into one generic rejection.
+func TestDeviceNonce_KnownAndUnknownAreIndistinguishable(t *testing.T) {
+	srv := newTestServer(t)
+	h := chiRouterFor(srv)
+	deviceID, _ := registerTestDevice(t, srv, 700000202)
+
+	call := func(id, addr string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/local-bridge/devices/"+id+"/nonce", nil)
+		req.RemoteAddr = addr
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	real := call(deviceID, "198.51.100.1:1000")
+	bogus := call("dev_definitely_not_real", "198.51.100.2:1000")
+
+	if real.Code != bogus.Code {
+		t.Fatalf("status codes differ: real=%d bogus=%d", real.Code, bogus.Code)
+	}
+	var rj, bj map[string]any
+	if err := json.Unmarshal(real.Body.Bytes(), &rj); err != nil {
+		t.Fatalf("decode real: %v", err)
+	}
+	if err := json.Unmarshal(bogus.Body.Bytes(), &bj); err != nil {
+		t.Fatalf("decode bogus: %v", err)
+	}
+	if len(rj) != len(bj) || rj["expires_in"] != bj["expires_in"] {
+		t.Fatalf("response shapes differ, creating an oracle: real=%v bogus=%v", rj, bj)
+	}
+	if rj["nonce"] == "" || bj["nonce"] == "" {
+		t.Fatal("one of the responses carried no nonce")
 	}
 }

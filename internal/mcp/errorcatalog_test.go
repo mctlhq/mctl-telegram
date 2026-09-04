@@ -12,9 +12,9 @@ import (
 
 func TestFloodWaitSeconds(t *testing.T) {
 	cases := []struct {
-		code    string
-		wantN   int
-		wantOK  bool
+		code   string
+		wantN  int
+		wantOK bool
 	}{
 		{"FLOOD_WAIT_0", 0, true},
 		{"FLOOD_WAIT_30", 30, true},

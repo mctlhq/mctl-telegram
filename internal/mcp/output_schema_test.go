@@ -34,6 +34,8 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"mint_worker_token", first(s.toolMintWorkerToken())},
 		{"set_telegram_access", first(s.toolSetAccess())},
 		{"set_account_send", first(s.toolSetAccountSend())},
+		{"set_send_consent", first(s.toolSetSendConsent())},
+		{"revoke_local_bridge_device", first(s.toolRevokeLocalBridgeDevice())},
 		{"set_account_mode", first(s.toolSetAccountMode())},
 		{"provision_local_account", first(s.toolProvisionLocalAccount())},
 		{"send_message", first(s.toolSendMessage())},
