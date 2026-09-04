@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -274,6 +275,37 @@ func TestRegisterDevice_PostgresUpsert(t *testing.T) {
 	if !strings.HasPrefix(first, "dev_") {
 		t.Errorf("device_id %q does not have the expected dev_ prefix", first)
 	}
+
+	// Re-registration after a revoke is the path this fix opened, and it is
+	// the half the arbiter check above cannot reach: it depends on the index
+	// predicate excluding revoked rows AND on the ON CONFLICT target naming
+	// that same predicate, character for character. Drift between the two
+	// compiles, passes every SQLite test in this file -- SQLite's branch never
+	// runs the ON CONFLICT statement at all -- and then fails here, which is
+	// the only place it can be caught before production.
+	if err := s.RevokeDevice(ctx, first, "test revoke"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+	replacement, err := s.RegisterDevice(ctx, uid, "pg-device", key)
+	if err != nil {
+		// A predicate mismatch surfaces as "there is no unique or exclusion
+		// constraint matching the ON CONFLICT specification"; a revoked row
+		// still occupying the index surfaces as a unique violation the
+		// ON CONFLICT no longer absorbs.
+		t.Fatalf("re-register after revoke on Postgres: %v", err)
+	}
+	if replacement == first {
+		t.Fatalf("re-registration returned the revoked device_id %q", replacement)
+	}
+	var revoked sql.NullTime
+	if err := conn.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, replacement,
+	).Scan(&revoked); err != nil {
+		t.Fatalf("read replacement: %v", err)
+	}
+	if revoked.Valid {
+		t.Fatalf("replacement device %q is already revoked", replacement)
+	}
 }
 
 // Two DIFFERENT users supplying the same idempotency key must each get their
@@ -392,5 +424,104 @@ func TestTouchDeviceLastSeen_NoOpOnRevokedDevice(t *testing.T) {
 	}
 	if !after.LastSeenAt.Equal(*before.LastSeenAt) {
 		t.Errorf("last_seen_at moved on a revoked device: %v -> %v", *before.LastSeenAt, *after.LastSeenAt)
+	}
+}
+
+// A revoked device must not be resurrected by a retry, and revoking must not
+// permanently burn the idempotency key. Before the fix the read-back had no
+// revoked_at filter and the unique index covered revoked rows too, so
+// re-running activation after a revoke returned the REVOKED device_id and no
+// replacement row could ever be inserted -- the device was unusable and
+// unre-registerable at the same time, and issue #483 would have gone on to
+// mint credentials for the dead id.
+func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1099, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	const key = "idem-revoke-reuse"
+
+	first, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("first RegisterDevice: %v", err)
+	}
+	if err := s.RevokeDevice(ctx, first, "user revoked"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+
+	second, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("re-register after revoke: %v", err)
+	}
+	if second == first {
+		t.Fatalf("re-registration returned the revoked device_id %q", second)
+	}
+
+	// The replacement must be live, and the revoked row must stay revoked.
+	var revokedAt sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, second,
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("read replacement: %v", err)
+	}
+	if revokedAt.Valid {
+		t.Fatalf("replacement device %q is already revoked", second)
+	}
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM local_bridge_devices WHERE device_id = $1`, first,
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	if !revokedAt.Valid {
+		t.Fatalf("original device %q lost its revocation", first)
+	}
+
+	// A retry after the replacement still collapses onto the live row.
+	third, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	if err != nil {
+		t.Fatalf("retry after re-register: %v", err)
+	}
+	if third != second {
+		t.Fatalf("retry did not resolve to the live device: got %q want %q", third, second)
+	}
+}
+
+// A revoke that lands between RegisterDevice's insert and its read-back must
+// surface as ErrDeviceRevokedConcurrently, not as a bare sql.ErrNoRows
+// wrapped in "read back". The interleaving is forced with an AFTER INSERT
+// trigger, which revokes the freshly inserted row before control returns to
+// the read-back -- the same observable ordering a concurrent RevokeDevice
+// produces, without needing two connections to race.
+func TestRegisterDevice_RevokedBetweenInsertAndReadBack(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1100, "dave", "Dave")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`CREATE TRIGGER revoke_right_after_insert AFTER INSERT ON local_bridge_devices
+		 BEGIN
+		   UPDATE local_bridge_devices SET revoked_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+		 END`,
+	); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := s.DB.ExecContext(context.Background(),
+			`DROP TRIGGER IF EXISTS revoke_right_after_insert`); err != nil {
+			t.Fatalf("drop trigger: %v", err)
+		}
+	})
+
+	_, err = s.RegisterDevice(ctx, uid, "dave-laptop", "idem-raced-revoke")
+	if !errors.Is(err, ErrDeviceRevokedConcurrently) {
+		t.Fatalf("expected ErrDeviceRevokedConcurrently, got %v", err)
+	}
+	// The generic read-back wrapper must not be what the caller sees.
+	if strings.Contains(err.Error(), "no rows in result set") {
+		t.Fatalf("raw sql.ErrNoRows leaked to the caller: %v", err)
 	}
 }

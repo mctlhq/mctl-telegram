@@ -14,6 +14,13 @@ import (
 // device id.
 var ErrDeviceNotFound = errors.New("local bridge device not found")
 
+// ErrDeviceRevokedConcurrently is returned by RegisterDevice when the row
+// owning the supplied idempotency key was revoked between the insert and the
+// read-back. It is a distinct condition from any other read-back failure:
+// nothing is wrong with the request, and retrying with a fresh idempotency
+// key succeeds.
+var ErrDeviceRevokedConcurrently = errors.New("local bridge device revoked concurrently with registration")
+
 // Device is one row of local_bridge_devices: a durable record of a single
 // Local Bridge daemon installation, distinct from the account-wide
 // telegram_accounts.mode flag. Nothing in this issue reads or writes it from
@@ -59,7 +66,7 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 			// the pair, not the key alone — see the index comment in db.go.
 			`INSERT INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL DO NOTHING`,
 			userID, deviceID, nullable(label), nullable(idempotencyKey),
 		); err != nil {
 			return "", fmt.Errorf("register device: %w", err)
@@ -84,11 +91,32 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 	// user_id as well as the key, so this can only ever return a row
 	// belonging to the caller — a second layer behind the scoped unique
 	// index, not a substitute for it.
+	//
+	// revoked_at IS NULL matters as much as user_id: without it, re-running
+	// activation after a revoke returned the REVOKED device_id, and the
+	// unique index (then unscoped) refused to insert a replacement -- so a
+	// revoked device could never be re-registered with the same key, and the
+	// caller was handed a dead id it would go on to request credentials for.
+	// The index predicate above must stay in step with this WHERE clause.
 	var existing string
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT device_id FROM local_bridge_devices WHERE user_id = $1 AND idempotency_key = $2`,
+		`SELECT device_id FROM local_bridge_devices
+		 WHERE user_id = $1 AND idempotency_key = $2 AND revoked_at IS NULL`,
 		userID, idempotencyKey,
 	).Scan(&existing); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The key had a live row when the statement above ran and has
+			// none now: a revoke landed in between. Wrapping the insert and
+			// this read-back in one transaction does NOT close that window
+			// -- under READ COMMITTED each statement takes a fresh snapshot,
+			// and on the retry path the insert is a conflict no-op that
+			// leaves the pre-existing row unlocked, so a revoke committed
+			// between the two is still visible here. Name the condition
+			// instead of surfacing a bare "sql: no rows in result set", so
+			// the caller can retry with a fresh key rather than treating a
+			// benign race as a database fault.
+			return "", ErrDeviceRevokedConcurrently
+		}
 		return "", fmt.Errorf("register device: read back: %w", err)
 	}
 	return existing, nil
