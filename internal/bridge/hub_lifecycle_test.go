@@ -53,17 +53,36 @@ func TestHub_CallRetirementWhileEnqueueBlocked(t *testing.T) {
 			h := NewHub()
 			send := h.Register(userID, deviceID)
 
-			// Freeze the pump: fill its writer-facing buffer, then fill the
-			// internal outbound buffer. The next Hub.Call must block in its
-			// enqueue select until either capacity appears or dc.done closes.
+			// Freeze the pump, then fill the internal outbound buffer so the
+			// next Hub.Call has to block in its enqueue select until either
+			// capacity appears or dc.done closes.
+			//
+			// Order matters. The pump pulls from outbound as soon as anything
+			// lands there, so filling outbound to cap() in one pass leaves a
+			// free slot behind the pump's first pull, and Call would enqueue
+			// straight away and only ever exercise the reply-wait path. Park
+			// the pump on the full send buffer first, then top outbound up
+			// until a send would block, and check that it really is full.
 			h.mu.Lock()
 			dc := h.conn[userID]
 			h.mu.Unlock()
 			for i := 0; i < cap(dc.send); i++ {
 				dc.send <- Envelope{Type: TypePing, ID: fmt.Sprintf("send-%d", i)}
 			}
-			for i := 0; i < cap(dc.outbound); i++ {
-				dc.outbound <- Envelope{Type: TypePing, ID: fmt.Sprintf("queue-%d", i)}
+			dc.outbound <- Envelope{Type: TypePing, ID: "park-pump"}
+			for len(dc.outbound) != 0 {
+				time.Sleep(time.Millisecond) // pump takes it and parks on send
+			}
+			for i := 0; ; i++ {
+				select {
+				case dc.outbound <- Envelope{Type: TypePing, ID: fmt.Sprintf("queue-%d", i)}:
+					continue
+				default:
+				}
+				break
+			}
+			if got, want := len(dc.outbound), cap(dc.outbound); got != want {
+				t.Fatalf("outbound queue not full: %d/%d", got, want)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
