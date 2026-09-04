@@ -327,6 +327,14 @@ func serveDaemon(parent context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Fail here, by name, rather than three steps later as "device credential
+	// refresh failed" against an empty URL. This is what a 0.60.0 user saw
+	// after the documented init, login, activate --server, daemon sequence:
+	// activate did not persist --server until #501, and daemon has no
+	// --server flag of its own, so the config had nothing to dial.
+	if cfg.Server == "" {
+		return errNoServerConfigured
+	}
 
 	// Branch on which credential files are present -- design.md's "cmd/local
 	// daemon": a usable device credential means the device-signed path,
@@ -413,6 +421,11 @@ func serveDaemon(parent context.Context) error {
 	slog.Info("daemon stopped")
 	return nil
 }
+
+// errNoServerConfigured is the daemon's answer to a config.json with no
+// server: it names the two commands that set one, since the daemon itself
+// deliberately has no --server flag.
+var errNoServerConfigured = errors.New("no server configured -- run `mctl-telegram-local activate --server <url>` (or `connect --server <url> --token <t>`) first")
 
 // ---- helpers -------------------------------------------------------------
 
