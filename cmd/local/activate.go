@@ -30,7 +30,21 @@ import (
 // time.Now calls) so tests can drive the poll loop without waiting on real
 // wall-clock time, mirroring the enableLockWait-style testing seam used
 // elsewhere in this repo.
-var activateSleep = time.Sleep
+//
+// activateSleep takes a context because the poll interval is the longest the
+// CLI is ever idle: with a bare time.Sleep, a Ctrl-C arriving just after a
+// poll would sit unnoticed for the whole interval before anything looked at
+// the context again.
+var activateSleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 var activateNow = time.Now
 
 type activateStartResponse struct {
@@ -137,7 +151,9 @@ func runActivateFlow(ctx context.Context, out io.Writer, server string, telegram
 		if !deadline.IsZero() && activateNow().After(deadline) {
 			return "", errActivationTimedOut
 		}
-		activateSleep(interval)
+		if err := activateSleep(ctx, interval); err != nil {
+			return "", err
+		}
 		poll, err := activatePollRequest(ctx, server, start.DeviceCode)
 		if err != nil {
 			// A failed poll says nothing about the activation, which lives on
@@ -209,11 +225,13 @@ func activateStartRequest(ctx context.Context, server string, telegramID int64, 
 	return &out, nil
 }
 
-// activatePollRequest polls once. A non-200 HTTP status (the server's shape
-// for "unknown or expired device_code") is translated to a synthetic
-// {"status":"expired"} rather than propagated as a Go error, so the caller's
-// switch in runActivateFlow has one place that decides what to do with
-// every terminal outcome.
+// activatePollRequest polls once. HTTP 400 -- the server's only non-200 shape
+// for this endpoint, covering both "device_code is required" and "unknown or
+// expired device_code" -- is translated to a synthetic {"status":"expired"}
+// rather than propagated as a Go error, so the caller's switch in
+// runActivateFlow has one place that decides what to do with every terminal
+// outcome. Every OTHER non-200 is returned as an error: a 502 from an ingress
+// mid-rollout says nothing about the activation, which the server still holds.
 func activatePollRequest(ctx context.Context, server, deviceCode string) (*activatePollResponse, error) {
 	body, err := json.Marshal(map[string]string{"device_code": deviceCode})
 	if err != nil {

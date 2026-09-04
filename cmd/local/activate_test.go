@@ -22,8 +22,12 @@ func withFastPolling(t *testing.T) {
 	origSleep, origNow := activateSleep, activateNow
 	var fakeNow atomic.Int64
 	fakeNow.Store(time.Now().UnixNano())
-	activateSleep = func(d time.Duration) {
+	activateSleep = func(ctx context.Context, d time.Duration) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fakeNow.Add(int64(d))
+		return nil
 	}
 	activateNow = func() time.Time {
 		return time.Unix(0, fakeNow.Load())
@@ -318,5 +322,24 @@ func TestRunActivateFlow_CancelledContextStopsRetrying(t *testing.T) {
 	}()
 	if _, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label"); err == nil {
 		t.Fatal("expected an error once the context was cancelled")
+	}
+}
+
+// The poll interval is the longest the CLI is ever idle, so a cancellation
+// arriving during it must be observed then rather than one interval later.
+// Exercises the real activateSleep, not the test seam.
+func TestActivateSleep_ReturnsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	started := time.Now()
+	err := activateSleep(ctx, 10*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("waited %v for a cancellation that arrived after 10ms", elapsed)
 	}
 }
