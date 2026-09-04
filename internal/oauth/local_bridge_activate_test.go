@@ -622,7 +622,7 @@ func TestActivation_NoIndexLeaks(t *testing.T) {
 	resp.Body.Close()
 
 	srv.mu.Lock()
-	_, byUserCode := srv.activationsByUserCode[consent.UserCode]
+	_, byUserCode := srv.activationsByUserCode[normalizeUserCode(consent.UserCode)]
 	_, byState := srv.activationsByState[""] // sanity: never populated with empty key
 	act := srv.activations[start["device_code"].(string)]
 	srv.mu.Unlock()
@@ -956,7 +956,7 @@ func TestActivation_StoreFailureLeavesUsableRetry(t *testing.T) {
 	// activation state machine instead, mirroring what a store failure
 	// would leave behind: resolving -> awaiting_consent with a fresh token.
 	srv.mu.Lock()
-	act := srv.activationsByUserCode[consent.UserCode]
+	act := srv.activationsByUserCode[normalizeUserCode(consent.UserCode)]
 	if act == nil {
 		srv.mu.Unlock()
 		t.Fatal("activation not found by user_code")
@@ -1185,5 +1185,50 @@ func TestActivationFailLimiter_MapIsBounded(t *testing.T) {
 	srv.mu.Unlock()
 	if n > 8 {
 		t.Fatalf("activationFails holds %d keys, above the configured bound of 8", n)
+	}
+}
+
+// The user_code is Crockford base32 so it survives being read off a terminal
+// and retyped. That promise only holds if the lookup forgives what Crockford
+// forgives. A miss here does not merely re-prompt -- it spends the client's
+// failure budget -- so a desktop browser handing back a lowercase code, or a
+// user typing O for 0, must not be punished for a code they got right.
+func TestActivateVerify_UserCodeIsNormalized(t *testing.T) {
+	srv, _ := newActivationHTTPServer(t)
+	_, deviceCode := startActivationFrom(t, srv, "203.0.113.7:1000", "norm-key")
+	if deviceCode == "" {
+		t.Fatal("activation start was refused")
+	}
+	srv.mu.Lock()
+	displayed := srv.activations[deviceCode].userCode
+	srv.mu.Unlock()
+
+	canonical := normalizeUserCode(displayed)
+	variants := map[string]string{
+		"as displayed":      displayed,
+		"lowercased":        strings.ToLower(displayed),
+		"hyphen omitted":    strings.ReplaceAll(displayed, "-", ""),
+		"surrounding space": "  " + displayed + "  ",
+		// Crockford's whole point: these glyphs are absent from the alphabet
+		// precisely because they are misread for the digits they resemble.
+		"O typed for 0": strings.ReplaceAll(displayed, "0", "O"),
+		"I typed for 1": strings.ReplaceAll(displayed, "1", "I"),
+		"l typed for 1": strings.ToLower(strings.ReplaceAll(displayed, "1", "L")),
+	}
+	for name, typed := range variants {
+		if got := normalizeUserCode(typed); got != canonical {
+			t.Errorf("%s: normalizeUserCode(%q) = %q, want %q", name, typed, got, canonical)
+		}
+		srv.mu.Lock()
+		_, found := srv.activationsByUserCode[normalizeUserCode(typed)]
+		srv.mu.Unlock()
+		if !found {
+			t.Errorf("%s: %q did not resolve to the activation", name, typed)
+		}
+	}
+
+	// Normalization must not turn a genuinely wrong code into a hit.
+	if _, found := srv.activationsByUserCode[normalizeUserCode("ZZZZ-ZZZZ")]; found {
+		t.Error("an unrelated code resolved to the activation")
 	}
 }

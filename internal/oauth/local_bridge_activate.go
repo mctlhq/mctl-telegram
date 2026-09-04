@@ -141,8 +141,8 @@ type activationFailWindow struct {
 // CLI still has to poll device_code to learn the outcome and, for done,
 // collect device_id. Must be called with s.mu held.
 func (s *Server) unindexActivation(act *localBridgeActivation) {
-	if act.userCode != "" && s.activationsByUserCode[act.userCode] == act {
-		delete(s.activationsByUserCode, act.userCode)
+	if key := normalizeUserCode(act.userCode); key != "" && s.activationsByUserCode[key] == act {
+		delete(s.activationsByUserCode, key)
 	}
 	if act.oidcState != "" && s.activationsByState[act.oidcState] == act {
 		delete(s.activationsByState, act.oidcState)
@@ -189,6 +189,35 @@ func (s *Server) denyActivation(act *localBridgeActivation, reason string) {
 	s.denyActivationFrom(act, statusPending, reason)
 }
 
+// normalizeUserCode maps a code as a human typed it onto the canonical key
+// used by Server.activationsByUserCode. The code is displayed in Crockford
+// base32 precisely so it survives being read off a terminal and retyped, and
+// that promise only holds if the lookup forgives what Crockford is designed
+// to forgive: case, the confusable glyphs the alphabet omits (O for 0, I and
+// L for 1), and the cosmetic hyphen. Anything outside the alphabet is dropped
+// rather than rejected, so a stray space or a doubled hyphen is not a failure.
+//
+// This matters beyond convenience: a miss does not merely re-prompt, it spends
+// the client's failure budget. Without normalization a desktop browser (which
+// ignores autocapitalize) handing back a lowercase code would burn that budget
+// on a code the user typed correctly.
+func normalizeUserCode(in string) string {
+	var b strings.Builder
+	b.Grow(len(in))
+	for _, r := range strings.ToUpper(strings.TrimSpace(in)) {
+		switch r {
+		case 'O':
+			r = '0'
+		case 'I', 'L':
+			r = '1'
+		}
+		if strings.ContainsRune(crockfordAlphabet, r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // ----- user_code generation -----
 
 // crockfordAlphabet excludes I, L, O, U to avoid visual confusion with
@@ -230,7 +259,7 @@ func (s *Server) mintUserCodeLocked() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if _, exists := s.activationsByUserCode[code]; !exists {
+		if _, exists := s.activationsByUserCode[normalizeUserCode(code)]; !exists {
 			return code, nil
 		}
 	}
@@ -567,7 +596,7 @@ func (s *Server) handleActivateStart(w http.ResponseWriter, r *http.Request) {
 	}
 	act.userCode = userCode
 	s.activations[act.deviceCode] = act
-	s.activationsByUserCode[userCode] = act
+	s.activationsByUserCode[normalizeUserCode(userCode)] = act
 	s.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -649,7 +678,7 @@ func (s *Server) handleActivateVerify(w http.ResponseWriter, r *http.Request) {
 	userCode := strings.TrimSpace(r.FormValue("user_code"))
 
 	s.mu.Lock()
-	act, ok := s.activationsByUserCode[userCode]
+	act, ok := s.activationsByUserCode[normalizeUserCode(userCode)]
 	if ok && s.clock().Sub(act.createdAt) > s.cfg.ActivationTTL {
 		ok = false
 	}
@@ -814,7 +843,7 @@ func (s *Server) handleActivateConsent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	act, ok := s.activationsByUserCode[userCode]
+	act, ok := s.activationsByUserCode[normalizeUserCode(userCode)]
 	if ok && s.clock().Sub(act.createdAt) > s.cfg.ActivationTTL {
 		ok = false
 	}

@@ -76,7 +76,7 @@ type Server struct {
 	// mechanism. See local_bridge_activate.go.
 	activations           map[string]*localBridgeActivation // keyed by device_code
 	activationsByState    map[string]*localBridgeActivation // keyed by the Telegram-leg OIDC state
-	activationsByUserCode map[string]*localBridgeActivation // keyed by user_code
+	activationsByUserCode map[string]*localBridgeActivation // keyed by normalizeUserCode(user_code)
 	// activationFails is the failed-submission rate limiter shared by the
 	// user_code form and the consent endpoint, keyed by the client IP derived
 	// via clientIP (trusted-proxy-aware). Read/written under mu, swept
