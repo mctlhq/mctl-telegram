@@ -592,10 +592,12 @@ definition and points at a readable file.
 than Git Bash; the no-echo prompt does not work under mintty.
 
 **My first send after granting consent didn't go through** — check the
-`dry_run` field of the response. If it is still a dry-run, the daemon's
-scheduled credential refresh (see `set_send_consent` above) is what makes a
-newly granted send scope available.
-still doesn't clear, confirm `set_send_consent` actually reports
+`dry_run` field of the response. If it is still a dry-run, the credential
+your MCP client presents has not picked up the send scope yet — it gains that
+at its next refresh (see `set_send_consent` above), and nothing on the
+daemon's side can hurry it, because the refusal is decided on the server and
+never reaches the daemon. Refresh that credential and try again. If the
+dry-run still doesn't clear, confirm `set_send_consent` actually reports
 `send_enabled: true` for your account.
 
 ## Rolling back

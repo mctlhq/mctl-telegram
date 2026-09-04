@@ -169,8 +169,10 @@ func deviceLockFilePath(configDir string) string {
 }
 
 // withDeviceRecordLock acquires an exclusive lock on the device record --
-// implemented as an os.O_EXCL lockfile in configDir, no external dependency
-// needed -- runs fn, and releases the lock. Used by BOTH activate's record
+// an advisory flock (LockFileEx on Windows) on a lockfile in configDir, no
+// external dependency needed. The lock lives on the open handle rather than
+// on the file's existence, so the kernel releases it when the holder dies
+// however it dies; a leftover lockfile is inert -- runs fn, and releases the lock. Used by BOTH activate's record
 // read-modify-writes and the daemon's credential-merge writes (design.md,
 // "activate serialises its record writes").
 //
