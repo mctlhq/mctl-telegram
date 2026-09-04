@@ -347,7 +347,13 @@ func selectDeviceCredentialSource() (rec *deviceRecord, priv ed25519.PrivateKey,
 // routes require no live credential, so a daemon whose worker token expired
 // while the machine was asleep still refreshes normally, and this is one
 // extra round trip per session start, not per call.
-func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64) error {
+//
+// primed carries a credential the caller has ALREADY refreshed — runDaemonCmd
+// refreshes once before prompting for the passphrase, so that a revoked or
+// unusable device fails before the user types anything. Without threading it
+// through, the first loop iteration would refresh again immediately: two PoP
+// round trips on every start, for one connection.
+func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64, primed *bridgeTokenFile) error {
 	backoff := reconnectBase
 	for {
 		rec, priv, selErr := selectDeviceCredentialSource()
@@ -356,14 +362,20 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 		}
 
 		var bt *bridgeTokenFile
-		if rec != nil {
+		switch {
+		case primed != nil:
+			// Consumed once: every later iteration is a genuine reconnect and
+			// must fetch a current credential of its own.
+			bt = primed
+			primed = nil
+		case rec != nil:
 			newBT, refreshErr := refreshDeviceCredential(ctx, cfg, rec.DeviceID, priv)
 			if refreshErr != nil {
 				return fmt.Errorf("refresh device credential: %w", refreshErr)
 			}
 			bt = newBT
 			slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
-		} else {
+		default:
 			var err error
 			bt, err = loadBridgeToken()
 			if err != nil {

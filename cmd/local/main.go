@@ -381,7 +381,7 @@ func runDaemonCmd() {
 	}()
 
 	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt, "user_id", uid)
-	if err := runDaemon(ctx, cfg, pool, uid); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runDaemon(ctx, cfg, pool, uid, bt); err != nil && !errors.Is(err, context.Canceled) {
 		die(err)
 	}
 	slog.Info("daemon stopped")

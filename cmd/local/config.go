@@ -192,22 +192,30 @@ func withDeviceRecordLock(configDir string, timeout time.Duration, fn func() err
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	lockPath := deviceLockFilePath(configDir)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open device lock file: %w", err)
+	}
+	defer f.Close()
+
 	deadline := time.Now().Add(timeout)
 	for {
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			_ = f.Close()
-			break
+		got, err := lockFileExclusive(f)
+		if err != nil {
+			return fmt.Errorf("lock device record: %w", err)
 		}
-		if !os.IsExist(err) {
-			return fmt.Errorf("create device lock file: %w", err)
+		if got {
+			break
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("another activation or daemon refresh is already running (device lock held past %v) -- try again shortly", timeout)
 		}
 		time.Sleep(deviceLockRetryInterval)
 	}
-	defer func() { _ = os.Remove(lockPath) }()
+	// The lockfile itself is left in place deliberately: the lock lives on the
+	// open handle, not on the file's existence, so a leftover file is inert and
+	// removing it would only race a process that is holding it.
+	defer unlockFile(f)
 	return fn()
 }
 

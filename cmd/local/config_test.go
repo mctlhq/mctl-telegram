@@ -471,13 +471,18 @@ func TestWithDeviceRecordLock_TimesOutOnContention(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// Simulate another process holding the lock indefinitely.
-	lockPath := deviceLockFilePath(dir)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	// Hold the lock the way a live process holds it: on an open handle. The
+	// file merely existing is not the lock -- see the staleness test below.
+	f, err := os.OpenFile(deviceLockFilePath(dir), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		t.Fatalf("seed lock file: %v", err)
+		t.Fatalf("open lock file: %v", err)
 	}
 	defer f.Close()
+	got, err := lockFileExclusive(f)
+	if err != nil || !got {
+		t.Fatalf("seed lock: got=%v err=%v", got, err)
+	}
+	defer unlockFile(f)
 
 	err = withDeviceRecordLock(dir, 200*time.Millisecond, func() error {
 		t.Fatal("fn must not run when the lock could not be acquired")
@@ -485,5 +490,40 @@ func TestWithDeviceRecordLock_TimesOutOnContention(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected a timeout error, got nil")
+	}
+}
+
+// A lockfile left behind by a process that died holding it must NOT block
+// anything. The lock lives on the open handle, and the kernel drops it when
+// the holder dies however it dies -- which is the whole reason this is an
+// advisory lock and not a sentinel file. With a sentinel, a SIGKILL, an OOM
+// kill or a power cut left every later activate and daemon refresh failing
+// until a human found and deleted the file: the guard against a bricked
+// config directory becoming a way to brick one.
+func TestWithDeviceRecordLock_StaleLockFileDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	// A file left over from a dead holder: present, unlocked.
+	f, err := os.OpenFile(deviceLockFilePath(dir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	if _, err := f.WriteString("leftover"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.Close() // process died; the OS released whatever it held
+
+	ran := false
+	start := time.Now()
+	if err := withDeviceRecordLock(dir, 2*time.Second, func() error {
+		ran = true
+		return nil
+	}); err != nil {
+		t.Fatalf("a leftover lock file blocked acquisition: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn did not run")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("waited %v for a lock nobody holds", elapsed)
 	}
 }
