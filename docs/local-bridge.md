@@ -251,38 +251,20 @@ getting this backwards in either direction is worse than saying nothing:
   whether or not it is still connected. Nothing here evicts the daemon's
   websocket connection on a consent change — that would overstate what
   consent does and understate what device revocation (below) is for.
-- **Turning consent on** is the direction that needs the daemon's own
-  credential to catch up before a send can actually go through, because the
-  scope baked into that credential is the coarse gate the server checks before
-  it even gets to the live `send_enabled` read. Waiting for the daemon's
-  normal, hours-scale scheduled refresh would mean granting consent and then
-  waiting hours for your first real message to leave — so the daemon does not
-  wait: when a send comes back as a dry-run draft, it opportunistically
-  refreshes its own device credential out of band, at most once every 30
-  seconds (`outOfBandRefreshCooldown` in `cmd/local/daemon.go`), and retries
-  the same send as real **only if** the refreshed credential's scopes
-  actually gained `telegram:messages:send`. If consent is still off, the
-  refresh comes back exactly as read-only as before, the daemon reports the
-  same dry-run it would have anyway, and it will not refresh again for
-  another 30 seconds no matter how many sends you retry in the meantime — a
-  refusal can trigger at most one refresh, never a loop.
+- **Turning consent on** takes effect once the credential your MCP client
+  presents carries `telegram:messages:send`. That scope is derived from your
+  account's current `send_enabled` every time a device credential is issued or
+  refreshed, so it arrives on the next refresh — it is not baked in for the
+  life of the credential.
 
-  **This out-of-band refresh is a documented assumption, not a guarantee.**
-  It works because in the zero-admin flow this guide describes, the same
-  worker credential the daemon refreshes doubles as the credential your MCP
-  client itself authenticates with — mirroring how the legacy
-  `bridge_token.json`'s `mcp_token` field serves both purposes today. If your
-  MCP client is instead authenticating with some other credential entirely,
-  refreshing the daemon's own copy has no effect on that other credential's
-  scope, and your send stays a dry run until whatever issued *that* credential
-  refreshes it. If your first send after granting consent does not go
-  through immediately, wait a moment and try again — most of the time the
-  next daemon-initiated refresh (the ordinary hours-scale one, not the
-  opportunistic one) closes the gap.
-
-Three things that are **no longer** operator steps, in case you read an older
-description of this mode:
-
+  There is deliberately no mechanism that shortcuts this from the daemon's
+  side. The send gate is evaluated on the server, and when it refuses, the
+  server returns the dry-run preview to your MCP client directly; the daemon
+  is never contacted. A daemon that wanted to notice a refusal and refresh
+  early has nothing to notice — an earlier draft of this feature shipped
+  exactly that mechanism, and it could not fire. If you have just granted
+  consent and want to send immediately, refresh the credential your client
+  authenticates with rather than waiting for the scheduled refresh.
 - **No hosted login first.** A local account can be created directly by
   `activate`, so the server never holds a session for it.
 - **No TTL exemption.** Local accounts are excluded from the idle and absolute
@@ -611,8 +593,8 @@ than Git Bash; the no-echo prompt does not work under mintty.
 
 **My first send after granting consent didn't go through** — check the
 `dry_run` field of the response. If it is still a dry-run, the daemon's
-opportunistic out-of-band refresh (see `set_send_consent` above) may be
-cooling down from a previous attempt; wait a few seconds and retry. If it
+scheduled credential refresh (see `set_send_consent` above) is what makes a
+newly granted send scope available.
 still doesn't clear, confirm `set_send_consent` actually reports
 `send_enabled: true` for your account.
 

@@ -238,11 +238,11 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	// ---- send ----
 	//
 	// The credential in hand is still the read-only one, so this send is
-	// refused for want of SCOPE, not for want of consent. That is the case the
-	// daemon's out-of-band refresh exists for: it observes the refusal,
-	// refreshes immediately rather than waiting for its scheduled refresh, and
-	// retries. Without that step the owner would grant consent and then wait
-	// hours for their first message, which is not zero-admin onboarding.
+	// refused for want of SCOPE, not for want of consent — and the refusal is
+	// decided HERE, on the server, which returns the dry-run to the MCP client
+	// without contacting the daemon at all. That is why there is no daemon-side
+	// mechanism to shortcut it: a daemon never sees this refusal. The scope
+	// arrives on the credential's next refresh, which is the step below.
 	if real, reason := evaluateSendGate(ctx, store, readID, true, 0); real {
 		t.Fatal("a read-only credential was allowed to send")
 	} else if !strings.Contains(reason, "scope") {

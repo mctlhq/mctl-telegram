@@ -98,32 +98,6 @@ var (
 	lastOutOfBandRefresh time.Time
 )
 
-// jwtScopes decodes the "scopes" claim from a JWT's payload segment WITHOUT
-// verifying its signature -- safe for the client's own local
-// decision-making (see background: "the client can decode the middle
-// segment without verifying the signature to read scopes -- this is fine
-// ... it does not bypass any server-side enforcement"). The server
-// re-checks everything (ALLOW_SEND, scope, live send_enabled, rate limit)
-// on every call regardless of what this daemon believes its own token
-// allows.
-func jwtScopes(token string) ([]string, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("not a 3-segment JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("decode JWT payload: %w", err)
-	}
-	var claims struct {
-		Scopes []string `json:"scopes"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("parse JWT payload: %w", err)
-	}
-	return claims.Scopes, nil
-}
-
 func hasScope(scopes []string, want string) bool {
 	for _, s := range scopes {
 		if s == want {
@@ -133,77 +107,20 @@ func hasScope(scopes []string, want string) bool {
 	return false
 }
 
-// maybeUpgradeSendMode implements the out-of-band send-scope refresh
-// described above. It is a no-op unless ALL of the following hold:
+// The out-of-band send-scope refresh that used to live here has been removed:
+// it could never run. The send gate is evaluated SERVER-side, and when it
+// refuses, internal/mcp returns the dry-run preview to the MCP client
+// directly without contacting the daemon at all (see tools.go's
+// "Draft-by-default" branch). A call only reaches the daemon once the gate has
+// already passed, with mode="send" set — so the daemon never observes a
+// refusal, and a daemon-side "notice the refusal and refresh" mechanism has
+// nothing to notice. Keeping it would have meant the documentation promising
+// a mechanism that cannot fire.
 //
-//   - the server already decided a draft (*realSend == false) -- a real
-//     send is never second-guessed;
-//   - a usable device credential is on disk (the legacy bearer path is left
-//     entirely alone);
-//   - the stored worker_token does NOT already carry
-//     telegram:messages:send (if it does, the draft verdict came from
-//     something a refresh cannot fix -- ALLOW_SEND, the rate limiter, the
-//     demo-reviewer gate -- and refreshing again would just cost a round
-//     trip for no possible benefit);
-//   - the cooldown has elapsed since the last out-of-band refresh, bounding
-//     this to at most one attempt per outOfBandRefreshCooldown regardless
-//     of how many refused sends arrive in between (T18's bound -- a refusal
-//     is reachable by anyone who can cause the daemon to attempt a send).
-//
-// On a successful refresh it re-checks the NEW token's scopes and only then
-// overrides realSend/dryReason -- so a refresh that does not actually gain
-// the scope (consent is still off) leaves the original dry-run verdict
-// untouched, and a repeated refusal never turns into a retry loop.
-func maybeUpgradeSendMode(ctx context.Context, cfg *localConfig, realSend *bool, dryReason *string) {
-	if *realSend {
-		return
-	}
-	rec, err := loadDeviceRecordIfPresent()
-	if err != nil || rec == nil || !deviceCredentialUsable(rec) {
-		return // no usable device credential -- legacy path, left untouched
-	}
-	scopes, err := jwtScopes(rec.WorkerToken)
-	if err == nil && hasScope(scopes, "telegram:messages:send") {
-		return // already has the scope; a refresh cannot help
-	}
-
-	outOfBandRefreshMu.Lock()
-	coolingDown := time.Since(lastOutOfBandRefresh) < outOfBandRefreshCooldown
-	if !coolingDown {
-		lastOutOfBandRefresh = time.Now()
-	}
-	outOfBandRefreshMu.Unlock()
-	if coolingDown {
-		return
-	}
-
-	priv, _, ok := deviceIdentityUsable(rec.PrivateKey, rec.PublicKey)
-	if !ok {
-		// Unusable key material is the daemon's "stop and name activate"
-		// condition elsewhere (selectDeviceCredentialSource); here it is
-		// simply "cannot attempt the opportunistic refresh", since a send
-		// call is already in flight and refusing the whole daemon over an
-		// optional optimization would be worse than reporting the dry-run.
-		return
-	}
-	if _, err := refreshDeviceCredential(ctx, cfg, rec.DeviceID, priv); err != nil {
-		slog.Warn("out-of-band send-scope refresh failed", "err", err)
-		return
-	}
-
-	rec2, err := loadDeviceRecordIfPresent()
-	if err != nil || rec2 == nil {
-		return
-	}
-	newScopes, err := jwtScopes(rec2.WorkerToken)
-	if err != nil {
-		return
-	}
-	if hasScope(newScopes, "telegram:messages:send") {
-		*realSend = true
-		*dryReason = ""
-	}
-}
+// What a consent GRANT actually waits for is the credential the MCP client
+// presents carrying telegram:messages:send, which it gains at its next
+// refresh. A consent REVOKE needs nothing: the live send_enabled read refuses
+// the next send whatever any credential says.
 
 // exchangeForBridgeToken presents bearerToken to POST /api/bridge/token and
 // returns the resulting aud=bridge token. Shared by refreshBridgeToken
@@ -752,7 +669,6 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		}
 		realSend := args.Mode == "send"
 		dryReason := args.DryReason
-		maybeUpgradeSendMode(ctx, cfg, &realSend, &dryReason)
 		if !realSend && dryReason == "" {
 			dryReason = "mode=draft"
 		}
@@ -782,7 +698,6 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		}
 		realSend := args.Mode == "send"
 		dryReason := args.DryReason
-		maybeUpgradeSendMode(ctx, cfg, &realSend, &dryReason)
 		if !realSend && dryReason == "" {
 			dryReason = "mode=draft"
 		}
