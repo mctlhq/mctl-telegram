@@ -1308,3 +1308,98 @@ func TestTrustedProxyCIDRsFromEnv(t *testing.T) {
 		}
 	})
 }
+
+// The exact attack the consent step exists to stop, run end to end in two
+// browsers.
+//
+// The attacker opens the activation naming the victim's telegram_id, so they
+// know the user_code. The victim signs in and the activation reaches
+// awaiting_consent. The attacker then re-presents that user_code from their
+// own browser with a CSRF pair they minted themselves. If resuming is allowed
+// on the strength of the code alone, the server hands the attacker a fresh
+// consentToken plus the victim's verified username, and the attacker approves
+// a device onto the victim's account without the victim ever consenting.
+func TestActivation_ConsentCannotBeResumedFromAnotherBrowser(t *testing.T) {
+	srv, ts := newActivationHTTPServer(t)
+	victim := newActivationClient(t)
+	attacker := newActivationClient(t)
+	before := snapshotDB(t, srv)
+
+	// The victim completes the Telegram leg; the activation now sits in
+	// awaiting_consent with nothing written.
+	start, victimConsent := driveToConsent(t, ts, victim, 210408407, "attacker-device-key")
+	userCode := start["user_code"].(string)
+
+	// The attacker re-presents the code from a browser that never did the
+	// OIDC leg, with a CSRF pair of their own.
+	attackerCSRF := activationFormCSRF(t, ts, attacker)
+	resp := activateVerify(t, ts, attacker, userCode, attackerCSRF)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if consentTokenRe.Match(body) {
+		t.Fatal("a browser that never completed the Telegram leg was handed a consent token")
+	}
+	if strings.Contains(string(body), "mctlhq") {
+		t.Errorf("the victim's verified Telegram username leaked to the attacker: %s", body)
+	}
+
+	// And the victim's own token must not have been rotated out from under
+	// them by the attacker's attempt -- otherwise the attack degrades into
+	// locking the victim out of their own consent page.
+	srv.mu.Lock()
+	act := srv.activationsByUserCode[normalizeUserCode(userCode)]
+	stillValid := act != nil && act.consentToken == victimConsent.ConsentToken
+	srv.mu.Unlock()
+	if !stillValid {
+		t.Error("the attacker's attempt invalidated the victim's consent token")
+	}
+
+	if after := snapshotDB(t, srv); after != before {
+		t.Errorf("db changed during the attempted bypass: before=%+v after=%+v", before, after)
+	}
+}
+
+// The legitimate case the resume branch exists for: the SAME browser
+// re-presents the code (the user reopened the form) and is shown the consent
+// page again. The binding must not break this.
+func TestActivation_ConsentResumesInTheSameBrowser(t *testing.T) {
+	_, ts := newActivationHTTPServer(t)
+	client := newActivationClient(t)
+
+	start, first := driveToConsent(t, ts, client, 210408407, "resume-key")
+	csrf := activationFormCSRF(t, ts, client)
+	resp := activateVerify(t, ts, client, start["user_code"].(string), csrf)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("resume status=%d body=%s", resp.StatusCode, body)
+	}
+	second := extractConsent(t, body)
+	if second.ConsentToken == "" {
+		t.Fatal("resumed consent page carried no token")
+	}
+	if second.ConsentToken == first.ConsentToken {
+		t.Error("resuming should mint a fresh consent token")
+	}
+}
+
+// X-Forwarded-For legitimately arrives as several header lines. Header.Get
+// returns only the first, so a proxy that appends its own line rather than
+// comma-extending the existing one is invisible -- and the line Get does
+// return is the attacker's. The chain must be read whole.
+func TestClientIP_MultipleForwardedForHeaderLines(t *testing.T) {
+	trusted := netip.MustParsePrefix("198.51.100.0/24")
+	srv, _ := newActivationHTTPServer(t, func(c *Config) {
+		c.TrustedProxyCIDRs = []netip.Prefix{trusted}
+	})
+
+	r := httptest.NewRequest("POST", "/local-bridge/activate", nil)
+	r.RemoteAddr = "198.51.100.5:1111"              // the trusted ingress
+	r.Header.Add("X-Forwarded-For", "10.9.9.9")     // the attacker's own line, sent first
+	r.Header.Add("X-Forwarded-For", "203.0.113.42") // appended by the proxy
+
+	if got := srv.clientIP(r); got != "203.0.113.42" {
+		t.Fatalf("clientIP = %q, want 203.0.113.42 -- the proxy's appended line, not the attacker's", got)
+	}
+}

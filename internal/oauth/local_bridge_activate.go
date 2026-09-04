@@ -33,6 +33,7 @@ package oauth
 // the consent step and the (non-URL-embedded) user_code both exist.
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -108,6 +109,14 @@ type localBridgeActivation struct {
 	// Set once the browser starts the Telegram leg. oidcState keys
 	// Server.activationsByState while the leg is in flight.
 	oidcState, oidcNonce, oidcVerifier string
+
+	// consentBinding is a per-activation secret minted at the moment the
+	// OIDC leg proves the identity. Its hash is handed to that browser as a
+	// cookie, and every later step of the consent phase demands it back. It
+	// is what makes the consent gate a gate: without it, knowing the
+	// user_code is enough to be handed a consent page, and the attacker who
+	// opened the activation always knows the user_code.
+	consentBinding string
 
 	// consentToken is set once Telegram OIDC has proven the identity and
 	// cleared on resolution (or replaced with a fresh value on a resumed
@@ -288,11 +297,17 @@ func (s *Server) clientIP(r *http.Request) string {
 	if !s.peerIsTrustedProxy(peerAddr) {
 		return rateLimitKeyFor(peerAddr)
 	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
+	// Values, not Get. X-Forwarded-For legitimately arrives as several
+	// header lines, and Get returns only the FIRST -- which, when a proxy
+	// appends its own line rather than comma-extending the existing one, is
+	// the attacker's line and not the proxy's. The chain has to be read
+	// whole, in wire order, or the right-to-left scan below is scanning a
+	// list the attacker chose.
+	lines := r.Header.Values("X-Forwarded-For")
+	if len(lines) == 0 {
 		return rateLimitKeyFor(peerAddr)
 	}
-	parts := strings.Split(xff, ",")
+	parts := strings.Split(strings.Join(lines, ","), ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		cand := strings.TrimSpace(parts[i])
 		candAddr, cerr := netip.ParseAddr(cand)
@@ -469,6 +484,64 @@ func clearActivationStateCookie(w http.ResponseWriter) {
 func hashActivationState(oidcState string) string {
 	sum := sha256.Sum256([]byte(oidcState))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// ----- consent-phase browser binding cookie (lb_act_consent) -----
+
+// activationConsentCookieName carries the hash of an activation's
+// consentBinding. It is what proves a request in the consent phase comes from
+// the same browser that completed the Telegram leg.
+//
+// The consent step exists to stop activation phishing: an attacker opens an
+// activation naming the victim's telegram_id, gets the victim to sign in, and
+// without a separate approval their device is registered on the victim's
+// account. Both the identity check and the CLI-claim check pass, because the
+// claimed and verified ids really are the same -- the only thing standing
+// between the attacker and the account is that somebody must consciously
+// approve.
+//
+// The user_code alone cannot be that somebody. The attacker started the
+// activation, so they know it, and the double-submit CSRF token is one they
+// mint for themselves. Presenting the code again after the victim signs in
+// would otherwise hand the attacker a fresh consentToken AND the victim's
+// verified username and display name. This cookie is the missing binding.
+const activationConsentCookieName = "lb_act_consent"
+
+func setActivationConsentCookie(w http.ResponseWriter, binding string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     activationConsentCookieName,
+		Value:    hashActivationState(binding),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600,
+	})
+}
+
+func clearActivationConsentCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     activationConsentCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
+// consentCookieMatches reports whether r carries the consent binding cookie
+// for binding. Compared with hmac.Equal, like every other binding check here.
+func consentCookieMatches(r *http.Request, binding string) bool {
+	if binding == "" {
+		return false
+	}
+	c, err := r.Cookie(activationConsentCookieName)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal([]byte(hashActivationState(binding)), []byte(c.Value))
 }
 
 // ----- code-form double-submit CSRF cookie -----
@@ -707,6 +780,19 @@ func (s *Server) handleActivateVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if act.status == statusAwaitingConsent {
+		// Resuming is only for the browser that completed the Telegram leg.
+		// Without this check, re-presenting the user_code after the victim
+		// signs in hands the caller a fresh consentToken and the victim's
+		// verified username and display name -- and the attacker who opened
+		// the activation is precisely who knows the user_code. Refuse
+		// exactly like a wrong code: same generic page, same failure budget,
+		// nothing about the activation disclosed.
+		if !consentCookieMatches(r, act.consentBinding) {
+			s.mu.Unlock()
+			s.recordActivationFailure(ip)
+			renderActivationRejected(w, r)
+			return
+		}
 		// Resuming, not restarting: the identity was already proven by a
 		// prior pass through Telegram OIDC. finishActivation requires
 		// `pending`, so starting a second OIDC leg here would fail that
@@ -816,6 +902,7 @@ func (s *Server) finishActivation(w http.ResponseWriter, r *http.Request, act *l
 	if ok {
 		act.verifiedIdentity = identity
 		act.consentToken = randomToken(32)
+		act.consentBinding = randomToken(32)
 		act.status = statusAwaitingConsent
 		page = activationConsentPage{
 			UserCode:     act.userCode,
@@ -825,6 +912,7 @@ func (s *Server) finishActivation(w http.ResponseWriter, r *http.Request, act *l
 			DisplayName:  strings.TrimSpace(identity.FirstName + " " + identity.LastName),
 		}
 	}
+	binding := act.consentBinding
 	s.mu.Unlock()
 	if !ok {
 		// Already resolved, or superseded by a concurrent leg for the same
@@ -834,6 +922,9 @@ func (s *Server) finishActivation(w http.ResponseWriter, r *http.Request, act *l
 		renderActivationError(w, "This activation has already been used or has expired. Return to your terminal and run the activation command again if you need a new one.")
 		return
 	}
+	// Only this browser -- the one that just proved the identity -- may act
+	// on the consent page it is about to be shown.
+	setActivationConsentCookie(w, binding)
 	renderActivationConsent(w, page)
 }
 
@@ -864,7 +955,13 @@ func (s *Server) handleActivateConsent(w http.ResponseWriter, r *http.Request) {
 	if ok && s.clock().Sub(act.createdAt) > s.cfg.ActivationTTL {
 		ok = false
 	}
-	if !ok || act.status != statusAwaitingConsent || !constantTimeStringEqual(act.consentToken, consentTok) {
+	// The binding cookie is checked alongside the consentToken, not instead
+	// of it: the token proves the request came from the page we rendered,
+	// the cookie proves the browser is the one that proved the identity. A
+	// leaked token alone must not be enough to approve.
+	if !ok || act.status != statusAwaitingConsent ||
+		!constantTimeStringEqual(act.consentToken, consentTok) ||
+		!consentCookieMatches(r, act.consentBinding) {
 		s.mu.Unlock()
 		s.recordActivationFailure(ip)
 		renderActivationError(w, activationGenericRejection)
@@ -878,9 +975,11 @@ func (s *Server) handleActivateConsent(w http.ResponseWriter, r *http.Request) {
 		act.oidcVerifier = ""
 		act.oidcNonce = ""
 		act.consentToken = ""
+		act.consentBinding = ""
 		act.verifiedIdentity = nil
 		s.unindexActivation(act)
 		s.mu.Unlock()
+		clearActivationConsentCookie(w)
 		renderActivationDenied(w, "You declined the device request. Nothing was changed on your account.")
 		return
 	}
@@ -948,10 +1047,12 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		act.status = statusDone
 		act.resultDeviceID = deviceID
 		act.verifiedIdentity = nil
+		act.consentBinding = ""
 		s.unindexActivation(act)
 	}
 	s.mu.Unlock()
 	s.store.LogToolCall(ctx, uid, "local_bridge_activate", "", "ok", "", "")
+	clearActivationConsentCookie(w)
 	renderActivationDone(w)
 }
 

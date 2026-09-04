@@ -23,8 +23,14 @@ func withFastPolling(t *testing.T) {
 	var fakeNow atomic.Int64
 	fakeNow.Store(time.Now().UnixNano())
 	activateSleep = func(ctx context.Context, d time.Duration) error {
-		if err := ctx.Err(); err != nil {
-			return err
+		// Mirrors the real activateSleep's contract -- cancellation wins over
+		// the wait -- while advancing a fake clock instead of waiting on a
+		// real one. A seam that ignored ctx would let a test claim to cover
+		// cancellation while covering nothing.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 		fakeNow.Add(int64(d))
 		return nil
@@ -295,11 +301,16 @@ func TestRunActivateFlow_TransientNetworkErrorRecovers(t *testing.T) {
 	}
 }
 
-// A cancelled context must still stop the flow immediately, rather than being
-// swallowed by the retry path added above.
+// A cancelled context must stop the flow immediately, and must be the reason
+// it stops. The cancellation is triggered from inside the poll handler rather
+// than by a wall-clock sleep in a goroutine: with the fake clock advancing
+// five seconds per iteration, a timer-based cancel loses the race to the
+// activation's own 600-second deadline every time, and the test would pass on
+// errActivationTimedOut while never exercising cancellation at all.
 func TestRunActivateFlow_CancelledContextStopsRetrying(t *testing.T) {
 	withFastPolling(t)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/local-bridge/activate/start", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -308,20 +319,22 @@ func TestRunActivateFlow_CancelledContextStopsRetrying(t *testing.T) {
 			"expires_in":       600, "interval": 5,
 		})
 	})
+	var polls atomic.Int32
 	mux.HandleFunc("/api/local-bridge/activate/poll", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal", http.StatusInternalServerError)
+		polls.Add(1)
+		cancel() // the user hits Ctrl-C while the first poll is in flight
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
 	var out bytes.Buffer
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
-	if _, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label"); err == nil {
-		t.Fatal("expected an error once the context was cancelled")
+	_, err := runActivateFlow(ctx, &out, ts.URL, 1, "key", "label")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if got := polls.Load(); got != 1 {
+		t.Fatalf("polled %d times after cancellation, want exactly 1", got)
 	}
 }
 
