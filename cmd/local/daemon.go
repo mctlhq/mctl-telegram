@@ -199,6 +199,16 @@ func selectDeviceCredentialSource() (rec *deviceRecord, priv ed25519.PrivateKey,
 	return rec, p, nil
 }
 
+// dispatchToolCall is the seam between the websocket session and the local
+// Telegram client: daemonSession hands every TypeCall envelope to it and
+// writes back whatever it returns. It is a variable only so the CLI/daemon
+// end-to-end test (e2e_cli_daemon_test.go) can stand in for MTProto, which
+// cannot run in CI, at exactly the point where the real daemon would talk to
+// Telegram -- everything before it (activation, credential refresh, the
+// /bridge handshake, envelope routing) stays real. Never reassigned outside
+// tests.
+var dispatchToolCall = dispatchCall
+
 // runDaemon runs the persistent websocket loop against the bridge server.
 // On every connection attempt it picks the device-signed refresh path when
 // a usable device credential is on disk, or the legacy bearer path
@@ -405,7 +415,7 @@ func daemonSession(ctx context.Context, cfg *localConfig, bt *bridgeTokenFile, p
 				go func(e bridge.Envelope) {
 					callCtx, callCancel := context.WithTimeout(sessionCtx, bridge.DeadlineFor(e.Tool))
 					defer callCancel()
-					resp := dispatchCall(callCtx, cfg, pool, userID, e)
+					resp := dispatchToolCall(callCtx, cfg, pool, userID, e)
 					if werr := wsjson.Write(ctx, conn, resp); werr != nil {
 						slog.Warn("write response failed", "id", e.ID, "err", werr)
 					}

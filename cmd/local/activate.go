@@ -113,6 +113,17 @@ func runActivate(args []string) {
 			fmt.Fprintln(os.Stderr, bootErr)
 			os.Exit(1)
 		}
+		// Persist a --server override only now that the device is fully
+		// activated against it, mirroring `connect`. `daemon` reads the
+		// server from config.json and has no flag of its own, so without
+		// this the documented first-time sequence (init, login, activate
+		// --server, daemon) left the daemon with no server to dial.
+		if *server != "" && cfg.Server != srv {
+			cfg.Server = srv
+			if err := saveConfig(cfg); err != nil {
+				die(fmt.Errorf("persist server override: %w", err))
+			}
+		}
 		fmt.Println("Device is fully activated and ready. Run `mctl-telegram-local daemon` next.")
 	case errors.Is(err, errActivationDenied):
 		fmt.Fprintf(os.Stderr, "Activation was not completed: %v\n", err)
