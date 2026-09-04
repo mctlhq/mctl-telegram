@@ -71,13 +71,23 @@ client works.
 
 ## What the operator has to do (and when)
 
-Three of the steps below are ours, and none of them is self-service yet. They
-are listed here so you can see exactly where you have to wait for us, and so
-the operator has a checklist rather than a memory.
+**Step 1 is self-service for a brand-new account.** Run
+`mctl-telegram-local activate --telegram-id <your numeric Telegram id>`
+before asking an operator for anything: it prints a verification URL and a
+short code, you open the URL, type the code, sign in with Telegram, and
+approve the device from the consent screen it shows you. That alone gets you
+a `local`-mode account with a registered device — no operator call, and
+nothing is written to the database until you explicitly approve. It does
+**not** migrate an existing hosted account; if you already have one and want
+to move it, the operator still runs `set_account_mode mode="local"` for you.
+
+Steps 2 and 3 below are still ours, and neither is self-service yet. They are
+listed here so you can see exactly where you have to wait for us, and so the
+operator has a checklist rather than a memory.
 
 | # | Step | Who | When |
 |---|------|-----|------|
-| 1 | `provision_local_account` (new account) or `set_account_mode mode="local"` (migration) | operator | before you run `connect` |
+| 1 | `mctl-telegram-local activate` (new account) — self-service; or `set_account_mode mode="local"` (migrating an existing hosted account) — still operator | you (new account) / operator (migration) | before you run `connect` |
 | 2 | Mint the long-lived MCP token — `mint_worker_token` with `purpose="local-bridge"` | operator | before you run `connect` |
 | 3 | `set_account_send` to turn real sending on | operator | after step 1, before you expect a message to leave |
 

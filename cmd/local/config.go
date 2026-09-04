@@ -63,10 +63,20 @@ type bridgeTokenFile struct {
 	ExpiresAt   string `json:"expires_at"`
 }
 
+// deviceKeyFile is the persisted JSON at
+// ~/.config/mctl-telegram-local/device_key.json. DeviceRegistrationKey is an
+// opaque idempotency key (see internal/db/local_bridge_devices.go /
+// RegisterDevice) -- never a device id, which is server-generated and
+// returned only by a successful activation.
+type deviceKeyFile struct {
+	DeviceRegistrationKey string `json:"device_registration_key"`
+}
+
 const (
 	configDir       = ".config/mctl-telegram-local"
 	configFileName  = "config.json"
 	bridgeTokenName = "bridge_token.json"
+	deviceKeyName   = "device_key.json"
 	dbFileName      = "state.db"
 )
 
@@ -92,6 +102,59 @@ func bridgeTokenFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, bridgeTokenName), nil
+}
+
+func deviceKeyFilePath() (string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, deviceKeyName), nil
+}
+
+// loadOrCreateDeviceKey returns the persisted device_registration_key,
+// generating and saving a fresh one on first use. Reused on every subsequent
+// `activate` run so a retry (network failure, closed browser tab, or a
+// completely separate later run) resolves to the SAME local_bridge_devices
+// row instead of registering a duplicate device -- see RegisterDevice's
+// (user_id, idempotency_key) contract (issue #481).
+func loadOrCreateDeviceKey() (string, error) {
+	p, err := deviceKeyFilePath()
+	if err != nil {
+		return "", err
+	}
+	if data, err := os.ReadFile(p); err == nil {
+		var dk deviceKeyFile
+		if jerr := json.Unmarshal(data, &dk); jerr == nil && dk.DeviceRegistrationKey != "" {
+			return dk.DeviceRegistrationKey, nil
+		}
+		// Fall through and regenerate if the file is present but unreadable
+		// or empty -- better than refusing to activate at all.
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read device key: %w", err)
+	}
+
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", fmt.Errorf("generate device key: %w", err)
+	}
+	key := base64.RawURLEncoding.EncodeToString(keyBytes)
+
+	dir, err := configDirPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := json.MarshalIndent(deviceKeyFile{DeviceRegistrationKey: key}, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal device key: %w", err)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, deviceKeyName), data, 0o600); err != nil {
+		return "", fmt.Errorf("write device key: %w", err)
+	}
+	return key, nil
 }
 
 func dbFilePath() (string, error) {

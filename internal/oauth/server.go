@@ -24,6 +24,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -33,7 +34,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +69,19 @@ type Server struct {
 	codes   map[string]*authCode      // keyed by the authorization_code value
 	clients map[string]*clientReg     // keyed by client_id
 	enables map[string]*enableSession // keyed by the "es" token of an enable_access flow
+
+	// Local Bridge self-service device activation (issue #482). Three indexes
+	// over the same set of *localBridgeActivation values, mirroring the
+	// enables/pending sibling-map shape rather than a fourth, unrelated
+	// mechanism. See local_bridge_activate.go.
+	activations           map[string]*localBridgeActivation // keyed by device_code
+	activationsByState    map[string]*localBridgeActivation // keyed by the Telegram-leg OIDC state
+	activationsByUserCode map[string]*localBridgeActivation // keyed by normalizeUserCode(user_code)
+	// activationFails is the failed-submission rate limiter shared by the
+	// user_code form and the consent endpoint, keyed by the client IP derived
+	// via clientIP (trusted-proxy-aware). Read/written under mu, swept
+	// alongside the activations.
+	activationFails map[string]*activationFailWindow
 
 	// loginFn performs the Telegram MTProto phone -> code -> 2FA login. It is
 	// a field (not a direct telegram.Login call) so tests can substitute a
@@ -265,6 +281,61 @@ type Config struct {
 	// "postgres://" or "postgresql://". Has no effect when the store is nil.
 	UseDBForOAuth bool
 
+	// MaxPendingActivations caps the in-memory Local Bridge activation map.
+	// /api/local-bridge/activate/start is unauthenticated, so without this
+	// bound an attacker could grow process memory by calling it repeatedly.
+	// Oldest-evict on insert, mirroring MaxPendingAuth/MaxPendingEnable.
+	// Defaults to 5000.
+	MaxPendingActivations int
+	// MaxActivationsPerIP caps how many live activations a single
+	// rate-limiter key (see TrustedProxyCIDRs) may hold at once. It is what
+	// keeps MaxPendingActivations from becoming an eviction weapon: without
+	// it, an unauthenticated flood from one address fills the map and pushes
+	// other users' in-flight activations out mid-sign-in. Asking for one more
+	// than this recycles the requester's own oldest activation. Defaults
+	// to 16 -- far above any real CLI, which holds one at a time and retries.
+	MaxActivationsPerIP int
+	// MaxActivationFailKeys caps the failed-submission rate-limiter map.
+	// Entries are created for whatever key clientIP derives, from an
+	// unauthenticated path, so a spread-out source would otherwise grow it
+	// unboundedly between sweeps. Defaults to MaxPendingActivations.
+	MaxActivationFailKeys int
+	// ActivationTTL bounds how long a Local Bridge activation (device_code,
+	// user_code, and — once resolved — its outcome) stays reachable before
+	// the sweeper drops it. Measured from the activation's createdAt, so a
+	// resolved activation is swept on the same schedule as an abandoned one;
+	// this must be long enough for the CLI's next poll to observe the
+	// outcome. Defaults to 10 minutes, matching RFC 8628's expires_in
+	// convention for a short-lived device code.
+	ActivationTTL time.Duration
+	// ActivationFailBudget is the number of failed user_code / consent
+	// submissions a single rate-limiter key (see TrustedProxyCIDRs) may make
+	// within ActivationFailWindow before further submissions are refused with
+	// the same generic message as a wrong code, without a lookup. Defaults
+	// to 10.
+	ActivationFailBudget int
+	// ActivationFailWindow is the sliding window ActivationFailBudget is
+	// measured over. Defaults to 10 minutes.
+	ActivationFailWindow time.Duration
+	// TrustedProxyCIDRs is the trust boundary the Local Bridge activation
+	// rate limiter's client-IP derivation depends on (see clientIP in
+	// local_bridge_activate.go): a forwarding header (X-Forwarded-For) is
+	// only consulted when the immediate transport peer (r.RemoteAddr) falls
+	// inside one of these prefixes; otherwise the peer address itself is the
+	// key and the header is ignored outright. Evaluating trust in that order
+	// — peer first, header second — is the whole guarantee: checking the
+	// header before the peer lets a directly-connected attacker choose their
+	// own limiter key.
+	//
+	// Nil (the caller never set it) is defaulted in New from the
+	// TRUSTED_PROXY_CIDRS env var: unset ⇒ the cluster's own ranges,
+	// 10.42.0.0/16 (pods) and 10.43.0.0/16 (services); set but empty or
+	// entirely unparseable ⇒ an empty, non-nil slice, meaning "trust
+	// nothing" — the safe direction. A caller that explicitly wants to
+	// trust nothing should pass a non-nil empty slice directly, which New
+	// leaves untouched.
+	TrustedProxyCIDRs []netip.Prefix
+
 	// Reviewer/demo auth-mode for the ChatGPT App Directory review.
 	//
 	// When DemoReviewerEnabled is true, /oauth/authorize renders a chooser page
@@ -383,6 +454,27 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	if cfg.MaxPendingEnable == 0 {
 		cfg.MaxPendingEnable = 256
 	}
+	if cfg.MaxPendingActivations == 0 {
+		cfg.MaxPendingActivations = 5000
+	}
+	if cfg.MaxActivationsPerIP == 0 {
+		cfg.MaxActivationsPerIP = 16
+	}
+	if cfg.MaxActivationFailKeys == 0 {
+		cfg.MaxActivationFailKeys = cfg.MaxPendingActivations
+	}
+	if cfg.ActivationTTL <= 0 {
+		cfg.ActivationTTL = 10 * time.Minute
+	}
+	if cfg.ActivationFailBudget == 0 {
+		cfg.ActivationFailBudget = 10
+	}
+	if cfg.ActivationFailWindow <= 0 {
+		cfg.ActivationFailWindow = 10 * time.Minute
+	}
+	if cfg.TrustedProxyCIDRs == nil {
+		cfg.TrustedProxyCIDRs = trustedProxyCIDRsFromEnv()
+	}
 	issuer, err := localjwt.NewIssuer(cfg.JWTSecret, cfg.Issuer)
 	if err != nil {
 		return nil, err
@@ -413,17 +505,21 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		}
 	}
 	s := &Server{
-		cfg:     cfg,
-		issuer:  issuer,
-		tgoidc:  auth,
-		store:   store,
-		clock:   time.Now,
-		useDB:   cfg.UseDBForOAuth && store != nil,
-		pending: map[string]*pendingAuth{},
-		codes:   map[string]*authCode{},
-		clients: map[string]*clientReg{},
-		enables: map[string]*enableSession{},
-		loginFn: telegram.Login,
+		cfg:                   cfg,
+		issuer:                issuer,
+		tgoidc:                auth,
+		store:                 store,
+		clock:                 time.Now,
+		useDB:                 cfg.UseDBForOAuth && store != nil,
+		pending:               map[string]*pendingAuth{},
+		codes:                 map[string]*authCode{},
+		clients:               map[string]*clientReg{},
+		enables:               map[string]*enableSession{},
+		activations:           map[string]*localBridgeActivation{},
+		activationsByState:    map[string]*localBridgeActivation{},
+		activationsByUserCode: map[string]*localBridgeActivation{},
+		activationFails:       map[string]*activationFailWindow{},
+		loginFn:               telegram.Login,
 	}
 	if cfg.DemoReviewerEnabled {
 		s.demoLimiter = newDemoRateLimiter(s.clock)
@@ -439,6 +535,46 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
 	return s, nil
+}
+
+// defaultTrustedProxyCIDRs are the cluster's own pod and service ranges —
+// where the ingress that terminates every inbound request actually sits.
+var defaultTrustedProxyCIDRs = []netip.Prefix{
+	netip.MustParsePrefix("10.42.0.0/16"),
+	netip.MustParsePrefix("10.43.0.0/16"),
+}
+
+// trustedProxyCIDRsFromEnv parses TRUSTED_PROXY_CIDRS: a comma-separated
+// list of CIDRs. Called from New only when the caller left
+// Config.TrustedProxyCIDRs nil.
+//
+// The env var being genuinely UNSET (not present in the environment) is
+// what selects the safe cluster-default. Once it is present at all, an
+// empty value or one whose entries all fail to parse degrades to an empty,
+// non-nil slice — "trust nothing" — rather than silently falling back to
+// the permissive default: a typo in the deployment manifest must not
+// re-admit the header-spoofing hole this trust boundary exists to close.
+func trustedProxyCIDRsFromEnv() []netip.Prefix {
+	raw, present := os.LookupEnv("TRUSTED_PROXY_CIDRS")
+	if !present {
+		out := make([]netip.Prefix, len(defaultTrustedProxyCIDRs))
+		copy(out, defaultTrustedProxyCIDRs)
+		return out
+	}
+	out := []netip.Prefix{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			slog.Warn("oauth: TRUSTED_PROXY_CIDRS entry could not be parsed; ignoring it", "entry", part, "err", err)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // ConnectClientID is the client_id for the built-in self-connect OAuth client.
@@ -628,6 +764,23 @@ func (s *Server) sweep(now time.Time) {
 			}
 		}
 	}
+	// Local Bridge activations. ActivationTTL is measured from createdAt for
+	// both abandoned and resolved activations — dropActivation (not
+	// unindexActivation) is correct here because the activation is genuinely
+	// gone at this point, not merely finished; resolution itself already
+	// unindexed it from the browser-reachable maps while keeping it pollable.
+	for k, act := range s.activations {
+		if now.Sub(act.createdAt) > s.cfg.ActivationTTL {
+			s.dropActivation(act)
+			_ = k // dropActivation removes by act.deviceCode, which is k here
+		}
+	}
+	// Failed-submission rate-limiter entries, swept in the same pass.
+	for k, w := range s.activationFails {
+		if now.Sub(w.startedAt) > s.cfg.ActivationFailWindow {
+			delete(s.activationFails, k)
+		}
+	}
 }
 
 // cancelEnableFlow best-effort cancels the background login goroutine of an
@@ -740,6 +893,16 @@ func (s *Server) Register(mux Router) {
 	// table is stable across config. CSRF/state is carried by the server-side
 	// "state" token minted at /oauth/authorize.
 	mux.Post("/oauth/demo/login", s.handleDemoLogin)
+	// Local Bridge self-service device activation (issue #482). /start and
+	// /poll are unauthenticated API endpoints for the CLI; the GET/POST pair
+	// at /local-bridge/activate is the browser-driven user_code + Telegram
+	// OIDC leg; /consent is the explicit, CSRF-protected approval that alone
+	// authorises the database writes. See local_bridge_activate.go.
+	mux.Post("/api/local-bridge/activate/start", s.handleActivateStart)
+	mux.Get("/local-bridge/activate", s.handleActivateForm)
+	mux.Post("/local-bridge/activate", s.handleActivateVerify)
+	mux.Post("/local-bridge/activate/consent", s.handleActivateConsent)
+	mux.Post("/api/local-bridge/activate/poll", s.handleActivatePoll)
 }
 
 // Router is the minimum chi.Router surface we depend on. Lets us write
@@ -995,6 +1158,46 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing state", http.StatusBadRequest)
 		return
 	}
+
+	// Local Bridge activation dispatch. Must run BEFORE the pendingAuth
+	// lookup below and BEFORE any other check: a state minted by
+	// handleActivateVerify never appears in s.pending, so this is a pure
+	// addition with no behavioral change for any state /oauth/authorize
+	// minted. isActivation false falls straight through unchanged.
+	s.mu.Lock()
+	act, isActivation := s.activationsByState[serverState]
+	var actVerifier, actNonce string
+	if isActivation {
+		delete(s.activationsByState, serverState)
+		// Copy under the lock — never read act.oidcVerifier/act.oidcNonce
+		// again after Unlock, including inside finishActivation: a concurrent
+		// form submission for the same activation can rewrite those fields
+		// while the exchange is in flight, which in Go is a genuine data
+		// race, not merely a stale read.
+		actVerifier, actNonce = act.oidcVerifier, act.oidcNonce
+	}
+	s.mu.Unlock()
+	if isActivation {
+		// Login-CSRF binding: this callback is only honoured for the browser
+		// that submitted the user_code on this activation. Without this check
+		// the user_code step is bypassable — the attacker can type their own
+		// code in their own browser, capture the resulting Telegram
+		// authorization URL, and forward that URL to the victim, whose
+		// sign-in would otherwise land on the attacker's activation having
+		// never seen the code entry form. Refuse before doing anything else;
+		// never fall through to the pendingAuth path below.
+		c, cerr := r.Cookie(activationStateCookieName)
+		if cerr != nil || !hmac.Equal([]byte(hashActivationState(serverState)), []byte(c.Value)) {
+			s.denyActivation(act, "verification link was opened in a different browser or has expired")
+			clearActivationStateCookie(w)
+			renderActivationError(w, "That sign-in link is no longer valid. Return to your terminal and run the activation command again.")
+			return
+		}
+		clearActivationStateCookie(w) // single use
+		s.finishActivation(w, r, act, q, actVerifier, actNonce)
+		return
+	}
+
 	// Consume the pending entry up front — state is single-use whatever the
 	// outcome, so an error redirect cannot be replayed against a fresh code.
 	var pending *pendingAuth
