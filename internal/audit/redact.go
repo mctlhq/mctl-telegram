@@ -46,6 +46,19 @@ var sensitiveKeys = map[string]struct{}{
 	"encryption_key":              {},
 	"authorization":               {},
 	"bearer":                      {},
+	// Local Bridge owner-consent / device-credential surface (issue-483).
+	// device_pubkey is DELIBERATELY absent from this list: it is a public
+	// key, so logging it is not a disclosure, and redacting it would make
+	// debugging device-mismatch reports (wrong key / wrong device) harder
+	// for no security benefit -- see the call site that logs it.
+	"user_code":               {},
+	"device_code":             {},
+	"consent_token":           {},
+	"nonce":                   {},
+	"signature":               {},
+	"device_registration_key": {},
+	"worker_token":            {},
+	"bridge_token":            {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

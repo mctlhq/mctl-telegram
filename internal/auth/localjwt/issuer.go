@@ -304,6 +304,7 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		Scopes:           c.Scopes,
 		Jti:              c.Jti,
 		OriginalIssuedAt: c.OriginalIssuedAt,
+		DeviceID:         c.DeviceID,
 	}, nil
 }
 

@@ -36,6 +36,8 @@ func TestToolAnnotations(t *testing.T) {
 		{"mint_worker_token", first(s.toolMintWorkerToken()), false, true, false},
 		{"set_telegram_access", first(s.toolSetAccess()), false, true, false},
 		{"set_account_send", first(s.toolSetAccountSend()), false, true, false},
+		{"set_send_consent", first(s.toolSetSendConsent()), false, true, false},
+		{"revoke_local_bridge_device", first(s.toolRevokeLocalBridgeDevice()), false, true, false},
 		{"set_account_mode", first(s.toolSetAccountMode()), false, true, false},
 		{"provision_local_account", first(s.toolProvisionLocalAccount()), false, true, false},
 		{"send_message", first(s.toolSendMessage()), false, true, true},

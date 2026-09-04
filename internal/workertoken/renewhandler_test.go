@@ -158,6 +158,45 @@ func TestRenew_LocalBridgeTokenRejectsScopeOutsideBridgeAllowlist(t *testing.T) 
 // TestRenew_ReadOnlyTokenStillRejectsSendScope: regression — a token with
 // aud=["mcp-worker-ro"] carrying "telegram:messages:send" is still refused
 // renewal, proving the audience-to-allowlist mapping did not cross-wire.
+// deviceClaims is a self-service Local Bridge device credential shaped
+// exactly like what MintForDevice produces: aud=["mcp-worker-device"],
+// carrying DeviceID and (in this fixture) a stale send scope the owner has
+// since revoked.
+func deviceClaims() localjwt.Claims {
+	return localjwt.Claims{
+		Subject:          "tg:924671154",
+		TelegramID:       924671154,
+		Scopes:           []string{"telegram:messages:send", "telegram:messages:pin"},
+		Audience:         []string{workerDeviceAudience},
+		OriginalIssuedAt: time.Now().Unix(),
+		DeviceID:         "dev_test123",
+	}
+}
+
+// T5b: a device credential presented to POST /api/mcp/worker-token/renew is
+// refused outright -- 403 "token is not a worker token" -- not renewed with
+// whatever scopes it happens to carry. Renew copies scopes forward from the
+// presented token by design; without this refusal, a device whose owner had
+// revoked send consent could keep a send scope indefinitely by calling
+// renew instead of going through PoP refresh, which is exactly the
+// token-driven-derivation bug issue-483 exists to forbid.
+//
+// Validate by mutation: stamping workerBridgeAudience instead of the device
+// marker in MintForDevice would make this test observe a 200 instead of a
+// 403.
+func TestRenew_RejectsDeviceCredential(t *testing.T) {
+	rec := doRenew(t, mintFor(t, deviceClaims(), time.Hour), "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err == nil {
+		if body["error"] != "token is not a worker token" {
+			t.Fatalf("error = %q, want %q", body["error"], "token is not a worker token")
+		}
+	}
+}
+
 func TestRenew_ReadOnlyTokenStillRejectsSendScope(t *testing.T) {
 	c := workerClaims()
 	c.Scopes = []string{"telegram:dialogs:read", "telegram:messages:send"}

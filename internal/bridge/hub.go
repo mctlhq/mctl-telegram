@@ -39,6 +39,13 @@ type daemonConn struct {
 	send         chan Envelope
 	pending      sync.Map // map[string]chan Envelope
 	pendingCount atomic.Int64
+	// deviceID is the Local Bridge device this connection authenticated as
+	// (issue-483), empty for a connection whose credential predates device
+	// binding (a rolling-deploy transitional window). EvictDevice only
+	// evicts when this matches the caller's target, mirroring
+	// UnregisterSend's "only touch the entry if it's still the one we
+	// mean" discipline.
+	deviceID string
 }
 
 // Hub multiplexes per-user daemon connections. There is at most one
@@ -75,9 +82,15 @@ func (h *Hub) WithMetrics(m *metrics.Registry) *Hub {
 // channel is the daemon's outbound queue — the transport writes
 // frames pulled from it onto the websocket.
 //
+// deviceID names which local_bridge_devices row authenticated this
+// connection (issue-483); empty when the connecting identity carries no
+// device binding (a legacy/admin-minted bridge token). It is stored on the
+// entry so EvictDevice can later find and close this specific connection
+// without disturbing a different device's live session for the same user.
+//
 // Cap of 16 is intentional: a daemon falling behind on reads will
 // back-pressure the hub rather than blow memory.
-func (h *Hub) Register(userID int64) chan Envelope {
+func (h *Hub) Register(userID int64, deviceID string) chan Envelope {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if prev, ok := h.conn[userID]; ok {
@@ -97,7 +110,7 @@ func (h *Hub) Register(userID int64) chan Envelope {
 	if h.metrics != nil {
 		h.metrics.BridgeConnectionsTotal.WithLabelValues(strconv.FormatInt(userID, 10)).Inc()
 	}
-	dc := &daemonConn{send: make(chan Envelope, 16)}
+	dc := &daemonConn{send: make(chan Envelope, 16), deviceID: deviceID}
 	h.conn[userID] = dc
 	return dc.send
 }
@@ -138,6 +151,37 @@ func (h *Hub) UnregisterSend(userID int64, send chan Envelope) {
 			h.metrics.BridgeActiveDaemons.Dec()
 		}
 	}
+}
+
+// EvictDevice closes and removes userID's live connection ONLY if it is
+// currently registered as deviceID (issue-483: device revocation's active
+// disconnect). Returns true when a connection was evicted.
+//
+// Mirrors UnregisterSend's "only touch the entry if it's still the one we
+// mean" discipline: without the deviceID match, a revoke racing a
+// legitimate reconnect from a DIFFERENT, non-revoked device belonging to
+// the same user could evict the wrong session -- the very thing
+// UnregisterSend was already written to prevent for the reconnect-race
+// case. An empty deviceID never matches (a connection with no device
+// binding is never evicted by this path), and idempotent: calling it again
+// after the entry is already gone (or already replaced by a different
+// connection) is a no-op returning false, not an error.
+func (h *Hub) EvictDevice(userID int64, deviceID string) bool {
+	if deviceID == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	dc, ok := h.conn[userID]
+	if !ok || dc.deviceID != deviceID {
+		return false
+	}
+	delete(h.conn, userID)
+	close(dc.send)
+	if h.metrics != nil {
+		h.metrics.BridgeActiveDaemons.Dec()
+	}
+	return true
 }
 
 // Call queues an envelope for the daemon and waits up to DeadlineCall

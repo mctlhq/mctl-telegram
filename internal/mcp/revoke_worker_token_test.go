@@ -144,7 +144,7 @@ func TestToolRevokeWorkerToken_EvictsLiveDaemonConnection(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 	hub := bridge.NewHub()
-	hub.Register(uid)
+	hub.Register(uid, "")
 	if !hub.HasDaemon(uid) {
 		t.Fatal("daemon should be registered before revocation")
 	}
@@ -245,7 +245,7 @@ func TestToolRevokeWorkerToken_RefreshesDenylistBeforeEvicting(t *testing.T) {
 	if uErr != nil {
 		t.Fatalf("ensure user: %v", uErr)
 	}
-	hub.Register(uid)
+	hub.Register(uid, "")
 
 	var evictedBeforeRefresh bool
 	cache := &fakeRevocationCache{onRefresh: func() {

@@ -33,6 +33,7 @@ package oauth
 // the consent step and the (non-URL-embedded) user_code both exist.
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -100,6 +101,11 @@ type localBridgeActivation struct {
 	// resultDeviceID below.
 	deviceRegKey string
 	deviceLabel  string
+	// devicePubkey is the CLI-supplied Ed25519 public key (issue-483, task
+	// 3/4), decoded and length-validated at /activate/start. Threaded into
+	// RegisterDevice at approval so the resulting local_bridge_devices row
+	// can verify this device's PoP signatures at issuance/refresh time.
+	devicePubkey []byte
 
 	// userCode is the short, human-typable code; the ONLY way a browser
 	// binds to this activation. It must never appear in any URL. Keys
@@ -598,7 +604,24 @@ type activateStartRequest struct {
 	TelegramID            int64  `json:"telegram_id"`
 	DeviceRegistrationKey string `json:"device_registration_key"`
 	DeviceLabel           string `json:"device_label"`
+	// DevicePubkey is the device's Ed25519 public key, base64 (standard,
+	// padded) encoded. Required (issue-483, task 1/3/4): a device row with
+	// no public key can never complete self-service issuance/refresh, so
+	// admitting one here only moves the failure later and leaves an unusable
+	// row behind. See handleActivateStart's rejection message -- this is a
+	// deliberate breaking change for a client build that predates #483, and
+	// the rejection names the required upgrade rather than returning a bare
+	// generic 400.
+	DevicePubkey string `json:"device_pubkey"`
 }
+
+// devicePubkeyRequiredMessage is returned verbatim (not merely "400") when
+// device_pubkey is missing or malformed, so an operator/user reading the
+// error understands their client needs upgrading rather than assuming a
+// transient failure. See design.md's "Making the field mandatory is a
+// breaking change ... and is accepted deliberately" -- the whole point of
+// naming the upgrade is lost if this collapses to a generic message.
+const devicePubkeyRequiredMessage = "device_pubkey is required and must be a base64-encoded 32-byte Ed25519 public key -- this server requires a Local Bridge client that supports self-service device credentials (issue #483); upgrade mctl-telegram-local and re-run activate"
 
 // handleActivateStart is unauthenticated by design (that is the point of the
 // issue): it accepts a CLIENT-CLAIMED telegram_id and device_registration_key
@@ -628,6 +651,11 @@ func (s *Server) handleActivateStart(w http.ResponseWriter, r *http.Request) {
 		s.writeActivateError(w, http.StatusBadRequest, "device_label exceeds 256 bytes")
 		return
 	}
+	pubkey, pkErr := base64.StdEncoding.DecodeString(strings.TrimSpace(req.DevicePubkey))
+	if pkErr != nil || len(pubkey) != ed25519.PublicKeySize {
+		s.writeActivateError(w, http.StatusBadRequest, devicePubkeyRequiredMessage)
+		return
+	}
 
 	ip := s.clientIP(r)
 	act := &localBridgeActivation{
@@ -635,6 +663,7 @@ func (s *Server) handleActivateStart(w http.ResponseWriter, r *http.Request) {
 		claimedTGID:  req.TelegramID,
 		deviceRegKey: key,
 		deviceLabel:  req.DeviceLabel,
+		devicePubkey: pubkey,
 		createdAt:    s.clock(),
 		startIP:      ip,
 		status:       statusPending,
@@ -993,16 +1022,17 @@ func (s *Server) handleActivateConsent(w http.ResponseWriter, r *http.Request) {
 	identity := act.verifiedIdentity
 	deviceLabel := act.deviceLabel
 	deviceRegKey := act.deviceRegKey
+	devicePubkey := act.devicePubkey
 	s.mu.Unlock()
 
-	s.approveActivation(w, r, act, identity, deviceLabel, deviceRegKey)
+	s.approveActivation(w, r, act, identity, deviceLabel, deviceRegKey, devicePubkey)
 }
 
 // approveActivation runs design.md's steps 5-8 of the approve path: resolve
 // the internal user, provision (or confirm) the local account, register the
 // device, and mark the activation done -- all fed from act.verifiedIdentity
 // (the OIDC-proven identity), never the CLI-claimed one.
-func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *localBridgeActivation, identity *telegramoidc.Identity, deviceLabel, deviceRegKey string) {
+func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *localBridgeActivation, identity *telegramoidc.Identity, deviceLabel, deviceRegKey string, devicePubkey []byte) {
 	ctx := r.Context()
 	displayName := strings.TrimSpace(identity.FirstName + " " + identity.LastName)
 	uid, err := s.store.EnsureUserByTelegramID(ctx, identity.TelegramID, identity.Username, displayName)
@@ -1035,7 +1065,7 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		}
 	}
 
-	deviceID, regErr := s.store.RegisterDevice(ctx, uid, deviceLabel, deviceRegKey)
+	deviceID, regErr := s.store.RegisterDevice(ctx, uid, deviceLabel, deviceRegKey, devicePubkey)
 	if regErr != nil {
 		slog.Error("local bridge activation: register device failed", "err", regErr)
 		s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem registering the device. Approve again to retry.")

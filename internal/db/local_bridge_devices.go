@@ -37,6 +37,24 @@ type Device struct {
 	LastSeenAt     *time.Time
 	RevokedAt      *time.Time
 	RevokedReason  string
+	// DevicePubkey is the Ed25519 public key registered at activation
+	// (issue-483 task 1/2/3/4), used to verify PoP signatures at issuance
+	// and refresh. Nil for a row that predates this column or that was
+	// registered by a client build that did not submit one -- such a row can
+	// never complete issuance/refresh (see internal/oauth's PoP handlers).
+	DevicePubkey []byte
+	// DevicePubkeyAlgo names the algorithm DevicePubkey is verified under.
+	// Defaults to "ed25519" at the schema level; future-proofs "or an
+	// equivalent reviewed primitive" without a second migration.
+	DevicePubkeyAlgo string
+	// CurrentJti is the ONE credential lineage jti claimed atomically at
+	// first issuance and carried forward unchanged by every later PoP
+	// refresh. Empty until first issuance claims it.
+	CurrentJti string
+	// CredentialIssuedAt is the OriginalIssuedAt anchor for CurrentJti's
+	// lineage, written once at first issuance alongside CurrentJti and read
+	// by every refresh. Nil until first issuance.
+	CredentialIssuedAt *time.Time
 }
 
 // RegisterDevice inserts a new local_bridge_devices row for userID and
@@ -46,8 +64,13 @@ type Device struct {
 // retried registration call (e.g. a daemon retrying after a network
 // timeout) be answered with the existing row instead of creating a
 // duplicate: a second call with the same idempotencyKey returns the
-// device_id from the first call.
-func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempotencyKey string) (string, error) {
+// device_id from the first call. pubkey, when non-empty, is the device's
+// Ed25519 public key (issue-483); it is only written on the INSERT branch
+// -- an idempotent retry that resolves to an existing row does not rewrite
+// its pubkey, matching every other field's "first registration wins"
+// behavior. device_pubkey_algo is always 'ed25519' today (the column
+// default); no caller sets a different algorithm yet.
+func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempotencyKey string, pubkey []byte) (string, error) {
 	if userID <= 0 {
 		return "", errors.New("register device: user_id required")
 	}
@@ -64,18 +87,18 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 			// fails at runtime on Postgres; SQLite's INSERT OR IGNORE branch
 			// below never exercises this statement. The conflict target is
 			// the pair, not the key alone — see the index comment in db.go.
-			`INSERT INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key, device_pubkey)
+			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL DO NOTHING`,
-			userID, deviceID, nullable(label), nullable(idempotencyKey),
+			userID, deviceID, nullable(label), nullable(idempotencyKey), nullableBytes(pubkey),
 		); err != nil {
 			return "", fmt.Errorf("register device: %w", err)
 		}
 	} else {
 		if _, err := s.DB.ExecContext(ctx,
-			`INSERT OR IGNORE INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key)
-			 VALUES ($1, $2, $3, $4)`,
-			userID, deviceID, nullable(label), nullable(idempotencyKey),
+			`INSERT OR IGNORE INTO local_bridge_devices (user_id, device_id, device_label, idempotency_key, device_pubkey)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			userID, deviceID, nullable(label), nullable(idempotencyKey), nullableBytes(pubkey),
 		); err != nil {
 			return "", fmt.Errorf("register device: %w", err)
 		}
@@ -126,15 +149,18 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 // ErrDeviceNotFound (checkable via errors.Is) when no row matches.
 func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error) {
 	var d Device
-	var label, idempotencyKey, revokedReason sql.NullString
-	var lastSeenAt, revokedAt sql.NullTime
+	var label, idempotencyKey, revokedReason, currentJti, pubkeyAlgo sql.NullString
+	var lastSeenAt, revokedAt, credentialIssuedAt sql.NullTime
+	var pubkey []byte
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, user_id, device_id, device_label, idempotency_key,
-		        registered_at, last_seen_at, revoked_at, revoked_reason
+		        registered_at, last_seen_at, revoked_at, revoked_reason,
+		        device_pubkey, device_pubkey_algo, current_jti, credential_issued_at
 		 FROM local_bridge_devices WHERE device_id = $1`,
 		deviceID,
 	).Scan(&d.ID, &d.UserID, &d.DeviceID, &label, &idempotencyKey,
-		&d.RegisteredAt, &lastSeenAt, &revokedAt, &revokedReason)
+		&d.RegisteredAt, &lastSeenAt, &revokedAt, &revokedReason,
+		&pubkey, &pubkeyAlgo, &currentJti, &credentialIssuedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrDeviceNotFound
 	}
@@ -144,6 +170,9 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	d.DeviceLabel = label.String
 	d.IdempotencyKey = idempotencyKey.String
 	d.RevokedReason = revokedReason.String
+	d.DevicePubkey = pubkey
+	d.DevicePubkeyAlgo = pubkeyAlgo.String
+	d.CurrentJti = currentJti.String
 	if lastSeenAt.Valid {
 		t := lastSeenAt.Time
 		d.LastSeenAt = &t
@@ -151,6 +180,10 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	if revokedAt.Valid {
 		t := revokedAt.Time
 		d.RevokedAt = &t
+	}
+	if credentialIssuedAt.Valid {
+		t := credentialIssuedAt.Time
+		d.CredentialIssuedAt = &t
 	}
 	return &d, nil
 }
@@ -173,6 +206,134 @@ func (s *Store) RevokeDevice(ctx context.Context, deviceID, reason string) error
 		return fmt.Errorf("revoke device: %w", err)
 	}
 	return nil
+}
+
+// RevokeDeviceAndDenylist marks deviceID revoked and, in the SAME
+// transaction, denylists its credential lineage (current_jti) when it has
+// one -- see design.md's "the jti to denylist is read INSIDE that
+// transaction, not before it": reading current_jti from an earlier,
+// separate SELECT would race a concurrent first issuance that claims the
+// lineage slot between the read and the revoke, denylisting a value that
+// was NULL at read time while the freshly minted credential goes unlisted.
+// The RETURNING clause here reads current_jti from the very row this
+// UPDATE just locked, closing that window.
+//
+// telegramID is recorded on the denylist row for audit only (mirroring
+// RevokeWorkerToken's own contract) -- pass the caller's own
+// auth.Identity.TelegramID, since local_bridge_devices.user_id is the
+// internal user id, not a Telegram id.
+//
+// Idempotent and safe to re-run: the UPDATE's SET clause uses
+// COALESCE(revoked_at, ...) so a device already revoked keeps its original
+// revoked_at/revoked_reason (matching RevokeDevice's no-op contract) while
+// STILL matching the row and returning its current_jti every time --
+// unlike a "WHERE revoked_at IS NULL" predicate, which would make a second
+// call match zero rows and silently skip the RETURNING (and therefore the
+// denylist) on retry. RevokeWorkerToken's own INSERT ... ON CONFLICT DO
+// NOTHING makes the denylist insert itself idempotent too, so a retry after
+// a partial failure (crash between the two writes) repairs the state
+// instead of erroring or duplicating.
+//
+// Returns ErrDeviceNotFound if deviceID does not exist. Returns the jti that
+// was (re-)denylisted, or "" if the device has never completed first
+// issuance -- callers must not treat an empty jti as a failure: "the
+// revoked device holds no credential lineage" is an expected, successful
+// outcome (T6e), and inserting an empty jti would either write a
+// meaningless row or violate the denylist table's constraints.
+func (s *Store) RevokeDeviceAndDenylist(ctx context.Context, deviceID string, telegramID int64, reason string, revokedBy int64) (jti string, err error) {
+	if deviceID == "" {
+		return "", errors.New("revoke device: device_id required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin revoke device tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UTC()
+	var currentJti sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`UPDATE local_bridge_devices
+		 SET revoked_at = COALESCE(revoked_at, $1), revoked_reason = COALESCE(revoked_reason, $2)
+		 WHERE device_id = $3
+		 RETURNING current_jti`,
+		now, nullable(reason), deviceID,
+	).Scan(&currentJti)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrDeviceNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("revoke device: %w", err)
+	}
+
+	jti = currentJti.String
+	if jti != "" {
+		if s.isPostgres(ctx) {
+			if _, err := tx.ExecContext(ctx,
+				// Same partial-index arbiter pitfall as RevokeWorkerToken's
+				// top-level statement -- see that comment. Repeated here
+				// because this insert must run inside THIS transaction, not
+				// via a call to RevokeWorkerToken (which opens its own
+				// implicit, separate write and would defeat the whole point
+				// of the shared transaction).
+				`INSERT INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
+				 VALUES ($1, $2, $3, $4, $5)
+				 ON CONFLICT (jti) WHERE jti IS NOT NULL DO NOTHING`,
+				jti, telegramID, now, nullable(reason), nullableInt(revokedBy),
+			); err != nil {
+				return "", fmt.Errorf("denylist device credential: %w", err)
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				jti, telegramID, now, nullable(reason), nullableInt(revokedBy),
+			); err != nil {
+				return "", fmt.Errorf("denylist device credential: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit revoke device tx: %w", err)
+	}
+	return jti, nil
+}
+
+// ClaimDeviceCredentialLineage atomically claims deviceID's ONE credential
+// lineage slot at first issuance: writes jti/issuedAt to current_jti/
+// credential_issued_at if and only if the slot is still unclaimed AND the
+// device is not revoked, in a single conditional UPDATE. This is the row
+// acting as the lock design.md calls for -- not a SELECT-then-UPDATE, which
+// would let two concurrent first-issuance requests both observe an empty
+// current_jti and both mint, orphaning whichever write lands second for the
+// rest of its TTL.
+//
+// Returns (true, nil) when this call won the claim. Returns (false, nil) --
+// NOT an error -- when zero rows were affected: either the slot was already
+// claimed by an earlier issuance (a concurrent request lost the race, T5d)
+// or the device was revoked in the meantime (T5e; the same predicate closes
+// both races at once). The caller maps false to a 409 with nothing minted.
+func (s *Store) ClaimDeviceCredentialLineage(ctx context.Context, deviceID, jti string, issuedAt time.Time) (bool, error) {
+	if deviceID == "" {
+		return false, errors.New("claim device credential lineage: device_id required")
+	}
+	if jti == "" {
+		return false, errors.New("claim device credential lineage: jti required")
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE local_bridge_devices
+		 SET current_jti = $1, credential_issued_at = $2
+		 WHERE device_id = $3 AND current_jti IS NULL AND revoked_at IS NULL`,
+		jti, issuedAt.UTC(), deviceID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim device credential lineage: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim device credential lineage: %w", err)
+	}
+	return n > 0, nil
 }
 
 // TouchDeviceLastSeen updates a device's last-seen timestamp so a future

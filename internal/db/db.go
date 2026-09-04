@@ -267,6 +267,37 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	if err := migrateAgent(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Local Bridge device-bound credentials (issue-483). All four columns are
+	// additive and nullable (device_pubkey_algo carries a default so existing
+	// rows read as 'ed25519'), so this migration is safe to run against an
+	// existing local dev DB or a fresh one, and idempotent on re-run via
+	// addColumnIfMissing.
+	//
+	// device_pubkey / device_pubkey_algo: the Ed25519 public key registered at
+	// activation (task 3/4) and the algorithm it uses, so issuance/refresh can
+	// verify a proof-of-possession signature. A row with no device_pubkey can
+	// never complete issuance -- see local_bridge_credential.go.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "local_bridge_devices", "device_pubkey",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "local_bridge_devices", "device_pubkey_algo",
+		"TEXT NOT NULL DEFAULT 'ed25519'", "TEXT NOT NULL DEFAULT 'ed25519'"); err != nil {
+		return err
+	}
+	// current_jti / credential_issued_at: the ONE credential lineage claimed
+	// atomically at first issuance (see local_bridge_credential.go's
+	// conditional UPDATE) and carried forward unchanged by every later PoP
+	// refresh. revoke_local_bridge_device denylists current_jti to revoke the
+	// whole lineage in one call.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "local_bridge_devices", "current_jti",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "local_bridge_devices", "credential_issued_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	return nil
 }
 

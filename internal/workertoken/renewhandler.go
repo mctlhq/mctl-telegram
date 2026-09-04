@@ -46,6 +46,26 @@ const workerAudience = "mcp-worker-ro"
 // allowedLocalBridgeScopes) governs the defense-in-depth scope check below.
 const workerBridgeAudience = "mcp-worker-bridge"
 
+// workerDeviceAudience is the audience value MintForDevice stamps on every
+// self-service Local Bridge device credential (issue-483) -- deliberately
+// its OWN marker, never workerAudience or workerBridgeAudience. This
+// handler's switch below matches only the latter two, so a device
+// credential presented here falls through to the default case and is
+// refused with 403 "token is not a worker token": renew copies scopes
+// forward from the presented token by design, and a device whose owner has
+// revoked send consent could otherwise keep a stale send scope indefinitely
+// by calling renew instead of refreshing through the PoP path, which is
+// exactly the token-driven-derivation bug this issue exists to forbid. See
+// internal/oauth/local_bridge_credential.go's MintForDevice caller.
+//
+// This does NOT require an auth-middleware change: localjwt.CheckAudience
+// passes when ANY entry of the token's aud list matches, and MintForDevice
+// still includes the configured mcpAudience alongside this marker (exactly
+// as Mint does for its own markers), so a device credential still
+// authenticates fine at /mcp and at POST /api/bridge/token -- only THIS
+// handler's marker-specific switch treats it differently.
+const workerDeviceAudience = "mcp-worker-device"
+
 // renewWorkerTokenRequest is the POST /api/mcp/worker-token/renew body. The
 // body is optional; an empty request renews at defaultWorkerTokenTTL.
 //

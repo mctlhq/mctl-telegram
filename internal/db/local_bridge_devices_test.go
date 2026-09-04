@@ -1,12 +1,14 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // T1: RegisterDevice with a fresh idempotency key inserts exactly one row
@@ -18,7 +20,7 @@ func TestRegisterDevice_Insert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	deviceID, err := s.RegisterDevice(ctx, uid, "alice-laptop", "idem-1")
+	deviceID, err := s.RegisterDevice(ctx, uid, "alice-laptop", "idem-1", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -46,11 +48,11 @@ func TestRegisterDevice_IdempotentRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	first, err := s.RegisterDevice(ctx, uid, "bob-desktop", "idem-retry")
+	first, err := s.RegisterDevice(ctx, uid, "bob-desktop", "idem-retry", nil)
 	if err != nil {
 		t.Fatalf("first RegisterDevice: %v", err)
 	}
-	second, err := s.RegisterDevice(ctx, uid, "bob-desktop", "idem-retry")
+	second, err := s.RegisterDevice(ctx, uid, "bob-desktop", "idem-retry", nil)
 	if err != nil {
 		t.Fatalf("second RegisterDevice: %v", err)
 	}
@@ -77,11 +79,11 @@ func TestRegisterDevice_NoIdempotencyKeyAlwaysInserts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	first, err := s.RegisterDevice(ctx, uid, "", "")
+	first, err := s.RegisterDevice(ctx, uid, "", "", nil)
 	if err != nil {
 		t.Fatalf("first RegisterDevice: %v", err)
 	}
-	second, err := s.RegisterDevice(ctx, uid, "", "")
+	second, err := s.RegisterDevice(ctx, uid, "", "", nil)
 	if err != nil {
 		t.Fatalf("second RegisterDevice: %v", err)
 	}
@@ -99,7 +101,7 @@ func TestGetDevice_Lookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	deviceID, err := s.RegisterDevice(ctx, uid, "dave-phone", "idem-lookup")
+	deviceID, err := s.RegisterDevice(ctx, uid, "dave-phone", "idem-lookup", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -140,7 +142,7 @@ func TestRevokeDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	deviceID, err := s.RegisterDevice(ctx, uid, "erin-desktop", "idem-revoke")
+	deviceID, err := s.RegisterDevice(ctx, uid, "erin-desktop", "idem-revoke", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -169,7 +171,7 @@ func TestRevokeDevice_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	deviceID, err := s.RegisterDevice(ctx, uid, "frank-tablet", "idem-double-revoke")
+	deviceID, err := s.RegisterDevice(ctx, uid, "frank-tablet", "idem-double-revoke", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -205,7 +207,7 @@ func TestTouchDeviceLastSeen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	deviceID, err := s.RegisterDevice(ctx, uid, "grace-nuc", "idem-touch")
+	deviceID, err := s.RegisterDevice(ctx, uid, "grace-nuc", "idem-touch", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -261,11 +263,11 @@ func TestRegisterDevice_PostgresUpsert(t *testing.T) {
 	})
 
 	const key = "pgtest-idem-1"
-	first, err := s.RegisterDevice(ctx, uid, "pg-device", key)
+	first, err := s.RegisterDevice(ctx, uid, "pg-device", key, nil)
 	if err != nil {
 		t.Fatalf("first RegisterDevice: %v", err)
 	}
-	second, err := s.RegisterDevice(ctx, uid, "pg-device", key)
+	second, err := s.RegisterDevice(ctx, uid, "pg-device", key, nil)
 	if err != nil {
 		t.Fatalf("second RegisterDevice (idempotent retry): %v", err)
 	}
@@ -286,7 +288,7 @@ func TestRegisterDevice_PostgresUpsert(t *testing.T) {
 	if err := s.RevokeDevice(ctx, first, "test revoke"); err != nil {
 		t.Fatalf("RevokeDevice: %v", err)
 	}
-	replacement, err := s.RegisterDevice(ctx, uid, "pg-device", key)
+	replacement, err := s.RegisterDevice(ctx, uid, "pg-device", key, nil)
 	if err != nil {
 		// A predicate mismatch surfaces as "there is no unique or exclusion
 		// constraint matching the ON CONFLICT specification"; a revoked row
@@ -327,11 +329,11 @@ func TestRegisterDevice_IdempotencyKeyIsScopedPerUser(t *testing.T) {
 		t.Fatalf("ensure bob: %v", err)
 	}
 
-	aliceDev, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key")
+	aliceDev, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key", nil)
 	if err != nil {
 		t.Fatalf("alice RegisterDevice: %v", err)
 	}
-	bobDev, err := s.RegisterDevice(ctx, bob, "bob-laptop", "shared-key")
+	bobDev, err := s.RegisterDevice(ctx, bob, "bob-laptop", "shared-key", nil)
 	if err != nil {
 		t.Fatalf("bob RegisterDevice: %v", err)
 	}
@@ -360,7 +362,7 @@ func TestRegisterDevice_IdempotencyKeyIsScopedPerUser(t *testing.T) {
 	}
 
 	// Each user's own retry still collapses onto their own row.
-	aliceRetry, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key")
+	aliceRetry, err := s.RegisterDevice(ctx, alice, "alice-laptop", "shared-key", nil)
 	if err != nil {
 		t.Fatalf("alice retry: %v", err)
 	}
@@ -391,7 +393,7 @@ func TestTouchDeviceLastSeen_NoOpOnRevokedDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	dev, err := s.RegisterDevice(ctx, uid, "heidi-laptop", "")
+	dev, err := s.RegisterDevice(ctx, uid, "heidi-laptop", "", nil)
 	if err != nil {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
@@ -443,7 +445,7 @@ func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
 	}
 	const key = "idem-revoke-reuse"
 
-	first, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	first, err := s.RegisterDevice(ctx, uid, "carol-laptop", key, nil)
 	if err != nil {
 		t.Fatalf("first RegisterDevice: %v", err)
 	}
@@ -451,7 +453,7 @@ func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
 		t.Fatalf("RevokeDevice: %v", err)
 	}
 
-	second, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	second, err := s.RegisterDevice(ctx, uid, "carol-laptop", key, nil)
 	if err != nil {
 		t.Fatalf("re-register after revoke: %v", err)
 	}
@@ -479,7 +481,7 @@ func TestRegisterDevice_RevokedKeyIsReusable(t *testing.T) {
 	}
 
 	// A retry after the replacement still collapses onto the live row.
-	third, err := s.RegisterDevice(ctx, uid, "carol-laptop", key)
+	third, err := s.RegisterDevice(ctx, uid, "carol-laptop", key, nil)
 	if err != nil {
 		t.Fatalf("retry after re-register: %v", err)
 	}
@@ -516,12 +518,233 @@ func TestRegisterDevice_RevokedBetweenInsertAndReadBack(t *testing.T) {
 		}
 	})
 
-	_, err = s.RegisterDevice(ctx, uid, "dave-laptop", "idem-raced-revoke")
+	_, err = s.RegisterDevice(ctx, uid, "dave-laptop", "idem-raced-revoke", nil)
 	if !errors.Is(err, ErrDeviceRevokedConcurrently) {
 		t.Fatalf("expected ErrDeviceRevokedConcurrently, got %v", err)
 	}
 	// The generic read-back wrapper must not be what the caller sees.
 	if strings.Contains(err.Error(), "no rows in result set") {
 		t.Fatalf("raw sql.ErrNoRows leaked to the caller: %v", err)
+	}
+}
+
+// issue-483 task 2: RegisterDevice persists a supplied pubkey, and GetDevice
+// returns it back unchanged, defaulting device_pubkey_algo to 'ed25519'.
+func TestRegisterDevice_WithPubkey(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2001, "ivan", "Ivan")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	pubkey := bytes.Repeat([]byte{0x42}, 32)
+	deviceID, err := s.RegisterDevice(ctx, uid, "ivan-laptop", "idem-pubkey", pubkey)
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	d, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if !bytes.Equal(d.DevicePubkey, pubkey) {
+		t.Errorf("DevicePubkey = %x, want %x", d.DevicePubkey, pubkey)
+	}
+	if d.DevicePubkeyAlgo != "ed25519" {
+		t.Errorf("DevicePubkeyAlgo = %q, want ed25519", d.DevicePubkeyAlgo)
+	}
+}
+
+// The existing idempotency-retry path is unchanged when a pubkey is
+// re-submitted identically: the retry resolves to the SAME row (created by
+// the first call) rather than rewriting its pubkey.
+func TestRegisterDevice_IdempotentRetry_PubkeyUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2002, "judy", "Judy")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	pubkey := bytes.Repeat([]byte{0x01}, 32)
+	first, err := s.RegisterDevice(ctx, uid, "judy-desktop", "idem-pubkey-retry", pubkey)
+	if err != nil {
+		t.Fatalf("first RegisterDevice: %v", err)
+	}
+	// Retry with the identical pubkey (as a real retrying client would).
+	second, err := s.RegisterDevice(ctx, uid, "judy-desktop", "idem-pubkey-retry", pubkey)
+	if err != nil {
+		t.Fatalf("second RegisterDevice: %v", err)
+	}
+	if first != second {
+		t.Fatalf("device_id mismatch on retry: first=%q second=%q", first, second)
+	}
+	d, err := s.GetDevice(ctx, first)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if !bytes.Equal(d.DevicePubkey, pubkey) {
+		t.Errorf("DevicePubkey after retry = %x, want %x", d.DevicePubkey, pubkey)
+	}
+}
+
+// issue-483 task 9: ClaimDeviceCredentialLineage's conditional UPDATE claims
+// the slot exactly once; a second claim attempt against the same device
+// affects zero rows and does not overwrite the first claim.
+func TestClaimDeviceCredentialLineage(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2003, "kim", "Kim")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deviceID, err := s.RegisterDevice(ctx, uid, "kim-phone", "idem-claim", bytes.Repeat([]byte{0x02}, 32))
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	issuedAt := time.Now().UTC().Truncate(time.Second)
+	won, err := s.ClaimDeviceCredentialLineage(ctx, deviceID, "jti-first", issuedAt)
+	if err != nil {
+		t.Fatalf("ClaimDeviceCredentialLineage: %v", err)
+	}
+	if !won {
+		t.Fatal("first claim should have won")
+	}
+	// A second claim attempt (simulating a losing concurrent request) must
+	// lose: it must not overwrite the stored jti.
+	won2, err := s.ClaimDeviceCredentialLineage(ctx, deviceID, "jti-second", issuedAt)
+	if err != nil {
+		t.Fatalf("second ClaimDeviceCredentialLineage: %v", err)
+	}
+	if won2 {
+		t.Fatal("second claim should have lost (slot already claimed)")
+	}
+	d, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if d.CurrentJti != "jti-first" {
+		t.Errorf("CurrentJti = %q, want %q (the winning claim)", d.CurrentJti, "jti-first")
+	}
+	if d.CredentialIssuedAt == nil || !d.CredentialIssuedAt.Equal(issuedAt) {
+		t.Errorf("CredentialIssuedAt = %v, want %v", d.CredentialIssuedAt, issuedAt)
+	}
+}
+
+// T5e: a revoked device cannot claim a lineage slot -- the conditional
+// UPDATE's revoked_at IS NULL predicate must make the claim lose.
+func TestClaimDeviceCredentialLineage_RevokedDeviceLoses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2004, "liam", "Liam")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deviceID, err := s.RegisterDevice(ctx, uid, "liam-phone", "idem-claim-revoked", bytes.Repeat([]byte{0x03}, 32))
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	if err := s.RevokeDevice(ctx, deviceID, "test"); err != nil {
+		t.Fatalf("RevokeDevice: %v", err)
+	}
+	won, err := s.ClaimDeviceCredentialLineage(ctx, deviceID, "jti-should-not-land", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ClaimDeviceCredentialLineage: %v", err)
+	}
+	if won {
+		t.Fatal("claim on a revoked device should lose, not win")
+	}
+}
+
+// issue-483 task 12: RevokeDeviceAndDenylist is atomic (revoke + denylist in
+// one transaction), reads current_jti from the row it just locked, and is
+// repeatable: a second call on an already-revoked device still returns and
+// (re-)denylists the same jti.
+func TestRevokeDeviceAndDenylist(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2005, "mona", "Mona")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deviceID, err := s.RegisterDevice(ctx, uid, "mona-laptop", "idem-revoke-denylist", bytes.Repeat([]byte{0x04}, 32))
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	if won, err := s.ClaimDeviceCredentialLineage(ctx, deviceID, "jti-mona-1", time.Now().UTC()); err != nil || !won {
+		t.Fatalf("claim lineage: won=%v err=%v", won, err)
+	}
+
+	jti, err := s.RevokeDeviceAndDenylist(ctx, deviceID, 2005, "lost device", 0)
+	if err != nil {
+		t.Fatalf("RevokeDeviceAndDenylist: %v", err)
+	}
+	if jti != "jti-mona-1" {
+		t.Fatalf("returned jti = %q, want %q", jti, "jti-mona-1")
+	}
+	revoked, err := s.IsWorkerTokenRevoked(ctx, "jti-mona-1", 2005, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("IsWorkerTokenRevoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("jti was not denylisted by RevokeDeviceAndDenylist")
+	}
+
+	// T6b: repeating the call on an already-revoked device must still
+	// return (and thereby let the caller re-denylist/re-evict) the same
+	// jti, not an error and not an empty string.
+	jti2, err := s.RevokeDeviceAndDenylist(ctx, deviceID, 2005, "repeat call", 0)
+	if err != nil {
+		t.Fatalf("repeat RevokeDeviceAndDenylist: %v", err)
+	}
+	if jti2 != "jti-mona-1" {
+		t.Fatalf("repeat call returned jti = %q, want %q", jti2, "jti-mona-1")
+	}
+
+	// revoked_reason must be unchanged by the repeat call (COALESCE keeps
+	// the original), mirroring RevokeDevice's own no-op-on-retry contract.
+	d, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if d.RevokedReason != "lost device" {
+		t.Errorf("RevokedReason = %q, want %q (unchanged by repeat call)", d.RevokedReason, "lost device")
+	}
+}
+
+// T6e: revoking a device that never issued succeeds -- the row comes back
+// revoked, no denylist row is written (empty jti), and nothing rolls back.
+func TestRevokeDeviceAndDenylist_NeverIssued(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 2006, "nate", "Nate")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	deviceID, err := s.RegisterDevice(ctx, uid, "nate-phone", "idem-never-issued", bytes.Repeat([]byte{0x05}, 32))
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	jti, err := s.RevokeDeviceAndDenylist(ctx, deviceID, 2006, "never issued", 0)
+	if err != nil {
+		t.Fatalf("RevokeDeviceAndDenylist: %v", err)
+	}
+	if jti != "" {
+		t.Fatalf("jti = %q, want empty (device never issued)", jti)
+	}
+	d, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetDevice: %v", err)
+	}
+	if d.RevokedAt == nil {
+		t.Fatal("device row was not revoked")
+	}
+}
+
+// Unknown device_id returns ErrDeviceNotFound, not a silent no-op.
+func TestRevokeDeviceAndDenylist_NotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	_, err := s.RevokeDeviceAndDenylist(ctx, "dev_does_not_exist", 1, "reason", 0)
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("err = %v, want ErrDeviceNotFound", err)
 	}
 }
