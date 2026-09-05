@@ -206,6 +206,35 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			lf.err = err
 			return
 		}
+		// From here on the login has already persisted its session bytes
+		// through the gotd SessionStore, and with no loaded row id that write
+		// lands on EVERY active row of this uid -- including a bridge-only one
+		// provisioned since the re-check above. So every exit between here and
+		// a successful SaveSession has to run the repair, not just the
+		// SaveSession refusal: the identity-mismatch bail-out, a LoadSession
+		// failure, and "no session bytes were persisted" all leave the same
+		// stray bytes behind, and a hosted worker holding a live session for
+		// an account the operator believes is local is the exact outcome this
+		// PR exists to prevent. A defer is the only form that cannot be
+		// forgotten by a future exit added in between.
+		//
+		// Detached and bounded, not merely detached: bgCtx carries the flow's
+		// CodeTTL deadline, so the repair must not die on an expiry that is
+		// itself a likely cause of getting here -- while WithoutCancel alone
+		// would strip the deadline too, and this runs under the uid login
+		// mutex, where an unresponsive database would park the goroutine
+		// forever and lock the user out of every later attempt.
+		saved := false
+		defer func() {
+			if saved {
+				return
+			}
+			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), db.StraySessionRepairTimeout)
+			defer repairCancel()
+			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
+				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
+			}
+		}()
 		// Identity binding. The Telegram account that just completed
 		// phone/SMS/2FA MUST be the same one Telegram OIDC proved. Otherwise an
 		// admin authenticated as account A could enter account B's phone and
@@ -240,32 +269,16 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		if serr := s.store.SaveSession(bgCtx, uid, pt, tgID, displayName, username); serr != nil {
-			// Backstop: a local account won the race against both checks
-			// above. The login already wrote its session bytes through the
-			// gotd SessionStore, which with no loaded row id targets EVERY
-			// active row, so drop them from all of them — otherwise the hosted
-			// worker could act as the user through a row the operator believes
-			// is bridge-only. The rows themselves stay active; the bridge
-			// re-uploads its own session on next connect.
-			//
-			// Detached from bgCtx and gated on the account state rather than
-			// on ErrAccountModeConflict: bgCtx carries the flow's CodeTTL
-			// deadline, so SaveSession can fail with that deadline instead of
-			// the sentinel while a local row is present -- and the repair
-			// itself must not die on the same expiry.
-			// Bounded, not merely detached: WithoutCancel alone strips the
-			// deadline as well as the cancellation, and this runs while the
-			// goroutine holds the uid login mutex -- an unresponsive database
-			// would park it there forever and lock the user out of every
-			// later attempt.
-			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), db.StraySessionRepairTimeout)
-			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
-				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
-			}
-			repairCancel()
+			// The deferred repair above covers this: SaveSession's own guard
+			// is gated on account state rather than on ErrAccountModeConflict
+			// precisely because it can fail with the CodeTTL deadline instead
+			// of the sentinel while a local row is present.
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
+		// Past the point of no return for the repair: the session is now
+		// legitimately the user's, and clearing it would undo a good login.
+		saved = true
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
@@ -425,6 +438,13 @@ func (es *enableSession) abandonFlow() {
 // One function for both call sites (the pre-flight gate and startLoginFlow's
 // re-check) so the wording and the prefilled fields cannot drift apart.
 func (s *Server) renderModeCheckRetry(w http.ResponseWriter, es *enableSession, esTok, phone string, sendOptIn bool) {
+	// Owned here, like renderEnableTerminalError owns its own abandonFlow, so
+	// a third mode-check exit cannot forget it. Forgetting would look fine --
+	// renderEnablePhoneStep resets es.step on its own, so the duplicate-/start
+	// guard stays satisfied -- while es.flow kept pointing at an uncancelled
+	// goroutine, which is the enableSendCodeWait orphan abandonFlow exists to
+	// close.
+	es.abandonFlow()
 	renderEnablePhoneStep(w, es, enablePhonePage{
 		Issuer:      s.cfg.Issuer,
 		EnableToken: esTok,
@@ -550,12 +570,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// must not read as Telegram flakiness on the dashboard.
 		observePhoneStep("mode_check_error")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
-		// Retryable, so not a terminal refusal — but the flow still has to be
-		// let go of: both arms here return above the supersede block below,
-		// which is what would otherwise cancel a predecessor left running by
-		// the enableSendCodeWait arm.
-		es.abandonFlow()
-		// And any refusal already on file has to go with it. This arm cannot
+		// Any refusal already on file has to go. This arm cannot
 		// re-derive the account state — that is what just failed — so all it
 		// knows is "unknown", and "unknown" must not outrank the retry it is
 		// about to offer. Leaving a cached message here would let a step
@@ -641,7 +656,6 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(lf.err, errModeCheckFailed) {
 				observePhoneStep("mode_check_error")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "")
-				es.abandonFlow()
 				s.renderModeCheckRetry(w, es, esTok, rawPhone, sendOptIn)
 				return
 			}

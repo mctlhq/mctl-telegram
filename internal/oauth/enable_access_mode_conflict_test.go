@@ -553,3 +553,86 @@ func TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage(t *testing.T) 
 		t.Errorf("a refusal the server could no longer confirm was replayed as fact; body=%s", body)
 	}
 }
+
+// TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing covers an exit
+// between the login and SaveSession that the repair used to miss: the login
+// succeeds, but the reload finds no bytes and the flow returns before
+// SaveSession — where the only repair used to hang.
+//
+// The precondition is the multi-active-row state ProvisionLocalAccount's own
+// doc names: a local row provisioned in the window after the login returned.
+// It carries a NULL blob and is the newest active row, so LoadSession answers
+// nil, while the bytes the gotd SessionStore wrote a moment earlier sit on the
+// older hosted row. Leaving them there is the whole failure this change
+// exists to prevent — a hosted worker holding a live session for a user the
+// operator believes is bridge-only.
+func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) {
+	ctx := context.Background()
+	var srv *Server
+
+	srv, mux := newEnableTestServer(t, func(lctx context.Context, apiID int, apiHash string,
+		store *db.Store, uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
+	) (int64, string, string, error) {
+		if _, err := askCode(lctx); err != nil {
+			return 0, "", "", err
+		}
+		// gotd's SessionStore write. With no loaded row id it targets every
+		// active row; here that is the hosted row created below.
+		if err := store.UpdateSessionBlob(lctx, uid, []byte("fake-mtproto-session")); err != nil {
+			return 0, "", "", err
+		}
+		// Self-service activation lands in the window between the login
+		// returning and the reload. Direct SQL because ProvisionLocalAccount
+		// refuses while another active row exists — that guard is exactly what
+		// makes this state a race rather than a normal one.
+		if _, err := store.DB.ExecContext(lctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username,
+			                               session_encrypted, mode, send_enabled, connected_at)
+			 VALUES ($1, $2, $3, $4, NULL, $5, $6, CURRENT_TIMESTAMP)`,
+			uid, 210408407, "Dmitry", "MashkovD", db.ModeLocal, false); err != nil {
+			return 0, "", "", err
+		}
+		return 210408407, "Dmitry", "MashkovD", nil
+	})
+	esTok := driveToPhone(t, mux)
+
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	// The hosted row the login's bytes will land on.
+	if err := srv.store.SaveSession(ctx, uid, []byte("previous-session"), 210408407, "Dmitry", "MashkovD"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {esTok}, "code": {"12345"}})
+
+	// Precondition check: if the flow did not take the reload bail-out, this
+	// test is not exercising the exit it claims to.
+	var localRows int
+	if err := srv.store.DB.QueryRowContext(ctx,
+		`SELECT count(*) FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`, uid, db.ModeLocal).Scan(&localRows); err != nil {
+		t.Fatalf("count local rows: %v", err)
+	}
+	if localRows != 1 {
+		t.Fatalf("expected the raced local row to be active, got %d", localRows)
+	}
+
+	var blob []byte
+	if err := srv.store.DB.QueryRowContext(ctx,
+		`SELECT session_encrypted FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`, uid, db.ModeHosted).Scan(&blob); err != nil {
+		t.Fatalf("read hosted row: %v", err)
+	}
+	if blob != nil {
+		t.Error("the login's bytes survived a bail-out before SaveSession; a hosted worker could act as a user the operator believes is bridge-only")
+	}
+}
