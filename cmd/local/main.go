@@ -537,10 +537,14 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 // testable without touching the real filesystem or stdin.
 //
 // Precedence and aliasing:
+//   - Any non-empty token together with a non-empty tokenFile is rejected:
+//     the caller supplied two sources for the same secret. This is checked
+//     on the flags as supplied, so "-" is not exempt -- `--token -
+//     --token-file /path` is a conflict, not a stdin read that quietly
+//     discards the path.
 //   - token == "-" is an alias for tokenFile == "-": both mean "read the
-//     token from stdin", and take that path below.
-//   - A non-empty, non-"-" token together with a non-empty tokenFile is
-//     rejected: the caller supplied two sources for the same secret.
+//     token from stdin", and take that path below. The alias is applied
+//     only after the conflict check above.
 //   - tokenFile == "-" reads all of stdin; a non-empty, non-"-" tokenFile
 //     reads that file. Either way the result is trimmed of a trailing
 //     "\r\n", the same trim passphraseFromEnv applies to the passphrase
@@ -554,13 +558,21 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 // an error so the caller decides whether it is a usage problem or a fatal
 // one.
 func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(string) ([]byte, error)) (string, error) {
+	// Mutual exclusion is checked on the flags AS SUPPLIED, before the "-"
+	// alias rewrites them. Applying the alias first sets tokenFile = "-"
+	// unconditionally, which erases an explicitly-passed --token-file and
+	// makes `--token - --token-file /path` read stdin and silently ignore
+	// the file -- while the mirror-image `--token abc --token-file -` is
+	// correctly rejected, because that input never enters the alias branch.
+	// Two sources for one secret is the condition being rejected here, and
+	// "-" is a source like any other.
+	if token != "" && tokenFile != "" {
+		return "", errors.New("--token and --token-file are mutually exclusive")
+	}
+
 	if token == "-" {
 		token = ""
 		tokenFile = "-"
-	}
-
-	if token != "" && tokenFile != "" {
-		return "", errors.New("--token and --token-file are mutually exclusive")
 	}
 
 	if tokenFile == "-" {

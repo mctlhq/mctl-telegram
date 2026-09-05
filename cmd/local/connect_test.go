@@ -78,6 +78,33 @@ func TestResolveMCPToken(t *testing.T) {
 		}
 	})
 
+	// The "-" alias is a source like any other, so pairing it with an
+	// explicit --token-file is the same two-sources conflict as above. This
+	// direction regressed once: applying the alias before the exclusion
+	// check rewrote tokenFile to "-", so the file path vanished and stdin
+	// was read with no error -- while the mirror-image case below stayed
+	// correct, which is what made the asymmetry easy to miss.
+	t.Run("--token - with an explicit --token-file is an error, not a silent stdin read", func(t *testing.T) {
+		got, err := resolveMCPToken("-", "/p", strings.NewReader("from-stdin\n"),
+			file(map[string][]byte{"/p": []byte("from-file\n")}))
+		if err == nil {
+			t.Fatalf("got %q err=nil, want a mutual-exclusion error rather than a silent stdin read", got)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+	})
+
+	t.Run("--token with --token-file - is an error (the mirror image)", func(t *testing.T) {
+		got, err := resolveMCPToken("abc123", "-", strings.NewReader("from-stdin\n"), noFile)
+		if err == nil {
+			t.Fatalf("got %q err=nil, want a mutual-exclusion error", got)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+	})
+
 	t.Run("unreadable --token-file path names the path in the error", func(t *testing.T) {
 		_, err := resolveMCPToken("", wrongFile, strings.NewReader(""), noFile)
 		if err == nil || !strings.Contains(err.Error(), wrongFile) {
