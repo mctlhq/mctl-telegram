@@ -406,16 +406,12 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	if !ok {
 		return
 	}
-	// Conversation.State is checked by Evaluate BEFORE the owner-facing
-	// short-circuit (policy.go's switch on in.Conversation.State runs ahead
-	// of the ActionTypeOwnerSummary/OwnerApproval branch), and its default
-	// case denies any unrecognized state — including the empty string a
-	// zero-value Conversation carries. A conversation-less owner-facing call
-	// (req.ConversationID == 0, e.g. a general daily summary) must therefore
-	// still present State: Active so it reaches that short-circuit at all;
-	// policy_test.go's TestEvaluate_OwnerActionsAndPeerZero documents this
-	// exact contract.
-	conv := db.Conversation{State: db.ConversationActive}
+	// Owner-facing actions bypass conversation state entirely in Evaluate
+	// (its short-circuit runs before the in.Conversation.State switch), so
+	// no synthetic conversation is needed here: a conversation-less call
+	// (req.ConversationID == 0, e.g. a general daily summary) can pass the
+	// zero-value Conversation as-is.
+	var conv db.Conversation
 	if req.ConversationID != 0 {
 		c, err := s.Store.GetConversation(ctx, id.UserID, req.ConversationID)
 		if errors.Is(err, db.ErrConversationNotFound) {
@@ -439,8 +435,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
 	// ONLY after the global gates (kill switch, mode==off, autopilot paused)
 	// have already had a chance to deny — see policy.go's ordering. A Deny
-	// here means one of those gates fired, and it must actually stop the
-	// notification from going out: the emergency kill switch exists
+	// here can now only come from one of those account-wide gates (never
+	// conversation state or the sender blocklist), and it must actually stop
+	// the notification from going out: the emergency kill switch exists
 	// precisely to silence every owner-facing message too, not just replies.
 	status := db.ActionExecuted
 	if result.Decision != policy.Allow {

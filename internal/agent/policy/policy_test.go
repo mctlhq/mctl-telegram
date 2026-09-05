@@ -245,13 +245,66 @@ func TestEvaluate_OwnerActionsAndPeerZero(t *testing.T) {
 	// Owner-facing actions are not conversation-scoped: a caller notifying
 	// the owner may have no per-recruiter Conversation row at all. The
 	// cross-user Profile/Conversation guard must not fire for these, only
-	// for ActionTypeReply. (Conversation.State is set to Active only to
-	// isolate this from the unrelated conversation-state gate.)
+	// for ActionTypeReply. Conversation.State is deliberately left at a
+	// non-active, zero-value default here: owner-facing actions bypass
+	// conversation state by design, not by accident of an Active dodge.
 	in = baseInput()
 	in.Action.Type = db.ActionTypeOwnerSummary
-	in.Conversation = db.Conversation{State: db.ConversationActive}
+	in.Conversation = db.Conversation{}
 	if got := Evaluate(in); got.Decision != Allow {
 		t.Fatalf("owner action with zero-value conversation = %s (%v)", got.Decision, got.Reasons)
+	}
+}
+
+func TestEvaluate_OwnerFacingBypassesConversationAndBlocklistGates(t *testing.T) {
+	states := []string{
+		string(db.ConversationTakenOver),
+		string(db.ConversationClosed),
+		string(db.ConversationPaused),
+	}
+	actionTypes := []string{db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval}
+	for _, state := range states {
+		for _, actionType := range actionTypes {
+			in := baseInput()
+			in.Action.Type = actionType
+			in.Conversation.State = state
+			if got := Evaluate(in); got.Decision != Allow {
+				t.Fatalf("state=%s actionType=%s decision = %s (%v), want allow", state, actionType, got.Decision, got.Reasons)
+			}
+		}
+	}
+
+	// The sender-blocklist gate is per-conversation, same as taken_over /
+	// closed / paused: it exists to stop the agent replying to that person,
+	// not to stop the owner from being told they tried to make contact.
+	for _, actionType := range actionTypes {
+		in := baseInput()
+		in.Action.Type = actionType
+		in.Profile.BlockedSenders = "111,555,222"
+		if got := Evaluate(in); got.Decision != Allow {
+			t.Fatalf("blocked sender actionType=%s decision = %s (%v), want allow", actionType, got.Decision, got.Reasons)
+		}
+	}
+}
+
+func TestEvaluate_OwnerFacingStillDeniedByAccountWideGates(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Input)
+	}{
+		{"global kill", func(in *Input) { in.GlobalKill = true }},
+		{"mode off", func(in *Input) { in.Profile.Mode = db.AgentModeOff }},
+		{"autopilot paused", func(in *Input) { in.Profile.AutopilotPaused = true }},
+	}
+	for _, actionType := range []string{db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval} {
+		for _, c := range cases {
+			in := baseInput()
+			in.Action.Type = actionType
+			c.mutate(&in)
+			if got := Evaluate(in); got.Decision != Deny {
+				t.Fatalf("%s/%s decision = %s, want deny", actionType, c.name, got.Decision)
+			}
+		}
 	}
 }
 

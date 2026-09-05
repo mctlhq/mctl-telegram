@@ -307,6 +307,16 @@ func Evaluate(in Input) Result {
 	if in.Profile.AutopilotPaused {
 		return deny("autopilot paused for this account")
 	}
+	// Owner-facing actions notify the human, not the recruiter: they encode
+	// "tell me what happened," not "reply on my behalf." They must still
+	// clear every account-wide gate above (kill switch, mode, autopilot
+	// pause) but must never be silenced by a per-conversation instruction
+	// below (taken over / closed / paused, or that peer being blocked) —
+	// those gates exist to keep the agent quiet toward the recruiter, not
+	// to keep the owner uninformed.
+	if in.Action.Type == db.ActionTypeOwnerSummary || in.Action.Type == db.ActionTypeOwnerApproval {
+		return Result{Decision: Allow, Reasons: []string{"owner-facing action"}}
+	}
 	switch in.Conversation.State {
 	case db.ConversationActive:
 	case db.ConversationTakenOver:
@@ -324,8 +334,6 @@ func Evaluate(in Input) Result {
 
 	switch in.Action.Type {
 	case db.ActionTypeReply:
-	case db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval:
-		return Result{Decision: Allow, Reasons: []string{"owner-facing action"}}
 	default:
 		return deny("unrecognized action type " + strconv.Quote(in.Action.Type))
 	}
