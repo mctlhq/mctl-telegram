@@ -239,7 +239,7 @@ func runConnect(args []string) {
 		die(err)
 	}
 
-	mcpTokenVal, err := resolveMCPToken(*mcpToken, *tokenFile, os.Stdin, os.ReadFile)
+	mcpTokenVal, err := resolveMCPToken(*mcpToken, *tokenFile, os.Stdin, readTokenFile)
 	if err != nil {
 		die(err)
 	}
@@ -554,6 +554,23 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 //   - Both empty returns "", nil: the caller prints its own usage hint for
 //     that case, since it is not an error resolveMCPToken should format.
 //
+// readTokenFile is resolveMCPToken's production file reader. It is NOT
+// os.ReadFile: that reads the whole file into memory and would only be
+// rejected afterwards by the length check, so the bound would be reported but
+// never enforced -- the memory is already spent by then, which is exactly the
+// failure the bound exists to prevent. Reading through io.LimitReader on an
+// open handle enforces it, and the cap+1 byte keeps "exactly cap" and "cap
+// and still going" distinguishable so an oversized file is refused rather
+// than silently truncated into a wrong token.
+func readTokenFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxMCPTokenBytes+1))
+}
+
 // maxMCPTokenBytes bounds what resolveMCPToken will read from stdin or a
 // token file. A real MCP token is a few hundred bytes; 64 KiB is far above
 // any legitimate one and far below anything that threatens the process.

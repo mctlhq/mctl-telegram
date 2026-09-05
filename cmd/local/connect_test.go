@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -108,6 +110,52 @@ func TestResolveMCPToken(t *testing.T) {
 		}
 		if got != "" {
 			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+	})
+
+	// The file branch is bounded by readTokenFile, the production reader,
+	// rather than by the length check alone: os.ReadFile would have spent the
+	// memory before the check could reject it, so the bound would have been
+	// reported but never enforced. Exercised through the real reader on a real
+	// file for that reason -- injecting a stub here would test the check and
+	// miss the thing that does the bounding.
+	t.Run("oversized --token-file is refused, and bounded by the reader itself", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "token")
+		// Deliberately FAR over the cap, not cap+1: at cap+1 a bounded reader
+		// and os.ReadFile return the same number of bytes, so the assertion
+		// below could not tell them apart and would pass for either.
+		if err := os.WriteFile(path, []byte(strings.Repeat("a", maxMCPTokenBytes*4)), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		got, err := resolveMCPToken("", path, strings.NewReader(""), readTokenFile)
+		if err == nil {
+			t.Fatalf("got %q err=nil, want an over-size error", got)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+		// readTokenFile must stop at cap+1, never read the whole file.
+		data, rerr := readTokenFile(path)
+		if rerr != nil {
+			t.Fatalf("readTokenFile: %v", rerr)
+		}
+		if len(data) != maxMCPTokenBytes+1 {
+			t.Fatalf("readTokenFile read %d bytes of a %d-byte file, want it to stop at %d",
+				len(data), maxMCPTokenBytes*4, maxMCPTokenBytes+1)
+		}
+	})
+
+	t.Run("a --token-file exactly at the cap is still accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "token")
+		exact := strings.Repeat("a", maxMCPTokenBytes)
+		if err := os.WriteFile(path, []byte(exact), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		got, err := resolveMCPToken("", path, strings.NewReader(""), readTokenFile)
+		if err != nil || got != exact {
+			t.Fatalf("got %d bytes err=%v, want %d bytes and no error", len(got), err, maxMCPTokenBytes)
 		}
 	})
 
