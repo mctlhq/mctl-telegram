@@ -436,3 +436,21 @@ func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
 		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
 	}
 }
+
+// Both arms of the manage 401 must be uncacheable, including the JSON arm
+// reached directly from the handlers rather than through the middleware.
+func TestManageUnauthorizedIsNoStore(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	for _, accept := range []string{"text/html", "application/json"} {
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		srv.HandleManage(rec, req)
+
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("Accept %q: Cache-Control = %q, want no-store", accept, cc)
+		}
+	}
+}

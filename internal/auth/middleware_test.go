@@ -333,3 +333,27 @@ func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
 		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
 	}
 }
+
+// The Vary only picks the representation. Keeping a 401 out of caches
+// entirely is what stops one being replayed to a caller who has since
+// acquired a valid cookie, and it must hold on the JSON arm too — that arm
+// previously shipped no Cache-Control at all.
+func TestMiddlewareWithHTML_UnauthorizedIsNoStore(t *testing.T) {
+	renderer := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		w.WriteHeader(status)
+	}
+	for _, accept := range []string{"text/html", "application/json"} {
+		h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, renderer)(
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run")
+			}))
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("Accept %q: Cache-Control = %q, want no-store", accept, cc)
+		}
+	}
+}

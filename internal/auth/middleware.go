@@ -173,16 +173,31 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg str
 		return
 	}
 	// The body for this URL now depends on the request headers WantsJSON
-	// reads. 401 is not heuristically cacheable and the HTML branch sets
-	// Cache-Control: no-store, but a proxy configured to cache error
-	// responses would otherwise be free to serve one representation to a
-	// caller that asked for the other.
+	// reads, so a proxy configured to cache error responses would otherwise
+	// be free to serve one representation to a caller that asked for the
+	// other.
+	//
+	// The outcome also varies on Cookie — localjwt falls back to the
+	// mctl_connect_token cookie — but Vary: Cookie fragments a shared cache
+	// per cookie value and buys nothing here. no-store below is what
+	// actually stops a 401 being replayed to a caller who has since
+	// acquired a valid cookie; the Vary is only about picking the right
+	// representation.
 	AddNegotiationVary(w)
+	noStore(w)
 	if !WantsJSON(r) {
 		html(w, r, code, msg)
 		return
 	}
 	writeJSONError(w, code, msg)
+}
+
+// noStore keeps an unauthorized response out of any cache. 401 is not in the
+// RFC 9111 §4.2.2 heuristically-cacheable set, so nothing should store one
+// anyway — this makes the guarantee explicit rather than resting on a
+// status-code table a misconfigured proxy is free to ignore.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 }
 
 // AddNegotiationVary declares the request headers WantsJSON inspects, so a

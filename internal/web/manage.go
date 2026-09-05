@@ -41,6 +41,10 @@ func NewManageServer(store *db.Store, pool ManagePool, issuer string) *ManageSer
 func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	auth.AddNegotiationVary(w)
 	if auth.WantsJSON(r) {
+		// renderManageNeedAuth sets this on the HTML arm; the JSON arm is
+		// reached directly from the handlers below, which never pass
+		// through auth.writeUnauthorized.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
