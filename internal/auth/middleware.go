@@ -168,23 +168,25 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 }
 
 func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg string, html UnauthorizedRenderer) {
+	// Unconditional: cacheability is not a negotiation property. A /mcp or
+	// /api/* 401 varies on Authorization exactly as the manage 401 varies on
+	// Cookie, and a proxy told to cache error responses is as free to ignore
+	// the status-code table for one as for the other.
+	noStore(w)
 	if html == nil {
 		writeJSONError(w, code, msg)
 		return
 	}
-	// The body for this URL now depends on the request headers WantsJSON
-	// reads, so a proxy configured to cache error responses would otherwise
-	// be free to serve one representation to a caller that asked for the
-	// other.
+	// Vary, unlike no-store, genuinely does belong only here: the JSON-only
+	// middleware negotiates nothing, so claiming otherwise would fragment
+	// caches for no reason. The body for this URL depends on the request
+	// headers WantsJSON reads, so a cache must key the two representations
+	// apart.
 	//
 	// The outcome also varies on Cookie — localjwt falls back to the
 	// mctl_connect_token cookie — but Vary: Cookie fragments a shared cache
-	// per cookie value and buys nothing here. no-store below is what
-	// actually stops a 401 being replayed to a caller who has since
-	// acquired a valid cookie; the Vary is only about picking the right
-	// representation.
+	// per cookie value and buys nothing once the response is no-store.
 	AddNegotiationVary(w)
-	noStore(w)
 	if !WantsJSON(r) {
 		html(w, r, code, msg)
 		return
@@ -195,7 +197,8 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg str
 // noStore keeps an unauthorized response out of any cache. 401 is not in the
 // RFC 9111 §4.2.2 heuristically-cacheable set, so nothing should store one
 // anyway — this makes the guarantee explicit rather than resting on a
-// status-code table a misconfigured proxy is free to ignore.
+// status-code table a misconfigured proxy is free to ignore. It applies to
+// every 401 this package writes, negotiated or not.
 func noStore(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 }

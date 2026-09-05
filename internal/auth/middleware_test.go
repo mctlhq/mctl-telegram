@@ -307,6 +307,11 @@ func TestMiddleware_JSONOnlyDoesNotVary(t *testing.T) {
 	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
 		t.Fatalf("Vary = %v, want none for a JSON-only route", vary)
 	}
+	// The asymmetry is Vary-only. no-store is not a negotiation property and
+	// must hold here too — /mcp and /api/* reach this branch.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store on a JSON-only route", cc)
+	}
 }
 
 // varyTokens flattens the Vary header into its individual field names.
