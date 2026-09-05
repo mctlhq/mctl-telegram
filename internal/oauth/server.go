@@ -923,9 +923,19 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 	// over a config typo; the precedence is pinned by
 	// TestResolveScopes_Tiers so it cannot be swapped unnoticed.
 	//
-	// It is also checked before isClientTier's database call, so a
-	// statically-listed lookup admin resolves without touching the DB, the
-	// same way an AdminTelegramIDs entry above does.
+	// It is also checked before isClientTier's database call, so THIS
+	// FUNCTION resolves a statically-listed lookup admin without touching the
+	// DB, the same way an AdminTelegramIDs entry above does. That is a
+	// property of scope resolution only — it is NOT a login-wide guarantee
+	// that static tiers survive a database outage. handleTelegramCallback
+	// needs the database well before it reaches any tier logic
+	// (EnsureUserByTelegramID for the user row, GetAccessTier in the
+	// auto-approve block, and CheckSessionValid, whose default branch is an
+	// explicit 500), so a DB outage fails the callback for every tier
+	// including env-only admins. Reordering the checks there would move one
+	// query out of a path that still has three; it would not buy the
+	// guarantee, and reading this comment as if it did is the mistake to
+	// avoid.
 	if s.cfg.LookupAdminTelegramIDs[tgID] {
 		return []string{"admin-lookup"}, []string{"admin:users"}, nil
 	}
