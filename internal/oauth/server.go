@@ -1478,10 +1478,10 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// that reuses this same isLookupOnly, agentSendGate.hasSendScope):
 	// full-admin membership wins over a dual listing everywhere, so a full
 	// admin who is also listed as a lookup admin keeps the normal
-	// materialization. Nothing about their scopes
-	// changes either way -- those come from the env allowlist -- but letting
-	// the exemption fire for them would leave one site disagreeing with the
-	// rest about what a dual listing means.
+	// materialization. Nothing about their scopes changes either way --
+	// those come from the env allowlist -- but letting the exemption fire
+	// for them would leave one site disagreeing with the rest about what a
+	// dual listing means.
 	isLookupOnly := s.cfg.LookupAdminTelegramIDs[identity.TelegramID] &&
 		!s.cfg.AdminTelegramIDs[identity.TelegramID]
 	if s.cfg.AutoApproveClients && !isLookupOnly {
