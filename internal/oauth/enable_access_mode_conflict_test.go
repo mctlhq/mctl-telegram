@@ -250,4 +250,63 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 	if loginCalled.Load() {
 		t.Error("telegram login ran despite the local account winning the race; the bridge session would already be overwritten")
 	}
+
+	// The refusal must also leave the session on stepPhone. handleEnableStart
+	// sets es.step = stepCode before the select it refuses in, and its
+	// duplicate-/start guard keys on (stepCode, flow != nil) -- so without a
+	// reset a resubmitted /start is handed a code screen for an SMS Telegram
+	// was never asked to send, and returns from the guard before ever reaching
+	// the pre-flight mode gate that would have refused it again.
+	again := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+	againBody := again.Body.String()
+	if strings.Contains(againBody, "enable_access/code") {
+		t.Errorf("resubmitted /start after a terminal refusal rendered the code screen; body=%s", againBody)
+	}
+	if !strings.Contains(againBody, "Local Bridge") {
+		t.Errorf("resubmitted /start did not re-refuse via the pre-flight mode gate; body=%s", againBody)
+	}
+}
+
+// TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep is the same property for
+// handleEnableCode's terminal arm, which is reached on the other side of the
+// window: the login already ran and SaveSession refused. Kept separate from the
+// race test because it needs no goroutine -- the local row is provisioned after
+// the code screen is on screen, so the refusal lands in the code handler.
+func TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	esTok := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %d %s", rec.Code, rec.Body.String())
+	}
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}}); !strings.Contains(rec.Body.String(), "Local Bridge") {
+		t.Fatalf("code step did not refuse with the local-mode message: %s", rec.Body.String())
+	}
+
+	// es.step was stepCode when the refusal rendered; if the terminal arm did
+	// not reset it, this resubmit trips the duplicate-/start guard and gets a
+	// code form back instead of the refusal.
+	again := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+	againBody := again.Body.String()
+	if strings.Contains(againBody, "enable_access/code") {
+		t.Errorf("resubmitted /start after a terminal refusal rendered the code screen; body=%s", againBody)
+	}
+	if !strings.Contains(againBody, "Local Bridge") {
+		t.Errorf("resubmitted /start did not re-refuse via the pre-flight mode gate; body=%s", againBody)
+	}
 }

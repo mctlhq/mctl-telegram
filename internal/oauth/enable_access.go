@@ -356,6 +356,23 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 	renderEnablePhone(w, p)
 }
 
+// renderEnableTerminalError resets the flow and renders the dead-end screen. It
+// is the terminal counterpart to renderEnablePhoneStep and exists for the same
+// reason: es.step must never lag the screen actually shown. A refusal that left
+// es.step == stepCode with es.flow non-nil would satisfy handleEnableStart's
+// duplicate-/start guard, so a resubmitted /start would be handed a code screen
+// for an SMS Telegram was never asked to send, and would return from that guard
+// before ever reaching the pre-flight mode gate that produced this refusal.
+// Clearing es.flow is what makes the resubmit fall through to that gate and get
+// the same terminal answer instead. The flow is always finished by the time a
+// caller gets here -- every call site is inside a <-lf.done arm -- so dropping
+// the reference cancels nothing that is still running.
+func renderEnableTerminalError(w http.ResponseWriter, es *enableSession, msg string) {
+	es.step = stepPhone
+	es.flow = nil
+	renderEnableError(w, msg)
+}
+
 // lookupEnable parses the form, resolves the "es" token to a live (un-expired)
 // enableSession, and returns it. ok is false when the token is missing,
 // unknown, or past CodeTTL.
@@ -400,8 +417,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// advanced to the code screen must NOT cancel and relaunch the live flow
 	// (that would invalidate the SMS code the user is entering and send a
 	// second one). Re-render the code screen instead. A legitimate restart
-	// after an error arrives with es.step == stepPhone (every error branch
-	// resets it via renderEnablePhoneStep), so this only catches duplicates.
+	// after an error arrives with es.step == stepPhone -- every error branch
+	// resets it, via renderEnablePhoneStep when the user can retry and via
+	// renderEnableTerminalError when the refusal is terminal -- so this only
+	// catches duplicates.
 	if es.step == stepCode && es.flow != nil {
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
@@ -507,7 +526,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
 				observePhoneStep("mode_conflict")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
-				renderEnableError(w, friendlyErr(lf.err))
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
 				return
 			}
 			result := "error"
@@ -613,7 +632,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			// re-hits the same guard. Render the dead-end screen rather than
 			// the phone step's "start again to get a fresh code" framing.
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
-				renderEnableError(w, friendlyErr(lf.err))
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
 				return
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
@@ -693,7 +712,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			// Terminal, same as in handleEnableCode: a mode conflict is not a
 			// wrong password and restarting cannot clear it.
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
-				renderEnableError(w, friendlyErr(lf.err))
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
 				return
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{

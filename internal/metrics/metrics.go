@@ -60,7 +60,15 @@ type Registry struct {
 	// LoginPhoneStepTotal counts phone-step outcomes, labeled by result:
 	// "ok" (SendCode returned and the code screen was shown), "timeout"
 	// (connect/SendCode exceeded enableSendCodeWait — the stall failure mode),
-	// or "error" (Telegram returned an RPC error).
+	// "error" (Telegram returned an RPC error), "mode_conflict" (the account
+	// has an active Local Bridge row, so the hosted connect was refused before
+	// Telegram was contacted), or "mode_check_error" (the store could not
+	// answer whether it is local).
+	//
+	// The last two never reach Telegram, so they belong in neither the
+	// numerator nor the denominator of a Telegram-health ratio — see the
+	// MctlTelegramLoginSendCodeStalls section of docs/runbook.md, whose
+	// queries exclude them.
 	LoginPhoneStepTotal *prometheus.CounterVec
 	// LoginPhoneToCodeDuration measures connect + SendCode wall-clock latency
 	// for successful phone steps, in seconds. The buckets reach 90s to bracket
