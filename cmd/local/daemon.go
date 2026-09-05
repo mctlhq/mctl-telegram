@@ -12,6 +12,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -667,6 +669,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			MediaType  string `json:"media_type"`
 			FileURL    string `json:"file_url"`
 			FileBase64 string `json:"file_base64"`
+			FilePath   string `json:"file_path"`
 			Caption    string `json:"caption"`
 			FileName   string `json:"file_name"`
 			Mode       string `json:"mode"`
@@ -705,6 +708,23 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 				if err != nil {
 					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_url: %v", err))
 				}
+			case args.FilePath != "":
+				// The hosted server already rejected file_path for any account
+				// not resolved to Local Bridge mode, so reaching this arm means
+				// this daemon process is the one legitimately reading the
+				// caller's own filesystem.
+				var err error
+				data, err = os.ReadFile(args.FilePath)
+				if err != nil {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path: %v", err))
+				}
+				if int64(len(data)) > tg.DefaultMediaUploadMaxBytes {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path is %d bytes, exceeding the %d-byte upload cap", len(data), tg.DefaultMediaUploadMaxBytes))
+				}
+				if args.FileName == "" {
+					args.FileName = filepath.Base(args.FilePath)
+				}
+				mimeType = http.DetectContentType(data[:min(512, len(data))])
 			}
 		}
 		var sendResult *tg.SendMediaResult

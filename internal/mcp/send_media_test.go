@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
 )
 
 // callSendMedia invokes the send_media handler with the given args/identity.
@@ -93,6 +95,146 @@ func TestToolSendMedia_NeitherSourceSet(t *testing.T) {
 	})
 	if !res.IsError {
 		t.Fatal("expected an error result when neither file_url nor file_base64 is set")
+	}
+}
+
+// TestToolSendMedia_ExactlyOneOfThreeSources covers the 2-way -> 3-way
+// exclusivity refactor: zero, two, or three sources set must all error
+// (checked ahead of the file_path hosted-mode rejection, so combinations
+// involving file_path still error here for the same reason regardless of
+// account mode); exactly one of file_url/file_base64 set must pass
+// validation and reach the dry-run preview (gate is closed, so no I/O is
+// attempted either way). file_path-alone is exercised separately below,
+// since on a hosted (non-bridge) server it is rejected for a different
+// reason (Local Bridge-only), not an exclusivity failure.
+func TestToolSendMedia_ExactlyOneOfThreeSources(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      map[string]any
+		wantError bool
+	}{
+		{"none", map[string]any{}, true},
+		{"url+base64", map[string]any{"file_url": "https://example.com/f.jpg", "file_base64": "aGk="}, true},
+		{"url+path", map[string]any{"file_url": "https://example.com/f.jpg", "file_path": "/tmp/f.jpg"}, true},
+		{"base64+path", map[string]any{"file_base64": "aGk=", "file_path": "/tmp/f.jpg"}, true},
+		{"all three", map[string]any{"file_url": "https://example.com/f.jpg", "file_base64": "aGk=", "file_path": "/tmp/f.jpg"}, true},
+		{"url only", map[string]any{"file_url": "https://example.com/f.jpg"}, false},
+		{"base64 only", map[string]any{"file_base64": "aGk="}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := sendMediaTestServer(t, false)
+			args := map[string]any{"peer": "@x", "media_type": "photo"}
+			for k, v := range tc.args {
+				args[k] = v
+			}
+			res := callSendMedia(t, srv, sendMediaScopedIdentity(), args)
+			if res.IsError != tc.wantError {
+				t.Errorf("IsError = %v, want %v (result: %s)", res.IsError, tc.wantError, contentText(res))
+			}
+		})
+	}
+}
+
+// TestToolSendMedia_FilePathAloneRejectedOnHostedServer: file_path is the
+// sole source, exclusivity passes, but the server has no Hub (hosted mode)
+// — this must still error, for the Local-Bridge-only reason, not an
+// exclusivity reason. Points file_path at a path guaranteed not to exist so
+// any accidental read would surface as a different, filesystem-shaped
+// error rather than this validation error.
+func TestToolSendMedia_FilePathAloneRejectedOnHostedServer(t *testing.T) {
+	srv := sendMediaTestServer(t, true)
+	res := callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+		"peer":       "@x",
+		"media_type": "photo",
+		"file_path":  "/nonexistent/for-test-only",
+	})
+	if !res.IsError {
+		t.Fatal("expected an error result for file_path on a hosted (non-bridge) server")
+	}
+}
+
+// TestToolSendMedia_FilePathAloneAllowedForLocalBridgeAccount: same input,
+// but the account resolves to Local Bridge mode — validation must pass and
+// the call falls through to the (gate-closed) dry-run preview, not an
+// error. The gate stays closed (AllowSend=false) so this never actually
+// reaches the bridge call.
+func TestToolSendMedia_FilePathAloneAllowedForLocalBridgeAccount(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 8001)
+	srv := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: false}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendMediaResult(t, callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "photo",
+		"file_path":  "/nonexistent/for-test-only",
+	}))
+	if out["sent"] != false {
+		t.Errorf("sent = %v, want false", out["sent"])
+	}
+}
+
+// TestToolSendMedia_FilePathDerivesFileName: when file_path is the source
+// and file_name is omitted, the dry-run preview's file_name must be the
+// path's basename. Uses a Local Bridge account (gate closed) so file_path
+// clears the hosted-mode rejection and the call reaches the preview.
+func TestToolSendMedia_FilePathDerivesFileName(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 8003)
+	srv := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: false}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendMediaResult(t, callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "photo",
+		"file_path":  "/nonexistent/dir/report.pdf",
+	}))
+	if out["file_name"] != filepath.Base("/nonexistent/dir/report.pdf") {
+		t.Errorf("file_name = %v, want %q", out["file_name"], "report.pdf")
+	}
+}
+
+// TestToolSendMedia_FilePathDocumentNoFileNameNoLongerErrors: unlike
+// file_base64, media_type=document with file_path and no file_name must
+// NOT error — the basename derivation satisfies the document-name rule.
+func TestToolSendMedia_FilePathDocumentNoFileNameNoLongerErrors(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 8004)
+	srv := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: false}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	res := callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "document",
+		"file_path":  "/nonexistent/dir/report.pdf",
+	})
+	if res.IsError {
+		t.Fatalf("document+file_path without file_name should not error, got: %s", contentText(res))
+	}
+}
+
+// TestToolSendMedia_GateBlockedNeverReadsFilePath is the file_path analogue
+// of TestToolSendMedia_GateBlockedNeverFetchesURL: a gate-denied call with
+// file_path set on a Local Bridge account must never attempt a filesystem
+// read. Points file_path at a path guaranteed not to exist so any
+// accidental read would surface as a different, filesystem-shaped error
+// rather than the expected dry-run preview. Uses a Local Bridge account
+// (rather than sendMediaTestServer's hosted/no-Hub setup) so the gate check
+// — not the unrelated hosted-mode rejection — is what's under test here.
+func TestToolSendMedia_GateBlockedNeverReadsFilePath(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 8002)
+	srv := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: false}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendMediaResult(t, callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "photo",
+		"file_path":  "/nonexistent/for-test-only",
+	}))
+	if out["sent"] != false {
+		t.Errorf("sent = %v, want false", out["sent"])
 	}
 }
 

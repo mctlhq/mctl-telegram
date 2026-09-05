@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -300,15 +301,19 @@ Inputs (required):
     file_url    — an HTTPS URL this server fetches and re-uploads. Must resolve to a public
                   address; loopback, link-local, and private-range addresses are refused.
     file_base64 — standard base64-encoded file bytes.
+    file_path   — a local filesystem path (absolute or relative to the Local Bridge daemon's
+                  working directory). Local Bridge accounts only — rejected with a validation
+                  error for hosted accounts, before any filesystem access is attempted.
 
 Inputs (optional):
   caption   — text attached to the media (truncated to Telegram's ~1024-char caption limit).
   file_name — REQUIRED when media_type="document" and file_base64 is the source; optional
-              display name for the other media types.
+              display name for file_url. Never required for file_path — it defaults to the
+              path's basename when omitted.
 
 Both the file_url fetch and the file_base64 decode are capped by MEDIA_UPLOAD_MAX_BYTES
 (default 20 MiB) and are only ever performed on the real-send path — a draft or gate-denied
-call never fetches a URL or decodes base64.`),
+call never fetches a URL, decodes base64, or reads file_path.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -318,16 +323,19 @@ call never fetches a URL or decodes base64.`),
 			mcplib.Description(`One of "photo", "video", "document", "animation".`),
 		),
 		mcplib.WithString("file_url",
-			mcplib.Description("HTTPS URL to fetch and send. Exactly one of file_url/file_base64 is required."),
+			mcplib.Description("HTTPS URL to fetch and send. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("file_base64",
-			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64 is required."),
+			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64/file_path is required."),
+		),
+		mcplib.WithString("file_path",
+			mcplib.Description("Local filesystem path (absolute or relative to the Local Bridge daemon's working directory). Local Bridge accounts only — rejected for hosted accounts. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("caption",
 			mcplib.Description("Optional caption text for the media."),
 		),
 		mcplib.WithString("file_name",
-			mcplib.Description(`Required when media_type="document" and file_base64 is used; optional display name otherwise.`),
+			mcplib.Description(`Required when media_type="document" and file_base64 is used; optional display name otherwise. Defaults to the basename of file_path when file_path is the source and file_name is omitted.`),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -346,6 +354,7 @@ call never fetches a URL or decodes base64.`),
 		mediaType := stringArg(args, "media_type", "")
 		fileURL := stringArg(args, "file_url", "")
 		fileB64 := stringArg(args, "file_base64", "")
+		filePath := stringArg(args, "file_path", "")
 		caption := truncate(stringArg(args, "caption", ""), maxCaptionLen)
 		fileName := stringArg(args, "file_name", "")
 
@@ -355,11 +364,41 @@ call never fetches a URL or decodes base64.`),
 		if !telegram.ValidMediaTypes[mediaType] {
 			return mcplib.NewToolResultError(`media_type must be one of "photo", "video", "document", "animation"`), nil
 		}
-		if (fileURL == "") == (fileB64 == "") {
-			return mcplib.NewToolResultError("exactly one of file_url and file_base64 is required"), nil
+		sourceCount := 0
+		for _, src := range []string{fileURL, fileB64, filePath} {
+			if src != "" {
+				sourceCount++
+			}
+		}
+		if sourceCount != 1 {
+			return mcplib.NewToolResultError("exactly one of file_url, file_base64, and file_path is required"), nil
+		}
+		if filePath != "" && fileName == "" {
+			// Always derivable — write it back into args so the bridge-forwarded
+			// copy (if any) carries the same derived name, avoiding a second
+			// derivation on the daemon side.
+			fileName = filepath.Base(filePath)
+			args["file_name"] = fileName
 		}
 		if mediaType == "document" && fileB64 != "" && fileName == "" {
 			return mcplib.NewToolResultError(`file_name is required when media_type is "document" and file_base64 is used`), nil
+		}
+
+		if filePath != "" {
+			// file_path is only meaningful for a Local Bridge daemon, which has
+			// direct access to the caller's own filesystem. The hosted server
+			// must never resolve it against its own disk — reject before the
+			// gate/draft branch runs and before any filesystem access, mirroring
+			// the other fail-fast validation checks above.
+			isLocalBridge := false
+			if s.Hub != nil {
+				if mode, err := s.Store.GetAccountMode(ctx, id.UserID); err == nil && mode == "local" {
+					isLocalBridge = true
+				}
+			}
+			if !isLocalBridge {
+				return mcplib.NewToolResultError("file_path is only supported for Local Bridge accounts — use file_base64 or file_url, or connect Local Bridge"), nil
+			}
 		}
 
 		peerRedacted := telegram.RedactPeer(peer)
