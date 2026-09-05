@@ -195,6 +195,26 @@ func TestToolSendMedia_FilePathDerivesFileName(t *testing.T) {
 	}
 }
 
+// TestToolSendMedia_FilePathWindowsDerivesBaseName: the daemon also ships for
+// windows/amd64, so file_path can be a Windows path. This server is compiled
+// for Linux, where filepath.Base would leave it unsplit — the derived preview
+// name must still be just the basename, never the caller's full local path.
+func TestToolSendMedia_FilePathWindowsDerivesBaseName(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 8005)
+	srv := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: false}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendMediaResult(t, callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "photo",
+		"file_path":  `C:\Users\Alice\Pictures\cat.jpg`,
+	}))
+	if out["file_name"] != "cat.jpg" {
+		t.Errorf("file_name = %v, want %q", out["file_name"], "cat.jpg")
+	}
+}
+
 // TestToolSendMedia_FilePathDocumentNoFileNameNoLongerErrors: unlike
 // file_base64, media_type=document with file_path and no file_name must
 // NOT error — the basename derivation satisfies the document-name rule.

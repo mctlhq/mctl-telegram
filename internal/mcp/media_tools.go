@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -377,11 +378,13 @@ call never fetches a URL, decodes base64, or reads file_path.`),
 			return mcplib.NewToolResultError("exactly one of file_url, file_base64, and file_path is required"), nil
 		}
 		if filePath != "" && fileName == "" {
-			// Always derivable — write it back into args so the bridge-forwarded
-			// copy (if any) carries the same derived name, avoiding a second
-			// derivation on the daemon side.
-			fileName = filepath.Base(filePath)
-			args["file_name"] = fileName
+			// Derived for the dry-run preview only, and deliberately NOT written
+			// back into args: the daemon derives the name that actually leaves the
+			// machine, on the caller's own OS. This server is always built for
+			// Linux, so its filepath.Base leaves a Windows path (a published daemon
+			// target) unsplit — forwarding it would put the caller's full local
+			// path, username and all, into the sent file name.
+			fileName = localBaseName(filePath)
 		}
 		if mediaType == "document" && fileB64 != "" && fileName == "" {
 			return mcplib.NewToolResultError(`file_name is required when media_type is "document" and file_base64 is used`), nil
@@ -498,6 +501,21 @@ func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 str
 // log: the SHA-256 prefix of the path, plus its extension. Enough to correlate
 // repeated sends of the same file in an audit trail without recording the
 // caller's local directory layout or a revealing file name.
+// localBaseName is an OS-agnostic filepath.Base for paths that originate on
+// the caller's machine rather than on this (always Linux) server: it splits on
+// both separators, so C:\Users\Alice\cat.jpg yields cat.jpg instead of the
+// whole path.
+func localBaseName(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
+		path = path[i+1:]
+	}
+	// A drive-relative path ("C:cat.jpg") keeps its prefix after the split.
+	if i := strings.LastIndex(path, ":"); i >= 0 {
+		path = path[i+1:]
+	}
+	return path
+}
+
 func filePathAuditRef(path string) string {
 	sum := sha256.Sum256([]byte(path))
 	ref := "sha256:" + hex.EncodeToString(sum[:8])
