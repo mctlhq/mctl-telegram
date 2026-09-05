@@ -67,6 +67,7 @@ type Config struct {
 	TelegramLoginBotToken string  // bot token used to send the daily new-client digest
 	TGLoginAdmins         []int64 // allowlist of Telegram ids granted platform-admins scopes
 	TGLoginClients        []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
+	TGLoginLookupAdmins   []int64 // allowlist of Telegram ids granted admin:users:read only — the two read-only admin lookups; deliberately not the flat admin:users, which also gates every admin write tool. See oauth.Config.LookupAdminTelegramIDs
 	// Telegram OpenID Connect (Relying Party — replaces the legacy widget):
 	TelegramOIDCClientID     string   // OIDC client id = the login bot's numeric id; not secret
 	TelegramOIDCClientSecret string   // OIDC client secret from BotFather; sourced from Vault
@@ -323,6 +324,7 @@ func Load() (*Config, error) {
 	c.TGLoginAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_ADMINS"))
 	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
+	c.TGLoginLookupAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_LOOKUP_ADMINS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
 	if v := os.Getenv("TG_API_ID"); v != "" {

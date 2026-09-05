@@ -206,6 +206,26 @@ type Config struct {
 	// admin:users platform-admin capability. An id in neither allowlist still
 	// authenticates but receives an empty scope set (403 on every MCP tool).
 	ClientTelegramIDs map[int64]bool
+	// LookupAdminTelegramIDs is the allowlist of Telegram user ids that get
+	// ONLY admin:users:read — the two read-only admin lookups
+	// (list_telegram_identities, get_user_audit_log) and nothing else. It is
+	// deliberately NOT the flat admin:users scope: that one is the only gate
+	// on every admin WRITE tool (set_telegram_access, set_account_send,
+	// set_account_mode, provision_local_account, revoke_telegram_session,
+	// revoke_worker_token, mint_worker_token) and on the three admin mint
+	// routes in internal/agentapi and internal/workertoken, so granting it
+	// here would have made a "lookup-only" consumer a full platform admin
+	// over other people's accounts. mint_worker_token was the sharpest case:
+	// it mints for an ARBITRARY telegram_id and purpose "local-bridge" adds
+	// send and pin, so the tier could have granted itself exactly the
+	// capability it is described as not needing.
+	//
+	// This is the tier for a lookup-only consumer (e.g. an OpenClaw bot
+	// answering "who is Telegram user X") that must never need a
+	// real/working MTProto session of its own with read/send/pin capability.
+	// Checked after AdminTelegramIDs and before the client tier, so
+	// full-admin membership always takes precedence over a dual listing.
+	LookupAdminTelegramIDs map[int64]bool
 	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
 	// an operator action. An explicit DB tier of "none" still bans them.
@@ -452,6 +472,9 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.ClientTelegramIDs == nil {
 		cfg.ClientTelegramIDs = map[int64]bool{}
+	}
+	if cfg.LookupAdminTelegramIDs == nil {
+		cfg.LookupAdminTelegramIDs = map[int64]bool{}
 	}
 	if len(cfg.AllowedImplicitHosts) == 0 {
 		cfg.AllowedImplicitHosts = []string{
@@ -863,9 +886,18 @@ func cancelEnableFlow(e *enableSession) bool {
 	return false
 }
 
-// ResolveScopes maps a Telegram identity to a scope set. Three tiers:
+// ResolveScopes maps a Telegram identity to a scope set. Four tiers, checked
+// in this order:
 //   - admins (TG_LOGIN_ADMINS env) → platform-admins: full telegram:* plus
 //     admin:users.
+//   - lookup-admins (TG_LOGIN_LOOKUP_ADMINS env) → admin-lookup:
+//     admin:users:read only — the two read-only admin lookups, no telegram:*
+//     messaging scopes and none of the admin write tools the flat
+//     admin:users scope gates. For a lookup-only consumer (e.g. an OpenClaw
+//     bot answering "who is Telegram user X") that must never need a
+//     real/working MTProto session of its own. Checked after the full-admin
+//     tier, so an id listed in both always resolves via the full-admin
+//     branch above, unchanged.
 //   - clients → clients: telegram:* for the user's own account (read/send/
 //     pin), without admin:users. The client allowlist is the union of the
 //     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
@@ -893,6 +925,56 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			// admin-initiated device revocation).
 			"account:manage",
 		}, nil
+	}
+	// The lookup tier's scope is admin:users:read, NOT admin:users. That
+	// distinction is the whole tier: admin:users is a single flat scope
+	// gating nine MCP tools, only two of which are the read-only lookups
+	// this tier exists for (list_telegram_identities, get_user_audit_log).
+	// The other seven are writes -- set_telegram_access, set_account_send,
+	// set_account_mode, provision_local_account, revoke_telegram_session,
+	// revoke_worker_token and mint_worker_token -- plus three admin HTTP
+	// mint routes (internal/agentapi's two handlers and
+	// internal/workertoken's). Granting admin:users here would have handed
+	// a "lookup-only" consumer every one of them, and mint_worker_token in
+	// particular would have defeated this tier's own reason to exist: it
+	// mints a credential for an ARBITRARY target account, and purpose
+	// "local-bridge" adds send and pin. Withholding telegram:* from an
+	// identity that can mint itself a sending credential for anyone is a
+	// decorative restriction, not a boundary.
+	//
+	// admin:users:read is implicit-privileged the same way admin:users is:
+	// granted here, never in DCRNegotiableScopes, and absent from both of
+	// internal/workertoken's mint allowlists (which are subset-validated
+	// against fixed literals), so no worker or device credential can ever
+	// carry it.
+	//
+	// Checked before the client tier, so lookup-admin membership WINS over
+	// it: an id in both LookupAdminTelegramIDs and the client allowlist (env
+	// TG_LOGIN_CLIENTS or a DB access_tier) resolves to admin:users:read
+	// alone and keeps none of the telegram:* scopes. That is deliberate --
+	// the two are meant to be disjoint populations, a lookup admin being an
+	// operator bot rather than a messaging account -- and listing an id in
+	// both is a configuration mistake, not a way to combine the bundles. It
+	// resolves quietly rather than erroring because the alternative is
+	// failing a login over a config typo; the precedence is pinned by
+	// TestResolveScopes_Tiers so it cannot be swapped unnoticed. The
+	// background executor's agentSendGate mirrors this precedence
+	// explicitly (cmd/server/agentsendgate.go) -- it reconstructs send
+	// capability from the same tier inputs without calling this function,
+	// so a tier added here and not there is a silent divergence.
+	//
+	// It is also checked before isClientTier's database call, so THIS
+	// FUNCTION resolves a statically-listed lookup admin without touching the
+	// DB, the same way an AdminTelegramIDs entry above does. That is a
+	// property of scope resolution only -- it is NOT a login-wide guarantee
+	// that static tiers survive a database outage. handleTelegramCallback
+	// needs the database well before it reaches any tier logic
+	// (EnsureUserByTelegramID for the user row, GetAccessTier in the
+	// auto-approve block, and CheckSessionValid, whose default branch is an
+	// explicit 500), so a DB outage fails the callback for every tier
+	// including env-only admins.
+	if s.cfg.LookupAdminTelegramIDs[tgID] {
+		return []string{"admin-lookup"}, []string{"admin:users:read"}, nil
 	}
 	isClient, err := s.isClientTier(ctx, tgID)
 	if err != nil {
@@ -1378,7 +1460,31 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// block is best-effort: the transient grant in isClientTier already
 	// covers the user regardless, so a DB read/write hiccup here must not
 	// turn an otherwise-valid sign-in into an HTTP 500.
-	if s.cfg.AutoApproveClients {
+	//
+	// A statically-listed lookup admin is exempt. Without the exemption its
+	// first sign-in finds dbTier=="" and persists access_tier='client' --
+	// harmless while the id stays in TG_LOGIN_LOOKUP_ADMINS, since both
+	// ResolveScopes and agentSendGate.hasSendScope check that allowlist
+	// BEFORE the client tier, but a trap on removal: taking the bot out of
+	// the allowlist when it is rotated out would PROMOTE it to the full
+	// client tier off the persisted row (telegram:* plus account:manage)
+	// instead of dropping it to no scopes. Operators reasonably read
+	// "remove from the allowlist" as de-provisioning, so removal has to mean
+	// removal. It also keeps the bot from showing up as a client in
+	// list_telegram_identities and in the new-client digest.
+	//
+	// Guarded with !AdminTelegramIDs for the same reason every other tier
+	// site is (ResolveScopes' branch order, the enable_access routing below
+	// that reuses this same isLookupOnly, agentSendGate.hasSendScope):
+	// full-admin membership wins over a dual listing everywhere, so a full
+	// admin who is also listed as a lookup admin keeps the normal
+	// materialization. Nothing about their scopes changes either way --
+	// those come from the env allowlist -- but letting the exemption fire
+	// for them would leave one site disagreeing with the rest about what a
+	// dual listing means.
+	isLookupOnly := s.cfg.LookupAdminTelegramIDs[identity.TelegramID] &&
+		!s.cfg.AdminTelegramIDs[identity.TelegramID]
+	if s.cfg.AutoApproveClients && !isLookupOnly {
 		dbTier, err := s.store.GetAccessTier(r.Context(), identity.TelegramID)
 		if err != nil {
 			slog.Error("get access tier for auto-grant failed", "err", err)
@@ -1441,7 +1547,15 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient {
+	// A lookup-admin-only identity (in LookupAdminTelegramIDs but not
+	// AdminTelegramIDs) resolves to admin:users:read alone, per ResolveScopes —
+	// no telegram:* messaging scopes, so an MTProto session would be as
+	// unusable for them as for the no-scopes case above. Route them straight
+	// to the code, skipping the phone/SMS/2FA enable_access flow entirely.
+	// isLookupOnly is bound once above, at the auto-approve block: the two
+	// sites need the identical "lookup admin, and not also a full admin"
+	// predicate, and recomputing it is how the two would drift apart.
+	if (!s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient) || isLookupOnly {
 		s.issueAuthCode(w, r, oc)
 		return
 	}

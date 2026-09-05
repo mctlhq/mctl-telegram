@@ -1009,7 +1009,7 @@ func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[identitiesResult](),
-		mcplib.WithDescription(`Admin only (requires the admin:users scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
+		mcplib.WithDescription(`Admin only (requires the admin:users or admin:users:read scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
 
 Output: JSON array of {telegram_id, username, display_name, access_tier, has_session, connected_via}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account). connected_via is a list of distinct OAuth client names (e.g. ["Claude"], ["ChatGPT"], ["Claude","ChatGPT"]) from active refresh tokens; omitted when unknown (tokens predate dynamic client registration).
 
@@ -1018,7 +1018,7 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if err := requireScope(id, "admin:users"); err != nil {
+		if err := requireAnyScope(id, "admin:users", "admin:users:read"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		rows, err := s.Store.ListIdentities(ctx)
@@ -1455,7 +1455,7 @@ func (s *Server) toolGetUserAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		mcplib.WithOutputSchema[auditLogResult](),
-		mcplib.WithDescription(`Admin only (requires the admin:users scope). Return the audit-log rows for any Telegram user — the operator-facing counterpart of get_my_audit_log. Use list_telegram_identities to find the telegram_id.
+		mcplib.WithDescription(`Admin only (requires the admin:users or admin:users:read scope). Return the audit-log rows for any Telegram user — the operator-facing counterpart of get_my_audit_log. Use list_telegram_identities to find the telegram_id.
 
 Inputs:
   telegram_id — int, required. The Telegram user id whose audit log to read.
@@ -1474,7 +1474,7 @@ Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error, call_path}
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if err := requireScope(id, "admin:users"); err != nil {
+		if err := requireAnyScope(id, "admin:users", "admin:users:read"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
@@ -1790,6 +1790,31 @@ func requireScope(id *auth.Identity, scope string) error {
 		return fmt.Errorf("identity missing scope %s", scope)
 	}
 	return nil
+}
+
+// requireAnyScope passes when the identity carries at least one of scopes.
+// It exists for the two read-only admin lookups, which accept either the
+// full admin:users scope or the read-only admin:users:read granted to the
+// lookup-admin tier (TG_LOGIN_LOOKUP_ADMINS; see oauth.Server.ResolveScopes).
+//
+// Deliberately NOT a general relaxation: every admin tool that writes --
+// set_telegram_access, set_account_send, set_account_mode,
+// provision_local_account, revoke_telegram_session, revoke_worker_token,
+// mint_worker_token -- keeps its plain requireScope(id, "admin:users") gate,
+// as do the three admin mint routes in internal/agentapi and
+// internal/workertoken. admin:users:read is a strict subset of admin:users
+// by construction: adding it to a write tool's gate would silently widen the
+// lookup tier, which is the exact defect this scope was introduced to fix.
+func requireAnyScope(id *auth.Identity, scopes ...string) error {
+	if id == nil {
+		return errors.New("authentication required")
+	}
+	for _, sc := range scopes {
+		if id.HasScope(sc) {
+			return nil
+		}
+	}
+	return fmt.Errorf("identity missing scope %s", strings.Join(scopes, " or "))
 }
 
 // sessionErrText maps the well-known session sentinel errors to a clear,

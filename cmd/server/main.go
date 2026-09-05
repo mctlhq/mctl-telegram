@@ -197,13 +197,14 @@ func main() {
 		demoReviewerTGID = cfg.DemoReviewerTGID
 	}
 	executorGate := &agentSendGate{
-		store:              store,
-		allowSend:          cfg.AllowSend,
-		demoReviewerTGID:   demoReviewerTGID,
-		adminTelegramIDs:   telegramIDSet(cfg.TGLoginAdmins),
-		clientTelegramIDs:  telegramIDSet(cfg.TGLoginClients),
-		autoApproveClients: cfg.AutoApproveClients,
-		limiter:            limiter,
+		store:                  store,
+		allowSend:              cfg.AllowSend,
+		demoReviewerTGID:       demoReviewerTGID,
+		adminTelegramIDs:       telegramIDSet(cfg.TGLoginAdmins),
+		clientTelegramIDs:      telegramIDSet(cfg.TGLoginClients),
+		lookupAdminTelegramIDs: telegramIDSet(cfg.TGLoginLookupAdmins),
+		autoApproveClients:     cfg.AutoApproveClients,
+		limiter:                limiter,
 	}
 	agentExecutor.SendGate = executorGate.Allow
 	// A Codex finding on #307 caught that Approve() had no TTL check of its
@@ -780,6 +781,10 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	for _, id := range cfg.TGLoginClients {
 		clients[id] = true
 	}
+	lookupAdmins := map[int64]bool{}
+	for _, id := range cfg.TGLoginLookupAdmins {
+		lookupAdmins[id] = true
+	}
 	// oauth.New performs OIDC discovery against Telegram — a network call at
 	// boot. It is fail-closed: a discovery failure aborts startup rather than
 	// running a server that cannot authenticate anyone.
@@ -796,6 +801,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		TelegramOIDCSigningAlgs:  cfg.TelegramOIDCSigningAlgs,
 		AdminTelegramIDs:         admins,
 		ClientTelegramIDs:        clients,
+		LookupAdminTelegramIDs:   lookupAdmins,
 		AutoApproveClients:       cfg.AutoApproveClients,
 		AccessTokenTTL:           cfg.OAUTHAccessTokenTTL,
 		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,
