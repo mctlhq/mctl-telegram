@@ -1551,9 +1551,10 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// no telegram:* messaging scopes, so an MTProto session would be as
 	// unusable for them as for the no-scopes case above. Route them straight
 	// to the code, skipping the phone/SMS/2FA enable_access flow entirely.
-	isLookupOnlyAdmin := s.cfg.LookupAdminTelegramIDs[identity.TelegramID] &&
-		!s.cfg.AdminTelegramIDs[identity.TelegramID]
-	if (!s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient) || isLookupOnlyAdmin {
+	// isLookupOnly is bound once above, at the auto-approve block: the two
+	// sites need the identical "lookup admin, and not also a full admin"
+	// predicate, and recomputing it is how the two would drift apart.
+	if (!s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient) || isLookupOnly {
 		s.issueAuthCode(w, r, oc)
 		return
 	}
