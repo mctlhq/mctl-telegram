@@ -27,6 +27,9 @@ env:
   # Pinned to the controller-v1.11.3 commit SHA (mutable tags can move).
   INGRESS_NGINX_REF: f6456ea86c6c330e7cf401ade70ce1faa757265b
   ISTIO_VERSION: 1.23.2
+  # Official SHA-256 of istio-1.23.2-linux-amd64.tar.gz from
+  # https://github.com/istio/istio/releases/tag/1.23.2
+  ISTIO_SHA256: c4bbcb95e3015f63f9aa76ac07a544d4c2f46d6d3b20971559d9216eb07b676b
   # base64url payload of {"sub":"tg:123456789","x":"  >","exp":1999999999}; the
   # routing tier never verifies the signature, so header/sig are placeholders.
   # The "  >" claim makes the payload's base64url contain a '-', exercising the
@@ -82,8 +85,11 @@ jobs:
           kubectl -n ingress-nginx patch configmap ingress-nginx-controller \
             --type merge \
             -p '{"data":{"allow-snippet-annotations":"true","annotations-risk-level":"Critical"}}'
-          # Give the controller time to observe the ConfigMap and reload.
-          sleep 15
+          # The controller only reloads snippet-annotation policy after a
+          # restart; a bare sleep left the gate racing the old config.
+          kubectl -n ingress-nginx rollout restart deploy/ingress-nginx-controller
+          kubectl -n ingress-nginx rollout status \
+            deploy/ingress-nginx-controller --timeout=180s
 
       - name: deploy echo backend
         run: |
@@ -182,7 +188,10 @@ jobs:
           sudo curl -sSfLo /usr/local/bin/kubectl \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           sudo chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
-          curl -sSfL https://istio.io/downloadIstio | ISTIO_VERSION="${ISTIO_VERSION}" sh -
+          ISTIO_TARBALL="https://github.com/istio/istio/releases/download/${ISTIO_VERSION}/istio-${ISTIO_VERSION}-linux-amd64.tar.gz"
+          curl -sSfL -o istio.tar.gz "${ISTIO_TARBALL}"
+          echo "${ISTIO_SHA256}  istio.tar.gz" | sha256sum -c -
+          tar -xzf istio.tar.gz
           sudo install "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
 
       - name: create kind cluster
