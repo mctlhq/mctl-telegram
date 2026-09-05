@@ -780,6 +780,10 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	for _, id := range cfg.TGLoginClients {
 		clients[id] = true
 	}
+	lookupAdmins := map[int64]bool{}
+	for _, id := range cfg.TGLoginLookupAdmins {
+		lookupAdmins[id] = true
+	}
 	// oauth.New performs OIDC discovery against Telegram — a network call at
 	// boot. It is fail-closed: a discovery failure aborts startup rather than
 	// running a server that cannot authenticate anyone.
@@ -796,6 +800,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		TelegramOIDCSigningAlgs:  cfg.TelegramOIDCSigningAlgs,
 		AdminTelegramIDs:         admins,
 		ClientTelegramIDs:        clients,
+		LookupAdminTelegramIDs:   lookupAdmins,
 		AutoApproveClients:       cfg.AutoApproveClients,
 		AccessTokenTTL:           cfg.OAUTHAccessTokenTTL,
 		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,

@@ -206,6 +206,14 @@ type Config struct {
 	// admin:users platform-admin capability. An id in neither allowlist still
 	// authenticates but receives an empty scope set (403 on every MCP tool).
 	ClientTelegramIDs map[int64]bool
+	// LookupAdminTelegramIDs is the allowlist of Telegram user ids that get
+	// ONLY admin:users — no telegram:* messaging scopes at all. This is the
+	// tier for a lookup-only consumer (e.g. an OpenClaw bot answering "who is
+	// Telegram user X" via list_telegram_identities/get_user_audit_log) that
+	// must never need a real/working MTProto session with read/send/pin
+	// capability. Checked after AdminTelegramIDs and before the client tier,
+	// so full-admin membership always takes precedence over a dual listing.
+	LookupAdminTelegramIDs map[int64]bool
 	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
 	// an operator action. An explicit DB tier of "none" still bans them.
@@ -452,6 +460,9 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	}
 	if cfg.ClientTelegramIDs == nil {
 		cfg.ClientTelegramIDs = map[int64]bool{}
+	}
+	if cfg.LookupAdminTelegramIDs == nil {
+		cfg.LookupAdminTelegramIDs = map[int64]bool{}
 	}
 	if len(cfg.AllowedImplicitHosts) == 0 {
 		cfg.AllowedImplicitHosts = []string{
@@ -863,9 +874,16 @@ func cancelEnableFlow(e *enableSession) bool {
 	return false
 }
 
-// ResolveScopes maps a Telegram identity to a scope set. Three tiers:
+// ResolveScopes maps a Telegram identity to a scope set. Four tiers, checked
+// in this order:
 //   - admins (TG_LOGIN_ADMINS env) → platform-admins: full telegram:* plus
 //     admin:users.
+//   - lookup-admins (TG_LOGIN_LOOKUP_ADMINS env) → admin-lookup: admin:users
+//     only, no telegram:* messaging scopes at all. For a lookup-only
+//     consumer (e.g. an OpenClaw bot answering "who is Telegram user X")
+//     that must never need a real/working MTProto session. Checked after the
+//     full-admin tier, so an id listed in both always resolves via the
+//     full-admin branch above, unchanged.
 //   - clients → clients: telegram:* for the user's own account (read/send/
 //     pin), without admin:users. The client allowlist is the union of the
 //     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
@@ -893,6 +911,9 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			// admin-initiated device revocation).
 			"account:manage",
 		}, nil
+	}
+	if s.cfg.LookupAdminTelegramIDs[tgID] {
+		return []string{"admin-lookup"}, []string{"admin:users"}, nil
 	}
 	isClient, err := s.isClientTier(ctx, tgID)
 	if err != nil {
@@ -1441,7 +1462,14 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if !s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient {
+	// A lookup-admin-only identity (in LookupAdminTelegramIDs but not
+	// AdminTelegramIDs) resolves to admin:users alone, per ResolveScopes —
+	// no telegram:* messaging scopes, so an MTProto session would be as
+	// unusable for them as for the no-scopes case above. Route them straight
+	// to the code, skipping the phone/SMS/2FA enable_access flow entirely.
+	isLookupOnlyAdmin := s.cfg.LookupAdminTelegramIDs[identity.TelegramID] &&
+		!s.cfg.AdminTelegramIDs[identity.TelegramID]
+	if (!s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient) || isLookupOnlyAdmin {
 		s.issueAuthCode(w, r, oc)
 		return
 	}

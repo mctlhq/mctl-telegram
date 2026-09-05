@@ -527,6 +527,34 @@ func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_LookupAdminOnlySkipsFlow confirms a lookup-admin-only
+// identity (in LookupAdminTelegramIDs but not AdminTelegramIDs) gets the
+// authorization code directly, never the enable_access phone screen — it
+// mirrors TestEnableAccess_UnknownUserSkipsFlow's "no scopes" pattern, since
+// a lookup-admin's admin:users-only bundle has no telegram:* scope that
+// would make an MTProto session useful.
+func TestEnableAccess_LookupAdminOnlySkipsFlow(t *testing.T) {
+	lookupID := int64(888000333)
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	rec := telegramCallbackFor(t, srv, mux, lookupID)
+	// External client → success interstitial carrying the code (not the phone screen).
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("lookup-admin-only callback did not issue a code straight away: %s", loc)
+	}
+	if strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("lookup-admin-only identity was routed into the enable_access phone screen; body=%s", rec.Body.String())
+	}
+	// No pending enableSession/stepPhone state should have been created.
+	srv.mu.Lock()
+	numEnables := len(srv.enables)
+	srv.mu.Unlock()
+	if numEnables != 0 {
+		t.Errorf("lookup-admin-only callback created %d pending enableSession(s), want 0", numEnables)
+	}
+}
+
 // TestEnableAccess_ClientRoutedToPhoneScreen confirms a client-tier user with
 // no session is routed into the enable_access phone screen, not 302'd.
 func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
@@ -733,8 +761,15 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		return false
 	}
 	ctx := context.Background()
+	lookupOnlyID := int64(333000111)
+	bothID := int64(333000222)
 	srv := newTestServer(t, func(c *Config) {
 		c.ClientTelegramIDs = map[int64]bool{555000111: true}
+		c.LookupAdminTelegramIDs = map[int64]bool{
+			lookupOnlyID: true,
+			bothID:       true,
+		}
+		c.AdminTelegramIDs[bothID] = true
 	})
 
 	// Admin tier (210408407 is in newTestServer's AdminTelegramIDs).
@@ -744,6 +779,44 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	}
 	if !has(ag, "platform-admins") || !has(as, "admin:users") {
 		t.Errorf("admin tier wrong: groups=%v scopes=%v", ag, as)
+	}
+
+	// Lookup-admin-only tier: exactly admin:users, no telegram:* scopes.
+	lg, ls, err := srv.ResolveScopes(ctx, lookupOnlyID)
+	if err != nil {
+		t.Fatalf("lookup-admin ResolveScopes: %v", err)
+	}
+	if !has(lg, "admin-lookup") {
+		t.Errorf("lookup-admin groups = %v, want to contain admin-lookup", lg)
+	}
+	if len(ls) != 1 || ls[0] != "admin:users" {
+		t.Errorf("lookup-admin scopes = %v, want exactly [admin:users]", ls)
+	}
+	for _, forbidden := range []string{
+		"telegram:dialogs:read", "telegram:messages:read",
+		"telegram:messages:send", "telegram:messages:pin",
+	} {
+		if has(ls, forbidden) {
+			t.Errorf("lookup-admin must not receive %s (got %v)", forbidden, ls)
+		}
+	}
+
+	// An id in BOTH AdminTelegramIDs and LookupAdminTelegramIDs resolves
+	// identically to the full-admin-only case (full-admin takes precedence).
+	bg, bs, err := srv.ResolveScopes(ctx, bothID)
+	if err != nil {
+		t.Fatalf("both-tiers ResolveScopes: %v", err)
+	}
+	if !has(bg, "platform-admins") || !has(bg, "admins") {
+		t.Errorf("both-tiers groups = %v, want the full-admin groups", bg)
+	}
+	if len(bs) != len(as) {
+		t.Errorf("both-tiers scopes = %v, want the same bundle as full-admin %v", bs, as)
+	}
+	for _, want := range as {
+		if !has(bs, want) {
+			t.Errorf("both-tiers missing scope %s from full-admin bundle (got %v)", want, bs)
+		}
 	}
 
 	// Client tier via the TG_LOGIN_CLIENTS env allowlist.
