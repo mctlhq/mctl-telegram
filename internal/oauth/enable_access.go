@@ -218,25 +218,25 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// PR exists to prevent. A defer is the only form that cannot be
 		// forgotten by a future exit added in between.
 		//
-		// On the identity-mismatch path this runs only because that branch no
-		// longer revokes when a local row is active. Revoking first would
-		// leave nothing for it to match, since its EXISTS filters on
-		// revoked_at IS NULL -- see the reasoning there.
-		//
 		// Detached and bounded, not merely detached: bgCtx carries the flow's
 		// CodeTTL deadline, so the repair must not die on an expiry that is
 		// itself a likely cause of getting here -- while WithoutCancel alone
 		// would strip the deadline too, and this runs under the uid login
 		// mutex, where an unresponsive database would park the goroutine
 		// forever and lock the user out of every later attempt.
+		//
+		// The identity-mismatch local half now clears inline (and surfaces a
+		// failure), and the unknown half revokes, so this defer is a no-op on
+		// that branch. It remains the backstop for a LoadSession failure, "no
+		// session bytes were persisted", and SaveSession itself.
 		saved := false
 		defer func() {
 			if saved {
 				return
 			}
-			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), db.StraySessionRepairTimeout)
+			repairCtx, repairCancel := strayRepairContext(bgCtx)
 			defer repairCancel()
-			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
+			if cErr := s.clearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
 			}
 		}()
@@ -263,8 +263,25 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// With a local row present the repair is the better instrument
 			// anyway: it drops the wrong account's bytes from every active row
 			// while leaving the rows themselves alone, so the bridge keeps
-			// working and the stray session is gone.
-			local, cErr := s.hasActiveLocalAccount(bgCtx, uid)
+			// working and the stray session is gone. Called inline, not left
+			// to the defer: a failed ClearStraySessionIfLocal must surface
+			// the same way a failed revoke does, otherwise the wrong
+			// account's session stays on a row whose contract says NULL and
+			// lf.err carries only the identity-mismatch message. The defer
+			// then becomes a no-op (already-NULL blobs) or a second try.
+			//
+			// Both the check and the revoke/repair use a detached, bounded
+			// context rather than bgCtx. bgCtx carries the flow's CodeTTL
+			// deadline -- the very expiry the deferred repair was made
+			// detached to survive. On expiry the check fails, local becomes
+			// false, the revoke on the same dead context fails too, and
+			// lf.err becomes the revoke error, so friendlyErr renders "the
+			// login attempt expired." instead of the identity mismatch. The
+			// decision has to depend on account state, not on where the
+			// deadline happened to land.
+			decisionCtx, decisionCancel := strayRepairContext(bgCtx)
+			defer decisionCancel()
+			local, cErr := s.hasActiveLocalAccount(decisionCtx, uid)
 			if cErr != nil {
 				// Unknown, and the two failure modes are not symmetric: an
 				// unrevoked wrong-account session is exploitable, whereas a
@@ -280,10 +297,18 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			if !local {
 				// A failed revoke must surface — otherwise the wrong session
 				// stays active.
-				if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
+				if _, rErr := s.store.RevokeActiveSession(decisionCtx, uid, "disconnect"); rErr != nil {
 					lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
 					return
 				}
+			} else if clearErr := s.clearStraySessionIfLocal(decisionCtx, uid); clearErr != nil {
+				// Symmetric with the revoke arm: a cleanup we could not
+				// complete has to reach the caller. slog.Error on the defer
+				// is not enough -- the surviving row is mode='local', so
+				// nothing is served from those bytes, but they are still
+				// sitting on a row whose contract says NULL.
+				lf.err = fmt.Errorf("clear wrong-account session: %w", clearErr)
+				return
 			}
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
@@ -334,6 +359,27 @@ func (s *Server) hasActiveLocalAccount(ctx context.Context, uid int64) (bool, er
 		return s.modeCheckFn(ctx, uid)
 	}
 	return s.store.HasActiveLocalAccount(ctx, uid)
+}
+
+// clearStraySessionIfLocal is the repair both the deferred backstop and the
+// identity-mismatch local half run. The seam exists so tests can drive the
+// failure half of that cleanup: without it a later edit can drop the inline
+// surface and leave only slog.Error, and every current test stays green.
+func (s *Server) clearStraySessionIfLocal(ctx context.Context, uid int64) error {
+	if s.clearStrayFn != nil {
+		return s.clearStrayFn(ctx, uid)
+	}
+	return s.store.ClearStraySessionIfLocal(ctx, uid)
+}
+
+// strayRepairContext outlives parent (so a CodeTTL expiry cannot take the
+// repair down with it) and is bounded by StraySessionRepairTimeout (so an
+// unresponsive database cannot hold the uid login mutex forever). Shared by
+// the deferred stray-session repair and the identity-mismatch branch, which
+// has to make the same kind of decision after the login has already
+// persisted bytes.
+func strayRepairContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), db.StraySessionRepairTimeout)
 }
 
 // errModeCheckFailed marks a failure of the account-mode query itself, as
