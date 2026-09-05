@@ -322,7 +322,7 @@ func TestListConversations_ScopingOrderAndLimit(t *testing.T) {
 	}
 
 	// Touching c1 after c2 bumps its updated_at so it should sort first.
-	if err := s.SetConversationState(ctx, uid, c1.ID, ConversationTakenOver); err != nil {
+	if err := s.SetConversationState(ctx, uid, c1.ID, ConversationActive); err != nil {
 		t.Fatalf("touch c1: %v", err)
 	}
 
@@ -388,6 +388,53 @@ func TestGetConversationByUsername_CaseInsensitiveAndScoped(t *testing.T) {
 	}
 	if _, err := s.GetConversationByUsername(ctx, uid, "nope"); !errors.Is(err, ErrConversationNotFound) {
 		t.Fatalf("miss err = %v, want ErrConversationNotFound", err)
+	}
+
+	// Two rows, one handle. peer_username is a cached snapshot that
+	// EnsureConversation refreshes but never clears, and Telegram handles are
+	// releasable, so peer 555 can keep a stale "anna_hr" after peer 666 takes
+	// it over. Without ORDER BY updated_at DESC, id DESC LIMIT 1 the planner
+	// picks arbitrarily, and "/mctl continue @anna_hr" re-arms autonomous
+	// replies on a conversation the owner did not name.
+	newer, err := s.EnsureConversation(ctx, uid, 666, "anna_hr", "New Anna")
+	if err != nil {
+		t.Fatalf("ensure newer: %v", err)
+	}
+	if newer.ID == conv.ID {
+		t.Fatalf("second EnsureConversation reused row %d; the two-rows-one-handle state was never built", newer.ID)
+	}
+	if err := s.SetConversationState(ctx, uid, newer.ID, ConversationActive); err != nil {
+		t.Fatalf("touch newer: %v", err)
+	}
+	got, err = s.GetConversationByUsername(ctx, uid, "anna_hr")
+	if err != nil {
+		t.Fatalf("get by shared username: %v", err)
+	}
+	if got.ID != newer.ID {
+		t.Fatalf("shared handle resolved to conversation %d, want the most recently active %d", got.ID, newer.ID)
+	}
+
+	// The assertion above does NOT on its own prove the ORDER BY is doing the
+	// work: idx_conversations_user_updated is (user_id, updated_at DESC), so
+	// on SQLite the planner's own scan order already matches it, and deleting
+	// the clause leaves that assertion green. Verified by mutation, not
+	// assumed.
+	//
+	// Forcing a tie on updated_at removes the index's contribution and leaves
+	// `id DESC` as the only discriminator, which does kill the mutation:
+	// without the clause this resolves to the OLDER row.
+	tie := time.Now().UTC()
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE conversations SET updated_at = $1 WHERE user_id = $2`, tie, uid,
+	); err != nil {
+		t.Fatalf("force updated_at tie: %v", err)
+	}
+	got, err = s.GetConversationByUsername(ctx, uid, "anna_hr")
+	if err != nil {
+		t.Fatalf("get by shared username after tie: %v", err)
+	}
+	if got.ID != newer.ID {
+		t.Fatalf("tied updated_at resolved to conversation %d, want the higher id %d (the id DESC tiebreak)", got.ID, newer.ID)
 	}
 }
 

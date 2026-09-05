@@ -451,6 +451,50 @@ func TestRouter_Show_UnmatchedPeerReferenceUsesNotFoundMessage(t *testing.T) {
 	}
 }
 
+// TestRouter_PeerReferencePrefixesAreCaseInsensitive pins the prefix matching
+// to the same case-insensitivity ParseCommand already applies to the
+// subcommand, and for the same stated reason: the owner types this by hand on
+// a phone keyboard that may autocapitalize, turning "user:555" into "User:555"
+// and "@anna_hr" into an arg the switch would otherwise drop to the usage
+// line. The seeded conversation is the control -- an exact-case reference has
+// to resolve first, or the assertions below would pass on a router that
+// resolves nothing.
+func TestRouter_PeerReferencePrefixesAreCaseInsensitive(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if _, err := store.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna"); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	for _, arg := range []string{"user:555", "User:555", "USER:555", "@anna_hr", "@Anna_HR"} {
+		sender.sent = nil
+		if err := router.HandleSavedText(ctx, uid, "/mctl show "+arg); err != nil {
+			t.Fatalf("handle %q: %v", arg, err)
+		}
+		if len(sender.sent) != 1 {
+			t.Fatalf("show %q sent %d replies, want 1", arg, len(sender.sent))
+		}
+		if strings.HasPrefix(sender.sent[0], "Usage:") || strings.Contains(sender.sent[0], "not found") {
+			t.Errorf("show %q reply = %q, want the conversation; the prefix match is case-sensitive", arg, sender.sent[0])
+		}
+	}
+}
+
+// TestRouter_Show_MalformedPeerIDUsesUsageMessage separates "malformed" from
+// "no match". A "user:" prefix with a non-numeric tail never reaches the
+// store, so answering "Conversation user:abc not found." tells the owner the
+// same thing a well-formed reference to an unknown peer would -- and hides
+// that they mistyped the reference itself. errNotAReference routes them to
+// the usage line, which is what its own doc comment says it is for.
+func TestRouter_Show_MalformedPeerIDUsesUsageMessage(t *testing.T) {
+	router, _, sender, _, uid := newTestRouter(t)
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl show user:abc"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.HasPrefix(sender.sent[0], "Usage:") {
+		t.Fatalf("show user:abc reply = %v, want a Usage message (it is malformed, not a miss)", sender.sent)
+	}
+}
+
 // TestRouter_Continue_ResolvesPeerReference and
 // TestRouter_Takeover_ResolvesPeerReference guard the same resolution path
 // for the other two commands sharing resolveConversationID.
