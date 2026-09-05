@@ -21,6 +21,7 @@ Canary incidents are out of scope here; see
 - [MctlTelegramLoginSendCodeStalls — logins stalling at SendCode](#mctltelegramloginsendcodestalls)
 - [MctlTelegramLoginSlow — SendCode p95 above 30s](#mctltelegramloginslow)
 - [MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting](#mctlbridgedaemonsflapping)
+- [Auditing accounts with send disabled](#auditing-accounts-with-send-disabled)
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
 - [Communication Agent operations](#communication-agent-operations)
@@ -1271,6 +1272,52 @@ Open a postmortem if a local-mode account was revoked by the idle sweeper
 while in active use — that is the known correctness gap described in
 `internal/bridge/DESIGN.md`, and each occurrence is evidence for fixing it
 rather than re-applying the exemption.
+
+---
+
+<a id="auditing-accounts-with-send-disabled"></a>
+## Auditing accounts with send disabled
+
+`send_message` (and the other write tools) fall back to a dry-run preview
+whenever the per-account `send_enabled` flag is false — see
+`evaluateSendGateAccountFlag` in `internal/mcp/tools.go`. This section is for
+an operator who wants to see which connected accounts are sitting in that
+state, and whether anyone has actually hit it recently.
+
+Accounts with an active session that have never opted into real sends:
+
+```sql
+SELECT ta.user_id, ta.telegram_user_id, ta.username, ta.connected_at,
+       ta.last_used_at
+  FROM telegram_accounts ta
+ WHERE ta.send_enabled = FALSE
+   AND ta.revoked_at IS NULL
+ ORDER BY ta.last_used_at DESC NULLS LAST;
+```
+
+Of those, which ones tried to send recently and got a silent dry-run:
+
+```sql
+SELECT al.user_id, COUNT(*) AS draft_attempts,
+       MIN(al.created_at) AS first_attempt, MAX(al.created_at) AS last_attempt
+  FROM audit_logs al
+  JOIN telegram_accounts ta ON ta.user_id = al.user_id
+ WHERE al.tool_name = 'send_message:draft'
+   AND ta.send_enabled = FALSE
+   AND ta.revoked_at IS NULL
+   AND al.created_at >= NOW() - INTERVAL '7 days'  -- adjust window as needed
+ GROUP BY al.user_id
+ ORDER BY draft_attempts DESC;
+```
+
+`send_enabled=false` is the default state for a newly connected account, not
+evidence that anything was revoked or that the user did something wrong — do
+not treat a nonzero result from the first query as an incident by itself.
+The 7-day window in the second query is a starting point, not a rule; 30 days
+is equally plausible depending on how long you want the audit to look back.
+Both queries target the Postgres/production schema (`NOW() - INTERVAL` and
+`NULLS LAST` are Postgres-specific) — they do not run as-is against the
+SQLite dev schema.
 
 ---
 

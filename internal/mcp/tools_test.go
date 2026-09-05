@@ -77,6 +77,20 @@ func TestEvaluateSendGate_PerAccountFlagOff(t *testing.T) {
 	}
 }
 
+// The reason string evaluateSendGateAccountFlag returns for send_enabled=false
+// must equal the reasonSendDisabled constant that toolSendMessage compares
+// dryReason against to attach its hint. If these ever drift apart, the hint
+// silently stops firing for the one case it exists for.
+func TestEvaluateSendGateAccountFlag_ReasonMatchesConstant(t *testing.T) {
+	real, reason := evaluateSendGateAccountFlag(false)
+	if real {
+		t.Fatal("send_enabled=false must block real send")
+	}
+	if reason != reasonSendDisabled {
+		t.Fatalf("reason = %q, want reasonSendDisabled constant %q", reason, reasonSendDisabled)
+	}
+}
+
 func TestEvaluateSendGate_AllChecksPass(t *testing.T) {
 	ctx := context.Background()
 	s := newToolsTestStore(t)

@@ -124,3 +124,126 @@ func toStr(v any) string {
 	s, _ := v.(string)
 	return s
 }
+
+// TestToolSendMessage_HintOnlyForSendDisabled covers all four dry-run causes
+// and asserts SendResult.Hint is a presentation-only add-on: empty for three
+// of them, and equal to the expected nudge only when the per-account
+// send_enabled flag is the reason. This is a regression guard for the hint
+// logic staying scoped to exactly the one cause it was written for.
+func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
+	const wantHint = "Your account has never opted into real sends. Turn it on from /manage, or call get_my_send_status to confirm this is the reason."
+
+	cases := []struct {
+		name     string
+		build    func(t *testing.T) (*Server, *auth.Identity)
+		wantHint string
+	}{
+		{
+			name: "reviewer/demo account",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, guardReviewerTGID, true)
+				srv := &Server{Store: store, AllowSend: true, DemoReviewerTGID: guardReviewerTGID}
+				id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "",
+		},
+		{
+			name: "ALLOW_SEND=false",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				srv := &Server{Store: newToolsTestStore(t), AllowSend: false}
+				id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "",
+		},
+		{
+			name: "missing telegram:messages:send scope",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
+				id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
+				return srv, id
+			},
+			wantHint: "",
+		},
+		{
+			name: "send_enabled=false",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424242, false)
+				srv := &Server{Store: store, AllowSend: true}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: wantHint,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, id := tc.build(t)
+			out := parseSendResult(t, callSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi"}))
+			if out["sent"] != false {
+				t.Fatalf("sent = %v, want false (dry-run)", out["sent"])
+			}
+			gotHint := toStr(out["hint"])
+			if gotHint != tc.wantHint {
+				t.Fatalf("hint = %q, want %q", gotHint, tc.wantHint)
+			}
+		})
+	}
+}
+
+// TestToolSendMessage_RealSendHasNoHint is the T3 regression guard: when the
+// gate is fully open and a message is actually delivered, Hint must stay
+// empty and Sent must be true. The only real-send path this test suite can
+// exercise without a live MTProto connection is the local-bridge path (see
+// TestToolSendMessage_LocalBridgeInjectsSendMode); it shares that setup.
+func TestToolSendMessage_RealSendHasNoHint(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 910)
+
+	hub := bridge.NewHub()
+	send := hub.Register(uid, "")
+
+	go func() {
+		env := <-send
+		hub.Deliver(uid, bridge.EncodeResponse(env.ID, json.RawMessage(`{"sent":true,"mode":"send"}`)))
+	}()
+
+	srv := &Server{Store: store, Hub: hub, AllowSend: true}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendResult(t, callSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi"}))
+	if out["sent"] != true {
+		t.Fatalf("sent = %v, want true", out["sent"])
+	}
+	if hint := out["hint"]; hint != nil && hint != "" {
+		t.Fatalf("hint = %v, want empty on a real send", hint)
+	}
+}
+
+// TestToolSendMessage_DraftAuditUnaffectedByHint is the T4 regression guard:
+// the hint logic runs strictly after s.audit records the draft attempt, so
+// adding it must not change what gets audited (tool_name, call site, or
+// status) for the send_enabled=false dry-run path.
+func TestToolSendMessage_DraftAuditUnaffectedByHint(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 424243, false)
+	srv := &Server{Store: store, AllowSend: true}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+
+	out := parseSendResult(t, callSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi"}))
+	if out["sent"] != false {
+		t.Fatalf("sent = %v, want false", out["sent"])
+	}
+
+	tool, status, errMsg := latestAudit(t, store, uid)
+	if tool != "send_message:draft" {
+		t.Fatalf("audit tool_name = %q, want send_message:draft", tool)
+	}
+	if status != "ok" {
+		t.Fatalf("audit status = %q, errMsg = %q, want ok", status, errMsg)
+	}
+}

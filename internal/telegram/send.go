@@ -25,6 +25,11 @@ type SendResult struct {
 	Truncated bool   `json:"truncated,omitempty"`
 	MessageID int    `json:"message_id,omitempty"`
 	DryReason string `json:"dry_reason,omitempty"`
+	// Hint is an optional, presentation-only nudge attached by the MCP layer
+	// after the send gate's verdict is final. It is empty for every dry-run
+	// cause except per-account send_enabled=false, where it points the caller
+	// at how to turn real sends on. It never affects Sent/Mode/DryReason.
+	Hint string `json:"hint,omitempty"`
 }
 
 // SendMessage either sends a real message (mode="send" and gate allows) or

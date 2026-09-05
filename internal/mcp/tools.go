@@ -357,7 +357,9 @@ Draft-by-default: the message is sent for real only when the server send
 gate is fully open (ALLOW_SEND=true, the telegram:messages:send scope, and
 per-account send_enabled=true). Otherwise this returns a dry-run preview
 (sent=false) with the proposed text and a dry_reason — nothing is sent. The
-result's "sent" field tells you which happened.
+result's "sent" field tells you which happened. When the dry run is caused
+by per-account send_enabled=false, the result also carries an optional hint
+pointing at how to turn real sends on.
 
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
@@ -397,6 +399,9 @@ Inputs (required):
 			// workflow renders cleanly. No Telegram API call is made.
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
+			if dryReason == reasonSendDisabled {
+				result.Hint = "Your account has never opted into real sends. Turn it on from /manage, or call get_my_send_status to confirm this is the reason."
+			}
 			return jsonResult(result)
 		}
 		var result *telegram.SendResult
@@ -1746,12 +1751,18 @@ func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReview
 	return false, false, ""
 }
 
+// reasonSendDisabled is the dry-run reason returned when the per-account
+// send_enabled flag is off. It is a package-level constant (rather than an
+// inline literal) so toolSendMessage can compare a dry_reason value against
+// it to attach a targeted hint, without the two call sites risking drift.
+const reasonSendDisabled = "per-account send_enabled=false — contact the operator to enable real sends for your account"
+
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
 // final verdict. Both callers go through it so the wording of the last
 // remaining reason has exactly one source.
 func evaluateSendGateAccountFlag(enabled bool) (real bool, reason string) {
 	if !enabled {
-		return false, "per-account send_enabled=false — contact the operator to enable real sends for your account"
+		return false, reasonSendDisabled
 	}
 	return true, ""
 }
