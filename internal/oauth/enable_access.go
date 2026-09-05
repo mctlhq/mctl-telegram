@@ -547,7 +547,17 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// refusal in one round-trip, whereas a stale refusal has no such exit,
 		// and the user has just been shown a retryable screen either way.
 		es.terminalMsg = ""
-		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
+		// The phone step, not the dead-end template: this arm is retryable by
+		// construction -- that is why it does not go through
+		// renderEnableTerminalError -- and the recovery the block above argues
+		// for is "resubmit the phone form", which requires handing that form
+		// back. renderEnableError writes a page with nothing to resubmit, and
+		// would make the retryable and terminal outcomes visually identical.
+		renderEnablePhoneStep(w, es, enablePhonePage{
+			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
+			WizardMode: es.isWizardMode(), WizardStep: 3,
+			Error: "Could not verify this account's mode. Try again, or contact the operator if it persists.",
+		})
 		return
 	} else if local {
 		observePhoneStep("mode_conflict")
@@ -617,7 +627,13 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 				observePhoneStep("mode_check_error")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "")
 				es.abandonFlow()
-				renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
+				// Same shape as the gate arm: retryable, so it leaves through
+				// the phone step like every other retryable outcome here.
+				renderEnablePhoneStep(w, es, enablePhonePage{
+					Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
+					WizardMode: es.isWizardMode(), WizardStep: 3,
+					Error: "Could not verify this account's mode. Try again, or contact the operator if it persists.",
+				})
 				return
 			}
 			result := "error"

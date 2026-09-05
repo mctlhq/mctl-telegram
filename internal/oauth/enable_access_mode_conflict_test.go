@@ -445,6 +445,15 @@ func TestEnableAccess_ModeCheckFailure_IsNotTerminal(t *testing.T) {
 	if strings.Contains(body, "Telegram rejected the request") {
 		t.Errorf("a store outage rendered as a Telegram RPC failure; Telegram was never contacted. body=%s", body)
 	}
+	// Retryable means the user gets their form back. The dead-end template
+	// offers "Try again" on a page with nothing to try again with, and would
+	// make this outcome indistinguishable from the terminal one.
+	if !strings.Contains(body, "enable_access/start") {
+		t.Errorf("a retryable refusal rendered the dead-end page instead of the phone form; body=%s", body)
+	}
+	if !strings.Contains(body, "+14155551234") {
+		t.Errorf("the phone was not carried back into the form; body=%s", body)
+	}
 
 	// The refusal is retryable, so unlike a mode conflict it must not stick:
 	// once the store answers again the same session has to be able to proceed.
