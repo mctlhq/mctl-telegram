@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -103,4 +104,108 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// TestDispatchSendMedia_FilePathSensitiveRejected asserts file_path refuses
+// credential material: a real send must not turn send_media into an
+// exfiltration primitive for the caller's own secrets.
+func TestDispatchSendMedia_FilePathSensitiveRejected(t *testing.T) {
+	dir := t.TempDir()
+	sshDir := filepath.Join(dir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	path := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(path, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	resp := dispatchSendMedia(t, map[string]any{
+		"peer":       "@x",
+		"media_type": "document",
+		"file_path":  path,
+		"mode":       "send",
+	})
+	if resp.Type != bridge.TypeError {
+		t.Fatalf("expected TypeError, got %v (result=%s)", resp.Type, resp.Result)
+	}
+	if !containsAll(resp.Error, "file_path", "refusing to read") {
+		t.Errorf("error = %q, want it to refuse the credential directory", resp.Error)
+	}
+}
+
+// TestRejectSensitiveFilePath_FollowsSymlinks guards the resolution step: a
+// benign-looking symlink must not smuggle a credential file past the check.
+func TestRejectSensitiveFilePath_FollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	awsDir := filepath.Join(dir, ".aws")
+	if err := os.MkdirAll(awsDir, 0o700); err != nil {
+		t.Fatalf("mkdir .aws: %v", err)
+	}
+	target := filepath.Join(awsDir, "credentials")
+	if err := os.WriteFile(target, []byte("[default]"), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	link := filepath.Join(dir, "holiday.jpg")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := rejectSensitiveFilePath(link); err == nil {
+		t.Error("rejectSensitiveFilePath(symlink into .aws) = nil, want refusal")
+	}
+	ok := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(ok, []byte("jpeg"), 0o600); err != nil {
+		t.Fatalf("write photo: %v", err)
+	}
+	if err := rejectSensitiveFilePath(ok); err != nil {
+		t.Errorf("rejectSensitiveFilePath(ordinary file) = %v, want nil", err)
+	}
+}
+
+// TestReadBoundedFile_RejectsNonRegular is the memory/hang guard: a special
+// file such as /dev/zero must be refused before any read, since os.ReadFile
+// would grow without bound on it (and block forever on a FIFO). The timeout
+// is what catches a regression that reorders the check after the open.
+func TestReadBoundedFile_RejectsNonRegular(t *testing.T) {
+	if info, err := os.Stat("/dev/zero"); err != nil || info.Mode().IsRegular() {
+		t.Skip("no /dev/zero on this platform")
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := readBoundedFile("/dev/zero", tg.DefaultMediaUploadMaxBytes)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("readBoundedFile(/dev/zero) = nil error, want refusal")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("readBoundedFile did not refuse a non-regular file promptly")
+	}
+}
+
+// TestReadBoundedFile_RejectsDirectory covers the other non-regular case a
+// caller can reach without a device node.
+func TestReadBoundedFile_RejectsDirectory(t *testing.T) {
+	if _, err := readBoundedFile(t.TempDir(), tg.DefaultMediaUploadMaxBytes); err == nil {
+		t.Error("readBoundedFile(directory) = nil error, want refusal")
+	}
+}
+
+// TestReadBoundedFile_OversizeNotBuffered asserts an oversized file is
+// reported from its size, never loaded whole.
+func TestReadBoundedFile_OversizeNotBuffered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	data, err := readBoundedFile(path, 1024)
+	if err == nil {
+		t.Fatalf("readBoundedFile(4096 bytes, cap 1024) = %d bytes, want error", len(data))
+	}
+	if !containsAll(err.Error(), "exceeding", "upload cap") {
+		t.Errorf("err = %v, want it to name the upload cap", err)
+	}
 }

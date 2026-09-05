@@ -713,13 +713,13 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 				// not resolved to Local Bridge mode, so reaching this arm means
 				// this daemon process is the one legitimately reading the
 				// caller's own filesystem.
-				var err error
-				data, err = os.ReadFile(args.FilePath)
-				if err != nil {
+				if err := rejectSensitiveFilePath(args.FilePath); err != nil {
 					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path: %v", err))
 				}
-				if int64(len(data)) > tg.DefaultMediaUploadMaxBytes {
-					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path is %d bytes, exceeding the %d-byte upload cap", len(data), tg.DefaultMediaUploadMaxBytes))
+				var err error
+				data, err = readBoundedFile(args.FilePath, tg.DefaultMediaUploadMaxBytes)
+				if err != nil {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path: %v", err))
 				}
 				if args.FileName == "" {
 					args.FileName = filepath.Base(args.FilePath)
@@ -875,4 +875,84 @@ func bridgeWSURL(server string) string {
 	}
 	s = strings.TrimRight(s, "/")
 	return s + "/bridge"
+}
+
+// isSensitiveDirSegment and isSensitiveFileBase name local files that are
+// credential material rather than media. file_path makes send_media a
+// local-disk read primitive, so an agent caller steered by prompt injection
+// could aim it at the user's own secrets; rejectSensitiveFilePath refuses
+// these outright.
+func isSensitiveDirSegment(seg string) bool {
+	switch seg {
+	case ".ssh", ".gnupg", ".aws", ".kube", ".docker", "gcloud", ".password-store":
+		return true
+	}
+	return false
+}
+
+func isSensitiveFileBase(base string) bool {
+	switch base {
+	case ".env", ".netrc", ".git-credentials", ".pgpass":
+		return true
+	}
+	return false
+}
+
+// rejectSensitiveFilePath refuses a send whose file_path resolves into
+// well-known credential storage. Symlinks are resolved first so a
+// benign-looking link cannot smuggle one of these through; when resolution
+// fails the literal path is still checked rather than waved past.
+func rejectSensitiveFilePath(path string) error {
+	resolved := path
+	if r, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = r
+	}
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	if base := filepath.Base(resolved); isSensitiveFileBase(strings.ToLower(base)) {
+		return fmt.Errorf("refusing to read %s: credential file", base)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(resolved), "/") {
+		if isSensitiveDirSegment(strings.ToLower(seg)) {
+			return fmt.Errorf("refusing to read from %s: credential directory", seg)
+		}
+	}
+	return nil
+}
+
+// readBoundedFile reads path without ever buffering more than maxBytes+1.
+// Unlike os.ReadFile it refuses anything that is not a regular file, so a
+// special file such as /dev/zero can neither exhaust memory nor block the
+// dispatch goroutine forever, and it stops one byte past the cap so an
+// oversized file is reported instead of loaded — mirroring how the file_url
+// path bounds its fetch with io.LimitReader.
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	// Stat before opening: opening a FIFO blocks until a writer appears, and
+	// opening a character device such as /dev/zero hands back an endless
+	// stream — so the regular-file check only guards anything if it runs
+	// first. os.Stat follows symlinks, so a link to one is caught too.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("file is %d bytes, exceeding the %d-byte upload cap", info.Size(), maxBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file is %d bytes, exceeding the %d-byte upload cap", len(data), maxBytes)
+	}
+	return data, nil
 }

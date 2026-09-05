@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -426,6 +429,18 @@ call never fetches a URL, decodes base64, or reads file_path.`),
 				// Gates passed server-side; signal the daemon to really send —
 				// same mode-injection contract send_message relies on.
 				args["mode"] = "send"
+				if filePath != "" {
+					// file_path is a local-disk read primitive, so the audit
+					// trail must answer "which file left the machine", not just
+					// "who was it sent to" — peerRedacted alone cannot. Logged
+					// as a hash so an exfiltration attempt (e.g. an agent
+					// steered by prompt injection) stays reconstructable
+					// without writing the caller's directory layout, or a name
+					// like id_rsa, into the logs.
+					slog.Info("send_media: file_path real send",
+						"user_id", id.UserID, "peer", peerRedacted,
+						"file_path_ref", filePathAuditRef(filePath))
+				}
 				res, err2 := s.bridgeCall(ctx, id, "send_media", args)
 				s.audit(ctx, id, "send_media:via-bridge", peerRedacted, bridgeResultErr(res), startedAt, "local")
 				return res, err2
@@ -477,4 +492,17 @@ func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 str
 		return nil, "", fmt.Errorf("file_url: %w", err)
 	}
 	return data, mimeType, nil
+}
+
+// filePathAuditRef renders a file_path argument as a stable reference safe to
+// log: the SHA-256 prefix of the path, plus its extension. Enough to correlate
+// repeated sends of the same file in an audit trail without recording the
+// caller's local directory layout or a revealing file name.
+func filePathAuditRef(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	ref := "sha256:" + hex.EncodeToString(sum[:8])
+	if ext := filepath.Ext(path); ext != "" {
+		ref += ext
+	}
+	return ref
 }
