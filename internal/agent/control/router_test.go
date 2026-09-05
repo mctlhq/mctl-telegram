@@ -373,6 +373,65 @@ func TestRouter_Conversations_IncludesTakenOverWithNoLead(t *testing.T) {
 	}
 }
 
+func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= 21; i++ {
+		name := "Peer"
+		handle := "other"
+		if i == 1 {
+			name = "Anna HR"
+			handle = "anna_hr"
+		}
+		if _, err := store.EnsureConversation(ctx, uid, int64(1000+i), handle, name); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+		t.Fatalf("handle default: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("default replies = %d, want 1", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0], "Showing the 20 most recently updated") {
+		t.Fatalf("default reply = %q, want a truncation notice", sender.sent[0])
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 20 {
+		t.Fatalf("default listed %d conversations, want 20", strings.Count(sender.sent[0], "Conv #"))
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations 5"); err != nil {
+		t.Fatalf("handle count: %v", err)
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 5 {
+		t.Fatalf("count=5 listed %d conversations, want 5", strings.Count(sender.sent[0], "Conv #"))
+	}
+	if !strings.Contains(sender.sent[0], "Showing the 5 most recently updated") {
+		t.Fatalf("count=5 reply = %q, want a truncation notice", sender.sent[0])
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+		t.Fatalf("handle filter: %v", err)
+	}
+	if !strings.Contains(sender.sent[0], "Anna HR") {
+		t.Fatalf("filter reply = %q, want Anna HR", sender.sent[0])
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 1 {
+		t.Fatalf("filter listed %d conversations, want 1", strings.Count(sender.sent[0], "Conv #"))
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+		t.Fatalf("handle miss: %v", err)
+	}
+	if sender.sent[0] != "No conversations matched nobody." {
+		t.Fatalf("miss reply = %q", sender.sent[0])
+	}
+}
+
 // TestRouter_Show_ResolvesPeerReference guards the new resolution path: an
 // owner who never got a job lead for a conversation (e.g. a takeover) can
 // still address it by user:<id> or @username instead of the numeric id.

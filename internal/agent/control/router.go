@@ -44,7 +44,7 @@ func NewRouter(store *db.Store, executor Approver, notifier *Notifier) *Router {
 func (r *Router) HandleSavedText(ctx context.Context, userID int64, text string) error {
 	cmd, err := ParseCommand(text)
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>")
+		return r.Notifier.Reply(ctx, userID, "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations [count|filter]\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>")
 	}
 	switch cmd.Type {
 	case CmdStatus:
@@ -52,7 +52,7 @@ func (r *Router) HandleSavedText(ctx context.Context, userID int64, text string)
 	case CmdLeads:
 		return r.handleLeads(ctx, userID)
 	case CmdConversations:
-		return r.handleConversations(ctx, userID)
+		return r.handleConversations(ctx, userID, cmd.Arg)
 	case CmdShow:
 		return r.handleShow(ctx, userID, cmd.Arg)
 	case CmdContinue:
@@ -121,12 +121,76 @@ func (r *Router) handleLeads(ctx context.Context, userID int64) error {
 	return r.Notifier.Reply(ctx, userID, sb.String())
 }
 
-func (r *Router) handleConversations(ctx context.Context, userID int64) error {
-	convs, err := r.Store.ListConversations(ctx, userID, 20)
+const (
+	defaultConversationList = 20
+	maxConversationList     = 100
+	// conversationFilterScan is how many recent rows we pull when the owner
+	// supplied a @handle or substring. Full paging is out of scope; this is
+	// enough to recover a taken-over thread that fell off the default 20.
+	conversationFilterScan = 500
+)
+
+func parseConversationsArg(arg string) (limit int, filter string) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return defaultConversationList, ""
+	}
+	if n, err := strconv.Atoi(arg); err == nil && n > 0 {
+		if n > maxConversationList {
+			n = maxConversationList
+		}
+		return n, ""
+	}
+	return defaultConversationList, arg
+}
+
+func conversationMatchesFilter(c db.Conversation, filter string) bool {
+	f := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(filter), "@"))
+	if f == "" {
+		return true
+	}
+	if strings.Contains(strings.ToLower(c.PeerUsername), f) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(c.PeerDisplayName), f)
+}
+
+func (r *Router) handleConversations(ctx context.Context, userID int64, arg string) error {
+	limit, filter := parseConversationsArg(arg)
+	fetch := limit + 1
+	if filter != "" {
+		fetch = conversationFilterScan
+	}
+	convs, err := r.Store.ListConversations(ctx, userID, fetch)
 	if err != nil {
 		return fmt.Errorf("list conversations: %w", err)
 	}
+	truncated := false
+	if filter != "" {
+		var matched []db.Conversation
+		for _, c := range convs {
+			if conversationMatchesFilter(c, filter) {
+				matched = append(matched, c)
+			}
+		}
+		if len(matched) > limit {
+			matched = matched[:limit]
+			truncated = true
+		}
+		// A full scan that returned conversationFilterScan rows may have
+		// older matches we never saw.
+		if len(convs) >= conversationFilterScan {
+			truncated = true
+		}
+		convs = matched
+	} else if len(convs) > limit {
+		convs = convs[:limit]
+		truncated = true
+	}
 	if len(convs) == 0 {
+		if filter != "" {
+			return r.Notifier.Reply(ctx, userID, "No conversations matched "+filter+".")
+		}
 		return r.Notifier.Reply(ctx, userID, "No conversations yet.")
 	}
 	var sb strings.Builder
@@ -134,7 +198,11 @@ func (r *Router) handleConversations(ctx context.Context, userID int64) error {
 	for _, c := range convs {
 		fmt.Fprintf(&sb, "Conv #%d — %s (%s)\n", c.ID, orDash(c.PeerDisplayName), c.State)
 	}
-	sb.WriteString("\n/mctl show <conversation id> for details")
+	if truncated {
+		fmt.Fprintf(&sb, "\nShowing the %d most recently updated. Pass a count (e.g. /mctl conversations 50) or a filter (e.g. /mctl conversations @handle).", limit)
+	} else {
+		sb.WriteString("\n/mctl show <conversation id> for details")
+	}
 	return r.Notifier.Reply(ctx, userID, sb.String())
 }
 
