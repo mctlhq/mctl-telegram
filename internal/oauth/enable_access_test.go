@@ -527,6 +527,61 @@ func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_LookupAdminOnlySkipsFlow confirms a lookup-admin-only
+// identity (in LookupAdminTelegramIDs but not AdminTelegramIDs) gets the
+// authorization code directly, never the enable_access phone screen — it
+// mirrors TestEnableAccess_UnknownUserSkipsFlow's "no scopes" pattern, since
+// a lookup-admin's admin:users:read-only bundle has no telegram:* scope that
+// would make an MTProto session useful.
+func TestEnableAccess_LookupAdminOnlySkipsFlow(t *testing.T) {
+	lookupID := int64(888000333)
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	rec := telegramCallbackFor(t, srv, mux, lookupID)
+	// External client → success interstitial carrying the code (not the phone screen).
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("lookup-admin-only callback did not issue a code straight away: %s", loc)
+	}
+	if strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("lookup-admin-only identity was routed into the enable_access phone screen; body=%s", rec.Body.String())
+	}
+	// No pending enableSession/stepPhone state should have been created.
+	srv.mu.Lock()
+	numEnables := len(srv.enables)
+	srv.mu.Unlock()
+	if numEnables != 0 {
+		t.Errorf("lookup-admin-only callback created %d pending enableSession(s), want 0", numEnables)
+	}
+}
+
+// TestEnableAccess_LookupAdminAndClientSkipsFlow covers the dual-listed case
+// at the CALLBACK, where TestResolveScopes_Tiers only covers the scope grant.
+// An id in both LookupAdminTelegramIDs and ClientTelegramIDs resolves to
+// admin:users:read alone, so an MTProto session would be as useless to it as
+// to a no-scopes identity -- it must skip the phone screen, not be routed
+// into enable_access on the strength of its client listing.
+func TestEnableAccess_LookupAdminAndClientSkipsFlow(t *testing.T) {
+	dualID := int64(888000444)
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{dualID: true}
+		c.ClientTelegramIDs = map[int64]bool{dualID: true}
+	})
+	rec := telegramCallbackFor(t, srv, mux, dualID)
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("dual-listed lookup admin did not get a code straight away: %s", loc)
+	}
+	if strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("dual-listed lookup admin was routed into the enable_access phone screen; body=%s", rec.Body.String())
+	}
+	srv.mu.Lock()
+	numEnables := len(srv.enables)
+	srv.mu.Unlock()
+	if numEnables != 0 {
+		t.Errorf("dual-listed lookup admin created %d pending enableSession(s), want 0", numEnables)
+	}
+}
+
 // TestEnableAccess_ClientRoutedToPhoneScreen confirms a client-tier user with
 // no session is routed into the enable_access phone screen, not 302'd.
 func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
@@ -653,6 +708,51 @@ func TestHandleTelegramCallback_AutoApproveMaterializesDBTier(t *testing.T) {
 		}
 	})
 
+	// A lookup admin is exempt from the materialization. The write is
+	// harmless while the id stays listed -- both ResolveScopes and
+	// agentSendGate check LookupAdminTelegramIDs before the client tier --
+	// but it turns REMOVAL from the allowlist into a promotion to the full
+	// client tier off the persisted row, when an operator rotating the bot
+	// out reasonably expects removal to de-provision it. The control leg is
+	// the fresh-user subtest above: without it, this would pass even if
+	// auto-approve had stopped writing for everyone.
+	t.Run("lookup admin is exempt from materialization", func(t *testing.T) {
+		lookup := int64(444000666)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+			c.LookupAdminTelegramIDs = map[int64]bool{lookup: true}
+		})
+		telegramCallbackFor(t, srv, mux, lookup)
+		tier, err := srv.store.GetAccessTier(ctx, lookup)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != "" {
+			t.Fatalf("lookup admin persisted tier %q; removal from TG_LOGIN_LOOKUP_ADMINS would then promote it to the client tier instead of de-provisioning it", tier)
+		}
+	})
+
+	// Full-admin membership wins over a dual listing here as it does at every
+	// other tier site, so a full admin also listed as a lookup admin keeps the
+	// normal materialization. Paired with the exemption subtest above: one of
+	// the two must fail if the !AdminTelegramIDs guard is added or removed.
+	t.Run("full admin also listed as lookup admin still materializes", func(t *testing.T) {
+		dual := int64(444000777)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+			c.LookupAdminTelegramIDs = map[int64]bool{dual: true}
+			c.AdminTelegramIDs[dual] = true
+		})
+		telegramCallbackFor(t, srv, mux, dual)
+		tier, err := srv.store.GetAccessTier(ctx, dual)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != db.TierClient {
+			t.Fatalf("dual-listed full admin tier = %q, want %q; full-admin must win over the lookup listing here as it does everywhere else", tier, db.TierClient)
+		}
+	})
+
 	t.Run("re-sign-in is idempotent", func(t *testing.T) {
 		fresh := int64(444000555)
 		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
@@ -733,8 +833,17 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		return false
 	}
 	ctx := context.Background()
+	lookupOnlyID := int64(333000111)
+	bothID := int64(333000222)
+	lookupAndClientID := int64(333000333)
 	srv := newTestServer(t, func(c *Config) {
-		c.ClientTelegramIDs = map[int64]bool{555000111: true}
+		c.ClientTelegramIDs = map[int64]bool{555000111: true, lookupAndClientID: true}
+		c.LookupAdminTelegramIDs = map[int64]bool{
+			lookupOnlyID:      true,
+			bothID:            true,
+			lookupAndClientID: true,
+		}
+		c.AdminTelegramIDs[bothID] = true
 	})
 
 	// Admin tier (210408407 is in newTestServer's AdminTelegramIDs).
@@ -744,6 +853,51 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	}
 	if !has(ag, "platform-admins") || !has(as, "admin:users") {
 		t.Errorf("admin tier wrong: groups=%v scopes=%v", ag, as)
+	}
+
+	// Lookup-admin-only tier: exactly admin:users:read — no telegram:* scopes,
+	// and NOT the flat admin:users, which also gates every admin write tool.
+	lg, ls, err := srv.ResolveScopes(ctx, lookupOnlyID)
+	if err != nil {
+		t.Fatalf("lookup-admin ResolveScopes: %v", err)
+	}
+	if !has(lg, "admin-lookup") {
+		t.Errorf("lookup-admin groups = %v, want to contain admin-lookup", lg)
+	}
+	if len(ls) != 1 || ls[0] != "admin:users:read" {
+		t.Errorf("lookup-admin scopes = %v, want exactly [admin:users:read]", ls)
+	}
+	for _, forbidden := range []string{
+		"telegram:dialogs:read", "telegram:messages:read",
+		"telegram:messages:send", "telegram:messages:pin",
+		// The flat admin:users is forbidden too, not merely absent: it
+		// gates set_telegram_access, set_account_send, set_account_mode,
+		// provision_local_account, revoke_telegram_session,
+		// revoke_worker_token and mint_worker_token. Granting it here
+		// would make "lookup-only" a full admin write grant.
+		"admin:users", "account:manage",
+	} {
+		if has(ls, forbidden) {
+			t.Errorf("lookup-admin must not receive %s (got %v)", forbidden, ls)
+		}
+	}
+
+	// An id in BOTH AdminTelegramIDs and LookupAdminTelegramIDs resolves
+	// identically to the full-admin-only case (full-admin takes precedence).
+	bg, bs, err := srv.ResolveScopes(ctx, bothID)
+	if err != nil {
+		t.Fatalf("both-tiers ResolveScopes: %v", err)
+	}
+	if !has(bg, "platform-admins") || !has(bg, "admins") {
+		t.Errorf("both-tiers groups = %v, want the full-admin groups", bg)
+	}
+	if len(bs) != len(as) {
+		t.Errorf("both-tiers scopes = %v, want the same bundle as full-admin %v", bs, as)
+	}
+	for _, want := range as {
+		if !has(bs, want) {
+			t.Errorf("both-tiers missing scope %s from full-admin bundle (got %v)", want, bs)
+		}
 	}
 
 	// Client tier via the TG_LOGIN_CLIENTS env allowlist.
@@ -789,5 +943,30 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	}
 	if len(ng) != 0 || len(ns) != 0 {
 		t.Errorf("unknown id got groups=%v scopes=%v, want empty", ng, ns)
+	}
+	// Lookup-admin membership wins over the client tier for an id in both.
+	// Pins the precedence documented on ResolveScopes: the bundles do not
+	// combine, and a dual-listed id keeps no telegram:* scope. Without this,
+	// swapping the two checks would be a silent scope grant.
+	lcg, lcs, err := srv.ResolveScopes(ctx, lookupAndClientID)
+	if err != nil {
+		t.Fatalf("lookup+client ResolveScopes: %v", err)
+	}
+	if !has(lcs, "admin:users:read") {
+		t.Fatalf("lookup+client scopes = %v, want admin:users:read", lcs)
+	}
+	if has(lcs, "admin:users") {
+		t.Fatalf("lookup+client scopes = %v, must not carry the flat admin:users", lcs)
+	}
+	for _, sc := range []string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send", "account:manage"} {
+		if has(lcs, sc) {
+			t.Fatalf("lookup+client scopes = %v, must not carry %s (client tier must not merge in)", lcs, sc)
+		}
+	}
+	if !has(lcg, "admin-lookup") {
+		t.Fatalf("lookup+client groups = %v, want admin-lookup", lcg)
+	}
+	if has(lcg, "clients") {
+		t.Fatalf("lookup+client groups = %v, must not carry clients", lcg)
 	}
 }

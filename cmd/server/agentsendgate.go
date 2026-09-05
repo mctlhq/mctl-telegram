@@ -19,13 +19,23 @@ var errAgentSendGateDenied = errors.New("agent send gate denied")
 // effective telegram:messages:send scope from the same admin/client tier
 // inputs used by oauth.Server.ResolveScopes.
 type agentSendGate struct {
-	store              *db.Store
-	allowSend          bool
-	demoReviewerTGID   int64
-	adminTelegramIDs   map[int64]bool
-	clientTelegramIDs  map[int64]bool
-	autoApproveClients bool
-	limiter            *audit.RateLimiter
+	store             *db.Store
+	allowSend         bool
+	demoReviewerTGID  int64
+	adminTelegramIDs  map[int64]bool
+	clientTelegramIDs map[int64]bool
+	// lookupAdminTelegramIDs mirrors oauth.Config.LookupAdminTelegramIDs.
+	// ResolveScopes checks that tier BEFORE the client tier and grants it
+	// admin:users:read alone, so a lookup admin never holds
+	// telegram:messages:send. This gate reconstructs scopes without calling
+	// ResolveScopes, so the precedence has to be repeated here: without it,
+	// an id listed in both TG_LOGIN_LOOKUP_ADMINS and the client tier would
+	// be denied send at the MCP boundary and granted it by the background
+	// executor -- the executor handing out exactly the capability the tier
+	// exists to withhold.
+	lookupAdminTelegramIDs map[int64]bool
+	autoApproveClients     bool
+	limiter                *audit.RateLimiter
 }
 
 func (g *agentSendGate) Allow(ctx context.Context, userID, peerTGID int64) error {
@@ -69,6 +79,11 @@ func (g *agentSendGate) Allow(ctx context.Context, userID, peerTGID int64) error
 func (g *agentSendGate) hasSendScope(ctx context.Context, tgID int64) (bool, error) {
 	if g.adminTelegramIDs[tgID] {
 		return true, nil
+	}
+	// Ordered exactly as ResolveScopes orders its tiers: full admin above,
+	// lookup admin here, client below.
+	if g.lookupAdminTelegramIDs[tgID] {
+		return false, nil
 	}
 	tier, err := g.store.GetAccessTier(ctx, tgID)
 	if err != nil {
