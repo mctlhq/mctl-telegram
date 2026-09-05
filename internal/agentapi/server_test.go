@@ -968,6 +968,48 @@ func TestHandleNotifySummary(t *testing.T) {
 	}
 }
 
+// TestHandleNotifySummary_TakenOverConversationStillNotifies reproduces the
+// exact scenario from issue #441: a real, conversation-scoped owner summary
+// against a conversation the owner has taken over must still be allowed and
+// delivered, not silently denied. Before the policy.Evaluate reorder, this
+// conversation's State: db.ConversationTakenOver reached the per-conversation
+// switch ahead of the owner-facing short-circuit and denied it.
+func TestHandleNotifySummary_TakenOverConversationStillNotifies(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	if err := h.store.SetConversationState(context.Background(), h.userID, conv.ID, db.ConversationTakenOver); err != nil {
+		t.Fatalf("set conversation state: %v", err)
+	}
+
+	rec := h.do("POST", "/notify/summary", ownerNotifyRequest{
+		ConversationID: conv.ID,
+		Text:           "Recruiter from Acme reached out about a Backend role.",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ActionID       int64 `json:"action_id"`
+		NotificationID int64 `json:"notification_id"`
+	}
+	decodeBody(t, rec, &body)
+	if body.NotificationID == 0 {
+		t.Fatalf("notification_id = 0, want non-zero (taken-over conversation must not suppress owner notification)")
+	}
+
+	action, err := h.store.GetAgentAction(context.Background(), h.userID, body.ActionID)
+	if err != nil {
+		t.Fatalf("lookup action: %v", err)
+	}
+	if action.Status != db.ActionExecuted {
+		t.Fatalf("action status = %q, want executed", action.Status)
+	}
+	if action.PolicyDecision != string(policy.Allow) {
+		t.Fatalf("policy decision = %q, want allow", action.PolicyDecision)
+	}
+}
+
 // TestHandleOwnerFacing_KillSwitchBlocksNotification guards against the P2
 // found in review: handleOwnerFacing used to ignore policy.Evaluate's
 // verdict entirely, so an engaged AGENT_KILL_SWITCH still let the two
