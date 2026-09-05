@@ -306,12 +306,25 @@ whenever there is no device credential on disk —
 you do not choose between the two paths yourself, the presence or absence of
 `activate`'s device files decides it.
 
-`--token` is currently the only way to pass the token, so it appears in the
-process argument list and is readable by other local accounts through `ps`
-for as long as the command runs — a second or two. On a single-user machine
-that is a small window; on a shared one, run `connect` when nobody else is
-logged in. A `--token-file` option that avoids the argument list entirely is
-tracked in #454.
+`--token "$(cat mcp-token.txt)"` above is the interactive/convenience form,
+but it puts the token in the process argument list, readable by other local
+accounts through `ps` or `/proc/<pid>/cmdline` for as long as the command
+runs. On a shared machine, prefer one of these instead:
+
+```sh
+./mctl-telegram-local connect --token-file mcp-token.txt --server https://tg.mctl.ai
+```
+
+```sh
+op read op://vault/mcp-token/credential | ./mctl-telegram-local connect --token-file - --server https://tg.mctl.ai
+```
+
+`--token-file <path>` reads the token from a file and never puts it on the
+command line; `--token-file -` (or, equivalently, `--token -`) reads it from
+stdin, so a password manager's own output can be piped straight in without
+ever touching a shell history file or an intermediate plaintext file on disk.
+`--token-file` is now the recommended way to avoid the argument-list exposure
+described above.
 
 **`set_account_mode`** — migrates an **existing hosted** account into local
 mode. This is the one case `activate` genuinely cannot do by itself: it only
