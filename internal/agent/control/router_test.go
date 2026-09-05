@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -422,6 +423,9 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	if strings.Count(sender.sent[0], "Conv #") != 1 {
 		t.Fatalf("filter listed %d conversations, want 1", strings.Count(sender.sent[0], "Conv #"))
 	}
+	if strings.Contains(sender.sent[0], "Showing the") || strings.Contains(sender.sent[0], "Search covered only") {
+		t.Fatalf("filter reply = %q, want no truncation notice when the scan is under the cap", sender.sent[0])
+	}
 
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
@@ -429,6 +433,55 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	}
 	if sender.sent[0] != "No conversations matched nobody." {
 		t.Fatalf("miss reply = %q", sender.sent[0])
+	}
+}
+
+// TestRouter_Conversations_FilterScanCapFewMatches is Claude's P2 on #539:
+// hitting conversationFilterScan with fewer matches than limit must not
+// claim "Showing the 20 most recently updated" when only a couple of Conv
+// lines were printed. The scan-cap notice is the honest signal.
+func TestRouter_Conversations_FilterScanCapFewMatches(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= conversationFilterScan; i++ {
+		name := "Peer"
+		handle := "other"
+		if i <= 2 {
+			name = "Anna HR"
+			handle = "anna_hr"
+		}
+		if _, err := store.EnsureConversation(ctx, uid, int64(2000+i), handle, name); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+		t.Fatalf("handle filter: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if got := strings.Count(reply, "Conv #"); got != 2 {
+		t.Fatalf("listed %d conversations, want 2", got)
+	}
+	if strings.Contains(reply, "Showing the") {
+		t.Fatalf("reply = %q, count-truncation notice must not fire when matches < limit", reply)
+	}
+	wantScan := fmt.Sprintf("Search covered only the %d most recently updated conversations; older matches may not appear.", conversationFilterScan)
+	if !strings.Contains(reply, wantScan) {
+		t.Fatalf("reply = %q, want scan-cap notice %q", reply, wantScan)
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+		t.Fatalf("handle miss: %v", err)
+	}
+	if !strings.HasPrefix(sender.sent[0], "No conversations matched nobody.") {
+		t.Fatalf("miss reply = %q, want the no-match prefix", sender.sent[0])
+	}
+	if !strings.Contains(sender.sent[0], wantScan) {
+		t.Fatalf("miss reply = %q, want scan-cap notice when the empty result may be incomplete", sender.sent[0])
 	}
 }
 

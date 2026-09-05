@@ -165,7 +165,11 @@ func (r *Router) handleConversations(ctx context.Context, userID int64, arg stri
 	if err != nil {
 		return fmt.Errorf("list conversations: %w", err)
 	}
-	truncated := false
+	countTruncated := false
+	// A full scan that returned conversationFilterScan rows may have
+	// older matches we never saw. This is independent of how many
+	// rows actually matched the filter.
+	scanCapped := filter != "" && len(convs) >= conversationFilterScan
 	if filter != "" {
 		var matched []db.Conversation
 		for _, c := range convs {
@@ -175,21 +179,20 @@ func (r *Router) handleConversations(ctx context.Context, userID int64, arg stri
 		}
 		if len(matched) > limit {
 			matched = matched[:limit]
-			truncated = true
-		}
-		// A full scan that returned conversationFilterScan rows may have
-		// older matches we never saw.
-		if len(convs) >= conversationFilterScan {
-			truncated = true
+			countTruncated = true
 		}
 		convs = matched
 	} else if len(convs) > limit {
 		convs = convs[:limit]
-		truncated = true
+		countTruncated = true
 	}
 	if len(convs) == 0 {
 		if filter != "" {
-			return r.Notifier.Reply(ctx, userID, "No conversations matched "+filter+".")
+			msg := "No conversations matched " + filter + "."
+			if scanCapped {
+				msg += conversationScanCapNotice()
+			}
+			return r.Notifier.Reply(ctx, userID, msg)
 		}
 		return r.Notifier.Reply(ctx, userID, "No conversations yet.")
 	}
@@ -198,12 +201,20 @@ func (r *Router) handleConversations(ctx context.Context, userID int64, arg stri
 	for _, c := range convs {
 		fmt.Fprintf(&sb, "Conv #%d — %s (%s)\n", c.ID, orDash(c.PeerDisplayName), c.State)
 	}
-	if truncated {
-		fmt.Fprintf(&sb, "\nShowing the %d most recently updated. Pass a count (e.g. /mctl conversations 50) or a filter (e.g. /mctl conversations @handle).", limit)
-	} else {
+	if countTruncated {
+		fmt.Fprintf(&sb, "\nShowing the %d most recently updated. Pass a count (e.g. /mctl conversations 50) or a filter (e.g. /mctl conversations @handle).", len(convs))
+	}
+	if scanCapped {
+		sb.WriteString(conversationScanCapNotice())
+	}
+	if !countTruncated && !scanCapped {
 		sb.WriteString("\n/mctl show <conversation id> for details")
 	}
 	return r.Notifier.Reply(ctx, userID, sb.String())
+}
+
+func conversationScanCapNotice() string {
+	return fmt.Sprintf("\nSearch covered only the %d most recently updated conversations; older matches may not appear.", conversationFilterScan)
 }
 
 func (r *Router) handleShow(ctx context.Context, userID int64, arg string) error {
