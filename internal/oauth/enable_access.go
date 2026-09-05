@@ -988,14 +988,18 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	delete(s.enables, esTok)
 	s.mu.Unlock()
 	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "", "")
-	// Completing MTProto login is the registration event: persist the client
-	// tier so access survives flipping AUTO_APPROVE_CLIENTS off. Only write
-	// when the row is still unset — an explicit none set by an admin is
-	// never overwritten (same guard as the OIDC auto-grant path). Admins
-	// and lookup-only identities keep their env-allowlist tiers — writing
-	// 'client' for a lookup admin is the same trap that path already
-	// refuses (removal from the allowlist would promote them).
-	if !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
+	// Completing MTProto login is the registration event: persist the
+	// client tier so an auto-approved user keeps access after
+	// AUTO_APPROVE_CLIENTS is flipped off. Only write when open
+	// registration is on and the row is still unset — same scope as the
+	// OIDC auto-grant path. An env-listed TG_LOGIN_CLIENTS identity must
+	// stay unset so removal from the allowlist still revokes; writing
+	// 'client' would make the DB authoritative and force operators through
+	// set_telegram_access(none). An explicit none set by an admin is never
+	// overwritten. Admins and lookup-only identities keep their
+	// env-allowlist tiers — writing 'client' for a lookup admin is the
+	// same trap that path already refuses (removal would promote them).
+	if s.cfg.AutoApproveClients && !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
 		dbTier, err := s.store.GetAccessTier(r.Context(), es.tgID)
 		if err != nil {
 			slog.Error("finishEnable: read access tier", "uid", es.uid, "err", err)

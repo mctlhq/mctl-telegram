@@ -972,7 +972,9 @@ func TestResolveScopes_Tiers(t *testing.T) {
 }
 
 func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
-	srv, _ := newEnableTestServer(t, nil)
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
 	ctx := context.Background()
 	const tgID int64 = 424242
 	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "bob", "Bob")
@@ -1001,7 +1003,9 @@ func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
 }
 
 func TestFinishEnable_PreservesExplicitNone(t *testing.T) {
-	srv, _ := newEnableTestServer(t, nil)
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
 	ctx := context.Background()
 	const tgID int64 = 424243
 	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "banned", "Banned")
@@ -1029,6 +1033,60 @@ func TestFinishEnable_PreservesExplicitNone(t *testing.T) {
 	}
 	if tier != db.TierNone {
 		t.Fatalf("tier after finishEnable = %q, want %q", tier, db.TierNone)
+	}
+}
+
+func TestFinishEnable_EnvListedClientStaysRevocable(t *testing.T) {
+	ctx := context.Background()
+	const tgID int64 = 555000111
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = false
+		c.ClientTelegramIDs = map[int64]bool{tgID: true}
+	})
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "envclient", "Env Client")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "envclient",
+		},
+	}, "es-env")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != "" {
+		t.Fatalf("tier after finishEnable = %q, want unset so TG_LOGIN_CLIENTS stays revocable", tier)
+	}
+	ok, err := srv.isClientTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("isClientTier while listed: %v", err)
+	}
+	if !ok {
+		t.Fatal("env-listed client must still resolve as client while in TG_LOGIN_CLIENTS")
+	}
+	delete(srv.cfg.ClientTelegramIDs, tgID)
+	ok, err = srv.isClientTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("isClientTier after removal: %v", err)
+	}
+	if ok {
+		t.Fatal("removing id from TG_LOGIN_CLIENTS after connect must revoke client tier")
+	}
+	_, scopes, err := srv.ResolveScopes(ctx, tgID)
+	if err != nil {
+		t.Fatalf("ResolveScopes after removal: %v", err)
+	}
+	if len(scopes) != 0 {
+		t.Fatalf("scopes after TG_LOGIN_CLIENTS removal = %v, want empty", scopes)
 	}
 }
 
@@ -1079,7 +1137,9 @@ func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
 }
 
 func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
-	srv, _ := newEnableTestServer(t, nil)
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
 	// No users row: SetAccessTier fails. The auth-code redirect must still happen.
