@@ -989,13 +989,20 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	s.mu.Unlock()
 	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "", "")
 	// Completing MTProto login is the registration event: persist the client
-	// tier so access survives flipping AUTO_APPROVE_CLIENTS off. Admins and
-	// lookup-only identities keep their env-allowlist tiers — writing
-	// 'client' for a lookup admin is the same trap the OIDC auto-grant
-	// path already refuses (removal from the allowlist would promote them).
+	// tier so access survives flipping AUTO_APPROVE_CLIENTS off. Only write
+	// when the row is still unset — an explicit none set by an admin is
+	// never overwritten (same guard as the OIDC auto-grant path). Admins
+	// and lookup-only identities keep their env-allowlist tiers — writing
+	// 'client' for a lookup admin is the same trap that path already
+	// refuses (removal from the allowlist would promote them).
 	if !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
-		if terr := s.store.SetAccessTier(r.Context(), es.tgID, db.TierClient); terr != nil {
-			slog.Error("finishEnable: set client tier", "uid", es.uid, "err", terr)
+		dbTier, err := s.store.GetAccessTier(r.Context(), es.tgID)
+		if err != nil {
+			slog.Error("finishEnable: read access tier", "uid", es.uid, "err", err)
+		} else if dbTier == "" {
+			if terr := s.store.SetAccessTier(r.Context(), es.tgID, db.TierClient); terr != nil {
+				slog.Error("finishEnable: set client tier", "uid", es.uid, "err", terr)
+			}
 		}
 	}
 	s.issueAuthCode(w, r, es.oc)

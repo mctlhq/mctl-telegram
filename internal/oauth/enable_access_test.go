@@ -1000,6 +1000,38 @@ func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
 	}
 }
 
+func TestFinishEnable_PreservesExplicitNone(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil)
+	ctx := context.Background()
+	const tgID int64 = 424243
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "banned", "Banned")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, tgID, db.TierNone); err != nil {
+		t.Fatalf("seed none: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "banned",
+		},
+	}, "es-none")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierNone {
+		t.Fatalf("tier after finishEnable = %q, want %q", tier, db.TierNone)
+	}
+}
+
 func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
 	const lookupID int64 = 555001
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
