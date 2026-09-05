@@ -1474,10 +1474,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// list_telegram_identities and in the new-client digest.
 	//
 	// Guarded with !AdminTelegramIDs for the same reason every other tier
-	// site in this file is (ResolveScopes' branch order, isLookupOnlyAdmin
-	// below, agentSendGate.hasSendScope): full-admin membership wins over a
-	// dual listing everywhere, so a full admin who is also listed as a lookup
-	// admin keeps the normal materialization. Nothing about their scopes
+	// site is (ResolveScopes' branch order, the enable_access routing below
+	// that reuses this same isLookupOnly, agentSendGate.hasSendScope):
+	// full-admin membership wins over a dual listing everywhere, so a full
+	// admin who is also listed as a lookup admin keeps the normal
+	// materialization. Nothing about their scopes
 	// changes either way -- those come from the env allowlist -- but letting
 	// the exemption fire for them would leave one site disagreeing with the
 	// rest about what a dual listing means.
