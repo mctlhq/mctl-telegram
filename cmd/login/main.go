@@ -146,10 +146,11 @@ func main() {
 		// If a local account was provisioned after the pre-login check above,
 		// SaveSession refuses with db.ErrAccountModeConflict — but the login
 		// has already written its bytes over that row's blob, so drop them
-		// before exiting. ClearActiveLocalSessionBlob keeps the local row
-		// itself active; only the stray hosted session is removed.
+		// before exiting — from every active row, since the gotd SessionStore
+		// wrote them there. ClearActiveSessionBlobs keeps the rows themselves
+		// active; only the stray session bytes are removed.
 		if errors.Is(err, db.ErrAccountModeConflict) {
-			if cErr := store.ClearActiveLocalSessionBlob(ctx, uid); cErr != nil {
+			if cErr := store.ClearActiveSessionBlobs(ctx, uid); cErr != nil {
 				slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
 			}
 		}

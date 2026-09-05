@@ -216,13 +216,14 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		}
 		if serr := s.store.SaveSession(bgCtx, uid, pt, tgID, displayName, username); serr != nil {
 			// Backstop: a local account won the race against both checks
-			// above. The login already wrote its session bytes over the local
-			// row's blob, so drop them — otherwise the hosted worker could act
-			// as the user through a row the operator believes is bridge-only.
-			// The row itself stays active in local mode; the bridge re-uploads
-			// its own session on next connect.
+			// above. The login already wrote its session bytes through the
+			// gotd SessionStore, which with no loaded row id targets EVERY
+			// active row, so drop them from all of them — otherwise the hosted
+			// worker could act as the user through a row the operator believes
+			// is bridge-only. The rows themselves stay active; the bridge
+			// re-uploads its own session on next connect.
 			if errors.Is(serr, db.ErrAccountModeConflict) {
-				if cErr := s.store.ClearActiveLocalSessionBlob(bgCtx, uid); cErr != nil {
+				if cErr := s.store.ClearActiveSessionBlobs(bgCtx, uid); cErr != nil {
 					slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
 				}
 			}

@@ -1267,24 +1267,38 @@ func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, 
 	return exists, nil
 }
 
-// ClearActiveLocalSessionBlob wipes session_encrypted on the user's active
-// local-mode rows. It is the repair path for the SaveSession backstop: if a
-// local account was enabled after the pre-login gate ran, telegram.Login has
-// already written the hosted session bytes over the local row's blob, and
-// leaving them there would let the hosted worker act as the user through a row
-// the operator believes is bridge-only.
+// ClearActiveSessionBlobs wipes session_encrypted on ALL of the user's active
+// rows. It is the repair path for the SaveSession backstop: if a local account
+// was enabled after the pre-login gate ran, telegram.Login has already written
+// the freshly negotiated session bytes through the gotd SessionStore, and
+// leaving them behind a refused connect would let the hosted worker act as the
+// user through a row the operator believes is bridge-only.
 //
-// Deliberately NOT RevokeActiveSession: that would revoke the local row
+// Every active row, not just the local ones. When the gotd SessionStore has no
+// loaded row id -- which is the case for a provisioned local account, whose
+// session_encrypted is NULL, so LoadSessionWithID returns id 0 -- StoreSession
+// falls through to UpdateSessionBlob, whose statement is
+// `WHERE user_id = $1 AND revoked_at IS NULL`: it writes the new bytes to
+// EVERY active row. Clearing only mode='local' rows left a user who also holds
+// an active hosted row with that row carrying a live session from a connect
+// that was explicitly refused. Clearing the hosted row costs nothing it still
+// had: whatever session it held was overwritten by that same UPDATE moments
+// earlier, so the bytes being dropped here are the new ones, not the old.
+//
+// What this does NOT do is terminate the Telegram-side authorization the login
+// created. There is no per-row MTProto logout on this path, and
+// RevokeActiveSession is not usable here: it would revoke the local row
 // itself, which is exactly the destruction this guard exists to prevent. The
-// row stays active in local mode; only the stolen blob is dropped, and the
-// bridge re-uploads its own session on next connect.
-func (s *Store) ClearActiveLocalSessionBlob(ctx context.Context, userID int64) error {
+// row stays active in local mode and the bridge re-uploads its own session on
+// next connect; the stray Telegram authorization has to be cleared by the user
+// from their device list.
+func (s *Store) ClearActiveSessionBlobs(ctx context.Context, userID int64) error {
 	if _, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts SET session_encrypted = NULL
-		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`,
-		userID, ModeLocal,
+		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
 	); err != nil {
-		return fmt.Errorf("clear local session blob: %w", err)
+		return fmt.Errorf("clear active session blobs: %w", err)
 	}
 	return nil
 }

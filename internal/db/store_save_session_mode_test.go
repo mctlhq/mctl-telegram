@@ -151,3 +151,80 @@ func TestSaveSession_RefusesLocalRowBehindNewerHostedRow(t *testing.T) {
 		t.Errorf("local row revoked_at = %v, want NULL (the refused SaveSession must not revoke it)", revokedAt.Time)
 	}
 }
+
+// TestClearActiveSessionBlobs_ClearsHostedRowToo is the regression test for
+// the finding that the backstop cleanup was scoped to mode='local' while the
+// write it repairs was not.
+//
+// When the gotd SessionStore has no loaded row id — the case for a provisioned
+// local account, whose session_encrypted is NULL — StoreSession falls through
+// to UpdateSessionBlob, which writes `WHERE user_id = $1 AND revoked_at IS
+// NULL`: every active row. A user holding both a local and a hosted active row
+// therefore ended a REFUSED connect with the hosted row carrying the freshly
+// negotiated session. The first half of this test pins that write behaviour,
+// so the cleanup's scope cannot drift back out of step with it.
+func TestClearActiveSessionBlobs_ClearsHostedRowToo(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+	uid := seedModedAccount(t, s, "clear-all-rows", 700000606, ModeLocal, false, false)
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode, send_enabled)
+		 VALUES($1,$2,$3,$4,$5)`,
+		uid, 700000606, nil, ModeHosted, false,
+	); err != nil {
+		t.Fatalf("seed hosted row: %v", err)
+	}
+
+	// What telegram.Login does through the SessionStore on this path.
+	if err := s.UpdateSessionBlob(ctx, uid, []byte("freshly-negotiated-session")); err != nil {
+		t.Fatalf("UpdateSessionBlob: %v", err)
+	}
+	blobbed := func() map[string]bool {
+		t.Helper()
+		rows, err := s.DB.QueryContext(ctx,
+			`SELECT mode, session_encrypted IS NOT NULL FROM telegram_accounts
+			 WHERE user_id = $1 AND revoked_at IS NULL`, uid)
+		if err != nil {
+			t.Fatalf("query rows: %v", err)
+		}
+		defer rows.Close()
+		out := map[string]bool{}
+		for rows.Next() {
+			var mode string
+			var has bool
+			if err := rows.Scan(&mode, &has); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			out[mode] = has
+		}
+		return out
+	}
+	// Control: the write really did reach both rows. Without this the
+	// assertion below would pass even if UpdateSessionBlob had stopped
+	// touching the hosted row, proving nothing about the cleanup.
+	if got := blobbed(); !got[ModeLocal] || !got[ModeHosted] {
+		t.Fatalf("after login write, blobs = %v, want both rows carrying bytes", got)
+	}
+
+	if err := s.ClearActiveSessionBlobs(ctx, uid); err != nil {
+		t.Fatalf("ClearActiveSessionBlobs: %v", err)
+	}
+	got := blobbed()
+	if got[ModeLocal] {
+		t.Errorf("local row still carries session bytes after the backstop clear")
+	}
+	if got[ModeHosted] {
+		t.Errorf("hosted row still carries the session bytes from a REFUSED connect; the cleanup must match UpdateSessionBlob's blast radius")
+	}
+	// Neither row may be revoked: destroying the local account is the very
+	// thing issue-492's guard exists to prevent.
+	var active int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`, uid,
+	).Scan(&active); err != nil {
+		t.Fatalf("count active: %v", err)
+	}
+	if active != 2 {
+		t.Errorf("active rows after cleanup = %d, want 2 (cleanup must not revoke)", active)
+	}
+}
