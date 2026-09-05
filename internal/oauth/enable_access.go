@@ -161,6 +161,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// predecessor — if its login RPC had already returned — could still
 		// run its revoke/SaveSession and clobber the newer flow's session.
 		ul := s.uidLoginMutex(uid)
+		// Test seam (nil in production): announce that this goroutine is about
+		// to park on the mutex, so a test holding it can provision a local
+		// account into the window the re-check below exists for.
+		if s.loginFlowParked != nil {
+			s.loginFlowParked()
+		}
 		ul.Lock()
 		defer ul.Unlock()
 		// Re-check under the uid lock, after handleEnableStart's pre-flight

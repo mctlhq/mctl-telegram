@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -201,6 +202,15 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 
+	// Announce the moment the flow goroutine is about to park on the uid
+	// mutex. Set before the /start request below and never mutated after, so
+	// the handler goroutine only ever reads it. Polling srv.enables[esTok].flow
+	// instead would read a field handleEnableStart writes under es.lock while
+	// this goroutine holds only srv.mu (which guards the map, not the entry) —
+	// a data race, and CI runs `go test -race ./...`.
+	parked := make(chan struct{})
+	srv.loginFlowParked = sync.OnceFunc(func() { close(parked) })
+
 	ul := srv.uidLoginMutex(uid)
 	ul.Lock()
 
@@ -213,19 +223,11 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 
 	// Wait until handleEnableStart has passed its pre-flight gate and handed
 	// off to the flow goroutine, which is now parked on the mutex we hold.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		srv.mu.Lock()
-		es := srv.enables[esTok]
-		srv.mu.Unlock()
-		if es != nil && es.flow != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			ul.Unlock()
-			t.Fatal("handleEnableStart never reached startLoginFlow; the pre-flight gate refused instead, so this test is not exercising the re-check")
-		}
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		ul.Unlock()
+		t.Fatal("handleEnableStart never reached startLoginFlow; the pre-flight gate refused instead, so this test is not exercising the re-check")
 	}
 
 	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
