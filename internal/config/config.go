@@ -67,7 +67,7 @@ type Config struct {
 	TelegramLoginBotToken string  // bot token used to send the daily new-client digest
 	TGLoginAdmins         []int64 // allowlist of Telegram ids granted platform-admins scopes
 	TGLoginClients        []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
-	TGLoginLookupAdmins   []int64 // allowlist of Telegram ids granted admin:users only (no telegram:* messaging scopes)
+	TGLoginLookupAdmins   []int64 // allowlist of Telegram ids granted admin:users only (no telegram:* messaging scopes); admin:users is flat, so this tier still gates every admin MCP tool — see oauth.Config.LookupAdminTelegramIDs
 	// Telegram OpenID Connect (Relying Party — replaces the legacy widget):
 	TelegramOIDCClientID     string   // OIDC client id = the login bot's numeric id; not secret
 	TelegramOIDCClientSecret string   // OIDC client secret from BotFather; sourced from Vault

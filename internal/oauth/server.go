@@ -210,9 +210,25 @@ type Config struct {
 	// ONLY admin:users — no telegram:* messaging scopes at all. This is the
 	// tier for a lookup-only consumer (e.g. an OpenClaw bot answering "who is
 	// Telegram user X" via list_telegram_identities/get_user_audit_log) that
-	// must never need a real/working MTProto session with read/send/pin
-	// capability. Checked after AdminTelegramIDs and before the client tier,
-	// so full-admin membership always takes precedence over a dual listing.
+	// must never need a real/working MTProto session of its OWN with
+	// read/send/pin capability. Checked after AdminTelegramIDs and before the
+	// client tier, so full-admin membership always takes precedence over a
+	// dual listing.
+	//
+	// NOT low-blast-radius, despite the name. admin:users is a single flat
+	// scope and is the ONLY gate on every admin MCP tool
+	// (internal/mcp/tools.go's requireScope(id, "admin:users")); there is no
+	// narrower admin:users:read. A lookup admin can therefore also call
+	// set_telegram_access, set_account_send, set_account_mode,
+	// provision_local_account, revoke_telegram_session, revoke_worker_token
+	// and mint_worker_token — and mint_worker_token with purpose="local-bridge"
+	// mints a send+pin-capable credential for an ARBITRARY telegram_id, so this
+	// tier can grant itself the capability it is described as not needing. What
+	// the tier actually drops is the standing telegram:* grant on its own
+	// account, not operator authority over other people's accounts. Treat an
+	// entry here as a full platform admin that merely is not a messaging
+	// account; genuinely narrowing it needs a real read-only scope enforced in
+	// internal/mcp/tools.go, not just this allowlist.
 	LookupAdminTelegramIDs map[int64]bool
 	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
@@ -881,9 +897,12 @@ func cancelEnableFlow(e *enableSession) bool {
 //   - lookup-admins (TG_LOGIN_LOOKUP_ADMINS env) → admin-lookup: admin:users
 //     only, no telegram:* messaging scopes at all. For a lookup-only
 //     consumer (e.g. an OpenClaw bot answering "who is Telegram user X")
-//     that must never need a real/working MTProto session. Checked after the
-//     full-admin tier, so an id listed in both always resolves via the
-//     full-admin branch above, unchanged.
+//     that must never need a real/working MTProto session of its own.
+//     admin:users is flat and gates EVERY admin MCP tool, so this tier stays
+//     operator-privileged over other users' accounts despite the name — see
+//     LookupAdminTelegramIDs's comment for the full blast radius. Checked
+//     after the full-admin tier, so an id listed in both always resolves via
+//     the full-admin branch above, unchanged.
 //   - clients → clients: telegram:* for the user's own account (read/send/
 //     pin), without admin:users. The client allowlist is the union of the
 //     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
