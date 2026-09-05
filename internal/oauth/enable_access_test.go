@@ -763,11 +763,13 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	ctx := context.Background()
 	lookupOnlyID := int64(333000111)
 	bothID := int64(333000222)
+	lookupAndClientID := int64(333000333)
 	srv := newTestServer(t, func(c *Config) {
-		c.ClientTelegramIDs = map[int64]bool{555000111: true}
+		c.ClientTelegramIDs = map[int64]bool{555000111: true, lookupAndClientID: true}
 		c.LookupAdminTelegramIDs = map[int64]bool{
-			lookupOnlyID: true,
-			bothID:       true,
+			lookupOnlyID:      true,
+			bothID:            true,
+			lookupAndClientID: true,
 		}
 		c.AdminTelegramIDs[bothID] = true
 	})
@@ -862,5 +864,27 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	}
 	if len(ng) != 0 || len(ns) != 0 {
 		t.Errorf("unknown id got groups=%v scopes=%v, want empty", ng, ns)
+	}
+	// Lookup-admin membership wins over the client tier for an id in both.
+	// Pins the precedence documented on ResolveScopes: the bundles do not
+	// combine, and a dual-listed id keeps no telegram:* scope. Without this,
+	// swapping the two checks would be a silent scope grant.
+	lcg, lcs, err := srv.ResolveScopes(ctx, lookupAndClientID)
+	if err != nil {
+		t.Fatalf("lookup+client ResolveScopes: %v", err)
+	}
+	if !has(lcs, "admin:users") {
+		t.Fatalf("lookup+client scopes = %v, want admin:users", lcs)
+	}
+	for _, sc := range []string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send", "account:manage"} {
+		if has(lcs, sc) {
+			t.Fatalf("lookup+client scopes = %v, must not carry %s (client tier must not merge in)", lcs, sc)
+		}
+	}
+	if !has(lcg, "admin-lookup") {
+		t.Fatalf("lookup+client groups = %v, want admin-lookup", lcg)
+	}
+	if has(lcg, "clients") {
+		t.Fatalf("lookup+client groups = %v, must not carry clients", lcg)
 	}
 }

@@ -912,6 +912,20 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			"account:manage",
 		}, nil
 	}
+	// Checked before the client tier, so lookup-admin membership WINS over
+	// it: an id in both LookupAdminTelegramIDs and the client allowlist (env
+	// TG_LOGIN_CLIENTS or a DB access_tier) resolves to admin:users alone and
+	// keeps none of the telegram:* scopes. That is deliberate -- the two are
+	// meant to be disjoint populations, a lookup admin being an operator
+	// bot rather than a messaging account -- and listing an id in both is a
+	// configuration mistake, not a way to combine the bundles. It resolves
+	// quietly rather than erroring because the alternative is failing a login
+	// over a config typo; the precedence is pinned by
+	// TestResolveScopes_Tiers so it cannot be swapped unnoticed.
+	//
+	// It is also checked before isClientTier's database call, so a
+	// statically-listed lookup admin resolves without touching the DB, the
+	// same way an AdminTelegramIDs entry above does.
 	if s.cfg.LookupAdminTelegramIDs[tgID] {
 		return []string{"admin-lookup"}, []string{"admin:users"}, nil
 	}
