@@ -424,10 +424,22 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	return out, clientRows.Err()
 }
 
+// ErrAccountModeConflict is returned by SaveSession when the user's
+// current active account is mode='local'. A hosted login must not
+// silently revoke a Local Bridge account and replace it with a
+// server-side session; the caller must switch modes explicitly via
+// set_account_mode first.
+var ErrAccountModeConflict = errors.New("account is in local mode; switch to hosted mode before connecting")
+
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
 // Any prior active row for the user is marked revoked. Writes always use
 // SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read
 // by LoadSession.
+//
+// Refuses with ErrAccountModeConflict, without revoking or inserting
+// anything, when ANY of the user's active rows is mode='local' -- see the
+// mctl-telegram issue-492 proposal. A revoked local row (or no active row at
+// all) does not block this call; only an active local row does.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
@@ -438,12 +450,48 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx,
+	// The mode check IS the revoke: one statement, RETURNING the mode of every
+	// row it touched. A separate `SELECT EXISTS` first would leave a window --
+	// under READ COMMITTED a ProvisionLocalAccount committing between the two
+	// is a phantom the SELECT never sees, while the UPDATE takes a fresh
+	// snapshot at statement start, sees the new row and revokes it. That is
+	// issue-492 verbatim, and the enable_access backstop cannot catch it
+	// because SaveSession would return nil on that path. Here the local row is
+	// revoked and then un-revoked by the deferred Rollback, so it survives and
+	// the caller still gets ErrAccountModeConflict.
+	//
+	// RETURNING over EVERY affected row, not the newest one: this UPDATE is
+	// `WHERE user_id = $1 AND revoked_at IS NULL`, so a check that read only
+	// the newest row (LIMIT 1) would let a newer hosted row wave the guard
+	// through while an older local row is revoked anyway.
+	revoked, err := tx.QueryContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 RETURNING mode`,
 		userID,
-	); err != nil {
-		return fmt.Errorf("revoke prior: %w", err)
+	)
+	if err != nil {
+		return fmt.Errorf("revoke prior sessions: %w", err)
+	}
+	hasLocal := false
+	for revoked.Next() {
+		var mode string
+		if err := revoked.Scan(&mode); err != nil {
+			revoked.Close()
+			return fmt.Errorf("scan revoked mode: %w", err)
+		}
+		if mode == ModeLocal {
+			hasLocal = true
+		}
+	}
+	if err := revoked.Err(); err != nil {
+		revoked.Close()
+		return fmt.Errorf("revoke prior sessions: %w", err)
+	}
+	revoked.Close()
+	if hasLocal {
+		// Deferred Rollback undoes the revoke above.
+		return ErrAccountModeConflict
 	}
 	now := time.Now().UTC()
 	// An exempt identity gets a NULL expires_at, which every absolute-TTL
@@ -1214,6 +1262,92 @@ func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error
 		return "hosted", fmt.Errorf("query account mode: %w", err)
 	}
 	return mode, nil
+}
+
+// HasActiveLocalAccount reports whether the user has at least one active
+// (revoked_at IS NULL) account row in local mode. Callers use it to refuse a
+// hosted connect BEFORE any Telegram login runs: telegram.Login persists the
+// new session bytes through the gotd SessionStore (UpdateSessionBlob) as soon
+// as auth succeeds, so a check that only happens at SaveSession time is too
+// late -- the local row's blob has already been overwritten.
+//
+// The predicate matches SaveSession's guard exactly (any active local row, not
+// just the newest), so the two cannot disagree about whether a connect is
+// allowed.
+func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, error) {
+	var exists bool
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM telegram_accounts
+		  WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2)`,
+		userID, ModeLocal,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("query active local account: %w", err)
+	}
+	return exists, nil
+}
+
+// StraySessionRepairTimeout bounds a ClearStraySessionIfLocal call. The repair
+// deliberately outlives the failed flow's own context (see the doc comment
+// below), so it needs a deadline of its own: the enable_access caller runs it
+// while holding that uid's login mutex, and a database that never answers must
+// not hold the mutex for the life of the process. Exported because both
+// callers -- the enable_access login goroutine and cmd/login -- must bound the
+// repair the same way.
+const StraySessionRepairTimeout = 5 * time.Second
+
+// ClearStraySessionIfLocal drops the session blob from every active row of a
+// user, but only when one of those rows is mode='local'. It is the repair for
+// a hosted connect that failed AFTER telegram.Login already persisted its
+// bytes through the gotd SessionStore: with no loaded row id that write lands
+// on EVERY active row, including a bridge-only one, so a failed connect can
+// leave the hosted worker holding a live session for an account the operator
+// believes is local.
+//
+// Gated on the account state, NOT on ErrAccountModeConflict. SaveSession can
+// fail with the caller's context deadline instead of the sentinel while a
+// local row is present -- the enable_access flow runs on a CodeTTL-bounded
+// context -- and a sentinel-only gate would skip the repair in exactly that
+// case, which is the one where the stray bytes are least likely to be noticed.
+// For the same reason callers should pass a context.WithoutCancel'd context:
+// an expired deadline must not take the repair down with it.
+//
+// A user with no active local row is left untouched: those rows are the
+// connect's own, and a normal failure does not make them stray.
+//
+// Every active row of such a user, not only the local ones. When a row id WAS
+// loaded, StoreSession takes UpdateSessionBlobByID (`WHERE id = $2`, one row),
+// a second active row was never overwritten, and clearing it does drop a
+// session that was still valid. Clear-everything is still the right default:
+// that state needs the multi-active-row race named at ProvisionLocalAccount,
+// and the alternative -- leaving a live hosted session behind a refused
+// connect -- is the worse failure.
+//
+// What this does NOT do is terminate the Telegram-side authorization the login
+// created. There is no per-row MTProto logout on this path, and
+// RevokeActiveSession is not usable here: it would revoke the local row
+// itself, which is exactly the destruction this guard exists to prevent. The
+// row stays active in local mode and the bridge re-uploads its own session on
+// next connect; the stray Telegram authorization has to be cleared by the user
+// from their device list.
+func (s *Store) ClearStraySessionIfLocal(ctx context.Context, userID int64) error {
+	// One statement, not a read followed by a write. A separate
+	// HasActiveLocalAccount first would leave the same window SaveSession's
+	// guard was just closed against, pointing the other way: an operator
+	// switching the account to hosted and a new session being negotiated
+	// between the two queries would have this cleanup wipe a session that is
+	// legitimately the user's. The EXISTS rides inside the UPDATE, so the
+	// destructive write happens only if the account is still local at the
+	// moment it lands.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = NULL
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		   AND EXISTS (SELECT 1 FROM telegram_accounts
+		               WHERE user_id = $2 AND revoked_at IS NULL AND mode = $3)`,
+		userID, userID, ModeLocal,
+	); err != nil {
+		return fmt.Errorf("clear stray session blobs: %w", err)
+	}
+	return nil
 }
 
 // SweepAuditLog removes audit rows older than `retention`. Returns the

@@ -76,6 +76,16 @@ func main() {
 	if err != nil {
 		die(fmt.Errorf("ensure user: %w", err))
 	}
+	// Refuse before any MTProto login runs. telegram.Login/LoginQR persist the
+	// new session bytes through the gotd SessionStore as soon as auth
+	// succeeds, so SaveSession's guard below fires only after the local row's
+	// blob has already been overwritten — too late to protect the bridge.
+	if local, err := store.HasActiveLocalAccount(ctx, uid); err != nil {
+		die(fmt.Errorf("check account mode: %w", err))
+	} else if local {
+		die(db.ErrAccountModeConflict)
+	}
+
 	var tgID int64
 	var displayName, username string
 
@@ -129,26 +139,52 @@ func main() {
 		}
 	}
 
-	if err := store.SaveSession(ctx, uid, mustLoadFreshSession(ctx, store, uid), tgID, displayName, username); err != nil {
+	// The login above has already persisted its session bytes through the gotd
+	// SessionStore, and with no loaded row id that write lands on EVERY active
+	// row of this uid — including a bridge-only one provisioned since the
+	// pre-login gate. So every failure from here to a successful SaveSession
+	// has to run the repair, not just SaveSession's own refusal: leaving the
+	// bytes behind would let the hosted worker act as the user through a row
+	// the operator believes is local.
+	//
+	// repairStraySession is called explicitly on each exit rather than
+	// deferred because die() is os.Exit, which does not run defers.
+	repairStraySession := func() {
+		repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(ctx), db.StraySessionRepairTimeout)
+		defer repairCancel()
+		// Gated on account state rather than on db.ErrAccountModeConflict, and
+		// detached from ctx: a failure caused by a cancelled or expired ctx
+		// while a local row is present would otherwise skip the repair, which
+		// is the case where the stray bytes are least likely to be noticed.
+		if cErr := store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
+			slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
+		}
+	}
+
+	// Hoisted out of SaveSession's argument list. Go evaluates arguments before
+	// the call, and this exits the process on failure — as an argument it could
+	// terminate before SaveSession was ever entered, taking the repair below
+	// with it and leaving exactly the stray bytes it exists to clean up.
+	pt, lerr := store.LoadSession(ctx, uid)
+	if lerr != nil {
+		repairStraySession()
+		die(fmt.Errorf("reload session after login: %w", lerr))
+	}
+	if pt == nil {
+		repairStraySession()
+		die(errors.New("session bytes missing after login"))
+	}
+
+	if err := store.SaveSession(ctx, uid, pt, tgID, displayName, username); err != nil {
 		// SaveSession revokes prior + reinserts with the just-stored bytes — for
 		// idempotence on partial-failure recovery flows. Errors here mean the DB
 		// is unhappy; surface and exit non-zero so the operator retries.
+		repairStraySession()
 		die(fmt.Errorf("save metadata: %w", err))
 	}
 
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s) bound to operator %q.\n",
 		tgID, displayName, username, cfg.OperatorLogin)
-}
-
-func mustLoadFreshSession(ctx context.Context, store *db.Store, uid int64) []byte {
-	pt, err := store.LoadSession(ctx, uid)
-	if err != nil {
-		die(fmt.Errorf("reload session after login: %w", err))
-	}
-	if pt == nil {
-		die(errors.New("session bytes missing after login"))
-	}
-	return pt
 }
 
 func die(err error) {

@@ -996,8 +996,9 @@ criteria.
 The counter behind it is `mctl_login_phone_step_total{result="timeout"}`,
 incremented when the handler's own `enableSendCodeWait` ceiling of **90 s**
 expires before Telegram's `SendCode` returns
-(`internal/oauth/enable_access.go:40,443`). A `timeout` is therefore always a
-server-side abandonment, never a user closing the tab.
+(the `enableSendCodeWait` constant in `internal/oauth/enable_access.go`, and
+the `select` arm that waits on it in `handleEnableStart`). A `timeout` is
+therefore always a server-side abandonment, never a user closing the tab.
 
 ### Likely causes
 
@@ -1016,14 +1017,22 @@ server-side abandonment, never a user closing the tab.
 
 ### Diagnostic queries
 
-Timeout rate against total phone steps:
+Timeout rate against total phone steps. The denominator excludes
+`mode_conflict` and `mode_check_error`: those two outcomes refuse the connect
+*before* Telegram is contacted (a Local Bridge account is active, or the store
+could not say whether one is), so counting them would widen the denominator
+and pull this ratio down while Telegram itself is stalling just as hard.
 
 ```promql
 sum(increase(mctl_login_phone_step_total{result="timeout"}[15m]))
-  / sum(increase(mctl_login_phone_step_total[15m]))
+  / sum(increase(
+        mctl_login_phone_step_total{result!~"mode_conflict|mode_check_error"}[15m]))
 ```
 
-Split by outcome, to separate a stall from an RPC error:
+Split by outcome, to separate a stall from an RPC error. A run dominated by
+`mode_conflict` is not a Telegram problem at all — it means hosted connects are
+being attempted against accounts already bound to a Local Bridge, and the
+answer is in the users' account mode, not in this alert.
 
 ```promql
 sum(increase(mctl_login_phone_step_total[15m])) by (result)

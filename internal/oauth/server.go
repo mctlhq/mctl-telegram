@@ -121,6 +121,30 @@ type Server struct {
 	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
 
+	// modeCheckFn, when non-nil, replaces the store's HasActiveLocalAccount on
+	// both enable_access mode checks. Test seam (nil in production): the store
+	// is a real *db.Store in these tests, so this is the only way to reach the
+	// failure half of that guard.
+	//
+	// Assigned before the request that reads it and not mutated while a flow is
+	// in flight -- the pre-flight gate reads it on the handler goroutine and
+	// the re-check on the flow goroutine, so a mid-flight write would be a
+	// race like any other.
+	modeCheckFn func(context.Context, int64) (bool, error)
+
+	// loginFlowParked, when non-nil, is invoked by the enable_access login
+	// goroutine immediately before it blocks on that uid's loginMu entry.
+	// Test seam: it is the only race-free way to observe the window between
+	// handleEnableStart's pre-flight mode gate and the re-check under the
+	// mutex, which is exactly the window issue-492's race lives in. Polling
+	// enableSession.flow from a test instead reads a field handleEnableStart
+	// writes under es.lock, which `go test -race` reports (build.yml runs
+	// `go test -race ./...`).
+	//
+	// Set once during test construction, before any request is served, and
+	// never mutated afterwards; nil in production.
+	loginFlowParked func()
+
 	// demoLimiter throttles /oauth/demo/login attempts per client IP so the
 	// password-gated reviewer path cannot be brute-forced. Non-nil only when
 	// the reviewer/demo auth-mode is enabled.

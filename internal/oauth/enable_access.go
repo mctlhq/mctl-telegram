@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // enableStep tracks where an enable_access flow is. Guarded by enableSession.lock.
@@ -71,6 +72,19 @@ type enableSession struct {
 	phone     string
 	sendOptIn bool
 	flow      *loginFlow
+
+	// terminalMsg is non-empty once the session has been refused for a reason
+	// restarting cannot clear (today: an active Local Bridge account). The
+	// step fallbacks in handleEnableCode/handleEnablePassword re-render it, so
+	// a browser-back re-POST of the last step lands back on the dead-end
+	// screen instead of the phone step's "Please start again." — which is a
+	// retry invitation for a condition that will not clear.
+	//
+	// /start deliberately does NOT read it: a resubmit there re-runs the
+	// pre-flight mode gate, which re-derives the refusal from live account
+	// state rather than replaying a cached message. If the operator has since
+	// switched the account back to hosted, that path lets the user through.
+	terminalMsg string
 }
 
 // loginFlow couples an HTTP handler to the background goroutine running
@@ -160,13 +174,72 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// predecessor — if its login RPC had already returned — could still
 		// run its revoke/SaveSession and clobber the newer flow's session.
 		ul := s.uidLoginMutex(uid)
+		// Test seam (nil in production): announce that this goroutine is about
+		// to park on the mutex, so a test holding it can provision a local
+		// account into the window the re-check below exists for.
+		if s.loginFlowParked != nil {
+			s.loginFlowParked()
+		}
 		ul.Lock()
 		defer ul.Unlock()
+		// Re-check under the uid lock, after handleEnableStart's pre-flight
+		// check: a local account could have been provisioned between the two.
+		// This is the last point at which we can refuse and still be sure no
+		// Telegram session bytes have been written — s.loginFn persists them
+		// through the gotd SessionStore the moment auth succeeds, overwriting
+		// the local row's blob before SaveSession is ever reached.
+		if local, cErr := s.hasActiveLocalAccount(bgCtx, uid); cErr != nil {
+			// Wrapped in errModeCheckFailed so handleEnableStart can give this
+			// the same treatment as the identical failure at the pre-flight
+			// gate: the mode_check_error label and the "could not verify"
+			// wording. Without the sentinel it surfaces through the generic
+			// arm as result="error" inside "Telegram rejected the request",
+			// and Telegram was not contacted on this path either.
+			lf.err = fmt.Errorf("%w: %w", errModeCheckFailed, cErr)
+			return
+		} else if local {
+			lf.err = db.ErrAccountModeConflict
+			return
+		}
 		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
 		if err != nil {
 			lf.err = err
 			return
 		}
+		// From here on the login has already persisted its session bytes
+		// through the gotd SessionStore, and with no loaded row id that write
+		// lands on EVERY active row of this uid -- including a bridge-only one
+		// provisioned since the re-check above. So every exit between here and
+		// a successful SaveSession has to run the repair, not just the
+		// SaveSession refusal: a LoadSession failure, "no session bytes were
+		// persisted" and the identity-mismatch bail-out all leave the same
+		// stray bytes behind, and a hosted worker holding a live session for
+		// an account the operator believes is local is the exact outcome this
+		// PR exists to prevent. A defer is the only form that cannot be
+		// forgotten by a future exit added in between.
+		//
+		// On the identity-mismatch path this runs only because that branch no
+		// longer revokes when a local row is active. Revoking first would
+		// leave nothing for it to match, since its EXISTS filters on
+		// revoked_at IS NULL -- see the reasoning there.
+		//
+		// Detached and bounded, not merely detached: bgCtx carries the flow's
+		// CodeTTL deadline, so the repair must not die on an expiry that is
+		// itself a likely cause of getting here -- while WithoutCancel alone
+		// would strip the deadline too, and this runs under the uid login
+		// mutex, where an unresponsive database would park the goroutine
+		// forever and lock the user out of every later attempt.
+		saved := false
+		defer func() {
+			if saved {
+				return
+			}
+			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), db.StraySessionRepairTimeout)
+			defer repairCancel()
+			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
+				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
+			}
+		}()
 		// Identity binding. The Telegram account that just completed
 		// phone/SMS/2FA MUST be the same one Telegram OIDC proved. Otherwise an
 		// admin authenticated as account A could enter account B's phone and
@@ -175,14 +248,42 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// revoke that row before bailing out.
 		if tgID != wantTgID {
 			// telegram.Login already persisted the wrong account's session
-			// bytes under uid; revoke them. The uid mutex guarantees no
-			// concurrent flow for uid, so this only targets this flow's own
-			// row. A failed revoke must surface — otherwise the wrong session
-			// stays active and a later callback would issue a token backed by
-			// it.
-			if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
-				lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
-				return
+			// bytes under uid, and they must not stay usable: a later callback
+			// would otherwise issue a token backed by them.
+			//
+			// Revoking is the right tool only when no bridge-only row is
+			// active. RevokeActiveSession is `WHERE user_id AND revoked_at IS
+			// NULL` -- every active row -- so on the race this whole block
+			// assumes it would revoke the local row too, which is the exact
+			// destruction this change exists to prevent, and it would also
+			// make the deferred repair above a no-op: both that repair's
+			// EXISTS and LoadSession filter on revoked_at IS NULL, so once
+			// the rows are revoked there is nothing left for it to match.
+			//
+			// With a local row present the repair is the better instrument
+			// anyway: it drops the wrong account's bytes from every active row
+			// while leaving the rows themselves alone, so the bridge keeps
+			// working and the stray session is gone.
+			local, cErr := s.hasActiveLocalAccount(bgCtx, uid)
+			if cErr != nil {
+				// Unknown, and the two failure modes are not symmetric: an
+				// unrevoked wrong-account session is exploitable, whereas a
+				// wrongly revoked local row degrades rather than breaks -- the
+				// daemon keeps being admitted, because GetAccountMode does not
+				// filter on revoked_at, and what is lost is this PR's own
+				// protection until the user reconnects. So revoke, and say why
+				// rather than leaving it to be re-derived.
+				slog.Warn("enable: account-mode check failed on the identity-mismatch path; revoking",
+					"uid", uid, "err", cErr)
+				local = false
+			}
+			if !local {
+				// A failed revoke must surface — otherwise the wrong session
+				// stays active.
+				if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
+					lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
+					return
+				}
 			}
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
@@ -201,9 +302,16 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		if serr := s.store.SaveSession(bgCtx, uid, pt, tgID, displayName, username); serr != nil {
+			// The deferred repair above covers this: SaveSession's own guard
+			// is gated on account state rather than on ErrAccountModeConflict
+			// precisely because it can fail with the CodeTTL deadline instead
+			// of the sentinel while a local row is present.
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
+		// Past the point of no return for the repair: the session is now
+		// legitimately the user's, and clearing it would undo a good login.
+		saved = true
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
@@ -214,6 +322,25 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	}()
 	return lf
 }
+
+// hasActiveLocalAccount is the account-mode query both the pre-flight gate and
+// startLoginFlow's re-check run. It exists as a method so tests can drive the
+// failure half of that guard: the store is a real *db.Store everywhere, so
+// without a seam the two errModeCheckFailed branches -- which deliberately do
+// something different to the session than their mode-conflict siblings -- have
+// nothing red to stop a later refactor from flattening them together.
+func (s *Server) hasActiveLocalAccount(ctx context.Context, uid int64) (bool, error) {
+	if s.modeCheckFn != nil {
+		return s.modeCheckFn(ctx, uid)
+	}
+	return s.store.HasActiveLocalAccount(ctx, uid)
+}
+
+// errModeCheckFailed marks a failure of the account-mode query itself, as
+// opposed to a mode conflict. Both the pre-flight gate and startLoginFlow's
+// re-check run the same HasActiveLocalAccount call; this is what lets the
+// handler label and word them identically no matter which one failed.
+var errModeCheckFailed = errors.New("could not verify the account mode")
 
 // uidLoginMutex returns the per-user mutex that serialises enable_access login
 // goroutines for one users.id. See Server.loginMu.
@@ -307,6 +434,71 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 	renderEnablePhone(w, p)
 }
 
+// abandonFlow returns the session to stepPhone and lets go of its login flow,
+// cancelling it first if it is still running.
+//
+// The step reset is the same invariant renderEnablePhoneStep maintains: es.step
+// must never lag the screen actually shown. A refusal that left es.step ==
+// stepCode with es.flow non-nil would satisfy handleEnableStart's duplicate-
+// /start guard, so a resubmitted /start would be handed a code screen for an
+// SMS Telegram was never asked to send, and would return from that guard before
+// ever reaching the pre-flight mode gate that produced the refusal.
+//
+// The cancel matters on one path that is easy to miss: the enableSendCodeWait
+// arm renders the phone step while its goroutine keeps running on bgCtx until
+// CodeTTL (by design — see startLoginFlow). A refusal on the next /start would
+// otherwise drop the reference to that live goroutine without ending it. Every
+// other caller reaches here from a <-lf.done arm, where the cancel is a no-op.
+func (es *enableSession) abandonFlow() {
+	es.step = stepPhone
+	if es.flow != nil && es.flow.cancel != nil {
+		es.flow.cancel()
+	}
+	es.flow = nil
+}
+
+// renderModeCheckRetry renders the account-mode query having failed. The
+// retryable counterpart to renderEnableTerminalError, and the pair is the
+// distinction that matters here: a mode CONFLICT is terminal and gets the
+// dead-end screen, a mode CHECK failure is not and gets the phone form back.
+//
+// The phone step rather than renderEnableError specifically because this is
+// retryable: the recovery is "resubmit the phone form", and renderEnableError
+// writes a page with nothing to resubmit -- which would also make the two
+// outcomes visually identical, differing only in wording. Every other
+// retryable outcome in handleEnableStart already leaves this way.
+//
+// One function for both call sites (the pre-flight gate and startLoginFlow's
+// re-check) so the wording and the prefilled fields cannot drift apart.
+func (s *Server) renderModeCheckRetry(w http.ResponseWriter, es *enableSession, esTok, phone string, sendOptIn bool) {
+	// Owned here, like renderEnableTerminalError owns its own abandonFlow, so
+	// a third mode-check exit cannot forget it. Forgetting would look fine --
+	// renderEnablePhoneStep resets es.step on its own, so the duplicate-/start
+	// guard stays satisfied -- while es.flow kept pointing at an uncancelled
+	// goroutine, which is the enableSendCodeWait orphan abandonFlow exists to
+	// close.
+	es.abandonFlow()
+	renderEnablePhoneStep(w, es, enablePhonePage{
+		Issuer:      s.cfg.Issuer,
+		EnableToken: esTok,
+		Phone:       phone,
+		SendOptIn:   sendOptIn,
+		WizardMode:  es.isWizardMode(),
+		WizardStep:  3,
+		Error:       "Could not verify this account's mode. Try again, or contact the operator if it persists.",
+	})
+}
+
+// renderEnableTerminalError abandons the flow, records the refusal as terminal
+// and renders the dead-end screen. The terminal counterpart to
+// renderEnablePhoneStep: it is for refusals a restart cannot clear, so unlike
+// that one it must not leave any route back that offers a retry.
+func renderEnableTerminalError(w http.ResponseWriter, es *enableSession, msg string) {
+	es.abandonFlow()
+	es.terminalMsg = msg
+	renderEnableError(w, msg)
+}
+
 // lookupEnable parses the form, resolves the "es" token to a live (un-expired)
 // enableSession, and returns it. ok is false when the token is missing,
 // unknown, or past CodeTTL.
@@ -351,8 +543,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// advanced to the code screen must NOT cancel and relaunch the live flow
 	// (that would invalidate the SMS code the user is entering and send a
 	// second one). Re-render the code screen instead. A legitimate restart
-	// after an error arrives with es.step == stepPhone (every error branch
-	// resets it via renderEnablePhoneStep), so this only catches duplicates.
+	// after an error arrives with es.step == stepPhone -- every error branch
+	// resets it, via renderEnablePhoneStep when the user can retry and via
+	// renderEnableTerminalError when the refusal is terminal -- so this only
+	// catches duplicates.
 	if es.step == stepCode && es.flow != nil {
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
@@ -385,26 +579,71 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Supersede any prior in-flight attempt (the user restarted after an error).
-	if es.flow != nil && es.flow.cancel != nil {
-		es.flow.cancel()
-	}
-	es.phone = phone
-	es.sendOptIn = sendOptIn
-	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
-	es.step = stepCode
-	lf := es.flow
-
-	// phoneStart bounds the connect + SendCode round-trip that this select waits
-	// on. observePhoneStep records its duration and outcome so the
-	// SendCode-stall failure mode (the "send code timeout" below) is queryable
-	// and alertable, not just visible as a coarse audit row.
+	// phoneStart bounds the connect + SendCode round-trip that the select
+	// below waits on. Declared before the mode gate so the gate's own outcomes
+	// are recorded too: a pre-flight refusal returns without ever reaching
+	// startLoginFlow, so leaving the declaration below it made every ordinary
+	// mode conflict invisible to mctl_login_phone_step and left only the
+	// narrow race window on the dashboard.
 	phoneStart := time.Now()
 	observePhoneStep := func(result string) {
 		if s.metrics != nil {
 			s.metrics.ObserveLoginPhoneStep(result, time.Since(phoneStart).Seconds())
 		}
 	}
+
+	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
+	// any MTProto login starts. telegram.Login persists the new session bytes
+	// through the gotd SessionStore as soon as auth succeeds, so by the time
+	// SaveSession's guard fires the local row's blob is already gone; the only
+	// way to leave the bridge untouched is to never start the login.
+	if local, cErr := s.hasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
+		// Not "error": that label is reserved for Telegram RPC failures (see
+		// the select below). This is our own store refusing to answer, and it
+		// must not read as Telegram flakiness on the dashboard.
+		observePhoneStep("mode_check_error")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
+		// Any refusal already on file has to go. This arm cannot
+		// re-derive the account state — that is what just failed — so all it
+		// knows is "unknown", and "unknown" must not outrank the retry it is
+		// about to offer. Leaving a cached message here would let a step
+		// fallback replay a Local Bridge refusal to an account that has since
+		// been switched back to hosted, which is the same staleness the clear
+		// at the pass-through below exists to prevent, reached through the arm
+		// that cannot check instead of the one that can.
+		//
+		// This is a choice between two wrong messages, not a strict
+		// improvement: when the account IS still local the clear discards a
+		// refusal that was true, and the next step fallback offers a retry for
+		// a condition retrying cannot clear. That is the accepted cost --
+		// resubmitting the phone form re-enters the gate and re-derives the
+		// refusal in one round-trip, whereas a stale refusal has no such exit,
+		// and the user has just been shown a retryable screen either way.
+		es.terminalMsg = ""
+		s.renderModeCheckRetry(w, es, esTok, rawPhone, sendOptIn)
+		return
+	} else if local {
+		observePhoneStep("mode_conflict")
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "")
+		renderEnableTerminalError(w, es, friendlyErr(db.ErrAccountModeConflict))
+		return
+	}
+
+	// Supersede any prior in-flight attempt (the user restarted after an error).
+	if es.flow != nil && es.flow.cancel != nil {
+		es.flow.cancel()
+	}
+	es.phone = phone
+	es.sendOptIn = sendOptIn
+	// Reaching this statement means the pre-flight gate re-derived the account
+	// state and let the user through, which is exactly the condition under
+	// which a cached terminal message is stale: the operator may have switched
+	// the account back to hosted since it was set. Leaving it would let the
+	// step fallbacks tell a user whose reconnect is now working that it cannot.
+	es.terminalMsg = ""
+	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
+	es.step = stepCode
+	lf := es.flow
 
 	select {
 	case <-lf.needCode:
@@ -424,6 +663,35 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// — that is the SendCode-stall the timeout alert watches, so record it
 			// as "timeout", not "error" (which is reserved for Telegram RPC errors
 			// like PHONE_NUMBER_INVALID / FLOOD_WAIT).
+			// A mode conflict is terminal and Telegram was never contacted, so
+			// it gets neither the "Telegram rejected the request ... Try
+			// again." framing nor the result="error" label reserved for real
+			// RPC failures -- booking it there makes a config condition read
+			// as Telegram flakiness on the dashboard. This is also the branch
+			// startLoginFlow's own re-check reliably lands in: that check sets
+			// lf.err and returns before lf.needCode is ever signalled, so
+			// lf.done closes first and the code/password handlers' terminal
+			// screens (which got this treatment) are never reached.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				observePhoneStep("mode_conflict")
+				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				return
+			}
+			// The re-check's other half. Same query, same non-Telegram cause
+			// as the pre-flight gate above, so the same label and wording —
+			// retryable, hence abandonFlow rather than the terminal renderer.
+			// No terminalMsg clear here, unlike the gate arm this mirrors:
+			// handleEnableStart empties the field unconditionally before
+			// launching the flow, so any request reaching this select has
+			// already had it cleared in the same request. Adding the
+			// symmetric clear would be dead code, not extra safety.
+			if errors.Is(lf.err, errModeCheckFailed) {
+				observePhoneStep("mode_check_error")
+				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "")
+				s.renderModeCheckRetry(w, es, esTok, rawPhone, sendOptIn)
+				return
+			}
 			result := "error"
 			if errors.Is(lf.err, context.DeadlineExceeded) || errors.Is(lf.err, context.Canceled) {
 				result = "timeout"
@@ -478,6 +746,14 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// A re-POST of this step after a terminal refusal (browser back, or a
+		// client that reissues its last request) must land back on the dead-end
+		// screen. "Please start again." below is a retry invitation, and this
+		// is the one condition restarting cannot clear.
+		if es.terminalMsg != "" {
+			renderEnableError(w, es.terminalMsg)
+			return
+		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
@@ -523,6 +799,13 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			// A mode conflict is terminal, not a bad code: retrying the flow
+			// re-hits the same guard. Render the dead-end screen rather than
+			// the phone step's "start again to get a fresh code" framing.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				return
+			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
@@ -562,6 +845,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			renderEnableError(w, "This sign-in already completed. Return to your MCP client.")
 			return
 		}
+		// Same as handleEnableCode: a terminal refusal outranks the retry
+		// framing below.
+		if es.terminalMsg != "" {
+			renderEnableError(w, es.terminalMsg)
+			return
+		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone,
 			Error: "Please start again.",
@@ -597,6 +886,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			// Terminal, same as in handleEnableCode: a mode conflict is not a
+			// wrong password and restarting cannot clear it.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				return
+			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
@@ -653,6 +948,14 @@ func validPhone(s string) bool {
 	return true
 }
 
+// localModeConnectMsg is the terminal wording for a hosted connect refused
+// because Local Bridge owns the account. It deliberately does not tell the
+// signed-in user to "switch the account back to hosted mode": mode changes go
+// through set_account_mode, which is admin-only, so that instruction is a dead
+// end for the person reading the screen. Point them at the two things they can
+// actually do instead.
+const localModeConnectMsg = "This account runs Local Bridge — its Telegram session lives on your own machine, and connecting here would replace it. Stop the bridge on that machine, or ask the operator to move the account back to hosted mode, then reconnect."
+
 // friendlyErr renders a login error for display. Telegram RPC errors are
 // short codes (PHONE_NUMBER_INVALID, FLOOD_WAIT) and carry no secrets; the
 // phone/code/password never appear in telegram.Login's error strings.
@@ -662,6 +965,9 @@ func friendlyErr(err error) string {
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "the login attempt expired."
+	}
+	if errors.Is(err, db.ErrAccountModeConflict) {
+		return localModeConnectMsg
 	}
 	// Map well-known MTProto error codes to human-readable messages.
 	var rpcErr *tgerr.Error
@@ -695,6 +1001,9 @@ func shortReason(err error) string {
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"
+	}
+	if errors.Is(err, db.ErrAccountModeConflict) {
+		return "local_mode_active"
 	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
