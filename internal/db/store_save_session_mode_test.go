@@ -152,7 +152,7 @@ func TestSaveSession_RefusesLocalRowBehindNewerHostedRow(t *testing.T) {
 	}
 }
 
-// TestClearActiveSessionBlobs_ClearsHostedRowToo is the regression test for
+// TestClearStraySessionIfLocal_ClearsHostedRowToo is the regression test for
 // the finding that the backstop cleanup was scoped to mode='local' while the
 // write it repairs was not.
 //
@@ -163,7 +163,7 @@ func TestSaveSession_RefusesLocalRowBehindNewerHostedRow(t *testing.T) {
 // therefore ended a REFUSED connect with the hosted row carrying the freshly
 // negotiated session. The first half of this test pins that write behaviour,
 // so the cleanup's scope cannot drift back out of step with it.
-func TestClearActiveSessionBlobs_ClearsHostedRowToo(t *testing.T) {
+func TestClearStraySessionIfLocal_ClearsHostedRowToo(t *testing.T) {
 	ctx := context.Background()
 	s := newSaveSessionTestStore(t)
 	uid := seedModedAccount(t, s, "clear-all-rows", 700000606, ModeLocal, false, false)
@@ -206,8 +206,8 @@ func TestClearActiveSessionBlobs_ClearsHostedRowToo(t *testing.T) {
 		t.Fatalf("after login write, blobs = %v, want both rows carrying bytes", got)
 	}
 
-	if err := s.ClearActiveSessionBlobs(ctx, uid); err != nil {
-		t.Fatalf("ClearActiveSessionBlobs: %v", err)
+	if err := s.ClearStraySessionIfLocal(ctx, uid); err != nil {
+		t.Fatalf("ClearStraySessionIfLocal: %v", err)
 	}
 	got := blobbed()
 	if got[ModeLocal] {

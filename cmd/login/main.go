@@ -24,7 +24,6 @@ import (
 	"os"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
 	"github.com/mctlhq/mctl-telegram/internal/config"
@@ -148,13 +147,13 @@ func main() {
 		// SaveSession refuses with db.ErrAccountModeConflict — but the login
 		// has already written its bytes over that row's blob, so drop them
 		// before exiting — from every active row, since the gotd SessionStore
-		// wrote them there. ClearActiveSessionBlobs keeps the rows themselves
+		// wrote them there. ClearStraySessionIfLocal keeps the rows themselves
 		// active; only the stray session bytes are removed.
 		// Gated on the account state rather than on the sentinel, and
 		// detached from ctx: a SaveSession that fails with a cancelled or
 		// expired ctx while a local row is present would otherwise skip the
 		// repair and leave the login's bytes on that row.
-		repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(ctx), db.StraySessionRepairTimeout)
 		if cErr := store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 			slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
 		}

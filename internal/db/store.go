@@ -1286,50 +1286,14 @@ func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, 
 	return exists, nil
 }
 
-// ClearActiveSessionBlobs wipes session_encrypted on ALL of the user's active
-// rows. It is the repair path for the SaveSession backstop: if a local account
-// was enabled after the pre-login gate ran, telegram.Login has already written
-// the freshly negotiated session bytes through the gotd SessionStore, and
-// leaving them behind a refused connect would let the hosted worker act as the
-// user through a row the operator believes is bridge-only.
-//
-// Every active row, not just the local ones. When the gotd SessionStore has no
-// loaded row id -- which is the case for a provisioned local account, whose
-// session_encrypted is NULL, so LoadSessionWithID returns id 0 -- StoreSession
-// falls through to UpdateSessionBlob, whose statement is
-// `WHERE user_id = $1 AND revoked_at IS NULL`: it writes the new bytes to
-// EVERY active row. Clearing only mode='local' rows left a user who also holds
-// an active hosted row with that row carrying a live session from a connect
-// that was explicitly refused.
-//
-// On that rowID == 0 branch, clearing the hosted row costs nothing it still
-// had: whatever session it held was overwritten by the same UPDATE moments
-// earlier, so the bytes dropped here are the new ones, not the old. The
-// justification is specific to that branch. When a row id WAS loaded,
-// StoreSession takes UpdateSessionBlobByID instead (`WHERE id = $2`, one row),
-// a second active row was never overwritten, and clearing it does drop a
-// session that was still valid. Clear-everything is still the right default:
-// that state needs the multi-active-row race named at ProvisionLocalAccount,
-// and the alternative -- leaving a live hosted session behind a refused
-// connect -- is the worse failure.
-//
-// What this does NOT do is terminate the Telegram-side authorization the login
-// created. There is no per-row MTProto logout on this path, and
-// RevokeActiveSession is not usable here: it would revoke the local row
-// itself, which is exactly the destruction this guard exists to prevent. The
-// row stays active in local mode and the bridge re-uploads its own session on
-// next connect; the stray Telegram authorization has to be cleared by the user
-// from their device list.
-func (s *Store) ClearActiveSessionBlobs(ctx context.Context, userID int64) error {
-	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET session_encrypted = NULL
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID,
-	); err != nil {
-		return fmt.Errorf("clear active session blobs: %w", err)
-	}
-	return nil
-}
+// StraySessionRepairTimeout bounds a ClearStraySessionIfLocal call. The repair
+// deliberately outlives the failed flow's own context (see the doc comment
+// below), so it needs a deadline of its own: the enable_access caller runs it
+// while holding that uid's login mutex, and a database that never answers must
+// not hold the mutex for the life of the process. Exported because both
+// callers -- the enable_access login goroutine and cmd/login -- must bound the
+// repair the same way.
+const StraySessionRepairTimeout = 5 * time.Second
 
 // ClearStraySessionIfLocal drops the session blob from every active row of a
 // user, but only when one of those rows is mode='local'. It is the repair for
@@ -1349,6 +1313,22 @@ func (s *Store) ClearActiveSessionBlobs(ctx context.Context, userID int64) error
 //
 // A user with no active local row is left untouched: those rows are the
 // connect's own, and a normal failure does not make them stray.
+//
+// Every active row of such a user, not only the local ones. When a row id WAS
+// loaded, StoreSession takes UpdateSessionBlobByID (`WHERE id = $2`, one row),
+// a second active row was never overwritten, and clearing it does drop a
+// session that was still valid. Clear-everything is still the right default:
+// that state needs the multi-active-row race named at ProvisionLocalAccount,
+// and the alternative -- leaving a live hosted session behind a refused
+// connect -- is the worse failure.
+//
+// What this does NOT do is terminate the Telegram-side authorization the login
+// created. There is no per-row MTProto logout on this path, and
+// RevokeActiveSession is not usable here: it would revoke the local row
+// itself, which is exactly the destruction this guard exists to prevent. The
+// row stays active in local mode and the bridge re-uploads its own session on
+// next connect; the stray Telegram authorization has to be cleared by the user
+// from their device list.
 func (s *Store) ClearStraySessionIfLocal(ctx context.Context, userID int64) error {
 	// One statement, not a read followed by a write. A separate
 	// HasActiveLocalAccount first would leave the same window SaveSession's

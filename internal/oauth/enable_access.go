@@ -239,7 +239,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// goroutine holds the uid login mutex -- an unresponsive database
 			// would park it there forever and lock the user out of every
 			// later attempt.
-			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), straySessionRepairTimeout)
+			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), db.StraySessionRepairTimeout)
 			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
 			}
@@ -257,12 +257,6 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	}()
 	return lf
 }
-
-// straySessionRepairTimeout bounds the post-login stray-session repair. The
-// repair deliberately outlives the flow's own context, so it needs a deadline
-// of its own: it runs under the uid login mutex, and a database that never
-// answers must not hold that mutex for the life of the process.
-const straySessionRepairTimeout = 5 * time.Second
 
 // uidLoginMutex returns the per-user mutex that serialises enable_access login
 // goroutines for one users.id. See Server.loginMu.
