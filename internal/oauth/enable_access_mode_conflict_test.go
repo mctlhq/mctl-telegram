@@ -268,6 +268,63 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_TerminalRefusalInPasswordStep_ResetsStep is the third
+// terminal arm. It is worth its own test rather than a table row: the reset
+// here crosses a different starting step (stepPassword, not stepCode), so it
+// takes a distinct path through both the duplicate-/start guard and
+// handleEnablePassword's own step fallback.
+func TestEnableAccess_TerminalRefusalInPasswordStep_ResetsStep(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(true, nil)) // 2FA path
+	esTok := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}}); !strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("code did not render password screen: %s", rec.Body.String())
+	}
+
+	// The local row lands while the 2FA screen is up, so the refusal comes out
+	// of handleEnablePassword rather than handleEnableCode.
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {esTok}, "password": {"hunter2"}}); !strings.Contains(rec.Body.String(), "Local Bridge") {
+		t.Fatalf("password step did not refuse with the local-mode message: %s", rec.Body.String())
+	}
+
+	// Route back in #1: /start. Must re-refuse through the pre-flight gate,
+	// not hand back a code screen via the duplicate guard.
+	again := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+	if body := again.Body.String(); strings.Contains(body, "enable_access/code") {
+		t.Errorf("resubmitted /start after a terminal refusal rendered the code screen; body=%s", body)
+	} else if !strings.Contains(body, "Local Bridge") {
+		t.Errorf("resubmitted /start did not re-refuse via the pre-flight mode gate; body=%s", body)
+	}
+
+	// Route back in #2: re-POST the password step itself (browser back, or a
+	// client reissuing its last request). The step fallback must show the
+	// terminal screen, not "Please start again." — restarting cannot clear a
+	// mode conflict, so inviting a retry is the wrong answer.
+	replay := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {esTok}, "password": {"hunter2"}})
+	if body := replay.Body.String(); strings.Contains(body, "Please start again") {
+		t.Errorf("password re-POST after a terminal refusal offered a retry; body=%s", body)
+	} else if !strings.Contains(body, "Local Bridge") {
+		t.Errorf("password re-POST did not re-render the terminal screen; body=%s", body)
+	}
+}
+
 // TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep is the same property for
 // handleEnableCode's terminal arm, which is reached on the other side of the
 // window: the login already ran and SaveSession refused. Kept separate from the
@@ -308,5 +365,51 @@ func TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep(t *testing.T) {
 	}
 	if !strings.Contains(againBody, "Local Bridge") {
 		t.Errorf("resubmitted /start did not re-refuse via the pre-flight mode gate; body=%s", againBody)
+	}
+
+	// The other route back: re-POST the code step. Resetting es.step moved this
+	// off handleEnableCode's happy path and onto its fallback, which offers
+	// "Please start again." — so the fallback has to know the session is dead.
+	replay := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}})
+	if body := replay.Body.String(); strings.Contains(body, "Please start again") {
+		t.Errorf("code re-POST after a terminal refusal offered a retry; body=%s", body)
+	} else if !strings.Contains(body, "Local Bridge") {
+		t.Errorf("code re-POST did not re-render the terminal screen; body=%s", body)
+	}
+}
+
+// TestAbandonFlow_ResetsStepAndCancels drives the helper directly rather than
+// through a handler, because two of its three effects are invisible from the
+// outside once the third has happened.
+//
+// Clearing es.flow alone is enough to make the handler-level assertions above
+// pass: the duplicate-/start guard and both step fallbacks are conjunctions
+// that already fail on es.flow == nil, so mutating away the step reset leaves
+// them green. That does not make the reset dead — es.step is the session's
+// record of which screen the user is on, and renderEnablePhoneStep exists
+// precisely so it never lags reality — but it does mean the HTTP tests cannot
+// pin it, and an unpinned line is one refactor from being deleted as redundant.
+//
+// The cancel has the same problem in reverse: it only matters when the flow is
+// still running, which is the enableSendCodeWait path, and by then no handler
+// is looking.
+func TestAbandonFlow_ResetsStepAndCancels(t *testing.T) {
+	cancelled := false
+	es := &enableSession{
+		step: stepCode,
+		flow: &loginFlow{cancel: func() { cancelled = true }},
+	}
+
+	es.abandonFlow()
+
+	if es.step != stepPhone {
+		t.Errorf("step = %v, want stepPhone: a session left on stepCode claims a screen the user is not on", es.step)
+	}
+	if es.flow != nil {
+		t.Error("flow was not released")
+	}
+	if !cancelled {
+		t.Error("a still-running flow was dropped without being cancelled; the enableSendCodeWait goroutine would outlive the request that ended it")
 	}
 }

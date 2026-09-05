@@ -72,6 +72,19 @@ type enableSession struct {
 	phone     string
 	sendOptIn bool
 	flow      *loginFlow
+
+	// terminalMsg is non-empty once the session has been refused for a reason
+	// restarting cannot clear (today: an active Local Bridge account). The
+	// step fallbacks in handleEnableCode/handleEnablePassword re-render it, so
+	// a browser-back re-POST of the last step lands back on the dead-end
+	// screen instead of the phone step's "Please start again." — which is a
+	// retry invitation for a condition that will not clear.
+	//
+	// /start deliberately does NOT read it: a resubmit there re-runs the
+	// pre-flight mode gate, which re-derives the refusal from live account
+	// state rather than replaying a cached message. If the operator has since
+	// switched the account back to hosted, that path lets the user through.
+	terminalMsg string
 }
 
 // loginFlow couples an HTTP handler to the background goroutine running
@@ -176,7 +189,13 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// through the gotd SessionStore the moment auth succeeds, overwriting
 		// the local row's blob before SaveSession is ever reached.
 		if local, cErr := s.store.HasActiveLocalAccount(bgCtx, uid); cErr != nil {
-			lf.err = fmt.Errorf("check account mode: %w", cErr)
+			// Wrapped in errModeCheckFailed so handleEnableStart can give this
+			// the same treatment as the identical failure at the pre-flight
+			// gate: the mode_check_error label and the "could not verify"
+			// wording. Without the sentinel it surfaces through the generic
+			// arm as result="error" inside "Telegram rejected the request",
+			// and Telegram was not contacted on this path either.
+			lf.err = fmt.Errorf("%w: %w", errModeCheckFailed, cErr)
 			return
 		} else if local {
 			lf.err = db.ErrAccountModeConflict
@@ -257,6 +276,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	}()
 	return lf
 }
+
+// errModeCheckFailed marks a failure of the account-mode query itself, as
+// opposed to a mode conflict. Both the pre-flight gate and startLoginFlow's
+// re-check run the same HasActiveLocalAccount call; this is what lets the
+// handler label and word them identically no matter which one failed.
+var errModeCheckFailed = errors.New("could not verify the account mode")
 
 // uidLoginMutex returns the per-user mutex that serialises enable_access login
 // goroutines for one users.id. See Server.loginMu.
@@ -350,20 +375,36 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 	renderEnablePhone(w, p)
 }
 
-// renderEnableTerminalError resets the flow and renders the dead-end screen. It
-// is the terminal counterpart to renderEnablePhoneStep and exists for the same
-// reason: es.step must never lag the screen actually shown. A refusal that left
-// es.step == stepCode with es.flow non-nil would satisfy handleEnableStart's
-// duplicate-/start guard, so a resubmitted /start would be handed a code screen
-// for an SMS Telegram was never asked to send, and would return from that guard
-// before ever reaching the pre-flight mode gate that produced this refusal.
-// Clearing es.flow is what makes the resubmit fall through to that gate and get
-// the same terminal answer instead. The flow is always finished by the time a
-// caller gets here -- every call site is inside a <-lf.done arm -- so dropping
-// the reference cancels nothing that is still running.
-func renderEnableTerminalError(w http.ResponseWriter, es *enableSession, msg string) {
+// abandonFlow returns the session to stepPhone and lets go of its login flow,
+// cancelling it first if it is still running.
+//
+// The step reset is the same invariant renderEnablePhoneStep maintains: es.step
+// must never lag the screen actually shown. A refusal that left es.step ==
+// stepCode with es.flow non-nil would satisfy handleEnableStart's duplicate-
+// /start guard, so a resubmitted /start would be handed a code screen for an
+// SMS Telegram was never asked to send, and would return from that guard before
+// ever reaching the pre-flight mode gate that produced the refusal.
+//
+// The cancel matters on one path that is easy to miss: the enableSendCodeWait
+// arm renders the phone step while its goroutine keeps running on bgCtx until
+// CodeTTL (by design — see startLoginFlow). A refusal on the next /start would
+// otherwise drop the reference to that live goroutine without ending it. Every
+// other caller reaches here from a <-lf.done arm, where the cancel is a no-op.
+func (es *enableSession) abandonFlow() {
 	es.step = stepPhone
+	if es.flow != nil && es.flow.cancel != nil {
+		es.flow.cancel()
+	}
 	es.flow = nil
+}
+
+// renderEnableTerminalError abandons the flow, records the refusal as terminal
+// and renders the dead-end screen. The terminal counterpart to
+// renderEnablePhoneStep: it is for refusals a restart cannot clear, so unlike
+// that one it must not leave any route back that offers a retry.
+func renderEnableTerminalError(w http.ResponseWriter, es *enableSession, msg string) {
+	es.abandonFlow()
+	es.terminalMsg = msg
 	renderEnableError(w, msg)
 }
 
@@ -471,12 +512,17 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// must not read as Telegram flakiness on the dashboard.
 		observePhoneStep("mode_check_error")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
+		// Retryable, so not a terminal refusal — but the flow still has to be
+		// let go of: both arms here return above the supersede block below,
+		// which is what would otherwise cancel a predecessor left running by
+		// the enableSendCodeWait arm.
+		es.abandonFlow()
 		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 		return
 	} else if local {
 		observePhoneStep("mode_conflict")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "")
-		renderEnableError(w, friendlyErr(db.ErrAccountModeConflict))
+		renderEnableTerminalError(w, es, friendlyErr(db.ErrAccountModeConflict))
 		return
 	}
 
@@ -521,6 +567,16 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 				observePhoneStep("mode_conflict")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
 				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				return
+			}
+			// The re-check's other half. Same query, same non-Telegram cause
+			// as the pre-flight gate above, so the same label and wording —
+			// retryable, hence abandonFlow rather than the terminal renderer.
+			if errors.Is(lf.err, errModeCheckFailed) {
+				observePhoneStep("mode_check_error")
+				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "")
+				es.abandonFlow()
+				renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 				return
 			}
 			result := "error"
@@ -575,6 +631,14 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 				WizardMode:  es.isWizardMode(),
 				WizardStep:  3,
 			})
+			return
+		}
+		// A re-POST of this step after a terminal refusal (browser back, or a
+		// client that reissues its last request) must land back on the dead-end
+		// screen. "Please start again." below is a retry invitation, and this
+		// is the one condition restarting cannot clear.
+		if es.terminalMsg != "" {
+			renderEnableError(w, es.terminalMsg)
 			return
 		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
@@ -666,6 +730,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		// user already has their authorization code.
 		if es.step == stepDone {
 			renderEnableError(w, "This sign-in already completed. Return to your MCP client.")
+			return
+		}
+		// Same as handleEnableCode: a terminal refusal outranks the retry
+		// framing below.
+		if es.terminalMsg != "" {
+			renderEnableError(w, es.terminalMsg)
 			return
 		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
