@@ -325,6 +325,9 @@ func agentSchemaSQLite() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_user_peer ON conversations(user_id, peer_tg_id)`,
+		// Serves ListConversations and /mctl conversations: newest-first,
+		// scoped to the owning user.
+		`CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS conversation_messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -539,6 +542,9 @@ func agentSchemaPG() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_user_peer ON conversations(user_id, peer_tg_id)`,
+		// Serves ListConversations and /mctl conversations: newest-first,
+		// scoped to the owning user.
+		`CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS conversation_messages (
 			id BIGSERIAL PRIMARY KEY,
 			conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
