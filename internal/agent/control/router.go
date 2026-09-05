@@ -297,19 +297,30 @@ func (r *Router) resolveConversationID(ctx context.Context, userID int64, arg st
 	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
 		return id, nil
 	}
+	// Prefix matching is case-insensitive for the same reason ParseCommand
+	// lowercases the subcommand: the owner types this by hand on a phone
+	// keyboard that may autocapitalize, which turns "user:555" into
+	// "User:555". Lowercasing the whole arg loses nothing -- the id path is
+	// digits and GetConversationByUsername lowercases the handle itself.
+	lower := strings.ToLower(arg)
 	switch {
-	case strings.HasPrefix(arg, "user:"):
-		peerTGID, err := strconv.ParseInt(strings.TrimPrefix(arg, "user:"), 10, 64)
+	case strings.HasPrefix(lower, "user:"):
+		// A malformed reference is NOT a miss: nothing was ever looked up, so
+		// reporting ErrConversationNotFound would tell the owner
+		// "Conversation user:abc not found" -- the same answer a well-formed
+		// reference to an unknown peer gets. errNotAReference routes them to
+		// the usage line instead, which is what actually helps.
+		peerTGID, err := strconv.ParseInt(lower[len("user:"):], 10, 64)
 		if err != nil {
-			return 0, db.ErrConversationNotFound
+			return 0, errNotAReference
 		}
 		conv, err := r.Store.GetConversationByPeer(ctx, userID, peerTGID)
 		if err != nil {
 			return 0, err
 		}
 		return conv.ID, nil
-	case strings.HasPrefix(arg, "@"):
-		conv, err := r.Store.GetConversationByUsername(ctx, userID, strings.TrimPrefix(arg, "@"))
+	case strings.HasPrefix(lower, "@"):
+		conv, err := r.Store.GetConversationByUsername(ctx, userID, lower[len("@"):])
 		if err != nil {
 			return 0, err
 		}
