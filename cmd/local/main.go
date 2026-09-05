@@ -57,6 +57,7 @@ Subcommands:
   activate --telegram-id <id> Self-service device activation (no operator step required).
   login --phone <num>        Interactive Telegram login.
   connect --token <t>        Exchange an MCP JWT for a bridge token and save it.
+                             (or --token-file <path>, or --token-file - / --token - for stdin)
   daemon                     Start the long-running websocket relay daemon.
   version                    Print the binary version.
   help                       Show this message.
@@ -231,15 +232,20 @@ func runLogin(args []string) {
 
 func runConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	mcpToken := fs.String("token", "", "MCP JWT from your mctl-telegram connector settings")
+	mcpToken := fs.String("token", "", "MCP JWT from your mctl-telegram connector settings (\"-\" for stdin)")
+	tokenFile := fs.String("token-file", "", "Read the MCP token from this file (\"-\" for stdin)")
 	server := fs.String("server", "", "Override the server URL (default: from config.json)")
 	if err := fs.Parse(args); err != nil {
 		die(err)
 	}
 
-	if *mcpToken == "" {
+	mcpTokenVal, err := resolveMCPToken(*mcpToken, *tokenFile, os.Stdin, readTokenFile)
+	if err != nil {
+		die(err)
+	}
+	if mcpTokenVal == "" {
 		fmt.Fprintln(os.Stderr, "Get your MCP token from your mctl-telegram connector settings, then run:")
-		fmt.Fprintln(os.Stderr, "  mctl-telegram-local connect --token <token>")
+		fmt.Fprintln(os.Stderr, "  mctl-telegram-local connect --token-file <path>   (or --token-file - to read stdin)")
 		os.Exit(2)
 	}
 
@@ -261,7 +267,7 @@ func runConnect(args []string) {
 	if err != nil {
 		die(fmt.Errorf("build request: %w", err))
 	}
-	req.Header.Set("Authorization", "Bearer "+*mcpToken)
+	req.Header.Set("Authorization", "Bearer "+mcpTokenVal)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -288,7 +294,7 @@ func runConnect(args []string) {
 	}
 
 	bt := &bridgeTokenFile{
-		MCPToken:    *mcpToken,
+		MCPToken:    mcpTokenVal,
 		BridgeToken: tok.BridgeToken,
 		ExpiresAt:   tok.ExpiresAt,
 	}
@@ -521,6 +527,114 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 		return []byte(pw), true, nil
 	}
 	return nil, false, nil
+}
+
+// resolveMCPToken determines the MCP token `connect` should use, given the
+// --token and --token-file flag values.
+//
+// stdin and readFile are parameters, mirroring passphraseFromEnv's
+// getenv/readFile split, so every branch — including the failure paths — is
+// testable without touching the real filesystem or stdin.
+//
+// Precedence and aliasing:
+//   - Any non-empty token together with a non-empty tokenFile is rejected:
+//     the caller supplied two sources for the same secret. This is checked
+//     on the flags as supplied, so "-" is not exempt -- `--token -
+//     --token-file /path` is a conflict, not a stdin read that quietly
+//     discards the path.
+//   - token == "-" is an alias for tokenFile == "-": both mean "read the
+//     token from stdin", and take that path below. The alias is applied
+//     only after the conflict check above.
+//   - tokenFile == "-" reads all of stdin; a non-empty, non-"-" tokenFile
+//     reads that file. Either way the result is trimmed of a trailing
+//     "\r\n", the same trim passphraseFromEnv applies to the passphrase
+//     file, and an empty result after trimming is an error.
+//   - A non-empty, non-"-" token alone is returned unchanged: the existing
+//     inline-flag behavior.
+//   - Both empty returns "", nil: the caller prints its own usage hint for
+//     that case, since it is not an error resolveMCPToken should format.
+//
+// readTokenFile is resolveMCPToken's production file reader. It is NOT
+// os.ReadFile: that reads the whole file into memory and would only be
+// rejected afterwards by the length check, so the bound would be reported but
+// never enforced -- the memory is already spent by then, which is exactly the
+// failure the bound exists to prevent. Reading through io.LimitReader on an
+// open handle enforces it, and the cap+1 byte keeps "exactly cap" and "cap
+// and still going" distinguishable so an oversized file is refused rather
+// than silently truncated into a wrong token.
+func readTokenFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxMCPTokenBytes+1))
+}
+
+// maxMCPTokenBytes bounds what resolveMCPToken will read from stdin or a
+// token file. A real MCP token is a few hundred bytes; 64 KiB is far above
+// any legitimate one and far below anything that threatens the process.
+const maxMCPTokenBytes = 64 * 1024
+
+// resolveMCPToken never calls die or os.Exit; every failure is returned as
+// an error so the caller decides whether it is a usage problem or a fatal
+// one.
+func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(string) ([]byte, error)) (string, error) {
+	// Mutual exclusion is checked on the flags AS SUPPLIED, before the "-"
+	// alias rewrites them. Applying the alias first sets tokenFile = "-"
+	// unconditionally, which erases an explicitly-passed --token-file and
+	// makes `--token - --token-file /path` read stdin and silently ignore
+	// the file -- while the mirror-image `--token abc --token-file -` is
+	// correctly rejected, because that input never enters the alias branch.
+	// Two sources for one secret is the condition being rejected here, and
+	// "-" is a source like any other.
+	if token != "" && tokenFile != "" {
+		return "", errors.New("--token and --token-file are mutually exclusive")
+	}
+
+	if token == "-" {
+		token = ""
+		tokenFile = "-"
+	}
+
+	if tokenFile == "-" {
+		// Bounded, not io.ReadAll: an MCP token is a few hundred bytes, and
+		// this path is a documented pipe target ("op read ... | connect
+		// --token-file -"), so a mistaken source -- /dev/zero, or the wrong
+		// file in a password-manager command -- would otherwise be read until
+		// the process dies. Reading cap+1 makes "exactly cap bytes" and
+		// "cap bytes and still going" distinguishable, so an oversized input
+		// is reported rather than silently truncated into a wrong token.
+		data, err := io.ReadAll(io.LimitReader(stdin, maxMCPTokenBytes+1))
+		if err != nil {
+			return "", fmt.Errorf("read MCP token from stdin: %w", err)
+		}
+		if len(data) > maxMCPTokenBytes {
+			return "", fmt.Errorf("MCP token on stdin exceeds %d bytes", maxMCPTokenBytes)
+		}
+		tok := bytes.TrimRight(data, "\r\n")
+		if len(tok) == 0 {
+			return "", errors.New("no MCP token on stdin")
+		}
+		return string(tok), nil
+	}
+
+	if tokenFile != "" {
+		data, err := readFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read --token-file %s: %w", tokenFile, err)
+		}
+		if len(data) > maxMCPTokenBytes {
+			return "", fmt.Errorf("%s exceeds %d bytes", tokenFile, maxMCPTokenBytes)
+		}
+		tok := bytes.TrimRight(data, "\r\n")
+		if len(tok) == 0 {
+			return "", fmt.Errorf("%s contains no MCP token", tokenFile)
+		}
+		return string(tok), nil
+	}
+
+	return token, nil
 }
 
 // restrictDBPerms narrows the local database to owner-only.
