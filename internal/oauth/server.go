@@ -1472,7 +1472,18 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// "remove from the allowlist" as de-provisioning, so removal has to mean
 	// removal. It also keeps the bot from showing up as a client in
 	// list_telegram_identities and in the new-client digest.
-	if s.cfg.AutoApproveClients && !s.cfg.LookupAdminTelegramIDs[identity.TelegramID] {
+	//
+	// Guarded with !AdminTelegramIDs for the same reason every other tier
+	// site in this file is (ResolveScopes' branch order, isLookupOnlyAdmin
+	// below, agentSendGate.hasSendScope): full-admin membership wins over a
+	// dual listing everywhere, so a full admin who is also listed as a lookup
+	// admin keeps the normal materialization. Nothing about their scopes
+	// changes either way -- those come from the env allowlist -- but letting
+	// the exemption fire for them would leave one site disagreeing with the
+	// rest about what a dual listing means.
+	isLookupOnly := s.cfg.LookupAdminTelegramIDs[identity.TelegramID] &&
+		!s.cfg.AdminTelegramIDs[identity.TelegramID]
+	if s.cfg.AutoApproveClients && !isLookupOnly {
 		dbTier, err := s.store.GetAccessTier(r.Context(), identity.TelegramID)
 		if err != nil {
 			slog.Error("get access tier for auto-grant failed", "err", err)

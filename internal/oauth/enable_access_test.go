@@ -732,6 +732,27 @@ func TestHandleTelegramCallback_AutoApproveMaterializesDBTier(t *testing.T) {
 		}
 	})
 
+	// Full-admin membership wins over a dual listing here as it does at every
+	// other tier site, so a full admin also listed as a lookup admin keeps the
+	// normal materialization. Paired with the exemption subtest above: one of
+	// the two must fail if the !AdminTelegramIDs guard is added or removed.
+	t.Run("full admin also listed as lookup admin still materializes", func(t *testing.T) {
+		dual := int64(444000777)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+			c.LookupAdminTelegramIDs = map[int64]bool{dual: true}
+			c.AdminTelegramIDs[dual] = true
+		})
+		telegramCallbackFor(t, srv, mux, dual)
+		tier, err := srv.store.GetAccessTier(ctx, dual)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != db.TierClient {
+			t.Fatalf("dual-listed full admin tier = %q, want %q; full-admin must win over the lookup listing here as it does everywhere else", tier, db.TierClient)
+		}
+	})
+
 	t.Run("re-sign-in is idempotent", func(t *testing.T) {
 		fresh := int64(444000555)
 		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
