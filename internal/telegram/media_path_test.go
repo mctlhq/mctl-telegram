@@ -50,6 +50,37 @@ func TestReadAllowlistedFile_RejectsOversize(t *testing.T) {
 	}
 }
 
+func TestReadAllowlistedFile_ExactCapIsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "exact.bin")
+	payload := []byte("12345")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadAllowlistedFile(path, dir, int64(len(payload)))
+	if err != nil {
+		t.Fatalf("exact-cap file must be accepted: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("got %q, want full payload", got)
+	}
+}
+
+func TestReadAllowlistedFile_UncappedReadsAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.bin")
+	if err := os.WriteFile(path, []byte("hello-media"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadAllowlistedFile(path, dir, 0)
+	if err != nil {
+		t.Fatalf("uncapped read: %v", err)
+	}
+	if string(got) != "hello-media" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestReadAllowlistedFile_RejectsSymlinkEscape(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.bin")

@@ -863,7 +863,7 @@ func envArgs(env bridge.Envelope) json.RawMessage {
 // ~/.config/mctl-telegram-local/media. The directory is created on first use
 // so a relative file_path has somewhere to land.
 func mediaAllowDir() string {
-	if d := os.Getenv("MCTL_MEDIA_DIR"); strings.TrimSpace(d) != "" {
+	if d := strings.TrimSpace(os.Getenv("MCTL_MEDIA_DIR")); d != "" {
 		_ = os.MkdirAll(d, 0o700)
 		return d
 	}

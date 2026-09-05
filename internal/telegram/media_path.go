@@ -48,7 +48,14 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 	if !isUnderDir(allowReal, resolved) {
 		return nil, fmt.Errorf("file_path is outside the media allowlist directory")
 	}
-	info, err := os.Stat(resolved)
+	// Open once and Stat the fd so a symlink swap between the path check
+	// and the read cannot change which inode we inspect versus upload.
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("file_path: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("file_path: %w", err)
 	}
@@ -58,14 +65,12 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 	if maxBytes > 0 && info.Size() > maxBytes {
 		return nil, fmt.Errorf("file_path is %d bytes, exceeding the %d-byte upload cap", info.Size(), maxBytes)
 	}
-	f, err := os.Open(resolved)
-	if err != nil {
-		return nil, fmt.Errorf("file_path: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	limit := info.Size()
-	if maxBytes > 0 && limit > maxBytes {
-		limit = maxBytes
+	// Bound the read by maxBytes, not the stat size. A file that grows
+	// after Stat (a voice note still being written is the usual case)
+	// must fail the oversize guard instead of uploading a truncated body.
+	limit := maxBytes
+	if limit <= 0 {
+		limit = info.Size()
 	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
