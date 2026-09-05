@@ -50,6 +50,11 @@ func bearerErrorCode(err error) string {
 	return `error="invalid_token"`
 }
 
+// UnauthorizedRenderer writes a non-JSON 401 body for browser navigations.
+// The status and machine-facing msg match writeJSONError so HTML and JSON
+// callers see the same rejection; only the presentation changes.
+type UnauthorizedRenderer func(w http.ResponseWriter, r *http.Request, status int, msg string)
+
 // Middleware authenticates each request through the provider. When required is
 // false and the provider returns (nil, nil), the request proceeds with no
 // Identity in context (anonymous mode for local-dev).
@@ -57,6 +62,18 @@ func bearerErrorCode(err error) string {
 // m is optional (nil-safe): when non-nil, authentication failures are
 // classified and counted in mctl_auth_failures_total{reason, provider}.
 func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata) func(http.Handler) http.Handler {
+	return middleware(p, required, m, rm, nil)
+}
+
+// MiddlewareWithHTML is Middleware plus an HTML 401 renderer for browser
+// navigations (Accept: text/html without application/json). API clients
+// keep the JSON {"error":...} contract: Accept: application/json,
+// X-Requested-With: XMLHttpRequest, empty Accept, or */*.
+func MiddlewareWithHTML(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata, html UnauthorizedRenderer) func(http.Handler) http.Handler {
+	return middleware(p, required, m, rm, html)
+}
+
+func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata, html UnauthorizedRenderer) func(http.Handler) http.Handler {
 	providerLabel := providerName(p)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +84,7 @@ func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues(classifyAuthError(err.Error()), providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path, bearerErrorCode(err)))
-				writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
+				writeUnauthorized(w, r, http.StatusUnauthorized, "invalid credentials", html)
 				return
 			}
 			if id == nil && required {
@@ -75,7 +92,7 @@ func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues("no_token", providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path))
-				writeJSONError(w, http.StatusUnauthorized, "authentication required")
+				writeUnauthorized(w, r, http.StatusUnauthorized, "authentication required", html)
 				return
 			}
 			if id != nil {
@@ -134,4 +151,34 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg string, html UnauthorizedRenderer) {
+	if html != nil && !WantsJSON(r) {
+		html(w, r, code, msg)
+		return
+	}
+	writeJSONError(w, code, msg)
+}
+
+// WantsJSON reports whether the caller asked for a JSON error body rather
+// than an HTML page. Browser navigations send Accept: text/html and must
+// get HTML on human routes such as /telegram/connect/manage. API clients
+// keep JSON when they send Accept: application/json, X-Requested-With:
+// XMLHttpRequest, omit Accept, or send */* (curl's default).
+func WantsJSON(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("X-Requested-With"), "XMLHttpRequest") {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	if accept == "" {
+		return true
+	}
+	a := strings.ToLower(accept)
+	hasHTML := strings.Contains(a, "text/html")
+	hasJSON := strings.Contains(a, "application/json")
+	if hasHTML && !hasJSON {
+		return false
+	}
+	return true
 }

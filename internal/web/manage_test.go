@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,6 +16,22 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	_ "modernc.org/sqlite"
 )
+
+type stubManageProvider struct {
+	id  *auth.Identity
+	err error
+}
+
+func (p stubManageProvider) Authenticate(*http.Request) (*auth.Identity, error) {
+	return p.id, p.err
+}
+
+func manageThroughAuth(t *testing.T, srv *ManageServer, p auth.Provider) http.Handler {
+	t.Helper()
+	return auth.MiddlewareWithHTML(p, true, nil, auth.ResourceMetadata{BaseURL: "https://tg.test"}, srv.WriteUnauthorized)(
+		http.HandlerFunc(srv.HandleManage),
+	)
+}
 
 func newManageTestStore(t *testing.T) *db.Store {
 	t.Helper()
@@ -34,23 +52,63 @@ func newManageTestStore(t *testing.T) *db.Store {
 	return db.NewStore(conn, crypt)
 }
 
-// TestManagePageRedirectsUnauthenticated confirms that GET /telegram/connect/manage
-// redirects to /telegram/connect when no auth.Identity is in context.
-func TestManagePageRedirectsUnauthenticated(t *testing.T) {
+// TestManagePageUnauthenticatedHTML confirms that a browser GET without an
+// identity gets an HTML sign-in page (not raw JSON) pointing at the hosted
+// connect wizard, with a Local Bridge alternative.
+func TestManagePageUnauthenticatedHTML(t *testing.T) {
 	store := newManageTestStore(t)
 	srv := NewManageServer(store, nil, "https://tg.test")
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
-	// No identity in context.
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	rec := httptest.NewRecorder()
 	srv.HandleManage(rec, req)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("expected 302 redirect for unauthenticated request, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated request, got %d", rec.Code)
 	}
-	loc := rec.Header().Get("Location")
-	if loc != "https://tg.test/telegram/connect" {
-		t.Errorf("redirect location = %q, want https://tg.test/telegram/connect", loc)
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `{"error"`) {
+		t.Fatalf("browser navigation must not see raw JSON; body=%s", body)
+	}
+	if !strings.Contains(body, "Sign in to manage your session") {
+		t.Errorf("missing sign-in heading; body=%s", body)
+	}
+	if !strings.Contains(body, "https://tg.test/telegram/connect") {
+		t.Errorf("missing hosted connect CTA; body=%s", body)
+	}
+	if !strings.Contains(body, "https://tg.test/docs/local-bridge") {
+		t.Errorf("missing Local Bridge docs link; body=%s", body)
+	}
+	if !strings.Contains(body, "https://tg.test/local-bridge/activate") {
+		t.Errorf("missing Local Bridge activate link; body=%s", body)
+	}
+}
+
+func TestManagePageUnauthenticatedJSON(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	srv.HandleManage(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", ct)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("JSON body: %v; body=%s", err, rec.Body.String())
+	}
+	if got["error"] != "authentication required" {
+		t.Errorf("error = %q, want authentication required", got["error"])
 	}
 }
 
@@ -133,5 +191,164 @@ func TestHandleDisconnect_ClearsCookieAndRedirects(t *testing.T) {
 	}
 	if !strings.Contains(cookie, "Path=/telegram/connect") {
 		t.Errorf("Set-Cookie Path must match the set-cookie shape from HandleConnectDone: %q", cookie)
+	}
+}
+
+func TestManageMiddleware_BrowserNoTokenGetsHTML(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+	h := manageThroughAuth(t, srv, stubManageProvider{})
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, `Bearer realm="mctl-telegram"`) {
+		t.Errorf("WWW-Authenticate = %q, want Bearer challenge", got)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `{"error"`) {
+		t.Fatalf("browser 401 must be HTML, not JSON; body=%s", body)
+	}
+	if !strings.Contains(body, "https://tg.test/telegram/connect") {
+		t.Errorf("missing connect CTA; body=%s", body)
+	}
+}
+
+func TestManageMiddleware_InvalidCookieBrowserGetsHTML(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+	h := manageThroughAuth(t, srv, stubManageProvider{err: errors.New("JWT expired")})
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: "mctl_connect_token", Value: "expired-or-garbage"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `{"error":"invalid credentials"}`) {
+		t.Fatalf("browser must not see raw invalid-credentials JSON; body=%s", body)
+	}
+	if !strings.Contains(body, "expired, or invalid") {
+		t.Errorf("invalid session copy missing; body=%s", body)
+	}
+	if !strings.Contains(body, "https://tg.test/docs/local-bridge") {
+		t.Errorf("missing Local Bridge alternative; body=%s", body)
+	}
+}
+
+func TestManageMiddleware_APIClientsKeepJSON(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+	h := manageThroughAuth(t, srv, stubManageProvider{err: errors.New("JWT expired")})
+
+	cases := []struct {
+		name   string
+		accept string
+		xhr    string
+	}{
+		{name: "accept json", accept: "application/json"},
+		{name: "empty accept", accept: ""},
+		{name: "star accept", accept: "*/*"},
+		{name: "xhr", accept: "text/html", xhr: "XMLHttpRequest"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+			if c.accept != "" {
+				req.Header.Set("Accept", c.accept)
+			}
+			if c.xhr != "" {
+				req.Header.Set("X-Requested-With", c.xhr)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+				t.Fatalf("Content-Type = %q, want application/json", ct)
+			}
+			var got map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("JSON: %v; body=%s", err, rec.Body.String())
+			}
+			if got["error"] != "invalid credentials" {
+				t.Errorf("error = %q, want invalid credentials", got["error"])
+			}
+		})
+	}
+}
+
+func TestManageMiddleware_AuthenticatedStillRendersDashboard(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+
+	uid, err := store.EnsureUser(ctx, "carol", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7)`,
+		uid, int64(777), "Carol Test", "caroltest", []byte("blob"), now, now.Add(24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	srv := NewManageServer(store, nil, "https://tg.test")
+	id := &auth.Identity{UserID: uid}
+	h := manageThroughAuth(t, srv, stubManageProvider{id: id})
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for authenticated request, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Carol Test") {
+		t.Errorf("display_name not shown; body=%s", body)
+	}
+	if !strings.Contains(body, "Disable send") && !strings.Contains(body, "Enable send") {
+		t.Errorf("send toggle missing; body=%s", body)
+	}
+	if !strings.Contains(body, "Disconnect") {
+		t.Errorf("disconnect control missing; body=%s", body)
+	}
+}
+
+func TestManageDisconnectUnauthenticatedHTML(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	srv.HandleDisconnect(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
 	}
 }

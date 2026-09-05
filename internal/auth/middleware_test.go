@@ -132,6 +132,94 @@ func TestMiddleware_WWWAuthenticate_OnFailedAuth(t *testing.T) {
 	}
 }
 
+func TestWantsJSON(t *testing.T) {
+	cases := []struct {
+		name     string
+		accept   string
+		xhr      string
+		wantJSON bool
+	}{
+		{name: "browser chrome", accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8", wantJSON: false},
+		{name: "text/html only", accept: "text/html", wantJSON: false},
+		{name: "application/json", accept: "application/json", wantJSON: true},
+		{name: "json and sse", accept: "application/json, text/event-stream", wantJSON: true},
+		{name: "empty", accept: "", wantJSON: true},
+		{name: "star", accept: "*/*", wantJSON: true},
+		{name: "xhr wins over html", accept: "text/html", xhr: "XMLHttpRequest", wantJSON: true},
+		{name: "both html and json prefer json", accept: "text/html, application/json", wantJSON: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+			if c.accept != "" {
+				req.Header.Set("Accept", c.accept)
+			}
+			if c.xhr != "" {
+				req.Header.Set("X-Requested-With", c.xhr)
+			}
+			if got := WantsJSON(req); got != c.wantJSON {
+				t.Errorf("WantsJSON = %v, want %v", got, c.wantJSON)
+			}
+		})
+	}
+}
+
+func TestMiddlewareWithHTML_BrowserGetsRenderer(t *testing.T) {
+	var called bool
+	html := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		called = true
+		if status != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", status)
+		}
+		if msg != "authentication required" {
+			t.Errorf("msg = %q, want authentication required", msg)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("<html>sign in</html>"))
+	}
+	h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, html)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler should not run")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("HTML renderer was not used")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if rec.Body.String() != "<html>sign in</html>" {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+}
+
+func TestMiddlewareWithHTML_JSONSkipsRenderer(t *testing.T) {
+	html := func(http.ResponseWriter, *http.Request, int, string) {
+		t.Fatal("HTML renderer must not run for API clients")
+	}
+	h := MiddlewareWithHTML(failingProvider{err: errors.New("JWT expired")}, true, nil, ResourceMetadata{}, html)(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("handler should not run")
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if rec.Body.String() != "{\"error\":\"invalid credentials\"}\n" {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+}
+
 // A deployment with no PublicBaseURL still has to tell the client the token
 // was rejected, even though it cannot point at a PRM document.
 func TestMiddleware_WWWAuthenticate_FailedAuthWithZeroValueResourceMetadata(t *testing.T) {
