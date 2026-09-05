@@ -536,8 +536,20 @@ func (s *Store) GetConversationByPeer(ctx context.Context, userID, peerTGID int6
 // username) pair, matched case-insensitively — Telegram usernames are
 // case-preserving but not case-sensitive for lookup purposes, and an owner
 // typing "/mctl show @Bob" should match a peer stored as "bob".
+//
+// Unlike the peer-id lookup, this predicate is not backed by a unique index:
+// conversations is unique on (user_id, peer_tg_id) only, and peer_username is
+// a cached snapshot that EnsureConversation refreshes but never clears. Since
+// Telegram handles are releasable and re-registrable, one owner can hold two
+// rows carrying the same handle — a stale one for the peer who gave it up and
+// a live one for the peer who took it. The ORDER BY/LIMIT makes that case
+// deterministic and resolves to the row the owner means (the most recently
+// active conversation) instead of letting the planner pick arbitrarily.
 func (s *Store) GetConversationByUsername(ctx context.Context, userID int64, username string) (*Conversation, error) {
-	return s.getConversation(ctx, `user_id = $1 AND LOWER(peer_username) = LOWER($2)`, userID, username)
+	return s.getConversation(ctx,
+		`user_id = $1 AND LOWER(peer_username) = LOWER($2)
+		  ORDER BY updated_at DESC, id DESC LIMIT 1`,
+		userID, username)
 }
 
 // ListConversations returns the user's most recently updated conversations,
@@ -584,7 +596,11 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 	return out, rows.Err()
 }
 
-func (s *Store) getConversation(ctx context.Context, where string, args ...any) (*Conversation, error) {
+// getConversation runs the single-row conversation SELECT with the caller's
+// condition appended after WHERE. cond may carry trailing ORDER BY/LIMIT
+// clauses when the predicate is not backed by a unique index, so a multi-row
+// match resolves deterministically rather than arbitrarily.
+func (s *Store) getConversation(ctx context.Context, cond string, args ...any) (*Conversation, error) {
 	var (
 		c                 Conversation
 		username, display sql.NullString
@@ -593,7 +609,7 @@ func (s *Store) getConversation(ctx context.Context, where string, args ...any) 
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
 		        autonomous_turns, last_incoming_at, last_agent_reply_at, created_at, updated_at
-		   FROM conversations WHERE `+where,
+		   FROM conversations WHERE `+cond,
 		args...,
 	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
 		&c.AutonomousTurns, &lastIn, &lastOut, &c.CreatedAt, &c.UpdatedAt)

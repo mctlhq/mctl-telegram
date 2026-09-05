@@ -101,9 +101,19 @@ func (r *Router) handleLeads(ctx context.Context, userID int64) error {
 		// l.ConversationID, not l.ID (job_leads.id) — /mctl show takes a
 		// conversation id, and the two are different sequences. Showing the
 		// lead's own id here would send the owner to look up the wrong row.
+		// A missing conversation row is a real, expected state (the lead
+		// outlived it) and a dash is the honest answer for it. Any other error
+		// is a live DB failure: propagate it rather than rendering a list of
+		// dashes that reads like a successful answer.
 		name := "—"
-		if conv, err := r.Store.GetConversation(ctx, userID, l.ConversationID); err == nil {
+		conv, err := r.Store.GetConversation(ctx, userID, l.ConversationID)
+		switch {
+		case err == nil:
 			name = orDash(conv.PeerDisplayName)
+		case errors.Is(err, db.ErrConversationNotFound):
+			// conversation row is gone; keep the dash.
+		default:
+			return fmt.Errorf("get conversation %d: %w", l.ConversationID, err)
 		}
 		fmt.Fprintf(&sb, "Conv #%d — %s — %s / %s (%s)\n", l.ConversationID, name, orDash(l.Company), orDash(l.Role), l.Status)
 	}
