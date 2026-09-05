@@ -44,13 +44,15 @@ func NewRouter(store *db.Store, executor Approver, notifier *Notifier) *Router {
 func (r *Router) HandleSavedText(ctx context.Context, userID int64, text string) error {
 	cmd, err := ParseCommand(text)
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>")
+		return r.Notifier.Reply(ctx, userID, "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>")
 	}
 	switch cmd.Type {
 	case CmdStatus:
 		return r.handleStatus(ctx, userID)
 	case CmdLeads:
 		return r.handleLeads(ctx, userID)
+	case CmdConversations:
+		return r.handleConversations(ctx, userID)
 	case CmdShow:
 		return r.handleShow(ctx, userID, cmd.Arg)
 	case CmdContinue:
@@ -99,16 +101,53 @@ func (r *Router) handleLeads(ctx context.Context, userID int64) error {
 		// l.ConversationID, not l.ID (job_leads.id) — /mctl show takes a
 		// conversation id, and the two are different sequences. Showing the
 		// lead's own id here would send the owner to look up the wrong row.
-		fmt.Fprintf(&sb, "Conv #%d — %s / %s (%s)\n", l.ConversationID, orDash(l.Company), orDash(l.Role), l.Status)
+		// A missing conversation row is a real, expected state (the lead
+		// outlived it) and a dash is the honest answer for it. Any other error
+		// is a live DB failure: propagate it rather than rendering a list of
+		// dashes that reads like a successful answer.
+		name := "—"
+		conv, err := r.Store.GetConversation(ctx, userID, l.ConversationID)
+		switch {
+		case err == nil:
+			name = orDash(conv.PeerDisplayName)
+		case errors.Is(err, db.ErrConversationNotFound):
+			// conversation row is gone; keep the dash.
+		default:
+			return fmt.Errorf("get conversation %d: %w", l.ConversationID, err)
+		}
+		fmt.Fprintf(&sb, "Conv #%d — %s — %s / %s (%s)\n", l.ConversationID, name, orDash(l.Company), orDash(l.Role), l.Status)
+	}
+	sb.WriteString("\n/mctl show <conversation id> for details")
+	return r.Notifier.Reply(ctx, userID, sb.String())
+}
+
+func (r *Router) handleConversations(ctx context.Context, userID int64) error {
+	convs, err := r.Store.ListConversations(ctx, userID, 20)
+	if err != nil {
+		return fmt.Errorf("list conversations: %w", err)
+	}
+	if len(convs) == 0 {
+		return r.Notifier.Reply(ctx, userID, "No conversations yet.")
+	}
+	var sb strings.Builder
+	sb.WriteString("Recent conversations:\n")
+	for _, c := range convs {
+		fmt.Fprintf(&sb, "Conv #%d — %s (%s)\n", c.ID, orDash(c.PeerDisplayName), c.State)
 	}
 	sb.WriteString("\n/mctl show <conversation id> for details")
 	return r.Notifier.Reply(ctx, userID, sb.String())
 }
 
 func (r *Router) handleShow(ctx context.Context, userID int64, arg string) error {
-	convID, err := strconv.ParseInt(arg, 10, 64)
+	convID, err := r.resolveConversationID(ctx, userID, arg)
+	if errors.Is(err, errNotAReference) {
+		return r.Notifier.Reply(ctx, userID, "Usage: /mctl show <conversation id> | user:<id> | @username")
+	}
+	if errors.Is(err, db.ErrConversationNotFound) {
+		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Conversation %s not found.", arg))
+	}
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Usage: /mctl show <conversation id>")
+		return fmt.Errorf("resolve conversation: %w", err)
 	}
 	conv, err := r.Store.GetConversation(ctx, userID, convID)
 	if errors.Is(err, db.ErrConversationNotFound) {
@@ -129,9 +168,15 @@ func (r *Router) handleShow(ctx context.Context, userID int64, arg string) error
 }
 
 func (r *Router) handleContinue(ctx context.Context, userID int64, arg string) error {
-	convID, err := strconv.ParseInt(arg, 10, 64)
+	convID, err := r.resolveConversationID(ctx, userID, arg)
+	if errors.Is(err, errNotAReference) {
+		return r.Notifier.Reply(ctx, userID, "Usage: /mctl continue <conversation id> | user:<id> | @username")
+	}
+	if errors.Is(err, db.ErrConversationNotFound) {
+		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Conversation %s not found.", arg))
+	}
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Usage: /mctl continue <conversation id>")
+		return fmt.Errorf("resolve conversation: %w", err)
 	}
 	// Continuing un-does a takeover (explicit or listener-detected) and
 	// grants the agent a fresh autonomous-turn budget — matches
@@ -159,9 +204,15 @@ func (r *Router) handlePause(ctx context.Context, userID int64) error {
 }
 
 func (r *Router) handleTakeover(ctx context.Context, userID int64, arg string) error {
-	convID, err := strconv.ParseInt(arg, 10, 64)
+	convID, err := r.resolveConversationID(ctx, userID, arg)
+	if errors.Is(err, errNotAReference) {
+		return r.Notifier.Reply(ctx, userID, "Usage: /mctl takeover <conversation id> | user:<id> | @username")
+	}
+	if errors.Is(err, db.ErrConversationNotFound) {
+		return r.Notifier.Reply(ctx, userID, fmt.Sprintf("Conversation %s not found.", arg))
+	}
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Usage: /mctl takeover <conversation id>")
+		return fmt.Errorf("resolve conversation: %w", err)
 	}
 	if err := r.Store.SetConversationState(ctx, userID, convID, db.ConversationTakenOver); err != nil {
 		if errors.Is(err, db.ErrConversationNotFound) {
@@ -226,6 +277,45 @@ func approverErrText(err error) string {
 		return "already resolved (approved, rejected, or expired) by the time this was processed"
 	default:
 		return "an internal error occurred"
+	}
+}
+
+// errNotAReference means arg is neither a plain numeric conversation id nor
+// a recognized peer reference (user:<telegram id> or @username) —
+// resolveConversationID never even attempted a store lookup, so the caller
+// should reply with usage text rather than a "not found" message.
+var errNotAReference = errors.New("not a conversation reference")
+
+// resolveConversationID turns a /mctl show|continue|takeover argument into a
+// conversation id. A plain numeric id is returned as-is without a store
+// lookup here — unchanged from the pre-existing behavior, so an id that
+// doesn't exist is still reported by the caller's own store call as
+// db.ErrConversationNotFound. A user:<telegram id> or @username reference is
+// resolved against the already-persisted conversations table; no live
+// Telegram/MTProto RPC is made.
+func (r *Router) resolveConversationID(ctx context.Context, userID int64, arg string) (int64, error) {
+	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
+		return id, nil
+	}
+	switch {
+	case strings.HasPrefix(arg, "user:"):
+		peerTGID, err := strconv.ParseInt(strings.TrimPrefix(arg, "user:"), 10, 64)
+		if err != nil {
+			return 0, db.ErrConversationNotFound
+		}
+		conv, err := r.Store.GetConversationByPeer(ctx, userID, peerTGID)
+		if err != nil {
+			return 0, err
+		}
+		return conv.ID, nil
+	case strings.HasPrefix(arg, "@"):
+		conv, err := r.Store.GetConversationByUsername(ctx, userID, strings.TrimPrefix(arg, "@"))
+		if err != nil {
+			return 0, err
+		}
+		return conv.ID, nil
+	default:
+		return 0, errNotAReference
 	}
 }
 
