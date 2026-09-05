@@ -427,12 +427,12 @@ func main() {
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
 		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"))
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
-			Get("/telegram/connect/manage", manageSrv.HandleManage)
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
-			Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
-		mux.With(auth.Middleware(provider, true, m, resourceMeta)).
-			Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
+		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
+		// Auth is still required — only the unauthenticated presentation changes.
+		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
+		mux.With(manageAuth).Get("/telegram/connect/manage", manageSrv.HandleManage)
+		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
+		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 	}
 
 	// Account endpoints — self-service disconnect/delete + status.

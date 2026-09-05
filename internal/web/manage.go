@@ -7,6 +7,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -34,11 +35,29 @@ func NewManageServer(store *db.Store, pool ManagePool, issuer string) *ManageSer
 	return &ManageServer{store: store, pool: pool, issuer: issuer}
 }
 
+// WriteUnauthorized is the browser-facing 401 for /telegram/connect/manage.
+// Auth is still rejected (same status and JSON error for API clients);
+// only the HTML presentation and next-step links change.
+func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	if auth.WantsJSON(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+		return
+	}
+	renderManageNeedAuth(w, status, manageNeedAuthData{
+		ConnectURL:             s.issuer + "/telegram/connect",
+		LocalBridgeDocsURL:     s.issuer + "/docs/local-bridge",
+		LocalBridgeActivateURL: s.issuer + "/local-bridge/activate",
+		InvalidSession:         msg == "invalid credentials",
+	})
+}
+
 // HandleManage renders the session management dashboard.
 func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	info, err := s.store.GetActiveAccount(r.Context(), id.UserID)
@@ -61,7 +80,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	var err error
@@ -96,7 +115,7 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	if _, err := s.store.ToggleSendEnabled(r.Context(), id.UserID); err != nil {
@@ -179,6 +198,28 @@ var manageErrorTemplate = template.Must(template.New("manageError").Parse(manage
 
 type manageErrorData struct {
 	Message string
+}
+
+type manageNeedAuthData struct {
+	ConnectURL             string
+	LocalBridgeDocsURL     string
+	LocalBridgeActivateURL string
+	InvalidSession         bool
+}
+
+var manageNeedAuthTemplate = template.Must(template.New("manageNeedAuth").Parse(manageHead + `    <h1>Sign in to manage your session</h1>
+    {{if .InvalidSession}}
+    <p>Your connect session is missing, expired, or invalid, so it was rejected. Sign in again to manage send permissions and disconnect.</p>
+    {{else}}
+    <p>You need to connect a Telegram account before you can manage this session.</p>
+    {{end}}
+    <a class="btn" href="{{.ConnectURL}}">Connect with Telegram</a>
+    <p class="meta">Using Local Bridge? <a href="{{.LocalBridgeDocsURL}}">Setup guide</a>
+       &#183; <a href="{{.LocalBridgeActivateURL}}">Activate a device</a></p>
+` + manageFoot))
+
+func renderManageNeedAuth(w http.ResponseWriter, status int, data manageNeedAuthData) {
+	renderManage(w, status, manageNeedAuthTemplate, data)
 }
 
 func renderManagePage(w http.ResponseWriter, data managePageData) {
