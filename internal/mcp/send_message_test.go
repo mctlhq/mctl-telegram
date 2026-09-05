@@ -131,7 +131,7 @@ func toStr(v any) string {
 // send_enabled flag is the reason. This is a regression guard for the hint
 // logic staying scoped to exactly the one cause it was written for.
 func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
-	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent or from /telegram/connect/manage, or call get_my_send_status to confirm this is the reason."
+	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
 
 	cases := []struct {
 		name     string

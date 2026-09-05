@@ -15,10 +15,14 @@ To let the daemon send or pin, grant consent on your own account:
 
 - Call the `set_send_consent` MCP tool with `enabled: true`. It is gated
   on the `account:manage` scope, always acts on your own account, and
-  has no `telegram_id` argument.
-- Or use the manage page at
-  [`/telegram/connect/manage`](/telegram/connect/manage) and enable
-  **Send messages**.
+  has no `telegram_id` argument. Confirm the gate with
+  `get_my_send_status` — it reports the same verdict `send_message`
+  uses.
+- If you authenticated through the hosted Telegram connect wizard
+  (local-jwt / connect cookie), you can also enable **Send messages**
+  on that session's manage page (`/telegram/connect/manage`). That
+  route is only mounted in local-jwt mode; shared-hmac deploys do
+  not serve it.
 
 `set_account_send` is the admin recovery tool. It is not how you turn
 sending on for yourself.
@@ -43,9 +47,9 @@ sending on for yourself.
 
 If a send comes back as a dry-run after you granted consent, check the
 `dry_reason` and `hint`. A typical reason is
-`per-account send_enabled=false` — enable sending with `set_send_consent`
-or from `/telegram/connect/manage`, then refresh the client credential.
-`get_my_send_status` reports the same gate `send_message` uses.
+`per-account send_enabled=false` — enable sending with `set_send_consent`,
+then refresh the client credential. `get_my_send_status` reports the
+same gate `send_message` uses.
 
 ## Revoke a device
 
