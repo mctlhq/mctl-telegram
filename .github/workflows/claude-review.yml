@@ -18,13 +18,21 @@ jobs:
       id-token: write
     with:
       sensitive-paths: '^internal/(auth|crypto|db|mcp|telegram)/'
-      # dependabot and mctl-agents are listed so their PRs get reviewed
-      # automatically.
+      # dependabot, mctl-agents and cursor are listed so their PRs get
+      # reviewed automatically.
       # Without it claude-code-action hard-fails with "Workflow initiated
       # by non-human actor", and since branch protection requires an
       # approving review, dependabot PRs then sit unmergeable until a
       # maintainer triggers a review by hand.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents"
+      #
+      # cursor drives the cursor/* branches and pushes to them itself, so
+      # only the first run (the human opening the PR) was ever reviewed and
+      # every later synchronize was rejected in ~2s on both tokens. The
+      # comment that failure posts says "failed to complete on both tokens",
+      # which reads like an exhausted quota but is not one. Re-triggering
+      # with @claude review does not help either: the actor check looks at
+      # who initiated the workflow, so a bot comment fails the same way.
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents,cursor"
       conventions: |
         Follow the conventions in this repository's CLAUDE.md (Go style,
         conventional commits, English only, no emoji).
