@@ -496,3 +496,51 @@ func TestEnableAccess_TerminalMessageDoesNotOutliveItsCondition(t *testing.T) {
 		t.Errorf("a stale terminal message told a user with a hosted account to stop trying; body=%s", body)
 	}
 }
+
+// TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage is the same
+// property reached through the arm that cannot re-derive the account state.
+// A store failure knows only "unknown", and "unknown" must not outrank the
+// retry it offers: leaving a cached refusal on file would let a step fallback
+// replay it to an account that has since been switched back to hosted.
+func TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	esTok := driveToPhone(t, mux)
+
+	mode := make(chan struct {
+		local bool
+		err   error
+	}, 8)
+	srv.modeCheckFn = func(context.Context, int64) (bool, error) {
+		r := <-mode
+		return r.local, r.err
+	}
+
+	// 1. Local row active -> terminal refusal, terminalMsg set.
+	mode <- struct {
+		local bool
+		err   error
+	}{true, nil}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "Local Bridge") {
+		t.Fatalf("gate did not refuse while the account was local: %s", rec.Body.String())
+	}
+
+	// 2. The account goes back to hosted, and 3. the next /start hits a store
+	// blip, so the gate refuses without being able to say what the mode is.
+	mode <- struct {
+		local bool
+		err   error
+	}{false, errors.New("connection refused")}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "Could not verify this account") {
+		t.Fatalf("store blip did not render the retryable refusal: %s", rec.Body.String())
+	}
+
+	// 4. A code re-POST must now get the retry framing, not the refusal from
+	// step 1 that nothing has been able to confirm since.
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}})
+	if body := rec.Body.String(); strings.Contains(body, "Local Bridge") {
+		t.Errorf("a refusal the server could no longer confirm was replayed as fact; body=%s", body)
+	}
+}

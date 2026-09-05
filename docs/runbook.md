@@ -996,8 +996,10 @@ criteria.
 The counter behind it is `mctl_login_phone_step_total{result="timeout"}`,
 incremented when the handler's own `enableSendCodeWait` ceiling of **90 s**
 expires before Telegram's `SendCode` returns
-(`internal/oauth/enable_access.go:41,598`). A `timeout` is therefore always a
-server-side abandonment, never a user closing the tab.
+(the `enableSendCodeWait` constant in `internal/oauth/enable_access.go`, and
+the `select` arm that waits on it in `handleEnableStart` — grep the symbols;
+a line number here drifted three times in a single PR). A `timeout` is
+therefore always a server-side abandonment, never a user closing the tab.
 
 ### Likely causes
 

@@ -530,6 +530,15 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// which is what would otherwise cancel a predecessor left running by
 		// the enableSendCodeWait arm.
 		es.abandonFlow()
+		// And any refusal already on file has to go with it. This arm cannot
+		// re-derive the account state — that is what just failed — so all it
+		// knows is "unknown", and "unknown" must not outrank the retry it is
+		// about to offer. Leaving a cached message here would let a step
+		// fallback replay a Local Bridge refusal to an account that has since
+		// been switched back to hosted, which is the same staleness the clear
+		// at the pass-through below exists to prevent, reached through the arm
+		// that cannot check instead of the one that can.
+		es.terminalMsg = ""
 		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 		return
 	} else if local {
