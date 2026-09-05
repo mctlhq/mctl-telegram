@@ -155,7 +155,7 @@
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code>.</li>
     <li>Identity has <code>telegram:messages:send</code> scope.</li>
-    <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this via <code>set_send_consent</code> or <a href="/telegram/connect/manage">/telegram/connect/manage</a>).</li>
+    <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}).</li>
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
   <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; no send RPC reaches Telegram. A denied media call does not fetch its URL or decode its base64 payload.</p>

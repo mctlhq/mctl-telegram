@@ -382,7 +382,7 @@
       <ol class="steps">
         <li><code>init</code>, then <code>login --phone +…</code></li>
         <li><code>activate --server https://tg.mctl.ai</code> and approve the device in a browser. After <code>login</code>, <code>--telegram-id</code> is optional.</li>
-        <li><code>daemon</code> — first credential is read-only. Turn sending on yourself with <code>set_send_consent</code> or the <a href="/telegram/connect/manage">manage</a> page.</li>
+        <li><code>daemon</code> — first credential is read-only. Turn sending on yourself with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}.</li>
       </ol>
       <div class="trust-links">
         <a href="/docs/local-bridge/quickstart">Quick start</a>
@@ -409,7 +409,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag (you turn this on with <code>set_send_consent</code> or the <a href="/telegram/connect/manage">manage</a> page) and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
+        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag (you turn this on with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}) and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does ChatGPT see?</dt>
