@@ -377,7 +377,9 @@ func main() {
 	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL, showManage))
 	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())
 	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
-	mux.Get("/docs/local-bridge", web.LocalBridge(cfg.PublicBaseURL, showManage))
+	localBridge := web.LocalBridge(cfg.PublicBaseURL, showManage)
+	mux.Get("/docs/local-bridge", localBridge)
+	mux.Get("/docs/local-bridge/*", localBridge)
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,

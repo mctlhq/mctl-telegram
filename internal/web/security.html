@@ -116,7 +116,7 @@
   </ul>
 
   <h2>Local Bridge mode</h2>
-  <p>When an account is set to <code>mode='local'</code>, the MTProto session it uses lives on the user's machine rather than in the hosted session pool, and this server acts as a relay. Turning it on for a new account is self-service via the <code>mctl-telegram-local activate</code> CLI; migrating an existing hosted account into local mode still goes through an operator (<code>set_account_mode</code>).</p>
+  <p>When an account is set to <code>mode='local'</code>, the MTProto session it uses lives on the user's machine rather than in the hosted session pool, and this server acts as a relay. Turning it on for a new account is self-service via the <code>mctl-telegram-local activate</code> CLI; migrating an existing hosted account into local mode still goes through an operator (<code>set_account_mode</code>). Setup is documented at <a href="/docs/local-bridge">/docs/local-bridge</a>.</p>
   <ul>
     <li><strong>Whether the server ever held a copy of the session depends on how the account became local.</strong> <code>session_encrypted</code> is nullable: an account provisioned directly as local-only (via <code>provision_local_account</code>, without ever completing a hosted login) has <code>session_encrypted = NULL</code> from the start — the server never holds a copy of your session at all. An account migrated from an existing hosted login (via <code>set_account_mode</code>) keeps the sealed session blob that was stored when it first connected; switching to local mode stops the server from borrowing that blob, but does not erase it (clearing it is a separate, not-yet-implemented step). Revoking the hosted session of a migrated account does not revert it to hosted mode or disconnect the bridge — <code>mode</code> is a property of the account, independent of whether its stored session is still considered valid. To render a migrated account's stored copy useless, terminate that session from your own Telegram client (Settings &rarr; Devices); the stored bytes then hold a dead authorization key.</li>
     <li><strong>New Telegram traffic originates from your machine.</strong> Once a daemon is connected, tool calls are dispatched over the relay to it and the MTProto connection to Telegram is made by your daemon using the session on your disk. The <code>call_path</code> audit column records which route each call took.</li>
@@ -155,7 +155,7 @@
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code>.</li>
     <li>Identity has <code>telegram:messages:send</code> scope.</li>
-    <li><code>telegram_accounts.send_enabled = true</code> for that operator.</li>
+    <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this via <code>set_send_consent</code> or <a href="/telegram/connect/manage">/telegram/connect/manage</a>).</li>
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
   <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; no send RPC reaches Telegram. A denied media call does not fetch its URL or decode its base64 payload.</p>

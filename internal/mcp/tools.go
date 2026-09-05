@@ -400,7 +400,7 @@ Inputs (required):
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 			if dryReason == reasonSendDisabled {
-				result.Hint = "Your account has never opted into real sends. Turn it on from /manage, or call get_my_send_status to confirm this is the reason."
+				result.Hint = "Your account has never opted into real sends. Enable them with set_send_consent or from /telegram/connect/manage, or call get_my_send_status to confirm this is the reason."
 			}
 			return jsonResult(result)
 		}
@@ -1755,7 +1755,7 @@ func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReview
 // send_enabled flag is off. It is a package-level constant (rather than an
 // inline literal) so toolSendMessage can compare a dry_reason value against
 // it to attach a targeted hint, without the two call sites risking drift.
-const reasonSendDisabled = "per-account send_enabled=false — contact the operator to enable real sends for your account"
+const reasonSendDisabled = "per-account send_enabled=false — enable real sends with set_send_consent or from /telegram/connect/manage"
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
 // final verdict. Both callers go through it so the wording of the last

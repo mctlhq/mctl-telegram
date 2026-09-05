@@ -5,6 +5,7 @@
 ## Key Resources & Submissions
 
 - [Public Documentation](https://tg.mctl.ai/docs): Getting started and tool documentation.
+- [Local Bridge](https://tg.mctl.ai/docs/local-bridge): Optional self-hosted session mode. Quick start at `/docs/local-bridge/quickstart`.
 - [Security & Trust Model](https://tg.mctl.ai/security): Data minimization and session encryption details.
 - [ChatGPT App Directory Submission](https://github.com/mctlhq/mctl-telegram/blob/main/chatgpt-submission-package.md): Reviewer notes and submission package.
 - [Claude Connector Submission](https://github.com/mctlhq/mctl-telegram/blob/main/claude-connector-submission.md): Anthropic Remote MCP directory submission metadata.
