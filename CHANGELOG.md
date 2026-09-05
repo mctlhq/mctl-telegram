@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.61.0](https://github.com/mctlhq/mctl-telegram/compare/0.60.1...0.61.0) (2026-09-05)
+
+
+### Features
+
+* **agent-control:** address /mctl targets by [@username](https://github.com/username) or user:&lt;id&gt; and list conversations ([#513](https://github.com/mctlhq/mctl-telegram/issues/513)) ([4de7196](https://github.com/mctlhq/mctl-telegram/commit/4de71961a997217f7ecc0abad25b2085dd3711b9))
+* **agents:** issue-400-admins-openclaw-bot-can-t-answer-who-is ([#511](https://github.com/mctlhq/mctl-telegram/issues/511)) ([567478c](https://github.com/mctlhq/mctl-telegram/commit/567478ce020910ce055e16be3c9e7516f3eeba2b))
+* **agents:** issue-441-communication-agent-taken-over-conversat ([#507](https://github.com/mctlhq/mctl-telegram/issues/507)) ([e3a310b](https://github.com/mctlhq/mctl-telegram/commit/e3a310b728874362327421ac2600bad0bada0c1a))
+* **agents:** issue-454-feat-local-accept-the-mcp-token-from-a-f ([#509](https://github.com/mctlhq/mctl-telegram/issues/509)) ([be20ca7](https://github.com/mctlhq/mctl-telegram/commit/be20ca7459f06cf98237ba52600025484ec1621a))
+* **agents:** issue-487-audit-per-account-send-enabled-false-in ([#505](https://github.com/mctlhq/mctl-telegram/issues/505)) ([fbcc94b](https://github.com/mctlhq/mctl-telegram/commit/fbcc94b7bd984e431cd12b4fca16d7652d171bd0))
+
+
+### Bug Fixes
+
+* **control:** close the three remaining P3s from [#513](https://github.com/mctlhq/mctl-telegram/issues/513)'s review ([#523](https://github.com/mctlhq/mctl-telegram/issues/523)) ([7623cd5](https://github.com/mctlhq/mctl-telegram/commit/7623cd5b2d9bce880fbf551dd0b609be38fc6b38))
+* **oauth:** refuse a hosted connect while a Local Bridge account is active ([#512](https://github.com/mctlhq/mctl-telegram/issues/512)) ([0c52d57](https://github.com/mctlhq/mctl-telegram/commit/0c52d5723fcdef790bfcae29a2c6ba9460c39810))
+
 ## [0.60.1](https://github.com/mctlhq/mctl-telegram/compare/0.60.0...0.60.1) (2026-09-04)
 
 
