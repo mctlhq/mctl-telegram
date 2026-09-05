@@ -57,6 +57,7 @@ Subcommands:
   activate --telegram-id <id> Self-service device activation (no operator step required).
   login --phone <num>        Interactive Telegram login.
   connect --token <t>        Exchange an MCP JWT for a bridge token and save it.
+                             (or --token-file <path>, or --token-file - / --token - for stdin)
   daemon                     Start the long-running websocket relay daemon.
   version                    Print the binary version.
   help                       Show this message.
@@ -231,15 +232,20 @@ func runLogin(args []string) {
 
 func runConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	mcpToken := fs.String("token", "", "MCP JWT from your mctl-telegram connector settings")
+	mcpToken := fs.String("token", "", "MCP JWT from your mctl-telegram connector settings (\"-\" for stdin)")
+	tokenFile := fs.String("token-file", "", "Read the MCP token from this file (\"-\" for stdin)")
 	server := fs.String("server", "", "Override the server URL (default: from config.json)")
 	if err := fs.Parse(args); err != nil {
 		die(err)
 	}
 
-	if *mcpToken == "" {
+	mcpTokenVal, err := resolveMCPToken(*mcpToken, *tokenFile, os.Stdin, os.ReadFile)
+	if err != nil {
+		die(err)
+	}
+	if mcpTokenVal == "" {
 		fmt.Fprintln(os.Stderr, "Get your MCP token from your mctl-telegram connector settings, then run:")
-		fmt.Fprintln(os.Stderr, "  mctl-telegram-local connect --token <token>")
+		fmt.Fprintln(os.Stderr, "  mctl-telegram-local connect --token-file <path>   (or --token-file - to read stdin)")
 		os.Exit(2)
 	}
 
@@ -261,7 +267,7 @@ func runConnect(args []string) {
 	if err != nil {
 		die(fmt.Errorf("build request: %w", err))
 	}
-	req.Header.Set("Authorization", "Bearer "+*mcpToken)
+	req.Header.Set("Authorization", "Bearer "+mcpTokenVal)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -288,7 +294,7 @@ func runConnect(args []string) {
 	}
 
 	bt := &bridgeTokenFile{
-		MCPToken:    *mcpToken,
+		MCPToken:    mcpTokenVal,
 		BridgeToken: tok.BridgeToken,
 		ExpiresAt:   tok.ExpiresAt,
 	}
@@ -521,6 +527,67 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 		return []byte(pw), true, nil
 	}
 	return nil, false, nil
+}
+
+// resolveMCPToken determines the MCP token `connect` should use, given the
+// --token and --token-file flag values.
+//
+// stdin and readFile are parameters, mirroring passphraseFromEnv's
+// getenv/readFile split, so every branch — including the failure paths — is
+// testable without touching the real filesystem or stdin.
+//
+// Precedence and aliasing:
+//   - token == "-" is an alias for tokenFile == "-": both mean "read the
+//     token from stdin", and take that path below.
+//   - A non-empty, non-"-" token together with a non-empty tokenFile is
+//     rejected: the caller supplied two sources for the same secret.
+//   - tokenFile == "-" reads all of stdin; a non-empty, non-"-" tokenFile
+//     reads that file. Either way the result is trimmed of a trailing
+//     "\r\n", the same trim passphraseFromEnv applies to the passphrase
+//     file, and an empty result after trimming is an error.
+//   - A non-empty, non-"-" token alone is returned unchanged: the existing
+//     inline-flag behavior.
+//   - Both empty returns "", nil: the caller prints its own usage hint for
+//     that case, since it is not an error resolveMCPToken should format.
+//
+// resolveMCPToken never calls die or os.Exit; every failure is returned as
+// an error so the caller decides whether it is a usage problem or a fatal
+// one.
+func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(string) ([]byte, error)) (string, error) {
+	if token == "-" {
+		token = ""
+		tokenFile = "-"
+	}
+
+	if token != "" && tokenFile != "" {
+		return "", errors.New("--token and --token-file are mutually exclusive")
+	}
+
+	if tokenFile == "-" {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("read MCP token from stdin: %w", err)
+		}
+		tok := bytes.TrimRight(data, "\r\n")
+		if len(tok) == 0 {
+			return "", errors.New("no MCP token on stdin")
+		}
+		return string(tok), nil
+	}
+
+	if tokenFile != "" {
+		data, err := readFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read --token-file %s: %w", tokenFile, err)
+		}
+		tok := bytes.TrimRight(data, "\r\n")
+		if len(tok) == 0 {
+			return "", fmt.Errorf("%s contains no MCP token", tokenFile)
+		}
+		return string(tok), nil
+	}
+
+	return token, nil
 }
 
 // restrictDBPerms narrows the local database to owner-only.
