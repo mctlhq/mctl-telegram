@@ -211,12 +211,17 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// lands on EVERY active row of this uid -- including a bridge-only one
 		// provisioned since the re-check above. So every exit between here and
 		// a successful SaveSession has to run the repair, not just the
-		// SaveSession refusal: the identity-mismatch bail-out, a LoadSession
-		// failure, and "no session bytes were persisted" all leave the same
+		// SaveSession refusal: a LoadSession failure, "no session bytes were
+		// persisted" and the identity-mismatch bail-out all leave the same
 		// stray bytes behind, and a hosted worker holding a live session for
 		// an account the operator believes is local is the exact outcome this
 		// PR exists to prevent. A defer is the only form that cannot be
 		// forgotten by a future exit added in between.
+		//
+		// On the identity-mismatch path this runs only because that branch no
+		// longer revokes when a local row is active. Revoking first would
+		// leave nothing for it to match, since its EXISTS filters on
+		// revoked_at IS NULL -- see the reasoning there.
 		//
 		// Detached and bounded, not merely detached: bgCtx carries the flow's
 		// CodeTTL deadline, so the repair must not die on an expiry that is
@@ -243,14 +248,42 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// revoke that row before bailing out.
 		if tgID != wantTgID {
 			// telegram.Login already persisted the wrong account's session
-			// bytes under uid; revoke them. The uid mutex guarantees no
-			// concurrent flow for uid, so this only targets this flow's own
-			// row. A failed revoke must surface — otherwise the wrong session
-			// stays active and a later callback would issue a token backed by
-			// it.
-			if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
-				lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
-				return
+			// bytes under uid, and they must not stay usable: a later callback
+			// would otherwise issue a token backed by them.
+			//
+			// Revoking is the right tool only when no bridge-only row is
+			// active. RevokeActiveSession is `WHERE user_id AND revoked_at IS
+			// NULL` -- every active row -- so on the race this whole block
+			// assumes it would revoke the local row too, which is the exact
+			// destruction this change exists to prevent, and it would also
+			// make the deferred repair above a no-op: both that repair's
+			// EXISTS and LoadSession filter on revoked_at IS NULL, so once
+			// the rows are revoked there is nothing left for it to match.
+			//
+			// With a local row present the repair is the better instrument
+			// anyway: it drops the wrong account's bytes from every active row
+			// while leaving the rows themselves alone, so the bridge keeps
+			// working and the stray session is gone.
+			local, cErr := s.hasActiveLocalAccount(bgCtx, uid)
+			if cErr != nil {
+				// Unknown, and the two failure modes are not symmetric: an
+				// unrevoked wrong-account session is exploitable, whereas a
+				// wrongly revoked local row degrades rather than breaks -- the
+				// daemon keeps being admitted, because GetAccountMode does not
+				// filter on revoked_at, and what is lost is this PR's own
+				// protection until the user reconnects. So revoke, and say why
+				// rather than leaving it to be re-derived.
+				slog.Warn("enable: account-mode check failed on the identity-mismatch path; revoking",
+					"uid", uid, "err", cErr)
+				local = false
+			}
+			if !local {
+				// A failed revoke must surface — otherwise the wrong session
+				// stays active.
+				if _, rErr := s.store.RevokeActiveSession(bgCtx, uid, "disconnect"); rErr != nil {
+					lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
+					return
+				}
 			}
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return

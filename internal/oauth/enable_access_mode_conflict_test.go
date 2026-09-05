@@ -612,18 +612,16 @@ func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) 
 		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
 		t.Fatalf("start did not render code screen: %s", rec.Body.String())
 	}
-	postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {esTok}, "code": {"12345"}})
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {esTok}, "code": {"12345"}})
 
-	// Precondition check: if the flow did not take the reload bail-out, this
-	// test is not exercising the exit it claims to.
-	var localRows int
-	if err := srv.store.DB.QueryRowContext(ctx,
-		`SELECT count(*) FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`, uid, db.ModeLocal).Scan(&localRows); err != nil {
-		t.Fatalf("count local rows: %v", err)
-	}
-	if localRows != 1 {
-		t.Fatalf("expected the raced local row to be active, got %d", localRows)
+	// This is the discriminator, and it has to be checked: the SaveSession
+	// path — which the old sentinel-gated code already covered — leaves the
+	// same two rows in the same state, so both assertions below pass on it
+	// too. Only the error text says which exit ran. Without this, a change to
+	// LoadSessionWithID's row selection could silently re-point the test at
+	// the path it says it is not exercising.
+	if body := rec.Body.String(); !strings.Contains(body, "no session bytes were persisted") {
+		t.Fatalf("the flow did not take the reload bail-out this test is named for; body=%s", body)
 	}
 
 	var blob []byte
@@ -634,5 +632,56 @@ func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) 
 	}
 	if blob != nil {
 		t.Error("the login's bytes survived a bail-out before SaveSession; a hosted worker could act as a user the operator believes is bridge-only")
+	}
+}
+
+// TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge covers the one exit
+// where the deferred repair is not enough on its own, because the branch used
+// to destroy the thing the repair protects.
+//
+// RevokeActiveSession is `WHERE user_id AND revoked_at IS NULL` — every active
+// row. On the race this block assumes, that includes the bridge-only row, so
+// the mismatch bail-out revoked a valid Local Bridge account. It also silenced
+// the repair: both ClearStraySessionIfLocal's EXISTS and LoadSession filter on
+// revoked_at IS NULL, so after the revoke there is nothing left to match.
+//
+// Both properties are asserted, because either one alone would pass on the old
+// behaviour combined with the other bug.
+func TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
+	esTok := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+
+	// The bridge row lands in the race window, exactly as in the other
+	// mode-conflict tests.
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}})
+	if body := rec.Body.String(); !strings.Contains(body, "different Telegram account") {
+		t.Fatalf("mismatch was not reported to the user; body=%s", body)
+	}
+
+	var blob []byte
+	if err := srv.store.DB.QueryRowContext(ctx,
+		`SELECT session_encrypted FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`,
+		uid, db.ModeLocal).Scan(&blob); err != nil {
+		// sql.ErrNoRows here means the row was revoked, which is the bug.
+		t.Fatalf("the bridge row is no longer active after an identity mismatch: %v", err)
+	}
+	if blob != nil {
+		t.Error("the wrong account's session bytes survived on the bridge row; a later callback could issue a token backed by them")
 	}
 }
