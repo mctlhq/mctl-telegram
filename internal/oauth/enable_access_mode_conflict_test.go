@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -411,5 +412,87 @@ func TestAbandonFlow_ResetsStepAndCancels(t *testing.T) {
 	}
 	if !cancelled {
 		t.Error("a still-running flow was dropped without being cancelled; the enableSendCodeWait goroutine would outlive the request that ended it")
+	}
+}
+
+// TestEnableAccess_ModeCheckFailure_IsNotTerminal covers the other half of the
+// guard the mode-conflict tests exercise: the account-mode query failing rather
+// than answering "local". The two halves deliberately do different things to
+// the session — a conflict is terminal, a store outage is not — and that
+// distinction had nothing pinning it.
+func TestEnableAccess_ModeCheckFailure_IsNotTerminal(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	esTok := driveToPhone(t, mux)
+
+	var fail atomic.Bool
+	fail.Store(true)
+	srv.modeCheckFn = func(context.Context, int64) (bool, error) {
+		if fail.Load() {
+			return false, errors.New("connection refused")
+		}
+		return false, nil
+	}
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+	body := rec.Body.String()
+	if !strings.Contains(body, "Could not verify this account") {
+		t.Fatalf("mode-check failure did not surface its own wording; body=%s", body)
+	}
+	if strings.Contains(body, "Local Bridge") {
+		t.Errorf("a store outage rendered as a mode conflict; body=%s", body)
+	}
+	if strings.Contains(body, "Telegram rejected the request") {
+		t.Errorf("a store outage rendered as a Telegram RPC failure; Telegram was never contacted. body=%s", body)
+	}
+
+	// The refusal is retryable, so unlike a mode conflict it must not stick:
+	// once the store answers again the same session has to be able to proceed.
+	fail.Store(false)
+	rec = postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+	if body := rec.Body.String(); !strings.Contains(body, "enable_access/code") {
+		t.Errorf("retry after a recovered store did not reach the code screen; body=%s", body)
+	}
+}
+
+// TestEnableAccess_TerminalMessageDoesNotOutliveItsCondition pins the other
+// direction: a terminal refusal must not still be on file after the account is
+// switched back to hosted and the same session successfully restarts. The step
+// fallbacks read terminalMsg, so a stale one tells a user whose reconnect is
+// now working that restarting cannot help.
+func TestEnableAccess_TerminalMessageDoesNotOutliveItsCondition(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	esTok := driveToPhone(t, mux)
+
+	var local atomic.Bool
+	local.Store(true)
+	srv.modeCheckFn = func(context.Context, int64) (bool, error) { return local.Load(), nil }
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "Local Bridge") {
+		t.Fatalf("gate did not refuse while the account was local: %s", rec.Body.String())
+	}
+
+	// The operator switches the account back to hosted, inside the same es.
+	local.Store(false)
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("restart after the flip did not reach the code screen: %s", rec.Body.String())
+	}
+
+	// Now drive a step fallback: the code form re-POSTed after the flow has
+	// moved on. It must offer the retry, not replay the refusal from before.
+	srv.mu.Lock()
+	es := srv.enables[esTok]
+	srv.mu.Unlock()
+	es.lock.Lock()
+	es.step = stepPhone // what the enableSignInWait arm leaves behind
+	es.lock.Unlock()
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}})
+	if body := rec.Body.String(); strings.Contains(body, "Local Bridge") {
+		t.Errorf("a stale terminal message told a user with a hosted account to stop trying; body=%s", body)
 	}
 }

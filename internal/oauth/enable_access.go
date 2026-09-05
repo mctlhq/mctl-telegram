@@ -188,7 +188,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// Telegram session bytes have been written — s.loginFn persists them
 		// through the gotd SessionStore the moment auth succeeds, overwriting
 		// the local row's blob before SaveSession is ever reached.
-		if local, cErr := s.store.HasActiveLocalAccount(bgCtx, uid); cErr != nil {
+		if local, cErr := s.hasActiveLocalAccount(bgCtx, uid); cErr != nil {
 			// Wrapped in errModeCheckFailed so handleEnableStart can give this
 			// the same treatment as the identical failure at the pre-flight
 			// gate: the mode_check_error label and the "could not verify"
@@ -275,6 +275,19 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		lf.tgUserID = tgID
 	}()
 	return lf
+}
+
+// hasActiveLocalAccount is the account-mode query both the pre-flight gate and
+// startLoginFlow's re-check run. It exists as a method so tests can drive the
+// failure half of that guard: the store is a real *db.Store everywhere, so
+// without a seam the two errModeCheckFailed branches -- which deliberately do
+// something different to the session than their mode-conflict siblings -- have
+// nothing red to stop a later refactor from flattening them together.
+func (s *Server) hasActiveLocalAccount(ctx context.Context, uid int64) (bool, error) {
+	if s.modeCheckFn != nil {
+		return s.modeCheckFn(ctx, uid)
+	}
+	return s.store.HasActiveLocalAccount(ctx, uid)
 }
 
 // errModeCheckFailed marks a failure of the account-mode query itself, as
@@ -506,7 +519,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// through the gotd SessionStore as soon as auth succeeds, so by the time
 	// SaveSession's guard fires the local row's blob is already gone; the only
 	// way to leave the bridge untouched is to never start the login.
-	if local, cErr := s.store.HasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
+	if local, cErr := s.hasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
 		// Not "error": that label is reserved for Telegram RPC failures (see
 		// the select below). This is our own store refusing to answer, and it
 		// must not read as Telegram flakiness on the dashboard.
@@ -532,6 +545,12 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 	es.phone = phone
 	es.sendOptIn = sendOptIn
+	// Reaching this statement means the pre-flight gate re-derived the account
+	// state and let the user through, which is exactly the condition under
+	// which a cached terminal message is stale: the operator may have switched
+	// the account back to hosted since it was set. Leaving it would let the
+	// step fallbacks tell a user whose reconnect is now working that it cannot.
+	es.terminalMsg = ""
 	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
 	es.step = stepCode
 	lf := es.flow
