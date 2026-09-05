@@ -303,6 +303,94 @@ func TestEnsureConversation_UpsertAndTurnCounters(t *testing.T) {
 	}
 }
 
+func TestListConversations_ScopingOrderAndLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+
+	c1, err := s.EnsureConversation(ctx, uid, 111, "one", "One")
+	if err != nil {
+		t.Fatalf("ensure c1: %v", err)
+	}
+	c2, err := s.EnsureConversation(ctx, uid, 222, "two", "Two")
+	if err != nil {
+		t.Fatalf("ensure c2: %v", err)
+	}
+	if _, err := s.EnsureConversation(ctx, other, 333, "three", "Three"); err != nil {
+		t.Fatalf("ensure other-user conversation: %v", err)
+	}
+
+	// Touching c1 after c2 bumps its updated_at so it should sort first.
+	if err := s.SetConversationState(ctx, uid, c1.ID, ConversationTakenOver); err != nil {
+		t.Fatalf("touch c1: %v", err)
+	}
+
+	got, err := s.ListConversations(ctx, uid, 20)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("list len = %d, want 2 (scoped to uid, excluding other user)", len(got))
+	}
+	if got[0].ID != c1.ID || got[1].ID != c2.ID {
+		t.Fatalf("list order = [%d,%d], want [%d,%d] (most recently updated first)",
+			got[0].ID, got[1].ID, c1.ID, c2.ID)
+	}
+
+	limited, err := s.ListConversations(ctx, uid, 1)
+	if err != nil {
+		t.Fatalf("list limited: %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != c1.ID {
+		t.Fatalf("limited list = %+v, want just c1", limited)
+	}
+
+	// limit <= 0 defaults to 20, not zero rows.
+	defaulted, err := s.ListConversations(ctx, uid, 0)
+	if err != nil {
+		t.Fatalf("list defaulted: %v", err)
+	}
+	if len(defaulted) != 2 {
+		t.Fatalf("defaulted list len = %d, want 2", len(defaulted))
+	}
+}
+
+func TestGetConversationByUsername_CaseInsensitiveAndScoped(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	other := seedAgentUser(t, s, "other")
+
+	conv, err := s.EnsureConversation(ctx, uid, 555, "Anna_HR", "Anna")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	got, err := s.GetConversationByUsername(ctx, uid, "anna_hr")
+	if err != nil {
+		t.Fatalf("get by username (lowercase): %v", err)
+	}
+	if got.ID != conv.ID {
+		t.Fatalf("got id %d, want %d", got.ID, conv.ID)
+	}
+
+	got, err = s.GetConversationByUsername(ctx, uid, "ANNA_HR")
+	if err != nil {
+		t.Fatalf("get by username (uppercase): %v", err)
+	}
+	if got.ID != conv.ID {
+		t.Fatalf("got id %d, want %d", got.ID, conv.ID)
+	}
+
+	if _, err := s.GetConversationByUsername(ctx, other, "anna_hr"); !errors.Is(err, ErrConversationNotFound) {
+		t.Fatalf("cross-user lookup err = %v, want ErrConversationNotFound", err)
+	}
+	if _, err := s.GetConversationByUsername(ctx, uid, "nope"); !errors.Is(err, ErrConversationNotFound) {
+		t.Fatalf("miss err = %v, want ErrConversationNotFound", err)
+	}
+}
+
 func TestConversationMessages_RoundTripAndOrder(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

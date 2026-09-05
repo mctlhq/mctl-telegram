@@ -278,6 +278,223 @@ func TestRouter_Leads_ShowsConversationIDNotLeadID(t *testing.T) {
 	}
 }
 
+// TestRouter_Leads_IncludesPeerName guards the new /mctl leads line format —
+// the owner should see who the conversation is with, not just the
+// company/role.
+func TestRouter_Leads_IncludesPeerName(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer Name")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if _, err := store.UpsertJobLead(ctx, db.JobLead{
+		UserID: uid, ConversationID: conv.ID, Company: "Acme", Role: "Engineer",
+	}); err != nil {
+		t.Fatalf("seed lead: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0], "Peer Name") {
+		t.Fatalf("leads reply = %q, want it to contain the peer display name", sender.sent[0])
+	}
+}
+
+// TestRouter_Leads_FallsBackToDashOnMissingConversation guards the failure
+// path: a lead pointing at a conversation id that can't be looked up (e.g.
+// deleted) must not error the whole command — it should render a dash for
+// the name instead.
+func TestRouter_Leads_FallsBackToDashOnMissingConversation(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	// UpsertJobLead itself requires an existing conversation, so a dangling
+	// conversation_id (the ON DELETE SET NULL / lookup-fails case this
+	// fallback exists for) is seeded directly, bypassing that validation.
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO job_leads(user_id, conversation_id, company, role, status, detail) VALUES($1,$2,$3,$4,$5,$6)`,
+		uid, 999999, "Acme", "Engineer", "new", "{}",
+	); err != nil {
+		t.Fatalf("seed dangling lead: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0], "Conv #999999 — — — Acme") {
+		t.Fatalf("leads reply = %q, want dash fallback for missing conversation name", sender.sent[0])
+	}
+}
+
+func TestRouter_Conversations_ListsAndHandlesEmpty(t *testing.T) {
+	router, _, sender, _, uid := newTestRouter(t)
+	ctx := context.Background()
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+		t.Fatalf("handle empty: %v", err)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "No conversations yet." {
+		t.Fatalf("empty reply = %v, want [No conversations yet.]", sender.sent)
+	}
+}
+
+// TestRouter_Conversations_IncludesTakenOverWithNoLead guards the exact gap
+// this command exists to fill: a conversation that was taken over before the
+// agent ever produced a job lead has no job_leads row, so /mctl leads cannot
+// surface its id — /mctl conversations must.
+func TestRouter_Conversations_IncludesTakenOverWithNoLead(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer Name")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
+		t.Fatalf("take over: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	wantMarker := "Conv #" + strconv.FormatInt(conv.ID, 10) + " — Peer Name (taken_over)"
+	if !strings.Contains(reply, wantMarker) {
+		t.Fatalf("conversations reply = %q, want it to contain %q", reply, wantMarker)
+	}
+}
+
+// TestRouter_Show_ResolvesPeerReference guards the new resolution path: an
+// owner who never got a job lead for a conversation (e.g. a takeover) can
+// still address it by user:<id> or @username instead of the numeric id.
+func TestRouter_Show_ResolvesPeerReference(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl show user:555"); err != nil {
+		t.Fatalf("handle user: %v", err)
+	}
+	wantMarker := "Conversation #" + strconv.FormatInt(conv.ID, 10)
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], wantMarker) {
+		t.Fatalf("show user:555 reply = %v, want it to contain %q", sender.sent, wantMarker)
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl show @anna_hr"); err != nil {
+		t.Fatalf("handle @username: %v", err)
+	}
+	if len(sender.sent) != 2 || !strings.Contains(sender.sent[1], wantMarker) {
+		t.Fatalf("show @anna_hr reply = %v, want it to contain %q", sender.sent, wantMarker)
+	}
+}
+
+// TestRouter_Show_PlainIntegerStillWorks guards byte-identical behavior for
+// the pre-existing numeric-id path once resolveConversationID sits in front
+// of it.
+func TestRouter_Show_PlainIntegerStillWorks(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := router.HandleSavedText(ctx, uid, "/mctl show "+strconv.FormatInt(conv.ID, 10)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	wantMarker := "Conversation #" + strconv.FormatInt(conv.ID, 10)
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], wantMarker) {
+		t.Fatalf("show reply = %v, want it to contain %q", sender.sent, wantMarker)
+	}
+}
+
+// TestRouter_Show_MalformedArgUsesUsageMessage guards the "bad input" branch:
+// garbage that isn't a numeric id and isn't a recognized user:/@ reference
+// must get the usage text, not a not-found reply.
+func TestRouter_Show_MalformedArgUsesUsageMessage(t *testing.T) {
+	router, _, sender, _, uid := newTestRouter(t)
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl show garbage"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.HasPrefix(sender.sent[0], "Usage:") {
+		t.Fatalf("show garbage reply = %v, want a Usage message", sender.sent)
+	}
+}
+
+// TestRouter_Show_UnmatchedPeerReferenceUsesNotFoundMessage guards the
+// "well-formed reference, no match" branch distinct from the usage branch.
+func TestRouter_Show_UnmatchedPeerReferenceUsesNotFoundMessage(t *testing.T) {
+	router, _, sender, _, uid := newTestRouter(t)
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl show @nobody"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "not found") {
+		t.Fatalf("show @nobody reply = %v, want a not-found message", sender.sent)
+	}
+	sender.sent = nil
+	if err := router.HandleSavedText(context.Background(), uid, "/mctl show user:404"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "not found") {
+		t.Fatalf("show user:404 reply = %v, want a not-found message", sender.sent)
+	}
+}
+
+// TestRouter_Continue_ResolvesPeerReference and
+// TestRouter_Takeover_ResolvesPeerReference guard the same resolution path
+// for the other two commands sharing resolveConversationID.
+func TestRouter_Continue_ResolvesPeerReference(t *testing.T) {
+	router, _, _, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
+		t.Fatalf("take over: %v", err)
+	}
+	if err := router.HandleSavedText(ctx, uid, "/mctl continue @anna_hr"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	got, err := store.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.State != db.ConversationActive {
+		t.Fatalf("state = %q, want active", got.State)
+	}
+}
+
+func TestRouter_Takeover_ResolvesPeerReference(t *testing.T) {
+	router, _, _, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "anna_hr", "Anna")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := router.HandleSavedText(ctx, uid, "/mctl takeover user:555"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	got, err := store.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.State != db.ConversationTakenOver {
+		t.Fatalf("state = %q, want taken_over", got.State)
+	}
+}
+
 func TestRouter_Continue_ResetsStateAndTurns(t *testing.T) {
 	router, _, _, store, uid := newTestRouter(t)
 	ctx := context.Background()

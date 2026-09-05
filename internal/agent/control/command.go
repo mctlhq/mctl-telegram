@@ -13,14 +13,15 @@ import (
 type CommandType string
 
 const (
-	CmdStatus   CommandType = "status"
-	CmdLeads    CommandType = "leads"
-	CmdShow     CommandType = "show"
-	CmdContinue CommandType = "continue"
-	CmdPause    CommandType = "pause"
-	CmdTakeover CommandType = "takeover"
-	CmdApprove  CommandType = "approve"
-	CmdReject   CommandType = "reject"
+	CmdStatus        CommandType = "status"
+	CmdLeads         CommandType = "leads"
+	CmdShow          CommandType = "show"
+	CmdContinue      CommandType = "continue"
+	CmdPause         CommandType = "pause"
+	CmdTakeover      CommandType = "takeover"
+	CmdApprove       CommandType = "approve"
+	CmdReject        CommandType = "reject"
+	CmdConversations CommandType = "conversations"
 )
 
 // Command is a parsed owner instruction typed into Saved Messages.
@@ -63,7 +64,7 @@ func ParseCommand(text string) (Command, error) {
 		arg = strings.Join(fields[2:], " ")
 	}
 	switch sub {
-	case CmdStatus, CmdLeads, CmdPause:
+	case CmdStatus, CmdLeads, CmdPause, CmdConversations:
 		return Command{Type: sub}, nil
 	case CmdApprove, CmdReject:
 		if arg == "" {

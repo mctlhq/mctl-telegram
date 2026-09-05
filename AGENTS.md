@@ -43,6 +43,11 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`
+- **Agent pipeline is opt-in.** The `agents:intake` label is what enrolls an issue into the
+  `mctl-agents` durable DevLoop (its poller picks the label up and starts an implementer run).
+  Add it by hand, only to issues that are actually meant to be agent work — never to trackers,
+  epics, questions, or to several issues of an ordered chain at once. Nothing labels issues
+  automatically in this repo (see #485).
 - Tag format: `MAJOR.MINOR.PATCH` (no `v` prefix)
 - Release flow: pushes to `main` run `release-please`, which maintains a release PR; merging that release PR creates the tag + GitHub release and dispatches the centralized `mctl-gitops/.github/workflows/release-deploy.yaml`. Do **not** create or push tags by hand (see `RELEASE.md`).
 - **Merge strategy: squash merges** (`gh pr merge <N> --squash --delete-branch`) — one clean
