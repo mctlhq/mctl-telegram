@@ -50,6 +50,40 @@ func TestLoadDBPoolEnvVars(t *testing.T) {
 	}
 }
 
+func TestLoadOAuthAllowImplicitClientDefaultsOff(t *testing.T) {
+	t.Setenv("OAUTH_ALLOW_IMPLICIT_CLIENT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OAUTHAllowImplicitClient {
+		t.Fatal("OAUTH_ALLOW_IMPLICIT_CLIENT must default to false")
+	}
+	if cfg.AllowSharedHMACLegacy {
+		t.Fatal("AUTH_ALLOW_SHARED_HMAC_LEGACY must default to false")
+	}
+	if cfg.OAUTHRegisterRatePerMin != 10 {
+		t.Fatalf("OAUTH_REGISTER_RATE_PER_MIN default = %d, want 10", cfg.OAUTHRegisterRatePerMin)
+	}
+
+	t.Setenv("OAUTH_ALLOW_IMPLICIT_CLIENT", "true")
+	t.Setenv("AUTH_ALLOW_SHARED_HMAC_LEGACY", "true")
+	t.Setenv("OAUTH_REGISTER_RATE_PER_MIN", "3")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.OAUTHAllowImplicitClient {
+		t.Fatal("OAUTH_ALLOW_IMPLICIT_CLIENT=true was ignored")
+	}
+	if !cfg.AllowSharedHMACLegacy {
+		t.Fatal("AUTH_ALLOW_SHARED_HMAC_LEGACY=true was ignored")
+	}
+	if cfg.OAUTHRegisterRatePerMin != 3 {
+		t.Fatalf("OAUTH_REGISTER_RATE_PER_MIN = %d, want 3", cfg.OAUTHRegisterRatePerMin)
+	}
+}
+
 func TestLoadOAuthAllowedImplicitHosts(t *testing.T) {
 	tests := []struct {
 		name string

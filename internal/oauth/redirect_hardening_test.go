@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// Implicit clients are on by default (OAUTH_ALLOW_IMPLICIT_CLIENT defaults to
-// true), so validateClient's host allowlist is what stands between an
-// unregistered caller and an arbitrary redirect target. These cases pin the
-// shapes where the host this code approves is not the host a browser would
-// dial — the split that turns a host allowlist into an open redirect.
+// Implicit clients are an explicit opt-in (OAUTH_ALLOW_IMPLICIT_CLIENT
+// defaults to false). These cases turn implicit clients on so
+// validateClient's host allowlist is what stands between an unregistered
+// caller and an arbitrary redirect target. They pin the shapes where the
+// host this code approves is not the host a browser would dial — the split
+// that turns a host allowlist into an open redirect.
 func TestValidateClientRejectsHostSpoofingShapes(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) {
 		c.AllowImplicitClient = true

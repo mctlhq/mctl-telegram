@@ -59,6 +59,29 @@ func TestSelectProviderLocalJWTRequiresSecret(t *testing.T) {
 	}
 }
 
+func TestSelectProviderSharedHMACLegacyIsGated(t *testing.T) {
+	cfg := &config.Config{AuthMode: "shared-hmac-legacy", OAUTHJWTSecret: "not-a-real-secret"}
+	p, err := selectProvider(cfg, nil, nil)
+	if err == nil {
+		t.Fatal("shared-hmac-legacy without AUTH_ALLOW_SHARED_HMAC_LEGACY must fail")
+	}
+	if p != nil {
+		t.Fatalf("expected nil provider, got %T", p)
+	}
+	if !strings.Contains(err.Error(), "AUTH_ALLOW_SHARED_HMAC_LEGACY") {
+		t.Fatalf("error should name the opt-in flag, got: %s", err.Error())
+	}
+
+	cfg.AllowSharedHMACLegacy = true
+	p, err = selectProvider(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("opted-in shared-hmac-legacy should boot, got: %v", err)
+	}
+	if p == nil {
+		t.Fatal("opted-in shared-hmac-legacy returned nil provider")
+	}
+}
+
 func TestSelectProviderCaseInsensitive(t *testing.T) {
 	for _, mode := range []string{"LOCAL-DEV", "Local-Dev", "local-dev"} {
 		cfg := &config.Config{AuthMode: mode, OperatorLogin: "op"}

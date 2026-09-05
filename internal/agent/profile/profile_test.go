@@ -237,7 +237,7 @@ func TestPublicProfile_EmptySectionsOmitted(t *testing.T) {
 }
 
 // TestPublicProfile_NestedYAMLMapsAreJSONMarshalable guards against the P2
-// found in review: yaml.v2 decodes a nested object into any as
+// found in review: older YAML decoders decode a nested object into any as
 // map[interface{}]interface{}, which encoding/json cannot marshal at all —
 // GET /recruiters/{peer} would write a 200 status and then silently emit a
 // truncated body the moment its json.Encoder hit that value. A profile with

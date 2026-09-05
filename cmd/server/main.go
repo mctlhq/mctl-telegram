@@ -657,12 +657,16 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 //   - "local-dev" — fixed-identity bypass (safe only behind 127.0.0.1).
 //   - "local-jwt" — mctl-telegram is its own OAuth issuer (Telegram Login
 //     Widget → JWT with iss=PublicBaseURL, verified by localjwt.Provider).
-//   - "shared-hmac-legacy" — backwards compat for deployments that still
-//     trust JWTs signed by api.mctl.ai via the shared OAUTH_JWT_SECRET.
-//     "shared-hmac" is accepted as an alias for the legacy mode for the
-//     duration of one minor release.
+//   - "shared-hmac" — still verifies JWTs signed by api.mctl.ai. Discouraged.
+//   - "shared-hmac-legacy" — the same verifier, gated behind
+//     AUTH_ALLOW_SHARED_HMAC_LEGACY=true. Refused at boot otherwise so the
+//     name cannot stay a first-class production mode by accident.
 func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) (auth.Provider, error) {
-	switch strings.ToLower(cfg.AuthMode) {
+	mode := strings.ToLower(cfg.AuthMode)
+	if mode == "shared-hmac-legacy" && !cfg.AllowSharedHMACLegacy {
+		return nil, fmt.Errorf("AUTH_MODE=shared-hmac-legacy is gated off; set AUTH_ALLOW_SHARED_HMAC_LEGACY=true to opt in, or use AUTH_MODE=local-jwt")
+	}
+	switch mode {
 	case "local-jwt":
 		// Use the canonicalised issuer (trailing slash stripped) so the
 		// minting path in registerOAuth and the verify path here always
@@ -808,6 +812,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		CodeTTL:                  cfg.OAUTHCodeTTL,
 		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
+		RegisterRatePerMin:       cfg.OAUTHRegisterRatePerMin,
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,
 		UseDBForOAuth:            useDBForOAuth,

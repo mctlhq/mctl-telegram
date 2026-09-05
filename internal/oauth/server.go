@@ -86,6 +86,10 @@ type Server struct {
 	// endpoints (local_bridge_credential.go), sharing one posture across
 	// every unauthenticated-but-secret-bearing endpoint in this file.
 	activationFails map[string]*activationFailWindow
+	// registerHits is the unauthenticated POST /oauth/register rate limiter,
+	// keyed the same way as activationFails. Every attempt counts, not only
+	// failures — DCR is an abuse surface even when the body is well-formed.
+	registerHits map[string]*activationFailWindow
 
 	// deviceNonces is the in-memory, TTL-bounded, capacity-bounded PoP nonce
 	// store for self-service Local Bridge device issuance/refresh
@@ -320,6 +324,19 @@ type Config struct {
 	// MaxRedirectURILength caps each individual redirect URI string.
 	// Default 2048.
 	MaxRedirectURILength int
+	// RegisterRatePerMin is the number of POST /oauth/register attempts a
+	// single client-IP key may make inside RegisterRateWindow. The endpoint
+	// is unauthenticated; without this bound a scanner can fill the
+	// registration map (up to MaxRegisteredClients) and the audit log.
+	// Defaults to 10.
+	RegisterRatePerMin int
+	// RegisterRateWindow is the sliding window RegisterRatePerMin is
+	// measured over. Defaults to 1 minute.
+	RegisterRateWindow time.Duration
+	// MaxRegisterKeys caps the in-memory register-rate map. Defaults to
+	// MaxRegisteredClients so a spread-out source cannot grow it without
+	// bound between sweeps.
+	MaxRegisterKeys int
 	// JWTAudience overrides the aud claim emitted into newly minted access
 	// tokens. When empty (default), the access token has no aud — keeping
 	// token-side audience policy aligned with the localjwt verifier's
@@ -530,6 +547,15 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	if cfg.MaxRedirectURILength == 0 {
 		cfg.MaxRedirectURILength = 2048
 	}
+	if cfg.RegisterRatePerMin == 0 {
+		cfg.RegisterRatePerMin = 10
+	}
+	if cfg.RegisterRateWindow <= 0 {
+		cfg.RegisterRateWindow = time.Minute
+	}
+	if cfg.MaxRegisterKeys == 0 {
+		cfg.MaxRegisterKeys = cfg.MaxRegisteredClients
+	}
 	if cfg.MaxPendingEnable == 0 {
 		cfg.MaxPendingEnable = 256
 	}
@@ -616,6 +642,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		activationsByState:    map[string]*localBridgeActivation{},
 		activationsByUserCode: map[string]*localBridgeActivation{},
 		activationFails:       map[string]*activationFailWindow{},
+		registerHits:          map[string]*activationFailWindow{},
 		deviceNonces:          map[string]*deviceNonce{},
 		deviceMinter:          deviceMinter,
 		loginFn:               telegram.Login,
@@ -2292,10 +2319,20 @@ func writeTokenError(w http.ResponseWriter, code, desc string, status int) {
 // ----- /oauth/register (RFC 7591) -----
 
 func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request) {
-	// /oauth/register is unauthenticated. Wrap the body with MaxBytesReader
-	// before json.Decode so a 1-MB attack payload cannot force the JSON
-	// decoder to allocate proportional memory. The cap is generous for
-	// RFC 7591 metadata fields but a non-starter for OOM probes.
+	// /oauth/register is unauthenticated. Rate-limit first so a flood never
+	// reaches the JSON decoder or the registration map. The audit line
+	// records outcome only — no request body, no IP (the limiter already
+	// keys on it), no client secret (DCR here is public-client).
+	if !s.allowRegister(s.clientIP(r)) {
+		slog.Info("oauth: client_registration audit", "outcome", "rate_limited")
+		w.Header().Set("Retry-After", "60")
+		writeTokenError(w, "temporarily_unavailable", "too many registration attempts", http.StatusTooManyRequests)
+		return
+	}
+	// Wrap the body with MaxBytesReader before json.Decode so a 1-MB attack
+	// payload cannot force the JSON decoder to allocate proportional memory.
+	// The cap is generous for RFC 7591 metadata fields but a non-starter for
+	// OOM probes.
 	if s.cfg.MaxRegisterBodyBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRegisterBodyBytes)
 	}
@@ -2423,9 +2460,48 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
+	slog.Info("oauth: client_registration audit",
+		"outcome", "accepted",
+		"client_name", req.ClientName,
+		"redirect_uri_count", len(req.RedirectURIs),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// allowRegister records one /oauth/register attempt for ip and reports
+// whether it is still inside RegisterRatePerMin for the current window.
+// Every attempt counts — well-formed registrations are the abuse path as
+// much as garbage bodies. Must not log the IP: the limiter already keys
+// on it, and the audit line only needs the outcome.
+func (s *Server) allowRegister(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.clock()
+	w, ok := s.registerHits[ip]
+	if !ok || now.Sub(w.startedAt) > s.cfg.RegisterRateWindow {
+		if s.cfg.MaxRegisterKeys > 0 && !ok &&
+			len(s.registerHits) >= s.cfg.MaxRegisterKeys {
+			var oldestKey string
+			var oldest *activationFailWindow
+			for k, fw := range s.registerHits {
+				if oldest == nil || fw.startedAt.Before(oldest.startedAt) {
+					oldestKey, oldest = k, fw
+				}
+			}
+			if oldest != nil {
+				delete(s.registerHits, oldestKey)
+			}
+		}
+		w = &activationFailWindow{startedAt: now}
+		s.registerHits[ip] = w
+	}
+	if w.count >= s.cfg.RegisterRatePerMin {
+		return false
+	}
+	w.count++
+	return true
 }
 
 // validateImplicitRedirectURI applies the same policy as the implicit-client
