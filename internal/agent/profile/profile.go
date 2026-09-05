@@ -101,6 +101,13 @@ func ParseYAML(raw []byte) (Data, error) {
 	if err := dec.Decode(&d); err != nil {
 		return Data{}, err
 	}
+	// Decoder.Decode reads only the first document. A second document after
+	// "---" would otherwise be ignored, so later restricted markers such as
+	// approval_required could be dropped without a load error.
+	var dummy any
+	if err := dec.Decode(&dummy); err != io.EOF {
+		return Data{}, fmt.Errorf("profile must contain exactly one YAML document")
+	}
 	normalizeData(&d)
 	return d, nil
 }

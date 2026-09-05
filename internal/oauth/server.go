@@ -907,6 +907,14 @@ func (s *Server) sweep(now time.Time) {
 			delete(s.activationFails, k)
 		}
 	}
+	// /oauth/register attempt windows. Expired keys are dropped here so the
+	// request path can evict in O(1) when the cap is hit instead of walking
+	// the map under s.mu.
+	for k, w := range s.registerHits {
+		if now.Sub(w.startedAt) > s.cfg.RegisterRateWindow {
+			delete(s.registerHits, k)
+		}
+	}
 	// Device PoP nonces (issue-483). expiresAt is set at mint time from
 	// DeviceNonceTTL, so this is a plain expiry check, not a createdAt/TTL
 	// recomputation.
@@ -2483,15 +2491,13 @@ func (s *Server) allowRegister(ip string) bool {
 	if !ok || now.Sub(w.startedAt) > s.cfg.RegisterRateWindow {
 		if s.cfg.MaxRegisterKeys > 0 && !ok &&
 			len(s.registerHits) >= s.cfg.MaxRegisterKeys {
-			var oldestKey string
-			var oldest *activationFailWindow
-			for k, fw := range s.registerHits {
-				if oldest == nil || fw.startedAt.Before(oldest.startedAt) {
-					oldestKey, oldest = k, fw
-				}
-			}
-			if oldest != nil {
-				delete(s.registerHits, oldestKey)
+			// O(1) random eviction. Walking the map for the oldest window
+			// held s.mu for O(N) and turned a unique-IP flood into lock
+			// contention on every OAuth path that shares this mutex.
+			// Expired windows are dropped by sweep.
+			for k := range s.registerHits {
+				delete(s.registerHits, k)
+				break
 			}
 		}
 		w = &activationFailWindow{startedAt: now}

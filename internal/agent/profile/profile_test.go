@@ -410,6 +410,34 @@ restricted:
 // defaulting to false — the restricted value would still MATCH in
 // MatchRestricted, but with no enforcement at all, and nothing would ever
 // reveal the typo. Load must now fail loudly instead.
+func TestParseYAML_RejectsSecondDocument(t *testing.T) {
+	raw := []byte(`identity:
+  name: Jane
+---
+restricted:
+  current_salary:
+    value: 145000
+    approval_required: true
+`)
+	if _, err := ParseYAML(raw); err == nil {
+		t.Fatal("second YAML document was accepted; later restricted markers would be dropped")
+	}
+}
+
+func TestParseYAML_AcceptsSingleDocumentWithLeadingSeparator(t *testing.T) {
+	raw := []byte(`---
+identity:
+  name: Jane
+`)
+	d, err := ParseYAML(raw)
+	if err != nil {
+		t.Fatalf("single document with leading --- rejected: %v", err)
+	}
+	if d.Identity["name"] != "Jane" {
+		t.Fatalf("identity.name = %v, want Jane", d.Identity["name"])
+	}
+}
+
 func TestLoad_RejectsMisspelledRestrictedFieldMarker(t *testing.T) {
 	path := writeTestProfile(t, `
 restricted:
