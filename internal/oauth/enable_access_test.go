@@ -531,7 +531,7 @@ func TestEnableAccess_UnknownUserSkipsFlow(t *testing.T) {
 // identity (in LookupAdminTelegramIDs but not AdminTelegramIDs) gets the
 // authorization code directly, never the enable_access phone screen — it
 // mirrors TestEnableAccess_UnknownUserSkipsFlow's "no scopes" pattern, since
-// a lookup-admin's admin:users-only bundle has no telegram:* scope that
+// a lookup-admin's admin:users:read-only bundle has no telegram:* scope that
 // would make an MTProto session useful.
 func TestEnableAccess_LookupAdminOnlySkipsFlow(t *testing.T) {
 	lookupID := int64(888000333)
@@ -783,7 +783,8 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		t.Errorf("admin tier wrong: groups=%v scopes=%v", ag, as)
 	}
 
-	// Lookup-admin-only tier: exactly admin:users, no telegram:* scopes.
+	// Lookup-admin-only tier: exactly admin:users:read — no telegram:* scopes,
+	// and NOT the flat admin:users, which also gates every admin write tool.
 	lg, ls, err := srv.ResolveScopes(ctx, lookupOnlyID)
 	if err != nil {
 		t.Fatalf("lookup-admin ResolveScopes: %v", err)
@@ -791,12 +792,18 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	if !has(lg, "admin-lookup") {
 		t.Errorf("lookup-admin groups = %v, want to contain admin-lookup", lg)
 	}
-	if len(ls) != 1 || ls[0] != "admin:users" {
-		t.Errorf("lookup-admin scopes = %v, want exactly [admin:users]", ls)
+	if len(ls) != 1 || ls[0] != "admin:users:read" {
+		t.Errorf("lookup-admin scopes = %v, want exactly [admin:users:read]", ls)
 	}
 	for _, forbidden := range []string{
 		"telegram:dialogs:read", "telegram:messages:read",
 		"telegram:messages:send", "telegram:messages:pin",
+		// The flat admin:users is forbidden too, not merely absent: it
+		// gates set_telegram_access, set_account_send, set_account_mode,
+		// provision_local_account, revoke_telegram_session,
+		// revoke_worker_token and mint_worker_token. Granting it here
+		// would make "lookup-only" a full admin write grant.
+		"admin:users", "account:manage",
 	} {
 		if has(ls, forbidden) {
 			t.Errorf("lookup-admin must not receive %s (got %v)", forbidden, ls)
@@ -873,8 +880,11 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup+client ResolveScopes: %v", err)
 	}
-	if !has(lcs, "admin:users") {
-		t.Fatalf("lookup+client scopes = %v, want admin:users", lcs)
+	if !has(lcs, "admin:users:read") {
+		t.Fatalf("lookup+client scopes = %v, want admin:users:read", lcs)
+	}
+	if has(lcs, "admin:users") {
+		t.Fatalf("lookup+client scopes = %v, must not carry the flat admin:users", lcs)
 	}
 	for _, sc := range []string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send", "account:manage"} {
 		if has(lcs, sc) {

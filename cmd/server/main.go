@@ -197,13 +197,14 @@ func main() {
 		demoReviewerTGID = cfg.DemoReviewerTGID
 	}
 	executorGate := &agentSendGate{
-		store:              store,
-		allowSend:          cfg.AllowSend,
-		demoReviewerTGID:   demoReviewerTGID,
-		adminTelegramIDs:   telegramIDSet(cfg.TGLoginAdmins),
-		clientTelegramIDs:  telegramIDSet(cfg.TGLoginClients),
-		autoApproveClients: cfg.AutoApproveClients,
-		limiter:            limiter,
+		store:                  store,
+		allowSend:              cfg.AllowSend,
+		demoReviewerTGID:       demoReviewerTGID,
+		adminTelegramIDs:       telegramIDSet(cfg.TGLoginAdmins),
+		clientTelegramIDs:      telegramIDSet(cfg.TGLoginClients),
+		lookupAdminTelegramIDs: telegramIDSet(cfg.TGLoginLookupAdmins),
+		autoApproveClients:     cfg.AutoApproveClients,
+		limiter:                limiter,
 	}
 	agentExecutor.SendGate = executorGate.Allow
 	// A Codex finding on #307 caught that Approve() had no TTL check of its
