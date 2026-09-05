@@ -25,6 +25,7 @@ var ValidMediaTypes = map[string]bool{
 	"video":     true,
 	"document":  true,
 	"animation": true,
+	"voice":     true,
 }
 
 // SendMediaResult mirrors SendResult's shape (sent, mode, peer, message_id,
@@ -53,7 +54,7 @@ type SendMediaResult struct {
 // per send_media's draft-by-default contract.
 //
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
-func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, data []byte, fileName, mimeType, caption string, realSend bool, dryReason string, cache *PeerCache, userID int64) (*SendMediaResult, error) {
+func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, data []byte, fileName, mimeType, caption string, realSend bool, dryReason string, cache *PeerCache, userID int64, durationSeconds int) (*SendMediaResult, error) {
 	if peer == "" {
 		return nil, fmt.Errorf("peer required")
 	}
@@ -76,6 +77,17 @@ func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, 
 	if len(data) == 0 {
 		return nil, fmt.Errorf("media bytes required for a real send")
 	}
+	if mediaType == "voice" {
+		if err := validateVoicePayload(data); err != nil {
+			return nil, err
+		}
+		// Telegram's voice player expects audio/ogg regardless of what
+		// DetectContentType guessed (often application/ogg or octet-stream).
+		mimeType = "audio/ogg"
+		if fileName == "" {
+			fileName = defaultUploadName("voice")
+		}
+	}
 
 	var randomID int64
 	{
@@ -94,7 +106,7 @@ func SendMedia(ctx context.Context, c *telegram.Client, peer, mediaType string, 
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
-	media, err := buildInputMedia(mediaType, uploaded, fileName, mimeType)
+	media, err := buildInputMedia(mediaType, uploaded, fileName, mimeType, durationSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +152,8 @@ func defaultUploadName(mediaType string) string {
 		return "video.mp4"
 	case "animation":
 		return "animation.mp4"
+	case "voice":
+		return "voice.ogg"
 	default:
 		return "file"
 	}
@@ -155,7 +169,7 @@ func defaultUploadName(mediaType string) string {
 // animation attributes only fill an empty slot; whichever appears first
 // wins) — so animation-then-video here is what keeps a message this function
 // sends from being read back as "video" instead of "animation".
-func buildInputMedia(mediaType string, uploaded tg.InputFileClass, fileName, mimeType string) (tg.InputMediaClass, error) {
+func buildInputMedia(mediaType string, uploaded tg.InputFileClass, fileName, mimeType string, durationSeconds int) (tg.InputMediaClass, error) {
 	switch mediaType {
 	case "photo":
 		return &tg.InputMediaUploadedPhoto{File: uploaded}, nil
@@ -183,9 +197,36 @@ func buildInputMedia(mediaType string, uploaded tg.InputFileClass, fileName, mim
 			MimeType:   mimeType,
 			Attributes: attrs,
 		}, nil
+	case "voice":
+		if mimeType == "" {
+			mimeType = "audio/ogg"
+		}
+		attrs := []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeAudio{Voice: true, Duration: durationSeconds},
+		}
+		if fileName != "" {
+			attrs = append(attrs, &tg.DocumentAttributeFilename{FileName: fileName})
+		}
+		return &tg.InputMediaUploadedDocument{
+			File:       uploaded,
+			MimeType:   mimeType,
+			Attributes: attrs,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported media_type %q", mediaType)
 	}
+}
+
+// validateVoicePayload requires OGG container bytes. Telegram's voice player
+// expects OGG/Opus; transcoding is out of scope, so anything else is refused
+// rather than uploaded as a file attachment that would not render as a
+// waveform. The OggS magic is the authority — DetectContentType often
+// reports application/octet-stream for short Opus pages.
+func validateVoicePayload(data []byte) error {
+	if len(data) < 4 || string(data[:4]) != "OggS" {
+		return fmt.Errorf("voice messages require OGG/Opus bytes")
+	}
+	return nil
 }
 
 // videoAttributes builds the DocumentAttributeVideo (+ optional filename)
