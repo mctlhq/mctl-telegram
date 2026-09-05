@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -519,8 +518,15 @@ func localBaseName(path string) string {
 func filePathAuditRef(path string) string {
 	sum := sha256.Sum256([]byte(path))
 	ref := "sha256:" + hex.EncodeToString(sum[:8])
-	if ext := filepath.Ext(path); ext != "" {
-		ref += ext
+	// The extension comes from the separator-agnostic basename, not
+	// filepath.Ext: this server is always built for Linux, so Ext scans back
+	// past a Windows path's separators and would splice the caller's directory
+	// layout into the ref (C:\Users\alice.smith\Downloads\report yields
+	// ".smith\Downloads\report") — exactly what hashing the path exists to
+	// withhold. LastIndex > 0 also keeps a dotfile such as .netrc from being
+	// appended whole.
+	if base := localBaseName(path); strings.LastIndex(base, ".") > 0 {
+		ref += base[strings.LastIndex(base, "."):]
 	}
 	return ref
 }
