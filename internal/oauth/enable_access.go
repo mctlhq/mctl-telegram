@@ -538,6 +538,14 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// been switched back to hosted, which is the same staleness the clear
 		// at the pass-through below exists to prevent, reached through the arm
 		// that cannot check instead of the one that can.
+		//
+		// This is a choice between two wrong messages, not a strict
+		// improvement: when the account IS still local the clear discards a
+		// refusal that was true, and the next step fallback offers a retry for
+		// a condition retrying cannot clear. That is the accepted cost --
+		// resubmitting the phone form re-enters the gate and re-derives the
+		// refusal in one round-trip, whereas a stale refusal has no such exit,
+		// and the user has just been shown a retryable screen either way.
 		es.terminalMsg = ""
 		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 		return
@@ -600,6 +608,11 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// The re-check's other half. Same query, same non-Telegram cause
 			// as the pre-flight gate above, so the same label and wording —
 			// retryable, hence abandonFlow rather than the terminal renderer.
+			// No terminalMsg clear here, unlike the gate arm this mirrors:
+			// handleEnableStart empties the field unconditionally before
+			// launching the flow, so any request reaching this select has
+			// already had it cleared in the same request. Adding the
+			// symmetric clear would be dead code, not extra safety.
 			if errors.Is(lf.err, errModeCheckFailed) {
 				observePhoneStep("mode_check_error")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "")
