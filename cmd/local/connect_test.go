@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // TestResolveMCPToken covers how `connect` resolves the MCP token across its
@@ -89,6 +90,45 @@ func TestResolveMCPToken(t *testing.T) {
 			file(map[string][]byte{"/p": []byte("from-file\n")}))
 		if err == nil {
 			t.Fatalf("got %q err=nil, want a mutual-exclusion error rather than a silent stdin read", got)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+	})
+
+	// The stdin read is bounded, so a mistaken source cannot read until the
+	// process dies. cap+1 is read deliberately: without it, "exactly cap
+	// bytes" and "cap bytes and still going" look identical and an oversized
+	// input would be silently truncated into a wrong token.
+	t.Run("oversized stdin is refused rather than truncated", func(t *testing.T) {
+		big := strings.NewReader(strings.Repeat("a", maxMCPTokenBytes+1))
+		got, err := resolveMCPToken("", "-", big, noFile)
+		if err == nil {
+			t.Fatalf("got %q err=nil, want an over-size error", got)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want an empty token alongside the error", got)
+		}
+	})
+
+	t.Run("stdin exactly at the cap is still accepted", func(t *testing.T) {
+		exact := strings.Repeat("a", maxMCPTokenBytes)
+		got, err := resolveMCPToken("", "-", strings.NewReader(exact), noFile)
+		if err != nil || got != exact {
+			t.Fatalf("got %d bytes err=%v, want %d bytes and no error", len(got), err, maxMCPTokenBytes)
+		}
+	})
+
+	// A read failure must surface, not be mistaken for an empty token: the
+	// caller's next move differs entirely between "no token supplied" and
+	// "the pipe broke".
+	t.Run("a stdin read error is wrapped and propagated", func(t *testing.T) {
+		got, err := resolveMCPToken("", "-", iotest.ErrReader(errors.New("pipe blew up")), noFile)
+		if err == nil {
+			t.Fatalf("got %q err=nil, want the read error propagated", got)
+		}
+		if !strings.Contains(err.Error(), "pipe blew up") {
+			t.Fatalf("err = %v, want it to wrap the underlying read error", err)
 		}
 		if got != "" {
 			t.Fatalf("got %q, want an empty token alongside the error", got)

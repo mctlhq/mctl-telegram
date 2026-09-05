@@ -554,6 +554,11 @@ func passphraseFromEnv(getenv func(string) string, readFile func(string) ([]byte
 //   - Both empty returns "", nil: the caller prints its own usage hint for
 //     that case, since it is not an error resolveMCPToken should format.
 //
+// maxMCPTokenBytes bounds what resolveMCPToken will read from stdin or a
+// token file. A real MCP token is a few hundred bytes; 64 KiB is far above
+// any legitimate one and far below anything that threatens the process.
+const maxMCPTokenBytes = 64 * 1024
+
 // resolveMCPToken never calls die or os.Exit; every failure is returned as
 // an error so the caller decides whether it is a usage problem or a fatal
 // one.
@@ -576,9 +581,19 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 	}
 
 	if tokenFile == "-" {
-		data, err := io.ReadAll(stdin)
+		// Bounded, not io.ReadAll: an MCP token is a few hundred bytes, and
+		// this path is a documented pipe target ("op read ... | connect
+		// --token-file -"), so a mistaken source -- /dev/zero, or the wrong
+		// file in a password-manager command -- would otherwise be read until
+		// the process dies. Reading cap+1 makes "exactly cap bytes" and
+		// "cap bytes and still going" distinguishable, so an oversized input
+		// is reported rather than silently truncated into a wrong token.
+		data, err := io.ReadAll(io.LimitReader(stdin, maxMCPTokenBytes+1))
 		if err != nil {
 			return "", fmt.Errorf("read MCP token from stdin: %w", err)
+		}
+		if len(data) > maxMCPTokenBytes {
+			return "", fmt.Errorf("MCP token on stdin exceeds %d bytes", maxMCPTokenBytes)
 		}
 		tok := bytes.TrimRight(data, "\r\n")
 		if len(tok) == 0 {
@@ -591,6 +606,9 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 		data, err := readFile(tokenFile)
 		if err != nil {
 			return "", fmt.Errorf("read --token-file %s: %w", tokenFile, err)
+		}
+		if len(data) > maxMCPTokenBytes {
+			return "", fmt.Errorf("%s exceeds %d bytes", tokenFile, maxMCPTokenBytes)
 		}
 		tok := bytes.TrimRight(data, "\r\n")
 		if len(tok) == 0 {
