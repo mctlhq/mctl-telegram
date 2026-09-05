@@ -133,6 +133,10 @@ func main() {
 		// SaveSession revokes prior + reinserts with the just-stored bytes — for
 		// idempotence on partial-failure recovery flows. Errors here mean the DB
 		// is unhappy; surface and exit non-zero so the operator retries.
+		// If the target account's active row is mode='local' (Local Bridge),
+		// SaveSession refuses with db.ErrAccountModeConflict instead of
+		// silently overwriting it; that message is operator-readable as-is
+		// via die(), no special-casing needed here.
 		die(fmt.Errorf("save metadata: %w", err))
 	}
 

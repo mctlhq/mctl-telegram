@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tgerr"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // enableStep tracks where an enable_access flow is. Guarded by enableSession.lock.
@@ -663,6 +664,9 @@ func friendlyErr(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "the login attempt expired."
 	}
+	if errors.Is(err, db.ErrAccountModeConflict) {
+		return "this account runs Local Bridge — its Telegram session lives on your own machine. Switch it back to hosted mode first, then reconnect."
+	}
 	// Map well-known MTProto error codes to human-readable messages.
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
@@ -695,6 +699,9 @@ func shortReason(err error) string {
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"
+	}
+	if errors.Is(err, db.ErrAccountModeConflict) {
+		return "local_mode_active"
 	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {

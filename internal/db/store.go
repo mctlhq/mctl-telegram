@@ -424,10 +424,22 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	return out, clientRows.Err()
 }
 
+// ErrAccountModeConflict is returned by SaveSession when the user's
+// current active account is mode='local'. A hosted login must not
+// silently revoke a Local Bridge account and replace it with a
+// server-side session; the caller must switch modes explicitly via
+// set_account_mode first.
+var ErrAccountModeConflict = errors.New("account is in local mode; switch to hosted mode before connecting")
+
 // SaveSession upserts (logically) the active telegram account for a user, encrypting the blob.
 // Any prior active row for the user is marked revoked. Writes always use
 // SealForUser (VersionPerUser, 0x02); legacy v1 rows are migrated on read
 // by LoadSession.
+//
+// Refuses with ErrAccountModeConflict, without revoking or inserting
+// anything, when the user's current active row is mode='local' -- see
+// the mctl-telegram issue-492 proposal. A revoked local row (or no active
+// row at all) does not block this call; only an active local row does.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
@@ -438,6 +450,19 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var mode string
+	err = tx.QueryRowContext(ctx,
+		`SELECT mode FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
+		userID,
+	).Scan(&mode)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check account mode: %w", err)
+	}
+	if mode == ModeLocal {
+		return ErrAccountModeConflict
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
