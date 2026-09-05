@@ -555,6 +555,33 @@ func TestEnableAccess_LookupAdminOnlySkipsFlow(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_LookupAdminAndClientSkipsFlow covers the dual-listed case
+// at the CALLBACK, where TestResolveScopes_Tiers only covers the scope grant.
+// An id in both LookupAdminTelegramIDs and ClientTelegramIDs resolves to
+// admin:users:read alone, so an MTProto session would be as useless to it as
+// to a no-scopes identity -- it must skip the phone screen, not be routed
+// into enable_access on the strength of its client listing.
+func TestEnableAccess_LookupAdminAndClientSkipsFlow(t *testing.T) {
+	dualID := int64(888000444)
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{dualID: true}
+		c.ClientTelegramIDs = map[int64]bool{dualID: true}
+	})
+	rec := telegramCallbackFor(t, srv, mux, dualID)
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("dual-listed lookup admin did not get a code straight away: %s", loc)
+	}
+	if strings.Contains(rec.Body.String(), "/oauth/telegram/enable_access/start") {
+		t.Fatalf("dual-listed lookup admin was routed into the enable_access phone screen; body=%s", rec.Body.String())
+	}
+	srv.mu.Lock()
+	numEnables := len(srv.enables)
+	srv.mu.Unlock()
+	if numEnables != 0 {
+		t.Errorf("dual-listed lookup admin created %d pending enableSession(s), want 0", numEnables)
+	}
+}
+
 // TestEnableAccess_ClientRoutedToPhoneScreen confirms a client-tier user with
 // no session is routed into the enable_access phone screen, not 302'd.
 func TestEnableAccess_ClientRoutedToPhoneScreen(t *testing.T) {
@@ -678,6 +705,30 @@ func TestHandleTelegramCallback_AutoApproveMaterializesDBTier(t *testing.T) {
 		}
 		if tier != db.TierNone {
 			t.Fatalf("tier after sign-in = %q, want %q (must not be overwritten)", tier, db.TierNone)
+		}
+	})
+
+	// A lookup admin is exempt from the materialization. The write is
+	// harmless while the id stays listed -- both ResolveScopes and
+	// agentSendGate check LookupAdminTelegramIDs before the client tier --
+	// but it turns REMOVAL from the allowlist into a promotion to the full
+	// client tier off the persisted row, when an operator rotating the bot
+	// out reasonably expects removal to de-provision it. The control leg is
+	// the fresh-user subtest above: without it, this would pass even if
+	// auto-approve had stopped writing for everyone.
+	t.Run("lookup admin is exempt from materialization", func(t *testing.T) {
+		lookup := int64(444000666)
+		srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
+			c.AutoApproveClients = true
+			c.LookupAdminTelegramIDs = map[int64]bool{lookup: true}
+		})
+		telegramCallbackFor(t, srv, mux, lookup)
+		tier, err := srv.store.GetAccessTier(ctx, lookup)
+		if err != nil {
+			t.Fatalf("get access tier: %v", err)
+		}
+		if tier != "" {
+			t.Fatalf("lookup admin persisted tier %q; removal from TG_LOGIN_LOOKUP_ADMINS would then promote it to the client tier instead of de-provisioning it", tier)
 		}
 	})
 

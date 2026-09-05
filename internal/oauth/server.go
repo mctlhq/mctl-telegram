@@ -207,7 +207,6 @@ type Config struct {
 	// authenticates but receives an empty scope set (403 on every MCP tool).
 	ClientTelegramIDs map[int64]bool
 	// LookupAdminTelegramIDs is the allowlist of Telegram user ids that get
-	// LookupAdminTelegramIDs is the allowlist of Telegram user ids that get
 	// ONLY admin:users:read — the two read-only admin lookups
 	// (list_telegram_identities, get_user_audit_log) and nothing else. It is
 	// deliberately NOT the flat admin:users scope: that one is the only gate
@@ -899,8 +898,6 @@ func cancelEnableFlow(e *enableSession) bool {
 //     real/working MTProto session of its own. Checked after the full-admin
 //     tier, so an id listed in both always resolves via the full-admin
 //     branch above, unchanged.
-//     after the full-admin tier, so an id listed in both always resolves via
-//     the full-admin branch above, unchanged.
 //   - clients → clients: telegram:* for the user's own account (read/send/
 //     pin), without admin:users. The client allowlist is the union of the
 //     TG_LOGIN_CLIENTS env (bootstrap) and the runtime-managed
@@ -1463,7 +1460,19 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// block is best-effort: the transient grant in isClientTier already
 	// covers the user regardless, so a DB read/write hiccup here must not
 	// turn an otherwise-valid sign-in into an HTTP 500.
-	if s.cfg.AutoApproveClients {
+	//
+	// A statically-listed lookup admin is exempt. Without the exemption its
+	// first sign-in finds dbTier=="" and persists access_tier='client' --
+	// harmless while the id stays in TG_LOGIN_LOOKUP_ADMINS, since both
+	// ResolveScopes and agentSendGate.hasSendScope check that allowlist
+	// BEFORE the client tier, but a trap on removal: taking the bot out of
+	// the allowlist when it is rotated out would PROMOTE it to the full
+	// client tier off the persisted row (telegram:* plus account:manage)
+	// instead of dropping it to no scopes. Operators reasonably read
+	// "remove from the allowlist" as de-provisioning, so removal has to mean
+	// removal. It also keeps the bot from showing up as a client in
+	// list_telegram_identities and in the new-client digest.
+	if s.cfg.AutoApproveClients && !s.cfg.LookupAdminTelegramIDs[identity.TelegramID] {
 		dbTier, err := s.store.GetAccessTier(r.Context(), identity.TelegramID)
 		if err != nil {
 			slog.Error("get access tier for auto-grant failed", "err", err)
