@@ -437,9 +437,9 @@ var ErrAccountModeConflict = errors.New("account is in local mode; switch to hos
 // by LoadSession.
 //
 // Refuses with ErrAccountModeConflict, without revoking or inserting
-// anything, when the user's current active row is mode='local' -- see
-// the mctl-telegram issue-492 proposal. A revoked local row (or no active
-// row at all) does not block this call; only an active local row does.
+// anything, when ANY of the user's active rows is mode='local' -- see the
+// mctl-telegram issue-492 proposal. A revoked local row (or no active row at
+// all) does not block this call; only an active local row does.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
@@ -450,17 +450,21 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var mode string
-	err = tx.QueryRowContext(ctx,
-		`SELECT mode FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
-		userID,
-	).Scan(&mode)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	// EXISTS over EVERY active row, not the newest one: the revoke below is
+	// `WHERE user_id = $1 AND revoked_at IS NULL`, so it would revoke every
+	// active row. Reading only the newest (LIMIT 1) would let a newer hosted
+	// row wave the guard through while an older local row is revoked anyway —
+	// the exact data loss this guard exists to prevent. The predicate must
+	// match the blast radius of the UPDATE.
+	var hasLocal bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM telegram_accounts
+		  WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2)`,
+		userID, ModeLocal,
+	).Scan(&hasLocal); err != nil {
 		return fmt.Errorf("check account mode: %w", err)
 	}
-	if mode == ModeLocal {
+	if hasLocal {
 		return ErrAccountModeConflict
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -1239,6 +1243,50 @@ func (s *Store) GetAccountMode(ctx context.Context, userID int64) (string, error
 		return "hosted", fmt.Errorf("query account mode: %w", err)
 	}
 	return mode, nil
+}
+
+// HasActiveLocalAccount reports whether the user has at least one active
+// (revoked_at IS NULL) account row in local mode. Callers use it to refuse a
+// hosted connect BEFORE any Telegram login runs: telegram.Login persists the
+// new session bytes through the gotd SessionStore (UpdateSessionBlob) as soon
+// as auth succeeds, so a check that only happens at SaveSession time is too
+// late -- the local row's blob has already been overwritten.
+//
+// The predicate matches SaveSession's guard exactly (any active local row, not
+// just the newest), so the two cannot disagree about whether a connect is
+// allowed.
+func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, error) {
+	var exists bool
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM telegram_accounts
+		  WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2)`,
+		userID, ModeLocal,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("query active local account: %w", err)
+	}
+	return exists, nil
+}
+
+// ClearActiveLocalSessionBlob wipes session_encrypted on the user's active
+// local-mode rows. It is the repair path for the SaveSession backstop: if a
+// local account was enabled after the pre-login gate ran, telegram.Login has
+// already written the hosted session bytes over the local row's blob, and
+// leaving them there would let the hosted worker act as the user through a row
+// the operator believes is bridge-only.
+//
+// Deliberately NOT RevokeActiveSession: that would revoke the local row
+// itself, which is exactly the destruction this guard exists to prevent. The
+// row stays active in local mode; only the stolen blob is dropped, and the
+// bridge re-uploads its own session on next connect.
+func (s *Store) ClearActiveLocalSessionBlob(ctx context.Context, userID int64) error {
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = NULL
+		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`,
+		userID, ModeLocal,
+	); err != nil {
+		return fmt.Errorf("clear local session blob: %w", err)
+	}
+	return nil
 }
 
 // SweepAuditLog removes audit rows older than `retention`. Returns the

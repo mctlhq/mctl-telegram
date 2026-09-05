@@ -113,3 +113,41 @@ func TestSaveSession_RevokedLocalRowDoesNotBlock(t *testing.T) {
 		t.Errorf("mode after SaveSession over a revoked local row = %q, want %q (fresh hosted row)", mode, ModeHosted)
 	}
 }
+
+// TestSaveSession_RefusesLocalRowBehindNewerHostedRow pins the guard's
+// predicate to the same rows the revoke below it touches. Nothing stops a user
+// from having several active rows, and the revoke is
+// `WHERE user_id = $1 AND revoked_at IS NULL` -- every active row. A guard that
+// inspected only the newest row (ORDER BY connected_at DESC LIMIT 1) would see
+// the hosted row here, wave the login through, and then revoke the older local
+// row anyway: the exact silent destruction issue-492 is about.
+func TestSaveSession_RefusesLocalRowBehindNewerHostedRow(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+	uid := seedModedAccount(t, s, "local-behind-hosted", 700000305, ModeLocal, false, false)
+
+	// A newer active hosted row for the same user, so the local row is no
+	// longer the one a LIMIT 1 mode probe would find.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode, send_enabled)
+		 VALUES($1,$2,$3,$4,$5)`,
+		uid, 700000305, []byte("hosted-blob"), ModeHosted, false,
+	); err != nil {
+		t.Fatalf("seed newer hosted row: %v", err)
+	}
+
+	if err := s.SaveSession(ctx, uid, []byte("session-bytes"), 700000305, "Hosted Name", "hosteduser"); !errors.Is(err, ErrAccountModeConflict) {
+		t.Fatalf("SaveSession error = %v, want ErrAccountModeConflict", err)
+	}
+
+	var revokedAt sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_at FROM telegram_accounts WHERE user_id = $1 AND mode = $2`,
+		uid, ModeLocal,
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("read local row: %v", err)
+	}
+	if revokedAt.Valid {
+		t.Errorf("local row revoked_at = %v, want NULL (the refused SaveSession must not revoke it)", revokedAt.Time)
+	}
+}

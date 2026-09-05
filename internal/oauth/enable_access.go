@@ -163,6 +163,19 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		ul := s.uidLoginMutex(uid)
 		ul.Lock()
 		defer ul.Unlock()
+		// Re-check under the uid lock, after handleEnableStart's pre-flight
+		// check: a local account could have been provisioned between the two.
+		// This is the last point at which we can refuse and still be sure no
+		// Telegram session bytes have been written — s.loginFn persists them
+		// through the gotd SessionStore the moment auth succeeds, overwriting
+		// the local row's blob before SaveSession is ever reached.
+		if local, cErr := s.store.HasActiveLocalAccount(bgCtx, uid); cErr != nil {
+			lf.err = fmt.Errorf("check account mode: %w", cErr)
+			return
+		} else if local {
+			lf.err = db.ErrAccountModeConflict
+			return
+		}
 		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
 		if err != nil {
 			lf.err = err
@@ -202,6 +215,17 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		if serr := s.store.SaveSession(bgCtx, uid, pt, tgID, displayName, username); serr != nil {
+			// Backstop: a local account won the race against both checks
+			// above. The login already wrote its session bytes over the local
+			// row's blob, so drop them — otherwise the hosted worker could act
+			// as the user through a row the operator believes is bridge-only.
+			// The row itself stays active in local mode; the bridge re-uploads
+			// its own session on next connect.
+			if errors.Is(serr, db.ErrAccountModeConflict) {
+				if cErr := s.store.ClearActiveLocalSessionBlob(bgCtx, uid); cErr != nil {
+					slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
+				}
+			}
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
@@ -386,6 +410,21 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
+	// any MTProto login starts. telegram.Login persists the new session bytes
+	// through the gotd SessionStore as soon as auth succeeds, so by the time
+	// SaveSession's guard fires the local row's blob is already gone; the only
+	// way to leave the bridge untouched is to never start the login.
+	if local, cErr := s.store.HasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
+		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
+		return
+	} else if local {
+		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "")
+		renderEnableError(w, friendlyErr(db.ErrAccountModeConflict))
+		return
+	}
+
 	// Supersede any prior in-flight attempt (the user restarted after an error).
 	if es.flow != nil && es.flow.cancel != nil {
 		es.flow.cancel()
@@ -524,6 +563,13 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			// A mode conflict is terminal, not a bad code: retrying the flow
+			// re-hits the same guard. Render the dead-end screen rather than
+			// the phone step's "start again to get a fresh code" framing.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				renderEnableError(w, friendlyErr(lf.err))
+				return
+			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
@@ -598,6 +644,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			// Terminal, same as in handleEnableCode: a mode conflict is not a
+			// wrong password and restarting cannot clear it.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				renderEnableError(w, friendlyErr(lf.err))
+				return
+			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
@@ -654,6 +706,14 @@ func validPhone(s string) bool {
 	return true
 }
 
+// localModeConnectMsg is the terminal wording for a hosted connect refused
+// because Local Bridge owns the account. It deliberately does not tell the
+// signed-in user to "switch the account back to hosted mode": mode changes go
+// through set_account_mode, which is admin-only, so that instruction is a dead
+// end for the person reading the screen. Point them at the two things they can
+// actually do instead.
+const localModeConnectMsg = "This account runs Local Bridge — its Telegram session lives on your own machine, and connecting here would replace it. Stop the bridge on that machine, or ask the operator to move the account back to hosted mode, then reconnect."
+
 // friendlyErr renders a login error for display. Telegram RPC errors are
 // short codes (PHONE_NUMBER_INVALID, FLOOD_WAIT) and carry no secrets; the
 // phone/code/password never appear in telegram.Login's error strings.
@@ -665,7 +725,7 @@ func friendlyErr(err error) string {
 		return "the login attempt expired."
 	}
 	if errors.Is(err, db.ErrAccountModeConflict) {
-		return "this account runs Local Bridge — its Telegram session lives on your own machine. Switch it back to hosted mode first, then reconnect."
+		return localModeConnectMsg
 	}
 	// Map well-known MTProto error codes to human-readable messages.
 	var rpcErr *tgerr.Error

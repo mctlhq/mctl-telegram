@@ -76,6 +76,16 @@ func main() {
 	if err != nil {
 		die(fmt.Errorf("ensure user: %w", err))
 	}
+	// Refuse before any MTProto login runs. telegram.Login/LoginQR persist the
+	// new session bytes through the gotd SessionStore as soon as auth
+	// succeeds, so SaveSession's guard below fires only after the local row's
+	// blob has already been overwritten — too late to protect the bridge.
+	if local, err := store.HasActiveLocalAccount(ctx, uid); err != nil {
+		die(fmt.Errorf("check account mode: %w", err))
+	} else if local {
+		die(db.ErrAccountModeConflict)
+	}
+
 	var tgID int64
 	var displayName, username string
 
@@ -133,10 +143,16 @@ func main() {
 		// SaveSession revokes prior + reinserts with the just-stored bytes — for
 		// idempotence on partial-failure recovery flows. Errors here mean the DB
 		// is unhappy; surface and exit non-zero so the operator retries.
-		// If the target account's active row is mode='local' (Local Bridge),
-		// SaveSession refuses with db.ErrAccountModeConflict instead of
-		// silently overwriting it; that message is operator-readable as-is
-		// via die(), no special-casing needed here.
+		// If a local account was provisioned after the pre-login check above,
+		// SaveSession refuses with db.ErrAccountModeConflict — but the login
+		// has already written its bytes over that row's blob, so drop them
+		// before exiting. ClearActiveLocalSessionBlob keeps the local row
+		// itself active; only the stray hosted session is removed.
+		if errors.Is(err, db.ErrAccountModeConflict) {
+			if cErr := store.ClearActiveLocalSessionBlob(ctx, uid); cErr != nil {
+				slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
+			}
+		}
 		die(fmt.Errorf("save metadata: %w", err))
 	}
 
