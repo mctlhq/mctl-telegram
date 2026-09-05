@@ -274,3 +274,89 @@ func TestSaveSession_RefusalLeavesNoRowRevoked(t *testing.T) {
 		t.Errorf("%d row(s) left revoked after a refused SaveSession; the rollback must undo the revoke the mode check performed", revoked)
 	}
 }
+
+// TestClearStraySessionIfLocal_RunsOnCancelledContext pins the two properties
+// that make the enable_access/cmd-login backstop reliable, neither of which
+// the sentinel-gated shape had.
+//
+// 1. It is gated on the ACCOUNT STATE, not on ErrAccountModeConflict. Both
+// callers run SaveSession on a context with a deadline (the enable_access flow
+// uses CodeTTL); when that deadline lands on SaveSession the call fails with
+// the context error, errors.Is(err, ErrAccountModeConflict) is false, and the
+// old gate skipped the repair — leaving the freshly negotiated MTProto bytes
+// that gotd's SessionStore already wrote onto the active mode='local' row.
+//
+// 2. It survives a dead context. The repair must not be taken down by the same
+// expiry that caused the failure it is repairing, hence the callers'
+// context.WithoutCancel; this test passes an already-cancelled context to prove
+// nothing in the helper depends on the caller's context still being alive.
+func TestClearStraySessionIfLocal_RunsOnCancelledContext(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+
+	uid, err := s.EnsureUser(ctx, "stray-local", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := s.ProvisionLocalAccount(ctx, uid, 700000401, "Local User", "localuser"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+	// What telegram.Login leaves behind: gotd's SessionStore has no loaded row
+	// id here, so UpdateSessionBlob writes the new bytes to EVERY active row —
+	// the local one included.
+	if err := s.UpdateSessionBlob(ctx, uid, []byte("stray-hosted-bytes")); err != nil {
+		t.Fatalf("UpdateSessionBlob: %v", err)
+	}
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.ClearStraySessionIfLocal(context.WithoutCancel(dead), uid); err != nil {
+		t.Fatalf("ClearStraySessionIfLocal: %v", err)
+	}
+
+	var sessionEncrypted []byte
+	var revokedAt sql.NullTime
+	if scanErr := s.DB.QueryRowContext(ctx,
+		`SELECT session_encrypted, revoked_at FROM telegram_accounts WHERE user_id = $1`,
+		uid,
+	).Scan(&sessionEncrypted, &revokedAt); scanErr != nil {
+		t.Fatalf("read local row: %v", scanErr)
+	}
+	if sessionEncrypted != nil {
+		t.Errorf("session_encrypted = %q, want NULL — the stray hosted bytes must not survive on a local row", sessionEncrypted)
+	}
+	if revokedAt.Valid {
+		t.Errorf("revoked_at = %v, want NULL — the repair drops the bytes, it does not revoke the bridge account", revokedAt.Time)
+	}
+}
+
+// TestClearStraySessionIfLocal_LeavesHostedOnlyUserAlone is the control for the
+// test above: with no active local row there is nothing stray about the bytes,
+// and a failed hosted connect must not wipe the user's own session.
+func TestClearStraySessionIfLocal_LeavesHostedOnlyUserAlone(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+
+	uid, err := s.EnsureUser(ctx, "stray-hosted", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := s.UpdateSessionBlob(ctx, uid, []byte("hosted-bytes")); err != nil {
+		t.Fatalf("UpdateSessionBlob: %v", err)
+	}
+
+	if err := s.ClearStraySessionIfLocal(ctx, uid); err != nil {
+		t.Fatalf("ClearStraySessionIfLocal: %v", err)
+	}
+
+	var sessionEncrypted []byte
+	if scanErr := s.DB.QueryRowContext(ctx,
+		`SELECT session_encrypted FROM telegram_accounts WHERE user_id = $1`,
+		uid,
+	).Scan(&sessionEncrypted); scanErr != nil {
+		t.Fatalf("read hosted row: %v", scanErr)
+	}
+	if sessionEncrypted == nil {
+		t.Error("session_encrypted = NULL, want the hosted user's own bytes left intact")
+	}
+}

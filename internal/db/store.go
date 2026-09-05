@@ -1331,6 +1331,35 @@ func (s *Store) ClearActiveSessionBlobs(ctx context.Context, userID int64) error
 	return nil
 }
 
+// ClearStraySessionIfLocal drops the session blob from every active row of a
+// user, but only when one of those rows is mode='local'. It is the repair for
+// a hosted connect that failed AFTER telegram.Login already persisted its
+// bytes through the gotd SessionStore: with no loaded row id that write lands
+// on EVERY active row, including a bridge-only one, so a failed connect can
+// leave the hosted worker holding a live session for an account the operator
+// believes is local.
+//
+// Gated on the account state, NOT on ErrAccountModeConflict. SaveSession can
+// fail with the caller's context deadline instead of the sentinel while a
+// local row is present -- the enable_access flow runs on a CodeTTL-bounded
+// context -- and a sentinel-only gate would skip the repair in exactly that
+// case, which is the one where the stray bytes are least likely to be noticed.
+// For the same reason callers should pass a context.WithoutCancel'd context:
+// an expired deadline must not take the repair down with it.
+//
+// A user with no active local row is left untouched: those rows are the
+// connect's own, and a normal failure does not make them stray.
+func (s *Store) ClearStraySessionIfLocal(ctx context.Context, userID int64) error {
+	local, err := s.HasActiveLocalAccount(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("check account mode for stray-session cleanup: %w", err)
+	}
+	if !local {
+		return nil
+	}
+	return s.ClearActiveSessionBlobs(ctx, userID)
+}
+
 // SweepAuditLog removes audit rows older than `retention`. Returns the
 // number of rows removed. Called from the audit-retention sweeper.
 // retention <= 0 is treated as a no-op so an operator who sets

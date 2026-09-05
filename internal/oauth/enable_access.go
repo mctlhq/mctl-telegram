@@ -228,10 +228,14 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// worker could act as the user through a row the operator believes
 			// is bridge-only. The rows themselves stay active; the bridge
 			// re-uploads its own session on next connect.
-			if errors.Is(serr, db.ErrAccountModeConflict) {
-				if cErr := s.store.ClearActiveSessionBlobs(bgCtx, uid); cErr != nil {
-					slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
-				}
+			//
+			// Detached from bgCtx and gated on the account state rather than
+			// on ErrAccountModeConflict: bgCtx carries the flow's CodeTTL
+			// deadline, so SaveSession can fail with that deadline instead of
+			// the sentinel while a local row is present -- and the repair
+			// itself must not die on the same expiry.
+			if cErr := s.store.ClearStraySessionIfLocal(context.WithoutCancel(bgCtx), uid); cErr != nil {
+				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
 			}
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
@@ -417,16 +421,31 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// phoneStart bounds the connect + SendCode round-trip that the select
+	// below waits on. Declared before the mode gate so the gate's own outcomes
+	// are recorded too: a pre-flight refusal returns without ever reaching
+	// startLoginFlow, so leaving the declaration below it made every ordinary
+	// mode conflict invisible to mctl_login_phone_step and left only the
+	// narrow race window on the dashboard.
+	phoneStart := time.Now()
+	observePhoneStep := func(result string) {
+		if s.metrics != nil {
+			s.metrics.ObserveLoginPhoneStep(result, time.Since(phoneStart).Seconds())
+		}
+	}
+
 	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
 	// any MTProto login starts. telegram.Login persists the new session bytes
 	// through the gotd SessionStore as soon as auth succeeds, so by the time
 	// SaveSession's guard fires the local row's blob is already gone; the only
 	// way to leave the bridge untouched is to never start the login.
 	if local, cErr := s.store.HasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
+		observePhoneStep("error")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
 		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 		return
 	} else if local {
+		observePhoneStep("mode_conflict")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "")
 		renderEnableError(w, friendlyErr(db.ErrAccountModeConflict))
 		return
@@ -441,17 +460,6 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
 	es.step = stepCode
 	lf := es.flow
-
-	// phoneStart bounds the connect + SendCode round-trip that this select waits
-	// on. observePhoneStep records its duration and outcome so the
-	// SendCode-stall failure mode (the "send code timeout" below) is queryable
-	// and alertable, not just visible as a coarse audit row.
-	phoneStart := time.Now()
-	observePhoneStep := func(result string) {
-		if s.metrics != nil {
-			s.metrics.ObserveLoginPhoneStep(result, time.Since(phoneStart).Seconds())
-		}
-	}
 
 	select {
 	case <-lf.needCode:

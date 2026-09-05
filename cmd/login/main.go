@@ -149,10 +149,12 @@ func main() {
 		// before exiting — from every active row, since the gotd SessionStore
 		// wrote them there. ClearActiveSessionBlobs keeps the rows themselves
 		// active; only the stray session bytes are removed.
-		if errors.Is(err, db.ErrAccountModeConflict) {
-			if cErr := store.ClearActiveSessionBlobs(ctx, uid); cErr != nil {
-				slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
-			}
+		// Gated on the account state rather than on the sentinel, and
+		// detached from ctx: a SaveSession that fails with a cancelled or
+		// expired ctx while a local row is present would otherwise skip the
+		// repair and leave the login's bytes on that row.
+		if cErr := store.ClearStraySessionIfLocal(context.WithoutCancel(ctx), uid); cErr != nil {
+			slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
 		}
 		die(fmt.Errorf("save metadata: %w", err))
 	}
