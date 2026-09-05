@@ -52,8 +52,10 @@ func bearerErrorCode(err error) string {
 
 // Machine-facing 401 messages. Exported so an UnauthorizedRenderer can
 // branch on which rejection it is asked to present without re-matching the
-// literal string: a reword here then breaks compilation at every renderer
-// instead of silently flipping the rendered copy.
+// literal string. Rewording a value here cannot desynchronise producer and
+// consumer, because there is only one of it; and renaming or removing a
+// constant is a compile error at every renderer, where deleting the branch
+// arm of a literal comparison was not.
 const (
 	// MsgInvalidCredentials is the 401 for a token that failed to verify
 	// (expired, bad signature, wrong audience) — the caller had credentials.
@@ -185,9 +187,26 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg str
 
 // AddNegotiationVary declares the request headers WantsJSON inspects, so a
 // cache keys the HTML and JSON representations of the same URL separately.
+//
+// Idempotent by necessity, not by politeness: an UnauthorizedRenderer such as
+// web.ManageServer.WriteUnauthorized repeats the negotiation for its own
+// direct handler calls and so must add the header itself, but on the
+// middleware path it is invoked *after* writeUnauthorized already added it.
+// Appending blindly there shipped "Vary: Accept, X-Requested-With, Accept,
+// X-Requested-With".
 func AddNegotiationVary(w http.ResponseWriter) {
-	w.Header().Add("Vary", "Accept")
-	w.Header().Add("Vary", "X-Requested-With")
+	present := map[string]bool{}
+	for _, v := range w.Header().Values("Vary") {
+		// One header line may carry several comma-separated field names.
+		for _, tok := range strings.Split(v, ",") {
+			present[http.CanonicalHeaderKey(strings.TrimSpace(tok))] = true
+		}
+	}
+	for _, want := range []string{"Accept", "X-Requested-With"} {
+		if !present[want] {
+			w.Header().Add("Vary", want)
+		}
+	}
 }
 
 // WantsJSON reports whether the caller asked for a JSON error body rather

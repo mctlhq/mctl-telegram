@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -255,19 +256,41 @@ func TestMiddlewareWithHTML_DeclaresNegotiationVary(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
-		vary := rec.Header().Values("Vary")
-		var gotAccept, gotXRW bool
-		for _, v := range vary {
-			if strings.Contains(v, "Accept") {
-				gotAccept = true
-			}
-			if strings.Contains(v, "X-Requested-With") {
-				gotXRW = true
-			}
-		}
-		if !gotAccept || !gotXRW {
-			t.Fatalf("Accept %q: Vary = %v, want Accept and X-Requested-With", accept, vary)
-		}
+		wantExactNegotiationVary(t, rec.Header(), "Accept "+accept)
+	}
+}
+
+// The renderer wired in cmd/server/main.go adds the header itself, because it
+// also serves direct handler calls that never reach this middleware. On the
+// middleware path it therefore runs after writeUnauthorized already added it.
+func TestMiddlewareWithHTML_VaryNotDuplicatedByRenderer(t *testing.T) {
+	renderer := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		AddNegotiationVary(w)
+		w.WriteHeader(status)
+	}
+	h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, renderer)(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("handler should not run")
+		}))
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	wantExactNegotiationVary(t, rec.Header(), "renderer re-adds")
+}
+
+// A Vary a compression layer already set must not make AddNegotiationVary
+// think Accept is covered — "Accept-Encoding" is a different field name.
+func TestAddNegotiationVary_DistinguishesAcceptPrefixedFields(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rec.Header().Add("Vary", "Accept-Encoding, Accept-Language")
+	AddNegotiationVary(rec)
+
+	got := varyTokens(rec.Header())
+	want := []string{"Accept-Encoding", "Accept-Language", "Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Vary = %v, want %v", got, want)
 	}
 }
 
@@ -283,5 +306,30 @@ func TestMiddleware_JSONOnlyDoesNotVary(t *testing.T) {
 
 	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
 		t.Fatalf("Vary = %v, want none for a JSON-only route", vary)
+	}
+}
+
+// varyTokens flattens the Vary header into its individual field names.
+// Asserting on this rather than substring-matching the raw values matters
+// twice over: "Accept-Encoding" contains "Accept", and a duplicated append
+// is invisible to a Contains check.
+func varyTokens(h http.Header) []string {
+	var out []string
+	for _, v := range h.Values("Vary") {
+		for _, tok := range strings.Split(v, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				out = append(out, http.CanonicalHeaderKey(tok))
+			}
+		}
+	}
+	return out
+}
+
+func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
+	t.Helper()
+	got := varyTokens(h)
+	want := []string{"Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
 	}
 }

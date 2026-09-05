@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -385,19 +386,7 @@ func TestManageUnauthorizedSetsNegotiationVary(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.HandleManage(rec, req)
 
-		vary := rec.Header().Values("Vary")
-		var gotAccept, gotXRW bool
-		for _, v := range vary {
-			if strings.Contains(v, "Accept") {
-				gotAccept = true
-			}
-			if strings.Contains(v, "X-Requested-With") {
-				gotXRW = true
-			}
-		}
-		if !gotAccept || !gotXRW {
-			t.Fatalf("Accept %q: Vary = %v, want Accept and X-Requested-With", accept, vary)
-		}
+		wantExactNegotiationVary(t, rec.Header(), "Accept "+accept)
 	}
 }
 
@@ -420,5 +409,30 @@ func TestManageUnauthorizedReasonSelectsCopy(t *testing.T) {
 	}
 	if body := render(auth.MsgAuthRequired); !strings.Contains(body, "need to connect a Telegram account") {
 		t.Fatalf("MsgAuthRequired rendered the wrong copy: %s", body)
+	}
+}
+
+// varyTokens flattens the Vary header into its individual field names.
+// Asserting on this rather than substring-matching the raw values matters
+// twice over: "Accept-Encoding" contains "Accept", and a duplicated append
+// is invisible to a Contains check.
+func varyTokens(h http.Header) []string {
+	var out []string
+	for _, v := range h.Values("Vary") {
+		for _, tok := range strings.Split(v, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				out = append(out, http.CanonicalHeaderKey(tok))
+			}
+		}
+	}
+	return out
+}
+
+func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
+	t.Helper()
+	got := varyTokens(h)
+	want := []string{"Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
 	}
 }
