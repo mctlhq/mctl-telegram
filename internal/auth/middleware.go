@@ -50,6 +50,18 @@ func bearerErrorCode(err error) string {
 	return `error="invalid_token"`
 }
 
+// Machine-facing 401 messages. Exported so an UnauthorizedRenderer can
+// branch on which rejection it is asked to present without re-matching the
+// literal string: a reword here then breaks compilation at every renderer
+// instead of silently flipping the rendered copy.
+const (
+	// MsgInvalidCredentials is the 401 for a token that failed to verify
+	// (expired, bad signature, wrong audience) — the caller had credentials.
+	MsgInvalidCredentials = "invalid credentials"
+	// MsgAuthRequired is the 401 for a request that carried no credentials.
+	MsgAuthRequired = "authentication required"
+)
+
 // UnauthorizedRenderer writes a non-JSON 401 body for browser navigations.
 // The status and machine-facing msg match writeJSONError so HTML and JSON
 // callers see the same rejection; only the presentation changes.
@@ -84,7 +96,7 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues(classifyAuthError(err.Error()), providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path, bearerErrorCode(err)))
-				writeUnauthorized(w, r, http.StatusUnauthorized, "invalid credentials", html)
+				writeUnauthorized(w, r, http.StatusUnauthorized, MsgInvalidCredentials, html)
 				return
 			}
 			if id == nil && required {
@@ -92,7 +104,7 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues("no_token", providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path))
-				writeUnauthorized(w, r, http.StatusUnauthorized, "authentication required", html)
+				writeUnauthorized(w, r, http.StatusUnauthorized, MsgAuthRequired, html)
 				return
 			}
 			if id != nil {
@@ -154,11 +166,28 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 }
 
 func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg string, html UnauthorizedRenderer) {
-	if html != nil && !WantsJSON(r) {
+	if html == nil {
+		writeJSONError(w, code, msg)
+		return
+	}
+	// The body for this URL now depends on the request headers WantsJSON
+	// reads. 401 is not heuristically cacheable and the HTML branch sets
+	// Cache-Control: no-store, but a proxy configured to cache error
+	// responses would otherwise be free to serve one representation to a
+	// caller that asked for the other.
+	AddNegotiationVary(w)
+	if !WantsJSON(r) {
 		html(w, r, code, msg)
 		return
 	}
 	writeJSONError(w, code, msg)
+}
+
+// AddNegotiationVary declares the request headers WantsJSON inspects, so a
+// cache keys the HTML and JSON representations of the same URL separately.
+func AddNegotiationVary(w http.ResponseWriter) {
+	w.Header().Add("Vary", "Accept")
+	w.Header().Add("Vary", "X-Requested-With")
 }
 
 // WantsJSON reports whether the caller asked for a JSON error body rather

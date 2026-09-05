@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -234,5 +235,53 @@ func TestMiddleware_WWWAuthenticate_FailedAuthWithZeroValueResourceMetadata(t *t
 	want := `Bearer realm="mctl-telegram", error="invalid_token"`
 	if got := rec.Header().Get("WWW-Authenticate"); got != want {
 		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}
+
+// Only the HTML-capable middleware negotiates its 401 body, so only it may
+// claim a Vary — a plain Middleware always answers JSON and must not tell
+// caches otherwise.
+func TestMiddlewareWithHTML_DeclaresNegotiationVary(t *testing.T) {
+	html := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		w.WriteHeader(status)
+	}
+	for _, accept := range []string{"text/html", "application/json"} {
+		h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, html)(
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run")
+			}))
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		vary := rec.Header().Values("Vary")
+		var gotAccept, gotXRW bool
+		for _, v := range vary {
+			if strings.Contains(v, "Accept") {
+				gotAccept = true
+			}
+			if strings.Contains(v, "X-Requested-With") {
+				gotXRW = true
+			}
+		}
+		if !gotAccept || !gotXRW {
+			t.Fatalf("Accept %q: Vary = %v, want Accept and X-Requested-With", accept, vary)
+		}
+	}
+}
+
+func TestMiddleware_JSONOnlyDoesNotVary(t *testing.T) {
+	h := Middleware(noTokenProvider{}, true, nil, ResourceMetadata{})(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("handler should not run")
+		}))
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
+		t.Fatalf("Vary = %v, want none for a JSON-only route", vary)
 	}
 }
