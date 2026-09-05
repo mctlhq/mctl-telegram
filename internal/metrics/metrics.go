@@ -213,7 +213,7 @@ func New() *Registry {
 
 	r.LoginPhoneStepTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_phone_step_total",
-		Help: "Total enable_access phone-step outcomes, labeled by result: ok, timeout, error.",
+		Help: "Total enable_access phone-step outcomes, labeled by result: ok, timeout, error, mode_conflict.",
 	}, []string{"result"})
 
 	r.LoginPhoneToCodeDuration = prometheus.NewHistogram(prometheus.HistogramOpts{

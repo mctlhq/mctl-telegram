@@ -228,3 +228,49 @@ func TestClearActiveSessionBlobs_ClearsHostedRowToo(t *testing.T) {
 		t.Errorf("active rows after cleanup = %d, want 2 (cleanup must not revoke)", active)
 	}
 }
+
+// TestSaveSession_RefusalLeavesNoRowRevoked pins the property that makes the
+// mode check safe to fold into the revoke: when SaveSession refuses, the
+// deferred Rollback must undo the revoke the RETURNING statement performed, so
+// the local row it was protecting survives with revoked_at still NULL.
+//
+// The earlier shape ran `SELECT EXISTS` and then the revoke as two statements.
+// That left a window: under READ COMMITTED a ProvisionLocalAccount committing
+// between them is a phantom the SELECT never sees, while the UPDATE takes a
+// fresh snapshot at statement start, sees the new row and revokes it —
+// issue-492 verbatim, and invisible to the enable_access backstop because
+// SaveSession returns nil on that path.
+//
+// The hosted row is here as the control: it proves the statement really did
+// revoke rows before the refusal (so the rollback is doing work), rather than
+// the guard short-circuiting before any write.
+func TestSaveSession_RefusalLeavesNoRowRevoked(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+	uid := seedModedAccount(t, s, "refusal-rolls-back", 700000707, ModeLocal, false, false)
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode, send_enabled)
+		 VALUES($1,$2,$3,$4,$5)`,
+		uid, 700000707, []byte("hosted-blob"), ModeHosted, false,
+	); err != nil {
+		t.Fatalf("seed hosted row: %v", err)
+	}
+
+	if err := s.SaveSession(ctx, uid, []byte("session-bytes"), 700000707, "Hosted", "hosted"); !errors.Is(err, ErrAccountModeConflict) {
+		t.Fatalf("SaveSession error = %v, want ErrAccountModeConflict", err)
+	}
+
+	var revoked, total int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FILTER (WHERE revoked_at IS NOT NULL), COUNT(*)
+		   FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&revoked, &total); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("row count = %d, want 2 (the refusal must not insert a hosted row either)", total)
+	}
+	if revoked != 0 {
+		t.Errorf("%d row(s) left revoked after a refused SaveSession; the rollback must undo the revoke the mode check performed", revoked)
+	}
+}

@@ -450,29 +450,48 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// EXISTS over EVERY active row, not the newest one: the revoke below is
-	// `WHERE user_id = $1 AND revoked_at IS NULL`, so it would revoke every
-	// active row. Reading only the newest (LIMIT 1) would let a newer hosted
-	// row wave the guard through while an older local row is revoked anyway —
-	// the exact data loss this guard exists to prevent. The predicate must
-	// match the blast radius of the UPDATE.
-	var hasLocal bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM telegram_accounts
-		  WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2)`,
-		userID, ModeLocal,
-	).Scan(&hasLocal); err != nil {
-		return fmt.Errorf("check account mode: %w", err)
-	}
-	if hasLocal {
-		return ErrAccountModeConflict
-	}
-	if _, err := tx.ExecContext(ctx,
+	// The mode check IS the revoke: one statement, RETURNING the mode of every
+	// row it touched. A separate `SELECT EXISTS` first would leave a window --
+	// under READ COMMITTED a ProvisionLocalAccount committing between the two
+	// is a phantom the SELECT never sees, while the UPDATE takes a fresh
+	// snapshot at statement start, sees the new row and revokes it. That is
+	// issue-492 verbatim, and the enable_access backstop cannot catch it
+	// because SaveSession would return nil on that path. Here the local row is
+	// revoked and then un-revoked by the deferred Rollback, so it survives and
+	// the caller still gets ErrAccountModeConflict.
+	//
+	// RETURNING over EVERY affected row, not the newest one: this UPDATE is
+	// `WHERE user_id = $1 AND revoked_at IS NULL`, so a check that read only
+	// the newest row (LIMIT 1) would let a newer hosted row wave the guard
+	// through while an older local row is revoked anyway.
+	revoked, err := tx.QueryContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
-		 WHERE user_id = $1 AND revoked_at IS NULL`,
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		 RETURNING mode`,
 		userID,
-	); err != nil {
-		return fmt.Errorf("revoke prior: %w", err)
+	)
+	if err != nil {
+		return fmt.Errorf("revoke prior sessions: %w", err)
+	}
+	hasLocal := false
+	for revoked.Next() {
+		var mode string
+		if err := revoked.Scan(&mode); err != nil {
+			revoked.Close()
+			return fmt.Errorf("scan revoked mode: %w", err)
+		}
+		if mode == ModeLocal {
+			hasLocal = true
+		}
+	}
+	if err := revoked.Err(); err != nil {
+		revoked.Close()
+		return fmt.Errorf("revoke prior sessions: %w", err)
+	}
+	revoked.Close()
+	if hasLocal {
+		// Deferred Rollback undoes the revoke above.
+		return ErrAccountModeConflict
 	}
 	now := time.Now().UTC()
 	// An exempt identity gets a NULL expires_at, which every absolute-TTL
@@ -1281,9 +1300,18 @@ func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, 
 // `WHERE user_id = $1 AND revoked_at IS NULL`: it writes the new bytes to
 // EVERY active row. Clearing only mode='local' rows left a user who also holds
 // an active hosted row with that row carrying a live session from a connect
-// that was explicitly refused. Clearing the hosted row costs nothing it still
-// had: whatever session it held was overwritten by that same UPDATE moments
-// earlier, so the bytes being dropped here are the new ones, not the old.
+// that was explicitly refused.
+//
+// On that rowID == 0 branch, clearing the hosted row costs nothing it still
+// had: whatever session it held was overwritten by the same UPDATE moments
+// earlier, so the bytes dropped here are the new ones, not the old. The
+// justification is specific to that branch. When a row id WAS loaded,
+// StoreSession takes UpdateSessionBlobByID instead (`WHERE id = $2`, one row),
+// a second active row was never overwritten, and clearing it does drop a
+// session that was still valid. Clear-everything is still the right default:
+// that state needs the multi-active-row race named at ProvisionLocalAccount,
+// and the alternative -- leaving a live hosted session behind a refused
+// connect -- is the worse failure.
 //
 // What this does NOT do is terminate the Telegram-side authorization the login
 // created. There is no per-row MTProto logout on this path, and

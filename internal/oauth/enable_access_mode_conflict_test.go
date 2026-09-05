@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -161,5 +162,90 @@ func TestEnableAccess_LocalModeConflict_RefusedBeforeLogin(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("audit log missing connect:failed:local_mode_active entry; got %+v", entries)
+	}
+}
+
+// TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal covers the branch
+// startLoginFlow's own re-check actually lands in, which the code/password
+// handlers' terminal screens never reach.
+//
+// When the re-check refuses, it sets lf.err and returns before lf.needCode is
+// ever signalled, so lf.done closes first and handleEnableStart takes its
+// `case <-lf.done` arm. That arm renders "Telegram rejected the request: ...
+// Try again." and books the outcome as result="error" — a label reserved for
+// real RPC failures like PHONE_NUMBER_INVALID. Telegram was never contacted,
+// the condition is terminal, and "Try again" invites a loop against a guard
+// that cannot clear.
+//
+// The race is driven deterministically by holding the uid login mutex: the
+// pre-flight gate in handleEnableStart runs before startLoginFlow is called
+// and passes (no local row yet), the flow goroutine then blocks on that mutex,
+// and the local account is provisioned into exactly that window.
+func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
+	inner := stubLogin(false, nil)
+	var loginCalled atomic.Bool
+	srv, mux := newEnableTestServer(t, func(ctx context.Context, apiID int, apiHash string,
+		store *db.Store, uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+		cfgs ...telegram.LoginConfig,
+	) (int64, string, string, error) {
+		loginCalled.Store(true)
+		return inner(ctx, apiID, apiHash, store, uid, phone, askCode, askPassword, cfgs...)
+	})
+	esTok := driveToPhone(t, mux)
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	ul := srv.uidLoginMutex(uid)
+	ul.Lock()
+
+	type res struct{ rec *httptest.ResponseRecorder }
+	done := make(chan res, 1)
+	go func() {
+		done <- res{postForm(t, mux, "/oauth/telegram/enable_access/start",
+			url.Values{"es": {esTok}, "phone": {"+14155551234"}})}
+	}()
+
+	// Wait until handleEnableStart has passed its pre-flight gate and handed
+	// off to the flow goroutine, which is now parked on the mutex we hold.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		srv.mu.Lock()
+		es := srv.enables[esTok]
+		srv.mu.Unlock()
+		if es != nil && es.flow != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			ul.Unlock()
+			t.Fatal("handleEnableStart never reached startLoginFlow; the pre-flight gate refused instead, so this test is not exercising the re-check")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+		ul.Unlock()
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+	ul.Unlock()
+
+	rec := (<-done).rec
+	body := rec.Body.String()
+	if !strings.Contains(body, "Local Bridge") {
+		t.Fatalf("race refusal did not surface the local-mode message; body=%s", body)
+	}
+	if strings.Contains(body, "Telegram rejected the request") {
+		t.Errorf("race refusal rendered as a Telegram RPC failure; Telegram was never contacted. body=%s", body)
+	}
+	if strings.Contains(body, "Try again") {
+		t.Errorf("race refusal offers a retry against a terminal condition. body=%s", body)
+	}
+	if loginCalled.Load() {
+		t.Error("telegram login ran despite the local account winning the race; the bridge session would already be overwritten")
 	}
 }

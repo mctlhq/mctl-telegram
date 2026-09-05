@@ -465,6 +465,21 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// — that is the SendCode-stall the timeout alert watches, so record it
 			// as "timeout", not "error" (which is reserved for Telegram RPC errors
 			// like PHONE_NUMBER_INVALID / FLOOD_WAIT).
+			// A mode conflict is terminal and Telegram was never contacted, so
+			// it gets neither the "Telegram rejected the request ... Try
+			// again." framing nor the result="error" label reserved for real
+			// RPC failures -- booking it there makes a config condition read
+			// as Telegram flakiness on the dashboard. This is also the branch
+			// startLoginFlow's own re-check reliably lands in: that check sets
+			// lf.err and returns before lf.needCode is ever signalled, so
+			// lf.done closes first and the code/password handlers' terminal
+			// screens (which got this treatment) are never reached.
+			if errors.Is(lf.err, db.ErrAccountModeConflict) {
+				observePhoneStep("mode_conflict")
+				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+				renderEnableError(w, friendlyErr(lf.err))
+				return
+			}
 			result := "error"
 			if errors.Is(lf.err, context.DeadlineExceeded) || errors.Is(lf.err, context.Canceled) {
 				result = "timeout"
