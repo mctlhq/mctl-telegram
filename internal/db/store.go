@@ -1350,14 +1350,24 @@ func (s *Store) ClearActiveSessionBlobs(ctx context.Context, userID int64) error
 // A user with no active local row is left untouched: those rows are the
 // connect's own, and a normal failure does not make them stray.
 func (s *Store) ClearStraySessionIfLocal(ctx context.Context, userID int64) error {
-	local, err := s.HasActiveLocalAccount(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("check account mode for stray-session cleanup: %w", err)
+	// One statement, not a read followed by a write. A separate
+	// HasActiveLocalAccount first would leave the same window SaveSession's
+	// guard was just closed against, pointing the other way: an operator
+	// switching the account to hosted and a new session being negotiated
+	// between the two queries would have this cleanup wipe a session that is
+	// legitimately the user's. The EXISTS rides inside the UPDATE, so the
+	// destructive write happens only if the account is still local at the
+	// moment it lands.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = NULL
+		 WHERE user_id = $1 AND revoked_at IS NULL
+		   AND EXISTS (SELECT 1 FROM telegram_accounts
+		               WHERE user_id = $2 AND revoked_at IS NULL AND mode = $3)`,
+		userID, userID, ModeLocal,
+	); err != nil {
+		return fmt.Errorf("clear stray session blobs: %w", err)
 	}
-	if !local {
-		return nil
-	}
-	return s.ClearActiveSessionBlobs(ctx, userID)
+	return nil
 }
 
 // SweepAuditLog removes audit rows older than `retention`. Returns the

@@ -234,9 +234,16 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// deadline, so SaveSession can fail with that deadline instead of
 			// the sentinel while a local row is present -- and the repair
 			// itself must not die on the same expiry.
-			if cErr := s.store.ClearStraySessionIfLocal(context.WithoutCancel(bgCtx), uid); cErr != nil {
+			// Bounded, not merely detached: WithoutCancel alone strips the
+			// deadline as well as the cancellation, and this runs while the
+			// goroutine holds the uid login mutex -- an unresponsive database
+			// would park it there forever and lock the user out of every
+			// later attempt.
+			repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(bgCtx), straySessionRepairTimeout)
+			if cErr := s.store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
 			}
+			repairCancel()
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
@@ -250,6 +257,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	}()
 	return lf
 }
+
+// straySessionRepairTimeout bounds the post-login stray-session repair. The
+// repair deliberately outlives the flow's own context, so it needs a deadline
+// of its own: it runs under the uid login mutex, and a database that never
+// answers must not hold that mutex for the life of the process.
+const straySessionRepairTimeout = 5 * time.Second
 
 // uidLoginMutex returns the per-user mutex that serialises enable_access login
 // goroutines for one users.id. See Server.loginMu.
@@ -440,7 +453,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// SaveSession's guard fires the local row's blob is already gone; the only
 	// way to leave the bridge untouched is to never start the login.
 	if local, cErr := s.store.HasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
-		observePhoneStep("error")
+		// Not "error": that label is reserved for Telegram RPC failures (see
+		// the select below). This is our own store refusing to answer, and it
+		// must not read as Telegram flakiness on the dashboard.
+		observePhoneStep("mode_check_error")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
 		renderEnableError(w, "Could not verify this account's mode. Try again, or contact the operator if it persists.")
 		return

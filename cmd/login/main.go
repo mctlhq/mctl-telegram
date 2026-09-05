@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
 	"github.com/mctlhq/mctl-telegram/internal/config"
@@ -153,9 +154,11 @@ func main() {
 		// detached from ctx: a SaveSession that fails with a cancelled or
 		// expired ctx while a local row is present would otherwise skip the
 		// repair and leave the login's bytes on that row.
-		if cErr := store.ClearStraySessionIfLocal(context.WithoutCancel(ctx), uid); cErr != nil {
+		repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if cErr := store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 			slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
 		}
+		repairCancel()
 		die(fmt.Errorf("save metadata: %w", err))
 	}
 
