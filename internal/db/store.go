@@ -313,6 +313,30 @@ func (s *Store) SetAccessTier(ctx context.Context, tgID int64, tier string) erro
 	return nil
 }
 
+// GetLoginIdentity returns the Telegram login projection for users.id: the
+// widget/OIDC telegram_login_id plus any captured username and display name.
+// Missing attributes come back empty rather than guessed. A missing users
+// row is not an error — all three values are zero.
+func (s *Store) GetLoginIdentity(ctx context.Context, userID int64) (tgID int64, username, displayName string, err error) {
+	var (
+		id sql.NullInt64
+		u  sql.NullString
+		d  sql.NullString
+	)
+	err = s.DB.QueryRowContext(ctx,
+		`SELECT telegram_login_id, telegram_username, telegram_display_name
+		   FROM users WHERE id = $1`,
+		userID,
+	).Scan(&id, &u, &d)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", "", nil
+	}
+	if err != nil {
+		return 0, "", "", fmt.Errorf("get login identity: %w", err)
+	}
+	return id.Int64, u.String, d.String, nil
+}
+
 // GetAccessTier returns the explicit users.access_tier value for a Telegram
 // id: "" when the user has no row or a NULL tier (unset — the caller should
 // fall back to the env bootstrap allowlist), or "client"/"none" when the tool

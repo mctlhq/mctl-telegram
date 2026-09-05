@@ -970,3 +970,97 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		t.Fatalf("lookup+client groups = %v, must not carry clients", lcg)
 	}
 }
+
+func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil)
+	ctx := context.Background()
+	const tgID int64 = 424242
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "bob",
+		},
+	}, "es-tok")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierClient {
+		t.Fatalf("tier after finishEnable = %q, want %q", tier, db.TierClient)
+	}
+}
+
+func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
+	const lookupID int64 = 555001
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	ctx := context.Background()
+
+	adminID := int64(210408407)
+	adminUID, err := srv.store.EnsureUserByTelegramID(ctx, adminID, "admin", "Admin")
+	if err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+	lookupUID, err := srv.store.EnsureUserByTelegramID(ctx, lookupID, "lookup", "Lookup")
+	if err != nil {
+		t.Fatalf("ensure lookup: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		uid  int64
+		tgID int64
+	}{
+		{"full admin", adminUID, adminID},
+		{"lookup admin", lookupUID, lookupID},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		srv.finishEnable(rec, req, &enableSession{
+			uid:  tc.uid,
+			tgID: tc.tgID,
+			oc: oauthCtx{
+				ClientID:    "claude.ai",
+				RedirectURI: "https://claude.ai/cb",
+				TelegramID:  tc.tgID,
+			},
+		}, "es-"+tc.name)
+		tier, err := srv.store.GetAccessTier(ctx, tc.tgID)
+		if err != nil {
+			t.Fatalf("%s GetAccessTier: %v", tc.name, err)
+		}
+		if tier != "" {
+			t.Fatalf("%s tier after finishEnable = %q, want unset", tc.name, tier)
+		}
+	}
+}
+
+func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	// No users row: SetAccessTier fails. The auth-code redirect must still happen.
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  1,
+		tgID: 999001,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  999001,
+		},
+	}, "es-missing")
+	if rec.Code != http.StatusFound && rec.Code != http.StatusOK {
+		t.Fatalf("finishEnable status = %d, want a successful handoff despite SetAccessTier failure", rec.Code)
+	}
+}

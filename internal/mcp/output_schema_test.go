@@ -27,6 +27,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"get_user_audit_log", first(s.toolGetUserAuditLog())},
 		{"get_my_audit_log", first(s.toolGetMyAuditLog())},
 		{"get_my_send_status", first(s.toolGetMySendStatus())},
+		{"get_my_identity", first(s.toolGetMyIdentity())},
 		{"disconnect_telegram_account", first(s.toolDisconnectAccount())},
 		{"delete_telegram_account", first(s.toolDeleteAccount())},
 		{"revoke_telegram_session", first(s.toolRevokeSession())},
