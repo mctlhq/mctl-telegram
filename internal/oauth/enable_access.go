@@ -296,9 +296,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			}
 			if !local {
 				// A failed revoke must surface — otherwise the wrong session
-				// stays active.
+				// stays active. wrapIdentityCleanupErr, not %w of rErr
+				// directly: decisionCtx's own 5s budget can expire here,
+				// and a raw DeadlineExceeded would render as login CodeTTL
+				// expiry.
 				if _, rErr := s.store.RevokeActiveSession(decisionCtx, uid, "disconnect"); rErr != nil {
-					lf.err = fmt.Errorf("revoke wrong-account session: %w", rErr)
+					lf.err = wrapIdentityCleanupErr("revoke wrong-account session", rErr)
 					return
 				}
 			} else if clearErr := s.clearStraySessionIfLocal(decisionCtx, uid); clearErr != nil {
@@ -307,7 +310,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 				// is not enough -- the surviving row is mode='local', so
 				// nothing is served from those bytes, but they are still
 				// sitting on a row whose contract says NULL.
-				lf.err = fmt.Errorf("clear wrong-account session: %w", clearErr)
+				lf.err = wrapIdentityCleanupErr("clear wrong-account session", clearErr)
 				return
 			}
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
@@ -380,6 +383,28 @@ func (s *Server) clearStraySessionIfLocal(ctx context.Context, uid int64) error 
 // persisted bytes.
 func strayRepairContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), db.StraySessionRepairTimeout)
+}
+
+// errIdentityCleanupTimeout is a stray-repair budget expiry on the
+// identity-mismatch revoke/clear path. It replaces context.DeadlineExceeded
+// so friendlyErr/shortReason cannot treat a failed cleanup as login CodeTTL
+// expiry ("the login attempt expired." / audit "timeout").
+var errIdentityCleanupTimeout = errors.New("repair timed out")
+
+// wrapIdentityCleanupErr records a failed identity-mismatch revoke/clear.
+// decisionCtx is bounded by StraySessionRepairTimeout; if that budget
+// expires, the store returns DeadlineExceeded — the same sentinel as a
+// login CodeTTL expiry. Wrapping that with %w would make
+// errors.Is(..., DeadlineExceeded) true and hide the cleanup failure
+// this path exists to surface.
+func wrapIdentityCleanupErr(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s: %w", op, errIdentityCleanupTimeout)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // errModeCheckFailed marks a failure of the account-mode query itself, as
@@ -1044,6 +1069,9 @@ func friendlyErr(err error) string {
 func shortReason(err error) string {
 	if err == nil {
 		return "unknown"
+	}
+	if errors.Is(err, errIdentityCleanupTimeout) {
+		return "identity_cleanup_timeout"
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"

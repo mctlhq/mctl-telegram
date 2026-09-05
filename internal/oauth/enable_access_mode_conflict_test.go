@@ -847,3 +847,58 @@ func TestEnableAccess_IdentityMismatch_LocalCleanupFailureSurfaces(t *testing.T)
 		t.Fatalf("a failed local cleanup was not surfaced; body=%s", body)
 	}
 }
+
+// TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry covers
+// the class of bug switching off bgCtx was meant to kill: decisionCtx is
+// still a 5s timeout, so a slow (or injected) revoke/clear can return
+// DeadlineExceeded. Wrapping that with %w makes friendlyErr/shortReason
+// treat it as login CodeTTL expiry and hide the cleanup failure.
+func TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
+	esTok := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+
+	srv.clearStrayFn = func(context.Context, int64) error {
+		return context.DeadlineExceeded
+	}
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {esTok}, "code": {"12345"}})
+	body := rec.Body.String()
+	if strings.Contains(body, "login attempt expired") {
+		t.Errorf("repair-budget DeadlineExceeded rendered as login CodeTTL expiry; body=%s", body)
+	}
+	if !strings.Contains(body, "clear wrong-account session") {
+		t.Fatalf("cleanup failure was not surfaced; body=%s", body)
+	}
+
+	entries, err := srv.store.ListAuditFor(ctx, uid, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("ListAuditFor: %v", err)
+	}
+	foundCleanup := false
+	for _, e := range entries {
+		if e.ToolName == "connect:failed:timeout" {
+			t.Errorf("repair deadline booked as the generic login timeout tag; entries=%+v", entries)
+		}
+		if e.ToolName == "connect:failed:identity_cleanup_timeout" {
+			foundCleanup = true
+		}
+	}
+	if !foundCleanup {
+		t.Errorf("audit log missing connect:failed:identity_cleanup_timeout; got %+v", entries)
+	}
+}
