@@ -210,6 +210,76 @@ func TestReadAllowlistedFile_RejectsSwapToSymlink(t *testing.T) {
 	}
 }
 
+func TestReadAllowlistedFile_RejectsParentDirSwapThenRestore(t *testing.T) {
+	allow := t.TempDir()
+	sub := filepath.Join(allow, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(sub, "note.bin")
+	if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	outside := t.TempDir()
+	outsideSub := filepath.Join(outside, "sub")
+	if err := os.Mkdir(outsideSub, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideSub, "note.bin"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	origLstat := lstatAllowlisted
+	origOpen := openAllowlisted
+	t.Cleanup(func() {
+		lstatAllowlisted = origLstat
+		openAllowlisted = origOpen
+	})
+
+	// After the initial allowlist resolve, swap the parent directory to a
+	// symlink pointing at the outside tree so Lstat and Open both land on
+	// the same outside inode (SameFile passes). Restore the original tree
+	// after open so a string-path EvalSymlinks would look safe again while
+	// the fd still points outside. fd-to-path must refuse that.
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		if err := os.RemoveAll(sub); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(outsideSub, sub); err != nil {
+			return nil, err
+		}
+		return os.Lstat(p)
+	}
+	openAllowlisted = func(p string) (*os.File, error) {
+		f, err := openNoFollow(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Remove(sub); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return f, nil
+	}
+
+	got, err := ReadAllowlistedFile(path, allow, 1024)
+	if err == nil {
+		t.Fatalf("parent-dir symlink swap must be refused, got %q", got)
+	}
+	if string(got) == "secret" {
+		t.Fatal("must not return the swapped outside target")
+	}
+}
+
 func TestReadAllowlistedFile_UncappedGrowingFileReadsAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "grow.bin")

@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -30,9 +29,10 @@ var (
 // After the allowlist resolve, the file is Lstat'd (must be a regular file,
 // not a symlink), opened without following a final-component symlink
 // (O_NOFOLLOW on Unix), and the opened fd is required to be the same inode
-// (os.SameFile). The opened file's real path is checked again so a parent
+// (os.SameFile). The opened fd's kernel path is checked again so a parent
 // directory swapped to a symlink between resolve and open cannot leak an
-// outside regular file.
+// outside regular file. If that fd-to-path lookup is unavailable, the
+// read fails closed instead of re-evaluating the string path.
 func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("file_path is required")
@@ -98,7 +98,7 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 		return nil, fmt.Errorf("file_path is %d bytes, exceeding the %d-byte upload cap", info.Size(), maxBytes)
 	}
 
-	openedReal, err := realOpenedPath(f, resolved)
+	openedReal, err := realOpenedPath(f)
 	if err != nil {
 		return nil, fmt.Errorf("file_path: %w", err)
 	}
@@ -128,16 +128,20 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 	return data, nil
 }
 
-// realOpenedPath returns the path of the already-opened file. On Linux,
-// /proc/self/fd names the inode we hold, so a parent-directory symlink
-// swap between Lstat and Open cannot hide an outside target. Elsewhere
-// we re-resolve the candidate path (fail closed if it now escapes).
-func realOpenedPath(f *os.File, fallback string) (string, error) {
-	proc := "/proc/self/fd/" + strconv.FormatInt(int64(f.Fd()), 10)
-	if p, err := filepath.EvalSymlinks(proc); err == nil {
-		return p, nil
+// realOpenedPath returns the filesystem path of the already-opened fd
+// via a kernel fd-to-path mechanism (/proc/self/fd on Linux, F_GETPATH
+// on macOS). A missing or failed lookup is an error: re-evaluating the
+// original string path is TOCTOU-racy (a parent directory can be swapped
+// to a symlink for Lstat/Open and restored before a string EvalSymlinks).
+func realOpenedPath(f *os.File) (string, error) {
+	p, err := resolveOpenedFDPath(f)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve opened file path: %w", err)
 	}
-	return filepath.EvalSymlinks(fallback)
+	if p == "" {
+		return "", fmt.Errorf("cannot resolve opened file path")
+	}
+	return p, nil
 }
 
 func isUnderDir(dir, path string) bool {
