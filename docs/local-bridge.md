@@ -67,6 +67,9 @@ These are current, not permanent. Plan around them.
   `pin_message`.
 - `fetch_media=true` is refused on `get_messages` and
   `get_unread_messages`. Use `prepare_get_media` then `get_media`.
+- `send_media` `file_path` is Local Bridge only: file_path is only supported on Linux and macOS.
+  On Windows use `file_base64`. The daemon reads only files inside
+  `MCTL_MEDIA_DIR` (default `~/.config/mctl-telegram-local/media`).
 - No always-on Communication Agent listener. That path needs a
   server-side Telegram client.
 - One account per machine (`init` overwrites the previous setup). One
