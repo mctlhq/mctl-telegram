@@ -326,8 +326,8 @@ func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
 }
 
 // columnExists reports whether table already has column, in whichever dialect
-// is in play. Both catalogs are ordinary reads: pg_catalog behind
-// information_schema.columns, and the pragma table for SQLite.
+// is in play. Both catalogs are ordinary reads that take no table lock:
+// pg_attribute for Postgres and the pragma table for SQLite.
 func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) (bool, error) {
 	q := `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`
 	if pg {
@@ -365,6 +365,10 @@ func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column st
 //     EXCLUSIVE lock on the table to discover there is nothing to do. Migrate
 //     runs on every start, so that is the steady state, not a one-off. With the
 //     pre-check the steady state is a catalog read that takes no table lock.
+//     Note this holds for the drop pass only: the additive pass above still
+//     issues its ADD COLUMN IF NOT EXISTS statements unconditionally on
+//     Postgres, so Migrate as a whole has not stopped taking that lock. Making
+//     it so is a separate change, not a claim this comment makes.
 //   - SQLite has neither the IF EXISTS clause nor DROP COLUMN at all before
 //     3.35.0, so the pre-check is what keeps an older SQLite working: it never
 //     reaches the unsupported statement unless the column exists, and a
