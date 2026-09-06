@@ -607,7 +607,14 @@ func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 // sorted-by-id argument order both get real query traffic here.
 func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 	ctx := context.Background()
-	// Deliberately unsorted input; ttlExemptClause must sort ids itself.
+	// The order here carries no meaning, contrary to what this comment used to
+	// claim: WithAbsoluteTTLExempt stores the ids in a map, so ttlExemptClause
+	// iterates them in random order regardless of how they arrive. Its sort
+	// exists to keep the generated SQL text -- and so the prepared-statement
+	// cache key -- stable, and nothing here pins that: reversing the
+	// comparator in ttlExemptClause and ReconcileTTLExemptions leaves this
+	// whole package green under -count=5. What this test does cover is the
+	// multi-placeholder fragment ($3,$4) getting real query traffic.
 	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101, 500100202})
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
 	seed := func(name string, tgID int64) {
