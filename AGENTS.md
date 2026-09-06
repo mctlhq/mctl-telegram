@@ -40,6 +40,10 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - Do not commit Telegram session data, OAuth tokens, API credentials (`TG_API_ID`/`TG_API_HASH`), or local SQLite databases.
 - Do not add logging of message bodies, phone numbers, Telegram session strings, or JWT secrets — the `internal/audit/redact.go` slog handler enforces this; new sensitive field names must be added there.
 - Treat all Telegram data as private user data.
+- Test fixtures must use synthetic Telegram identifiers — never a real account's
+  numeric id, first name or @handle, including your own. This repository is public,
+  and a fixture is committed forever. Reuse an existing synthetic persona rather than
+  inventing one, and check the value is not already in use for a different identity.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`

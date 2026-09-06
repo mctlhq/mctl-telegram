@@ -33,7 +33,7 @@ func newLoginTestStore(t *testing.T) *db.Store {
 
 func seedUser(t *testing.T, store *db.Store) int64 {
 	t.Helper()
-	uid, err := store.EnsureUserByTelegramID(context.Background(), 210408407, "MashkovD", "Dmitry")
+	uid, err := store.EnsureUserByTelegramID(context.Background(), 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestRefuseIfLocal_RefusesWhileBridgeActive(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestRefuseIfLocal_AllowsHostedAndNoAccount(t *testing.T) {
 		t.Fatalf("refused a user with no account at all: %v", err)
 	}
 
-	if err := store.SaveSession(ctx, uid, []byte("hosted-session"), 210408407, "Dmitry", "MashkovD"); err != nil {
+	if err := store.SaveSession(ctx, uid, []byte("hosted-session"), 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 	if err := refuseIfLocal(ctx, store, uid); err != nil {
@@ -88,7 +88,7 @@ func TestRepairStraySession_ClearsBytesButKeepsTheRow(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	// What telegram.Login does through the gotd SessionStore with no loaded
@@ -121,7 +121,7 @@ func TestRepairStraySession_SurvivesACancelledParent(t *testing.T) {
 	base := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(base, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(base, uid, 500100101, "dana_tg", "Dana"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	if err := store.UpdateSessionBlob(base, uid, []byte("hosted-login-session")); err != nil {

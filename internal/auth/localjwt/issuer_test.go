@@ -21,9 +21,9 @@ func TestMint_Verify_Roundtrip(t *testing.T) {
 		t.Fatalf("NewIssuer: %v", err)
 	}
 	tok, err := iss.Mint(Claims{
-		Subject:          "tg:210408407",
-		TelegramID:       210408407,
-		TelegramUsername: "MashkovD",
+		Subject:          "tg:500100101",
+		TelegramID:       500100101,
+		TelegramUsername: "dana_tg",
 		Groups:           []string{"platform-admins"},
 		Scopes:           []string{"telegram:dialogs:read"},
 	}, 1*time.Hour)
@@ -34,13 +34,13 @@ func TestMint_Verify_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if c.Subject != "tg:210408407" {
+	if c.Subject != "tg:500100101" {
 		t.Errorf("Subject = %q", c.Subject)
 	}
-	if c.TelegramID != 210408407 {
+	if c.TelegramID != 500100101 {
 		t.Errorf("TelegramID = %d", c.TelegramID)
 	}
-	if c.TelegramUsername != "MashkovD" {
+	if c.TelegramUsername != "dana_tg" {
 		t.Errorf("TelegramUsername = %q", c.TelegramUsername)
 	}
 	if len(c.Groups) != 1 || c.Groups[0] != "platform-admins" {

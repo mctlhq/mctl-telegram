@@ -252,10 +252,10 @@ func TestReconcileTTLExemptions(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 	deadline := time.Now().UTC().Add(30 * 24 * time.Hour)
-	seedAccountForTelegramID(t, s, uid, 210408407, &deadline)
+	seedAccountForTelegramID(t, s, uid, 500100101, &deadline)
 	seedAccountForTelegramID(t, s, uid, 999000111, &deadline)
 
-	s = s.WithAbsoluteTTLExempt([]int64{210408407})
+	s = s.WithAbsoluteTTLExempt([]int64{500100101})
 	cleared, err := s.ReconcileTTLExemptions(ctx)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -263,7 +263,7 @@ func TestReconcileTTLExemptions(t *testing.T) {
 	if cleared != 1 {
 		t.Errorf("cleared = %d, want 1", cleared)
 	}
-	if got := expiresAtFor(t, s, 210408407); got.Valid {
+	if got := expiresAtFor(t, s, 500100101); got.Valid {
 		t.Errorf("exempt identity must have NULL expires_at, got %v", got.Time)
 	}
 	if got := expiresAtFor(t, s, 999000111); !got.Valid {
@@ -287,12 +287,12 @@ func TestReconcileTTLExemptionsIsReversible(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 	deadline := time.Now().UTC().Add(30 * 24 * time.Hour)
-	seedAccountForTelegramID(t, s, uid, 210408407, &deadline)
+	seedAccountForTelegramID(t, s, uid, 500100101, &deadline)
 
-	if _, err := s.WithAbsoluteTTLExempt([]int64{210408407}).ReconcileTTLExemptions(ctx); err != nil {
+	if _, err := s.WithAbsoluteTTLExempt([]int64{500100101}).ReconcileTTLExemptions(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if got := expiresAtFor(t, s, 210408407); got.Valid {
+	if got := expiresAtFor(t, s, 500100101); got.Valid {
 		t.Fatal("precondition: expires_at should be NULL")
 	}
 
@@ -304,7 +304,7 @@ func TestReconcileTTLExemptionsIsReversible(t *testing.T) {
 	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if got := expiresAtFor(t, s, 210408407); !got.Valid {
+	if got := expiresAtFor(t, s, 500100101); !got.Valid {
 		t.Error("dropping an identity from the list must re-arm its absolute TTL")
 	}
 }
@@ -320,10 +320,10 @@ func TestSweepAbsoluteSessionsSkipsExempt(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 	past := time.Now().UTC().Add(-24 * time.Hour)
-	seedAccountForTelegramID(t, s, uid, 210408407, &past)
+	seedAccountForTelegramID(t, s, uid, 500100101, &past)
 	seedAccountForTelegramID(t, s, uid, 999000111, &past)
 
-	s = s.WithAbsoluteTTLExempt([]int64{210408407})
+	s = s.WithAbsoluteTTLExempt([]int64{500100101})
 	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestSweepAbsoluteSessionsSkipsExempt(t *testing.T) {
 
 	var revoked sql.NullTime
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 500100101`,
 	).Scan(&revoked); err != nil {
 		t.Fatalf("read revoked_at: %v", err)
 	}
@@ -350,15 +350,15 @@ func TestSweepAbsoluteSessionsSkipsExempt(t *testing.T) {
 // exemption must apply at insert time, not only after the next restart.
 func TestSaveSessionExemptIdentityHasNoDeadline(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{500100101})
 	uid, err := s.EnsureUser(ctx, "ttl-save", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := s.SaveSession(ctx, uid, []byte("blob"), 210408407, "Op", "op"); err != nil {
+	if err := s.SaveSession(ctx, uid, []byte("blob"), 500100101, "Op", "op"); err != nil {
 		t.Fatalf("save exempt session: %v", err)
 	}
-	if got := expiresAtFor(t, s, 210408407); got.Valid {
+	if got := expiresAtFor(t, s, 500100101); got.Valid {
 		t.Errorf("exempt identity must be inserted with NULL expires_at, got %v", got.Time)
 	}
 
@@ -378,12 +378,12 @@ func TestSaveSessionExemptIdentityHasNoDeadline(t *testing.T) {
 // sweeper: no absolute-expiry rejection for an exempt identity.
 func TestCheckSessionValidAcceptsExempt(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStoreCrypted(t).WithAbsoluteTTLExempt([]int64{500100101})
 	uid, err := s.EnsureUser(ctx, "ttl-check", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := s.SaveSession(ctx, uid, []byte("blob"), 210408407, "Op", "op"); err != nil {
+	if err := s.SaveSession(ctx, uid, []byte("blob"), 500100101, "Op", "op"); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if _, err := s.CheckSessionValid(ctx, uid); err != nil {
@@ -405,13 +405,13 @@ func TestMigrateLeavesExemptRowsNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	seedAccountForTelegramID(t, s, uid, 210408407, nil)
+	seedAccountForTelegramID(t, s, uid, 500100101, nil)
 	seedAccountForTelegramID(t, s, uid, 999000111, nil)
 
-	if err := Migrate(ctx, s.DB, 210408407); err != nil {
+	if err := Migrate(ctx, s.DB, 500100101); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if got := expiresAtFor(t, s, 210408407); got.Valid {
+	if got := expiresAtFor(t, s, 500100101); got.Valid {
 		t.Errorf("exempt row must stay NULL through Migrate, got %v", got.Time)
 	}
 	if got := expiresAtFor(t, s, 999000111); !got.Valid {
@@ -424,7 +424,7 @@ func TestMigrateLeavesExemptRowsNull(t *testing.T) {
 // nobody has used for longer than the idle TTL must survive the idle sweep.
 func TestSweepIdleSessionsSkipsExempt(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101})
 	uid, err := s.EnsureUser(ctx, "ttl-idle-exempt", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
@@ -433,7 +433,7 @@ func TestSweepIdleSessionsSkipsExempt(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
 		 VALUES($1,$2,$3,$4,NULL)`,
-		uid, 210408407, []byte("blob"), stale,
+		uid, 500100101, []byte("blob"), stale,
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestSweepIdleSessionsSkipsExempt(t *testing.T) {
 	}
 	var revoked sql.NullTime
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 500100101`,
 	).Scan(&revoked); err != nil {
 		t.Fatalf("read revoked_at: %v", err)
 	}
@@ -464,13 +464,13 @@ func TestSweepIdleSessionsSkipsExempt(t *testing.T) {
 // gets revoked.
 func TestSweepIdleSessionsTwoSided(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101})
 	uid, err := s.EnsureUser(ctx, "ttl-idle-two-sided", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
-	seedAccountForTelegramID(t, s, uid, 210408407, nil)
+	seedAccountForTelegramID(t, s, uid, 500100101, nil)
 	seedAccountForTelegramID(t, s, uid, 999000111, nil)
 	if _, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts SET last_used_at = $1`, stale,
@@ -491,7 +491,7 @@ func TestSweepIdleSessionsTwoSided(t *testing.T) {
 
 	var exemptRevoked, otherRevoked sql.NullTime
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 500100101`,
 	).Scan(&exemptRevoked); err != nil {
 		t.Fatalf("read exempt revoked_at: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestSweepIdleSessionsTwoSided(t *testing.T) {
 // identity with the same staleness is rejected with ReasonIdle.
 func TestCheckSessionValidAcceptsExemptIdle(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101})
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
 
 	exemptUID, err := s.EnsureUser(ctx, "ttl-check-idle-exempt", "", "test")
@@ -524,7 +524,7 @@ func TestCheckSessionValidAcceptsExemptIdle(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
 		 VALUES($1,$2,$3,$4,NULL)`,
-		exemptUID, 210408407, []byte("blob"), stale,
+		exemptUID, 500100101, []byte("blob"), stale,
 	); err != nil {
 		t.Fatalf("seed exempt: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestCheckSessionValidAcceptsExemptIdle(t *testing.T) {
 // needs the same NOT IN exclusion as SweepIdleSessions.
 func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101})
 	exempt, err := s.EnsureUser(ctx, "combined-exempt", "", "test")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
@@ -570,7 +570,7 @@ func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at)
 		 VALUES($1,$2,$3,$4,NULL)`,
-		exempt, 210408407, []byte("blob"), stale,
+		exempt, 500100101, []byte("blob"), stale,
 	); err != nil {
 		t.Fatalf("seed exempt: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 	}
 	var revoked sql.NullTime
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 210408407`,
+		`SELECT revoked_at FROM telegram_accounts WHERE telegram_user_id = 500100101`,
 	).Scan(&revoked); err != nil {
 		t.Fatalf("read revoked_at: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 	ctx := context.Background()
 	// Deliberately unsorted input; ttlExemptClause must sort ids itself.
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407, 924671154})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101, 500100202})
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
 	seed := func(name string, tgID int64) {
 		uid, err := s.EnsureUser(ctx, name, "", "test")
@@ -623,8 +623,8 @@ func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 			t.Fatalf("seed %s: %v", name, err)
 		}
 	}
-	seed("multi-exempt-a", 924671154)
-	seed("multi-exempt-b", 210408407)
+	seed("multi-exempt-a", 500100202)
+	seed("multi-exempt-b", 500100101)
 	seed("multi-plain", 222)
 	if _, err := s.ReconcileTTLExemptions(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -639,7 +639,7 @@ func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 	var count int
 	if err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM telegram_accounts
-		 WHERE telegram_user_id IN (210408407, 924671154) AND revoked_at IS NOT NULL`,
+		 WHERE telegram_user_id IN (500100101, 500100202) AND revoked_at IS NOT NULL`,
 	).Scan(&count); err != nil {
 		t.Fatalf("count revoked exempts: %v", err)
 	}

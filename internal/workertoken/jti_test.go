@@ -18,7 +18,7 @@ import (
 func TestMintThenRenew_PreservesJti(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	rec := httptest.NewRecorder()
-	h(rec, adminRequest(`{"telegram_id":924671154}`))
+	h(rec, adminRequest(`{"telegram_id":500100202}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("mint status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
@@ -104,7 +104,7 @@ func TestRenewThroughAuthMiddleware_RejectsRevokedToken(t *testing.T) {
 
 	mintHandler := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
 	mrec := httptest.NewRecorder()
-	mintHandler(mrec, adminRequest(`{"telegram_id":924671154}`))
+	mintHandler(mrec, adminRequest(`{"telegram_id":500100202}`))
 	if mrec.Code != http.StatusOK {
 		t.Fatalf("mint status = %d, want 200, body=%s", mrec.Code, mrec.Body.String())
 	}

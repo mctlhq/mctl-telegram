@@ -155,7 +155,7 @@ func TestEvaluateSendGate_ReviewerForcedDryRun(t *testing.T) {
 
 	// A non-reviewer identity on the same server (reviewer mode armed) is
 	// unaffected: its sends still pass when its own gates are open.
-	other := &auth.Identity{UserID: uid, TelegramID: 210408407, Scopes: []string{"telegram:messages:send"}}
+	other := &auth.Identity{UserID: uid, TelegramID: 500100101, Scopes: []string{"telegram:messages:send"}}
 	real, _ = evaluateSendGate(ctx, s, other, true, reviewerTGID)
 	if !real {
 		t.Fatal("non-reviewer identity must not be gagged by reviewer mode")
@@ -274,7 +274,7 @@ func TestToolDelete_DemoReviewerBlocked(t *testing.T) {
 func TestToolDisconnect_NormalUserAllowed(t *testing.T) {
 	ctx := context.Background()
 	store := newToolsTestStore(t)
-	const normalTGID int64 = 210408407
+	const normalTGID int64 = 500100101
 	uid := seedAccountWithSession(t, store, normalTGID, false)
 	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
 	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}
@@ -298,7 +298,7 @@ func TestToolDisconnect_NormalUserAllowed(t *testing.T) {
 func TestToolDelete_NormalUserAllowed(t *testing.T) {
 	ctx := context.Background()
 	store := newToolsTestStore(t)
-	const normalTGID int64 = 210408407
+	const normalTGID int64 = 500100101
 	uid := seedAccountWithSession(t, store, normalTGID, false)
 	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
 	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}

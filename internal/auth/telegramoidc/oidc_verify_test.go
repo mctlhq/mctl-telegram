@@ -76,7 +76,7 @@ func TestExchange_VerifiesAgainstSecp256k1JWKS(t *testing.T) {
 		"iss":   srv.URL,
 		"aud":   clientID,
 		"sub":   "1234567890123456789",
-		"id":    "210408407",
+		"id":    "500100101",
 		"nonce": nonce,
 		"iat":   now.Unix(),
 		"exp":   now.Add(5 * time.Minute).Unix(),
@@ -106,7 +106,7 @@ func TestExchange_VerifiesAgainstSecp256k1JWKS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Exchange failed — JWKS filter likely not wired into the verifier: %v", err)
 	}
-	if id.TelegramID != 210408407 {
-		t.Errorf("TelegramID = %d, want 210408407", id.TelegramID)
+	if id.TelegramID != 500100101 {
+		t.Errorf("TelegramID = %d, want 500100101", id.TelegramID)
 	}
 }

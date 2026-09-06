@@ -31,8 +31,8 @@ func mintFor(t *testing.T, c localjwt.Claims, ttl time.Duration) string {
 
 func workerClaims() localjwt.Claims {
 	return localjwt.Claims{
-		Subject:          "tg:924671154",
-		TelegramID:       924671154,
+		Subject:          "tg:500100202",
+		TelegramID:       500100202,
 		Scopes:           []string{"telegram:dialogs:read", "telegram:messages:read"},
 		Audience:         []string{workerAudience},
 		OriginalIssuedAt: time.Now().Unix(),
@@ -51,7 +51,7 @@ func renewRequest(tok, body string) *http.Request {
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	return req.WithContext(auth.With(req.Context(), &auth.Identity{
-		UserID: 7, TelegramID: 924671154, Scopes: []string{"telegram:dialogs:read"},
+		UserID: 7, TelegramID: 500100202, Scopes: []string{"telegram:dialogs:read"},
 	}))
 }
 
@@ -85,7 +85,7 @@ func TestRenew_HappyPathPreservesIdentityAndScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renewed token does not verify: %v", err)
 	}
-	if claims.TelegramID != 924671154 || claims.Subject != "tg:924671154" {
+	if claims.TelegramID != 500100202 || claims.Subject != "tg:500100202" {
 		t.Fatalf("identity changed: sub=%q tg_id=%d", claims.Subject, claims.TelegramID)
 	}
 	if strings.Join(claims.Scopes, ",") != "telegram:dialogs:read,telegram:messages:read" {
@@ -105,8 +105,8 @@ func TestRenew_HappyPathPreservesIdentityAndScopes(t *testing.T) {
 // carrying the full send/pin-capable scope set.
 func bridgeClaims() localjwt.Claims {
 	return localjwt.Claims{
-		Subject:          "tg:924671154",
-		TelegramID:       924671154,
+		Subject:          "tg:500100202",
+		TelegramID:       500100202,
 		Scopes:           []string{"telegram:messages:send", "telegram:messages:pin"},
 		Audience:         []string{workerBridgeAudience},
 		OriginalIssuedAt: time.Now().Unix(),
@@ -164,8 +164,8 @@ func TestRenew_LocalBridgeTokenRejectsScopeOutsideBridgeAllowlist(t *testing.T) 
 // since revoked.
 func deviceClaims() localjwt.Claims {
 	return localjwt.Claims{
-		Subject:          "tg:924671154",
-		TelegramID:       924671154,
+		Subject:          "tg:500100202",
+		TelegramID:       500100202,
 		Scopes:           []string{"telegram:messages:send", "telegram:messages:pin"},
 		Audience:         []string{workerDeviceAudience},
 		OriginalIssuedAt: time.Now().Unix(),
@@ -253,7 +253,7 @@ func TestRenew_RejectsScopeOutsideAllowlist(t *testing.T) {
 func TestRenew_RejectsIdentityOrScopeInBody(t *testing.T) {
 	tok := mintFor(t, workerClaims(), time.Hour)
 	for _, body := range []string{
-		`{"telegram_id":210408407}`,
+		`{"telegram_id":500100101}`,
 		`{"scopes":["telegram:messages:send"]}`,
 	} {
 		rec := doRenew(t, tok, body)
