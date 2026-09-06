@@ -234,7 +234,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			if saved {
 				return
 			}
-			repairCtx, repairCancel := strayRepairContext(bgCtx)
+			repairCtx, repairCancel := db.StrayRepairContext(bgCtx)
 			defer repairCancel()
 			if cErr := s.clearStraySessionIfLocal(repairCtx, uid); cErr != nil {
 				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
@@ -279,7 +279,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			// login attempt expired." instead of the identity mismatch. The
 			// decision has to depend on account state, not on where the
 			// deadline happened to land.
-			decisionCtx, decisionCancel := strayRepairContext(bgCtx)
+			decisionCtx, decisionCancel := db.StrayRepairContext(bgCtx)
 			defer decisionCancel()
 			local, cErr := s.hasActiveLocalAccount(decisionCtx, uid)
 			if cErr != nil {
@@ -373,16 +373,6 @@ func (s *Server) clearStraySessionIfLocal(ctx context.Context, uid int64) error 
 		return s.clearStrayFn(ctx, uid)
 	}
 	return s.store.ClearStraySessionIfLocal(ctx, uid)
-}
-
-// strayRepairContext outlives parent (so a CodeTTL expiry cannot take the
-// repair down with it) and is bounded by StraySessionRepairTimeout (so an
-// unresponsive database cannot hold the uid login mutex forever). Shared by
-// the deferred stray-session repair and the identity-mismatch branch, which
-// has to make the same kind of decision after the login has already
-// persisted bytes.
-func strayRepairContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), db.StraySessionRepairTimeout)
 }
 
 // errIdentityCleanupTimeout is a stray-repair budget expiry on the
