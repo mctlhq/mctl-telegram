@@ -104,8 +104,9 @@ The mctl-gitops kustomize base for this adapter configuration lives under
 ## Alerts
 
 Alert rules are defined in `deploy/alerts/mctl-telegram.rules.yaml` as a
-`monitoring.coreos.com/v1` `PrometheusRule` manifest. The manifest covers
-three alerts:
+`monitoring.coreos.com/v1` `PrometheusRule` manifest. **That file is a
+non-deployed reference** — nothing applies it, and the three alerts below are
+live in no cluster. It covers:
 
 - **MctlTelegramPoolNearCapacity** (warning at >85%, critical at >95%) — fires
   when the session pool fills up and the cap is positive.
@@ -114,20 +115,42 @@ three alerts:
 - **MctlTelegramOAuthPendingStuck** (warning) — fires when more than 100
   OAuth authorization flows remain in-flight for 15 minutes or longer.
 
-To deploy, apply the manifest to the cluster:
+To deploy them, port them into `mctl-gitops` as a `VMRule` under
+`platform-gitops/infra-components/observability/vm-rules/`, alongside
+`mctl-telegram-alerts.yaml`, `mctl-telegram-slo.yaml` and
+`mctl-telegram-canary.yaml`. That directory is what ArgoCD reconciles, and it
+is the only path by which an alert reaches this cluster.
+
+A one-off `kubectl apply` of the manifest here is not a deployment, and it does
+not clean itself up either. The applied object carries no ArgoCD tracking
+metadata, so ArgoCD neither adopts nor prunes it: it stays active
+indefinitely, drifting silently from this file, and will later fire alongside
+whatever gets ported properly. If you or anyone else ever applied one of these
+by hand, find and delete it explicitly; do not expect a reconcile to remove
+it.
+
+Find the strays by the tracking metadata ArgoCD stamps on what it manages. In
+this cluster that is the annotation `argocd.argoproj.io/tracking-id` — checked
+on a managed rule, which carries the annotation and no
+`app.kubernetes.io/instance` label, so filtering on the label would list every
+managed rule as a stray:
 
 ```
-kubectl apply -f deploy/alerts/mctl-telegram.rules.yaml
+kubectl get prometheusrule,vmrule -A -o json | jq -r '
+  .items[]
+  | select(.metadata.annotations["argocd.argoproj.io/tracking-id"] == null)
+  | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
 ```
 
-Alternatively, mirror it to `mctl-gitops` under
-`platform-gitops/infra-components/observability/vm-rules/` (where
-`mctl-telegram-alerts.yaml` already lives). The VictoriaMetrics operator
-auto-converts the `PrometheusRule` to a `VMRule` on apply.
+Confirm the method before trusting the output —
+`kubectl get cm argocd-cm -n argocd -o jsonpath='{.data.application\.resourceTrackingMethod}'`
+— since under label tracking the key is `app.kubernetes.io/instance` instead.
+Read the list before deleting anything: an object may be unmanaged for reasons
+other than a stray `kubectl apply`.
 
-For SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
-availability, session borrow success rate), see the PrometheusRule stanzas
-documented in [docs/slo.md](slo.md).
+The SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
+availability, session borrow success rate) have already been ported, as
+`mctl-telegram-slo.yaml`; see [docs/slo.md](slo.md).
 
 ## Notes
 

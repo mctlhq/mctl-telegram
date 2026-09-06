@@ -5,7 +5,28 @@ mctl-telegram, the corresponding SLI PromQL expressions, the error-budget
 policy, and the exclusions that govern how specific failure modes are
 counted.
 
-Alert YAML: [`deploy/alerts/mctl-telegram.rules.yaml`](../deploy/alerts/mctl-telegram.rules.yaml)
+Deployed alert rules: the burn-rate alerts and the SLI recording rules this
+document defines are deployed from `mctl-gitops`, at
+`platform-gitops/infra-components/observability/vm-rules/mctl-telegram-slo.yaml`
+(a `VMRule` — the cluster's alerting engine is VMAlert, and that file is what
+ArgoCD reconciles). The tables in this document are the source of truth for
+the numbers; that file is the only thing that changes what the cluster does.
+So a threshold change is two steps in this order: edit the table here, then
+open the `mctl-gitops` PR that makes the rule match it. Doing only the second
+leaves this document asserting a number the cluster does not use, which is the
+drift this section exists to prevent.
+
+Deployed alert names: `MctlTelegramToolAvailability{Fast,Slow}Burn`,
+`MctlTelegramOAuthAvailability{Fast,Slow}Burn`,
+`MctlTelegramSessionBorrow{Fast,Slow}Burn`. Severities there read `critical` and
+`warning` rather than the `page` / `ticket` used below, because that is the
+convention every other rule in that cluster follows; the page semantics are
+preserved by routing the three `FastBurn` alert names to the Telegram receiver
+in Alertmanager.
+
+Reference-only alert YAML:
+[`deploy/alerts/mctl-telegram.rules.yaml`](../deploy/alerts/mctl-telegram.rules.yaml).
+That file is **not deployed by anything** — see the header comment in it.
 
 ---
 
