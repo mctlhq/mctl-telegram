@@ -65,8 +65,35 @@ jobs:
             echo "::error::Postgres-backed tests skipped -- the service container did not reach the test environment"
             exit 1
           fi
-          if grep -q "^--- SKIP" /tmp/pg-tests.log; then
+          # Indentation matters: `go test -v` indents subtest results, so an
+          # anchored "^--- SKIP" sees a skipped top-level test but not a
+          # skipped subtest. A table-driven rewrite of these tests would slip
+          # straight through the strict anchor.
+          if grep -Eq "^[[:space:]]*--- SKIP" /tmp/pg-tests.log; then
             echo "::error::a Postgres-backed test skipped for another reason; see the log above"
+            exit 1
+          fi
+          # Nothing above fires when the -run filter matches NOTHING: go test
+          # prints "no tests to run" and exits 0, so a rename that drops the
+          # "Postgres" substring would leave this step green while testing
+          # nothing at all -- the same silent loss the step exists to prevent,
+          # reached by a different route.
+          if grep -q "no tests to run" /tmp/pg-tests.log; then
+            echo "::error::the -run filter matched no tests -- were the Postgres-backed tests renamed?"
+            exit 1
+          fi
+          # Belt and braces for the case the warning text ever changes: assert
+          # the count of top-level results. A floor, not an equality, so adding
+          # a Postgres-backed test needs no CI edit; removing one is caught.
+          # Raise it when the set below grows:
+          #   TestOpenPool, TestRegisterDevice_PostgresUpsert,
+          #   TestGrantClientTierIfUnset_PostgresHeldNoneIsNotOverwritten,
+          #   TestGrantClientTierIfUnset_PostgresSetsClientWhenUnset,
+          #   TestRevokeWorkerToken_PostgresUpsert
+          expected=5
+          passed=$(grep -c "^--- PASS" /tmp/pg-tests.log || true)
+          if [ "$passed" -lt "$expected" ]; then
+            echo "::error::expected at least $expected Postgres-backed tests to pass, saw $passed"
             exit 1
           fi
       - run: GOOS=darwin GOARCH=arm64 go build ./...
