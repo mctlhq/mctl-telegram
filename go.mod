@@ -13,7 +13,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/mark3labs/mcp-go v0.58.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/prometheus/client_model v0.6.2
+	github.com/prometheus/client_model v0.6.3
 	github.com/yuin/goldmark v1.8.4
 	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
@@ -73,7 +73,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
