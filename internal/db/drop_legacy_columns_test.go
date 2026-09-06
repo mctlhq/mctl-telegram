@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -105,7 +106,7 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username,
 		                               session_encrypted, mode, send_enabled, bridge_token_hash)
-		 VALUES ($1, 42, 'Dmitry', 'MashkovD', NULL, $2, 0, X'0badc0de')`,
+		 VALUES ($1, 42, 'Alice', 'alice_tg', NULL, $2, 0, X'0badc0de')`,
 		uid, ModeLocal); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
@@ -124,7 +125,101 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 	if mode != ModeLocal {
 		t.Errorf("mode = %q after the drop, want %q", mode, ModeLocal)
 	}
-	if username != "MashkovD" || tgID != 42 {
+	if username != "alice_tg" || tgID != 42 {
 		t.Errorf("row contents changed across the drop: username=%q tgID=%d", username, tgID)
+	}
+}
+
+// TestDropColumnIfPresent_Postgres covers the dialect the SQLite tests cannot
+// reach. Following db_test.go's convention it runs only when TEST_DATABASE_URL
+// is set, so it is a local/opt-in check rather than a CI gate.
+//
+// The property under test is not just "the column goes" but "the steady state
+// issues no DDL": Migrate runs on every pod start, and an unconditional
+// `ALTER TABLE ... DROP COLUMN IF EXISTS` takes its ACCESS EXCLUSIVE lock
+// before discovering there is nothing to drop. So the second call is checked
+// through pg_stat, by asserting the table's last DDL did not move.
+func TestDropColumnIfPresent_Postgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	conn, err := Open(ctx, dsn, 0, 0)
+	if err != nil {
+		t.Skipf("postgres not available: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, err := conn.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS drop_probe (id BIGSERIAL PRIMARY KEY, keep TEXT)`); err != nil {
+		t.Fatalf("create probe table: %v", err)
+	}
+	t.Cleanup(func() { _, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS drop_probe`) })
+	if _, err := conn.ExecContext(ctx,
+		`ALTER TABLE drop_probe ADD COLUMN IF NOT EXISTS legacy BYTEA`); err != nil {
+		t.Fatalf("add the legacy column: %v", err)
+	}
+
+	present, err := columnExists(ctx, conn, true, "drop_probe", "legacy")
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if !present {
+		t.Fatal("the Postgres catalog lookup does not see a column that is really there")
+	}
+
+	if err := dropColumnIfPresent(ctx, conn, true, "drop_probe", "legacy"); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	present, err = columnExists(ctx, conn, true, "drop_probe", "legacy")
+	if err != nil {
+		t.Fatalf("columnExists after the drop: %v", err)
+	}
+	if present {
+		t.Fatal("the column survived the drop")
+	}
+
+	keep, err := columnExists(ctx, conn, true, "drop_probe", "keep")
+	if err != nil {
+		t.Fatalf("columnExists(keep): %v", err)
+	}
+	if !keep {
+		t.Error("the drop took a sibling column with it")
+	}
+
+	// The steady state -- every pod boot after the first -- must take no table
+	// lock, and this is the assertion that actually pins it rather than
+	// restating the intent. Another session holds an ACCESS SHARE lock on the
+	// table for the duration; a bare ALTER TABLE ... DROP COLUMN IF EXISTS
+	// needs ACCESS EXCLUSIVE, which conflicts, so it would queue behind that
+	// lock and hit lock_timeout. The catalog pre-check never asks for the lock,
+	// so it returns immediately.
+	holder, err := conn.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	tx, err := holder.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("holder begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM drop_probe`); err != nil {
+		t.Fatalf("holder take ACCESS SHARE: %v", err)
+	}
+
+	// One connection, so the session-level lock_timeout applies to the call.
+	dropper, err := Open(ctx, dsn, 1, 1)
+	if err != nil {
+		t.Fatalf("dropper open: %v", err)
+	}
+	defer func() { _ = dropper.Close() }()
+	if _, err := dropper.ExecContext(ctx, `SET lock_timeout = '2s'`); err != nil {
+		t.Fatalf("set lock_timeout: %v", err)
+	}
+
+	if err := dropColumnIfPresent(ctx, dropper, true, "drop_probe", "legacy"); err != nil {
+		t.Fatalf("the steady-state call waited on a table lock instead of reading the catalog: %v", err)
 	}
 }

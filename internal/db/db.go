@@ -325,35 +325,59 @@ func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	return dropColumnIfPresent(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash")
 }
 
-// dropColumnIfPresent runs an ALTER TABLE ... DROP COLUMN that is a no-op when
-// the column is already gone -- the mirror of addColumnIfMissing, and it has
-// to be, because both dialects reach that no-op differently.
-//
-// Postgres has DROP COLUMN IF EXISTS. SQLite has neither the IF EXISTS clause
-// nor DROP COLUMN before 3.35.0, so the column is looked up in
-// pragma_table_info first and the statement is issued only when it is really
-// there. That pre-check is also what keeps an older SQLite working: it never
-// reaches the unsupported statement unless the column exists, and a database
-// old enough to be missing DROP COLUMN support predates the column itself.
-func dropColumnIfPresent(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) error {
+// columnExists reports whether table already has column, in whichever dialect
+// is in play. Both catalogs are ordinary reads: pg_catalog behind
+// information_schema.columns, and the pragma table for SQLite.
+func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) (bool, error) {
+	q := `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`
 	if pg {
-		stmt := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN IF EXISTS %s`, table, column)
-		if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("drop column %s.%s: %w", table, column, err)
-		}
-		return nil
+		// Schema-qualified: an unqualified table_name matches a same-named
+		// table in any schema on the search path, which would report a column
+		// that this connection's statements do not address.
+		q = `SELECT count(*) FROM information_schema.columns
+		     WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`
 	}
 	var count int
-	if err := dbConn.QueryRowContext(ctx,
-		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`,
-		table, column,
-	).Scan(&count); err != nil {
-		return fmt.Errorf("pragma table_info(%s): %w", table, err)
+	if err := dbConn.QueryRowContext(ctx, q, table, column).Scan(&count); err != nil {
+		return false, fmt.Errorf("look up column %s.%s: %w", table, column, err)
 	}
-	if count == 0 {
+	return count > 0, nil
+}
+
+// dropColumnIfPresent runs an ALTER TABLE ... DROP COLUMN that is a no-op when
+// the column is already gone -- the mirror of addColumnIfMissing.
+//
+// Both dialects pre-check the catalog and issue no DDL at all when there is
+// nothing to drop, for reasons that differ per dialect but land in the same
+// place:
+//
+//   - Postgres would accept a bare DROP COLUMN IF EXISTS, but IF EXISTS is
+//     evaluated after the lock is taken, so an unconditional statement makes
+//     every pod boot for the life of the deployment briefly hold an ACCESS
+//     EXCLUSIVE lock on the table to discover there is nothing to do. Migrate
+//     runs on every start, so that is the steady state, not a one-off. With the
+//     pre-check the steady state is a catalog read that takes no table lock.
+//   - SQLite has neither the IF EXISTS clause nor DROP COLUMN at all before
+//     3.35.0, so the pre-check is what keeps an older SQLite working: it never
+//     reaches the unsupported statement unless the column exists, and a
+//     database old enough to lack DROP COLUMN support predates the column.
+//
+// The Postgres statement keeps its IF EXISTS anyway. The pre-check is not a
+// lock: two pods can boot together, both read "present", and both issue the
+// drop, and IF EXISTS is what makes the loser a no-op instead of an error that
+// crashloops it.
+func dropColumnIfPresent(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) error {
+	present, err := columnExists(ctx, dbConn, pg, table, column)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return nil
 	}
 	stmt := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, table, column)
+	if pg {
+		stmt = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN IF EXISTS %s`, table, column)
+	}
 	if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("drop column %s.%s: %w", table, column, err)
 	}
