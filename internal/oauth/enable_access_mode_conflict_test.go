@@ -696,15 +696,22 @@ func TestEnableAccess_IdentityMismatch_UnknownRevokesTheBridge(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
 	esTok := driveToPhone(t, mux)
 
+	// Fail only the identity-mismatch check (third call). The first two are
+	// handleEnableStart's pre-flight gate and startLoginFlow's re-check;
+	// those must pass so the flow reaches the mismatch branch. Assigned
+	// before /start and never rewritten: a mid-flight write races with the
+	// flow goroutine's reads (see Server.modeCheckFn).
+	var checks atomic.Int32
+	srv.modeCheckFn = func(context.Context, int64) (bool, error) {
+		if checks.Add(1) >= 3 {
+			return false, errors.New("boom")
+		}
+		return false, nil
+	}
+
 	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
 		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
 		t.Fatalf("start did not render code screen: %s", rec.Body.String())
-	}
-
-	// Pre-flight and re-check have both passed. The next hasActiveLocalAccount
-	// is the identity-mismatch branch; make it the unknown half.
-	srv.modeCheckFn = func(context.Context, int64) (bool, error) {
-		return false, errors.New("boom")
 	}
 
 	ctx := context.Background()
