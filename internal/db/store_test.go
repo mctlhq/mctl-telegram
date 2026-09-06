@@ -489,13 +489,13 @@ func TestListIdentities_PartialSessionNotCounted(t *testing.T) {
 // non-exempt identity with the same staleness reports HasSession=false.
 func TestListIdentities_ExemptIdleSurvives(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{210408407})
+	s := newTestStore(t).WithAbsoluteTTLExempt([]int64{500100101})
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour) // past the 30d idle TTL
 
-	exemptUID, _ := s.EnsureUserByTelegramID(ctx, 210408407, "exempt", "Exempt")
+	exemptUID, _ := s.EnsureUserByTelegramID(ctx, 500100101, "exempt", "Exempt")
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1,$2,$3,$4,NULL)`,
-		exemptUID, 210408407, []byte("blob"), stale,
+		exemptUID, 500100101, []byte("blob"), stale,
 	); err != nil {
 		t.Fatalf("seed exempt: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestListIdentities_ExemptIdleSurvives(t *testing.T) {
 	for _, r := range rows {
 		got[r.TelegramID] = r.HasSession
 	}
-	if !got[210408407] {
+	if !got[500100101] {
 		t.Error("exempt identity with stale last_used_at must report HasSession=true")
 	}
 	if got[999000111] {

@@ -81,7 +81,7 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
 		TelegramOIDC:        newFakeAuthenticator(),
-		AdminTelegramIDs:    map[int64]bool{210408407: true},
+		AdminTelegramIDs:    map[int64]bool{500100101: true},
 		AccessTokenTTL:      time.Hour,
 		CodeTTL:             time.Minute,
 		AllowImplicitClient: true,
@@ -128,12 +128,12 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
-		return 210408407, "Dmitry", "MashkovD", nil
+		return 500100101, "Dana", "dana_tg", nil
 	}
 }
 
 // stubLoginWrongAccount fakes a login that succeeds but resolves to a
-// different Telegram account than the widget-proven one (id 210408407). It
+// different Telegram account than the widget-proven one (id 500100101). It
 // persists session bytes first, mimicking gotd, so the test can assert the
 // identity-mismatch path revokes them.
 func stubLoginWrongAccount() LoginFunc {
@@ -224,7 +224,7 @@ func callbackViaChi(t *testing.T, mux *chi.Mux, state string) *httptest.Response
 
 // driveToPhone runs /oauth/authorize then the Telegram OIDC callback for an
 // admin with no session, and returns the "es" token from the rendered phone
-// screen. The fake authenticator resolves the admin (210408407) by default.
+// screen. The fake authenticator resolves the admin (500100101) by default.
 func driveToPhone(t *testing.T, mux *chi.Mux) string {
 	t.Helper()
 	_, challenge := pkceVerifierAndChallenge()
@@ -264,7 +264,7 @@ func TestEnableAccess_HappyPath_NoTwoFA(t *testing.T) {
 
 	// The session must now be valid, bound to the widget-resolved user.
 	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if _, err := srv.store.CheckSessionValid(ctx, uid); err != nil {
 		t.Errorf("session not valid after enable_access: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestEnableAccess_SendOptIn_SetsFlag(t *testing.T) {
 	authCodeRedirect(t, postForm(t, mux, "/oauth/telegram/enable_access/code",
 		url.Values{"es": {es}, "code": {"12345"}}))
 	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	on, err := srv.store.IsSendEnabled(ctx, uid)
 	if err != nil {
 		t.Fatalf("IsSendEnabled: %v", err)
@@ -669,7 +669,7 @@ func TestResolveScopes_AutoApprove(t *testing.T) {
 	}
 
 	// Admin is still an admin under auto-approve.
-	if _, as, err := srv.ResolveScopes(ctx, 210408407); err != nil || !has(as, "admin:users") {
+	if _, as, err := srv.ResolveScopes(ctx, 500100101); err != nil || !has(as, "admin:users") {
 		t.Errorf("admin tier broken under auto-approve: scopes=%v err=%v", as, err)
 	}
 }
@@ -823,7 +823,7 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 
 	// The wrong-account session bytes must have been revoked, not left valid.
 	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if _, err := srv.store.CheckSessionValid(ctx, uid); err == nil {
 		t.Error("wrong-account session was left valid after the mismatch")
 	}
@@ -855,8 +855,8 @@ func TestResolveScopes_Tiers(t *testing.T) {
 		c.AdminTelegramIDs[bothID] = true
 	})
 
-	// Admin tier (210408407 is in newTestServer's AdminTelegramIDs).
-	ag, as, err := srv.ResolveScopes(ctx, 210408407)
+	// Admin tier (500100101 is in newTestServer's AdminTelegramIDs).
+	ag, as, err := srv.ResolveScopes(ctx, 500100101)
 	if err != nil {
 		t.Fatalf("admin ResolveScopes: %v", err)
 	}
@@ -1107,7 +1107,7 @@ func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	adminID := int64(210408407)
+	adminID := int64(500100101)
 	adminUID, err := srv.store.EnsureUserByTelegramID(ctx, adminID, "admin", "Admin")
 	if err != nil {
 		t.Fatalf("ensure admin: %v", err)
@@ -1178,7 +1178,7 @@ func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
 		TelegramOIDC:        newFakeAuthenticator(),
-		AdminTelegramIDs:    map[int64]bool{210408407: true},
+		AdminTelegramIDs:    map[int64]bool{500100101: true},
 		AccessTokenTTL:      time.Hour,
 		CodeTTL:             time.Minute,
 		AllowImplicitClient: true,

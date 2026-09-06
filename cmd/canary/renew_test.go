@@ -319,7 +319,7 @@ func TestRun_DoesNotRenewWhileTokenIsFresh(t *testing.T) {
 	cfg := &config{
 		baseURL:     srv.URL,
 		bearerToken: jwtWithExp(time.Now().Add(29 * 24 * time.Hour)),
-		tgUserID:    "924671154",
+		tgUserID:    "500100202",
 		timeout:     5 * time.Second,
 		mcpPath:     "/mcp",
 		renew:       &renewConfig{enabled: true, threshold: defaultRenewThreshold},
@@ -347,7 +347,7 @@ func TestRun_RenewalFailureDoesNotFailTheRun(t *testing.T) {
 	cfg := &config{
 		baseURL:     srv.URL,
 		bearerToken: jwtWithExp(time.Now().Add(2 * 24 * time.Hour)),
-		tgUserID:    "924671154",
+		tgUserID:    "500100202",
 		timeout:     5 * time.Second,
 		mcpPath:     "/mcp",
 		// enabled, but no in-cluster environment exists in a unit test, so the

@@ -40,6 +40,20 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - Do not commit Telegram session data, OAuth tokens, API credentials (`TG_API_ID`/`TG_API_HASH`), or local SQLite databases.
 - Do not add logging of message bodies, phone numbers, Telegram session strings, or JWT secrets — the `internal/audit/redact.go` slog handler enforces this; new sensitive field names must be added there.
 - Treat all Telegram data as private user data.
+- Test fixtures must use synthetic Telegram identifiers — never a real account's
+  numeric id, first name or @handle, including your own. This repository is public,
+  and a fixture is committed forever. Reuse one of the personas already in the
+  tests — `Alice`, `Bob`, `Carol`, `Dana` — rather than inventing another, and
+  before picking a numeric id run `git grep <id>` to see what it already means.
+  An id may carry different labels in different places and often does: in
+  `internal/db` the same id is the exempt-account subject and is labelled
+  `Exempt` or `Op` by the test that uses it, while in `internal/oauth` the same
+  id is `Dana`/`dana_tg` almost everywhere and `Admin` at a single site. Those
+  role labels are not personas, and reusing an id for a role is
+  fine — the stores are independent and nothing couples them. What must never
+  recur is the thing this rule exists for: a real person's name, handle or
+  numeric id in a fixture. `.github/CODEOWNERS` is the one deliberate
+  exception, because the login there is review routing rather than test data.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`

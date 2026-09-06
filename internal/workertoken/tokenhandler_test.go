@@ -42,7 +42,7 @@ func decodeJWTPayload(t *testing.T, token string) string {
 // allowedReadOnlyScopes and TTL defaultWorkerTokenTTL.
 func TestNewHandler_DefaultScopesAndTTL(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
-	req := adminRequest(`{"telegram_id":924671154}`)
+	req := adminRequest(`{"telegram_id":500100202}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -53,7 +53,7 @@ func TestNewHandler_DefaultScopesAndTTL(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	payload := decodeJWTPayload(t, resp.WorkerToken)
-	if !strings.Contains(payload, `"tg_id":924671154`) {
+	if !strings.Contains(payload, `"tg_id":500100202`) {
 		t.Fatalf("payload missing target tg_id: %s", payload)
 	}
 	if !strings.Contains(payload, `"aud":"mcp-worker-ro"`) {
@@ -207,7 +207,7 @@ func TestNewHandler_ExplicitSubsetScopeHonored(t *testing.T) {
 // worker token the moment an operator sets that config.
 func TestNewHandler_IncludesConfiguredMCPAudience(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "https://mcp.example.com")
-	req := adminRequest(`{"telegram_id":924671154}`)
+	req := adminRequest(`{"telegram_id":500100202}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -227,7 +227,7 @@ func TestNewHandler_IncludesConfiguredMCPAudience(t *testing.T) {
 // decodeStrict's documented contract.
 func TestNewHandler_RejectsTrailingBodyData(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
-	req := adminRequest(`{"telegram_id":924671154}{"telegram_id":1}`)
+	req := adminRequest(`{"telegram_id":500100202}{"telegram_id":1}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -240,7 +240,7 @@ func TestNewHandler_RejectsTrailingBodyData(t *testing.T) {
 // with aud containing "mcp-worker-bridge".
 func TestNewHandler_LocalBridgePurposeDefaultScopes(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
-	req := adminRequest(`{"telegram_id":924671154,"purpose":"local-bridge"}`)
+	req := adminRequest(`{"telegram_id":500100202,"purpose":"local-bridge"}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
@@ -314,7 +314,7 @@ func TestNewHandler_RejectsUnknownPurpose(t *testing.T) {
 // "mcp-worker-ro" — regression guard for backward compatibility.
 func TestNewHandler_NoPurposeUnchanged(t *testing.T) {
 	h := NewHandler([]byte(testWorkerHMACSecret), testWorkerIssuerURL, "")
-	req := adminRequest(`{"telegram_id":924671154}`)
+	req := adminRequest(`{"telegram_id":500100202}`)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusOK {
