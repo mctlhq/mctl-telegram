@@ -42,8 +42,11 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - Treat all Telegram data as private user data.
 - Test fixtures must use synthetic Telegram identifiers — never a real account's
   numeric id, first name or @handle, including your own. This repository is public,
-  and a fixture is committed forever. Reuse an existing synthetic persona rather than
-  inventing one, and check the value is not already in use for a different identity.
+  and a fixture is committed forever. Reuse one of the personas already in the
+  tests — `Alice`, `Bob`, `Carol`, `Dana` — rather than inventing another, and
+  before picking a numeric id run `git grep <id>` to check it is not already bound
+  to a different identity. `.github/CODEOWNERS` is the one deliberate exception:
+  the login there is review routing, not test data.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`

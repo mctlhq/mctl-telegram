@@ -34,6 +34,13 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
 - Do not commit Telegram session data, OAuth tokens, API credentials (`TG_API_ID`/`TG_API_HASH`), or local SQLite databases.
 - Do not add logging of message bodies, phone numbers, Telegram session strings, or JWT secrets — the `internal/audit/redact.go` slog handler enforces this; new sensitive field names must be added there.
 - Treat all Telegram data as private user data.
+- Test fixtures must use synthetic Telegram identifiers — never a real account's
+  numeric id, first name or @handle, including your own. This repository is public,
+  and a fixture is committed forever. Reuse one of the personas already in the
+  tests — `Alice`, `Bob`, `Carol`, `Dana` — rather than inventing another, and
+  before picking a numeric id run `git grep <id>` to check it is not already bound
+  to a different identity. `.github/CODEOWNERS` is the one deliberate exception:
+  the login there is review routing, not test data.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`
