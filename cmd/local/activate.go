@@ -69,29 +69,46 @@ type activatePollResponse struct {
 var errActivationDenied = errors.New("activation denied")
 var errActivationTimedOut = errors.New("activation timed out")
 
+// resolveActivateTelegramID picks the Telegram id activate should send.
+// A positive --telegram-id flag always wins. Otherwise the id persisted by
+// login in config.json is used. Zero/negative values are missing, not ids.
+func resolveActivateTelegramID(flagID, cfgID int64) (id int64, fromLogin bool, err error) {
+	if flagID > 0 {
+		return flagID, false, nil
+	}
+	if cfgID > 0 {
+		return cfgID, true, nil
+	}
+	return 0, false, errors.New("--telegram-id is required (or run `mctl-telegram-local login` first so it can be read from config)")
+}
+
 func runActivate(args []string) {
 	fs := flag.NewFlagSet("activate", flag.ExitOnError)
-	telegramID := fs.Int64("telegram-id", 0, "Your Telegram user id (numeric)")
+	telegramID := fs.Int64("telegram-id", 0, "Your Telegram user id (numeric; default: the id saved by login)")
 	server := fs.String("server", "", "Override the server URL (default: from config.json)")
 	label := fs.String("label", "", "Human-readable label for this device (default: hostname)")
 	if err := fs.Parse(args); err != nil {
 		die(err)
-	}
-	if *telegramID <= 0 {
-		fmt.Fprintln(os.Stderr, "--telegram-id is required (your numeric Telegram user id)")
-		os.Exit(2)
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
 		die(err)
 	}
+	id, fromLogin, err := resolveActivateTelegramID(*telegramID, cfg.TelegramID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if fromLogin {
+		fmt.Printf("Using Telegram id %d from local login (override with --telegram-id).\n", id)
+	}
 	srv := cfg.Server
 	if *server != "" {
 		srv = *server
 	}
 	if srv == "" {
-		die(errors.New("no server configured -- pass --server or run `mctl-telegram-local connect --server <url> --token <t>` first"))
+		die(errors.New("no server configured -- pass --server https://tg.mctl.ai (or run `mctl-telegram-local connect --server <url> --token <t>` first)"))
 	}
 
 	rec, priv, pub, err := loadOrCreateDeviceIdentity()
@@ -105,7 +122,7 @@ func runActivate(args []string) {
 		}
 	}
 
-	deviceID, err := runActivateFlow(context.Background(), os.Stdout, srv, *telegramID, rec.DeviceRegistrationKey, deviceLabel, pub)
+	deviceID, err := runActivateFlow(context.Background(), os.Stdout, srv, id, rec.DeviceRegistrationKey, deviceLabel, pub)
 	switch {
 	case err == nil:
 		fmt.Printf("\nDevice activated (device_id=%s).\n", deviceID)

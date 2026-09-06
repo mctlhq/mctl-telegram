@@ -1,0 +1,365 @@
+package telegram
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type modeOverride struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (m modeOverride) Mode() os.FileMode { return m.mode }
+
+func TestReadAllowlistedFile_ReadsInsideDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.ogg")
+	if err := os.WriteFile(path, []byte("hello-media"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadAllowlistedFile(path, dir, 1024)
+	if err != nil {
+		t.Fatalf("ReadAllowlistedFile: %v", err)
+	}
+	if string(got) != "hello-media" {
+		t.Fatalf("got %q", got)
+	}
+	got, err = ReadAllowlistedFile("note.ogg", dir, 1024)
+	if err != nil {
+		t.Fatalf("relative path: %v", err)
+	}
+	if string(got) != "hello-media" {
+		t.Fatalf("relative got %q", got)
+	}
+}
+
+func TestReadAllowlistedFile_AcceptsAbsPathWhenAllowDirIsSymlink(t *testing.T) {
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "note.bin"), []byte("via-symlink-allow"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	allowLink := filepath.Join(t.TempDir(), "media")
+	if err := os.Symlink(realDir, allowLink); err != nil {
+		t.Fatalf("symlink allow dir: %v", err)
+	}
+	allowAbs, err := filepath.Abs(allowLink)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	allowReal, err := filepath.EvalSymlinks(allowAbs)
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if allowAbs == allowReal {
+		t.Fatal("test setup must have allowAbs != allowReal")
+	}
+	// Agent-style absolute path under the unresolved allow-dir spelling.
+	candidate := filepath.Join(allowAbs, "note.bin")
+	got, err := ReadAllowlistedFile(candidate, allowLink, 1024)
+	if err != nil {
+		t.Fatalf("abs path through symlink allow dir: %v", err)
+	}
+	if string(got) != "via-symlink-allow" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReadAllowlistedFile_RejectsEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "..", "escape.txt")
+	if _, err := ReadAllowlistedFile(outside, dir, 1024); err == nil {
+		t.Fatal("path escape must be refused")
+	}
+	if _, err := ReadAllowlistedFile("/etc/passwd", dir, 1024); err == nil {
+		t.Fatal("absolute path outside allowlist must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_RejectsOversize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.bin")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := ReadAllowlistedFile(path, dir, 3); err == nil {
+		t.Fatal("oversize file must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_ExactCapIsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "exact.bin")
+	payload := []byte("12345")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadAllowlistedFile(path, dir, int64(len(payload)))
+	if err != nil {
+		t.Fatalf("exact-cap file must be accepted: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("got %q, want full payload", got)
+	}
+}
+
+func TestReadAllowlistedFile_UncappedReadsAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.bin")
+	if err := os.WriteFile(path, []byte("hello-media"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadAllowlistedFile(path, dir, 0)
+	if err != nil {
+		t.Fatalf("uncapped read: %v", err)
+	}
+	if string(got) != "hello-media" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReadAllowlistedFile_RejectsSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.bin")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link.bin")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := ReadAllowlistedFile(link, dir, 1024); err == nil {
+		t.Fatal("symlink pointing outside the allowlist must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_EmptyAllowDir(t *testing.T) {
+	if _, err := ReadAllowlistedFile("x", "", 10); err == nil {
+		t.Fatal("empty allowlist must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_FollowsInternalSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.bin")
+	if err := os.WriteFile(target, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(dir, "link.bin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	got, err := ReadAllowlistedFile(link, dir, 1024)
+	if err != nil {
+		t.Fatalf("internal symlink must resolve and read: %v", err)
+	}
+	if string(got) != "inside" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReadAllowlistedFile_RejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := ReadAllowlistedFile(dir, dir, 1024); err == nil {
+		t.Fatal("directory must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_RejectsLstatSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.bin")
+	if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	orig := lstatAllowlisted
+	t.Cleanup(func() { lstatAllowlisted = orig })
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return nil, err
+		}
+		return modeOverride{FileInfo: info, mode: os.ModeSymlink | 0o777}, nil
+	}
+	if _, err := ReadAllowlistedFile(path, dir, 1024); err == nil {
+		t.Fatal("Lstat reporting a symlink must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_RejectsOpenedInodeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.bin")
+	if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	other := filepath.Join(dir, "other.bin")
+	if err := os.WriteFile(other, []byte("other"), 0o600); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	orig := openAllowlisted
+	t.Cleanup(func() { openAllowlisted = orig })
+	openAllowlisted = func(string) (*os.File, error) {
+		return os.Open(other)
+	}
+	if _, err := ReadAllowlistedFile(path, dir, 1024); err == nil {
+		t.Fatal("SameFile mismatch must be refused")
+	}
+}
+
+func TestReadAllowlistedFile_RejectsSwapToSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.bin")
+	if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.bin")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	orig := lstatAllowlisted
+	t.Cleanup(func() { lstatAllowlisted = orig })
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		if err := os.Symlink(outside, p); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		return info, nil
+	}
+	got, err := ReadAllowlistedFile(path, dir, 1024)
+	if err == nil {
+		t.Fatalf("symlink swap must be refused, got %q", got)
+	}
+	if string(got) == "secret" {
+		t.Fatal("must not return the swapped target")
+	}
+}
+
+func TestReadAllowlistedFile_RejectsParentDirSwapThenRestore(t *testing.T) {
+	allow := t.TempDir()
+	sub := filepath.Join(allow, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(sub, "note.bin")
+	if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	outside := t.TempDir()
+	outsideSub := filepath.Join(outside, "sub")
+	if err := os.Mkdir(outsideSub, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideSub, "note.bin"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	origLstat := lstatAllowlisted
+	origOpen := openAllowlisted
+	t.Cleanup(func() {
+		lstatAllowlisted = origLstat
+		openAllowlisted = origOpen
+	})
+
+	// After the initial allowlist resolve, swap the parent directory to a
+	// symlink pointing at the outside tree so Lstat and Open both land on
+	// the same outside inode (SameFile passes). Restore the original tree
+	// after open so a string-path EvalSymlinks would look safe again while
+	// the fd still points outside. fd-to-path must refuse that.
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		if err := os.RemoveAll(sub); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(outsideSub, sub); err != nil {
+			return nil, err
+		}
+		return os.Lstat(p)
+	}
+	openAllowlisted = func(p string) (*os.File, error) {
+		f, err := openNoFollow(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Remove(sub); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if err := os.WriteFile(path, []byte("inside"), 0o600); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return f, nil
+	}
+
+	got, err := ReadAllowlistedFile(path, allow, 1024)
+	if err == nil {
+		t.Fatalf("parent-dir symlink swap must be refused, got %q", got)
+	}
+	if string(got) == "secret" {
+		t.Fatal("must not return the swapped outside target")
+	}
+}
+
+func TestReadAllowlistedFile_UncappedGrowingFileReadsAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grow.bin")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	grown := []byte("1234567890-grown")
+	orig := lstatAllowlisted
+	t.Cleanup(func() { lstatAllowlisted = orig })
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(p, grown, 0o600); err != nil {
+			t.Fatalf("grow: %v", err)
+		}
+		return info, nil
+	}
+	got, err := ReadAllowlistedFile(path, dir, 0)
+	if err != nil {
+		t.Fatalf("uncapped growing file: %v", err)
+	}
+	if string(got) != string(grown) {
+		t.Fatalf("got %q, want full grown payload (not stat-size truncated)", got)
+	}
+}
+
+func TestReadAllowlistedFile_CappedGrowingFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grow.bin")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	orig := lstatAllowlisted
+	t.Cleanup(func() { lstatAllowlisted = orig })
+	lstatAllowlisted = func(p string) (os.FileInfo, error) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(p, []byte("1234567890"), 0o600); err != nil {
+			t.Fatalf("grow: %v", err)
+		}
+		return info, nil
+	}
+	if _, err := ReadAllowlistedFile(path, dir, 7); err == nil {
+		t.Fatal("growing past the cap must be refused")
+	} else if !strings.Contains(err.Error(), "exceeding") {
+		t.Fatalf("got %v, want an oversize error", err)
+	}
+}

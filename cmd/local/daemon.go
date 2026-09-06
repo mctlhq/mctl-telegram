@@ -12,6 +12,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -663,14 +665,16 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 
 	case "send_media":
 		var args struct {
-			Peer       string `json:"peer"`
-			MediaType  string `json:"media_type"`
-			FileURL    string `json:"file_url"`
-			FileBase64 string `json:"file_base64"`
-			Caption    string `json:"caption"`
-			FileName   string `json:"file_name"`
-			Mode       string `json:"mode"`
-			DryReason  string `json:"dry_reason"`
+			Peer            string `json:"peer"`
+			MediaType       string `json:"media_type"`
+			FileURL         string `json:"file_url"`
+			FileBase64      string `json:"file_base64"`
+			FilePath        string `json:"file_path"`
+			Caption         string `json:"caption"`
+			FileName        string `json:"file_name"`
+			Mode            string `json:"mode"`
+			DryReason       string `json:"dry_reason"`
+			DurationSeconds int    `json:"duration_seconds"`
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: bad args: %v", err))
@@ -705,12 +709,20 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 				if err != nil {
 					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_url: %v", err))
 				}
+			case args.FilePath != "":
+				var err error
+				var name string
+				data, name, mimeType, err = loadSendMediaFilePath(args.FilePath, args.FileName)
+				if err != nil {
+					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path: %v", err))
+				}
+				args.FileName = name
 			}
 		}
 		var sendResult *tg.SendMediaResult
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			sendResult, err = tg.SendMedia(ctx, c, args.Peer, args.MediaType, data, args.FileName, mimeType, args.Caption, realSend, dryReason, nil, 0)
+			sendResult, err = tg.SendMedia(ctx, c, args.Peer, args.MediaType, data, args.FileName, mimeType, args.Caption, realSend, dryReason, nil, 0, args.DurationSeconds)
 			return err
 		})
 		if dispErr == nil {
@@ -842,6 +854,38 @@ func envArgs(env bridge.Envelope) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	return env.Args
+}
+
+// loadSendMediaFilePath reads filePath from the media allowlist and fills
+// an empty fileName from the path base. Isolated so the file_path branch
+// can be tested without a ClientPool.
+func loadSendMediaFilePath(filePath, fileName string) ([]byte, string, string, error) {
+	data, err := tg.ReadAllowlistedFile(filePath, mediaAllowDir(), tg.DefaultMediaUploadMaxBytes)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if fileName == "" {
+		fileName = filepath.Base(filePath)
+	}
+	return data, fileName, http.DetectContentType(data[:min(512, len(data))]), nil
+}
+
+// mediaAllowDir is the only directory the daemon will read for send_media
+// file_path. Override with MCTL_MEDIA_DIR; default is
+// ~/.config/mctl-telegram-local/media. The directory is created on first use
+// so a relative file_path has somewhere to land.
+func mediaAllowDir() string {
+	if d := strings.TrimSpace(os.Getenv("MCTL_MEDIA_DIR")); d != "" {
+		_ = os.MkdirAll(d, 0o700)
+		return d
+	}
+	dir, err := configDirPath()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "media")
+	_ = os.MkdirAll(path, 0o700)
+	return path
 }
 
 // bridgeWSURL converts an https:// server URL to a wss:// websocket URL.

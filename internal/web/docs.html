@@ -19,6 +19,15 @@
     <p class="lead">
       Tool catalogue, scopes, storage schema, and release checklist for the mctl-telegram MCP connector.
     </p>
+    <p class="muted">
+      On this page:
+      <a href="#setup">connector</a> ·
+      <a href="#tools">tools</a> ·
+      <a href="#scopes">scopes</a> ·
+      <a href="#storage">storage</a> ·
+      <a href="#controls">controls</a> ·
+      <a href="#local-bridge">Local Bridge</a>
+    </p>
   </section>
 
   <!-- ============ 01 Connector setup ============ -->
@@ -119,6 +128,18 @@
           <td><span class="pill pill-write">write</span></td>
           <td>any authenticated identity</td>
           <td>Hard-deletes the encrypted session blob.</td>
+        </tr>
+        <tr>
+          <td><code>set_send_consent</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>account:manage</code></td>
+          <td>Owner-only. Enable or disable real sends on <em>your</em> account. No <code>telegram_id</code> argument. This is how Local Bridge sending is turned on; see <a href="/docs/local-bridge/owner">owner controls</a>.</td>
+        </tr>
+        <tr>
+          <td><code>revoke_local_bridge_device</code></td>
+          <td><span class="pill pill-write">write</span></td>
+          <td><code>account:manage</code></td>
+          <td>Owner-only. Revoke one of your Local Bridge devices, denylist its credential lineage, and evict a live daemon connection.</td>
         </tr>
         <tr>
           <td><code>list_telegram_identities</code></td>
@@ -261,13 +282,20 @@ curl -s -X POST {{.MCPURL}} \
       Local Bridge is an optional mode in which the Telegram session lives on a machine you
       control and this server forwards each tool call to a daemon running there, instead of
       opening Telegram itself. It costs you a machine that stays on, so it is not part of the
-      standard install path — but it is the only mode in which this server never holds a
-      usable copy of your session, and turning it on is self-service: the CLI walks you
-      through activation with no operator step. Migrating an existing hosted account into
-      this mode still uses <code>set_account_mode</code>.
-      The <a href="/docs/local-bridge">setup guide</a> covers installation, the tools that
-      are unavailable in this mode, and how to roll back.
+      standard install path — but a new account can be provisioned so this server never holds
+      a session at all, and turning it on is self-service: <code>init</code>,
+      <code>login</code>, <code>activate</code>, <code>daemon</code>. Migrating an existing
+      hosted account into this mode still uses <code>set_account_mode</code> (support, not
+      onboarding).
     </p>
+    <ul class="ctrl">
+      <li><strong>Overview:</strong> <a href="/docs/local-bridge">/docs/local-bridge</a> — when to use it and what it changes.</li>
+      <li><strong>Quick start:</strong> <a href="/docs/local-bridge/quickstart">/docs/local-bridge/quickstart</a> — install and the four commands.</li>
+      <li><strong>Owner:</strong> <a href="/docs/local-bridge/owner">/docs/local-bridge/owner</a> — <code>set_send_consent</code>, manage page, revoke a device.</li>
+      <li><strong>How it works:</strong> <a href="/docs/local-bridge/how-it-works">/docs/local-bridge/how-it-works</a> — activation, proof of possession, read-only first token.</li>
+      <li><strong>Support:</strong> <a href="/docs/local-bridge/support">/docs/local-bridge/support</a> — migration, troubleshooting, emergency. Not onboarding.</li>
+      <li><strong>Legacy:</strong> <a href="/docs/local-bridge/legacy">/docs/local-bridge/legacy</a> — <code>connect --token</code>.</li>
+    </ul>
   </section>
 
   {{template "ui_footer" .}}

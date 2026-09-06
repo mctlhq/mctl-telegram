@@ -136,8 +136,10 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 
 ### Blocking a user, in the order a user hits them
 
-1. **No user-facing documentation.** Closed by #444: `docs/local-bridge.md`
-   is the guide, and the landing copy links it.
+1. **No user-facing documentation.** Closed by #444 / later split: the
+   public guide is `docs/local-bridge.md` plus `docs/local-bridge/*.md`,
+   served at `/docs/local-bridge` and its subpages. The landing copy
+   links the overview and the quick start.
 2. **No released binary.** Closed by #448: every release now carries
    builds for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
    `linux/arm64` and `windows/amd64` plus `SHA256SUMS.txt`. They are

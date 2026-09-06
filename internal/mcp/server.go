@@ -237,6 +237,10 @@ func (s *Server) HTTPHandler() http.Handler {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolGetMyIdentity()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolListIdentities()
 		s.addTool(srv, t, h)
 	}

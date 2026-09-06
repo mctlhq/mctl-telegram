@@ -59,6 +59,10 @@ var sensitiveKeys = map[string]struct{}{
 	"device_registration_key": {},
 	"worker_token":            {},
 	"bridge_token":            {},
+	// send_media byte sources. file_base64 is file contents; file_path is a
+	// local filesystem path. Neither may appear in slog.
+	"file_base64": {},
+	"file_path":   {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

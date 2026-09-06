@@ -78,6 +78,8 @@ func TestRedactAttr_LocalBridgeSensitiveKeys(t *testing.T) {
 		"device_registration_key",
 		"worker_token",
 		"bridge_token",
+		"file_base64",
+		"file_path",
 		// Case-insensitivity check, matching the package's stated matching
 		// rule for every other entry.
 		"Nonce",

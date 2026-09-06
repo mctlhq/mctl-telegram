@@ -51,11 +51,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 // localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
 type localConfig struct {
-	APIID    int    `json:"api_id"`
-	APIHash  string `json:"api_hash"`
-	Server   string `json:"server"`
-	KeySalt  string `json:"key_salt"`  // base64-encoded 16-byte Argon2id salt
-	KeyCheck string `json:"key_check"` // HMAC-SHA256(key, "mctl-telegram-local-check")[:16], base64
+	APIID      int    `json:"api_id"`
+	APIHash    string `json:"api_hash"`
+	Server     string `json:"server"`
+	KeySalt    string `json:"key_salt"`  // base64-encoded 16-byte Argon2id salt
+	KeyCheck   string `json:"key_check"` // HMAC-SHA256(key, "mctl-telegram-local-check")[:16], base64
+	TelegramID int64  `json:"telegram_id,omitempty"`
 }
 
 // bridgeTokenFile is the persisted JSON at ~/.config/mctl-telegram-local/bridge_token.json.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -198,5 +199,85 @@ func TestToolSendMedia_ValidationNeverFetchesURL(t *testing.T) {
 	}
 	if fetched {
 		t.Error("a validation failure must not fetch file_url")
+	}
+}
+
+func TestToolSendMedia_FilePathAndBase64Rejected(t *testing.T) {
+	srv := sendMediaTestServer(t, false)
+	res := callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+		"peer":        "@x",
+		"media_type":  "photo",
+		"file_base64": "aGk=",
+		"file_path":   "/tmp/x.jpg",
+	})
+	if !res.IsError {
+		t.Fatal("expected an error when file_path and file_base64 are both set")
+	}
+}
+
+func TestToolSendMedia_GateBlockedNeverReadsFilePath(t *testing.T) {
+	srv := sendMediaTestServer(t, false)
+	out := parseSendMediaResult(t, callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+		"peer":       "@x",
+		"media_type": "document",
+		"file_path":  "/this/path/must/not/be/stat'd",
+	}))
+	if out["sent"] != false {
+		t.Errorf("sent = %v, want false", out["sent"])
+	}
+	if out["mode"] != "draft" {
+		t.Errorf("mode = %v, want draft", out["mode"])
+	}
+}
+
+func TestToolSendMedia_HostedFilePathRefused(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedHostedAccount(t, store, 4242, true)
+	srv := &Server{AllowSend: true, Store: store}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+	res := callSendMedia(t, srv, id, map[string]any{
+		"peer":       "@x",
+		"media_type": "document",
+		"file_path":  "/etc/passwd",
+	})
+	if !res.IsError {
+		t.Fatal("hosted file_path must be refused")
+	}
+	if !strings.Contains(contentText(res), "Local Bridge") {
+		t.Fatalf("error = %q, want Local Bridge boundary", contentText(res))
+	}
+}
+
+func TestToolSendMedia_VoiceTypeAcceptedOnDraft(t *testing.T) {
+	srv := sendMediaTestServer(t, false)
+	out := parseSendMediaResult(t, callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+		"peer":             "@x",
+		"media_type":       "voice",
+		"file_base64":      "T2dnUw==",
+		"duration_seconds": 4,
+	}))
+	if out["media_type"] != "voice" {
+		t.Errorf("media_type = %v, want voice", out["media_type"])
+	}
+	if out["sent"] != false {
+		t.Errorf("sent = %v, want false", out["sent"])
+	}
+}
+
+func TestToolSendMedia_DurationSecondsRejected(t *testing.T) {
+	srv := sendMediaTestServer(t, false)
+	for _, d := range []any{-5, 86401} {
+		res := callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+			"peer":             "@x",
+			"media_type":       "voice",
+			"file_base64":      "T2dnUw==",
+			"duration_seconds": d,
+		})
+		if !res.IsError {
+			t.Fatalf("duration_seconds=%v must be rejected", d)
+		}
+		if !strings.Contains(contentText(res), "duration_seconds must be between 0 and 86400") {
+			t.Fatalf("duration_seconds=%v: got %q", d, contentText(res))
+		}
 	}
 }

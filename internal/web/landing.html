@@ -232,6 +232,7 @@
     <p class="muted">
       <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
       <a href="mailto:support@mctl.ai">support@mctl.ai</a>
+      · Want the session on your own machine? <a href="/docs/local-bridge">Local Bridge</a>
     </p>
   </section>
 
@@ -364,12 +365,31 @@
         <a href="/privacy">Data retention</a>
         <a href="/docs#controls">Developer reference</a>
       </div>
-      <p style="margin-top: 16px; font-size: 13.5px;">
-        <strong>Optional:</strong> Local Bridge mode (beta, self-hosted) keeps the session on your own machine instead of this server.
-        It is not required for the ChatGPT App, and it is self-service — run the CLI to activate it yourself. Migrating an
-        existing hosted account into this mode still uses <code>set_account_mode</code>.
-        See the <a href="/docs/local-bridge">setup guide</a>.
+    </div>
+  </section>
+
+  <!-- ============ Local Bridge ============ -->
+  <section id="local-bridge">
+    <div class="section-head">
+      <h2>Keep the session on your machine</h2>
+    </div>
+    <div class="trust-card">
+      <p>
+        <strong>Local Bridge</strong> (beta) is the self-service path where the Telegram session
+        stays on a machine you control and tg.mctl.ai acts only as a relay. It is not the ChatGPT
+        App install path. You need a machine that stays on. Activation is self-service.
       </p>
+      <ol class="steps">
+        <li><code>init</code>, then <code>login --phone +…</code></li>
+        <li><code>activate --server https://tg.mctl.ai</code> and approve the device in a browser. After <code>login</code>, <code>--telegram-id</code> is optional.</li>
+        <li><code>daemon</code> — first credential is read-only. Turn sending on yourself with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}.</li>
+      </ol>
+      <div class="trust-links">
+        <a href="/docs/local-bridge/quickstart">Quick start</a>
+        <a href="/docs/local-bridge">Overview</a>
+        <a href="/docs/local-bridge/owner">Owner controls</a>
+        <a href="/docs/local-bridge/support">Support and recovery</a>
+      </div>
     </div>
   </section>
 
@@ -389,7 +409,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
+        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag (you turn this on with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}) and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does ChatGPT see?</dt>
@@ -409,7 +429,7 @@
       </div>
       <div class="faq-item">
         <dt>What is the Local Bridge?</dt>
-        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path, and it needs a machine that stays on, but turning it on is self-service &mdash; run the CLI to activate it yourself. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code>. The <a href="/docs/local-bridge">setup guide</a> covers what works today and what does not.</dd>
+        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path, and it needs a machine that stays on, but turning it on is self-service: <code>init</code>, <code>login</code>, <code>activate</code>, <code>daemon</code>. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code> (an operator step, not onboarding). Start at the <a href="/docs/local-bridge/quickstart">quick start</a>.</dd>
       </div>
     </dl>
   </section>
