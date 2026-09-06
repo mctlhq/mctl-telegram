@@ -114,18 +114,14 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		return err
 	}
 	// Local Bridge scaffolding (M4). `mode` distinguishes the legacy
-	// server-side MTProto path (hosted) from the upcoming Local Bridge
-	// path where MTProto runs on the user's machine and tg.mctl.ai is a
-	// relay only; `bridge_token_hash` is the SHA-256 of the most-recent
-	// short-lived JWT a daemon has used to register, used to drop stale
-	// connections when a new token rotates in. Defaults to 'hosted' so
-	// existing rows keep their behaviour.
+	// server-side MTProto path (hosted) from the Local Bridge path where
+	// MTProto runs on the user's machine and tg.mctl.ai is a relay only.
+	// Defaults to 'hosted' so existing rows keep their behaviour.
+	//
+	// A sibling `bridge_token_hash` column was declared alongside it and is
+	// dropped below; see dropLegacyColumns.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "mode",
 		"TEXT NOT NULL DEFAULT 'hosted'", "TEXT NOT NULL DEFAULT 'hosted'"); err != nil {
-		return err
-	}
-	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash",
-		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
 	// call_path column on audit_logs (M4). Distinguishes relay-forwarded
@@ -298,6 +294,69 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	return dropLegacyColumns(ctx, dbConn, pg)
+}
+
+// dropLegacyColumns removes columns that were declared for a design that was
+// then implemented some other way. Runs after the additive pass, so a fresh
+// database creates its tables, adds nothing, and drops nothing.
+//
+// telegram_accounts.bridge_token_hash (M4): declared as the SHA-256 of the
+// most recent daemon registration JWT, to "drop stale connections when a new
+// token rotates in", and never read or written by any code path. Both halves
+// of its job were answered elsewhere:
+//
+//   - Evicting the stale connection is Hub.Register's (internal/bridge/hub.go),
+//     which replaces h.conn[userID] and retires the predecessor on every
+//     registration, whatever token it arrived with. A stored hash would not
+//     change that decision.
+//   - Tying a registered daemon to an issued credential is
+//     local_bridge_devices.current_jti / credential_issued_at, claimed
+//     atomically at first issuance and denylisted wholesale by
+//     revoke_local_bridge_device. That is per device, which is the granularity
+//     the question actually has; bridge_token_hash sits on telegram_accounts
+//     and so cannot represent a user's second daemon at all.
+//
+// Wiring it up now would mean a coarser second source of truth for a question
+// already answered, so it goes instead. Dropping rather than leaving it is the
+// point: DESIGN.md described it as load-bearing, which is a live trap for the
+// next reader.
+func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
+	return dropColumnIfPresent(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash")
+}
+
+// dropColumnIfPresent runs an ALTER TABLE ... DROP COLUMN that is a no-op when
+// the column is already gone -- the mirror of addColumnIfMissing, and it has
+// to be, because both dialects reach that no-op differently.
+//
+// Postgres has DROP COLUMN IF EXISTS. SQLite has neither the IF EXISTS clause
+// nor DROP COLUMN before 3.35.0, so the column is looked up in
+// pragma_table_info first and the statement is issued only when it is really
+// there. That pre-check is also what keeps an older SQLite working: it never
+// reaches the unsupported statement unless the column exists, and a database
+// old enough to be missing DROP COLUMN support predates the column itself.
+func dropColumnIfPresent(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) error {
+	if pg {
+		stmt := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN IF EXISTS %s`, table, column)
+		if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("drop column %s.%s: %w", table, column, err)
+		}
+		return nil
+	}
+	var count int
+	if err := dbConn.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, column,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	if count == 0 {
+		return nil
+	}
+	stmt := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, table, column)
+	if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("drop column %s.%s: %w", table, column, err)
+	}
 	return nil
 }
 
@@ -356,8 +415,7 @@ func sqliteSchema() []string {
 			revoked_at DATETIME,
 			last_used_at DATETIME,
 			expires_at DATETIME,
-			mode TEXT NOT NULL DEFAULT 'hosted',
-			bridge_token_hash BLOB
+			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
@@ -476,8 +534,7 @@ func pgSchema() []string {
 			revoked_at TIMESTAMPTZ,
 			last_used_at TIMESTAMPTZ,
 			expires_at TIMESTAMPTZ,
-			mode TEXT NOT NULL DEFAULT 'hosted',
-			bridge_token_hash BYTEA
+			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
