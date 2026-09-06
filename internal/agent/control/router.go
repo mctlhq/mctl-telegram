@@ -188,7 +188,11 @@ func (r *Router) handleConversations(ctx context.Context, userID int64, arg stri
 	}
 	if len(convs) == 0 {
 		if filter != "" {
-			msg := "No conversations matched " + filter + "."
+			// Generic copy — do not reflect the raw filter. Replies are
+			// plain text today (SendToSelf sets no Entities), but echoing
+			// owner input has no benefit and would break if a future send
+			// path parsed Markdown/HTML.
+			msg := "No conversations matched your search."
 			if scanCapped {
 				msg += conversationScanCapNotice()
 			}
@@ -202,7 +206,13 @@ func (r *Router) handleConversations(ctx context.Context, userID int64, arg stri
 		fmt.Fprintf(&sb, "Conv #%d — %s (%s)\n", c.ID, orDash(c.PeerDisplayName), c.State)
 	}
 	if countTruncated {
-		fmt.Fprintf(&sb, "\nShowing the %d most recently updated. Pass a count (e.g. /mctl conversations 50) or a filter (e.g. /mctl conversations @handle).", len(convs))
+		if filter == "" {
+			fmt.Fprintf(&sb, "\nShowing the %d most recently updated. Pass a count (e.g. /mctl conversations 50) or a filter (e.g. /mctl conversations @handle).", len(convs))
+		} else {
+			// parseConversationsArg accepts count XOR filter, so "Pass a
+			// count" is an impossible next step on a filtered listing.
+			fmt.Fprintf(&sb, "\nShowing the %d most recently updated matches.", len(convs))
+		}
 	}
 	if scanCapped {
 		sb.WriteString(conversationScanCapNotice())
