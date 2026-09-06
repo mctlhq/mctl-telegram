@@ -24,6 +24,15 @@ import (
 // SaveSession / LoadSession calls the login goroutine makes do not nil-panic.
 func newEnableTestStore(t *testing.T) *db.Store {
 	t.Helper()
+	st, _ := newEnableTestStoreDSN(t)
+	return st
+}
+
+// newEnableTestStoreDSN is newEnableTestStore plus the file DSN, so a test
+// can open a second connection against the same database (SQLite's store
+// pool is MaxOpenConns=1, which cannot interleave a held write with finishEnable).
+func newEnableTestStoreDSN(t *testing.T) (*db.Store, string) {
+	t.Helper()
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "enable.db") + "?_pragma=busy_timeout(5000)"
 	conn, err := db.Open(ctx, dsn, 0, 0)
@@ -38,7 +47,7 @@ func newEnableTestStore(t *testing.T) *db.Store {
 	if err != nil {
 		t.Fatalf("crypto: %v", err)
 	}
-	return db.NewStore(conn, crypt)
+	return db.NewStore(conn, crypt), dsn
 }
 
 // seedSession inserts a fresh, valid telegram_accounts row for tgID so the
@@ -1143,7 +1152,7 @@ func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
-	// No users row: SetAccessTier fails. The auth-code redirect must still happen.
+	// No users row: GrantClientTierIfUnset fails. The auth-code redirect must still happen.
 	srv.finishEnable(rec, req, &enableSession{
 		uid:  1,
 		tgID: 999001,
@@ -1154,6 +1163,92 @@ func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
 		},
 	}, "es-missing")
 	if rec.Code != http.StatusFound && rec.Code != http.StatusOK {
-		t.Fatalf("finishEnable status = %d, want a successful handoff despite SetAccessTier failure", rec.Code)
+		t.Fatalf("finishEnable status = %d, want a successful handoff despite GrantClientTierIfUnset failure", rec.Code)
+	}
+}
+
+// TestFinishEnable_ConcurrentNoneIsNotOverwritten pins the TOCTOU Agy flagged:
+// the users row exists with a NULL tier before finishEnable runs, and an
+// admin can SET access_tier='none' while the grant is in flight. The old
+// GetAccessTier-then-SetAccessTier path would read unset, wait out the
+// admin write, then overwrite the ban. GrantClientTierIfUnset must not.
+func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
+	st, dsn := newEnableTestStoreDSN(t)
+	cfg := Config{
+		Issuer:              testIssuer,
+		JWTSecret:           testJWTSecret,
+		TelegramOIDC:        newFakeAuthenticator(),
+		AdminTelegramIDs:    map[int64]bool{210408407: true},
+		AccessTokenTTL:      time.Hour,
+		CodeTTL:             time.Minute,
+		AllowImplicitClient: true,
+		TGAPIID:             99999,
+		TGAPIHash:           "test-api-hash",
+		AutoApproveClients:  true,
+	}
+	srv, err := New(context.Background(), cfg, st)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	const tgID int64 = 424244
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "racer", "Racer")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	// Second connection: hold an uncommitted none so finishEnable's grant
+	// blocks on the write lock, then sees the ban after we commit.
+	held, err := db.Open(ctx, dsn, 0, 0)
+	if err != nil {
+		t.Fatalf("open second conn: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	tx, err := held.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET access_tier = $1 WHERE telegram_login_id = $2`,
+		db.TierNone, tgID,
+	); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("hold none: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		srv.finishEnable(rec, req, &enableSession{
+			uid:  uid,
+			tgID: tgID,
+			oc: oauthCtx{
+				ClientID:    "claude.ai",
+				RedirectURI: "https://claude.ai/cb",
+				TelegramID:  tgID,
+				Username:    "racer",
+			},
+		}, "es-race")
+	}()
+
+	// Let finishEnable reach the grant UPDATE and park on SQLITE_BUSY.
+	time.Sleep(100 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit none: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finishEnable blocked past busy_timeout")
+	}
+
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierNone {
+		t.Fatalf("tier after raced finishEnable = %q, want %q (admin none must survive)", tier, db.TierNone)
 	}
 }

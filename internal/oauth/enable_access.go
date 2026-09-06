@@ -991,27 +991,24 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	// Completing MTProto login is the registration event: persist the
 	// client tier so an auto-approved user keeps access after
 	// AUTO_APPROVE_CLIENTS is flipped off. Only write when open
-	// registration is on and the row is still unset. Neither this path
-	// nor the OIDC auto-grant excludes ClientTelegramIDs: when
+	// registration is on; the SQL predicate (GrantClientTierIfUnset)
+	// is what keeps an already-set tier — including a concurrent
+	// admin none — from being overwritten. Neither this path nor the
+	// OIDC auto-grant excludes ClientTelegramIDs: when
 	// AutoApproveClients is on, an env-listed identity gets the same
 	// persisted 'client' row as any other first-time user. While
 	// AutoApproveClients is off the write does not run, so an
 	// env-listed TG_LOGIN_CLIENTS identity stays unset and removal
-	// from the allowlist still revokes. An explicit none set by an
-	// admin is never overwritten. Admins and lookup-only identities
-	// keep their env-allowlist tiers — writing 'client' for a lookup
-	// admin is the same trap that path already refuses (removal
-	// would promote them).
+	// from the allowlist still revokes. Admins and lookup-only
+	// identities keep their env-allowlist tiers — writing 'client'
+	// for a lookup admin is the same trap that path already refuses
+	// (removal would promote them).
 	if s.cfg.AutoApproveClients && !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
-		dbTier, err := s.store.GetAccessTier(r.Context(), es.tgID)
-		if err != nil {
-			slog.Error("finishEnable: read access tier", "uid", es.uid, "err", err)
-		} else if dbTier == "" {
-			if terr := s.store.SetAccessTier(r.Context(), es.tgID, db.TierClient); terr != nil {
-				slog.Error("finishEnable: set client tier", "uid", es.uid, "err", terr)
-			} else {
-				slog.Info("auto-granted client tier on enable", "telegram_id", es.tgID)
-			}
+		granted, terr := s.store.GrantClientTierIfUnset(r.Context(), es.tgID)
+		if terr != nil {
+			slog.Error("finishEnable: grant client tier", "uid", es.uid, "err", terr)
+		} else if granted {
+			slog.Info("auto-granted client tier on enable", "telegram_id", es.tgID)
 		}
 	}
 	s.issueAuthCode(w, r, es.oc)

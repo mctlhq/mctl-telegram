@@ -313,6 +313,39 @@ func (s *Store) SetAccessTier(ctx context.Context, tgID int64, tier string) erro
 	return nil
 }
 
+// GrantClientTierIfUnset sets users.access_tier to TierClient only when the
+// row is still unset (NULL or empty). An explicit value — including an
+// admin-set TierNone — is left untouched. The predicate lives in SQL so a
+// concurrent SetAccessTier cannot be overwritten by this grant.
+//
+// Returns granted=true when this call wrote the row. A missing users row
+// is an error, same as SetAccessTier: the user must have signed in once.
+func (s *Store) GrantClientTierIfUnset(ctx context.Context, tgID int64) (granted bool, err error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET access_tier = $2
+		  WHERE telegram_login_id = $1
+		    AND (access_tier IS NULL OR access_tier = '')`,
+		tgID, TierClient,
+	)
+	if err != nil {
+		return false, fmt.Errorf("grant client tier if unset: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 1 {
+		return true, nil
+	}
+	var exists bool
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE telegram_login_id = $1)`, tgID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("grant client tier if unset: %w", err)
+	}
+	if !exists {
+		return false, fmt.Errorf("no user with telegram id %d — they must sign in once first", tgID)
+	}
+	return false, nil
+}
+
 // GetLoginIdentity returns the Telegram login projection for users.id: the
 // widget/OIDC telegram_login_id plus any captured username and display name.
 // Missing attributes come back empty rather than guessed. A missing users
