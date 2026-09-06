@@ -54,14 +54,57 @@ Usage:
 
 Subcommands:
   init                       Initialise config (TG api_id, api_hash, passphrase).
-  activate --telegram-id <id> Self-service device activation (no operator step required).
-  login --phone <num>        Interactive Telegram login.
+  login --phone <num>        Interactive Telegram login (persists telegram_id).
+  activate [--telegram-id <id>] [--server <url>]
+                             Self-service device activation (no operator step).
+                             --telegram-id defaults to the id saved by login.
   connect --token <t>        Exchange an MCP JWT for a bridge token and save it.
                              (or --token-file <path>, or --token-file - / --token - for stdin)
   daemon                     Start the long-running websocket relay daemon.
   version                    Print the binary version.
   help                       Show this message.
+
+  init --help and daemon --help print that command's usage and exit.
+  They do not start init or the daemon.
 `
+
+const initUsage = `Usage: mctl-telegram-local init
+
+Create ~/.config/mctl-telegram-local/config.json. Prompts for TG_API_ID,
+TG_API_HASH, and a passphrase (used to encrypt the local session database).
+
+init does not ask for a server URL. Pass --server on the first activate
+(or connect) so daemon has one to dial.
+
+This command is interactive. --help only prints this text.
+`
+
+const daemonUsage = `Usage: mctl-telegram-local daemon
+
+Start the long-running websocket relay. Reads the server URL from
+config.json (set by activate --server or connect --server). There is no
+--server flag on daemon.
+
+Passphrase: set MCTL_LOCAL_PASSPHRASE_FILE (preferred) or
+MCTL_LOCAL_PASSPHRASE, or type it at the prompt if a terminal is present.
+
+This command starts the daemon. --help only prints this text.
+`
+
+// wantsHelp reports whether args ask for usage. Used by init and daemon,
+// which have no FlagSet of their own — without this, `init --help` and
+// `daemon --help` start those commands instead of showing help.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
+}
 
 func main() {
 	// Before anything creates a file: the config, the bridge token and the
@@ -84,6 +127,10 @@ func main() {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	case "init":
+		if wantsHelp(os.Args[2:]) {
+			fmt.Print(initUsage)
+			return
+		}
 		runInit()
 	case "activate":
 		runActivate(os.Args[2:])
@@ -92,6 +139,10 @@ func main() {
 	case "connect":
 		runConnect(os.Args[2:])
 	case "daemon":
+		if wantsHelp(os.Args[2:]) {
+			fmt.Print(daemonUsage)
+			return
+		}
 		runDaemonCmd()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
@@ -225,7 +276,15 @@ func runLogin(args []string) {
 		die(fmt.Errorf("save session metadata: %w", err))
 	}
 
+	if cfg.TelegramID != tgID {
+		cfg.TelegramID = tgID
+		if err := saveConfig(cfg); err != nil {
+			die(fmt.Errorf("persist telegram id: %w", err))
+		}
+	}
+
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s).\n", tgID, displayName, username)
+	fmt.Println("activate will use this id unless you pass --telegram-id.")
 }
 
 // ---- connect -------------------------------------------------------------

@@ -400,7 +400,7 @@ Inputs (required):
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 			if dryReason == reasonSendDisabled {
-				result.Hint = "Your account has never opted into real sends. Turn it on from /manage, or call get_my_send_status to confirm this is the reason."
+				result.Hint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
 			}
 			return jsonResult(result)
 		}
@@ -939,6 +939,50 @@ disable it for an authenticated user. It takes no inputs.`),
 			out.CanSend, out.Reason = false, "store unavailable — cannot verify per-account send_enabled"
 		default:
 			out.CanSend, out.Reason = evaluateSendGateAccountFlag(acct.SendEnabled)
+		}
+		return jsonResult(out)
+	}
+	return tool, handler
+}
+
+func (s *Server) toolGetMyIdentity() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_my_identity",
+		mcplib.WithTitleAnnotation("Read your Telegram identity"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[myIdentityResult](),
+		mcplib.WithDescription(`Return the Telegram identity of the currently authenticated session.
+
+Output: {telegram_id, username, display_name}. username and display_name are omitted when they were never captured — Telegram did not supply them, or the row predates capture. They are never inferred from message content.
+
+This is the self-service counterpart of list_telegram_identities: it reports only the caller. No admin scope is required. Operators cannot disable it for an authenticated user. It takes no inputs.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		out := myIdentityResult{
+			TelegramID:  id.TelegramID,
+			Username:    id.TelegramUsername,
+			DisplayName: "",
+		}
+		if s.Store != nil && id.UserID != 0 {
+			tgID, username, display, err := s.Store.GetLoginIdentity(ctx, id.UserID)
+			if err != nil {
+				return toolErr("get_my_identity: %v", err), nil
+			}
+			if tgID != 0 {
+				out.TelegramID = tgID
+			}
+			if username != "" {
+				out.Username = username
+			}
+			out.DisplayName = display
+		}
+		if out.TelegramID == 0 && out.Username == "" && out.DisplayName == "" {
+			return mcplib.NewToolResultError("get_my_identity: no Telegram identity on this session"), nil
 		}
 		return jsonResult(out)
 	}
@@ -1755,7 +1799,7 @@ func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReview
 // send_enabled flag is off. It is a package-level constant (rather than an
 // inline literal) so toolSendMessage can compare a dry_reason value against
 // it to attach a targeted hint, without the two call sites risking drift.
-const reasonSendDisabled = "per-account send_enabled=false — contact the operator to enable real sends for your account"
+const reasonSendDisabled = "per-account send_enabled=false — enable real sends with set_send_consent"
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
 // final verdict. Both callers go through it so the wording of the last
@@ -1914,6 +1958,13 @@ type auditLogResult struct {
 type identitiesResult struct {
 	Identities []db.IdentityRow `json:"identities"`
 	Count      int              `json:"count"`
+}
+
+// myIdentityResult is the success payload of get_my_identity.
+type myIdentityResult struct {
+	TelegramID  int64  `json:"telegram_id"`
+	Username    string `json:"username,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // setAccessResult is the success payload of set_telegram_access.

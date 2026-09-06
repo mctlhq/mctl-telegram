@@ -14,7 +14,7 @@ import (
 // tool layer) must not have fetched file_url or decoded file_base64 before
 // reaching here on a gate-denied call.
 func TestSendMedia_DryRunShape(t *testing.T) {
-	res, err := SendMedia(context.Background(), nil, "@bob", "photo", nil, "cat.jpg", "image/jpeg", "look at this cat", false, "ALLOW_SEND=false", nil, 0)
+	res, err := SendMedia(context.Background(), nil, "@bob", "photo", nil, "cat.jpg", "image/jpeg", "look at this cat", false, "ALLOW_SEND=false", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("dry-run must not error: %v", err)
 	}
@@ -51,14 +51,14 @@ func TestSendMedia_DryRunShape(t *testing.T) {
 // An invalid media_type must be rejected before any dry-run/real-send
 // branching, for both the dry-run and (implicitly) real-send paths.
 func TestSendMedia_InvalidMediaType(t *testing.T) {
-	_, err := SendMedia(context.Background(), nil, "@bob", "sticker", nil, "", "", "", false, "draft", nil, 0)
+	_, err := SendMedia(context.Background(), nil, "@bob", "sticker", nil, "", "", "", false, "draft", nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected an error for an unsupported media_type")
 	}
 }
 
 func TestSendMedia_PeerRequired(t *testing.T) {
-	_, err := SendMedia(context.Background(), nil, "", "photo", nil, "", "", "", false, "draft", nil, 0)
+	_, err := SendMedia(context.Background(), nil, "", "photo", nil, "", "", "", false, "draft", nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected an error for an empty peer")
 	}
@@ -69,7 +69,7 @@ func TestSendMedia_PeerRequired(t *testing.T) {
 // resolves bytes before calling SendMedia on the real-send path), but
 // SendMedia itself must not silently proceed if it ever is.
 func TestSendMedia_RealSendRequiresBytes(t *testing.T) {
-	_, err := SendMedia(context.Background(), nil, "@bob", "photo", nil, "", "", "", true, "", nil, 0)
+	_, err := SendMedia(context.Background(), nil, "@bob", "photo", nil, "", "", "", true, "", nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected an error when realSend=true with no data")
 	}
@@ -80,7 +80,7 @@ func TestSendMedia_RealSendRequiresBytes(t *testing.T) {
 // classification (internal/telegram/messages.go). These are pure-function
 // tests — no gotd/td RPC transport needed.
 func TestBuildInputMedia_Photo(t *testing.T) {
-	media, err := buildInputMedia("photo", &tg.InputFile{ID: 1}, "photo.jpg", "image/jpeg")
+	media, err := buildInputMedia("photo", &tg.InputFile{ID: 1}, "photo.jpg", "image/jpeg", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestBuildInputMedia_Photo(t *testing.T) {
 }
 
 func TestBuildInputMedia_Video(t *testing.T) {
-	media, err := buildInputMedia("video", &tg.InputFile{ID: 1}, "clip.mp4", "video/mp4")
+	media, err := buildInputMedia("video", &tg.InputFile{ID: 1}, "clip.mp4", "video/mp4", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestBuildInputMedia_Video(t *testing.T) {
 // fill an empty MediaType slot), so the order here is load-bearing, not
 // cosmetic.
 func TestBuildInputMedia_Animation(t *testing.T) {
-	media, err := buildInputMedia("animation", &tg.InputFile{ID: 1}, "clip.gif", "video/mp4")
+	media, err := buildInputMedia("animation", &tg.InputFile{ID: 1}, "clip.gif", "video/mp4", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestBuildInputMedia_Animation(t *testing.T) {
 }
 
 func TestBuildInputMedia_Document(t *testing.T) {
-	media, err := buildInputMedia("document", &tg.InputFile{ID: 1}, "report.pdf", "application/pdf")
+	media, err := buildInputMedia("document", &tg.InputFile{ID: 1}, "report.pdf", "application/pdf", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +179,52 @@ func TestBuildInputMedia_Document(t *testing.T) {
 }
 
 func TestBuildInputMedia_UnsupportedType(t *testing.T) {
-	if _, err := buildInputMedia("sticker", &tg.InputFile{ID: 1}, "", ""); err == nil {
+	if _, err := buildInputMedia("sticker", &tg.InputFile{ID: 1}, "", "", 0); err == nil {
 		t.Fatal("expected an error for an unsupported media_type")
+	}
+}
+
+func TestBuildInputMedia_Voice(t *testing.T) {
+	media, err := buildInputMedia("voice", &tg.InputFile{ID: 1}, "note.ogg", "audio/ogg", 12)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	doc, ok := media.(*tg.InputMediaUploadedDocument)
+	if !ok {
+		t.Fatalf("got %T, want *tg.InputMediaUploadedDocument", media)
+	}
+	if doc.MimeType != "audio/ogg" {
+		t.Errorf("MimeType = %q, want audio/ogg", doc.MimeType)
+	}
+	var voice *tg.DocumentAttributeAudio
+	for _, a := range doc.Attributes {
+		if v, ok := a.(*tg.DocumentAttributeAudio); ok {
+			voice = v
+		}
+	}
+	if voice == nil {
+		t.Fatal("voice media must carry DocumentAttributeAudio")
+	}
+	if !voice.Voice {
+		t.Error("Voice must be true so Telegram renders a waveform, not a file")
+	}
+	if voice.Duration != 12 {
+		t.Errorf("Duration = %d, want 12", voice.Duration)
+	}
+}
+
+func TestSendMedia_VoiceRejectsNonOGG(t *testing.T) {
+	_, err := SendMedia(context.Background(), nil, "@bob", "voice", []byte("not-ogg"), "note.mp3", "audio/mpeg", "", true, "", nil, 0, 3)
+	if err == nil {
+		t.Fatal("expected non-OGG voice bytes to be rejected")
+	}
+}
+
+func TestValidateVoicePayload_OggMagic(t *testing.T) {
+	if err := validateVoicePayload([]byte("OggS....")); err != nil {
+		t.Fatalf("OggS prefix must pass: %v", err)
+	}
+	if err := validateVoicePayload([]byte("RIFF")); err == nil {
+		t.Fatal("non-OGG magic must fail")
 	}
 }

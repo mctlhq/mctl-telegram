@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -285,7 +286,7 @@ func (s *Server) toolSendMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithOutputSchema[telegram.SendMediaResult](),
-		mcplib.WithDescription(`Send a photo, video, document, or animation (gif) to a Telegram peer, with an optional caption.
+		mcplib.WithDescription(`Send a photo, video, document, animation (gif), or voice note to a Telegram peer, with an optional caption.
 
 Draft-by-default: like send_message, media is sent for real only when the server send gate
 is fully open (ALLOW_SEND=true, the telegram:messages:send scope, and per-account
@@ -294,40 +295,54 @@ nothing is fetched, decoded, or sent. The result's "sent" field tells you which 
 
 Inputs (required):
   peer       — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
-  media_type — one of "photo", "video", "document", "animation". animation (gif) is sent as
-               a distinct type from video and is never relabeled as a plain video.
+  media_type — one of "photo", "video", "document", "animation", "voice". animation (gif) is
+               sent as a distinct type from video. voice is a Telegram voice note (OGG/Opus
+               waveform player), not a file attachment.
   Exactly one of:
     file_url    — an HTTPS URL this server fetches and re-uploads. Must resolve to a public
                   address; loopback, link-local, and private-range addresses are refused.
     file_base64 — standard base64-encoded file bytes.
+    file_path   — a path under the Local Bridge media allowlist. Hosted accounts cannot use
+                  this: the server never reads the local disk. The daemon reads only files
+                  inside MCTL_MEDIA_DIR (default ~/.config/mctl-telegram-local/media).
+                  file_path is only supported on Linux and macOS; on Windows use file_base64.
 
 Inputs (optional):
-  caption   — text attached to the media (truncated to Telegram's ~1024-char caption limit).
-  file_name — REQUIRED when media_type="document" and file_base64 is the source; optional
-              display name for the other media types.
+  caption          — text attached to the media (truncated to Telegram's ~1024-char caption limit).
+  file_name        — REQUIRED when media_type="document" and file_base64 is the source; optional
+                     display name for the other media types. Derived from file_path when omitted.
+  duration_seconds — optional duration for voice notes (shown on the Telegram player),
+                     0–86400. Ignored for other media types.
 
 Both the file_url fetch and the file_base64 decode are capped by MEDIA_UPLOAD_MAX_BYTES
 (default 20 MiB) and are only ever performed on the real-send path — a draft or gate-denied
-call never fetches a URL or decodes base64.`),
+call never fetches a URL, decodes base64, or reads file_path. Voice notes must already be
+OGG/Opus; the server does not transcode.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
 		),
 		mcplib.WithString("media_type",
 			mcplib.Required(),
-			mcplib.Description(`One of "photo", "video", "document", "animation".`),
+			mcplib.Description(`One of "photo", "video", "document", "animation", "voice".`),
 		),
 		mcplib.WithString("file_url",
-			mcplib.Description("HTTPS URL to fetch and send. Exactly one of file_url/file_base64 is required."),
+			mcplib.Description("HTTPS URL to fetch and send. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("file_base64",
-			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64 is required."),
+			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64/file_path is required."),
+		),
+		mcplib.WithString("file_path",
+			mcplib.Description("Local-Bridge-only path under the media allowlist. file_path is only supported on Linux and macOS; on Windows use file_base64. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("caption",
 			mcplib.Description("Optional caption text for the media."),
 		),
 		mcplib.WithString("file_name",
 			mcplib.Description(`Required when media_type="document" and file_base64 is used; optional display name otherwise.`),
+		),
+		mcplib.WithNumber("duration_seconds",
+			mcplib.Description("Optional duration for voice notes, in seconds (0-86400). Ignored for other media types."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -346,20 +361,38 @@ call never fetches a URL or decodes base64.`),
 		mediaType := stringArg(args, "media_type", "")
 		fileURL := stringArg(args, "file_url", "")
 		fileB64 := stringArg(args, "file_base64", "")
+		filePath := stringArg(args, "file_path", "")
 		caption := truncate(stringArg(args, "caption", ""), maxCaptionLen)
 		fileName := stringArg(args, "file_name", "")
+		durationSeconds := intArg(args, "duration_seconds", 0)
 
 		if peer == "" {
 			return mcplib.NewToolResultError("peer is required"), nil
 		}
 		if !telegram.ValidMediaTypes[mediaType] {
-			return mcplib.NewToolResultError(`media_type must be one of "photo", "video", "document", "animation"`), nil
+			return mcplib.NewToolResultError(`media_type must be one of "photo", "video", "document", "animation", "voice"`), nil
 		}
-		if (fileURL == "") == (fileB64 == "") {
-			return mcplib.NewToolResultError("exactly one of file_url and file_base64 is required"), nil
+		sources := 0
+		if fileURL != "" {
+			sources++
+		}
+		if fileB64 != "" {
+			sources++
+		}
+		if filePath != "" {
+			sources++
+		}
+		if sources != 1 {
+			return mcplib.NewToolResultError("exactly one of file_url, file_base64, and file_path is required"), nil
+		}
+		if fileName == "" && filePath != "" {
+			fileName = filepath.Base(filePath)
 		}
 		if mediaType == "document" && fileB64 != "" && fileName == "" {
 			return mcplib.NewToolResultError(`file_name is required when media_type is "document" and file_base64 is used`), nil
+		}
+		if durationSeconds < 0 || durationSeconds > 86400 {
+			return mcplib.NewToolResultError("duration_seconds must be between 0 and 86400"), nil
 		}
 
 		peerRedacted := telegram.RedactPeer(peer)
@@ -377,7 +410,7 @@ call never fetches a URL or decodes base64.`),
 			// I/O. Resolving the byte source only happens in the real-send
 			// branch below.
 			s.audit(ctx, id, "send_media:draft", peerRedacted, nil, startedAt)
-			result, _ := telegram.SendMedia(ctx, nil, peer, mediaType, nil, fileName, "", caption, false, dryReason, nil, 0)
+			result, _ := telegram.SendMedia(ctx, nil, peer, mediaType, nil, fileName, "", caption, false, dryReason, nil, 0, durationSeconds)
 			return jsonResult(result)
 		}
 
@@ -394,7 +427,14 @@ call never fetches a URL or decodes base64.`),
 		}
 
 		// Hosted mode, real send: this is the ONLY branch that fetches
-		// file_url or decodes file_base64.
+		// file_url or decodes file_base64. file_path is a Local Bridge
+		// primitive — reading it here would pair an arbitrary host path
+		// with an arbitrary peer.
+		if filePath != "" {
+			err := fmt.Errorf("file_path is only available through Local Bridge")
+			s.audit(ctx, id, "send_media:sent", peerRedacted, err, startedAt)
+			return toolErr("send_media: %v", err), nil
+		}
 		data, mimeType, resolveErr := s.resolveSendMediaBytes(ctx, fileURL, fileB64)
 		if resolveErr != nil {
 			s.audit(ctx, id, "send_media:sent", peerRedacted, resolveErr, startedAt)
@@ -404,7 +444,7 @@ call never fetches a URL or decodes base64.`),
 		var result *telegram.SendMediaResult
 		err := s.borrowWithRetry(ctx, "send_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var inner error
-			result, inner = telegram.SendMedia(ctx, c, peer, mediaType, data, fileName, mimeType, caption, true, "", s.PeerCache, id.UserID)
+			result, inner = telegram.SendMedia(ctx, c, peer, mediaType, data, fileName, mimeType, caption, true, "", s.PeerCache, id.UserID, durationSeconds)
 			return inner
 		})
 		s.audit(ctx, id, "send_media:sent", peerRedacted, err, startedAt)

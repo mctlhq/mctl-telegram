@@ -64,8 +64,13 @@ func ParseCommand(text string) (Command, error) {
 		arg = strings.Join(fields[2:], " ")
 	}
 	switch sub {
-	case CmdStatus, CmdLeads, CmdPause, CmdConversations:
+	case CmdStatus, CmdLeads, CmdPause:
 		return Command{Type: sub}, nil
+	case CmdConversations:
+		// Optional count or @handle/substring filter. Full paging is not
+		// required; the router uses this to say when the default 20-row
+		// window was truncated (#525).
+		return Command{Type: sub, Arg: arg}, nil
 	case CmdApprove, CmdReject:
 		if arg == "" {
 			return Command{}, fmt.Errorf("%w: /mctl %s <arg>", ErrMissingArg, sub)
