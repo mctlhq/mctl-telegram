@@ -44,9 +44,13 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
   numeric id, first name or @handle, including your own. This repository is public,
   and a fixture is committed forever. Reuse one of the personas already in the
   tests — `Alice`, `Bob`, `Carol`, `Dana` — rather than inventing another, and
-  before picking a numeric id run `git grep <id>` to check it is not already bound
-  to a different identity. `.github/CODEOWNERS` is the one deliberate exception:
-  the login there is review routing, not test data.
+  before picking a numeric id run `git grep <id>` to check it is not already
+  bound to a different name or handle *within the same package*. Across
+  packages an id is deliberately free to mean different things: the stores are
+  independent and nothing couples them, so `500100101` is `Dana` in most files
+  but `Exempt`, `Op` and `Admin` elsewhere. `.github/CODEOWNERS` is the one
+  deliberate exception to the rule itself: the login there is review routing,
+  not test data.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`
