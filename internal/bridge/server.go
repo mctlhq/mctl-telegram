@@ -53,7 +53,10 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		// the token is invalid and makes error reporting harder.
 		id, err := provider.Authenticate(r)
 		if err != nil {
-			http.Error(w, "invalid credentials: "+err.Error(), http.StatusUnauthorized)
+			// Do not echo err.Error(): JWT parsers include algorithm names,
+			// claim paths and token fragments. Log server-side only.
+			slog.Info("bridge: authentication failed", "err", err)
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 		if id == nil {

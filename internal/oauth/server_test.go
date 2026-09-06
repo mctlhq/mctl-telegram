@@ -522,6 +522,97 @@ func TestRegister_BodySizeCap(t *testing.T) {
 	}
 }
 
+func TestRegister_RateLimitKeyCap(t *testing.T) {
+	const keyCap = 3
+	srv := newTestServer(t, func(c *Config) {
+		c.MaxRegisterKeys = keyCap
+		c.RegisterRatePerMin = 10
+		c.RegisterRateWindow = time.Minute
+	})
+	ips := []string{
+		"203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4",
+		"203.0.113.5", "203.0.113.6", "203.0.113.7", "203.0.113.8",
+	}
+	for _, ip := range ips {
+		if !srv.allowRegister(ip) {
+			t.Fatalf("allowRegister(%s) = false, want true for a fresh IP", ip)
+		}
+		srv.mu.Lock()
+		n := len(srv.registerHits)
+		srv.mu.Unlock()
+		if n > keyCap {
+			t.Fatalf("registerHits grew to %d, cap is %d", n, keyCap)
+		}
+	}
+	srv.mu.Lock()
+	n := len(srv.registerHits)
+	srv.mu.Unlock()
+	if n != keyCap {
+		t.Fatalf("registerHits len = %d, want %d", n, keyCap)
+	}
+}
+
+func TestRegister_RateLimitWindowReset(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.RegisterRatePerMin = 1
+		c.RegisterRateWindow = time.Minute
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	t0 := time.Now()
+	srv.clock = func() time.Time { return t0 }
+	body := `{"client_name":"ok","redirect_uris":["https://claude.ai/cb"]}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "203.0.113.20:1234"
+		rec := httptest.NewRecorder()
+		mux.serve("POST", "/oauth/register", rec, req)
+		return rec
+	}
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("first register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second register status = %d, want 429, body = %s", rec.Code, rec.Body.String())
+	}
+	srv.clock = func() time.Time { return t0.Add(time.Minute + time.Second) }
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("register after window reset status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRegister_RateLimitPerIP(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.RegisterRatePerMin = 2
+		c.RegisterRateWindow = time.Minute
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	body := `{"client_name":"ok","redirect_uris":["https://claude.ai/cb"]}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "203.0.113.10:1234"
+		rec := httptest.NewRecorder()
+		mux.serve("POST", "/oauth/register", rec, req)
+		return rec
+	}
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("first register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(); rec.Code != http.StatusCreated {
+		t.Fatalf("second register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec := post()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third register status = %d, want 429, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("rate-limited register missing Retry-After")
+	}
+}
+
 func TestAuthorize_PendingCapEvictsOldest(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.MaxPendingAuth = 2 })
 	mux := newMockRouter()

@@ -84,6 +84,7 @@ The legacy mode validates JWTs signed by an external authorization server using 
 
 * **Impact:** the services share secret material; compromise of either may allow minting tokens for both.
 * **Mitigation:** rotate the shared secret for both services simultaneously. Use `AUTH_MODE=local-jwt` for new deployments.
+* **Gate:** `AUTH_MODE=shared-hmac-legacy` refuses to start unless `AUTH_ALLOW_SHARED_HMAC_LEGACY=true`. The shorter `AUTH_MODE=shared-hmac` alias still boots so a known deployment is not cut off, but it is the same verifier and the same shared-secret risk.
 * **Plan:** `shared-hmac-legacy` will be removed in a future minor release.
 
 ## Cryptographic and logging invariants

@@ -22,7 +22,7 @@ import (
 	"strings"
 	"sync"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // RestrictedField is one entry under the profile's restricted section. A
@@ -72,10 +72,10 @@ func (p *Provider) Reload() error {
 	if err != nil {
 		return fmt.Errorf("read profile %s: %w", p.path, err)
 	}
-	// UnmarshalStrict, not Unmarshal: a Codex finding on #307 caught that a
-	// misspelled safety marker (never_auto_sent, approval_require, ...)
-	// under a restricted-section entry silently decoded as an unknown key
-	// yaml.v2 just ignores — the value would still MATCH in MatchRestricted
+	// KnownFields(true), not a plain Decode: a Codex finding on #307 caught
+	// that a misspelled safety marker (never_auto_sent, approval_require,
+	// ...) under a restricted-section entry silently decoded as an unknown
+	// key yaml ignores — the value would still MATCH in MatchRestricted
 	// (its `value` field is spelled correctly), but with both marker
 	// booleans defaulting false, restrictedFieldBlocks would let it
 	// auto-send with no enforcement at all, and no startup or reload error
@@ -96,8 +96,17 @@ func (p *Provider) Reload() error {
 // the tenant's agent_profiles row.
 func ParseYAML(raw []byte) (Data, error) {
 	var d Data
-	if err := yaml.UnmarshalStrict(raw, &d); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&d); err != nil {
 		return Data{}, err
+	}
+	// Decoder.Decode reads only the first document. A second document after
+	// "---" would otherwise be ignored, so later restricted markers such as
+	// approval_required could be dropped without a load error.
+	var dummy any
+	if err := dec.Decode(&dummy); err != io.EOF {
+		return Data{}, fmt.Errorf("profile must contain exactly one YAML document")
 	}
 	normalizeData(&d)
 	return d, nil
@@ -210,11 +219,14 @@ func RejectDuplicateJSONKeys(raw []byte) error {
 }
 
 // normalizeData recursively converts every map[interface{}]interface{} that
-// yaml.v2 produces for nested YAML objects into map[string]interface{} —
-// encoding/json cannot marshal the former at all, so a profile with any
+// older YAML decoders produce for nested objects into map[string]interface{}
+// — encoding/json cannot marshal the former at all, so a profile with any
 // nested object under identity/public_profile/preferences (not just flat
 // key: value pairs) would make GET /recruiters/{peer}'s writeJSON silently
-// emit a truncated body once it hit the unmarshalable value.
+// emit a truncated body once it hit the unmarshalable value. yaml.v3
+// already emits map[string]interface{}, so this is a no-op for current
+// input and keeps the JSON path safe if a nested value is still a
+// map[interface{}]interface{}.
 func normalizeData(d *Data) {
 	d.Identity = normalizeMap(d.Identity)
 	d.PublicProfile = normalizeMap(d.PublicProfile)

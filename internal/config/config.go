@@ -77,7 +77,15 @@ type Config struct {
 	OAUTHCodeTTL             time.Duration
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
-	OAUTHAllowImplicitClient bool          // accept unregistered client_ids (eases Claude.ai onboarding)
+	OAUTHAllowImplicitClient bool          // accept unregistered client_ids; default false (explicit opt-in)
+	// AllowSharedHMACLegacy opts in to AUTH_MODE=shared-hmac-legacy. The
+	// alias is gated off by default: it is the audit-2026-08 leftover that
+	// still treated a shared api.mctl.ai secret as a first-class mode.
+	AllowSharedHMACLegacy bool
+	// OAUTHRegisterRatePerMin caps unauthenticated POST /oauth/register
+	// attempts per client-IP key. Zero in Load falls through to the oauth
+	// server default (10).
+	OAUTHRegisterRatePerMin int
 	// OAUTHAllowedImplicitHosts is the redirect_uri hostname allowlist applied
 	// both to unregistered client_ids and to every redirect_uri supplied at
 	// RFC 7591 dynamic registration. Empty ⇒ the built-in default in
@@ -248,7 +256,9 @@ func Load() (*Config, error) {
 		OAUTHCodeTTL:                  envDuration("OAUTH_CODE_TTL", 10*time.Minute),
 		OAUTHAccessTokenTTL:           envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
 		OAUTHRefreshTokenTTL:          envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
-		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", true),
+		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
+		AllowSharedHMACLegacy:         envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
+		OAUTHRegisterRatePerMin:       envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 	}
