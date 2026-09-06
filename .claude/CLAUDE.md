@@ -38,13 +38,15 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
   numeric id, first name or @handle, including your own. This repository is public,
   and a fixture is committed forever. Reuse one of the personas already in the
   tests — `Alice`, `Bob`, `Carol`, `Dana` — rather than inventing another, and
-  before picking a numeric id run `git grep <id>` to check it is not already
-  bound to a different name or handle *within the same package*. Across
-  packages an id is deliberately free to mean different things: the stores are
-  independent and nothing couples them, so `500100101` is `Dana` in most files
-  but `Exempt`, `Op` and `Admin` elsewhere. `.github/CODEOWNERS` is the one
-  deliberate exception to the rule itself: the login there is review routing,
-  not test data.
+  before picking a numeric id run `git grep <id>` to see what it already means.
+  An id may carry different labels in different places and often does: in
+  `internal/db` the same id is the exempt-account subject and is labelled
+  `Exempt` or `Op` by the test that uses it, while `internal/oauth` labels it
+  `Admin`. Those are role labels, not personas, and reusing an id for a role is
+  fine — the stores are independent and nothing couples them. What must never
+  recur is the thing this rule exists for: a real person's name, handle or
+  numeric id in a fixture. `.github/CODEOWNERS` is the one deliberate
+  exception, because the login there is review routing rather than test data.
 
 ## Workflow
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`

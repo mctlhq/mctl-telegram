@@ -603,8 +603,8 @@ func TestSweepExpiredSessionsSkipsIdleExempt(t *testing.T) {
 }
 
 // TestSweepIdleSessionsSkipsMultipleExempt exercises ttlExemptClause with
-// more than one id: the multi-placeholder fragment ($3,$4) and the
-// sorted-by-id argument order both get real query traffic here.
+// more than one id: the multi-placeholder fragment ($3,$4) gets real query
+// traffic here. The sort is a separate matter -- see the note in the body.
 func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 	ctx := context.Background()
 	// The order here carries no meaning, contrary to what this comment used to
