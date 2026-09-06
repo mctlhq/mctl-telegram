@@ -653,6 +653,29 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Any refusal already on file goes here, once, for every way the gate can
+	// end. Reaching the live account-state check is itself the proof that a
+	// cached answer is superseded: whatever the check returns -- pass,
+	// conflict, or "cannot tell" -- is derived from the account as it is now,
+	// and the cached message is by construction older. The conflict arm
+	// re-sets the field through renderEnableTerminalError two lines below, so
+	// the only paths that keep an empty field are the two that should.
+	//
+	// Placed before the gate rather than on each of its exits deliberately.
+	// The rule is one sentence -- a cached terminal refusal must not outlive
+	// the state that justified it -- but as a per-exit clear it took three
+	// commits to establish, one exit at a time, and the next exit added
+	// between here and startLoginFlow would have reintroduced it again. Here
+	// it covers exits that do not exist yet.
+	//
+	// The cost is real and accepted: when the account IS still local, the
+	// mode_check_error arm now discards a refusal that was true and offers a
+	// retry for a condition retrying cannot clear. Resubmitting the phone form
+	// re-enters this gate and re-derives the refusal in one round-trip,
+	// whereas a stale refusal has no such exit, and that arm has just shown
+	// the user a retryable screen either way.
+	es.terminalMsg = ""
+
 	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
 	// any MTProto login starts. telegram.Login persists the new session bytes
 	// through the gotd SessionStore as soon as auth succeeds, so by the time
@@ -664,23 +687,9 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// must not read as Telegram flakiness on the dashboard.
 		observePhoneStep("mode_check_error")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "")
-		// Any refusal already on file has to go. This arm cannot
-		// re-derive the account state — that is what just failed — so all it
-		// knows is "unknown", and "unknown" must not outrank the retry it is
-		// about to offer. Leaving a cached message here would let a step
-		// fallback replay a Local Bridge refusal to an account that has since
-		// been switched back to hosted, which is the same staleness the clear
-		// at the pass-through below exists to prevent, reached through the arm
-		// that cannot check instead of the one that can.
-		//
-		// This is a choice between two wrong messages, not a strict
-		// improvement: when the account IS still local the clear discards a
-		// refusal that was true, and the next step fallback offers a retry for
-		// a condition retrying cannot clear. That is the accepted cost --
-		// resubmitting the phone form re-enters the gate and re-derives the
-		// refusal in one round-trip, whereas a stale refusal has no such exit,
-		// and the user has just been shown a retryable screen either way.
-		es.terminalMsg = ""
+		// The clear above already ran: this arm cannot re-derive the account
+		// state -- that is what just failed -- so all it knows is "unknown",
+		// and "unknown" must not outrank the retry it is about to offer.
 		s.renderModeCheckRetry(w, es, esTok, rawPhone, sendOptIn)
 		return
 	} else if local {
@@ -696,12 +705,6 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 	es.phone = phone
 	es.sendOptIn = sendOptIn
-	// Reaching this statement means the pre-flight gate re-derived the account
-	// state and let the user through, which is exactly the condition under
-	// which a cached terminal message is stale: the operator may have switched
-	// the account back to hosted since it was set. Leaving it would let the
-	// step fallbacks tell a user whose reconnect is now working that it cannot.
-	es.terminalMsg = ""
 	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
 	es.step = stepCode
 	lf := es.flow
@@ -742,10 +745,9 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// The re-check's other half. Same query, same non-Telegram cause
 			// as the pre-flight gate above, so the same label and wording —
 			// retryable, hence abandonFlow rather than the terminal renderer.
-			// No terminalMsg clear here, unlike the gate arm this mirrors:
-			// handleEnableStart empties the field unconditionally before
-			// launching the flow, so any request reaching this select has
-			// already had it cleared in the same request. Adding the
+			// No terminalMsg clear here, and none is needed: the single
+			// clear ahead of the pre-flight gate ran in this same request,
+			// before the flow it is now reporting on was ever launched. A
 			// symmetric clear would be dead code, not extra safety.
 			if errors.Is(lf.err, errModeCheckFailed) {
 				observePhoneStep("mode_check_error")
