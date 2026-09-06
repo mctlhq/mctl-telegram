@@ -511,6 +511,12 @@ func TestEnableAccess_TerminalMessageDoesNotOutliveItsCondition(t *testing.T) {
 // A store failure knows only "unknown", and "unknown" must not outrank the
 // retry it offers: leaving a cached refusal on file would let a step fallback
 // replay it to an account that has since been switched back to hosted.
+//
+// This is also the pin for the hoisted clear at the top of handleEnableStart:
+// the only /start calls below are the terminal refusal that sets the message
+// and the mode-check failure that must drop it, so no successful pass-through
+// can account for the message being gone. Deleting the hoisted clear turns
+// this test red.
 func TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
 	esTok := driveToPhone(t, mux)
