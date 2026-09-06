@@ -9,3 +9,23 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # github/codeql-action/{init,autobuild,analyze} must run at the same
+      # release: init writes a config stamped with its own version and
+      # autobuild refuses to load a config from a different one. Ungrouped,
+      # dependabot opens one PR per uses: entry, and merging them one at a
+      # time leaves main red between the first and the last -- every run
+      # started in that window fails with "Loaded a configuration file for
+      # version 'X', but running version 'Y'", including runs on unrelated
+      # pull requests. Observed 2026-09-06: #434/#435/#436 merged 06:32,
+      # 06:41 and 06:49, and main plus four PRs failed across those 17
+      # minutes for no reason of their own.
+      codeql-action:
+        patterns:
+          # Three segments, and the trailing /* is deliberate: dependabot
+          # matches group patterns with path-aware globbing, where a bare *
+          # does not cross a / boundary. "github/codeql-action*" is two
+          # segments and would match nothing against the three-segment
+          # dependency names, silently leaving the group empty -- which
+          # reproduces the exact incident this file documents below.
+          - "github/codeql-action/*"
