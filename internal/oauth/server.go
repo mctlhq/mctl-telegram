@@ -153,8 +153,14 @@ type Server struct {
 	// writes under es.lock, which `go test -race` reports (build.yml runs
 	// `go test -race ./...`).
 	//
-	// Set once during test construction, before any request is served, and
-	// never mutated afterwards; nil in production.
+	// Assigned before the request that reads it and not mutated while a flow
+	// is in flight -- the flow goroutine reads it, so a mid-flight write would
+	// be a race like any other. Same contract as modeCheckFn and clearStrayFn
+	// above; the wording is shared deliberately, because the earlier "set once
+	// during test construction" claimed more than the only caller practices
+	// (it assigns after driveToPhone has already served two requests) and a
+	// comment nobody can satisfy stops being the thing that keeps the field
+	// race-free. nil in production.
 	loginFlowParked func()
 
 	// demoLimiter throttles /oauth/demo/login attempts per client IP so the

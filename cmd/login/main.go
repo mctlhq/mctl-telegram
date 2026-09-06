@@ -76,14 +76,8 @@ func main() {
 	if err != nil {
 		die(fmt.Errorf("ensure user: %w", err))
 	}
-	// Refuse before any MTProto login runs. telegram.Login/LoginQR persist the
-	// new session bytes through the gotd SessionStore as soon as auth
-	// succeeds, so SaveSession's guard below fires only after the local row's
-	// blob has already been overwritten — too late to protect the bridge.
-	if local, err := store.HasActiveLocalAccount(ctx, uid); err != nil {
-		die(fmt.Errorf("check account mode: %w", err))
-	} else if local {
-		die(db.ErrAccountModeConflict)
+	if err := refuseIfLocal(ctx, store, uid); err != nil {
+		die(err)
 	}
 
 	var tgID int64
@@ -149,17 +143,6 @@ func main() {
 	//
 	// repairStraySession is called explicitly on each exit rather than
 	// deferred because die() is os.Exit, which does not run defers.
-	repairStraySession := func() {
-		repairCtx, repairCancel := context.WithTimeout(context.WithoutCancel(ctx), db.StraySessionRepairTimeout)
-		defer repairCancel()
-		// Gated on account state rather than on db.ErrAccountModeConflict, and
-		// detached from ctx: a failure caused by a cancelled or expired ctx
-		// while a local row is present would otherwise skip the repair, which
-		// is the case where the stray bytes are least likely to be noticed.
-		if cErr := store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
-			slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
-		}
-	}
 
 	// Hoisted out of SaveSession's argument list. Go evaluates arguments before
 	// the call, and this exits the process on failure — as an argument it could
@@ -167,11 +150,11 @@ func main() {
 	// with it and leaving exactly the stray bytes it exists to clean up.
 	pt, lerr := store.LoadSession(ctx, uid)
 	if lerr != nil {
-		repairStraySession()
+		repairStraySession(ctx, store, uid)
 		die(fmt.Errorf("reload session after login: %w", lerr))
 	}
 	if pt == nil {
-		repairStraySession()
+		repairStraySession(ctx, store, uid)
 		die(errors.New("session bytes missing after login"))
 	}
 
@@ -179,12 +162,55 @@ func main() {
 		// SaveSession revokes prior + reinserts with the just-stored bytes — for
 		// idempotence on partial-failure recovery flows. Errors here mean the DB
 		// is unhappy; surface and exit non-zero so the operator retries.
-		repairStraySession()
+		repairStraySession(ctx, store, uid)
 		die(fmt.Errorf("save metadata: %w", err))
 	}
 
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s) bound to operator %q.\n",
 		tgID, displayName, username, cfg.OperatorLogin)
+}
+
+// refuseIfLocal refuses a hosted connect while a Local Bridge account is
+// active, and is called BEFORE any MTProto login runs. telegram.Login/LoginQR
+// persist the new session bytes through the gotd SessionStore as soon as auth
+// succeeds, so SaveSession's guard fires only after the local row's blob has
+// already been overwritten — too late to protect the bridge. The only place
+// this can be refused for free is ahead of the login.
+//
+// A store failure is not a refusal and must not be reported as one: it is
+// wrapped, while an actual conflict returns db.ErrAccountModeConflict
+// unwrapped so the operator sees the same sentence the hosted flow prints.
+func refuseIfLocal(ctx context.Context, store *db.Store, uid int64) error {
+	local, err := store.HasActiveLocalAccount(ctx, uid)
+	if err != nil {
+		return fmt.Errorf("check account mode: %w", err)
+	}
+	if local {
+		return db.ErrAccountModeConflict
+	}
+	return nil
+}
+
+// repairStraySession drops session bytes a failed login left on a bridge-only
+// row. Gated on account state rather than on db.ErrAccountModeConflict: the
+// failure that brought us here can be a context error instead of the sentinel
+// while a local row is present, and that is the case where the stray bytes are
+// least likely to be noticed.
+//
+// db.StrayRepairContext, not ctx: a login that failed because ctx was
+// cancelled is precisely when the repair is needed, so running it on the same
+// context would skip it. Bounded so an unresponsive database cannot hang the
+// exit path.
+//
+// Failure is logged rather than returned. Every caller is already on its way
+// to die() with the error that caused the login to fail, and that error is the
+// more useful one to print.
+func repairStraySession(ctx context.Context, store *db.Store, uid int64) {
+	repairCtx, repairCancel := db.StrayRepairContext(ctx)
+	defer repairCancel()
+	if cErr := store.ClearStraySessionIfLocal(repairCtx, uid); cErr != nil {
+		slog.Error("clear stray session blob failed", "user_id", uid, "err", cErr)
+	}
 }
 
 func die(err error) {
