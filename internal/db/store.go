@@ -1352,8 +1352,13 @@ func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, 
 // repair the same way.
 const StraySessionRepairTimeout = 5 * time.Second
 
-// StrayRepairContext derives the context a ClearStraySessionIfLocal call must
-// run on. Detached from parent AND bounded, and both halves are load-bearing:
+// StrayRepairContext derives the context a stray-session repair, and the
+// account-state decision that gates one, must run on -- the second because
+// enable_access's identity-mismatch branch chooses between revoking and
+// repairing on a hasActiveLocalAccount answer, and that answer has to survive
+// the same expiries the repair does.
+//
+// Detached from parent AND bounded, and both halves are load-bearing:
 // WithoutCancel alone would strip the deadline too, while a plain WithTimeout
 // would inherit an expiry that is itself a likely reason the repair is needed
 // -- the enable_access flow runs on a CodeTTL-bounded context, and cmd/login
