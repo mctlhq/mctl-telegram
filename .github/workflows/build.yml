@@ -30,8 +30,17 @@ jobs:
         # Without a healthcheck the job races the server's first boot and the
         # tests fail to connect rather than skipping, which is a different
         # false signal from the one this exists to fix.
+        # pg_isready must be pointed at TCP explicitly. Bare pg_isready checks
+        # the Unix socket, and the postgres image's entrypoint runs a temporary
+        # socket-only server while it provisions POSTGRES_DB -- so the probe can
+        # report healthy before the real server is listening on 5432. The job
+        # then starts, `go test -race ./...` fails to connect, and those tests
+        # SKIP, which is green. By the time the guard step below runs, TCP is up
+        # and the tests pass there -- without -race. Net effect: the race
+        # detector silently stops covering internal/db while CI stays green and
+        # the guard stays satisfied. Intermittent by nature, which is worse.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
