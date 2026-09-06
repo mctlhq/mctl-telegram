@@ -126,9 +126,27 @@ not clean itself up either. The applied object carries no ArgoCD tracking
 metadata, so ArgoCD neither adopts nor prunes it: it stays active
 indefinitely, drifting silently from this file, and will later fire alongside
 whatever gets ported properly. If you or anyone else ever applied one of these
-by hand, find and delete it explicitly —
-`kubectl get prometheusrule,vmrule -A -l '!argocd.argoproj.io/instance'` — do
-not expect a reconcile to remove it.
+by hand, find and delete it explicitly; do not expect a reconcile to remove
+it.
+
+Find the strays by the tracking metadata ArgoCD stamps on what it manages. In
+this cluster that is the annotation `argocd.argoproj.io/tracking-id` — checked
+on a managed rule, which carries the annotation and no
+`app.kubernetes.io/instance` label, so filtering on the label would list every
+managed rule as a stray:
+
+```
+kubectl get prometheusrule,vmrule -A -o json | jq -r '
+  .items[]
+  | select(.metadata.annotations["argocd.argoproj.io/tracking-id"] == null)
+  | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+```
+
+Confirm the method before trusting the output —
+`kubectl get cm argocd-cm -n argocd -o jsonpath='{.data.application\.resourceTrackingMethod}'`
+— since under label tracking the key is `app.kubernetes.io/instance` instead.
+Read the list before deleting anything: an object may be unmanaged for reasons
+other than a stray `kubectl apply`.
 
 The SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
 availability, session borrow success rate) have already been ported, as
