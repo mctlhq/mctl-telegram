@@ -40,7 +40,15 @@ func TestPublicPagesSmoke(t *testing.T) {
 	base := strings.TrimRight(strings.TrimSpace(getenv("SMOKE_BASE_URL", "http://127.0.0.1:8080")), "/")
 
 	// Landing is checked separately below for content; the rest just need 200.
-	for _, p := range []string{"/privacy", "/security", "/terms", "/demo", "/docs", "/docs/local-bridge"} {
+	for _, p := range []string{
+		"/privacy", "/security", "/terms", "/demo", "/docs",
+		"/docs/local-bridge",
+		"/docs/local-bridge/quickstart",
+		"/docs/local-bridge/owner",
+		"/docs/local-bridge/how-it-works",
+		"/docs/local-bridge/support",
+		"/docs/local-bridge/legacy",
+	} {
 		if code, _ := fetch(t, base, p); code != http.StatusOK {
 			t.Fatalf("GET %s: status %d", p, code)
 		}

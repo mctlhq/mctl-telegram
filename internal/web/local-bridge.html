@@ -4,7 +4,7 @@
 {{template "ui_head" .}}
 <style>
   /* Prose styling for the rendered guide, built on the shared design tokens.
-     The markup below is produced by goldmark from docs/local-bridge.md, so
+     The markup below is produced by goldmark from docs/local-bridge*.md, so
      these selectors are plain elements rather than page-specific classes. */
   .doc { max-width: 760px; }
   .doc h1 {
@@ -43,7 +43,6 @@
     margin: 16px 0; padding: 2px 0 2px 16px;
     border-left: 3px solid var(--border); color: var(--text-dim);
   }
-  /* Wide tables swipe within their own box rather than widening the page. */
   .doc table {
     display: block; width: 100%; overflow-x: auto; border-collapse: collapse;
     margin: 14px 0; font-size: 14px;
@@ -55,10 +54,52 @@
   .doc th { font-weight: 600; color: var(--text); white-space: nowrap; }
   .doc hr { border: 0; border-top: 1px solid var(--border); margin: 32px 0; }
   .doc-source { color: var(--text-dim); font-size: 13px; margin-top: 40px; }
+
+  .doc-nav {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 0 0 28px; padding-bottom: 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .doc-nav a {
+    display: inline-flex; align-items: center;
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: .02em;
+    padding: 6px 10px; border-radius: var(--mctl-radius-md);
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text-dim); text-decoration: none;
+  }
+  .doc-nav a:hover { border-color: var(--accent); color: var(--text); }
+  .doc-nav a.active {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .doc-nav a.kind-support { opacity: .85; }
+
+  .doc-toc {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+    margin: 8px 0 28px;
+  }
+  .doc-toc a {
+    display: block; padding: 16px 18px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-top: 3px solid var(--accent);
+    border-radius: var(--mctl-radius-lg);
+    text-decoration: none; color: inherit;
+  }
+  .doc-toc a.kind-support { border-top-color: var(--border-strong); }
+  .doc-toc a:hover { border-color: var(--accent); }
+  .doc-toc .toc-label {
+    display: block; font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px;
+  }
+  .doc-toc .toc-summary {
+    display: block; font-size: 13.5px; color: var(--text-dim); line-height: 1.5;
+  }
+
   @media (max-width: 640px) {
     .doc h1 { font-size: 26px; }
     .doc h2 { font-size: 18px; }
     .doc table { font-size: 13px; }
+    .doc-toc { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -69,10 +110,27 @@
   {{template "ui_topbar" .}}
 
   <article class="doc">
+    <nav class="doc-nav" aria-label="Local Bridge guide">
+      {{range .Pages}}
+      <a href="{{.Href}}"{{if .Active}} class="active kind-{{.Kind}}"{{else}} class="kind-{{.Kind}}"{{end}}>{{.Label}}</a>
+      {{end}}
+    </nav>
+    {{if .ShowTOC}}
+    <div class="doc-toc" aria-label="Guide pages">
+      {{range .Pages}}
+        {{if and .Summary (not .Active)}}
+      <a href="{{.Href}}" class="kind-{{.Kind}}">
+        <span class="toc-label">{{.Label}}</span>
+        <span class="toc-summary">{{.Summary}}</span>
+      </a>
+        {{end}}
+      {{end}}
+    </div>
+    {{end}}
 {{.Body}}
     <p class="doc-source">
       This page is rendered from
-      <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/local-bridge.md" target="_blank" rel="noopener">docs/local-bridge.md</a>
+      <a href="https://github.com/mctlhq/mctl-telegram/blob/main/{{.Source}}" target="_blank" rel="noopener">{{.Source}}</a>
       in the repository, so what you read here is the same text the code is developed against.
     </p>
   </article>

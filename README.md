@@ -201,19 +201,20 @@ becomes a relay that forwards MCP tool calls down a websocket to a local
 daemon. Released binaries for macOS, Linux and Windows are attached to each
 [release](https://github.com/mctlhq/mctl-telegram/releases).
 
-**[docs/local-bridge.md](docs/local-bridge.md)** is the guide: setup, running
-the daemon unattended under launchd or systemd, the limitations that apply
-today, and the trust model. It is kept as the single description of the mode
-so this file and the site copy cannot drift from it.
+The public guide is split so onboarding is not buried under operator
+procedures. `docs/local-bridge.md` is the overview; the rest lives under
+`docs/local-bridge/`. The site serves the same files at
+[/docs/local-bridge](https://tg.mctl.ai/docs/local-bridge) (quick start,
+owner controls, how it works, support, legacy). `internal/web/` holds
+mirrors for `go:embed`; `TestLocalBridgeMarkdownMatchesDocs` fails the
+build if they drift.
 
-Two points that belong here because they are about the repository rather than
-about using the mode:
-
-- The mode is enabled per account by an operator. Nothing in the service writes
-  `telegram_accounts.mode`, and the account must already have completed a normal
-  hosted login, because that login is what creates the row the flip updates.
-- `internal/bridge/DESIGN.md` carries the implementation status, the known
-  correctness gaps, and one rejected approach that should not be revived.
+Turning the mode on for a **new** Telegram id is self-service
+(`mctl-telegram-local activate`). Migrating an existing hosted account,
+or flipping back to hosted, still uses the operator tool
+`set_account_mode`. `internal/bridge/DESIGN.md` carries the
+implementation status, the known correctness gaps, and one rejected
+approach that should not be revived.
 
 ## Operations: Canary account
 

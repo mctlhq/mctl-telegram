@@ -100,7 +100,7 @@ Real Telegram sends through `send_message` or `send_media` require **all** of:
 
 1. Server flag `ALLOW_SEND=true`.
 2. Identity has `telegram:messages:send` scope.
-3. `telegram_accounts.send_enabled = true` for that operator.
+3. `telegram_accounts.send_enabled = true` for that account (owner sets this via `set_send_consent` or `/telegram/connect/manage`).
 4. Per-peer send rate limit not exhausted.
 
 The tool exposes no trusted client-controlled bypass for these gates. Any condition false returns a dry-run result (`sent=false`) with a `dry_reason`; no send RPC reaches Telegram. Media dry-runs do not fetch a URL or decode base64 content.
