@@ -21,6 +21,8 @@ jobs:
       # channels, and #495 was a send-on-closed-channel that plain `go test`
       # could never surface. The whole module passes under -race on main.
       - run: go test -race ./...
+      - run: GOOS=darwin GOARCH=arm64 go build ./...
+      - run: GOOS=windows GOARCH=amd64 go build ./cmd/local
 
   govulncheck:
     runs-on: ubuntu-latest
