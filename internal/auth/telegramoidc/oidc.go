@@ -224,9 +224,11 @@ func parseIdentity(c idTokenClaims) (*Identity, error) {
 }
 
 // parseTelegramID normalises the `id` claim into a positive int64. Telegram
-// delivers it as a JSON string ("210408407", spike #48); a bare JSON number is
-// also accepted in case that ever changes. A missing or null claim yields 0
-// with no error — the sub-only contingency relies on that.
+// delivers it as a JSON string, not a number — observed against the operator's
+// own account during spike #48, where the claim arrived as a quoted 9-digit
+// decimal. A bare JSON number is also accepted in case that ever changes. A
+// missing or null claim yields 0 with no error — the sub-only contingency
+// relies on that.
 func parseTelegramID(raw json.RawMessage) (int64, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {

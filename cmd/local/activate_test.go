@@ -78,8 +78,8 @@ func TestRunActivateFlow_HappyPath(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode start request: %v", err)
 		}
-		if req["telegram_id"] != float64(210408407) {
-			t.Errorf("telegram_id = %v, want 210408407", req["telegram_id"])
+		if req["telegram_id"] != float64(500100101) {
+			t.Errorf("telegram_id = %v, want 500100101", req["telegram_id"])
 		}
 		if req["device_registration_key"] == "" || req["device_registration_key"] == nil {
 			t.Error("device_registration_key missing from start request")
@@ -121,7 +121,7 @@ func TestRunActivateFlow_HappyPath(t *testing.T) {
 	defer ts.Close()
 
 	var out bytes.Buffer
-	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 210408407, "test-device-key", "test-laptop", testSharedPub)
+	deviceID, err := runActivateFlow(context.Background(), &out, ts.URL, 500100101, "test-device-key", "test-laptop", testSharedPub)
 	if err != nil {
 		t.Fatalf("runActivateFlow: %v", err)
 	}
