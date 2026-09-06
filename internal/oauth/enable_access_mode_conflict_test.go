@@ -45,7 +45,7 @@ func TestEnableAccess_LocalModeConflict_SurfacesSpecificMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestEnableAccess_LocalModeConflict_RefusedBeforeLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -231,7 +231,7 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 		t.Fatal("handleEnableStart never reached startLoginFlow; the pre-flight gate refused instead, so this test is not exercising the re-check")
 	}
 
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		ul.Unlock()
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestEnableAccess_TerminalRefusalInPasswordStep_ResetsStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -669,7 +669,7 @@ func TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -725,7 +725,7 @@ func TestEnableAccess_IdentityMismatch_UnknownRevokesTheBridge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -799,7 +799,7 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -849,7 +849,7 @@ func TestEnableAccess_IdentityMismatch_LocalCleanupFailureSurfaces(t *testing.T)
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -884,7 +884,7 @@ func TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry(t *testin
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 

@@ -51,7 +51,7 @@ func TestRefuseIfLocal_RefusesWhileBridgeActive(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestRepairStraySession_ClearsBytesButKeepsTheRow(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	// What telegram.Login does through the gotd SessionStore with no loaded
@@ -123,7 +123,7 @@ func TestRepairStraySession_SurvivesACancelledParent(t *testing.T) {
 	base := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(base, uid, 500100101, "dana_tg", "Dana"); err != nil {
+	if err := store.ProvisionLocalAccount(base, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	if err := store.UpdateSessionBlob(base, uid, []byte("hosted-login-session")); err != nil {
@@ -207,7 +207,7 @@ func TestRunLoginOrRepair_RepairsWhenTheLoginFails(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -245,12 +245,12 @@ func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
 			if wErr := store.UpdateSessionBlob(ctx, uid, []byte("post-auth-session")); wErr != nil {
 				t.Fatalf("UpdateSessionBlob: %v", wErr)
 			}
-			return 210408407, "Dmitry", "MashkovD", nil
+			return 500100101, "Dana", "dana_tg", nil
 		})
 	if err != nil {
 		t.Fatalf("runLoginOrRepair: %v", err)
 	}
-	if tgID != 210408407 || displayName != "Dmitry" || username != "MashkovD" {
+	if tgID != 500100101 || displayName != "Dana" || username != "dana_tg" {
 		t.Fatalf("the login's own results were not passed through: %d %q %q", tgID, displayName, username)
 	}
 
