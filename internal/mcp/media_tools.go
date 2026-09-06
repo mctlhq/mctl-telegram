@@ -305,6 +305,7 @@ Inputs (required):
     file_path   — a path under the Local Bridge media allowlist. Hosted accounts cannot use
                   this: the server never reads the local disk. The daemon reads only files
                   inside MCTL_MEDIA_DIR (default ~/.config/mctl-telegram-local/media).
+                  Linux and macOS only; on Windows use file_base64.
 
 Inputs (optional):
   caption          — text attached to the media (truncated to Telegram's ~1024-char caption limit).
@@ -331,7 +332,7 @@ OGG/Opus; the server does not transcode.`),
 			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("file_path",
-			mcplib.Description("Local-Bridge-only path under the media allowlist. Exactly one of file_url/file_base64/file_path is required."),
+			mcplib.Description("Local-Bridge-only path under the media allowlist (Linux and macOS). On Windows, use file_base64. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("caption",
 			mcplib.Description("Optional caption text for the media."),

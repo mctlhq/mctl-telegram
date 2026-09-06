@@ -8,6 +8,8 @@ import (
 	"strconv"
 )
 
+const filePathSupported = true
+
 // procSelfFDDir names the kernel fd-to-path directory. Tests replace it
 // to exercise fail-closed behavior when /proc/self/fd is unavailable.
 var procSelfFDDir = "/proc/self/fd"

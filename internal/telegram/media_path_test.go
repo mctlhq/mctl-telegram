@@ -36,6 +36,37 @@ func TestReadAllowlistedFile_ReadsInsideDir(t *testing.T) {
 	}
 }
 
+func TestReadAllowlistedFile_AcceptsAbsPathWhenAllowDirIsSymlink(t *testing.T) {
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "note.bin"), []byte("via-symlink-allow"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	allowLink := filepath.Join(t.TempDir(), "media")
+	if err := os.Symlink(realDir, allowLink); err != nil {
+		t.Fatalf("symlink allow dir: %v", err)
+	}
+	allowAbs, err := filepath.Abs(allowLink)
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	allowReal, err := filepath.EvalSymlinks(allowAbs)
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if allowAbs == allowReal {
+		t.Fatal("test setup must have allowAbs != allowReal")
+	}
+	// Agent-style absolute path under the unresolved allow-dir spelling.
+	candidate := filepath.Join(allowAbs, "note.bin")
+	got, err := ReadAllowlistedFile(candidate, allowLink, 1024)
+	if err != nil {
+		t.Fatalf("abs path through symlink allow dir: %v", err)
+	}
+	if string(got) != "via-symlink-allow" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestReadAllowlistedFile_RejectsEscape(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(dir, "..", "escape.txt")

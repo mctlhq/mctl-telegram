@@ -34,6 +34,9 @@ var (
 // outside regular file. If that fd-to-path lookup is unavailable, the
 // read fails closed instead of re-evaluating the string path.
 func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) {
+	if !filePathSupported {
+		return nil, fmt.Errorf("file_path is not supported on this platform; use file_base64")
+	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("file_path is required")
 	}
@@ -53,7 +56,13 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 		candidate = filepath.Join(allowReal, candidate)
 	}
 	candidate = filepath.Clean(candidate)
-	if !isUnderDir(allowReal, candidate) {
+	// Pre-check is a cheap reject, not the security boundary. Accept either
+	// the resolved allow root or the caller's spelling of it: MCTL_MEDIA_DIR
+	// is often a symlink (macOS /tmp -> /private/tmp; ln -s media dir), and
+	// the agent then passes an absolute path under that unresolved spelling.
+	// The post-EvalSymlinks check against allowReal is what enforces the
+	// allowlist.
+	if !isUnderDir(allowReal, candidate) && !isUnderDir(allowAbs, candidate) {
 		return nil, fmt.Errorf("file_path is outside the media allowlist directory")
 	}
 	resolved, err := filepath.EvalSymlinks(candidate)

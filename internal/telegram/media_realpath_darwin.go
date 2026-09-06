@@ -10,9 +10,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const filePathSupported = true
+
 func resolveOpenedFDPath(f *os.File) (string, error) {
 	var buf [unix.PathMax]byte
-	if _, err := fcntlGetPath(f.Fd(), &buf); err != nil {
+	if _, err := fcntlGetPath(f.Fd(), uintptr(unsafe.Pointer(&buf[0]))); err != nil {
 		return "", fmt.Errorf("F_GETPATH: %w", err)
 	}
 	p := unix.ByteSliceToString(buf[:])
@@ -22,10 +24,12 @@ func resolveOpenedFDPath(f *os.File) (string, error) {
 	return p, nil
 }
 
-// fcntlGetPath asks the kernel for the path of fd. buf is passed as a
-// pointer so the array stays alive across the FcntlInt call; the address
-// is an int because that is what unix.FcntlInt accepts, and on darwin
-// amd64/arm64 int is pointer-width.
-func fcntlGetPath(fd uintptr, buf *[unix.PathMax]byte) (int, error) {
-	return unix.FcntlInt(fd, unix.F_GETPATH, int(uintptr(unsafe.Pointer(&buf[0]))))
+// fcntlGetPath asks the kernel for the path of fd. The //go:uintptrescapes
+// pragma keeps buf pinned for the duration of the call; converting the
+// pointer to uintptr in this argument list (not earlier) is the only
+// valid unsafe.Pointer pattern for FcntlInt, which has no such pragma.
+//
+//go:uintptrescapes
+func fcntlGetPath(fd uintptr, buf uintptr) (int, error) {
+	return unix.FcntlInt(fd, unix.F_GETPATH, int(buf))
 }
