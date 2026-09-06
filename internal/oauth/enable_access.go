@@ -991,14 +991,17 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	// Completing MTProto login is the registration event: persist the
 	// client tier so an auto-approved user keeps access after
 	// AUTO_APPROVE_CLIENTS is flipped off. Only write when open
-	// registration is on and the row is still unset — same scope as the
-	// OIDC auto-grant path. An env-listed TG_LOGIN_CLIENTS identity must
-	// stay unset so removal from the allowlist still revokes; writing
-	// 'client' would make the DB authoritative and force operators through
-	// set_telegram_access(none). An explicit none set by an admin is never
-	// overwritten. Admins and lookup-only identities keep their
-	// env-allowlist tiers — writing 'client' for a lookup admin is the
-	// same trap that path already refuses (removal would promote them).
+	// registration is on and the row is still unset. Neither this path
+	// nor the OIDC auto-grant excludes ClientTelegramIDs: when
+	// AutoApproveClients is on, an env-listed identity gets the same
+	// persisted 'client' row as any other first-time user. While
+	// AutoApproveClients is off the write does not run, so an
+	// env-listed TG_LOGIN_CLIENTS identity stays unset and removal
+	// from the allowlist still revokes. An explicit none set by an
+	// admin is never overwritten. Admins and lookup-only identities
+	// keep their env-allowlist tiers — writing 'client' for a lookup
+	// admin is the same trap that path already refuses (removal
+	// would promote them).
 	if s.cfg.AutoApproveClients && !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
 		dbTier, err := s.store.GetAccessTier(r.Context(), es.tgID)
 		if err != nil {
@@ -1006,6 +1009,8 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 		} else if dbTier == "" {
 			if terr := s.store.SetAccessTier(r.Context(), es.tgID, db.TierClient); terr != nil {
 				slog.Error("finishEnable: set client tier", "uid", es.uid, "err", terr)
+			} else {
+				slog.Info("auto-granted client tier on enable", "telegram_id", es.tgID)
 			}
 		}
 	}
