@@ -99,14 +99,14 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 	}
 	var uid int64
 	if err := conn.QueryRowContext(ctx,
-		`INSERT INTO users(github_login, provider) VALUES ('alice', 'test') RETURNING id`,
+		`INSERT INTO users(github_login, provider) VALUES ('dana', 'test') RETURNING id`,
 	).Scan(&uid); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username,
 		                               session_encrypted, mode, send_enabled, bridge_token_hash)
-		 VALUES ($1, 42, 'Alice', 'alice_tg', NULL, $2, 0, X'0badc0de')`,
+		 VALUES ($1, 500100101, 'Dana', 'dana_tg', NULL, $2, 0, X'0badc0de')`,
 		uid, ModeLocal); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 	if mode != ModeLocal {
 		t.Errorf("mode = %q after the drop, want %q", mode, ModeLocal)
 	}
-	if username != "alice_tg" || tgID != 42 {
+	if username != "dana_tg" || tgID != 500100101 {
 		t.Errorf("row contents changed across the drop: username=%q tgID=%d", username, tgID)
 	}
 }
