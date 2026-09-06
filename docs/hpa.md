@@ -121,9 +121,14 @@ To deploy them, port them into `mctl-gitops` as a `VMRule` under
 `mctl-telegram-canary.yaml`. That directory is what ArgoCD reconciles, and it
 is the only path by which an alert reaches this cluster.
 
-A one-off `kubectl apply` of the manifest here is not a deployment: ArgoCD does
-not know about it, so it survives only until the next reconcile of anything
-that touches it and drifts silently from this file thereafter.
+A one-off `kubectl apply` of the manifest here is not a deployment, and it does
+not clean itself up either. The applied object carries no ArgoCD tracking
+metadata, so ArgoCD neither adopts nor prunes it: it stays active
+indefinitely, drifting silently from this file, and will later fire alongside
+whatever gets ported properly. If you or anyone else ever applied one of these
+by hand, find and delete it explicitly —
+`kubectl get prometheusrule,vmrule -A -l '!argocd.argoproj.io/instance'` — do
+not expect a reconcile to remove it.
 
 The SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
 availability, session borrow success rate) have already been ported, as

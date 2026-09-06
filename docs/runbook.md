@@ -323,7 +323,7 @@ sum(rate(mctl_sessions_revoked_total[5m])) by (reason)
 
 5. **Critical severity.** If the critical alert fired, scale out immediately.
    New connections will be rejected once the pool is full, causing tool
-   invocation errors that will trigger the `MctlToolAvailabilityFastBurn`
+   invocation errors that will trigger the `MctlTelegramToolAvailabilityFastBurn`
    alert. See [SloBurnRate](#sloburnrate).
 
 ### Escalation
@@ -858,12 +858,12 @@ One or more of the following multi-window burn-rate alerts fire:
 
 | Alert | Severity | Window | Threshold |
 |-------|----------|--------|-----------|
-| `MctlToolAvailabilityFastBurn` | page | 1h | error rate >7.2% |
-| `MctlToolAvailabilitySlowBurn` | ticket | 6h | error rate >3.0% |
-| `MctlOAuthAvailabilityFastBurn` | page | 1h | error rate >1.440% |
-| `MctlOAuthAvailabilitySlowBurn` | ticket | 6h | error rate >0.600% |
-| `MctlSessionBorrowFastBurn` | page | 1h | error rate >14.4% |
-| `MctlSessionBorrowSlowBurn` | ticket | 6h | error rate >6.0% |
+| `MctlTelegramToolAvailabilityFastBurn` | critical (page) | 1h | error rate >7.2% |
+| `MctlTelegramToolAvailabilitySlowBurn` | warning (ticket) | 6h | error rate >3.0% |
+| `MctlTelegramOAuthAvailabilityFastBurn` | critical (page) | 1h | error rate >1.440% |
+| `MctlTelegramOAuthAvailabilitySlowBurn` | warning (ticket) | 6h | error rate >0.600% |
+| `MctlTelegramSessionBorrowFastBurn` | critical (page) | 1h | error rate >14.4% |
+| `MctlTelegramSessionBorrowSlowBurn` | warning (ticket) | 6h | error rate >6.0% |
 
 Fast-burn (page severity) means 14.4x the allowed burn rate — at that rate
 the full 30-day error budget is exhausted in about 2 days (30d / 14.4 ≈ 50
@@ -873,15 +873,15 @@ means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
 
 ### Likely causes
 
-- **MctlToolAvailabilityFastBurn/SlowBurn**: Telegram client errors
+- **MctlTelegramToolAvailabilityFastBurn/SlowBurn**: Telegram client errors
   (see [TelegramClientErrors](#telegramclienterrors)), pool exhaustion
   (see [MctlTelegramNearCapacity](#mctltelegramnearcapacity)), or
   flood-wait retries exhausted (see [MctlTelegramFloodWaitSpike](#mctltelegramfloodwaitspike)).
-- **MctlOAuthAvailabilityFastBurn/SlowBurn**: OAuth server errors (500s on
+- **MctlTelegramOAuthAvailabilityFastBurn/SlowBurn**: OAuth server errors (500s on
   `/oauth/token` or `/oauth/telegram/callback`). Check the OAuth pending
   state (see [MctlTelegramOAuthPendingStuck](#mctltelegramoauthpendingstuck))
   and JWT failures (see [JwtFailures](#jwtfailures)).
-- **MctlSessionBorrowFastBurn/SlowBurn**: Session store errors, database
+- **MctlTelegramSessionBorrowFastBurn/SlowBurn**: Session store errors, database
   connectivity failures, or session corruption. TTL expirations
   (`expired_idle`, `expired_absolute`) are excluded from the SLI
   denominator.

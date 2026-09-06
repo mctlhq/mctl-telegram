@@ -16,8 +16,12 @@
 # MctlTelegramOAuthPendingStuck, MctlBridgeDaemonsFlapping,
 # MctlAgentDeadLetter and MctlAgentActionsExecutingStuck. Wiring those is a
 # separate decision; until it is made, this is the only place their expressions
-# are written down and unit-tested (build.yml runs promtool over this file and
-# deploy/alerts/mctl-telegram.rules_test.yaml).
+# are written down. Coverage is not uniform, and the difference matters: CI
+# runs `promtool check rules` over this whole file, which validates syntax
+# only, plus `promtool test rules` over deploy/alerts/mctl-telegram.rules_test
+# .yaml, which carries behavioural cases for MctlBridgeDaemonsFlapping and for
+# nothing else. The other five families are syntax-checked, not unit-tested —
+# an expression there can be silently wrong and stay green.
 #
 # Two consequences worth stating, because a "looks deployed" manifest is how
 # this drifted in the first place (mctlhq/mctl-telegram#546, and #491 for the
@@ -304,10 +308,11 @@ spec:
               See docs/slo.md for the error-budget policy and recovery criteria.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
 
-    # status: pending instrumentation (tasks 1-2 in issue-88)
-    # These alerts reference mctl_sessions_borrow_total, which is introduced in
-    # this PR. Deploy only after the new binary has been running for at least one
-    # 6h slow-burn window so the counter has enough data for meaningful rates.
+    # The deployment gate that used to sit here ("pending instrumentation",
+    # deploy only after a 6h soak) is spent: mctl_sessions_borrow_total is
+    # registered in internal/metrics/metrics.go and these rules are live in
+    # mctl-gitops as MctlTelegramSessionBorrow{Fast,Slow}Burn. Kept here as a
+    # reference copy only -- see the header.
     - name: mctl-telegram-session-borrow
       rules:
         - alert: MctlSessionBorrowFastBurn
