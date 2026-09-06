@@ -140,9 +140,6 @@ func main() {
 	// has to run the repair, not just SaveSession's own refusal: leaving the
 	// bytes behind would let the hosted worker act as the user through a row
 	// the operator believes is local.
-	//
-	// repairStraySession is called explicitly on each exit rather than
-	// deferred because die() is os.Exit, which does not run defers.
 
 	// Hoisted out of SaveSession's argument list. Go evaluates arguments before
 	// the call, and this exits the process on failure — as an argument it could
@@ -205,6 +202,11 @@ func refuseIfLocal(ctx context.Context, store *db.Store, uid int64) error {
 // Failure is logged rather than returned. Every caller is already on its way
 // to die() with the error that caused the login to fail, and that error is the
 // more useful one to print.
+//
+// Called explicitly on every post-login exit rather than deferred once at the
+// top: each of those exits ends in die(), which is os.Exit, and os.Exit does
+// not run defers -- a deferred repair would never execute on any of the paths
+// that need it.
 func repairStraySession(ctx context.Context, store *db.Store, uid int64) {
 	repairCtx, repairCancel := db.StrayRepairContext(ctx)
 	defer repairCancel()

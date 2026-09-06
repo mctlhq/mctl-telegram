@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
@@ -49,7 +50,7 @@ func TestRefuseIfLocal_RefusesWhileBridgeActive(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -88,7 +89,7 @@ func TestRepairStraySession_ClearsBytesButKeepsTheRow(t *testing.T) {
 	ctx := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	// What telegram.Login does through the gotd SessionStore with no loaded
@@ -121,7 +122,7 @@ func TestRepairStraySession_SurvivesACancelledParent(t *testing.T) {
 	base := context.Background()
 	store := newLoginTestStore(t)
 	uid := seedUser(t, store)
-	if err := store.ProvisionLocalAccount(base, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := store.ProvisionLocalAccount(base, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 	if err := store.UpdateSessionBlob(base, uid, []byte("hosted-login-session")); err != nil {
@@ -142,5 +143,36 @@ func TestRepairStraySession_SurvivesACancelledParent(t *testing.T) {
 	}
 	if blob != nil {
 		t.Error("the repair inherited the cancelled context and left the stray bytes behind")
+	}
+}
+
+// TestRefuseIfLocal_StoreFailureIsNotARefusal pins the property refuseIfLocal's
+// own doc comment states and nothing checked: a store that cannot answer must
+// not be reported as a Local Bridge conflict. The operator's two remedies are
+// opposite -- a conflict means "stop, this account is bridge-only", a store
+// failure means "retry" -- so collapsing the second into the first sends them
+// to disconnect a bridge over a database blip.
+//
+// Closing the pool is the cheapest way to make HasActiveLocalAccount fail for
+// real, through the same query path production uses, rather than through a
+// stub that could drift from it.
+func TestRefuseIfLocal_StoreFailureIsNotARefusal(t *testing.T) {
+	ctx := context.Background()
+	store := newLoginTestStore(t)
+	uid := seedUser(t, store)
+
+	if err := store.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	err := refuseIfLocal(ctx, store, uid)
+	if err == nil {
+		t.Fatal("refuseIfLocal admitted a login while the store was unreachable")
+	}
+	if errors.Is(err, db.ErrAccountModeConflict) {
+		t.Fatalf("a store failure was reported as a mode conflict: %v", err)
+	}
+	if !strings.Contains(err.Error(), "check account mode") {
+		t.Fatalf("the store's own error reached the operator unwrapped: %v", err)
 	}
 }
