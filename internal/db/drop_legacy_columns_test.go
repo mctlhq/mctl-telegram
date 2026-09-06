@@ -132,7 +132,10 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 
 // TestDropColumnIfPresent_Postgres covers the dialect the SQLite tests cannot
 // reach. Following db_test.go's convention it runs only when TEST_DATABASE_URL
-// is set, so it is a local/opt-in check rather than a CI gate.
+// is set -- which, since #556 merged, CI does set: the test job has a
+// postgres:17.2 service container and a guard step that fails if any
+// Postgres-backed test skips. So this is a CI gate, not the local/opt-in check
+// it was when written.
 //
 // The property under test is not just "the column goes" but "the steady state
 // issues no DDL": Migrate runs on every pod start, and an unconditional
