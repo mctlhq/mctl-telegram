@@ -41,8 +41,9 @@ This file is a helper for Claude Code and other AI coding agents. Canonical cont
   before picking a numeric id run `git grep <id>` to see what it already means.
   An id may carry different labels in different places and often does: in
   `internal/db` the same id is the exempt-account subject and is labelled
-  `Exempt` or `Op` by the test that uses it, while `internal/oauth` labels it
-  `Admin`. Those are role labels, not personas, and reusing an id for a role is
+  `Exempt` or `Op` by the test that uses it, while in `internal/oauth` the same
+  id is `Dana`/`dana_tg` almost everywhere and `Admin` at a single site. Those
+  role labels are not personas, and reusing an id for a role is
   fine — the stores are independent and nothing couples them. What must never
   recur is the thing this rule exists for: a real person's name, handle or
   numeric id in a fixture. `.github/CODEOWNERS` is the one deliberate
