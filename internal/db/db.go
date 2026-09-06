@@ -331,11 +331,19 @@ func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
 func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) (bool, error) {
 	q := `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`
 	if pg {
-		// Schema-qualified: an unqualified table_name matches a same-named
-		// table in any schema on the search path, which would report a column
-		// that this connection's statements do not address.
-		q = `SELECT count(*) FROM information_schema.columns
-		     WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`
+		// Resolved through to_regclass so the lookup lands on exactly the
+		// table the DDL below will alter. The obvious spellings both get this
+		// wrong in opposite directions: an unqualified information_schema
+		// table_name matches a same-named table in ANY schema, while
+		// table_schema = current_schema() sees only the FIRST schema on the
+		// search path -- but an unqualified ALTER TABLE resolves through the
+		// whole path, so a table living in a later schema would be reported
+		// as column-less and the migration would silently skip it.
+		// to_regclass applies the same resolution rules as the statement, and
+		// yields NULL (hence count 0) when the table does not exist at all.
+		q = `SELECT count(*) FROM pg_attribute
+		     WHERE attrelid = to_regclass($1) AND attname = $2
+		       AND attnum > 0 AND NOT attisdropped`
 	}
 	var count int
 	if err := dbConn.QueryRowContext(ctx, q, table, column).Scan(&count); err != nil {

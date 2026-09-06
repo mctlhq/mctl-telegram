@@ -137,8 +137,13 @@ func TestMigrate_DropKeepsTheRowsAndTheSiblingColumns(t *testing.T) {
 // The property under test is not just "the column goes" but "the steady state
 // issues no DDL": Migrate runs on every pod start, and an unconditional
 // `ALTER TABLE ... DROP COLUMN IF EXISTS` takes its ACCESS EXCLUSIVE lock
-// before discovering there is nothing to drop. So the second call is checked
-// through pg_stat, by asserting the table's last DDL did not move.
+// before discovering there is nothing to drop. The second call is checked by
+// making that lock fatal rather than by inspecting statistics: a second
+// session holds ACCESS SHARE on the table inside an open transaction and the
+// dropper runs with lock_timeout = 2s, so a steady-state call that reached
+// the DDL would block and fail with SQLSTATE 55P03. Passing therefore means
+// no DDL was issued -- a direct observation, where a pg_stat counter would
+// only be circumstantial.
 func TestDropColumnIfPresent_Postgres(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
