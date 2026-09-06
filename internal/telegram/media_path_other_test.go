@@ -22,17 +22,17 @@ func TestReadAllowlistedFile_UnsupportedPlatform(t *testing.T) {
 	if string(got) == "inside" {
 		t.Fatal("must not return file bytes when file_path is unsupported")
 	}
-	if !strings.Contains(err.Error(), "file_path is not supported on this platform") {
+	if !strings.Contains(err.Error(), "file_path is only supported on Linux and macOS") {
 		t.Fatalf("got %v, want the documented platform error", err)
 	}
-	if !strings.Contains(err.Error(), "file_base64") {
-		t.Fatalf("got %v, want a file_base64 alternative", err)
+	if strings.Contains(err.Error(), "secure fd-to-path") {
+		t.Fatalf("got internal error %v, want the user-facing platform error", err)
 	}
 
 	// Refuse before I/O: a missing path must still get the platform error,
 	// not a not-found from open.
 	_, err = ReadAllowlistedFile(filepath.Join(dir, "missing.bin"), dir, 1024)
-	if err == nil || !strings.Contains(err.Error(), "file_path is not supported on this platform") {
+	if err == nil || !strings.Contains(err.Error(), "file_path is only supported on Linux and macOS") {
 		t.Fatalf("missing path must still be the platform error, got %v", err)
 	}
 }

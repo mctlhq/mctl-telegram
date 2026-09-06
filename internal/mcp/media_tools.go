@@ -305,13 +305,14 @@ Inputs (required):
     file_path   — a path under the Local Bridge media allowlist. Hosted accounts cannot use
                   this: the server never reads the local disk. The daemon reads only files
                   inside MCTL_MEDIA_DIR (default ~/.config/mctl-telegram-local/media).
-                  Linux and macOS only; on Windows use file_base64.
+                  file_path is only supported on Linux and macOS; on Windows use file_base64.
 
 Inputs (optional):
   caption          — text attached to the media (truncated to Telegram's ~1024-char caption limit).
   file_name        — REQUIRED when media_type="document" and file_base64 is the source; optional
                      display name for the other media types. Derived from file_path when omitted.
-  duration_seconds — optional duration for voice notes (shown on the Telegram player).
+  duration_seconds — optional duration for voice notes (shown on the Telegram player),
+                     0–86400. Ignored for other media types.
 
 Both the file_url fetch and the file_base64 decode are capped by MEDIA_UPLOAD_MAX_BYTES
 (default 20 MiB) and are only ever performed on the real-send path — a draft or gate-denied
@@ -332,7 +333,7 @@ OGG/Opus; the server does not transcode.`),
 			mcplib.Description("Standard base64-encoded file bytes. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("file_path",
-			mcplib.Description("Local-Bridge-only path under the media allowlist (Linux and macOS). On Windows, use file_base64. Exactly one of file_url/file_base64/file_path is required."),
+			mcplib.Description("Local-Bridge-only path under the media allowlist. file_path is only supported on Linux and macOS; on Windows use file_base64. Exactly one of file_url/file_base64/file_path is required."),
 		),
 		mcplib.WithString("caption",
 			mcplib.Description("Optional caption text for the media."),
@@ -341,7 +342,7 @@ OGG/Opus; the server does not transcode.`),
 			mcplib.Description(`Required when media_type="document" and file_base64 is used; optional display name otherwise.`),
 		),
 		mcplib.WithNumber("duration_seconds",
-			mcplib.Description("Optional duration for voice notes, in seconds."),
+			mcplib.Description("Optional duration for voice notes, in seconds (0-86400). Ignored for other media types."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -389,6 +390,9 @@ OGG/Opus; the server does not transcode.`),
 		}
 		if mediaType == "document" && fileB64 != "" && fileName == "" {
 			return mcplib.NewToolResultError(`file_name is required when media_type is "document" and file_base64 is used`), nil
+		}
+		if durationSeconds < 0 || durationSeconds > 86400 {
+			return mcplib.NewToolResultError("duration_seconds must be between 0 and 86400"), nil
 		}
 
 		peerRedacted := telegram.RedactPeer(peer)

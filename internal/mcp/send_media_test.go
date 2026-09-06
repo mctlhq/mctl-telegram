@@ -263,3 +263,21 @@ func TestToolSendMedia_VoiceTypeAcceptedOnDraft(t *testing.T) {
 		t.Errorf("sent = %v, want false", out["sent"])
 	}
 }
+
+func TestToolSendMedia_DurationSecondsRejected(t *testing.T) {
+	srv := sendMediaTestServer(t, false)
+	for _, d := range []any{-5, 86401} {
+		res := callSendMedia(t, srv, sendMediaScopedIdentity(), map[string]any{
+			"peer":             "@x",
+			"media_type":       "voice",
+			"file_base64":      "T2dnUw==",
+			"duration_seconds": d,
+		})
+		if !res.IsError {
+			t.Fatalf("duration_seconds=%v must be rejected", d)
+		}
+		if !strings.Contains(contentText(res), "duration_seconds must be between 0 and 86400") {
+			t.Fatalf("duration_seconds=%v: got %q", d, contentText(res))
+		}
+	}
+}

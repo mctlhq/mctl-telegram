@@ -2,13 +2,10 @@
 
 package telegram
 
-import (
-	"fmt"
-	"os"
-)
+import "os"
 
 const filePathSupported = false
 
 func resolveOpenedFDPath(*os.File) (string, error) {
-	return "", fmt.Errorf("secure fd-to-path is unavailable on this platform")
+	return "", errFilePathUnsupported
 }

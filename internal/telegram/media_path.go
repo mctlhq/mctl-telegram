@@ -15,6 +15,11 @@ var (
 	openAllowlisted  = openNoFollow
 )
 
+// errFilePathUnsupported is the user-facing refusal on platforms without
+// a kernel fd-to-path (Windows). Shared by the early check and
+// resolveOpenedFDPath so both paths name the OS constraint.
+var errFilePathUnsupported = fmt.Errorf("file_path is only supported on Linux and macOS")
+
 // ReadAllowlistedFile reads path if and only if it resolves inside allowDir
 // after cleaning and symlink evaluation. This is the send_media file_path
 // boundary: the hosted server never calls it; only the Local Bridge daemon
@@ -23,8 +28,10 @@ var (
 // Relative paths are resolved against allowDir, not the process working
 // directory. A path that escapes via ".." or a symlink is refused. The
 // file must be a regular file and, when maxBytes > 0, no larger than that
-// cap. The function never follows a path outside allowDir, including when
-// the file is missing (the parent prefix is still checked).
+// cap. The function never follows a symlink path outside allowDir,
+// including when the file is missing (the parent prefix is still checked).
+// A hardlink inside the allowlist that names an outside inode is out of
+// scope: fd-to-path reports the dentry used to open, not the link target.
 //
 // After the allowlist resolve, the file is Lstat'd (must be a regular file,
 // not a symlink), opened without following a final-component symlink
@@ -35,7 +42,7 @@ var (
 // read fails closed instead of re-evaluating the string path.
 func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) {
 	if !filePathSupported {
-		return nil, fmt.Errorf("file_path is not supported on this platform; use file_base64")
+		return nil, errFilePathUnsupported
 	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("file_path is required")
