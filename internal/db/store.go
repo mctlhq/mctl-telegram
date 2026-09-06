@@ -1352,6 +1352,20 @@ func (s *Store) HasActiveLocalAccount(ctx context.Context, userID int64) (bool, 
 // repair the same way.
 const StraySessionRepairTimeout = 5 * time.Second
 
+// StrayRepairContext derives the context a ClearStraySessionIfLocal call must
+// run on. Detached from parent AND bounded, and both halves are load-bearing:
+// WithoutCancel alone would strip the deadline too, while a plain WithTimeout
+// would inherit an expiry that is itself a likely reason the repair is needed
+// -- the enable_access flow runs on a CodeTTL-bounded context, and cmd/login
+// on a context a failed login may already have cancelled.
+//
+// One home rather than one per caller: both entrypoints have to detach and
+// bound the repair identically, and the pair had already drifted into two
+// copies of the same expression once.
+func StrayRepairContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), StraySessionRepairTimeout)
+}
+
 // ClearStraySessionIfLocal drops the session blob from every active row of a
 // user, but only when one of those rows is mode='local'. It is the repair for
 // a hosted connect that failed AFTER telegram.Login already persisted its

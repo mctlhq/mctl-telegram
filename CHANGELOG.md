@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.62.0](https://github.com/mctlhq/mctl-telegram/compare/0.61.0...0.62.0) (2026-09-06)
+
+
+### Features
+
+* **telegram:** bound send_media file_path to Local Bridge and add voice ([#543](https://github.com/mctlhq/mctl-telegram/issues/543)) ([4a2d81d](https://github.com/mctlhq/mctl-telegram/commit/4a2d81dd1e179e4045ab9af989ba2734cbd4aa8c))
+
+
+### Bug Fixes
+
+* **agent:** say when /mctl conversations is truncated ([#539](https://github.com/mctlhq/mctl-telegram/issues/539)) ([a5fe5f0](https://github.com/mctlhq/mctl-telegram/commit/a5fe5f07d298685d56d358b33f49777797573441))
+* **auth:** declare Vary and no-store on the 401, and type the rejection reason ([#538](https://github.com/mctlhq/mctl-telegram/issues/538)) ([931616c](https://github.com/mctlhq/mctl-telegram/commit/931616ce36d7531d5728e8246ff090421eeb2a31))
+* **oauth:** avoid mid-flight modeCheckFn write in mismatch test ([#545](https://github.com/mctlhq/mctl-telegram/issues/545)) ([9baf2a5](https://github.com/mctlhq/mctl-telegram/commit/9baf2a56573e8746f1d41482baea73cc0a16be0e))
+* **oauth:** persist client tier after enable_access and add get_my_identity ([#540](https://github.com/mctlhq/mctl-telegram/issues/540)) ([c030ddf](https://github.com/mctlhq/mctl-telegram/commit/c030ddf96850ec01d59b134cd4ecd5a56c000049))
+* **oauth:** surface identity-mismatch cleanup failure and detach its context ([#536](https://github.com/mctlhq/mctl-telegram/issues/536)) ([d19c91f](https://github.com/mctlhq/mctl-telegram/commit/d19c91f6cd2dfcfe8565c83ab61de8057a701735))
+* **security:** remediate remaining audit-2026-08 items ([#542](https://github.com/mctlhq/mctl-telegram/issues/542)) ([8a3e812](https://github.com/mctlhq/mctl-telegram/commit/8a3e812c291545cead66a07aad686738bfe4a6c1))
+* **web:** show connect page instead of JSON on /telegram/connect/manage ([#534](https://github.com/mctlhq/mctl-telegram/issues/534)) ([5918515](https://github.com/mctlhq/mctl-telegram/commit/5918515b1ec4775f7ffa07619c9a52b7b6786342))
+
 ## [0.61.0](https://github.com/mctlhq/mctl-telegram/compare/0.60.1...0.61.0) (2026-09-05)
 
 
