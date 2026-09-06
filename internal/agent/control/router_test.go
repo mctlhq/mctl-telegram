@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -370,6 +371,209 @@ func TestRouter_Conversations_IncludesTakenOverWithNoLead(t *testing.T) {
 	wantMarker := "Conv #" + strconv.FormatInt(conv.ID, 10) + " — Peer Name (taken_over)"
 	if !strings.Contains(reply, wantMarker) {
 		t.Fatalf("conversations reply = %q, want it to contain %q", reply, wantMarker)
+	}
+}
+
+func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= 21; i++ {
+		name := "Peer"
+		handle := "other"
+		if i == 1 {
+			name = "Anna HR"
+			handle = "anna_hr"
+		}
+		if _, err := store.EnsureConversation(ctx, uid, int64(1000+i), handle, name); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+		t.Fatalf("handle default: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("default replies = %d, want 1", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0], "Showing the 20 most recently updated") {
+		t.Fatalf("default reply = %q, want a truncation notice", sender.sent[0])
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 20 {
+		t.Fatalf("default listed %d conversations, want 20", strings.Count(sender.sent[0], "Conv #"))
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations 5"); err != nil {
+		t.Fatalf("handle count: %v", err)
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 5 {
+		t.Fatalf("count=5 listed %d conversations, want 5", strings.Count(sender.sent[0], "Conv #"))
+	}
+	if !strings.Contains(sender.sent[0], "Showing the 5 most recently updated") {
+		t.Fatalf("count=5 reply = %q, want a truncation notice", sender.sent[0])
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+		t.Fatalf("handle filter: %v", err)
+	}
+	if !strings.Contains(sender.sent[0], "Anna HR") {
+		t.Fatalf("filter reply = %q, want Anna HR", sender.sent[0])
+	}
+	if strings.Count(sender.sent[0], "Conv #") != 1 {
+		t.Fatalf("filter listed %d conversations, want 1", strings.Count(sender.sent[0], "Conv #"))
+	}
+	if strings.Contains(sender.sent[0], "Showing the") || strings.Contains(sender.sent[0], "Search covered only") {
+		t.Fatalf("filter reply = %q, want no truncation notice when the scan is under the cap", sender.sent[0])
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+		t.Fatalf("handle miss: %v", err)
+	}
+	if sender.sent[0] != "No conversations matched your search." {
+		t.Fatalf("miss reply = %q", sender.sent[0])
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations _unclosed["); err != nil {
+		t.Fatalf("handle markdown-ish miss: %v", err)
+	}
+	if sender.sent[0] != "No conversations matched your search." {
+		t.Fatalf("markdown-ish miss reply = %q, want a generic no-match (do not echo the filter)", sender.sent[0])
+	}
+	if strings.Contains(sender.sent[0], "_unclosed[") {
+		t.Fatalf("markdown-ish miss reply = %q, must not reflect the raw filter", sender.sent[0])
+	}
+}
+
+// TestRouter_Conversations_FilterScanCapFewMatches is Claude's P2 on #539:
+// hitting conversationFilterScan with fewer matches than limit must not
+// claim "Showing the 20 most recently updated" when only a couple of Conv
+// lines were printed. The scan-cap notice is the honest signal.
+func TestRouter_Conversations_FilterScanCapFewMatches(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= conversationFilterScan; i++ {
+		name := "Peer"
+		handle := "other"
+		if i <= 2 {
+			name = "Anna HR"
+			handle = "anna_hr"
+		}
+		if _, err := store.EnsureConversation(ctx, uid, int64(2000+i), handle, name); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+		t.Fatalf("handle filter: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if got := strings.Count(reply, "Conv #"); got != 2 {
+		t.Fatalf("listed %d conversations, want 2", got)
+	}
+	if strings.Contains(reply, "Showing the") {
+		t.Fatalf("reply = %q, count-truncation notice must not fire when matches < limit", reply)
+	}
+	wantScan := fmt.Sprintf("Search covered only the %d most recently updated conversations; older matches may not appear.", conversationFilterScan)
+	if !strings.Contains(reply, wantScan) {
+		t.Fatalf("reply = %q, want scan-cap notice %q", reply, wantScan)
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+		t.Fatalf("handle miss: %v", err)
+	}
+	if !strings.HasPrefix(sender.sent[0], "No conversations matched your search.") {
+		t.Fatalf("miss reply = %q, want the generic no-match prefix", sender.sent[0])
+	}
+	if strings.Contains(sender.sent[0], "nobody") {
+		t.Fatalf("miss reply = %q, must not reflect the raw filter", sender.sent[0])
+	}
+	if !strings.Contains(sender.sent[0], wantScan) {
+		t.Fatalf("miss reply = %q, want scan-cap notice when the empty result may be incomplete", sender.sent[0])
+	}
+}
+
+func TestParseConversationsArg(t *testing.T) {
+	cases := []struct {
+		arg        string
+		wantLimit  int
+		wantFilter string
+	}{
+		{"", defaultConversationList, ""},
+		{"50", 50, ""},
+		{"150", maxConversationList, ""},
+		{"@anna_hr", defaultConversationList, "@anna_hr"},
+		{"_unclosed[", defaultConversationList, "_unclosed["},
+	}
+	for _, c := range cases {
+		limit, filter := parseConversationsArg(c.arg)
+		if limit != c.wantLimit || filter != c.wantFilter {
+			t.Errorf("parseConversationsArg(%q) = (%d, %q), want (%d, %q)",
+				c.arg, limit, filter, c.wantLimit, c.wantFilter)
+		}
+	}
+}
+
+// TestRouter_Conversations_CountCappedAt100 is Agy's P3 on #539: a requested
+// count above maxConversationList must be clamped, and the listing plus
+// truncation notice must reflect that cap.
+func TestRouter_Conversations_CountCappedAt100(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= 150; i++ {
+		if _, err := store.EnsureConversation(ctx, uid, int64(3000+i), "other", "Peer"); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations 150"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if got := strings.Count(reply, "Conv #"); got != maxConversationList {
+		t.Fatalf("listed %d conversations, want %d", got, maxConversationList)
+	}
+	if !strings.Contains(reply, "Showing the 100 most recently updated") {
+		t.Fatalf("reply = %q, want the 100-row truncation notice", reply)
+	}
+}
+
+// TestRouter_Conversations_FilterTruncationOmitsCountHint is Agy's other P3
+// on #539: parseConversationsArg accepts count XOR filter, so a truncated
+// filtered listing must not tell the owner to "Pass a count".
+func TestRouter_Conversations_FilterTruncationOmitsCountHint(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	for i := 1; i <= 25; i++ {
+		if _, err := store.EnsureConversation(ctx, uid, int64(4000+i), "other", "Peer"); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	if err := router.HandleSavedText(ctx, uid, "/mctl conversations peer"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %d, want 1", len(sender.sent))
+	}
+	reply := sender.sent[0]
+	if got := strings.Count(reply, "Conv #"); got != defaultConversationList {
+		t.Fatalf("listed %d conversations, want %d", got, defaultConversationList)
+	}
+	if !strings.Contains(reply, "Showing the 20 most recently updated matches.") {
+		t.Fatalf("reply = %q, want the filtered truncation notice", reply)
+	}
+	if strings.Contains(reply, "Pass a count") {
+		t.Fatalf("reply = %q, must not suggest passing a count while a filter is active", reply)
 	}
 }
 
