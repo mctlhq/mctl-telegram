@@ -22,4 +22,10 @@ updates:
       # minutes for no reason of their own.
       codeql-action:
         patterns:
-          - "github/codeql-action*"
+          # Three segments, and the trailing /* is deliberate: dependabot
+          # matches group patterns with path-aware globbing, where a bare *
+          # does not cross a / boundary. "github/codeql-action*" is two
+          # segments and would match nothing against the three-segment
+          # dependency names, silently leaving the group empty -- which
+          # reproduces the exact incident this file documents below.
+          - "github/codeql-action/*"
