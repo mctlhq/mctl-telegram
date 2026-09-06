@@ -711,14 +711,12 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 				}
 			case args.FilePath != "":
 				var err error
-				data, err = tg.ReadAllowlistedFile(args.FilePath, mediaAllowDir(), tg.DefaultMediaUploadMaxBytes)
+				var name string
+				data, name, mimeType, err = loadSendMediaFilePath(args.FilePath, args.FileName)
 				if err != nil {
 					return bridge.EncodeError(env.ID, fmt.Sprintf("send_media: file_path: %v", err))
 				}
-				if args.FileName == "" {
-					args.FileName = filepath.Base(args.FilePath)
-				}
-				mimeType = http.DetectContentType(data[:min(512, len(data))])
+				args.FileName = name
 			}
 		}
 		var sendResult *tg.SendMediaResult
@@ -856,6 +854,20 @@ func envArgs(env bridge.Envelope) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	return env.Args
+}
+
+// loadSendMediaFilePath reads filePath from the media allowlist and fills
+// an empty fileName from the path base. Isolated so the file_path branch
+// can be tested without a ClientPool.
+func loadSendMediaFilePath(filePath, fileName string) ([]byte, string, string, error) {
+	data, err := tg.ReadAllowlistedFile(filePath, mediaAllowDir(), tg.DefaultMediaUploadMaxBytes)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if fileName == "" {
+		fileName = filepath.Base(filePath)
+	}
+	return data, fileName, http.DetectContentType(data[:min(512, len(data))]), nil
 }
 
 // mediaAllowDir is the only directory the daemon will read for send_media

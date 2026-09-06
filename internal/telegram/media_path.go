@@ -5,7 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+)
+
+// Hooks are package-level so tests can inject a post-Lstat swap or an
+// inode-mismatch open. Production keeps the OS implementations.
+var (
+	lstatAllowlisted = os.Lstat
+	openAllowlisted  = openNoFollow
 )
 
 // ReadAllowlistedFile reads path if and only if it resolves inside allowDir
@@ -18,6 +26,13 @@ import (
 // file must be a regular file and, when maxBytes > 0, no larger than that
 // cap. The function never follows a path outside allowDir, including when
 // the file is missing (the parent prefix is still checked).
+//
+// After the allowlist resolve, the file is Lstat'd (must be a regular file,
+// not a symlink), opened without following a final-component symlink
+// (O_NOFOLLOW on Unix), and the opened fd is required to be the same inode
+// (os.SameFile). The opened file's real path is checked again so a parent
+// directory swapped to a symlink between resolve and open cannot leak an
+// outside regular file.
 func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("file_path is required")
@@ -48,16 +63,33 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 	if !isUnderDir(allowReal, resolved) {
 		return nil, fmt.Errorf("file_path is outside the media allowlist directory")
 	}
-	// Open once and Stat the fd so a symlink swap between the path check
-	// and the read cannot change which inode we inspect versus upload.
-	f, err := os.Open(resolved)
+
+	lst, err := lstatAllowlisted(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("file_path: %w", err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("file_path must not be a symlink")
+	}
+	if !lst.Mode().IsRegular() {
+		return nil, fmt.Errorf("file_path must be a regular file")
+	}
+	if maxBytes > 0 && lst.Size() > maxBytes {
+		return nil, fmt.Errorf("file_path is %d bytes, exceeding the %d-byte upload cap", lst.Size(), maxBytes)
+	}
+
+	f, err := openAllowlisted(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("file_path: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("file_path: %w", err)
+	}
+	if !os.SameFile(lst, info) {
+		return nil, fmt.Errorf("file_path changed during open")
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("file_path must be a regular file")
@@ -65,21 +97,47 @@ func ReadAllowlistedFile(path, allowDir string, maxBytes int64) ([]byte, error) 
 	if maxBytes > 0 && info.Size() > maxBytes {
 		return nil, fmt.Errorf("file_path is %d bytes, exceeding the %d-byte upload cap", info.Size(), maxBytes)
 	}
-	// Bound the read by maxBytes, not the stat size. A file that grows
-	// after Stat (a voice note still being written is the usual case)
-	// must fail the oversize guard instead of uploading a truncated body.
-	limit := maxBytes
-	if limit <= 0 {
-		limit = info.Size()
-	}
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+
+	openedReal, err := realOpenedPath(f, resolved)
 	if err != nil {
 		return nil, fmt.Errorf("file_path: %w", err)
 	}
-	if maxBytes > 0 && int64(len(data)) > maxBytes {
+	if !isUnderDir(allowReal, openedReal) {
+		return nil, fmt.Errorf("file_path is outside the media allowlist directory")
+	}
+
+	// When uncapped, read the fd to EOF. Bounding by the stat-time size
+	// would silently truncate a file that grows after Lstat (a voice note
+	// still being written). Only apply LimitReader when a cap is set;
+	// then a growing file that crosses the cap errors instead of uploading
+	// a truncated body.
+	if maxBytes <= 0 {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return nil, fmt.Errorf("file_path: %w", err)
+		}
+		return data, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("file_path: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf("file_path is %d bytes, exceeding the %d-byte upload cap", len(data), maxBytes)
 	}
 	return data, nil
+}
+
+// realOpenedPath returns the path of the already-opened file. On Linux,
+// /proc/self/fd names the inode we hold, so a parent-directory symlink
+// swap between Lstat and Open cannot hide an outside target. Elsewhere
+// we re-resolve the candidate path (fail closed if it now escapes).
+func realOpenedPath(f *os.File, fallback string) (string, error) {
+	proc := "/proc/self/fd/" + strconv.FormatInt(int64(f.Fd()), 10)
+	if p, err := filepath.EvalSymlinks(proc); err == nil {
+		return p, nil
+	}
+	return filepath.EvalSymlinks(fallback)
 }
 
 func isUnderDir(dir, path string) bool {
