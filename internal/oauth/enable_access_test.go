@@ -1093,6 +1093,7 @@ func TestFinishEnable_EnvListedClientStaysRevocable(t *testing.T) {
 func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
 	const lookupID int64 = 555001
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
 		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
 	})
 	ctx := context.Background()
