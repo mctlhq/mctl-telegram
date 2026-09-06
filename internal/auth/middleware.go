@@ -50,6 +50,20 @@ func bearerErrorCode(err error) string {
 	return `error="invalid_token"`
 }
 
+// Machine-facing 401 messages. Exported so an UnauthorizedRenderer can
+// branch on which rejection it is asked to present without re-matching the
+// literal string. Rewording a value here cannot desynchronise producer and
+// consumer, because there is only one of it; and renaming or removing a
+// constant is a compile error at every renderer, where deleting the branch
+// arm of a literal comparison was not.
+const (
+	// MsgInvalidCredentials is the 401 for a token that failed to verify
+	// (expired, bad signature, wrong audience) — the caller had credentials.
+	MsgInvalidCredentials = "invalid credentials"
+	// MsgAuthRequired is the 401 for a request that carried no credentials.
+	MsgAuthRequired = "authentication required"
+)
+
 // UnauthorizedRenderer writes a non-JSON 401 body for browser navigations.
 // The status and machine-facing msg match writeJSONError so HTML and JSON
 // callers see the same rejection; only the presentation changes.
@@ -84,7 +98,7 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues(classifyAuthError(err.Error()), providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path, bearerErrorCode(err)))
-				writeUnauthorized(w, r, http.StatusUnauthorized, "invalid credentials", html)
+				writeUnauthorized(w, r, http.StatusUnauthorized, MsgInvalidCredentials, html)
 				return
 			}
 			if id == nil && required {
@@ -92,7 +106,7 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 					m.AuthFailuresTotal.WithLabelValues("no_token", providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path))
-				writeUnauthorized(w, r, http.StatusUnauthorized, "authentication required", html)
+				writeUnauthorized(w, r, http.StatusUnauthorized, MsgAuthRequired, html)
 				return
 			}
 			if id != nil {
@@ -154,11 +168,63 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 }
 
 func writeUnauthorized(w http.ResponseWriter, r *http.Request, code int, msg string, html UnauthorizedRenderer) {
-	if html != nil && !WantsJSON(r) {
+	// Unconditional: cacheability is not a negotiation property. A /mcp or
+	// /api/* 401 varies on Authorization exactly as the manage 401 varies on
+	// Cookie, and a proxy told to cache error responses is as free to ignore
+	// the status-code table for one as for the other.
+	noStore(w)
+	if html == nil {
+		writeJSONError(w, code, msg)
+		return
+	}
+	// Vary, unlike no-store, genuinely does belong only here: the JSON-only
+	// middleware negotiates nothing, so claiming otherwise would fragment
+	// caches for no reason. The body for this URL depends on the request
+	// headers WantsJSON reads, so a cache must key the two representations
+	// apart.
+	//
+	// The outcome also varies on Cookie — localjwt falls back to the
+	// mctl_connect_token cookie — but Vary: Cookie fragments a shared cache
+	// per cookie value and buys nothing once the response is no-store.
+	AddNegotiationVary(w)
+	if !WantsJSON(r) {
 		html(w, r, code, msg)
 		return
 	}
 	writeJSONError(w, code, msg)
+}
+
+// noStore keeps an unauthorized response out of any cache. 401 is not in the
+// RFC 9111 §4.2.2 heuristically-cacheable set, so nothing should store one
+// anyway — this makes the guarantee explicit rather than resting on a
+// status-code table a misconfigured proxy is free to ignore. It applies to
+// every 401 this package writes, negotiated or not.
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+}
+
+// AddNegotiationVary declares the request headers WantsJSON inspects, so a
+// cache keys the HTML and JSON representations of the same URL separately.
+//
+// Idempotent by necessity, not by politeness: an UnauthorizedRenderer such as
+// web.ManageServer.WriteUnauthorized repeats the negotiation for its own
+// direct handler calls and so must add the header itself, but on the
+// middleware path it is invoked *after* writeUnauthorized already added it.
+// Appending blindly there shipped "Vary: Accept, X-Requested-With, Accept,
+// X-Requested-With".
+func AddNegotiationVary(w http.ResponseWriter) {
+	present := map[string]bool{}
+	for _, v := range w.Header().Values("Vary") {
+		// One header line may carry several comma-separated field names.
+		for _, tok := range strings.Split(v, ",") {
+			present[http.CanonicalHeaderKey(strings.TrimSpace(tok))] = true
+		}
+	}
+	for _, want := range []string{"Accept", "X-Requested-With"} {
+		if !present[want] {
+			w.Header().Add("Vary", want)
+		}
+	}
 }
 
 // WantsJSON reports whether the caller asked for a JSON error body rather

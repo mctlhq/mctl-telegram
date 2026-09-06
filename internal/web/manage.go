@@ -39,7 +39,12 @@ func NewManageServer(store *db.Store, pool ManagePool, issuer string) *ManageSer
 // Auth is still rejected (same status and JSON error for API clients);
 // only the HTML presentation and next-step links change.
 func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	auth.AddNegotiationVary(w)
 	if auth.WantsJSON(r) {
+		// renderManageNeedAuth sets this on the HTML arm; the JSON arm is
+		// reached directly from the handlers below, which never pass
+		// through auth.writeUnauthorized.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
@@ -49,7 +54,7 @@ func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request,
 		ConnectURL:             s.issuer + "/telegram/connect",
 		LocalBridgeDocsURL:     s.issuer + "/docs/local-bridge",
 		LocalBridgeActivateURL: s.issuer + "/local-bridge/activate",
-		InvalidSession:         msg == "invalid credentials",
+		InvalidSession:         msg == auth.MsgInvalidCredentials,
 	})
 }
 
@@ -57,7 +62,7 @@ func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request,
 func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
 	info, err := s.store.GetActiveAccount(r.Context(), id.UserID)
@@ -80,7 +85,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
 	var err error
@@ -115,7 +120,7 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
-		s.WriteUnauthorized(w, r, http.StatusUnauthorized, "authentication required")
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
 	if _, err := s.store.ToggleSendEnabled(r.Context(), id.UserID); err != nil {

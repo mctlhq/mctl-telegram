@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -350,5 +351,106 @@ func TestManageDisconnectUnauthenticatedHTML(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+}
+
+func TestManageToggleSendUnauthenticatedHTML(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/toggle-send", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	srv.HandleToggleSend(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", ct)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location = %q, want no redirect for an unauthenticated caller", loc)
+	}
+}
+
+// The three manage routes negotiate their 401 body on Accept and
+// X-Requested-With, so both representations must be declared to caches.
+func TestManageUnauthorizedSetsNegotiationVary(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	for _, accept := range []string{"text/html", "application/json"} {
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		srv.HandleManage(rec, req)
+
+		wantExactNegotiationVary(t, rec.Header(), "Accept "+accept)
+	}
+}
+
+// InvalidSession picks the "expired session" copy off the reason the auth
+// package passes, so the two 401 reasons must render different pages.
+func TestManageUnauthorizedReasonSelectsCopy(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	render := func(msg string) string {
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		srv.WriteUnauthorized(rec, req, http.StatusUnauthorized, msg)
+		return rec.Body.String()
+	}
+
+	if body := render(auth.MsgInvalidCredentials); !strings.Contains(body, "expired, or invalid") {
+		t.Fatalf("MsgInvalidCredentials rendered the wrong copy: %s", body)
+	}
+	if body := render(auth.MsgAuthRequired); !strings.Contains(body, "need to connect a Telegram account") {
+		t.Fatalf("MsgAuthRequired rendered the wrong copy: %s", body)
+	}
+}
+
+// varyTokens flattens the Vary header into its individual field names.
+// Asserting on this rather than substring-matching the raw values matters
+// twice over: "Accept-Encoding" contains "Accept", and a duplicated append
+// is invisible to a Contains check.
+func varyTokens(h http.Header) []string {
+	var out []string
+	for _, v := range h.Values("Vary") {
+		for _, tok := range strings.Split(v, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				out = append(out, http.CanonicalHeaderKey(tok))
+			}
+		}
+	}
+	return out
+}
+
+func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
+	t.Helper()
+	got := varyTokens(h)
+	want := []string{"Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
+	}
+}
+
+// Both arms of the manage 401 must be uncacheable, including the JSON arm
+// reached directly from the handlers rather than through the middleware.
+func TestManageUnauthorizedIsNoStore(t *testing.T) {
+	store := newManageTestStore(t)
+	srv := NewManageServer(store, nil, "https://tg.test")
+
+	for _, accept := range []string{"text/html", "application/json"} {
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		srv.HandleManage(rec, req)
+
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("Accept %q: Cache-Control = %q, want no-store", accept, cc)
+		}
 	}
 }

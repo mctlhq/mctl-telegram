@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -234,5 +236,129 @@ func TestMiddleware_WWWAuthenticate_FailedAuthWithZeroValueResourceMetadata(t *t
 	want := `Bearer realm="mctl-telegram", error="invalid_token"`
 	if got := rec.Header().Get("WWW-Authenticate"); got != want {
 		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+}
+
+// Only the HTML-capable middleware negotiates its 401 body, so only it may
+// claim a Vary — a plain Middleware always answers JSON and must not tell
+// caches otherwise.
+func TestMiddlewareWithHTML_DeclaresNegotiationVary(t *testing.T) {
+	html := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		w.WriteHeader(status)
+	}
+	for _, accept := range []string{"text/html", "application/json"} {
+		h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, html)(
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run")
+			}))
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		wantExactNegotiationVary(t, rec.Header(), "Accept "+accept)
+	}
+}
+
+// The renderer wired in cmd/server/main.go adds the header itself, because it
+// also serves direct handler calls that never reach this middleware. On the
+// middleware path it therefore runs after writeUnauthorized already added it.
+func TestMiddlewareWithHTML_VaryNotDuplicatedByRenderer(t *testing.T) {
+	renderer := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		AddNegotiationVary(w)
+		w.WriteHeader(status)
+	}
+	h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, renderer)(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("handler should not run")
+		}))
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	wantExactNegotiationVary(t, rec.Header(), "renderer re-adds")
+}
+
+// A Vary a compression layer already set must not make AddNegotiationVary
+// think Accept is covered — "Accept-Encoding" is a different field name.
+func TestAddNegotiationVary_DistinguishesAcceptPrefixedFields(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rec.Header().Add("Vary", "Accept-Encoding, Accept-Language")
+	AddNegotiationVary(rec)
+
+	got := varyTokens(rec.Header())
+	want := []string{"Accept-Encoding", "Accept-Language", "Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Vary = %v, want %v", got, want)
+	}
+}
+
+func TestMiddleware_JSONOnlyDoesNotVary(t *testing.T) {
+	h := Middleware(noTokenProvider{}, true, nil, ResourceMetadata{})(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("handler should not run")
+		}))
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
+		t.Fatalf("Vary = %v, want none for a JSON-only route", vary)
+	}
+	// The asymmetry is Vary-only. no-store is not a negotiation property and
+	// must hold here too — /mcp and /api/* reach this branch.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store on a JSON-only route", cc)
+	}
+}
+
+// varyTokens flattens the Vary header into its individual field names.
+// Asserting on this rather than substring-matching the raw values matters
+// twice over: "Accept-Encoding" contains "Accept", and a duplicated append
+// is invisible to a Contains check.
+func varyTokens(h http.Header) []string {
+	var out []string
+	for _, v := range h.Values("Vary") {
+		for _, tok := range strings.Split(v, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				out = append(out, http.CanonicalHeaderKey(tok))
+			}
+		}
+	}
+	return out
+}
+
+func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
+	t.Helper()
+	got := varyTokens(h)
+	want := []string{"Accept", "X-Requested-With"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s: Vary = %v, want exactly %v", ctx, got, want)
+	}
+}
+
+// The Vary only picks the representation. Keeping a 401 out of caches
+// entirely is what stops one being replayed to a caller who has since
+// acquired a valid cookie, and it must hold on the JSON arm too — that arm
+// previously shipped no Cache-Control at all.
+func TestMiddlewareWithHTML_UnauthorizedIsNoStore(t *testing.T) {
+	renderer := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		w.WriteHeader(status)
+	}
+	for _, accept := range []string{"text/html", "application/json"} {
+		h := MiddlewareWithHTML(noTokenProvider{}, true, nil, ResourceMetadata{}, renderer)(
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("handler should not run")
+			}))
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+		req.Header.Set("Accept", accept)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("Accept %q: Cache-Control = %q, want no-store", accept, cc)
+		}
 	}
 }
