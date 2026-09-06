@@ -1,3 +1,36 @@
+# STATUS: NON-DEPLOYED REFERENCE. Nothing applies this file.
+#
+# The alerts that ARE live for mctl-telegram are defined in mctl-gitops, which
+# is what ArgoCD reconciles, under
+# platform-gitops/infra-components/observability/vm-rules/:
+#
+#   mctl-telegram-alerts.yaml   threshold alerts (JWT, tool error rate and
+#                               latency, rate limiting, /healthz, login stalls)
+#   mctl-telegram-slo.yaml      the SLO recording rules and burn-rate alerts
+#                               from docs/slo.md
+#   mctl-telegram-canary.yaml   the synthetic end-to-end canary
+#
+# This file is kept, rather than deleted, because it is not fully superseded:
+# six alert families below are deployed nowhere at all —
+# MctlTelegramPoolNearCapacity, MctlTelegramFloodWaitSpike,
+# MctlTelegramOAuthPendingStuck, MctlBridgeDaemonsFlapping,
+# MctlAgentDeadLetter and MctlAgentActionsExecutingStuck. Wiring those is a
+# separate decision; until it is made, this is the only place their expressions
+# are written down and unit-tested (build.yml runs promtool over this file and
+# deploy/alerts/mctl-telegram.rules_test.yaml).
+#
+# Two consequences worth stating, because a "looks deployed" manifest is how
+# this drifted in the first place (mctlhq/mctl-telegram#546, and #491 for the
+# same shape on the canary rules):
+#
+#   - Editing an expression here changes nothing in the cluster. If the alert
+#     is one of the deployed ones, edit the mctl-gitops file.
+#   - Where a rule appears in both places and they disagree, mctl-gitops wins.
+#     MctlTelegramLoginSendCodeStalls is the current example: it reads
+#     "increase(...) >= 2" here and "> 1" in the deployed rule, because
+#     increase() extrapolates to a float and an exactly-two-timeout window can
+#     interpolate to 1.97 and miss a >= 2 test.
+#
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

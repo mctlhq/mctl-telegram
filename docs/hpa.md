@@ -104,8 +104,9 @@ The mctl-gitops kustomize base for this adapter configuration lives under
 ## Alerts
 
 Alert rules are defined in `deploy/alerts/mctl-telegram.rules.yaml` as a
-`monitoring.coreos.com/v1` `PrometheusRule` manifest. The manifest covers
-three alerts:
+`monitoring.coreos.com/v1` `PrometheusRule` manifest. **That file is a
+non-deployed reference** — nothing applies it, and the three alerts below are
+live in no cluster. It covers:
 
 - **MctlTelegramPoolNearCapacity** (warning at >85%, critical at >95%) — fires
   when the session pool fills up and the cap is positive.
@@ -114,20 +115,19 @@ three alerts:
 - **MctlTelegramOAuthPendingStuck** (warning) — fires when more than 100
   OAuth authorization flows remain in-flight for 15 minutes or longer.
 
-To deploy, apply the manifest to the cluster:
+To deploy them, port them into `mctl-gitops` as a `VMRule` under
+`platform-gitops/infra-components/observability/vm-rules/`, alongside
+`mctl-telegram-alerts.yaml`, `mctl-telegram-slo.yaml` and
+`mctl-telegram-canary.yaml`. That directory is what ArgoCD reconciles, and it
+is the only path by which an alert reaches this cluster.
 
-```
-kubectl apply -f deploy/alerts/mctl-telegram.rules.yaml
-```
+A one-off `kubectl apply` of the manifest here is not a deployment: ArgoCD does
+not know about it, so it survives only until the next reconcile of anything
+that touches it and drifts silently from this file thereafter.
 
-Alternatively, mirror it to `mctl-gitops` under
-`platform-gitops/infra-components/observability/vm-rules/` (where
-`mctl-telegram-alerts.yaml` already lives). The VictoriaMetrics operator
-auto-converts the `PrometheusRule` to a `VMRule` on apply.
-
-For SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
-availability, session borrow success rate), see the PrometheusRule stanzas
-documented in [docs/slo.md](slo.md).
+The SLO-level burn-rate alerts (MCP tool availability, OAuth endpoint
+availability, session borrow success rate) have already been ported, as
+`mctl-telegram-slo.yaml`; see [docs/slo.md](slo.md).
 
 ## Notes
 

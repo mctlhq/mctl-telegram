@@ -1,8 +1,11 @@
 # mctl-telegram Operational Runbook
 
 This runbook covers the Beta-tier alert playbooks for mctl-telegram. Each
-section maps to one or more Prometheus alert rules defined in
-`deploy/alerts/mctl-telegram.rules.yaml`.
+section maps to one or more alert rules. The deployed rules live in
+`mctl-gitops` under
+`platform-gitops/infra-components/observability/vm-rules/`; the ones that are
+still only a reference are in `deploy/alerts/mctl-telegram.rules.yaml`, whose
+header says which is which.
 
 Canary incidents are out of scope here; see
 [docs/runbooks/canary.md](runbooks/canary.md).
