@@ -10,6 +10,33 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # internal/db has two backends, and until now CI only ever exercised one.
+    # Five tests gate on TEST_DATABASE_URL and skipped on every run, including
+    # the only test in the repo that covers Postgres lock behaviour on a
+    # migration. A test that always skips is a test that does not exist.
+    #
+    # Pinned to the major production runs: shared-pg is CNPG
+    # ghcr.io/cloudnative-pg/postgresql:17.2
+    # (mctl-gitops, platform-gitops/infra-components/data/cnpg/shared/cluster.yaml),
+    # so the schema and catalog behaviour under test match what deploys.
+    services:
+      postgres:
+        image: postgres@sha256:3267c505060a0052e5aa6e5175a7b41ab6b04da2f8c4540fc6e98a37210aa2d3 # 17.2
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mctl_test
+        ports:
+          - 5432:5432
+        # Without a healthcheck the job races the server's first boot and the
+        # tests fail to connect rather than skipping, which is a different
+        # false signal from the one this exists to fix.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/mctl_test?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -21,6 +48,54 @@ jobs:
       # channels, and #495 was a send-on-closed-channel that plain `go test`
       # could never surface. The whole module passes under -race on main.
       - run: go test -race ./...
+      # The Postgres-backed tests degrade to a skip, not a failure, when
+      # TEST_DATABASE_URL is missing or the service container never came up --
+      # so the step above stays green either way and the coverage this job
+      # exists to add could be lost silently in some later edit. This asserts
+      # they really ran. Cheap: the whole set is about a second.
+      - name: postgres-backed tests must not skip
+        run: |
+          set -euo pipefail
+          go test ./internal/db/ -count=1 -v -run 'Postgres|TestOpenPool' > /tmp/pg-tests.log 2>&1 || {
+            cat /tmp/pg-tests.log
+            exit 1
+          }
+          cat /tmp/pg-tests.log
+          if grep -q "TEST_DATABASE_URL not set" /tmp/pg-tests.log; then
+            echo "::error::Postgres-backed tests skipped -- the service container did not reach the test environment"
+            exit 1
+          fi
+          # Indentation matters: `go test -v` indents subtest results, so an
+          # anchored "^--- SKIP" sees a skipped top-level test but not a
+          # skipped subtest. A table-driven rewrite of these tests would slip
+          # straight through the strict anchor.
+          if grep -Eq "^[[:space:]]*--- SKIP" /tmp/pg-tests.log; then
+            echo "::error::a Postgres-backed test skipped for another reason; see the log above"
+            exit 1
+          fi
+          # Nothing above fires when the -run filter matches NOTHING: go test
+          # prints "no tests to run" and exits 0, so a rename that drops the
+          # "Postgres" substring would leave this step green while testing
+          # nothing at all -- the same silent loss the step exists to prevent,
+          # reached by a different route.
+          if grep -q "no tests to run" /tmp/pg-tests.log; then
+            echo "::error::the -run filter matched no tests -- were the Postgres-backed tests renamed?"
+            exit 1
+          fi
+          # Belt and braces for the case the warning text ever changes: assert
+          # the count of top-level results. A floor, not an equality, so adding
+          # a Postgres-backed test needs no CI edit; removing one is caught.
+          # Raise it when the set below grows:
+          #   TestOpenPool, TestRegisterDevice_PostgresUpsert,
+          #   TestGrantClientTierIfUnset_PostgresHeldNoneIsNotOverwritten,
+          #   TestGrantClientTierIfUnset_PostgresSetsClientWhenUnset,
+          #   TestRevokeWorkerToken_PostgresUpsert
+          expected=5
+          passed=$(grep -c "^--- PASS" /tmp/pg-tests.log || true)
+          if [ "$passed" -lt "$expected" ]; then
+            echo "::error::expected at least $expected Postgres-backed tests to pass, saw $passed"
+            exit 1
+          fi
       - run: GOOS=darwin GOARCH=arm64 go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./cmd/local
 
