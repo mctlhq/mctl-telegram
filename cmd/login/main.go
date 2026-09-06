@@ -83,24 +83,41 @@ func main() {
 	var tgID int64
 	var displayName, username string
 
+	// From the moment either login entrypoint is entered, a failure has to run
+	// the repair. gotd persists through the SessionStore as soon as it has an
+	// auth key, and flow.Run/qr.Auth returning success is what makes that key
+	// an authorised session -- but neither entrypoint returns at that instant.
+	// telegram.Login still calls client.Self, LoginQR still type-asserts
+	// auth.User, and both then re-read the session; any of those can fail after
+	// the bytes are already live. With no loaded row id that write lands on
+	// EVERY active row of this uid, including a bridge-only one provisioned
+	// since the pre-login gate, so a login that reports failure can still have
+	// left the hosted worker able to act as the user through a row the operator
+	// believes is local.
+	//
+	// runLoginOrRepair puts the repair on those exits; the ones below SaveSession
+	// carry it explicitly.
 	if *useQR {
 		slog.Info("qr login starting", "user_id", uid, "github_login", cfg.OperatorLogin)
 		var qrErr error
-		tgID, displayName, username, qrErr = telegram.LoginQR(
-			ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid,
-			func(_ context.Context, url, asciiArt string) error {
-				fmt.Print("\033[2J\033[H") // clear screen
-				fmt.Println("Scan this QR code with Telegram on another device:")
-				fmt.Println()
-				fmt.Print(asciiArt)
-				fmt.Println()
-				fmt.Println("Or open this link in Telegram:")
-				fmt.Println(url)
-				fmt.Println()
-				fmt.Println("Waiting for scan... (QR refreshes automatically)")
-				return nil
-			},
-		)
+		tgID, displayName, username, qrErr = runLoginOrRepair(ctx, store, uid,
+			func() (int64, string, string, error) {
+				return telegram.LoginQR(
+					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid,
+					func(_ context.Context, url, asciiArt string) error {
+						fmt.Print("\033[2J\033[H") // clear screen
+						fmt.Println("Scan this QR code with Telegram on another device:")
+						fmt.Println()
+						fmt.Print(asciiArt)
+						fmt.Println()
+						fmt.Println("Or open this link in Telegram:")
+						fmt.Println(url)
+						fmt.Println()
+						fmt.Println("Waiting for scan... (QR refreshes automatically)")
+						return nil
+					},
+				)
+			})
 		if qrErr != nil {
 			die(fmt.Errorf("qr login: %w", qrErr))
 		}
@@ -125,24 +142,21 @@ func main() {
 		}
 		slog.Info("phone login starting", "user_id", uid, "github_login", cfg.OperatorLogin, "phone", *phone)
 		var loginErr error
-		tgID, displayName, username, loginErr = telegram.Login(
-			ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid, *phone, askCode, askPassword,
-		)
+		tgID, displayName, username, loginErr = runLoginOrRepair(ctx, store, uid,
+			func() (int64, string, string, error) {
+				return telegram.Login(
+					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid, *phone, askCode, askPassword,
+				)
+			})
 		if loginErr != nil {
 			die(fmt.Errorf("login: %w", loginErr))
 		}
 	}
 
-	// The login above has already persisted its session bytes through the gotd
-	// SessionStore, and with no loaded row id that write lands on EVERY active
-	// row of this uid — including a bridge-only one provisioned since the
-	// pre-login gate. So every failure from here to a successful SaveSession
-	// has to run the repair, not just SaveSession's own refusal: leaving the
-	// bytes behind would let the hosted worker act as the user through a row
-	// the operator believes is local.
-	//
-	// repairStraySession is called explicitly on each exit rather than
-	// deferred because die() is os.Exit, which does not run defers.
+	// The login above has persisted its session bytes, so every failure from
+	// here to a successful SaveSession has to run the repair too, not just
+	// SaveSession's own refusal. Same leak as the one described above the login
+	// branch, reached through the exits after it returned.
 
 	// Hoisted out of SaveSession's argument list. Go evaluates arguments before
 	// the call, and this exits the process on failure — as an argument it could
@@ -168,6 +182,31 @@ func main() {
 
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s) bound to operator %q.\n",
 		tgID, displayName, username, cfg.OperatorLogin)
+}
+
+// runLoginOrRepair runs one of the telegram login entrypoints and repairs a
+// stray session if it fails. The two have different signatures, so they are
+// passed as a closure rather than as a shared function type: what is being
+// shared is the failure handling, not the call.
+//
+// The repair belongs on the login's own failure and not only on the exits
+// after it, because "telegram.Login returned an error" does not mean "nothing
+// was persisted" -- see the block above the call sites. It is a no-op unless a
+// mode='local' row is active, which is the only state that makes the leftover
+// bytes dangerous, so putting it on the ordinary hosted failure costs one query.
+//
+// Success is deliberately left alone: the bytes a successful login persisted
+// are the ones SaveSession is about to adopt, and clearing them here would
+// break every hosted login rather than only the failing ones.
+func runLoginOrRepair(ctx context.Context, store *db.Store, uid int64,
+	login func() (int64, string, string, error),
+) (int64, string, string, error) {
+	tgID, displayName, username, err := login()
+	if err != nil {
+		repairStraySession(ctx, store, uid)
+		return 0, "", "", err
+	}
+	return tgID, displayName, username, nil
 }
 
 // refuseIfLocal refuses a hosted connect while a Local Bridge account is
@@ -205,6 +244,11 @@ func refuseIfLocal(ctx context.Context, store *db.Store, uid int64) error {
 // Failure is logged rather than returned. Every caller is already on its way
 // to die() with the error that caused the login to fail, and that error is the
 // more useful one to print.
+//
+// Called explicitly on every post-login exit rather than deferred once at the
+// top: each of those exits ends in die(), which is os.Exit, and os.Exit does
+// not run defers -- a deferred repair would never execute on any of the paths
+// that need it.
 func repairStraySession(ctx context.Context, store *db.Store, uid int64) {
 	repairCtx, repairCancel := db.StrayRepairContext(ctx)
 	defer repairCancel()
