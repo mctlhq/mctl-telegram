@@ -24,6 +24,15 @@ import (
 // SaveSession / LoadSession calls the login goroutine makes do not nil-panic.
 func newEnableTestStore(t *testing.T) *db.Store {
 	t.Helper()
+	st, _ := newEnableTestStoreDSN(t)
+	return st
+}
+
+// newEnableTestStoreDSN is newEnableTestStore plus the file DSN, so a test
+// can open a second connection against the same database (SQLite's store
+// pool is MaxOpenConns=1, which cannot interleave a held write with finishEnable).
+func newEnableTestStoreDSN(t *testing.T) (*db.Store, string) {
+	t.Helper()
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "enable.db") + "?_pragma=busy_timeout(5000)"
 	conn, err := db.Open(ctx, dsn, 0, 0)
@@ -38,7 +47,7 @@ func newEnableTestStore(t *testing.T) *db.Store {
 	if err != nil {
 		t.Fatalf("crypto: %v", err)
 	}
-	return db.NewStore(conn, crypt)
+	return db.NewStore(conn, crypt), dsn
 }
 
 // seedSession inserts a fresh, valid telegram_accounts row for tgID so the
@@ -968,5 +977,278 @@ func TestResolveScopes_Tiers(t *testing.T) {
 	}
 	if has(lcg, "clients") {
 		t.Fatalf("lookup+client groups = %v, must not carry clients", lcg)
+	}
+}
+
+func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
+	ctx := context.Background()
+	const tgID int64 = 424242
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "bob",
+		},
+	}, "es-tok")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierClient {
+		t.Fatalf("tier after finishEnable = %q, want %q", tier, db.TierClient)
+	}
+}
+
+func TestFinishEnable_PreservesExplicitNone(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
+	ctx := context.Background()
+	const tgID int64 = 424243
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "banned", "Banned")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, tgID, db.TierNone); err != nil {
+		t.Fatalf("seed none: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "banned",
+		},
+	}, "es-none")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierNone {
+		t.Fatalf("tier after finishEnable = %q, want %q", tier, db.TierNone)
+	}
+}
+
+func TestFinishEnable_EnvListedClientStaysRevocable(t *testing.T) {
+	ctx := context.Background()
+	const tgID int64 = 555000111
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = false
+		c.ClientTelegramIDs = map[int64]bool{tgID: true}
+	})
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "envclient", "Env Client")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  uid,
+		tgID: tgID,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  tgID,
+			Username:    "envclient",
+		},
+	}, "es-env")
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != "" {
+		t.Fatalf("tier after finishEnable = %q, want unset so TG_LOGIN_CLIENTS stays revocable", tier)
+	}
+	ok, err := srv.isClientTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("isClientTier while listed: %v", err)
+	}
+	if !ok {
+		t.Fatal("env-listed client must still resolve as client while in TG_LOGIN_CLIENTS")
+	}
+	delete(srv.cfg.ClientTelegramIDs, tgID)
+	ok, err = srv.isClientTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("isClientTier after removal: %v", err)
+	}
+	if ok {
+		t.Fatal("removing id from TG_LOGIN_CLIENTS after connect must revoke client tier")
+	}
+	_, scopes, err := srv.ResolveScopes(ctx, tgID)
+	if err != nil {
+		t.Fatalf("ResolveScopes after removal: %v", err)
+	}
+	if len(scopes) != 0 {
+		t.Fatalf("scopes after TG_LOGIN_CLIENTS removal = %v, want empty", scopes)
+	}
+}
+
+func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
+	const lookupID int64 = 555001
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	ctx := context.Background()
+
+	adminID := int64(210408407)
+	adminUID, err := srv.store.EnsureUserByTelegramID(ctx, adminID, "admin", "Admin")
+	if err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+	lookupUID, err := srv.store.EnsureUserByTelegramID(ctx, lookupID, "lookup", "Lookup")
+	if err != nil {
+		t.Fatalf("ensure lookup: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		uid  int64
+		tgID int64
+	}{
+		{"full admin", adminUID, adminID},
+		{"lookup admin", lookupUID, lookupID},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		srv.finishEnable(rec, req, &enableSession{
+			uid:  tc.uid,
+			tgID: tc.tgID,
+			oc: oauthCtx{
+				ClientID:    "claude.ai",
+				RedirectURI: "https://claude.ai/cb",
+				TelegramID:  tc.tgID,
+			},
+		}, "es-"+tc.name)
+		tier, err := srv.store.GetAccessTier(ctx, tc.tgID)
+		if err != nil {
+			t.Fatalf("%s GetAccessTier: %v", tc.name, err)
+		}
+		if tier != "" {
+			t.Fatalf("%s tier after finishEnable = %q, want unset", tc.name, tier)
+		}
+	}
+}
+
+func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
+		c.AutoApproveClients = true
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	// No users row: GrantClientTierIfUnset fails. The auth-code redirect must still happen.
+	srv.finishEnable(rec, req, &enableSession{
+		uid:  1,
+		tgID: 999001,
+		oc: oauthCtx{
+			ClientID:    "claude.ai",
+			RedirectURI: "https://claude.ai/cb",
+			TelegramID:  999001,
+		},
+	}, "es-missing")
+	if rec.Code != http.StatusFound && rec.Code != http.StatusOK {
+		t.Fatalf("finishEnable status = %d, want a successful handoff despite GrantClientTierIfUnset failure", rec.Code)
+	}
+}
+
+// TestFinishEnable_ConcurrentNoneIsNotOverwritten pins the TOCTOU Agy flagged:
+// the users row exists with a NULL tier before finishEnable runs, and an
+// admin can SET access_tier='none' while the grant is in flight. The old
+// GetAccessTier-then-SetAccessTier path would read unset, wait out the
+// admin write, then overwrite the ban. GrantClientTierIfUnset must not.
+func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
+	st, dsn := newEnableTestStoreDSN(t)
+	cfg := Config{
+		Issuer:              testIssuer,
+		JWTSecret:           testJWTSecret,
+		TelegramOIDC:        newFakeAuthenticator(),
+		AdminTelegramIDs:    map[int64]bool{210408407: true},
+		AccessTokenTTL:      time.Hour,
+		CodeTTL:             time.Minute,
+		AllowImplicitClient: true,
+		TGAPIID:             99999,
+		TGAPIHash:           "test-api-hash",
+		AutoApproveClients:  true,
+	}
+	srv, err := New(context.Background(), cfg, st)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	const tgID int64 = 424244
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "racer", "Racer")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+
+	// Second connection: hold an uncommitted none so finishEnable's grant
+	// blocks on the write lock, then sees the ban after we commit.
+	held, err := db.Open(ctx, dsn, 0, 0)
+	if err != nil {
+		t.Fatalf("open second conn: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	tx, err := held.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET access_tier = $1 WHERE telegram_login_id = $2`,
+		db.TierNone, tgID,
+	); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("hold none: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		srv.finishEnable(rec, req, &enableSession{
+			uid:  uid,
+			tgID: tgID,
+			oc: oauthCtx{
+				ClientID:    "claude.ai",
+				RedirectURI: "https://claude.ai/cb",
+				TelegramID:  tgID,
+				Username:    "racer",
+			},
+		}, "es-race")
+	}()
+
+	// Let finishEnable reach the grant UPDATE and park on SQLITE_BUSY.
+	time.Sleep(100 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit none: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finishEnable blocked past busy_timeout")
+	}
+
+	tier, err := srv.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != db.TierNone {
+		t.Fatalf("tier after raced finishEnable = %q, want %q (admin none must survive)", tier, db.TierNone)
 	}
 }

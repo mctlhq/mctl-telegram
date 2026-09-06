@@ -945,6 +945,50 @@ disable it for an authenticated user. It takes no inputs.`),
 	return tool, handler
 }
 
+func (s *Server) toolGetMyIdentity() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_my_identity",
+		mcplib.WithTitleAnnotation("Read your Telegram identity"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithOutputSchema[myIdentityResult](),
+		mcplib.WithDescription(`Return the Telegram identity of the currently authenticated session.
+
+Output: {telegram_id, username, display_name}. username and display_name are omitted when they were never captured — Telegram did not supply them, or the row predates capture. They are never inferred from message content.
+
+This is the self-service counterpart of list_telegram_identities: it reports only the caller. No admin scope is required. Operators cannot disable it for an authenticated user. It takes no inputs.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := auth.From(ctx)
+		if id == nil {
+			return mcplib.NewToolResultError("authentication required"), nil
+		}
+		out := myIdentityResult{
+			TelegramID:  id.TelegramID,
+			Username:    id.TelegramUsername,
+			DisplayName: "",
+		}
+		if s.Store != nil && id.UserID != 0 {
+			tgID, username, display, err := s.Store.GetLoginIdentity(ctx, id.UserID)
+			if err != nil {
+				return toolErr("get_my_identity: %v", err), nil
+			}
+			if tgID != 0 {
+				out.TelegramID = tgID
+			}
+			if username != "" {
+				out.Username = username
+			}
+			out.DisplayName = display
+		}
+		if out.TelegramID == 0 && out.Username == "" && out.DisplayName == "" {
+			return mcplib.NewToolResultError("get_my_identity: no Telegram identity on this session"), nil
+		}
+		return jsonResult(out)
+	}
+	return tool, handler
+}
+
 func (s *Server) toolGetMyAuditLog() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_my_audit_log",
 		mcplib.WithTitleAnnotation("Read your own audit log"),
@@ -1914,6 +1958,13 @@ type auditLogResult struct {
 type identitiesResult struct {
 	Identities []db.IdentityRow `json:"identities"`
 	Count      int              `json:"count"`
+}
+
+// myIdentityResult is the success payload of get_my_identity.
+type myIdentityResult struct {
+	TelegramID  int64  `json:"telegram_id"`
+	Username    string `json:"username,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // setAccessResult is the success payload of set_telegram_access.
