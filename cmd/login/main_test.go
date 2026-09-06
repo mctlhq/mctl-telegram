@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -174,5 +175,89 @@ func TestRefuseIfLocal_StoreFailureIsNotARefusal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "check account mode") {
 		t.Fatalf("the store's own error reached the operator unwrapped: %v", err)
+	}
+}
+
+// activeLocalBlob returns the session bytes sitting on the user's active
+// bridge row, failing the test if that row is gone -- revoking it is the
+// destruction #492 exists to prevent, so it is never an acceptable outcome.
+func activeLocalBlob(t *testing.T, store *db.Store, uid int64) []byte {
+	t.Helper()
+	var blob []byte
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT session_encrypted FROM telegram_accounts
+		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`,
+		uid, db.ModeLocal).Scan(&blob); err != nil {
+		t.Fatalf("the bridge row is no longer active: %v", err)
+	}
+	return blob
+}
+
+// TestRunLoginOrRepair_RepairsWhenTheLoginFails pins the wiring, which is the
+// half the direct repairStraySession tests cannot reach: telegram.Login and
+// LoginQR both persist through the gotd SessionStore before they return, and
+// both have failure exits after that point -- client.Self, the auth.User type
+// assertion, the post-Run session re-read. A login that reports an error can
+// therefore still have left live bytes on a bridge row, so the error exit has
+// to run the repair rather than only the exits after a successful login.
+//
+// The closure stands in for that: it writes the blob the way gotd does, with
+// no loaded row id, and then fails.
+func TestRunLoginOrRepair_RepairsWhenTheLoginFails(t *testing.T) {
+	ctx := context.Background()
+	store := newLoginTestStore(t)
+	uid := seedUser(t, store)
+	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	sentinel := errors.New("self: RPC error")
+	_, _, _, err := runLoginOrRepair(ctx, store, uid, func() (int64, string, string, error) {
+		if wErr := store.UpdateSessionBlob(ctx, uid, []byte("post-auth-session")); wErr != nil {
+			t.Fatalf("UpdateSessionBlob: %v", wErr)
+		}
+		return 0, "", "", sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runLoginOrRepair err=%v, want the login's own error", err)
+	}
+
+	if blob := activeLocalBlob(t, store, uid); blob != nil {
+		t.Error("a failed login left its session bytes on the bridge row")
+	}
+}
+
+// TestRunLoginOrRepair_LeavesASuccessfulLoginAlone is the other half and is not
+// optional: repairing unconditionally would clear the very bytes SaveSession is
+// about to adopt, turning a fix for the failure path into a break of every
+// ordinary hosted login. Asserted on the bridge row because that is the only
+// row the repair touches.
+func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
+	ctx := context.Background()
+	store := newLoginTestStore(t)
+	uid := seedUser(t, store)
+	if err := store.ProvisionLocalAccount(ctx, uid, 210408407, "Dmitry", "MashkovD"); err != nil {
+		t.Fatalf("ProvisionLocalAccount: %v", err)
+	}
+
+	tgID, displayName, username, err := runLoginOrRepair(ctx, store, uid,
+		func() (int64, string, string, error) {
+			if wErr := store.UpdateSessionBlob(ctx, uid, []byte("post-auth-session")); wErr != nil {
+				t.Fatalf("UpdateSessionBlob: %v", wErr)
+			}
+			return 210408407, "Dmitry", "MashkovD", nil
+		})
+	if err != nil {
+		t.Fatalf("runLoginOrRepair: %v", err)
+	}
+	if tgID != 210408407 || displayName != "Dmitry" || username != "MashkovD" {
+		t.Fatalf("the login's own results were not passed through: %d %q %q", tgID, displayName, username)
+	}
+
+	// Compared by content, not equality: the store adds a version byte at
+	// rest, and pinning that framing here would make this test fail on an
+	// unrelated storage change.
+	if blob := activeLocalBlob(t, store, uid); !bytes.Contains(blob, []byte("post-auth-session")) {
+		t.Errorf("a successful login had its session bytes cleared; blob=%q", blob)
 	}
 }
