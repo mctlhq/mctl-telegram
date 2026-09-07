@@ -59,11 +59,18 @@ func TestHardenExistingSecretsTightensAnUpgradedInstall(t *testing.T) {
 		t.Fatalf("seed config dir: %v", err)
 	}
 	// What an older version left behind: world-readable secrets in a
-	// world-traversable directory.
+	// world-traversable directory. The mode is set with chmod because
+	// WriteFile's is masked — under `umask 077` the seed would already be
+	// 0600 and every assertion below would restate its own setup, passing
+	// with the repair removed.
 	secrets := []string{configFileName, bridgeTokenName, deviceKeyName, "state.db", "state.db-wal"}
 	for _, name := range secrets {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatalf("seed mode %s: %v", name, err)
 		}
 	}
 

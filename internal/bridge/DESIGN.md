@@ -174,8 +174,10 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    through `SeBackupPrivilege` without touching the DACL, or by taking
    ownership, and nothing here installs a SACL, so neither is audited unless
    the machine's audit policy says so independently. The threat model is
-   another unprivileged account on the same machine, not its administrator. And this is what was chosen over an OS keychain on
-   #138: the daemon is meant to run under a service manager, where the macOS
+   another unprivileged account on the same machine, not its administrator.
+
+   And this is what was chosen over an OS keychain on #138: the daemon is
+   meant to run under a service manager, where the macOS
    login keychain is locked and headless Linux has no Secret Service, so the
    credential stays a file and the file is what gets protected.
    `cmd/local/perms_windows_test.go` asserts the result — exactly one ACE,
