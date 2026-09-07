@@ -48,7 +48,8 @@ func TestRestrictDBPerms(t *testing.T) {
 // with — on Windows, the DACL inherited from the profile.
 //
 // The mode assertions are unix-only; the Windows half of the same property is
-// TestSecureFileGrantsOnlyTheCurrentUser plus the directory test.
+// TestHardenExistingSecretsOnWindows, which asserts the same seeded install
+// comes out with a protected single-ACE DACL on each secret.
 func TestHardenExistingSecretsTightensAnUpgradedInstall(t *testing.T) {
 	home := t.TempDir()
 	setHome(t, home)
@@ -99,4 +100,48 @@ func TestHardenExistingSecretsDoesNotCreateTheConfigDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".config", "mctl-telegram-local")); !os.IsNotExist(err) {
 		t.Errorf("config dir exists after hardening a machine with no install (err=%v)", err)
 	}
+}
+
+// TestHardenForCommandWiring pins decision and action together: the rule and
+// the repair are each covered on their own, and this is what connects them.
+// main() is one line — hardenForCommand(os.Args[1:]) — and no unit test can
+// reach it without executing the binary; everything below that line is here.
+func TestHardenForCommandWiring(t *testing.T) {
+	seed := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		setHome(t, home)
+		dir := filepath.Join(home, ".config", "mctl-telegram-local")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("seed config dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, configFileName), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed config: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("a command that reads state repairs first", func(t *testing.T) {
+		dir := seed(t)
+		hardenForCommand([]string{"connect", "--token", "x"})
+		info, err := os.Stat(filepath.Join(dir, configFileName))
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("config.json has mode %04o after `connect`, want 0600", got)
+		}
+	})
+
+	t.Run("version leaves an existing install untouched", func(t *testing.T) {
+		dir := seed(t)
+		hardenForCommand([]string{"version"})
+		info, err := os.Stat(filepath.Join(dir, configFileName))
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("config.json has mode %04o after `version`, want it untouched at 0644", got)
+		}
+	})
 }

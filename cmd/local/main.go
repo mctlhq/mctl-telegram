@@ -91,6 +91,18 @@ MCTL_LOCAL_PASSPHRASE, or type it at the prompt if a terminal is present.
 This command starts the daemon. --help only prints this text.
 `
 
+// hardenForCommand runs the startup repair pass for the invocations that reach
+// local state. It exists as a named function because main() itself is not
+// reachable from a test: without it, deleting the call would leave the suite
+// green while removing the whole upgrade path — the repair has exactly one
+// trigger since mkdirSecure stopped re-securing an existing directory on every
+// write.
+func hardenForCommand(args []string) {
+	if shouldHarden(args) {
+		hardenExistingSecrets()
+	}
+}
+
 // shouldHarden reports whether this invocation reaches local state and must
 // therefore repair its permissions first. It takes os.Args[1:] so the rule is
 // testable; inline in main() nothing could reach it.
@@ -152,9 +164,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if shouldHarden(os.Args[1:]) {
-		hardenExistingSecrets()
-	}
+	hardenForCommand(os.Args[1:])
 
 	switch os.Args[1] {
 	case "version":

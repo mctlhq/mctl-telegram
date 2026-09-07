@@ -74,7 +74,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // link. An install that predates this is repaired once at startup instead, by
 // hardenExistingSecrets.
 func mkdirSecure(dir string) error {
-	if _, err := os.Stat(dir); err == nil {
+	// IsDir, not merely "stat succeeded": a regular file at dir would otherwise
+	// return nil here and push the failure one layer down, where it surfaces as
+	// "create temp: ... not a directory" instead of naming the config dir.
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
