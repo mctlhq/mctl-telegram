@@ -81,8 +81,8 @@ session absence is a local-test assertion unless separately observed live.
 | Lookup login and refresh | PASS | Initial grant and refresh have only `admin:users:read`; no `telegram_accounts` row created. Removal has a finding below. |
 | Code review findings | FAIL | Three confirmed findings below; no application fixes applied. |
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
-| Backup and state replacement | PASS | Runner stopped the original launch agent, moved its complete state into an owner-only backup and installed the verified test binary. Original binary checksum matches preflight. |
-| Fresh local login and activation | BLOCKED | Runner is at interactive `init`; no completed-init marker yet. Requires operator terminal and browser input. |
+| Backup and state replacement | PASS | A failed interrupted attempt was repaired manually; original binary checksum matches preflight, original config is present with `0700`, and launchd is running again. The remote helper now restores based on actual backups rather than `started`/`restored` marker state. |
+| Fresh local login and activation | NOT RUN | The prior attempt completed local init/login but stopped before activation; its test state was restored. Requires a fresh operator terminal and browser input. |
 | ChatGPT OAuth and local reads | PENDING | Must be exercised with the new account. |
 | Consent, Saved Messages send, revoke | PENDING | Only the test account/device is in scope. |
 | Original service restoration | PENDING | Required after any test replacement. |
@@ -190,8 +190,9 @@ original Mac mini installation and restores it on normal exit, interruption
 or SSH hangup. It records only stage markers for remote progress checks;
 credential input is not captured in the repository or this report.
 
-At the latest observation, the original launch agent is intentionally stopped
-for the active test. The test runner has not completed `init`. Do not mark
-restoration or the live scenario complete from the existence of the backup.
-If the operator pauses the test, interrupt the terminal runner to restore the
-installation, then independently verify the resumed launch agent/connection.
+The latest recovery check confirms the original launch agent is running and
+the original binary checksum is unchanged. The helper was corrected after an
+interrupted run: `restore.sh` now examines actual backup paths and can recover
+even when the phase markers are stale or missing. The live scenario still
+requires a fresh interactive run; the helper must be run with a TTY and will
+restore the original installation on exit.
