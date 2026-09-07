@@ -132,11 +132,23 @@ jobs:
   #
   # fail-fast is off: a macOS failure and a Windows failure are independent
   # findings and cancelling one to report the other wastes the run.
+  #   - Server-side packages on Windows. The release builds windows/amd64 for
+  #     ./cmd/local and nothing else; internal/agent/*, internal/agentworker and
+  #     internal/mcp ship in a Linux container and are never executed on
+  #     Windows. Running them there reports failures in code that cannot reach a
+  #     user — a fake `claude` shell script that Windows cannot exec, and a
+  #     file_path media feature internal/telegram/media_path.go rejects on
+  #     Windows by design. macOS runs the whole module because it passes.
   test-cross-platform:
+    name: test-cross-platform (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-latest
+            packages: ./...
+          - os: windows-latest
+            packages: ./cmd/local/...
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -144,7 +156,7 @@ jobs:
         with:
           go-version: "1.26.6"
       - run: go build ./...
-      - run: go test ./...
+      - run: go test ${{ matrix.packages }}
 
   govulncheck:
     runs-on: ubuntu-latest

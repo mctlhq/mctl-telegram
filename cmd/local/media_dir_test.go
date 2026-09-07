@@ -39,7 +39,7 @@ func TestMediaAllowDir_TrimsEnv(t *testing.T) {
 
 func TestMediaAllowDir_WhitespaceOnlyFallsBack(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("MCTL_MEDIA_DIR", "   ")
 
 	got := mediaAllowDir()
@@ -51,7 +51,7 @@ func TestMediaAllowDir_WhitespaceOnlyFallsBack(t *testing.T) {
 
 func TestMediaAllowDir_Fallback(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("MCTL_MEDIA_DIR", "")
 
 	got := mediaAllowDir()
