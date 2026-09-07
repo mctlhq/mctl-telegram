@@ -94,6 +94,15 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 			if err := secureFile(tmpPath); err != nil {
 				return fmt.Errorf("restrict temp: %w", err)
 			}
+		} else if err := copyPermissions(path, tmpPath); err != nil {
+			// Declining has to mean "leave its permissions as they are", and
+			// leaving the temp file alone does not achieve that: os.Rename
+			// carries the temp file's permissions onto the target, so a target
+			// that was protected would come back inheriting the directory's
+			// broad ACL. A routine token refresh would then re-expose the
+			// secret it just rewrote — a downgrade performed by the branch
+			// whose whole purpose is to change nothing.
+			return fmt.Errorf("preserve permissions of %s: %w", path, err)
 		}
 	}
 	if _, err := tmp.Write(data); err != nil {

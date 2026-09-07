@@ -207,7 +207,7 @@ func TestRestrictDBPermsOnWindows(t *testing.T) {
 	}
 	// state.db-shm is deliberately absent.
 
-	if err := restrictDBPerms(dbPath); err != nil {
+	if err := restrictDBPerms(dbPath, false); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 	for _, p := range []string{dbPath, dbPath + "-wal"} {
@@ -301,7 +301,7 @@ func TestInstallNotOursIsLeftAloneOnWindows(t *testing.T) {
 	t.Cleanup(func() { installRestrictable = restore })
 
 	hardenExistingSecrets()
-	if err := restrictDBPerms(filepath.Join(dir, "state.db")); err != nil {
+	if err := restrictDBPerms(filepath.Join(dir, "state.db"), false); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
@@ -425,4 +425,42 @@ func TestNewSecretIsProtectedDespiteDeclinedGate(t *testing.T) {
 		t.Fatal("a newly created secret is unprotected; a declined gate must not leave a new file under the inherited ACL")
 	}
 	assertGrantsOnlyCurrentUser(t, filepath.Join(dir, bridgeTokenName), acl)
+}
+
+// TestDeclinedGateKeepsAProtectedTargetProtected is the Windows half of
+// TestDeclinedGatePreservesTargetPermissions, and the case codex raised: the
+// first write of a secret protects it (nothing was there to take), and the next
+// refresh reaches the declining branch. os.Rename carries the temp file's
+// security descriptor onto the target, so without copying the target's forward
+// a routine refresh would replace a protected token with one carrying the
+// directory's broad inherited ACL — re-exposing the secret it just rewrote.
+func TestDeclinedGateKeepsAProtectedTargetProtected(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	tokenPath := filepath.Join(dir, bridgeTokenName)
+	if err := os.WriteFile(tokenPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	// The state the first write leaves behind.
+	if err := secureFile(tokenPath); err != nil {
+		t.Fatalf("secureFile: %v", err)
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable = restore })
+
+	if err := saveBridgeToken(&bridgeTokenFile{BridgeToken: "refreshed"}); err != nil {
+		t.Fatalf("saveBridgeToken: %v", err)
+	}
+	acl, protected := dacl(t, tokenPath)
+	if !protected {
+		t.Fatal("a refresh under a declined gate replaced a protected token with an inherited DACL")
+	}
+	assertGrantsOnlyCurrentUser(t, tokenPath, acl)
 }

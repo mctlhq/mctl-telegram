@@ -166,3 +166,44 @@ func currentUserSID() (*windows.SID, error) {
 	}
 	return u.User.Sid, nil
 }
+
+// copyPermissions gives dst the DACL src already has.
+//
+// It is what "leave this file's permissions alone" means on a path that is
+// replaced through a temp file and a rename: the security descriptor that
+// survives the rename is the temp file's, so preserving the target's means
+// copying it forward. Without this, declining to restrict would silently
+// downgrade a target that was protected — the token refresh re-exposing the
+// secret it just wrote.
+//
+// A DACL that is not protected is inherited from the directory, and the temp
+// file was created in that same directory, so it already carries exactly those
+// ACEs: copying them would only convert inherited entries into explicit ones
+// that no longer follow the directory. In that case the right action is none.
+func copyPermissions(src, dst string) error {
+	sd, err := windows.GetNamedSecurityInfo(src, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("read permissions of %s: %w", src, err)
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return fmt.Errorf("read control bits of %s: %w", src, err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("read DACL of %s: %w", src, err)
+	}
+	if dacl == nil {
+		return nil
+	}
+	if err := windows.SetNamedSecurityInfo(dst, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("copy permissions to %s: %w", dst, err)
+	}
+	return nil
+}

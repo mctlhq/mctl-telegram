@@ -34,7 +34,7 @@ func TestRestrictDBPerms(t *testing.T) {
 	// state.db-shm is deliberately absent — an absent sidecar is normal and
 	// must not be reported as an error.
 
-	if err := restrictDBPerms(dbPath); err != nil {
+	if err := restrictDBPerms(dbPath, false); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
@@ -210,7 +210,7 @@ func TestInstallNotOursIsLeftAlone(t *testing.T) {
 	t.Cleanup(func() { installRestrictable = restore })
 
 	hardenExistingSecrets()
-	if err := restrictDBPerms(filepath.Join(dir, "state.db")); err != nil {
+	if err := restrictDBPerms(filepath.Join(dir, "state.db"), false); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
@@ -255,7 +255,7 @@ func TestGateReadFailureLeavesPermissionsAlone(t *testing.T) {
 	// Not an error: openLocalStore die()s on one, and a daemon holding a
 	// working session must not be stopped by an unanswerable question about
 	// who owns its files.
-	if err := restrictDBPerms(dbPath); err != nil {
+	if err := restrictDBPerms(dbPath, false); err != nil {
 		t.Fatalf("restrictDBPerms returned %v; a gate read failure must not stop startup", err)
 	}
 	info, err := os.Stat(dbPath)
@@ -278,5 +278,83 @@ func TestMayRestrictOwnDirectory(t *testing.T) {
 	}
 	if !allowed {
 		t.Errorf("own temp directory reported as owned by another account (owner %q); the repair would never run", owner)
+	}
+}
+
+// TestNewDatabaseIsProtectedDespiteDeclinedGate is the database half of the
+// creation exemption. `init` before this change and `login` after it on an
+// install the gate declines would otherwise leave state.db under whatever the
+// directory grants — and then write the encrypted session into it.
+func TestNewDatabaseIsProtectedDespiteDeclinedGate(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, t.TempDir())
+	dbPath := filepath.Join(dir, "state.db")
+	if err := os.WriteFile(dbPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("seed mode: %v", err)
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable = restore })
+
+	// created: this run brought the database into existence, so there is
+	// nothing here that belongs to anyone else.
+	if err := restrictDBPerms(dbPath, true); err != nil {
+		t.Fatalf("restrictDBPerms: %v", err)
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("a database this run created has mode %04o, want 0600", got)
+	}
+}
+
+// TestDeclinedGatePreservesTargetPermissions pins what declining means: the
+// replacement keeps the permissions the target had. os.Rename carries the temp
+// file's mode onto the target, so without copying them forward a refresh would
+// hand back a file that is no longer as restricted as the one it replaced.
+//
+// It also pins the one-way rule: a target more permissive than the temp file is
+// left behind rather than copied, because declining to restrict must not turn
+// into a licence to loosen.
+func TestDeclinedGatePreservesTargetPermissions(t *testing.T) {
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable = restore })
+
+	for _, tc := range []struct {
+		name           string
+		seed, expected os.FileMode
+	}{
+		{"a stricter target is preserved", 0o400, 0o400},
+		{"a wider target is not copied back", 0o644, 0o600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setHome(t, t.TempDir())
+			path := filepath.Join(dir, "secret.json")
+			if err := os.WriteFile(path, []byte("old"), tc.seed); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if err := os.Chmod(path, tc.seed); err != nil {
+				t.Fatalf("seed mode: %v", err)
+			}
+
+			if err := writeFileAtomic(path, []byte("new"), 0o600); err != nil {
+				t.Fatalf("writeFileAtomic: %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != tc.expected {
+				t.Errorf("mode %04o after a declined write, want %04o", got, tc.expected)
+			}
+		})
 	}
 }

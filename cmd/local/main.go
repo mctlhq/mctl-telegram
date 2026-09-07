@@ -316,7 +316,10 @@ func hardenExistingSecrets() {
 		}
 	}
 	if dbPath, err := dbFilePath(); err == nil {
-		if err := restrictDBPerms(dbPath); err != nil {
+		// false: the repair pass only ever finds a database that already
+		// exists, and hardenExistingSecrets has already established that this
+		// install is ours before it gets here.
+		if err := restrictDBPerms(dbPath, false); err != nil {
 			slog.Warn("could not restrict database permissions", "path", dbPath, "err", err)
 		}
 	}
@@ -674,6 +677,12 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		die(err)
 	}
 
+	// Before db.Open, which creates it: a database this run brings into
+	// existence is ours to protect whatever the ownership gate says about the
+	// install, because there is nothing there yet to take away.
+	_, statErr := os.Stat(dbPath)
+	createdDB := errors.Is(statErr, os.ErrNotExist)
+
 	dsn := sqliteDSN(dbPath) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	rawDB, err := db.Open(ctx, dsn, 0, 0)
 	if err != nil {
@@ -683,7 +692,7 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		_ = rawDB.Close()
 		die(fmt.Errorf("migrate local db: %w", err))
 	}
-	if err := restrictDBPerms(dbPath); err != nil {
+	if err := restrictDBPerms(dbPath, createdDB); err != nil {
 		_ = rawDB.Close()
 		die(err)
 	}
@@ -884,7 +893,7 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 //
 // What "owner-only" means is platform-specific and lives in secureFile: a mode
 // on unix, an explicit DACL on Windows, where the mode is ignored.
-func restrictDBPerms(dbPath string) error {
+func restrictDBPerms(dbPath string, created bool) error {
 	// Asked once, about the install, and not once per file. Per-path was wrong
 	// in the case the gate exists for: -wal and -shm are created by THIS
 	// process moments earlier by db.Open, so they are owned by it and would
@@ -894,6 +903,13 @@ func restrictDBPerms(dbPath string) error {
 	// pages. The members of an install are not independent, and the config
 	// directory is what says whose install it is.
 	switch allowed, owner, err := installRestrictable(); {
+	case created:
+		// This process created the database in this run, so there is nothing
+		// here to take from anybody — the same exemption writeFileAtomic makes
+		// for a secret that does not exist yet. Without it, `init` before the
+		// upgrade and `login` after it on a group-owned install would leave
+		// state.db and its sidecars under the broad inherited ACL and then
+		// write the encrypted session into them.
 	case errors.Is(err, os.ErrNotExist):
 		// No config directory yet, so nothing here belongs to anyone else.
 	case err != nil:
