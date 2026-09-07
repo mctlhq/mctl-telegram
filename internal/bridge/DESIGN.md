@@ -169,7 +169,12 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    Two consequences, stated rather than hidden. SYSTEM and Administrators
    get no ACE, so a daemon started as a Windows service under LocalSystem
    cannot read a token written by the interactive user — the secrets belong
-   to one human account. And this is what was chosen over an OS keychain on
+   to one human account. That exclusivity is against the ordinary access
+   check and no further: an elevated administrator can read these files
+   through `SeBackupPrivilege` without touching the DACL, or by taking
+   ownership, and nothing here installs a SACL, so neither is audited unless
+   the machine's audit policy says so independently. The threat model is
+   another unprivileged account on the same machine, not its administrator. And this is what was chosen over an OS keychain on
    #138: the daemon is meant to run under a service manager, where the macOS
    login keychain is locked and headless Linux has no Secret Service, so the
    credential stays a file and the file is what gets protected.

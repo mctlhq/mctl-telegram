@@ -115,8 +115,17 @@ func TestHardenForCommandWiring(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("seed config dir: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, configFileName), []byte("{}"), 0o644); err != nil {
+		p := filepath.Join(dir, configFileName)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
 			t.Fatalf("seed config: %v", err)
+		}
+		// Chmod, not the WriteFile mode: that one is masked, so under
+		// `umask 077` the seed would already be 0600 and both halves of this
+		// test would stop meaning anything — the "untouched" case failing on a
+		// run where nothing is wrong, the other passing without the repair
+		// having done a thing.
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatalf("seed mode: %v", err)
 		}
 		return dir
 	}
