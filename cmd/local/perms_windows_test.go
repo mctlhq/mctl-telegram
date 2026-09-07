@@ -44,12 +44,19 @@ func dacl(t *testing.T, path string) (*windows.ACL, bool) {
 	return acl, control&windows.SE_DACL_PROTECTED != 0
 }
 
-// aceAt returns the type, flags and trustee SID of one ACE.
+// aceAt returns the type, flags and trustee SID of one ACE. The SID is nil for
+// anything that is not an access-allowed ACE: SidStart is only at that offset
+// in that layout, so reading it out of, say, an object ACE would report a
+// plausible-looking SID that is not the trustee — and the failure message would
+// then be a lie about who was granted access.
 func aceAt(t *testing.T, acl *windows.ACL, i uint32) (uint8, uint8, *windows.SID) {
 	t.Helper()
 	var ace *windows.ACCESS_ALLOWED_ACE
 	if err := windows.GetAce(acl, i, &ace); err != nil {
 		t.Fatalf("GetAce(%d): %v", i, err)
+	}
+	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return ace.Header.AceType, ace.Header.AceFlags, nil
 	}
 	return ace.Header.AceType, ace.Header.AceFlags, (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 }

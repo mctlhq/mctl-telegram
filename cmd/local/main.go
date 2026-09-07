@@ -116,6 +116,8 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
+	hardenExistingSecrets()
+
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
 		os.Exit(2)
@@ -148,6 +150,53 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
+	}
+}
+
+// hardenExistingSecrets tightens an install that already exists, before any
+// command reads from it.
+//
+// Every other call site is a WRITE path, which is enough on a fresh install and
+// not enough on an upgrade: loadConfig and loadBridgeToken read their files
+// straight away, openLocalStore runs db.Open and db.Migrate — creating -wal and
+// -shm — before restrictDBPerms, and device_key.json is never rewritten at all
+// if the device record does not change. On Windows those all happened under the
+// DACL inherited from the profile, which is the thing #563 is about.
+//
+// The directory is secured first so that anything created inside it afterwards
+// inherits the restriction, and each known secret is then secured in its own
+// right: a child whose DACL is already protected does not take part in
+// propagation, so inheritance alone would leave it as it was.
+//
+// It never creates the config directory. A missing one means there is nothing
+// to repair yet — `version`, `help` and a first `init` must not leave a
+// directory behind — and `init` creates it through mkdirSecure when it writes.
+//
+// Failures warn rather than exit. This runs on a daemon that may already hold a
+// working session, and refusing to start because a permission could not be
+// narrowed would turn a hardening step into an outage; the warning names the
+// path so it can be fixed by hand.
+func hardenExistingSecrets() {
+	dir, err := configDirPath()
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+	if err := secureDir(dir); err != nil {
+		slog.Warn("could not restrict config directory permissions", "path", dir, "err", err)
+	}
+	for _, name := range []string{configFileName, bridgeTokenName, deviceKeyName} {
+		p := filepath.Join(dir, name)
+		if err := secureFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not restrict secret permissions", "path", p, "err", err)
+		}
+	}
+	if dbPath, err := dbFilePath(); err == nil {
+		if err := restrictDBPerms(dbPath); err != nil {
+			slog.Warn("could not restrict database permissions", "path", dbPath, "err", err)
+		}
 	}
 }
 
@@ -719,8 +768,12 @@ func restrictDBPerms(dbPath string) error {
 		// case arrives as a wrapped syscall.Errno, which the legacy helper
 		// does not unwrap, and an absent sidecar would then be reported as a
 		// failure to start.
+		//
+		// Returned unwrapped: both secureFile implementations already name the
+		// path — os.Chmod through *PathError, the ACL through its own message
+		// — and wrapping here repeated it twice in one sentence.
 		if err := secureFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("restrict permissions on %s: %w", p, err)
+			return err
 		}
 	}
 	return nil

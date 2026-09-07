@@ -874,9 +874,17 @@ func loadSendMediaFilePath(filePath, fileName string) ([]byte, string, string, e
 // file_path. Override with MCTL_MEDIA_DIR; default is
 // ~/.config/mctl-telegram-local/media. The directory is created on first use
 // so a relative file_path has somewhere to land.
+//
+// The override is created if missing and otherwise left exactly as the operator
+// set it up: no mode change, no DACL replacement. It is a read source the
+// daemon is pointed at — plausibly a shared drop folder another process writes
+// into — and not one of the three secrets #563 is about (the session database
+// and its sidecars, the bridge token, the device key). Narrowing it on every
+// send_media call would silently lock its writer out. Only the default, which
+// lives inside the config directory and is owned by the daemon, is secured.
 func mediaAllowDir() string {
 	if d := strings.TrimSpace(os.Getenv("MCTL_MEDIA_DIR")); d != "" {
-		_ = mkdirSecure(d)
+		_ = os.MkdirAll(d, 0o700)
 		return d
 	}
 	dir, err := configDirPath()
