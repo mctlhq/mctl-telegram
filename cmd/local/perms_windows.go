@@ -25,10 +25,6 @@ import (
 // has no Secret Service, so the credential stays a file and the file is what
 // gets protected.
 //
-// The account named is the object's owner — see grantee. On creation that is
-// this process; on the repair pass over an existing install it is whoever owns
-// the secrets, which is not necessarily who is running the repair.
-//
 // What this deliberately does NOT grant is worth stating, because it is a real
 // trade rather than an oversight: SYSTEM and Administrators get no ACE. A
 // daemon started as a Windows service under LocalSystem therefore cannot read a
@@ -60,7 +56,7 @@ func secureDir(path string) error {
 }
 
 func ownerOnlyACL(path string, inheritance uint32) error {
-	sid, err := grantee(path)
+	sid, err := currentUserSID()
 	if err != nil {
 		return err
 	}
@@ -98,31 +94,48 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 	return nil
 }
 
-// grantee is the account the DACL will name: the object's existing owner if it
-// has one, and the account this process runs as otherwise.
+// repairAllowed reports whether the startup repair pass may rewrite the
+// permissions under dir, and names the owner when it may not.
 //
-// The owner rather than the caller, because this also runs as a repair pass over
-// an install that already exists, and the two are not always the same account.
-// A daemon installed as a Windows service under LocalSystem with USERPROFILE
-// pointed at the interactive user's config directory would otherwise rewrite
-// that user's secrets to grant SYSTEM alone — handing the service the
-// credentials and locking the human they belong to out of them, which is the
-// documented boundary inverted rather than enforced.
+// The gate exists because the repair runs over an install this process did not
+// necessarily create. Granting the caller unconditionally would let a daemon
+// installed as a Windows service under LocalSystem, pointed at the interactive
+// user's config directory, rewrite that user's secrets to SYSTEM alone —
+// handing the service the credentials and locking out the human they belong to.
 //
-// On the creation path the two coincide: the account that creates a file is its
-// owner. If the owner cannot be read — a path that does not exist yet, or a
-// filesystem that does not carry one — the caller is the right answer and the
-// error is not worth failing over, since the DACL is about to be set on an
-// object this process is creating.
-func grantee(path string) (*windows.SID, error) {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+// Ownership is a gate and never a grantee. Reading a SID off disk and writing
+// it into a protected DACL is the other way to get this wrong: an owner
+// inherited from another machine, a backup restored with /COPYALL, or a group
+// that is not a login at all would then become the only account named on a
+// secret this process can still read but nobody can subsequently fix. CI proved
+// that danger rather than hypothesising it — on a GitHub Windows runner the
+// account is an elevated administrator, so files it creates are owned by
+// BUILTIN\Administrators (S-1-5-32-544), and an owner-as-grantee rule handed
+// every secret to a group instead of to the user.
+//
+// Membership, not equality, for the same reason: the owner of a file an
+// elevated user creates is often the Administrators group rather than that
+// user, and the process token carries it.
+func repairAllowed(dir string) (bool, string, error) {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION)
-	if err == nil && sd != nil {
-		if owner, _, err := sd.Owner(); err == nil && owner != nil && owner.IsValid() {
-			return owner, nil
-		}
+	if err != nil {
+		return false, "", fmt.Errorf("read owner of %s: %w", dir, err)
 	}
-	return currentUserSID()
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil {
+		return false, "", fmt.Errorf("read owner of %s: %w", dir, err)
+	}
+	tok, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return false, "", fmt.Errorf("open process token: %w", err)
+	}
+	defer tok.Close()
+	member, err := tok.IsMember(owner)
+	if err != nil {
+		return false, "", fmt.Errorf("check membership of %s: %w", owner, err)
+	}
+	return member, owner.String(), nil
 }
 
 // currentUserSID reads the SID of the account this process runs as. The token

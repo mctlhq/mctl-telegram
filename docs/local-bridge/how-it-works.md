@@ -64,6 +64,14 @@ more: an administrator of the machine can still read the files by other
 means, so the protection is against another ordinary account on the same
 computer, not against whoever administers it.
 
+The daemon also repairs these permissions at startup on an installation
+created by an older version. That pass is best-effort: it refuses to touch
+a configuration directory owned by a different account rather than seizing
+it, and if it cannot apply a permission it logs a warning and carries on
+rather than refusing to start. A warning from it at startup means the files
+may still be readable by other accounts on the machine — worth acting on
+rather than ignoring.
+
 `revoke_local_bridge_device` denylists the `jti` claimed at first
 issuance. Every later refresh carries that same `jti` forward, so
 denylisting it kills every credential the device has ever held. If the

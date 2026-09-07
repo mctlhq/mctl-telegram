@@ -217,10 +217,14 @@ func main() {
 // leave a directory behind before it has written anything. `init` creates it
 // through mkdirSecure when it saves.
 //
-// Failures warn rather than exit. This runs on a daemon that may already hold a
+// Failures warn rather than exit, which makes this best-effort by design: a
+// warning here means the install may still be readable by other local accounts,
+// and it is the signal to look. This runs on a daemon that may already hold a
 // working session, and refusing to start because a permission could not be
-// narrowed would turn a hardening step into an outage; the warning names the
-// path so it can be fixed by hand.
+// narrowed would turn a hardening step into an outage.
+//
+// It also refuses to touch an install owned by another account rather than
+// seizing it — see repairAllowed.
 func hardenExistingSecrets() {
 	dir, err := configDirPath()
 	if err != nil {
@@ -232,6 +236,19 @@ func hardenExistingSecrets() {
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("could not check the config directory", "path", dir, "err", err)
 		}
+		return
+	}
+	// Never rewrite permissions on an install owned by someone else: see
+	// repairAllowed. A warning and no change is the only safe outcome there —
+	// the alternative is taking a user's secrets away from them.
+	switch allowed, owner, err := repairAllowed(dir); {
+	case err != nil:
+		slog.Warn("could not check who owns the config directory; not repairing permissions",
+			"path", dir, "err", err)
+		return
+	case !allowed:
+		slog.Warn("config directory is owned by another account; not repairing permissions",
+			"path", dir, "owner", owner)
 		return
 	}
 	if err := secureDir(dir); err != nil {
