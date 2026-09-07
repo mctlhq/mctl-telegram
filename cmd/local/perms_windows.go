@@ -25,6 +25,10 @@ import (
 // has no Secret Service, so the credential stays a file and the file is what
 // gets protected.
 //
+// The account named is the object's owner — see grantee. On creation that is
+// this process; on the repair pass over an existing install it is whoever owns
+// the secrets, which is not necessarily who is running the repair.
+//
 // What this deliberately does NOT grant is worth stating, because it is a real
 // trade rather than an oversight: SYSTEM and Administrators get no ACE. A
 // daemon started as a Windows service under LocalSystem therefore cannot read a
@@ -56,7 +60,7 @@ func secureDir(path string) error {
 }
 
 func ownerOnlyACL(path string, inheritance uint32) error {
-	sid, err := currentUserSID()
+	sid, err := grantee(path)
 	if err != nil {
 		return err
 	}
@@ -92,6 +96,33 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 		return fmt.Errorf("restrict permissions on %s: %w", path, err)
 	}
 	return nil
+}
+
+// grantee is the account the DACL will name: the object's existing owner if it
+// has one, and the account this process runs as otherwise.
+//
+// The owner rather than the caller, because this also runs as a repair pass over
+// an install that already exists, and the two are not always the same account.
+// A daemon installed as a Windows service under LocalSystem with USERPROFILE
+// pointed at the interactive user's config directory would otherwise rewrite
+// that user's secrets to grant SYSTEM alone — handing the service the
+// credentials and locking the human they belong to out of them, which is the
+// documented boundary inverted rather than enforced.
+//
+// On the creation path the two coincide: the account that creates a file is its
+// owner. If the owner cannot be read — a path that does not exist yet, or a
+// filesystem that does not carry one — the caller is the right answer and the
+// error is not worth failing over, since the DACL is about to be set on an
+// object this process is creating.
+func grantee(path string) (*windows.SID, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION)
+	if err == nil && sd != nil {
+		if owner, _, err := sd.Owner(); err == nil && owner != nil && owner.IsValid() {
+			return owner, nil
+		}
+	}
+	return currentUserSID()
 }
 
 // currentUserSID reads the SID of the account this process runs as. The token

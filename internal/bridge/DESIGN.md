@@ -183,6 +183,13 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    `cmd/local/perms_windows_test.go` asserts the result — exactly one ACE,
    this account, protected from inheritance — where it used to assert the
    gap.
+
+   The account named is the object's **owner**, not the caller. On creation
+   they are the same; on the startup repair pass over an install that
+   already exists they need not be, and granting the caller there would let
+   a service running as LocalSystem rewrite the interactive user's secrets
+   to SYSTEM-only — handing the service the credentials and locking out the
+   human they belong to.
 4. **Closed for the self-service path by #484; still open, deliberately, for
    legacy `connect --token`.** `activate` never hands a user a token to
    paste: it mints its own device-bound credential end to end through the

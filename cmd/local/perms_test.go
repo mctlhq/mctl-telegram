@@ -58,6 +58,11 @@ func TestHardenExistingSecretsTightensAnUpgradedInstall(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("seed config dir: %v", err)
 	}
+	// MkdirAll's mode is masked like WriteFile's: without this the directory
+	// is 0700 under `umask 077` and the assertion below restates the seed.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir mode: %v", err)
+	}
 	// What an older version left behind: world-readable secrets in a
 	// world-traversable directory. The mode is set with chmod because
 	// WriteFile's is masked — under `umask 077` the seed would already be
