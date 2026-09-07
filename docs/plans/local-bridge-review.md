@@ -83,7 +83,7 @@ session absence is a local-test assertion unless separately observed live.
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
 | Backup and state replacement | PASS | A failed interrupted attempt was repaired manually; original binary checksum matches preflight, original config is present with `0700`, and launchd is running again. The remote helper now restores based on actual backups rather than `started`/`restored` marker state. |
 | Fresh local login and activation | PASS WITH UX BUG | Local Apple Silicon run completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. |
-| ChatGPT OAuth and local reads | PENDING | Must be exercised with the new account. |
+| ChatGPT OAuth and local reads | PASS | ChatGPT connected to `https://tg.mctl.ai/mcp` with the review account; `get_my_identity`, send-status inspection and dialog listing completed while the local daemon held an active websocket. |
 | Consent, Saved Messages send, revoke | PENDING | Only the test account/device is in scope. |
 | Original service restoration | PENDING | Required after any test replacement. |
 | Live lookup login | NOT RUN | No dedicated configured identity; local tests only. |
