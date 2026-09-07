@@ -94,10 +94,10 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 	return nil
 }
 
-// repairAllowed reports whether the startup repair pass may rewrite the
-// permissions under dir, and names the owner when it may not.
+// mayRestrict reports whether this process may rewrite the permissions of path,
+// and names the owner when it may not.
 //
-// The gate exists because the repair runs over an install this process did not
+// The gate exists because this runs over an install this process did not
 // necessarily create. Granting the caller unconditionally would let a daemon
 // installed as a Windows service under LocalSystem, pointed at the interactive
 // user's config directory, rewrite that user's secrets to SYSTEM alone —
@@ -116,22 +116,30 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 // Membership, not equality, for the same reason: the owner of a file an
 // elevated user creates is often the Administrators group rather than that
 // user, and the process token carries it.
-func repairAllowed(dir string) (bool, string, error) {
-	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+func mayRestrict(path string) (bool, string, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
-		return false, "", fmt.Errorf("read owner of %s: %w", dir, err)
+		return false, "", fmt.Errorf("read owner of %s: %w", path, err)
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil {
-		return false, "", fmt.Errorf("read owner of %s: %w", dir, err)
-	}
-	tok, err := windows.OpenCurrentProcessToken()
 	if err != nil {
-		return false, "", fmt.Errorf("open process token: %w", err)
+		return false, "", fmt.Errorf("read owner of %s: %w", path, err)
 	}
-	defer tok.Close()
-	member, err := tok.IsMember(owner)
+	if owner == nil {
+		// Distinct from a failure, and it has to say so: this decision leaves
+		// the secrets under the old DACL, and "%!w(<nil>)" in the warning would
+		// explain nothing about why.
+		return false, "", fmt.Errorf("read owner of %s: the object carries no owner", path)
+	}
+	// Token(0), not OpenCurrentProcessToken: CheckTokenMembership requires an
+	// impersonation token and fails with ERROR_NO_IMPERSONATION_TOKEN on a
+	// primary one. The NULL handle makes Windows impersonate the calling
+	// thread's own token for the check, which is the documented way to ask this
+	// question from a process that is not impersonating anybody. Getting this
+	// wrong made the gate error every time and killed the whole Windows repair
+	// pass — CI caught it.
+	member, err := windows.Token(0).IsMember(owner)
 	if err != nil {
 		return false, "", fmt.Errorf("check membership of %s: %w", owner, err)
 	}

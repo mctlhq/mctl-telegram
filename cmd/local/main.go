@@ -224,7 +224,7 @@ func main() {
 // narrowed would turn a hardening step into an outage.
 //
 // It also refuses to touch an install owned by another account rather than
-// seizing it — see repairAllowed.
+// seizing it — see mayRestrict.
 func hardenExistingSecrets() {
 	dir, err := configDirPath()
 	if err != nil {
@@ -239,9 +239,9 @@ func hardenExistingSecrets() {
 		return
 	}
 	// Never rewrite permissions on an install owned by someone else: see
-	// repairAllowed. A warning and no change is the only safe outcome there —
+	// mayRestrict. A warning and no change is the only safe outcome there —
 	// the alternative is taking a user's secrets away from them.
-	switch allowed, owner, err := repairAllowed(dir); {
+	switch allowed, owner, err := mayRestrict(dir); {
 	case err != nil:
 		slog.Warn("could not check who owns the config directory; not repairing permissions",
 			"path", dir, "err", err)
@@ -831,11 +831,28 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 // on unix, an explicit DACL on Windows, where the mode is ignored.
 func restrictDBPerms(dbPath string) error {
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		// errors.Is rather than os.IsNotExist: on Windows the missing-file
-		// case arrives as a wrapped syscall.Errno, which the legacy helper
-		// does not unwrap, and an absent sidecar would then be reported as a
-		// failure to start.
+		// The same gate the startup repair runs behind, for the same reason.
+		// Since #563 this is no longer a chmod: on Windows it writes a
+		// protected DACL naming this process's account, so running it
+		// unconditionally on an existing database owned by somebody else would
+		// hand the largest of the three secrets to whoever started the daemon
+		// and lock its owner out — on every start, not once.
 		//
+		// errors.Is rather than os.IsNotExist: on Windows a missing path
+		// arrives as a wrapped syscall.Errno, which the legacy helper does not
+		// unwrap, and an absent sidecar is normal rather than a failure.
+		allowed, owner, err := mayRestrict(p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if !allowed {
+			slog.Warn("database file is owned by another account; leaving its permissions alone",
+				"path", p, "owner", owner)
+			continue
+		}
 		// Returned unwrapped: both secureFile implementations already name the
 		// path — os.Chmod through *PathError, the ACL through its own message
 		// — and wrapping here repeated it twice in one sentence.

@@ -8,12 +8,12 @@ import (
 	"syscall"
 )
 
-// repairAllowed reports whether the startup repair pass may rewrite the
-// permissions under dir, and names the owner when it may not. See the Windows
-// half for why the gate exists; on unix the same question is whether this
-// process owns the directory, since chmod is the owner's to make (or root's).
-func repairAllowed(dir string) (bool, string, error) {
-	info, err := os.Stat(dir)
+// mayRestrict reports whether this process may rewrite the permissions of path,
+// and names the owner when it may not. See the Windows half for why the gate
+// exists; on unix the same question is whether this process owns the path,
+// since chmod is the owner's to make (or root's).
+func mayRestrict(path string) (bool, string, error) {
+	info, err := os.Stat(path)
 	if err != nil {
 		return false, "", err
 	}
