@@ -1,15 +1,21 @@
 # Local Bridge 0.62.1 review and manual verification
 
-Status: code review complete; local login and activation completed, 2026-09-08.
+Status: code review complete; the full interactive run completed on Apple
+Silicon, 2026-09-08. Intel release-binary preflight completed separately.
 This is the canonical plan and result log. Tracking PR: [#565](https://github.com/mctlhq/mctl-telegram/pull/565).
 
 ## Scope and acceptance
 
 Review release `0.62.1` (`2cc03c234be346919735a0e8e0ddacf533f354b5`),
-then exercise a Telegram account new to the service using the Intel macOS
-release binary, the production relay, and ChatGPT as the OAuth/MCP client.
-Do not change application code or production configuration as part of this
-review. Record actionable findings separately from untested assumptions.
+then exercise a Telegram account new to the service against the production
+relay. The Intel Mac mini release binary was used for checksum and launch-agent
+preflight. The complete interactive login, activation, MCP and daemon run was
+performed on the operator's Apple Silicon machine with a local review build
+(`0.62.1-review`); it is not evidence for the Intel release binary. The MCP
+client UI was the Codex client; this report makes no separate first-party
+ChatGPT UI claim. Do not change application code or production configuration
+as part of this review. Record actionable findings separately from untested
+assumptions.
 
 The lookup path from #400 is a separate code/local-test review. Its only
 scope is `admin:users:read`; Telegram Login establishes identity without
@@ -35,12 +41,13 @@ dedicated lookup identity is available.
 
 ## Manual procedure and restoration
 
-Use the operator's Intel Mac mini over SSH. It already runs a legacy
-Local Bridge launch agent. Temporarily stop the launch agent and preserve
-the original binary, complete configuration directory (including SQLite
-sidecars), passphrase and plist in an owner-only backup. Restore the
-original installation and service after the run, including on interruption.
-Never overwrite the original state with a fresh `init`.
+The original Intel Mac mini was used for release-binary preflight and a
+separate recovery check. The complete interactive run used the local Apple
+Silicon machine. In both cases, preserve the original binary, complete
+configuration directory (including SQLite sidecars), passphrase and plist in
+an owner-only backup. Restore the original installation after the run,
+including on interruption. Never overwrite the original state with a fresh
+`init`.
 
 1. Download `mctl-telegram-local-0.62.1-darwin-amd64`; verify the release
    checksum before execution. Record the deployed relay image independently.
@@ -48,18 +55,19 @@ Never overwrite the original state with a fresh `init`.
    `activate --server https://tg.mctl.ai`. The operator enters secrets
    directly in the terminal and completes browser sign-in and Approve.
    Local phone/code/2FA remains necessary for the local MTProto session.
-3. Connect ChatGPT to `https://tg.mctl.ai/mcp` as that same identity after
-   activation. Expect no hosted MTProto login. With the daemon stopped,
-   expect the explicit daemon-not-connected error.
-4. Start the daemon. Read dialogs and the account's own test conversation;
-   confirm `call_path=local` in the owner's audit log.
+3. Connect an MCP client to `https://tg.mctl.ai/mcp` as that same identity
+   after activation. The completed run used Codex MCP. Expect no hosted
+   MTProto login. The daemon-stopped error was not exercised in this run.
+4. Start the daemon. Read dialogs and the account's own test conversation.
+   The daemon log showed successful dispatches. Retrieving the owner's audit
+   log and confirming `call_path=local` was not exercised.
 5. Verify sending is blocked before consent. Grant owner send consent,
    inspect `get_my_send_status`, refresh the relevant credential if needed,
    then send one marked test message to Saved Messages only. Revoke consent
    and verify that the next send does not deliver.
-6. Restart the daemon and verify recovery; repeat activation without
-   creating another device. Revoke only the test device and verify both
-   disconnection and refusal to reconnect.
+6. Revoke only the test device and verify both disconnection and refusal to
+   refresh. A normal daemon restart and repeat activation without creating
+   another device were not exercised.
 7. Stop test processes, preserve test state separately, restore the original
    binary/configuration/passphrase/plist, restart the original launch agent,
    and verify its connection.
@@ -82,8 +90,12 @@ session absence is a local-test assertion unless separately observed live.
 | Code review findings | FAIL | Four confirmed findings below; no application fixes applied. |
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
 | Backup and state replacement | PASS | A failed interrupted attempt was repaired manually; original binary checksum matches preflight, original config is present with `0700`, and launchd is running again. The remote helper now restores based on actual backups rather than `started`/`restored` marker state. |
-| Fresh local login and activation | PASS WITH UX BUG | Local Apple Silicon run completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. |
-| ChatGPT OAuth and local reads | PASS | ChatGPT connected to `https://tg.mctl.ai/mcp` with the review account; `get_my_identity`, send-status inspection and dialog listing completed while the local daemon held an active websocket. |
+| Fresh local login and activation | PASS WITH UX BUG | Apple Silicon local review build completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. This does not validate the Intel release binary. |
+| MCP OAuth and local reads | PASS (Codex MCP) | Codex MCP connected to `https://tg.mctl.ai/mcp` with the review account; `get_my_identity`, send-status inspection and dialog listing completed while the local daemon held an active websocket. No separate first-party ChatGPT UI run was performed. |
+| Daemon-stopped MCP error | NOT RUN | The daemon remained running for the read-only and consent checks; the explicit absent-daemon error was not captured. |
+| Daemon restart recovery | NOT RUN | No normal stop/start recovery cycle was performed before restoration. |
+| Repeat activation without a new device | NOT RUN | No repeat activation was performed after the first device was activated. |
+| Owner audit `call_path=local` | NOT RUN | The daemon showed successful dispatches, but the owner audit endpoint was not queried. |
 | Consent, Saved Messages send, revoke | PASS | Consent enabled and one marked message reached Saved Messages through the local daemon; consent-off produced `sent=false` with `per-account send_enabled=false`; device `dev_6302c0cf42d6ed281106b899975e4c5c` was revoked with denylist refresh and hub eviction, and the daemon's refresh was rejected as a revoked device. |
 | Original service restoration | PASS | The local test daemon was stopped; the pre-test configuration was restored from its owner-only backup. The completed test state remains in a separate owner-only archive. |
 | Live lookup login | NOT RUN | No dedicated configured identity; local tests only. |
@@ -172,8 +184,8 @@ retiring the lookup integration. Do not change these values during this review.
 
 ### F4 — P2: activation form CSP blocks the Telegram OAuth redirect
 
-Locations: [activation page CSP](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate_page.go#L24),
-[activation verification redirect](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate.go#L119).
+Locations: [activation page CSP](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate_page.go#L129),
+[activation verification redirect](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate.go#L872).
 
 The activation page sends its same-origin code form with
 `Content-Security-Policy: ... form-action 'self'`. The verification handler
@@ -202,19 +214,27 @@ go test ./cmd/local ./internal/oauth ./internal/auth/... ./internal/bridge \
 ```
 
 Additional review-only tests were injected with Go's `-overlay`, leaving
-application and existing test sources unchanged. The three failures above
-are deliberate assertions of the required behavior, not failures of the
-baseline suite. `TestReviewLocalAccountChatGPTOAuth` passes. These tests
-replace Telegram itself; they do not prove delivery or ChatGPT UI behavior.
+application and existing test sources unchanged. The three overlay failures
+are deliberate assertions of F1-F3, not failures of the baseline suite.
+`TestReviewLocalAccountChatGPTOAuth` passes. These tests replace Telegram
+itself; they do not prove delivery or browser-client behavior. F4 is a manual
+browser finding.
 
-The manual run is still required. A prepared terminal helper preserves the
-original Mac mini installation and restores it on normal exit, interruption
-or SSH hangup. It records only stage markers for remote progress checks;
-credential input is not captured in the repository or this report.
+The full interactive run completed on Apple Silicon and the original local
+state was restored. The Intel Mac mini release binary was checksum-verified
+and its original launch agent/configuration were restored in the preflight
+track; that machine was not the source of the full interactive results.
 
-The latest recovery check confirms the original launch agent is running and
-the original binary checksum is unchanged. The helper was corrected after an
-interrupted run: `restore.sh` now examines actual backup paths and can recover
-even when the phase markers are stale or missing. The live scenario still
-requires a fresh interactive run; the helper must be run with a TTY and will
-restore the original installation on exit.
+### Troubleshooting the review run
+
+- If activation appears to do nothing, inspect the POST response's `Location`.
+  The current CSP can block the external Telegram OAuth redirect; opening that
+  URL directly in a top-level `https://tg.mctl.ai` browser tab completes the
+  existing activation transaction.
+- If `run-review.sh` says the run already started, inspect its markers and
+  execute the protected `restore.sh` before retrying. The corrected helper
+  uses the actual `original-config` and `original-binary` backups, so stale
+  `started`/`restored` markers no longer prevent recovery.
+- If a local `login` reports `wrong passphrase`, the state directory was
+  initialized with another passphrase. Move the directory to an owner-only
+  backup, run `init` with a new passphrase, and keep the old state untouched.
