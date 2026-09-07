@@ -84,13 +84,8 @@ func TestSecureFileGrantsOnlyTheCurrentUser(t *testing.T) {
 	if acl.AceCount != 1 {
 		t.Fatalf("DACL has %d ACEs, want exactly 1 — something other than this account is granted access to the bridge token", acl.AceCount)
 	}
-	typ, flags, sid := aceAt(t, acl, 0)
-	if typ != windows.ACCESS_ALLOWED_ACE_TYPE {
-		t.Errorf("ACE type is %d, want ACCESS_ALLOWED_ACE_TYPE", typ)
-	}
-	if !sid.Equals(testUserSID(t)) {
-		t.Errorf("the single ACE grants %s, want the current user %s", sid, testUserSID(t))
-	}
+	assertGrantsOnlyCurrentUser(t, path, acl)
+	_, flags, _ := aceAt(t, acl, 0)
 	if flags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != 0 {
 		t.Errorf("file ACE carries inheritance flags %#x; a file inherits to nothing", flags)
 	}
@@ -101,6 +96,16 @@ func TestSecureFileGrantsOnlyTheCurrentUser(t *testing.T) {
 // subdirectory are created inside the config directory by callers that do not
 // call secureFile, so the directory's ACE has to be inheritable or those files
 // are born with the profile's ACL.
+//
+// A directory legitimately carries MORE than one ACE here, which is why this
+// asserts exclusivity per ACE rather than a count the way the file test does.
+// GENERIC_ALL maps to different specific rights for a container than for an
+// object, so when SetEntriesInAcl writes an inheritable generic ACE onto a
+// directory Windows splits it: one effective ACE with the rights mapped for the
+// directory itself, and one INHERIT_ONLY ACE that keeps the generic bits for
+// children to map when they inherit it. Both name the same account, which is
+// the property that matters; the first version of this test asserted
+// AceCount == 1 and failed on CI for exactly this reason.
 func TestSecureDirIsInheritable(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "mctl-telegram-local")
 	if err := mkdirSecure(dir); err != nil {
@@ -111,31 +116,51 @@ func TestSecureDirIsInheritable(t *testing.T) {
 	if !protected {
 		t.Error("directory DACL is not protected")
 	}
-	if acl.AceCount != 1 {
-		t.Fatalf("directory DACL has %d ACEs, want exactly 1", acl.AceCount)
+	if acl.AceCount == 0 {
+		t.Fatal("directory DACL is empty")
 	}
-	_, flags, sid := aceAt(t, acl, 0)
-	if !sid.Equals(testUserSID(t)) {
-		t.Errorf("the single ACE grants %s, want the current user %s", sid, testUserSID(t))
+	assertGrantsOnlyCurrentUser(t, dir, acl)
+
+	const inherit = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+	var inheritable bool
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		if _, flags, _ := aceAt(t, acl, i); flags&inherit == inherit {
+			inheritable = true
+		}
 	}
-	const want = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
-	if flags&want != want {
-		t.Errorf("directory ACE flags %#x do not carry both inheritance bits; files created inside would keep the profile ACL", flags)
+	if !inheritable {
+		t.Error("no directory ACE carries both inheritance bits; files created inside would keep the profile ACL")
 	}
 
 	// The property the flags exist for, asserted end to end rather than only
 	// as bits: a file created afterwards by code that knows nothing about
-	// ACLs carries the same single grant.
+	// ACLs carries the same grant and no other.
 	child := filepath.Join(dir, "state.db-wal")
 	if err := os.WriteFile(child, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write child: %v", err)
 	}
 	childACL, _ := dacl(t, child)
-	if childACL.AceCount != 1 {
-		t.Fatalf("inherited DACL on %s has %d ACEs, want exactly 1", child, childACL.AceCount)
+	if childACL.AceCount == 0 {
+		t.Fatalf("inherited DACL on %s is empty", child)
 	}
-	if _, _, csid := aceAt(t, childACL, 0); !csid.Equals(testUserSID(t)) {
-		t.Errorf("inherited ACE grants %s, want the current user", csid)
+	assertGrantsOnlyCurrentUser(t, child, childACL)
+}
+
+// assertGrantsOnlyCurrentUser is the exclusivity check: every ACE in acl is an
+// allow ACE naming this account. An inherited profile-wide grant, Administrators
+// or SYSTEM all fail it, which is the whole point of the change.
+func assertGrantsOnlyCurrentUser(t *testing.T, path string, acl *windows.ACL) {
+	t.Helper()
+	want := testUserSID(t)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		typ, flags, sid := aceAt(t, acl, i)
+		if typ != windows.ACCESS_ALLOWED_ACE_TYPE {
+			t.Errorf("%s: ACE %d has type %d, want ACCESS_ALLOWED_ACE_TYPE", path, i, typ)
+			continue
+		}
+		if !sid.Equals(want) {
+			t.Errorf("%s: ACE %d (flags %#x) grants %s, want only the current user %s", path, i, flags, sid, want)
+		}
 	}
 }
 
@@ -165,5 +190,6 @@ func TestRestrictDBPermsOnWindows(t *testing.T) {
 		if acl.AceCount != 1 {
 			t.Errorf("%s: DACL has %d ACEs, want exactly 1 — the sealed session would be readable by another local account", p, acl.AceCount)
 		}
+		assertGrantsOnlyCurrentUser(t, p, acl)
 	}
 }

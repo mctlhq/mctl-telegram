@@ -37,6 +37,13 @@ func secureFile(path string) error { return ownerOnlyACL(path, windows.NO_INHERI
 // the directory protected without every creation site having to know about it —
 // the SQLite driver's -wal and -shm sidecars and the media subdirectory among
 // them.
+//
+// A directory ends up carrying two ACEs rather than one, both naming the same
+// account: GENERIC_ALL maps to different specific rights for a container than
+// for an object, so Windows splits an inheritable generic ACE into an effective
+// ACE for the directory itself and an INHERIT_ONLY ACE that keeps the generic
+// bits for children to map. That is normal, and perms_windows_test.go asserts
+// exclusivity per ACE for directories rather than a count for that reason.
 func secureDir(path string) error {
 	return ownerOnlyACL(path, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 }
