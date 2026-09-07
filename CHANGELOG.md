@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.62.1](https://github.com/mctlhq/mctl-telegram/compare/0.62.0...0.62.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **db:** drop the never-written bridge_token_hash column ([#553](https://github.com/mctlhq/mctl-telegram/issues/553)) ([0ab6daa](https://github.com/mctlhq/mctl-telegram/commit/0ab6daadb272551817fc85c96e09606e71c79a8d))
+* **local:** restrict Windows on-disk secrets with an explicit ACL ([#564](https://github.com/mctlhq/mctl-telegram/issues/564)) ([7c83145](https://github.com/mctlhq/mctl-telegram/commit/7c83145f4885a2e9f885e319a14aa63aa63cd2e4))
+
 ## [0.62.0](https://github.com/mctlhq/mctl-telegram/compare/0.61.0...0.62.0) (2026-09-06)
 
 
