@@ -177,6 +177,10 @@ func assertGrantsOnlyCurrentUser(t *testing.T, path string, acl *windows.ACL) {
 // path as a wrapped syscall.Errno, which os.IsNotExist does not unwrap, so this
 // would fail if restrictDBPerms went back to the legacy helper.
 func TestRestrictDBPermsOnWindows(t *testing.T) {
+	// See the note in TestRestrictDBPerms: the gate resolves the config
+	// directory from home, and this test's database does not live there.
+	setHome(t, t.TempDir())
+
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
 	for _, p := range []string{dbPath, dbPath + "-wal"} {
@@ -246,5 +250,45 @@ func TestHardenExistingSecretsOnWindows(t *testing.T) {
 			t.Errorf("%s: DACL is not protected after the repair pass", name)
 		}
 		assertGrantsOnlyCurrentUser(t, p, fileACL)
+	}
+}
+
+// TestInstallNotOursIsLeftAloneOnWindows is the Windows half of
+// TestInstallNotOursIsLeftAlone, which asserts modes and so cannot run here.
+// What it asserts instead is that the seeded files keep the inherited,
+// unprotected DACL they were created with: on this platform "left alone" is a
+// property of the ACL, and the mode never moves either way.
+func TestInstallNotOursIsLeftAloneOnWindows(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	seeded := []string{configFileName, bridgeTokenName, "state.db", "state.db-wal"}
+	for _, name := range seeded {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	if _, protected := dacl(t, filepath.Join(dir, configFileName)); protected {
+		t.Skip("seeded files are already protected; the runner's profile ACL cannot exercise this")
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable = restore })
+
+	hardenExistingSecrets()
+	if err := restrictDBPerms(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatalf("restrictDBPerms: %v", err)
+	}
+
+	for _, name := range seeded {
+		p := filepath.Join(dir, name)
+		if _, protected := dacl(t, p); protected {
+			t.Errorf("%s carries a protected DACL; permissions on an install owned by another account must be left alone", name)
+		}
 	}
 }

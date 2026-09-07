@@ -857,7 +857,16 @@ func restrictDBPerms(dbPath string) error {
 	case errors.Is(err, os.ErrNotExist):
 		// No config directory yet, so nothing here belongs to anyone else.
 	case err != nil:
-		return err
+		// Warn and decline, exactly as hardenExistingSecrets does, rather than
+		// returning: openLocalStore die()s on this error, and the question that
+		// failed is who owns the install — a config directory on exFAT or some
+		// SMB mounts carries no security information in the form SE_FILE_OBJECT
+		// expects, and "Incorrect function" would then stop a daemon whose
+		// session works. Declining leaves the permissions as they were, which
+		// is what an unanswerable ownership question warrants.
+		slog.Warn("could not check who owns this installation; leaving database permissions alone",
+			"err", err)
+		return nil
 	case !allowed:
 		slog.Warn("this installation belongs to another account; leaving database permissions alone",
 			"owner", owner)
