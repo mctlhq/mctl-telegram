@@ -245,11 +245,16 @@ var dbRestrictable = func(dbPath string) (bool, string, error) {
 }
 
 // installRestrictable answers whether this process may set permissions on the
-// secrets in the config directory, and is asked about the directory itself: it
-// is what says whose install this is, and its three secrets are written and
-// rewritten in place rather than recreated, so no one of them is a better
-// authority than the directory holding them. The database has its own — see
-// dbRestrictable, and the paragraph in restrictDBPerms for why the two differ.
+// secrets in the config directory, and is asked about the directory itself.
+//
+// Not about the secrets: all three are replaced through writeFileAtomic, which
+// renames a temp file over the target, so what sits at config.json,
+// bridge_token.json or device_key.json is always owned by whoever wrote it last
+// — the same reason the database's sidecars cannot answer for themselves. The
+// directory is the object that persists across those writes, and it is what
+// says whose install this is. The database has its own authority; see
+// dbRestrictable, and the paragraph in restrictDBPerms for why it is state.db
+// and not this.
 //
 // It is asked on each write rather than cached, because a cached verdict would
 // outlive the thing it describes; the repeated warning that would otherwise
