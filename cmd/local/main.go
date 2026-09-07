@@ -91,9 +91,6 @@ MCTL_LOCAL_PASSPHRASE, or type it at the prompt if a terminal is present.
 This command starts the daemon. --help only prints this text.
 `
 
-// wantsHelp reports whether args ask for usage. Used by init and daemon,
-// which have no FlagSet of their own — without this, `init --help` and
-// `daemon --help` start those commands instead of showing help.
 // shouldHarden reports whether this invocation reaches local state and must
 // therefore repair its permissions first. It takes os.Args[1:] so the rule is
 // testable; inline in main() nothing could reach it.
@@ -125,6 +122,9 @@ func shouldHarden(args []string) bool {
 	return true
 }
 
+// wantsHelp reports whether args ask for usage. Used by init and daemon,
+// which have no FlagSet of their own — without this, `init --help` and
+// `daemon --help` start those commands instead of showing help.
 func wantsHelp(args []string) bool {
 	for _, a := range args {
 		if a == "--" {

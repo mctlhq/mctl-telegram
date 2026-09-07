@@ -65,10 +65,18 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // inside the directory by code that never calls secureFile itself — the SQLite
 // driver's -wal and -shm sidecars, and the media subdirectory.
 //
-// It runs on an existing directory too, which repairs an installation created
-// before this and costs one syscall on the paths that create the config dir
-// before writing to it.
+// A directory that already exists is left alone. Every caller here is on a
+// write path — saveConfig, saveBridgeToken, writeDeviceRecord, the device lock
+// — and the device record is rewritten on every reconnect, the bridge token on
+// every refresh. On Windows secureDir re-propagates the inheritable ACEs
+// through the whole subtree, media/ included, so applying it on each of those
+// writes would put a tree walk in the path of a daemon reconnecting on a bad
+// link. An install that predates this is repaired once at startup instead, by
+// hardenExistingSecrets.
 func mkdirSecure(dir string) error {
+	if _, err := os.Stat(dir); err == nil {
+		return nil
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
