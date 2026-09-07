@@ -65,6 +65,15 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 			// unanswerable question here. Reading it as "nothing there" would
 			// protect a temp file that os.Rename then puts over whatever IS at
 			// path — the seizure the gate exists to prevent, taken on a guess.
+			//
+			// Deliberately untested rather than forgotten: os.Stat has to fail
+			// with something other than ErrNotExist on a path whose parent
+			// directory this process just created and can write, and the ways
+			// to arrange that are platform quirks (a sharing violation, a name
+			// the filesystem rejects at open time) that a test would be
+			// asserting about the OS rather than about this code. On unix the
+			// branch is unobservable in any case, since tmp.Chmod has already
+			// applied the mode and secureFile is then a redundant chmod.
 			warnOnce(path, "could not check whether this secret already exists; leaving its permissions alone",
 				"path", path, "err", statErr)
 			secure = false

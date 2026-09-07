@@ -212,10 +212,13 @@ func main() {
 // warning per reconnect. A warning is meant to be the signal to go and look;
 // one per attempt is a log line nobody reads.
 //
-// The key is the path rather than the message, because the message alone would
-// collapse three different secrets into one line: on an install where only some
-// are foreign-owned, "a permission was left alone" without saying which file is
-// a mood rather than something to act on. Three entries at most.
+// The key is the path AND the message. The message alone would collapse three
+// different secrets into one line — on an install where only some are
+// foreign-owned, "a permission was left alone" without saying which file is a
+// mood rather than something to act on — and the path alone would hide a second,
+// different reason for the same file. The ceiling is the three secrets times the
+// three reasons a write can decline, so nine lines in the worst case and one in
+// every ordinary one.
 func warnOnce(key, msg string, args ...any) {
 	warnedMu.Lock()
 	defer warnedMu.Unlock()
