@@ -229,6 +229,21 @@ func warnOnce(key, msg string, args ...any) {
 	slog.Warn(msg, args...)
 }
 
+// dbRestrictable answers whether this process may set permissions on the local
+// database and its sidecars. A variable for the same reason installRestrictable
+// is one: the divergent case needs a second account.
+//
+// A database that does not exist yet is ours — creating one takes nothing from
+// anybody, and this runs after db.Open, so the answer covers the run that
+// brings it into existence.
+var dbRestrictable = func(dbPath string) (bool, string, error) {
+	allowed, owner, err := mayRestrict(dbPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, "", nil
+	}
+	return allowed, owner, err
+}
+
 // installRestrictable answers whether this process may set permissions anywhere
 // in the install. The question is asked about the config directory and never
 // about an individual file: -wal and -shm are created by this process moments
@@ -316,10 +331,7 @@ func hardenExistingSecrets() {
 		}
 	}
 	if dbPath, err := dbFilePath(); err == nil {
-		// false: the repair pass only ever finds a database that already
-		// exists, and hardenExistingSecrets has already established that this
-		// install is ours before it gets here.
-		if err := restrictDBPerms(dbPath, false); err != nil {
+		if err := restrictDBPerms(dbPath); err != nil {
 			slog.Warn("could not restrict database permissions", "path", dbPath, "err", err)
 		}
 	}
@@ -677,12 +689,6 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		die(err)
 	}
 
-	// Before db.Open, which creates it: a database this run brings into
-	// existence is ours to protect whatever the ownership gate says about the
-	// install, because there is nothing there yet to take away.
-	_, statErr := os.Stat(dbPath)
-	createdDB := errors.Is(statErr, os.ErrNotExist)
-
 	dsn := sqliteDSN(dbPath) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	rawDB, err := db.Open(ctx, dsn, 0, 0)
 	if err != nil {
@@ -692,7 +698,7 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 		_ = rawDB.Close()
 		die(fmt.Errorf("migrate local db: %w", err))
 	}
-	if err := restrictDBPerms(dbPath, createdDB); err != nil {
+	if err := restrictDBPerms(dbPath); err != nil {
 		_ = rawDB.Close()
 		die(err)
 	}
@@ -893,39 +899,33 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 //
 // What "owner-only" means is platform-specific and lives in secureFile: a mode
 // on unix, an explicit DACL on Windows, where the mode is ignored.
-func restrictDBPerms(dbPath string, created bool) error {
-	// Asked once, about the install, and not once per file. Per-path was wrong
-	// in the case the gate exists for: -wal and -shm are created by THIS
-	// process moments earlier by db.Open, so they are owned by it and would
-	// pass a per-path check — a daemon under LocalSystem pointed at the
-	// interactive user's profile would decline state.db and then write a
-	// protected SYSTEM-only DACL on the sidecars, which carry the same sealed
-	// pages. The members of an install are not independent, and the config
-	// directory is what says whose install it is.
-	switch allowed, owner, err := installRestrictable(); {
-	case created:
-		// This process created the database in this run, so there is nothing
-		// here to take from anybody — the same exemption writeFileAtomic makes
-		// for a secret that does not exist yet. Without it, `init` before the
-		// upgrade and `login` after it on a group-owned install would leave
-		// state.db and its sidecars under the broad inherited ACL and then
-		// write the encrypted session into them.
-	case errors.Is(err, os.ErrNotExist):
-		// No config directory yet, so nothing here belongs to anyone else.
+func restrictDBPerms(dbPath string) error {
+	// Asked about state.db, and its answer covers all three paths.
+	//
+	// Not per file: -wal and -shm are deleted on the last connection close and
+	// recreated by db.Open, so they are always owned by whoever opened the
+	// database last — a per-file answer says yes about exactly the files the
+	// gate exists to protect.
+	//
+	// And not about the config directory either, which is what this used to
+	// ask. The directory can be group-owned on an install whose database is
+	// plainly ours — the shape the strict gate itself produces — and then every
+	// run after the first left the freshly recreated -wal under the directory's
+	// broad ACL while the database beside it stayed protected, holding the same
+	// sealed pages. The durable object is the one that can answer for the set.
+	switch allowed, owner, err := dbRestrictable(dbPath); {
 	case err != nil:
-		// Warn and decline, exactly as hardenExistingSecrets does, rather than
-		// returning: openLocalStore die()s on this error, and the question that
-		// failed is who owns the install — a config directory on exFAT or some
-		// SMB mounts carries no security information in the form SE_FILE_OBJECT
-		// expects, and "Incorrect function" would then stop a daemon whose
-		// session works. Declining leaves the permissions as they were, which
-		// is what an unanswerable ownership question warrants.
-		slog.Warn("could not check who owns this installation; leaving database permissions alone",
-			"err", err)
+		// Warn and decline rather than returning: openLocalStore die()s on this
+		// error, and the question that failed is who owns the database — a
+		// config directory on exFAT or some SMB mounts carries no security
+		// information in the form SE_FILE_OBJECT expects, and "Incorrect
+		// function" would then stop a daemon whose session works.
+		slog.Warn("could not check who owns the database; leaving its permissions alone",
+			"path", dbPath, "err", err)
 		return nil
 	case !allowed:
-		slog.Warn("this installation belongs to another account; leaving database permissions alone",
-			"owner", owner)
+		slog.Warn("the database belongs to another account; leaving its permissions alone",
+			"path", dbPath, "owner", owner)
 		return nil
 	}
 

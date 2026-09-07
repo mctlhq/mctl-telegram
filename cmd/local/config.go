@@ -55,7 +55,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		// inherited ACL — the gap this change exists to close — on exactly the
 		// installs whose directory is group-owned and which therefore never get
 		// a repair pass at all.
-		secure := true
+		secure, preserve := true, false
 		_, statErr := os.Stat(path)
 		switch {
 		case errors.Is(statErr, os.ErrNotExist):
@@ -76,6 +76,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 			// applied the mode and secureFile is then a redundant chmod.
 			warnOnce(path, "could not check whether this secret already exists; leaving its permissions alone",
 				"path", path, "err", statErr)
+			// Not preserve: copying the target's permissions forward starts by
+			// reading them, which fails with the same error, and the write
+			// would abort instead of leaving anything alone. The temp file
+			// keeps the mode tmp.Chmod already gave it and inherits whatever
+			// the directory grants, which is the outcome this branch claims.
 			secure = false
 		default:
 			allowed, owner, err := installRestrictable()
@@ -83,26 +88,28 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 			case err != nil && !errors.Is(err, os.ErrNotExist):
 				warnOnce(path, "could not check who owns this installation; leaving replaced file permissions alone",
 					"path", path, "err", err)
-				secure = false
+				secure, preserve = false, true
 			case err == nil && !allowed:
 				warnOnce(path, "this installation belongs to another account; leaving replaced file permissions alone",
 					"path", path, "owner", owner)
-				secure = false
+				secure, preserve = false, true
 			}
 		}
 		if secure {
 			if err := secureFile(tmpPath); err != nil {
 				return fmt.Errorf("restrict temp: %w", err)
 			}
-		} else if err := copyPermissions(path, tmpPath); err != nil {
-			// Declining has to mean "leave its permissions as they are", and
-			// leaving the temp file alone does not achieve that: os.Rename
-			// carries the temp file's permissions onto the target, so a target
-			// that was protected would come back inheriting the directory's
-			// broad ACL. A routine token refresh would then re-expose the
-			// secret it just rewrote — a downgrade performed by the branch
-			// whose whole purpose is to change nothing.
-			return fmt.Errorf("preserve permissions of %s: %w", path, err)
+		} else if preserve {
+			if err := copyPermissions(path, tmpPath); err != nil {
+				// Declining has to mean "leave its permissions as they are", and
+				// leaving the temp file alone does not achieve that: os.Rename
+				// carries the temp file's permissions onto the target, so a target
+				// that was protected would come back inheriting the directory's
+				// broad ACL. A routine token refresh would then re-expose the
+				// secret it just rewrote — a downgrade performed by the branch
+				// whose whole purpose is to change nothing.
+				return fmt.Errorf("preserve permissions of %s: %w", path, err)
+			}
 		}
 	}
 	if _, err := tmp.Write(data); err != nil {

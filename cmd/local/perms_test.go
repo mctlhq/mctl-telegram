@@ -34,7 +34,7 @@ func TestRestrictDBPerms(t *testing.T) {
 	// state.db-shm is deliberately absent — an absent sidecar is normal and
 	// must not be reported as an error.
 
-	if err := restrictDBPerms(dbPath, false); err != nil {
+	if err := restrictDBPerms(dbPath); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
@@ -205,12 +205,13 @@ func TestInstallNotOursIsLeftAlone(t *testing.T) {
 		}
 	}
 
-	restore := installRestrictable
+	restore, restoreDB := installRestrictable, dbRestrictable
 	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
-	t.Cleanup(func() { installRestrictable = restore })
+	dbRestrictable = func(string) (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable, dbRestrictable = restore, restoreDB })
 
 	hardenExistingSecrets()
-	if err := restrictDBPerms(filepath.Join(dir, "state.db"), false); err != nil {
+	if err := restrictDBPerms(filepath.Join(dir, "state.db")); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
@@ -246,16 +247,19 @@ func TestGateReadFailureLeavesPermissionsAlone(t *testing.T) {
 		t.Fatalf("seed mode: %v", err)
 	}
 
-	restore := installRestrictable
+	restore, restoreDB := installRestrictable, dbRestrictable
 	installRestrictable = func() (bool, string, error) {
 		return false, "", errors.New("incorrect function")
 	}
-	t.Cleanup(func() { installRestrictable = restore })
+	dbRestrictable = func(string) (bool, string, error) {
+		return false, "", errors.New("incorrect function")
+	}
+	t.Cleanup(func() { installRestrictable, dbRestrictable = restore, restoreDB })
 
 	// Not an error: openLocalStore die()s on one, and a daemon holding a
 	// working session must not be stopped by an unanswerable question about
 	// who owns its files.
-	if err := restrictDBPerms(dbPath, false); err != nil {
+	if err := restrictDBPerms(dbPath); err != nil {
 		t.Fatalf("restrictDBPerms returned %v; a gate read failure must not stop startup", err)
 	}
 	info, err := os.Stat(dbPath)
@@ -281,36 +285,40 @@ func TestMayRestrictOwnDirectory(t *testing.T) {
 	}
 }
 
-// TestNewDatabaseIsProtectedDespiteDeclinedGate is the database half of the
-// creation exemption. `init` before this change and `login` after it on an
-// install the gate declines would otherwise leave state.db under whatever the
-// directory grants — and then write the encrypted session into it.
-func TestNewDatabaseIsProtectedDespiteDeclinedGate(t *testing.T) {
+// TestDatabaseWeOwnIsProtectedOnAGroupOwnedInstall is the database half of the
+// rule that the durable object answers for its own set. The config directory
+// can be group-owned — the shape the strict gate produces — while the database
+// is plainly ours, and then the sidecars db.Open recreates on every run must be
+// narrowed like the database they carry the pages of.
+func TestDatabaseWeOwnIsProtectedOnAGroupOwnedInstall(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, t.TempDir())
 	dbPath := filepath.Join(dir, "state.db")
-	if err := os.WriteFile(dbPath, []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := os.Chmod(dbPath, 0o644); err != nil {
-		t.Fatalf("seed mode: %v", err)
+	for _, p := range []string{dbPath, dbPath + "-wal"} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatalf("seed mode %s: %v", p, err)
+		}
 	}
 
+	// The install is refused; the database is not. Only the second decides.
 	restore := installRestrictable
 	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
 	t.Cleanup(func() { installRestrictable = restore })
 
-	// created: this run brought the database into existence, so there is
-	// nothing here that belongs to anyone else.
-	if err := restrictDBPerms(dbPath, true); err != nil {
+	if err := restrictDBPerms(dbPath); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("a database this run created has mode %04o, want 0600", got)
+	for _, p := range []string{dbPath, dbPath + "-wal"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s has mode %04o, want 0600 — the sidecar carries the same pages as the database", p, got)
+		}
 	}
 }
 

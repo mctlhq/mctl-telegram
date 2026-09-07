@@ -207,7 +207,7 @@ func TestRestrictDBPermsOnWindows(t *testing.T) {
 	}
 	// state.db-shm is deliberately absent.
 
-	if err := restrictDBPerms(dbPath, false); err != nil {
+	if err := restrictDBPerms(dbPath); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 	for _, p := range []string{dbPath, dbPath + "-wal"} {
@@ -296,12 +296,13 @@ func TestInstallNotOursIsLeftAloneOnWindows(t *testing.T) {
 		t.Skip("seeded files are already protected; the runner's profile ACL cannot exercise this")
 	}
 
-	restore := installRestrictable
+	restore, restoreDB := installRestrictable, dbRestrictable
 	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
-	t.Cleanup(func() { installRestrictable = restore })
+	dbRestrictable = func(string) (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable, dbRestrictable = restore, restoreDB })
 
 	hardenExistingSecrets()
-	if err := restrictDBPerms(filepath.Join(dir, "state.db"), false); err != nil {
+	if err := restrictDBPerms(filepath.Join(dir, "state.db")); err != nil {
 		t.Fatalf("restrictDBPerms: %v", err)
 	}
 
