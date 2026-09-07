@@ -266,3 +266,17 @@ func TestGateReadFailureLeavesPermissionsAlone(t *testing.T) {
 		t.Errorf("state.db has mode %04o; nothing may be narrowed on an unanswered ownership question", got)
 	}
 }
+
+// TestMayRestrictOwnDirectory is the unix half of the gate's positive answer:
+// a directory this process created is owned by it, so its permissions are ours
+// to set.
+func TestMayRestrictOwnDirectory(t *testing.T) {
+	dir := t.TempDir()
+	allowed, owner, err := mayRestrict(dir)
+	if err != nil {
+		t.Fatalf("mayRestrict: %v", err)
+	}
+	if !allowed {
+		t.Errorf("own temp directory reported as owned by another account (owner %q); the repair would never run", owner)
+	}
+}

@@ -359,3 +359,37 @@ func TestGateReadFailureLeavesReplacedSecretsAloneOnWindows(t *testing.T) {
 		t.Error("a replaced secret carries a protected DACL after an unanswerable ownership question")
 	}
 }
+
+// TestMayRestrictOwnership is the Windows half of the gate's answer, and the
+// negative case is the one the runner can produce by itself: its account is an
+// elevated administrator, so a directory it creates is owned by
+// BUILTIN\Administrators. A group is not an account, and letting it through is
+// how a LocalSystem service — a member of that same group — used to pass the
+// gate and rewrite an install to SYSTEM-only.
+func TestMayRestrictOwnership(t *testing.T) {
+	t.Run("a group-owned directory is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		allowed, owner, err := mayRestrict(dir)
+		if err != nil {
+			t.Fatalf("mayRestrict: %v", err)
+		}
+		if owner == testUserSID(t).String() {
+			t.Skip("this runner's files are owned by the user, not a group; nothing to exercise")
+		}
+		if allowed {
+			t.Errorf("directory owned by %s reported as ours; a group is not an account", owner)
+		}
+	})
+
+	t.Run("a directory this account owns is repairable", func(t *testing.T) {
+		dir := t.TempDir()
+		ownPath(t, dir)
+		allowed, owner, err := mayRestrict(dir)
+		if err != nil {
+			t.Fatalf("mayRestrict: %v", err)
+		}
+		if !allowed {
+			t.Errorf("directory owned by this account reported as %q; the repair would never run", owner)
+		}
+	})
+}

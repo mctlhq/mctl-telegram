@@ -5,30 +5,17 @@ import (
 	"testing"
 )
 
-// TestMayRestrict pins the gate the permission writes run behind, on both
-// platforms. The case it exists for — a config directory owned by an account
-// this process is not — cannot be built in CI: it needs a second account, or
-// SeRestorePrivilege to set an arbitrary owner. What is cheap, and what would
-// otherwise be assumed, is the pair below.
+// TestMayRestrict pins the half of the gate that is the same everywhere: a path
+// that does not exist is an error, not a permission. The positive answer is
+// platform-specific — "owned by this account" is a uid on unix and a SID on
+// Windows, where the runner's own files are owned by a group — so it lives in
+// perms_test.go and perms_windows_test.go, next to the tools each needs.
 func TestMayRestrict(t *testing.T) {
-	t.Run("a directory this process created is repairable", func(t *testing.T) {
-		dir := t.TempDir()
-		allowed, owner, err := mayRestrict(dir)
-		if err != nil {
-			t.Fatalf("mayRestrict: %v", err)
-		}
-		if !allowed {
-			t.Errorf("own temp directory reported as owned by another account (owner %q); the repair would never run", owner)
-		}
-	})
-
-	t.Run("a path that does not exist is an error, not a permission", func(t *testing.T) {
-		allowed, _, err := mayRestrict(filepath.Join(t.TempDir(), "absent"))
-		if err == nil {
-			t.Error("want an error for a missing directory")
-		}
-		if allowed {
-			t.Error("a missing directory must not report as repairable")
-		}
-	})
+	allowed, _, err := mayRestrict(filepath.Join(t.TempDir(), "absent"))
+	if err == nil {
+		t.Error("want an error for a missing directory")
+	}
+	if allowed {
+		t.Error("a missing directory must not report as repairable")
+	}
 }
