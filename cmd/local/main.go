@@ -196,6 +196,21 @@ func main() {
 	}
 }
 
+// installRestrictable answers whether this process may set permissions anywhere
+// in the install, decided once from the config directory rather than per file.
+//
+// It is a variable so a test can drive the branch it guards: the divergent case
+// needs a second account or SeRestorePrivilege, and without a seam, replacing
+// the call with a constant true leaves the entire suite green — which is what
+// happened to the per-path version of this check.
+var installRestrictable = func() (bool, string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return false, "", err
+	}
+	return mayRestrict(dir)
+}
+
 // hardenExistingSecrets tightens an install that already exists, before any
 // command reads from it.
 //
@@ -241,7 +256,7 @@ func hardenExistingSecrets() {
 	// Never rewrite permissions on an install owned by someone else: see
 	// mayRestrict. A warning and no change is the only safe outcome there —
 	// the alternative is taking a user's secrets away from them.
-	switch allowed, owner, err := mayRestrict(dir); {
+	switch allowed, owner, err := installRestrictable(); {
 	case err != nil:
 		slog.Warn("could not check who owns the config directory; not repairing permissions",
 			"path", dir, "err", err)
@@ -830,29 +845,30 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 // What "owner-only" means is platform-specific and lives in secureFile: a mode
 // on unix, an explicit DACL on Windows, where the mode is ignored.
 func restrictDBPerms(dbPath string) error {
+	// Asked once, about the install, and not once per file. Per-path was wrong
+	// in the case the gate exists for: -wal and -shm are created by THIS
+	// process moments earlier by db.Open, so they are owned by it and would
+	// pass a per-path check — a daemon under LocalSystem pointed at the
+	// interactive user's profile would decline state.db and then write a
+	// protected SYSTEM-only DACL on the sidecars, which carry the same sealed
+	// pages. The members of an install are not independent, and the config
+	// directory is what says whose install it is.
+	switch allowed, owner, err := installRestrictable(); {
+	case errors.Is(err, os.ErrNotExist):
+		// No config directory yet, so nothing here belongs to anyone else.
+	case err != nil:
+		return err
+	case !allowed:
+		slog.Warn("this installation belongs to another account; leaving database permissions alone",
+			"owner", owner)
+		return nil
+	}
+
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		// The same gate the startup repair runs behind, for the same reason.
-		// Since #563 this is no longer a chmod: on Windows it writes a
-		// protected DACL naming this process's account, so running it
-		// unconditionally on an existing database owned by somebody else would
-		// hand the largest of the three secrets to whoever started the daemon
-		// and lock its owner out — on every start, not once.
-		//
 		// errors.Is rather than os.IsNotExist: on Windows a missing path
 		// arrives as a wrapped syscall.Errno, which the legacy helper does not
 		// unwrap, and an absent sidecar is normal rather than a failure.
-		allowed, owner, err := mayRestrict(p)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return err
-		}
-		if !allowed {
-			slog.Warn("database file is owned by another account; leaving its permissions alone",
-				"path", p, "owner", owner)
-			continue
-		}
+		//
 		// Returned unwrapped: both secureFile implementations already name the
 		// path — os.Chmod through *PathError, the ACL through its own message
 		// — and wrapping here repeated it twice in one sentence.

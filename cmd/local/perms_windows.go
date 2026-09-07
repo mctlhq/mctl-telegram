@@ -116,6 +116,15 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 // Membership, not equality, for the same reason: the owner of a file an
 // elevated user creates is often the Administrators group rather than that
 // user, and the process token carries it.
+//
+// The limit of that, stated because it decides a support report rather than
+// being a curiosity: CheckTokenMembership does not count a SID marked
+// SE_GROUP_USE_FOR_DENY_ONLY, and a UAC-filtered token carries Administrators
+// that way. So an install created from an elevated shell is owned by
+// Administrators, and every later non-elevated run declines to repair it and
+// logs the owner. That is the safe direction — declining changes nothing and
+// takes nothing away — but it does mean an install made with "run as
+// Administrator" gets no repair pass from an ordinary session.
 func mayRestrict(path string) (bool, string, error) {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION)

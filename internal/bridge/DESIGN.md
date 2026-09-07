@@ -184,12 +184,29 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    this account, protected from inheritance — where it used to assert the
    gap.
 
-   The account named is the object's **owner**, not the caller. On creation
-   they are the same; on the startup repair pass over an install that
-   already exists they need not be, and granting the caller there would let
-   a service running as LocalSystem rewrite the interactive user's secrets
-   to SYSTEM-only — handing the service the credentials and locking out the
-   human they belong to.
+   The account named is the **caller** — always, on every path. Ownership is
+   a gate and never a grantee: `mayRestrict` decides *whether* a permission
+   write may happen, and it is asked once about the config directory, which
+   is what says whose install this is. If the install belongs to another
+   account, nothing is rewritten and a warning is logged; a service running
+   as LocalSystem pointed at the interactive user's profile therefore leaves
+   it alone instead of rewriting those secrets to SYSTEM-only.
+
+   Both halves of that rule were learned the hard way and are worth keeping:
+   granting the caller with no gate hands a service the user's credentials,
+   and granting the owner read off disk is worse — on a machine where the
+   user is an elevated administrator the owner is `BUILTIN\Administrators`,
+   so the secrets go to a group, and an owner inherited from another machine
+   or a `/COPYALL` restore would name an account nobody can act as, inside a
+   PROTECTED DACL.
+
+   One consequence to know before debugging a support report: the gate uses
+   token membership, and a UAC-filtered token carries `Administrators` as
+   deny-only. An install created from an elevated shell is owned by
+   `Administrators`, so a later non-elevated run declines to repair and says
+   so in a warning. That is the safe direction — nothing is seized — but it
+   means "run `init` as Administrator" turns the repair into a no-op for
+   ordinary sessions.
 4. **Closed for the self-service path by #484; still open, deliberately, for
    legacy `connect --token`.** `activate` never hands a user a token to
    paste: it mints its own device-bound credential end to end through the
