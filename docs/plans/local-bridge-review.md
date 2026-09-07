@@ -1,6 +1,6 @@
 # Local Bridge 0.62.1 review and manual verification
 
-Status: code review complete; manual run awaiting operator input, 2026-09-08.
+Status: code review complete; local login and activation completed, 2026-09-08.
 This is the canonical plan and result log. Tracking PR: [#565](https://github.com/mctlhq/mctl-telegram/pull/565).
 
 ## Scope and acceptance
@@ -79,10 +79,10 @@ session absence is a local-test assertion unless separately observed live.
 | Static checks | PASS | `go vet` on the same package set; `git diff --check`. |
 | Additional OAuth integration | PASS | Synthetic ChatGPT DCR + S256 PKCE + local-account callback + owner token; no hosted session bytes. Telegram provider is stubbed. |
 | Lookup login and refresh | PASS | Initial grant and refresh have only `admin:users:read`; no `telegram_accounts` row created. Removal has a finding below. |
-| Code review findings | FAIL | Three confirmed findings below; no application fixes applied. |
+| Code review findings | FAIL | Four confirmed findings below; no application fixes applied. |
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
 | Backup and state replacement | PASS | A failed interrupted attempt was repaired manually; original binary checksum matches preflight, original config is present with `0700`, and launchd is running again. The remote helper now restores based on actual backups rather than `started`/`restored` marker state. |
-| Fresh local login and activation | NOT RUN | The prior attempt completed local init/login but stopped before activation; its test state was restored. Requires a fresh operator terminal and browser input. |
+| Fresh local login and activation | PASS WITH UX BUG | Local Apple Silicon run completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. |
 | ChatGPT OAuth and local reads | PENDING | Must be exercised with the new account. |
 | Consent, Saved Messages send, revoke | PENDING | Only the test account/device is in scope. |
 | Original service restoration | PENDING | Required after any test replacement. |
@@ -169,6 +169,28 @@ Recommended follow-up: define and enforce deprovisioning for open registration.
 Until fixed, removal alone must not be described as revocation: explicitly
 set the identity's DB tier to `none` and revoke its refresh-token family when
 retiring the lookup integration. Do not change these values during this review.
+
+### F4 — P2: activation form CSP blocks the Telegram OAuth redirect
+
+Locations: [activation page CSP](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate_page.go#L24),
+[activation verification redirect](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/local_bridge_activate.go#L119).
+
+The activation page sends its same-origin code form with
+`Content-Security-Policy: ... form-action 'self'`. The verification handler
+returns a 302 to the external Telegram OAuth origin. In Chromium, submitting
+the form from the rendered page produced the 302 in DevTools but the browser
+then blocked the navigation with `form-action 'self'`; the page appeared to do
+nothing. Copying the response `Location` URL and opening it directly allowed
+Telegram Login and activation to complete, confirming that the code and server
+redirect were valid.
+
+Recommended follow-up: make the activation transition compatible with the CSP
+policy. For example, allow the exact Telegram OAuth origin in `form-action`
+if the browser behavior is retained, or submit the verification with a
+same-origin script/navigation pattern whose redirect is not governed as an
+external form action. Add a browser-level regression covering the POST,
+302 and Telegram OAuth landing page; the current Go tests do not exercise
+browser CSP enforcement.
 
 ## Test evidence and limitations
 
