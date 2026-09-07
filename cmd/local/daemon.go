@@ -876,7 +876,7 @@ func loadSendMediaFilePath(filePath, fileName string) ([]byte, string, string, e
 // so a relative file_path has somewhere to land.
 func mediaAllowDir() string {
 	if d := strings.TrimSpace(os.Getenv("MCTL_MEDIA_DIR")); d != "" {
-		_ = os.MkdirAll(d, 0o700)
+		_ = mkdirSecure(d)
 		return d
 	}
 	dir, err := configDirPath()
@@ -884,7 +884,7 @@ func mediaAllowDir() string {
 		return ""
 	}
 	path := filepath.Join(dir, "media")
-	_ = os.MkdirAll(path, 0o700)
+	_ = mkdirSecure(path)
 	return path
 }
 

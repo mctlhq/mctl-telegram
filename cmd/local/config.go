@@ -34,6 +34,14 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Chmod(perm); err != nil {
 		return fmt.Errorf("chmod temp: %w", err)
 	}
+	if perm&0o077 == 0 {
+		// The caller asked for owner-only. On Windows the mode above does not
+		// deliver that, so the ACL is applied here — to the temp file, before
+		// the rename, so the secret never exists at its final path unprotected.
+		if err := secureFile(tmpPath); err != nil {
+			return fmt.Errorf("restrict temp: %w", err)
+		}
+	}
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write temp: %w", err)
 	}
@@ -47,6 +55,24 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
+}
+
+// mkdirSecure creates dir with its parents and restricts it to the owner.
+//
+// The mode passed to MkdirAll is enough on unix and is ignored on Windows, so
+// the restriction is applied afterwards through secureDir, which is an ACL
+// there. Making it inheritable on Windows is what protects the files created
+// inside the directory by code that never calls secureFile itself — the SQLite
+// driver's -wal and -shm sidecars, and the media subdirectory.
+//
+// It runs on an existing directory too, which repairs an installation created
+// before this and costs one syscall on the paths that create the config dir
+// before writing to it.
+func mkdirSecure(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return secureDir(dir)
 }
 
 // localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
@@ -191,7 +217,7 @@ func deviceLockFilePath(configDir string) string {
 // cross-process lock across it would starve a running daemon's refresh until
 // its credential expired and its connection dropped.
 func withDeviceRecordLock(configDir string, timeout time.Duration, fn func() error) error {
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
+	if err := mkdirSecure(configDir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	lockPath := deviceLockFilePath(configDir)
@@ -282,7 +308,7 @@ func writeDeviceRecord(rec *deviceRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
@@ -546,7 +572,7 @@ func saveConfig(cfg *localConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -586,7 +612,7 @@ func saveBridgeToken(bt *bridgeTokenFile) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(bt, "", "  ")

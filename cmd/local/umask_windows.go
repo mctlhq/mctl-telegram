@@ -5,9 +5,11 @@ package main
 // restrictUmask is a no-op on Windows, which has no umask: NTFS ignores POSIX
 // modes entirely and inherits an ACL from the parent directory instead.
 //
-// That is not equivalent protection, and pretending otherwise here would hide
-// the gap: on Windows the config, the bridge token and the session database
-// carry whatever ACL the user profile grants. Closing it means setting an
-// explicit ACL through golang.org/x/sys/windows. Tracked as gap 3 in
-// internal/bridge/DESIGN.md.
+// Unlike before #563 this is no longer an unclosed gap. The protection the
+// umask provides on unix — a file is never created readable in the first place
+// — is provided here by the inheritable owner-only DACL that mkdirSecure puts
+// on the config directory, so a file the SQLite driver creates inside it is
+// born with that grant and nothing wider. secureFile then applies an explicit,
+// protected DACL to each secret in its own right. See perms_windows.go and
+// gap 3 in internal/bridge/DESIGN.md.
 func restrictUmask() {}

@@ -710,9 +710,16 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 // the driver whenever the database is opened, so narrowing them once at
 // creation would not hold; this runs on every open. They may legitimately not
 // exist yet, and that is not an error.
+//
+// What "owner-only" means is platform-specific and lives in secureFile: a mode
+// on unix, an explicit DACL on Windows, where the mode is ignored.
 func restrictDBPerms(dbPath string) error {
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+		// errors.Is rather than os.IsNotExist: on Windows the missing-file
+		// case arrives as a wrapped syscall.Errno, which the legacy helper
+		// does not unwrap, and an absent sidecar would then be reported as a
+		// failure to start.
+		if err := secureFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("restrict permissions on %s: %w", p, err)
 		}
 	}

@@ -36,8 +36,8 @@ The server half is production-grade and deployed, and the CLI has caught up
 with it: `mctl-telegram-local activate` walks a user from nothing to a
 connected, read-only daemon with zero operator MCP tool calls, and
 `set_send_consent` lets the owner turn real sending on themselves. What
-remains is narrower than it used to be: Windows ACL hardening for on-disk
-secrets, and the correctness/cross-repo items below. The legacy
+remains is narrower than it used to be: the correctness/cross-repo items
+below. Windows ACL hardening for on-disk secrets is done (#563). The legacy
 `connect --token` path is intentionally still there, unmodified, for accounts
 onboarded before this and for operator-driven recovery -- see "Device-bound
 credential lifecycle".
@@ -153,16 +153,29 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    SmartScreen prompt on a double-click; fetching with `curl` and running
    from a terminal avoids both. Signing is a deliberate non-decision, not
    an oversight — see the note in #448.
-3. **Windows file protection is unsolved.** The daemon writes its config,
-   bridge token and session database `0600` and sets a `0o077` umask, but
-   NTFS ignores POSIX modes and inherits an ACL from the parent directory
-   instead, so on Windows those files carry whatever the user profile
-   grants. `cmd/local/umask_windows.go` is a deliberate no-op for the same
-   reason. Closing this means setting an explicit ACL through
-   `golang.org/x/sys/windows`, and it has not been done or tested. Until
-   then the Windows build is usable but its on-disk secrets — including
-   both bearer tokens in `bridge_token.json` — are only as protected as
-   the profile directory.
+3. **Closed by #563 — Windows secrets carry an explicit ACL.** This said for
+   a long time that the protection was unsolved: the daemon writes its
+   config, bridge token and session database `0600` and sets a `0o077`
+   umask, but NTFS ignores POSIX modes and inherits an ACL from the parent
+   directory instead, so those files carried whatever the user profile
+   granted. They no longer do. `cmd/local/perms_windows.go` sets a
+   **protected** DACL naming the current user and no one else, through
+   `golang.org/x/sys/windows`, on each secret (`secureFile`) and on the
+   config directory (`secureDir`, inheritable, so the SQLite driver's `-wal`
+   and `-shm` sidecars and the `media` subdirectory are covered without
+   their creation sites knowing about it). `umask_windows.go` stays a no-op
+   and now says why that is sufficient rather than why it is a gap.
+
+   Two consequences, stated rather than hidden. SYSTEM and Administrators
+   get no ACE, so a daemon started as a Windows service under LocalSystem
+   cannot read a token written by the interactive user — the secrets belong
+   to one human account. And this is what was chosen over an OS keychain on
+   #138: the daemon is meant to run under a service manager, where the macOS
+   login keychain is locked and headless Linux has no Secret Service, so the
+   credential stays a file and the file is what gets protected.
+   `cmd/local/perms_windows_test.go` asserts the result — exactly one ACE,
+   this account, protected from inheritance — where it used to assert the
+   gap.
 4. **Closed for the self-service path by #484; still open, deliberately, for
    legacy `connect --token`.** `activate` never hands a user a token to
    paste: it mints its own device-bound credential end to end through the

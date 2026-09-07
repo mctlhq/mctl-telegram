@@ -54,7 +54,12 @@ cannot send until you say so.
 `device_key.json` holds the private key, the public key, and — once
 issued — the device credential, in one record. Everything the daemon
 writes is owner-only (`0600`), including the session database and its
-SQLite sidecar files.
+SQLite sidecar files. On Windows, where NTFS ignores that mode, the same
+files and the folder holding them instead carry an explicit permission
+entry naming your account and nobody else — not even Administrators or
+SYSTEM, which means a daemon you install as a Windows *service* running
+as LocalSystem will not be able to read credentials you created as
+yourself.
 
 `revoke_local_bridge_device` denylists the `jti` claimed at first
 issuance. Every later refresh carries that same `jti` forward, so
