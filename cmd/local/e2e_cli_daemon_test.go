@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,6 +402,15 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if err != nil {
 		t.Fatalf("stat %s: %v", filepath.Base(path), err)
 	}
+	// The file must exist on every platform — that part is checked above and is
+	// the reason this is not simply skipped. The MODE, however, is a POSIX
+	// concept NTFS does not implement: os.Chmod on Windows only toggles the
+	// read-only attribute, so Perm() reports 0666 for a file the ACL may or may
+	// not protect. Asserting 0600 there would test the Go runtime's emulation,
+	// not this program. The gap itself is asserted in perms_windows_test.go.
+	if runtime.GOOS == "windows" {
+		return
+	}
 	if got := st.Mode().Perm(); got != want {
 		t.Fatalf("%s has mode %o, want %o", filepath.Base(path), got, want)
 	}
@@ -412,7 +422,7 @@ func TestZeroAdminCLIDaemon_EndToEnd(t *testing.T) {
 
 	// ---- a fresh config dir, and the passphrase the daemon will read ----
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv(passphraseEnv, e2ePassphrase)
 	t.Setenv(passphraseFileEnv, "")
 	cfgDir := filepath.Join(home, configDir)

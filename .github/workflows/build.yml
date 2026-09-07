@@ -108,6 +108,56 @@ jobs:
       - run: GOOS=darwin GOARCH=arm64 go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./cmd/local
 
+  # The released darwin/* and windows/amd64 binaries were compiled but never
+  # executed. `test` above cross-BUILDS them (GOOS=darwin/windows go build) and
+  # runs on ubuntu only, so every runtime behaviour that differs by platform —
+  # file modes, the umask helper, the device lock, path handling — shipped
+  # unexercised. mctl-telegram#138 lists this as the remaining distribution gap:
+  # "tests execute on Linux only, so the Windows and macOS binaries ship
+  # compiled-but-unexercised".
+  #
+  # Deliberately a NEW job rather than a matrix on `test`. A matrix renames the
+  # check to "test (ubuntu-latest)", and the required status check named "test"
+  # would then never report again, blocking every PR — the same trap the
+  # docker-agent-worker job below documents.
+  #
+  # What this job does NOT cover, so nobody reads it as broader than it is:
+  #
+  #   - Postgres. Service containers are Linux-only, so TEST_DATABASE_URL is
+  #     unset here and the Postgres-backed tests skip. That coverage stays on
+  #     `test`, which asserts they did not skip.
+  #   - The race detector. It needs a cgo toolchain, which is a portability
+  #     problem of its own on the Windows runner. Concurrency is covered under
+  #     -race on ubuntu; this job is about platform behaviour, not scheduling.
+  #   - Server-side packages on Windows. The release builds windows/amd64 for
+  #     ./cmd/local and nothing else; internal/agent/*, internal/agentworker and
+  #     internal/mcp ship in a Linux container and are never executed on
+  #     Windows. Running them there reports failures in code that cannot reach a
+  #     user — a fake `claude` shell script that Windows cannot exec, and a
+  #     file_path media feature internal/telegram/media_path.go rejects on
+  #     Windows by design. macOS runs the whole module because it passes.
+  #
+  # fail-fast is off: a macOS failure and a Windows failure are independent
+  # findings and cancelling one to report the other wastes the run.
+  test-cross-platform:
+    name: test-cross-platform (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            packages: ./...
+          - os: windows-latest
+            packages: ./cmd/local/...
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+      - run: go build ./...
+      - run: go test ${{ matrix.packages }}
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
