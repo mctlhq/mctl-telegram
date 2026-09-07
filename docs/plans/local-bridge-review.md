@@ -74,9 +74,12 @@ session absence is a local-test assertion unless separately observed live.
 | Source baseline | PASS | Release commit above; task worktree is based on the tag. |
 | Production relay version | PASS | Running deployment and pod use `ghcr.io/mctlhq/mctl-telegram:0.62.1`; one ready replica. |
 | Mac mini preflight | PASS | Intel macOS; existing launch agent running; current binary differs from release checksum. |
-| Automated suites | IN PROGRESS | CLI, OAuth/auth, bridge, database, MCP and web packages. |
-| Code review findings | IN PROGRESS | See findings below as they are confirmed. |
-| Backup and test binary | PENDING | Preserve the working installation before replacing state. |
+| Automated suites | PASS | CLI, OAuth/auth, bridge, database, MCP and web packages, uncached on the release worktree. |
+| Additional OAuth integration | PASS | Synthetic ChatGPT DCR + S256 PKCE + local-account callback + owner token; no hosted session bytes. Telegram provider is stubbed. |
+| Lookup login and refresh | PASS | Initial grant and refresh have only `admin:users:read`; no `telegram_accounts` row created. Removal has a finding below. |
+| Code review findings | FAIL | Three confirmed findings below; no application fixes applied. |
+| Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
+| Backup and state replacement | IN PROGRESS | Operator started the prepared SSH runner; it restores the original installation on exit. |
 | Fresh local login and activation | PENDING | Requires operator terminal and browser input. |
 | ChatGPT OAuth and local reads | PENDING | Must be exercised with the new account. |
 | Consent, Saved Messages send, revoke | PENDING | Only the test account/device is in scope. |
@@ -85,4 +88,102 @@ session absence is a local-test assertion unless separately observed live.
 
 ## Findings
 
-Review in progress. A green mocked test suite is not a completed live test.
+### F1 — P1: device revocation can miss an in-flight websocket admission
+
+Locations: [bridge authentication and registration](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/bridge/server.go#L54),
+[Hub registration](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/bridge/server.go#L97),
+[owner eviction](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/mcp/tools.go#L1336).
+
+`Authenticate` checks the credential before websocket upgrade and
+`hub.Register`. If revocation commits, refreshes the denylist and evicts the
+device between those two operations, the eviction sees no new connection.
+The already-authenticated request subsequently registers the revoked device.
+The open connection has no later revocation check and can receive further
+owner tool-call payloads. A fresh authentication correctly rejects the same
+token, so repeating authentication tests alone misses this containment gap.
+
+Local reproduction used the real `NewBridgeHandler`, SQLite device/lineage
+records and JWT provider/cache. Pause immediately after successful provider
+authentication; call `RevokeDeviceAndDenylist`, `cache.Refresh` and
+`hub.EvictDevice` in the production order; release admission. The revoked
+socket registers and completes a `list_dialogs` round trip. No real Telegram
+account or production revocation was used. `TestReviewRevokeDuringBridgeAuthentication`
+fails the expected no-post-revoke-admission assertion.
+
+Recommended follow-up: synchronize admission with revocation, ensuring a
+revoked device cannot become routable after eviction. Merely refreshing the
+cache sooner does not close the race. Add a deterministic regression for
+this exact interleaving and a control for a different, legitimate device.
+
+### F2 — P2: local pinning bypasses the documented send-consent gate
+
+Locations: [pin handler](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/mcp/tools.go#L666),
+[local dispatch](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/mcp/tools.go#L691),
+[daemon pin RPC](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/cmd/local/daemon.go#L823).
+
+The quick start promises a read-only daemon until the owner enables sending
+or pinning. However, a regular OAuth client receives `telegram:messages:pin`
+independently of `send_enabled`. After a valid prepare/confirmation,
+`pin_message` checks that scope but not the live consent flag, then forwards
+the call. The daemon invokes the pin RPC without an additional consent gate.
+The read-only first device credential does not restrict the owner's token.
+
+Local reproduction provisions a fresh local account (`send_enabled=false`),
+registers an in-process daemon and invokes the real pin handler with ordinary
+client pin scope and a valid confirmation. The daemon receives `pin_message`
+and the result is successful, even with server `ALLOW_SEND=false` as well.
+`TestReviewLocalPinWithoutSendConsent` fails the no-dispatch assertion. The
+confirmation requirement remains enforced; this is specifically the separate
+account-consent boundary. No real message was pinned.
+
+Recommended follow-up: enforce the documented live account gate before
+dispatching pin/unpin, with coverage for consent never granted and revoked
+after a token was issued. Keep the scopes and confirmation checks too.
+
+### F3 — P2: removing a lookup identity can broaden its refresh-token scopes
+
+Locations: [open-registration fallback](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/server.go#L1089),
+[refresh scope resolution](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/server.go#L2125),
+[lookup materialization exemption](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/oauth/server.go#L1537).
+
+While the identity is in `TG_LOGIN_LOOKUP_ADMINS`, both initial issuance and
+refresh correctly grant only `admin:users:read`. The exemption from persisting
+`access_tier=client` is insufficient for deprovisioning: with
+`AUTO_APPROVE_CLIENTS=true`, removing the allowlist entry makes the unset
+tier fall through to the automatic client grant. Refresh re-resolves scopes
+without bounding them to the original grant.
+
+Local reproduction completes DCR, browser callback, PKCE token exchange and
+a successful narrow refresh for a synthetic lookup account with no MTProto
+row. Remove only its lookup allowlist entry and refresh again. The token now
+has dialogs/messages read, messages send/pin and `account:manage`.
+`TestReviewLookupRefreshAndRemoval` fails the no-scope-expansion assertion.
+The two admin lookup privileges disappear; this is expansion into the
+identity's own messaging/owner permissions, not access to another account.
+Actual messaging still requires an available session/daemon and applicable
+send gates.
+
+Recommended follow-up: define and enforce deprovisioning for open registration.
+Until fixed, removal alone must not be described as revocation: explicitly
+set the identity's DB tier to `none` and revoke its refresh-token family when
+retiring the lookup integration. Do not change these values during this review.
+
+## Test evidence and limitations
+
+The unchanged release suites passed:
+
+```sh
+go test ./cmd/local ./internal/oauth ./internal/auth/... ./internal/bridge \
+  ./internal/db ./internal/mcp ./internal/web -count=1
+```
+
+Additional review-only tests were injected with Go's `-overlay`, leaving
+application and existing test sources unchanged. The three failures above
+are deliberate assertions of the required behavior, not failures of the
+baseline suite. `TestReviewLocalAccountChatGPTOAuth` passes. These tests
+replace Telegram itself; they do not prove delivery or ChatGPT UI behavior.
+
+The manual run is still required. A prepared terminal helper preserves the
+original Mac mini installation and restores it on normal exit, interruption
+or SSH hangup. It records only stage markers for remote progress checks;
+credential input is not captured in the repository or this report.
