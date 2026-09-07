@@ -291,4 +291,16 @@ func TestInstallNotOursIsLeftAloneOnWindows(t *testing.T) {
 			t.Errorf("%s carries a protected DACL; permissions on an install owned by another account must be left alone", name)
 		}
 	}
+
+	// The third permission write, and the one that runs most often: a bridge
+	// token refresh replaces the file through writeFileAtomic, and os.Rename
+	// carries the temp file's security descriptor onto the final path. Without
+	// the gate there, a refresh would hand the user's token to whoever is
+	// running the daemon while the other two writes correctly declined.
+	if err := saveBridgeToken(&bridgeTokenFile{BridgeToken: "x"}); err != nil {
+		t.Fatalf("saveBridgeToken: %v", err)
+	}
+	if _, protected := dacl(t, filepath.Join(dir, bridgeTokenName)); protected {
+		t.Error("a refreshed bridge token carries a protected DACL; the refresh path is not behind the ownership gate")
+	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,5 +222,47 @@ func TestInstallNotOursIsLeftAlone(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o644 {
 			t.Errorf("%s has mode %04o; permissions on an install owned by another account must be left alone", name, got)
 		}
+	}
+}
+
+// TestGateReadFailureLeavesPermissionsAlone pins the branch the other tests do
+// not reach: not "this install is someone else's" but "the question could not
+// be answered", which is what a volume carrying no security information in the
+// form the platform expects produces. It must not stop the daemon, and it must
+// not narrow anything on a guess.
+func TestGateReadFailureLeavesPermissionsAlone(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	dbPath := filepath.Join(dir, "state.db")
+	if err := os.WriteFile(dbPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("seed mode: %v", err)
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) {
+		return false, "", errors.New("incorrect function")
+	}
+	t.Cleanup(func() { installRestrictable = restore })
+
+	// Not an error: openLocalStore die()s on one, and a daemon holding a
+	// working session must not be stopped by an unanswerable question about
+	// who owns its files.
+	if err := restrictDBPerms(dbPath); err != nil {
+		t.Fatalf("restrictDBPerms returned %v; a gate read failure must not stop startup", err)
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("state.db has mode %04o; nothing may be narrowed on an unanswered ownership question", got)
 	}
 }
