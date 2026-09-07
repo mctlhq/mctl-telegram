@@ -129,9 +129,6 @@ jobs:
   #   - The race detector. It needs a cgo toolchain, which is a portability
   #     problem of its own on the Windows runner. Concurrency is covered under
   #     -race on ubuntu; this job is about platform behaviour, not scheduling.
-  #
-  # fail-fast is off: a macOS failure and a Windows failure are independent
-  # findings and cancelling one to report the other wastes the run.
   #   - Server-side packages on Windows. The release builds windows/amd64 for
   #     ./cmd/local and nothing else; internal/agent/*, internal/agentworker and
   #     internal/mcp ship in a Linux container and are never executed on
@@ -139,6 +136,9 @@ jobs:
   #     user — a fake `claude` shell script that Windows cannot exec, and a
   #     file_path media feature internal/telegram/media_path.go rejects on
   #     Windows by design. macOS runs the whole module because it passes.
+  #
+  # fail-fast is off: a macOS failure and a Windows failure are independent
+  # findings and cancelling one to report the other wastes the run.
   test-cross-platform:
     name: test-cross-platform (${{ matrix.os }})
     strategy:
