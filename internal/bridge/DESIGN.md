@@ -36,8 +36,8 @@ The server half is production-grade and deployed, and the CLI has caught up
 with it: `mctl-telegram-local activate` walks a user from nothing to a
 connected, read-only daemon with zero operator MCP tool calls, and
 `set_send_consent` lets the owner turn real sending on themselves. What
-remains is narrower than it used to be: Windows ACL hardening for on-disk
-secrets, and the correctness/cross-repo items below. The legacy
+remains is narrower than it used to be: the correctness/cross-repo items
+below. Windows ACL hardening for on-disk secrets is done (#563). The legacy
 `connect --token` path is intentionally still there, unmodified, for accounts
 onboarded before this and for operator-driven recovery -- see "Device-bound
 credential lifecycle".
@@ -153,16 +153,78 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    SmartScreen prompt on a double-click; fetching with `curl` and running
    from a terminal avoids both. Signing is a deliberate non-decision, not
    an oversight — see the note in #448.
-3. **Windows file protection is unsolved.** The daemon writes its config,
-   bridge token and session database `0600` and sets a `0o077` umask, but
-   NTFS ignores POSIX modes and inherits an ACL from the parent directory
-   instead, so on Windows those files carry whatever the user profile
-   grants. `cmd/local/umask_windows.go` is a deliberate no-op for the same
-   reason. Closing this means setting an explicit ACL through
-   `golang.org/x/sys/windows`, and it has not been done or tested. Until
-   then the Windows build is usable but its on-disk secrets — including
-   both bearer tokens in `bridge_token.json` — are only as protected as
-   the profile directory.
+3. **Closed by #563 — Windows secrets carry an explicit ACL.** This said for
+   a long time that the protection was unsolved: the daemon writes its
+   config, bridge token and session database `0600` and sets a `0o077`
+   umask, but NTFS ignores POSIX modes and inherits an ACL from the parent
+   directory instead, so those files carried whatever the user profile
+   granted. They no longer do. `cmd/local/perms_windows.go` sets a
+   **protected** DACL naming the current user and no one else, through
+   `golang.org/x/sys/windows`, on each secret (`secureFile`) and on the
+   config directory (`secureDir`, inheritable, so the SQLite driver's `-wal`
+   and `-shm` sidecars and the `media` subdirectory are covered without
+   their creation sites knowing about it). `umask_windows.go` stays a no-op
+   and now says why that is sufficient rather than why it is a gap.
+
+   Two consequences, stated rather than hidden. SYSTEM and Administrators
+   get no ACE, so a daemon started as a Windows service under LocalSystem
+   cannot read a token written by the interactive user — the secrets belong
+   to one human account. That exclusivity is against the ordinary access
+   check and no further: an elevated administrator can read these files
+   through `SeBackupPrivilege` without touching the DACL, or by taking
+   ownership, and nothing here installs a SACL, so neither is audited unless
+   the machine's audit policy says so independently. The threat model is
+   another unprivileged account on the same machine, not its administrator.
+
+   And this is what was chosen over an OS keychain on #138: the daemon is
+   meant to run under a service manager, where the macOS
+   login keychain is locked and headless Linux has no Secret Service, so the
+   credential stays a file and the file is what gets protected.
+   `cmd/local/perms_windows_test.go` asserts the result — exactly one ACE,
+   this account, protected from inheritance — where it used to assert the
+   gap.
+
+   The account named is the **caller** — always, on every path. Ownership is
+   a gate and never a grantee: `mayRestrict` decides *whether* a permission
+   write may happen, and it is asked about the object that can answer for the
+   set being written. For the config directory's secrets that is the
+   directory itself, which says whose install this is. For the database it is
+   `state.db`: `-wal` and `-shm` are deleted on the last connection close and
+   recreated on the next open, so they are owned by whoever opened it last
+   and can never be the authority, and the directory can be group-owned on an
+   install whose database is plainly ours. If the answer is another account,
+   nothing is rewritten and a warning is logged; a service running as
+   LocalSystem pointed at the interactive user's profile therefore leaves it
+   alone instead of rewriting those secrets to SYSTEM-only.
+
+   Creating takes nothing from anybody, so it is exempt on both paths: a
+   secret with nothing at its target path, and a database that does not exist
+   yet, are protected whatever the gate would say about the install. And
+   declining preserves rather than resets — `os.Rename` carries the temp
+   file's descriptor onto the target, so a protected target would otherwise
+   come back inherited on the next credential refresh.
+
+   Both halves of that rule were learned the hard way and are worth keeping:
+   granting the caller with no gate hands a service the user's credentials,
+   and granting the owner read off disk is worse — on a machine where the
+   user is an elevated administrator the owner is `BUILTIN\Administrators`,
+   so the secrets go to a group, and an owner inherited from another machine
+   or a `/COPYALL` restore would name an account nobody can act as, inside a
+   PROTECTED DACL.
+
+   The gate compares the owner to the caller's own SID. Token *membership*
+   was tried first and is too permissive in the direction that matters: a
+   LocalSystem service is a member of `BUILTIN\Administrators`, so a
+   group-owned install passed and the repair then granted SYSTEM alone.
+
+   One consequence to know before debugging a support report: an install
+   created from an elevated shell is owned by `Administrators`, a group, so
+   no session repairs it and every run says so in a warning (once per
+   process — the token is rewritten every few minutes and the warning would
+   otherwise repeat). Nothing is seized, and a **newly created** secret is
+   still protected: `writeFileAtomic` consults the gate only when something
+   already exists at the target path, because creating a file takes nothing
+   from anybody.
 4. **Closed for the self-service path by #484; still open, deliberately, for
    legacy `connect --token`.** `activate` never hands a user a token to
    paste: it mints its own device-bound credential end to end through the

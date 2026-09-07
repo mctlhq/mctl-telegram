@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -34,6 +35,92 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Chmod(perm); err != nil {
 		return fmt.Errorf("chmod temp: %w", err)
 	}
+	if perm&0o077 == 0 {
+		// The caller asked for owner-only. On Windows the mode above does not
+		// deliver that, so the ACL is applied here — to the temp file, before
+		// the rename, so the secret never exists at its final path unprotected.
+		//
+		// Replacing a secret that already exists goes behind the same ownership
+		// gate as the other two permission writes, and this is the path that
+		// runs most often: os.Rename carries the temp file's security
+		// descriptor onto the final path, so a daemon under LocalSystem
+		// refreshing the bridge token would replace the interactive user's
+		// secret with one granting SYSTEM alone — on every reconnect, with
+		// hardenExistingSecrets and restrictDBPerms both correctly declining a
+		// few lines away. Declining leaves the new file inheriting the config
+		// directory's ACL, which is the owner's.
+		//
+		// Creating one does not. There is nothing at the target path to take,
+		// and declining there would leave a freshly written token under the
+		// inherited ACL — the gap this change exists to close — on exactly the
+		// installs whose directory is group-owned and which therefore never get
+		// a repair pass at all.
+		secure, preserve := true, false
+		_, statErr := os.Stat(path)
+		switch {
+		case errors.Is(statErr, os.ErrNotExist):
+			// Nothing at the target path: creating, so the gate does not apply.
+		case statErr != nil:
+			// An unanswerable existence question fails closed like every other
+			// unanswerable question here. Reading it as "nothing there" would
+			// protect a temp file that os.Rename then puts over whatever IS at
+			// path — the seizure the gate exists to prevent, taken on a guess.
+			//
+			// Deliberately untested rather than forgotten: os.Stat has to fail
+			// with something other than ErrNotExist on a path whose parent
+			// directory this process just created and can write, and the ways
+			// to arrange that are platform quirks (a sharing violation, a name
+			// the filesystem rejects at open time) that a test would be
+			// asserting about the OS rather than about this code. On unix the
+			// branch is unobservable in any case, since tmp.Chmod has already
+			// applied the mode and secureFile is then a redundant chmod.
+			warnOnce(path, "could not check whether this secret already exists; leaving its permissions alone",
+				"path", path, "err", statErr)
+			// Preserved best-effort rather than as a requirement: copying the
+			// target's permissions forward starts by reading them, and that
+			// read may fail with the same error, in which case aborting the
+			// write would turn an unreadable stat into a failed credential
+			// refresh. Windows reads the descriptor through a different call
+			// than os.Stat, so it can still succeed here.
+			//
+			// When it does not, the honest description of what happens is not
+			// "nothing": the temp file carries the directory's inherited ACL,
+			// os.Rename puts that on the target, and a target that had been
+			// protected comes back inherited. Unix does not have that problem —
+			// tmp.Chmod has already applied 0600 — and on Windows the warning
+			// is the trace.
+			secure, preserve = false, false
+			_ = copyPermissions(path, tmpPath)
+		default:
+			allowed, owner, err := installRestrictable()
+			switch {
+			case err != nil && !errors.Is(err, os.ErrNotExist):
+				warnOnce(path, "could not check who owns this installation; leaving replaced file permissions alone",
+					"path", path, "err", err)
+				secure, preserve = false, true
+			case err == nil && !allowed:
+				warnOnce(path, "this installation belongs to another account; leaving replaced file permissions alone",
+					"path", path, "owner", owner)
+				secure, preserve = false, true
+			}
+		}
+		if secure {
+			if err := secureFile(tmpPath); err != nil {
+				return fmt.Errorf("restrict temp: %w", err)
+			}
+		} else if preserve {
+			if err := copyPermissions(path, tmpPath); err != nil {
+				// Declining has to mean "leave its permissions as they are", and
+				// leaving the temp file alone does not achieve that: os.Rename
+				// carries the temp file's permissions onto the target, so a target
+				// that was protected would come back inheriting the directory's
+				// broad ACL. A routine token refresh would then re-expose the
+				// secret it just rewrote — a downgrade performed by the branch
+				// whose whole purpose is to change nothing.
+				return fmt.Errorf("preserve permissions of %s: %w", path, err)
+			}
+		}
+	}
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write temp: %w", err)
 	}
@@ -47,6 +134,35 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
+}
+
+// mkdirSecure creates dir with its parents and restricts it to the owner.
+//
+// The mode passed to MkdirAll is enough on unix and is ignored on Windows, so
+// the restriction is applied afterwards through secureDir, which is an ACL
+// there. Making it inheritable on Windows is what protects the files created
+// inside the directory by code that never calls secureFile itself — the SQLite
+// driver's -wal and -shm sidecars, and the media subdirectory.
+//
+// A directory that already exists is left alone. Every caller here is on a
+// write path — saveConfig, saveBridgeToken, writeDeviceRecord, the device lock
+// — and the device record is rewritten on every reconnect, the bridge token on
+// every refresh. On Windows secureDir re-propagates the inheritable ACEs
+// through the whole subtree, media/ included, so applying it on each of those
+// writes would put a tree walk in the path of a daemon reconnecting on a bad
+// link. An install that predates this is repaired once at startup instead, by
+// hardenExistingSecrets.
+func mkdirSecure(dir string) error {
+	// IsDir, not merely "stat succeeded": a regular file at dir would otherwise
+	// return nil here and push the failure one layer down, where it surfaces as
+	// "create temp: ... not a directory" instead of naming the config dir.
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return secureDir(dir)
 }
 
 // localConfig is the persisted JSON at ~/.config/mctl-telegram-local/config.json.
@@ -191,7 +307,7 @@ func deviceLockFilePath(configDir string) string {
 // cross-process lock across it would starve a running daemon's refresh until
 // its credential expired and its connection dropped.
 func withDeviceRecordLock(configDir string, timeout time.Duration, fn func() error) error {
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
+	if err := mkdirSecure(configDir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	lockPath := deviceLockFilePath(configDir)
@@ -282,7 +398,7 @@ func writeDeviceRecord(rec *deviceRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
@@ -546,7 +662,7 @@ func saveConfig(cfg *localConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -586,7 +702,7 @@ func saveBridgeToken(bt *bridgeTokenFile) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirSecure(dir); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(bt, "", "  ")

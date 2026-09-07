@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,6 +47,12 @@ import (
 // claiming a release number it does not correspond to. The published builds
 // carry the release tag, so a bug report names a build that can be found.
 var version = "dev"
+
+// warned keys the warnings warnOnce has already emitted, by path and message.
+var (
+	warnedMu sync.Mutex
+	warned   = map[string]struct{}{}
+)
 
 const usage = `mctl-telegram-local — Local Bridge daemon for mctl-telegram
 
@@ -91,6 +98,49 @@ MCTL_LOCAL_PASSPHRASE, or type it at the prompt if a terminal is present.
 This command starts the daemon. --help only prints this text.
 `
 
+// hardenForCommand runs the startup repair pass for the invocations that reach
+// local state. It exists as a named function because main() itself is not
+// reachable from a test: without it, deleting the call would leave the suite
+// green while removing the whole upgrade path — the repair has exactly one
+// trigger since mkdirSecure stopped re-securing an existing directory on every
+// write.
+func hardenForCommand(args []string) {
+	if shouldHarden(args) {
+		hardenExistingSecrets()
+	}
+}
+
+// shouldHarden reports whether this invocation reaches local state and must
+// therefore repair its permissions first. It takes os.Args[1:] so the rule is
+// testable; inline in main() nothing could reach it.
+//
+// A denylist, not a list of the commands that do harden: a subcommand added
+// later must be hardened by default. The asymmetry is the whole argument —
+// getting it wrong in this direction costs a tree walk on a command that prints
+// usage, because securing the config directory on Windows re-propagates the
+// inheritable ACEs over everything under it, media/ included. Getting it wrong
+// in the other direction is a read against the old DACL with no error and
+// nothing in the log.
+//
+// The help skip covers only the two subcommands whose usage main() prints
+// itself, before dispatch. For login, activate and connect the FlagSet decides,
+// and it does not agree with a raw argv scan: `login --phone -h` consumes -h as
+// the value of --phone, so the run continues into loadConfig and openLocalStore.
+// Those are hardened rather than guessed about — a wasted walk on a
+// pathological command line is the acceptable half of the trade.
+func shouldHarden(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "version", "help", "-h", "--help":
+		return false
+	case "init", "daemon":
+		return !wantsHelp(args[1:])
+	}
+	return true
+}
+
 // wantsHelp reports whether args ask for usage. Used by init and daemon,
 // which have no FlagSet of their own — without this, `init --help` and
 // `daemon --help` start those commands instead of showing help.
@@ -121,6 +171,8 @@ func main() {
 		os.Exit(2)
 	}
 
+	hardenForCommand(os.Args[1:])
+
 	switch os.Args[1] {
 	case "version":
 		fmt.Println(version)
@@ -148,6 +200,146 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
+	}
+}
+
+// warnOnce logs a warning the first time it is seen for a given key, and
+// swallows repeats.
+//
+// The ownership gate is asked on every write of the bridge token — roughly
+// every five minutes for the lifetime of the daemon — and on every device
+// record write, so a declined install would otherwise emit one identical
+// warning per reconnect. A warning is meant to be the signal to go and look;
+// one per attempt is a log line nobody reads.
+//
+// The key is the path AND the message. The message alone would collapse three
+// different secrets into one line — on an install where only some are
+// foreign-owned, "a permission was left alone" without saying which file is a
+// mood rather than something to act on — and the path alone would hide a second,
+// different reason for the same file. The ceiling is the three secrets times the
+// three reasons a write can decline, so nine lines in the worst case and one in
+// every ordinary one.
+func warnOnce(key, msg string, args ...any) {
+	warnedMu.Lock()
+	defer warnedMu.Unlock()
+	if _, seen := warned[key+"|"+msg]; seen {
+		return
+	}
+	warned[key+"|"+msg] = struct{}{}
+	slog.Warn(msg, args...)
+}
+
+// dbRestrictable answers whether this process may set permissions on the local
+// database and its sidecars. A variable for the same reason installRestrictable
+// is one: the divergent case needs a second account.
+//
+// A database that does not exist yet is ours — creating one takes nothing from
+// anybody, and this runs after db.Open, so the answer covers the run that
+// brings it into existence.
+var dbRestrictable = func(dbPath string) (bool, string, error) {
+	allowed, owner, err := mayRestrict(dbPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, "", nil
+	}
+	return allowed, owner, err
+}
+
+// installRestrictable answers whether this process may set permissions on the
+// secrets in the config directory, and is asked about the directory itself.
+//
+// Not about the secrets: all three are replaced through writeFileAtomic, which
+// renames a temp file over the target, so what sits at config.json,
+// bridge_token.json or device_key.json is always owned by whoever wrote it last
+// — the same reason the database's sidecars cannot answer for themselves. The
+// directory is the object that persists across those writes, and it is what
+// says whose install this is. The database has its own authority; see
+// dbRestrictable, and the paragraph in restrictDBPerms for why it is state.db
+// and not this.
+//
+// It is asked on each write rather than cached, because a cached verdict would
+// outlive the thing it describes; the repeated warning that would otherwise
+// produce is handled by warnOnce.
+//
+// It is a variable so a test can drive the branch it guards: the divergent case
+// needs a second account or SeRestorePrivilege, and without a seam, replacing
+// the call with a constant true leaves the entire suite green — which is what
+// happened to the per-path version of this check.
+var installRestrictable = func() (bool, string, error) {
+	dir, err := configDirPath()
+	if err != nil {
+		return false, "", err
+	}
+	return mayRestrict(dir)
+}
+
+// hardenExistingSecrets tightens an install that already exists, before any
+// command reads from it.
+//
+// Every other call site is a WRITE path, which is enough on a fresh install and
+// not enough on an upgrade: loadConfig and loadBridgeToken read their files
+// straight away, openLocalStore runs db.Open and db.Migrate — creating -wal and
+// -shm — before restrictDBPerms, and device_key.json is never rewritten at all
+// if the device record does not change. On Windows those all happened under the
+// DACL inherited from the profile, which is the thing #563 is about.
+//
+// The directory is secured first so that anything created inside it afterwards
+// inherits the restriction, and each known secret is then secured in its own
+// right: a child whose DACL is already protected does not take part in
+// propagation, so inheritance alone would leave it as it was.
+//
+// It never creates the config directory. A missing one means there is nothing
+// to repair yet, and a first `init` — the one caller that reaches here with no
+// install, since shouldHarden already turns `version` and `help` away — must not
+// leave a directory behind before it has written anything. `init` creates it
+// through mkdirSecure when it saves.
+//
+// Failures warn rather than exit, which makes this best-effort by design: a
+// warning here means the install may still be readable by other local accounts,
+// and it is the signal to look. This runs on a daemon that may already hold a
+// working session, and refusing to start because a permission could not be
+// narrowed would turn a hardening step into an outage.
+//
+// It also refuses to touch an install owned by another account rather than
+// seizing it — see mayRestrict.
+func hardenExistingSecrets() {
+	dir, err := configDirPath()
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(dir); err != nil {
+		// A directory that exists but cannot be stat'd is exactly the case
+		// worth naming; a missing one is the normal pre-install state.
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not check the config directory", "path", dir, "err", err)
+		}
+		return
+	}
+	// Never rewrite permissions on an install owned by someone else: see
+	// mayRestrict. A warning and no change is the only safe outcome there —
+	// the alternative is taking a user's secrets away from them.
+	switch allowed, owner, err := installRestrictable(); {
+	case err != nil:
+		slog.Warn("could not check who owns the config directory; not repairing permissions",
+			"path", dir, "err", err)
+		return
+	case !allowed:
+		slog.Warn("config directory is owned by another account; not repairing permissions",
+			"path", dir, "owner", owner)
+		return
+	}
+	if err := secureDir(dir); err != nil {
+		slog.Warn("could not restrict config directory permissions", "path", dir, "err", err)
+	}
+	for _, name := range []string{configFileName, bridgeTokenName, deviceKeyName} {
+		p := filepath.Join(dir, name)
+		if err := secureFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not restrict secret permissions", "path", p, "err", err)
+		}
+	}
+	if dbPath, err := dbFilePath(); err == nil {
+		if err := restrictDBPerms(dbPath); err != nil {
+			slog.Warn("could not restrict database permissions", "path", dbPath, "err", err)
+		}
 	}
 }
 
@@ -710,10 +902,49 @@ func resolveMCPToken(token, tokenFile string, stdin io.Reader, readFile func(str
 // the driver whenever the database is opened, so narrowing them once at
 // creation would not hold; this runs on every open. They may legitimately not
 // exist yet, and that is not an error.
+//
+// What "owner-only" means is platform-specific and lives in secureFile: a mode
+// on unix, an explicit DACL on Windows, where the mode is ignored.
 func restrictDBPerms(dbPath string) error {
+	// Asked about state.db, and its answer covers all three paths.
+	//
+	// Not per file: -wal and -shm are deleted on the last connection close and
+	// recreated by db.Open, so they are always owned by whoever opened the
+	// database last — a per-file answer says yes about exactly the files the
+	// gate exists to protect.
+	//
+	// And not about the config directory either, which is what this used to
+	// ask. The directory can be group-owned on an install whose database is
+	// plainly ours — the shape the strict gate itself produces — and then every
+	// run after the first left the freshly recreated -wal under the directory's
+	// broad ACL while the database beside it stayed protected, holding the same
+	// sealed pages. The durable object is the one that can answer for the set.
+	switch allowed, owner, err := dbRestrictable(dbPath); {
+	case err != nil:
+		// Warn and decline rather than returning: openLocalStore die()s on this
+		// error, and the question that failed is who owns the database — a
+		// config directory on exFAT or some SMB mounts carries no security
+		// information in the form SE_FILE_OBJECT expects, and "Incorrect
+		// function" would then stop a daemon whose session works.
+		slog.Warn("could not check who owns the database; leaving its permissions alone",
+			"path", dbPath, "err", err)
+		return nil
+	case !allowed:
+		slog.Warn("the database belongs to another account; leaving its permissions alone",
+			"path", dbPath, "owner", owner)
+		return nil
+	}
+
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("restrict permissions on %s: %w", p, err)
+		// errors.Is rather than os.IsNotExist: on Windows a missing path
+		// arrives as a wrapped syscall.Errno, which the legacy helper does not
+		// unwrap, and an absent sidecar is normal rather than a failure.
+		//
+		// Returned unwrapped: both secureFile implementations already name the
+		// path — os.Chmod through *PathError, the ACL through its own message
+		// — and wrapping here repeated it twice in one sentence.
+		if err := secureFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	return nil
