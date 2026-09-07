@@ -1,6 +1,7 @@
 # Local Bridge 0.62.1 review and manual verification
 
-Status: in progress, 2026-09-08. This is the canonical plan and result log.
+Status: code review complete; manual run awaiting operator input, 2026-09-08.
+This is the canonical plan and result log. Tracking PR: [#565](https://github.com/mctlhq/mctl-telegram/pull/565).
 
 ## Scope and acceptance
 
@@ -75,12 +76,13 @@ session absence is a local-test assertion unless separately observed live.
 | Production relay version | PASS | Running deployment and pod use `ghcr.io/mctlhq/mctl-telegram:0.62.1`; one ready replica. |
 | Mac mini preflight | PASS | Intel macOS; existing launch agent running; current binary differs from release checksum. |
 | Automated suites | PASS | CLI, OAuth/auth, bridge, database, MCP and web packages, uncached on the release worktree. |
+| Static checks | PASS | `go vet` on the same package set; `git diff --check`. |
 | Additional OAuth integration | PASS | Synthetic ChatGPT DCR + S256 PKCE + local-account callback + owner token; no hosted session bytes. Telegram provider is stubbed. |
 | Lookup login and refresh | PASS | Initial grant and refresh have only `admin:users:read`; no `telegram_accounts` row created. Removal has a finding below. |
 | Code review findings | FAIL | Three confirmed findings below; no application fixes applied. |
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
-| Backup and state replacement | IN PROGRESS | Operator started the prepared SSH runner; it restores the original installation on exit. |
-| Fresh local login and activation | PENDING | Requires operator terminal and browser input. |
+| Backup and state replacement | PASS | Runner stopped the original launch agent, moved its complete state into an owner-only backup and installed the verified test binary. Original binary checksum matches preflight. |
+| Fresh local login and activation | BLOCKED | Runner is at interactive `init`; no completed-init marker yet. Requires operator terminal and browser input. |
 | ChatGPT OAuth and local reads | PENDING | Must be exercised with the new account. |
 | Consent, Saved Messages send, revoke | PENDING | Only the test account/device is in scope. |
 | Original service restoration | PENDING | Required after any test replacement. |
@@ -187,3 +189,9 @@ The manual run is still required. A prepared terminal helper preserves the
 original Mac mini installation and restores it on normal exit, interruption
 or SSH hangup. It records only stage markers for remote progress checks;
 credential input is not captured in the repository or this report.
+
+At the latest observation, the original launch agent is intentionally stopped
+for the active test. The test runner has not completed `init`. Do not mark
+restoration or the live scenario complete from the existence of the backup.
+If the operator pauses the test, interrupt the terminal runner to restore the
+installation, then independently verify the resumed launch agent/connection.
