@@ -48,6 +48,12 @@ import (
 // carry the release tag, so a bug report names a build that can be found.
 var version = "dev"
 
+// warned keys the warnings warnOnce has already emitted, by path and message.
+var (
+	warnedMu sync.Mutex
+	warned   = map[string]struct{}{}
+)
+
 const usage = `mctl-telegram-local — Local Bridge daemon for mctl-telegram
 
 Usage:
@@ -197,21 +203,28 @@ func main() {
 	}
 }
 
-// warnOnce logs a message the first time it is seen and swallows repeats.
+// warnOnce logs a warning the first time it is seen for a given key, and
+// swallows repeats.
 //
 // The ownership gate is asked on every write of the bridge token — roughly
 // every five minutes for the lifetime of the daemon — and on every device
 // record write, so a declined install would otherwise emit one identical
 // warning per reconnect. A warning is meant to be the signal to go and look;
 // one per attempt is a log line nobody reads.
-func warnOnce(msg string, args ...any) {
-	if _, seen := warned.LoadOrStore(msg, struct{}{}); seen {
+//
+// The key is the path rather than the message, because the message alone would
+// collapse three different secrets into one line: on an install where only some
+// are foreign-owned, "a permission was left alone" without saying which file is
+// a mood rather than something to act on. Three entries at most.
+func warnOnce(key, msg string, args ...any) {
+	warnedMu.Lock()
+	defer warnedMu.Unlock()
+	if _, seen := warned[key+"|"+msg]; seen {
 		return
 	}
+	warned[key+"|"+msg] = struct{}{}
 	slog.Warn(msg, args...)
 }
-
-var warned sync.Map
 
 // installRestrictable answers whether this process may set permissions anywhere
 // in the install. The question is asked about the config directory and never

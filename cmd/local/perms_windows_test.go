@@ -393,3 +393,36 @@ func TestMayRestrictOwnership(t *testing.T) {
 		}
 	})
 }
+
+// TestNewSecretIsProtectedDespiteDeclinedGate pins the escape the gate makes
+// for creation. It is the half of the rule that protects the install shape the
+// strict gate creates: a config directory owned by a group gets no repair pass
+// from any session, so if a declined gate also skipped new files, a freshly
+// written bridge_token.json would carry only the inherited profile ACL — #563
+// open on the new secret, with a warning as its only trace.
+//
+// The difference from TestInstallNotOursIsLeftAloneOnWindows is one line: the
+// token file is absent, so there is nothing at the target path to take, and the
+// assertion is inverted. With the existence check removed it fails.
+func TestNewSecretIsProtectedDespiteDeclinedGate(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) { return false, "another-account", nil }
+	t.Cleanup(func() { installRestrictable = restore })
+
+	if err := saveBridgeToken(&bridgeTokenFile{BridgeToken: "x"}); err != nil {
+		t.Fatalf("saveBridgeToken: %v", err)
+	}
+	acl, protected := dacl(t, filepath.Join(dir, bridgeTokenName))
+	if !protected {
+		t.Fatal("a newly created secret is unprotected; a declined gate must not leave a new file under the inherited ACL")
+	}
+	assertGrantsOnlyCurrentUser(t, filepath.Join(dir, bridgeTokenName), acl)
+}

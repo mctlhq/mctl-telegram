@@ -56,16 +56,28 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		// installs whose directory is group-owned and which therefore never get
 		// a repair pass at all.
 		secure := true
-		if _, err := os.Stat(path); err == nil {
+		_, statErr := os.Stat(path)
+		switch {
+		case errors.Is(statErr, os.ErrNotExist):
+			// Nothing at the target path: creating, so the gate does not apply.
+		case statErr != nil:
+			// An unanswerable existence question fails closed like every other
+			// unanswerable question here. Reading it as "nothing there" would
+			// protect a temp file that os.Rename then puts over whatever IS at
+			// path — the seizure the gate exists to prevent, taken on a guess.
+			warnOnce(path, "could not check whether this secret already exists; leaving its permissions alone",
+				"path", path, "err", statErr)
+			secure = false
+		default:
 			allowed, owner, err := installRestrictable()
 			switch {
 			case err != nil && !errors.Is(err, os.ErrNotExist):
-				warnOnce("could not check who owns this installation; leaving replaced file permissions alone",
-					"err", err)
+				warnOnce(path, "could not check who owns this installation; leaving replaced file permissions alone",
+					"path", path, "err", err)
 				secure = false
 			case err == nil && !allowed:
-				warnOnce("this installation belongs to another account; leaving replaced file permissions alone",
-					"owner", owner)
+				warnOnce(path, "this installation belongs to another account; leaving replaced file permissions alone",
+					"path", path, "owner", owner)
 				secure = false
 			}
 		}
