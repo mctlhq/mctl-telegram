@@ -76,12 +76,21 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 			// applied the mode and secureFile is then a redundant chmod.
 			warnOnce(path, "could not check whether this secret already exists; leaving its permissions alone",
 				"path", path, "err", statErr)
-			// Not preserve: copying the target's permissions forward starts by
-			// reading them, which fails with the same error, and the write
-			// would abort instead of leaving anything alone. The temp file
-			// keeps the mode tmp.Chmod already gave it and inherits whatever
-			// the directory grants, which is the outcome this branch claims.
-			secure = false
+			// Preserved best-effort rather than as a requirement: copying the
+			// target's permissions forward starts by reading them, and that
+			// read may fail with the same error, in which case aborting the
+			// write would turn an unreadable stat into a failed credential
+			// refresh. Windows reads the descriptor through a different call
+			// than os.Stat, so it can still succeed here.
+			//
+			// When it does not, the honest description of what happens is not
+			// "nothing": the temp file carries the directory's inherited ACL,
+			// os.Rename puts that on the target, and a target that had been
+			// protected comes back inherited. Unix does not have that problem —
+			// tmp.Chmod has already applied 0600 — and on Windows the warning
+			// is the trace.
+			secure, preserve = false, false
+			_ = copyPermissions(path, tmpPath)
 		default:
 			allowed, owner, err := installRestrictable()
 			switch {

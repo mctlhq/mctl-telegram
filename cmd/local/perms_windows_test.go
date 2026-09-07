@@ -194,8 +194,6 @@ func assertGrantsOnlyCurrentUser(t *testing.T, path string, acl *windows.ACL) {
 // path as a wrapped syscall.Errno, which os.IsNotExist does not unwrap, so this
 // would fail if restrictDBPerms went back to the legacy helper.
 func TestRestrictDBPermsOnWindows(t *testing.T) {
-	// See the note in TestRestrictDBPerms: the gate resolves the config
-	// directory from home, and this test's database does not live there.
 	setHome(t, t.TempDir())
 
 	dir := t.TempDir()
@@ -205,6 +203,11 @@ func TestRestrictDBPermsOnWindows(t *testing.T) {
 			t.Fatalf("seed %s: %v", p, err)
 		}
 	}
+	// The gate asks about state.db itself. Windows takes a new object's owner
+	// from the creating token rather than from the parent directory, so on a
+	// runner whose account is an elevated administrator the seeded database is
+	// owned by BUILTIN\Administrators and the gate would refuse it.
+	ownPath(t, dbPath)
 	// state.db-shm is deliberately absent.
 
 	if err := restrictDBPerms(dbPath); err != nil {
@@ -242,13 +245,18 @@ func TestHardenExistingSecretsOnWindows(t *testing.T) {
 		t.Fatalf("seed config dir: %v", err)
 	}
 	// An install this account owns; see ownPath for why the runner does not
-	// produce one by itself.
+	// produce one by itself. Each file as well as the directory: there is no
+	// owner inheritance on NTFS, and since the database answers for its own
+	// sidecars, a group-owned state.db would be refused even inside a directory
+	// this account owns.
 	ownPath(t, dir)
 	secrets := []string{configFileName, bridgeTokenName, deviceKeyName, "state.db", "state.db-wal"}
 	for _, name := range secrets {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
 		}
+		ownPath(t, p)
 	}
 	// The premise of the test: before hardening, these carry the profile's
 	// inherited ACL, which grants more than this account.
