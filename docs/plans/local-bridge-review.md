@@ -85,7 +85,7 @@ session absence is a local-test assertion unless separately observed live.
 | Fresh local login and activation | PASS WITH UX BUG | Local Apple Silicon run completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. |
 | ChatGPT OAuth and local reads | PASS | ChatGPT connected to `https://tg.mctl.ai/mcp` with the review account; `get_my_identity`, send-status inspection and dialog listing completed while the local daemon held an active websocket. |
 | Consent, Saved Messages send, revoke | PASS | Consent enabled and one marked message reached Saved Messages through the local daemon; consent-off produced `sent=false` with `per-account send_enabled=false`; device `dev_6302c0cf42d6ed281106b899975e4c5c` was revoked with denylist refresh and hub eviction, and the daemon's refresh was rejected as a revoked device. |
-| Original service restoration | PENDING | Required after any test replacement. |
+| Original service restoration | PASS | The local test daemon was stopped; the pre-test configuration was restored from its owner-only backup. The completed test state remains in a separate owner-only archive. |
 | Live lookup login | NOT RUN | No dedicated configured identity; local tests only. |
 
 ## Findings
