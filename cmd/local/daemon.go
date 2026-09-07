@@ -892,7 +892,15 @@ func mediaAllowDir() string {
 		return ""
 	}
 	path := filepath.Join(dir, "media")
-	_ = mkdirSecure(path)
+	// Secured when it is created, not on every call. mediaAllowDir runs per
+	// send_media request, and on Windows re-applying a protected DACL
+	// re-propagates it over everything in the directory — the same tree walk
+	// this binary just decided was too expensive to run on `version`. An
+	// upgraded install whose media/ predates this is repaired at startup
+	// instead, by the inheritable ACE hardenExistingSecrets puts on the parent.
+	if _, err := os.Stat(path); err != nil {
+		_ = mkdirSecure(path)
+	}
 	return path
 }
 

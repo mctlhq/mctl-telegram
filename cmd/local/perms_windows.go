@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 
 	"golang.org/x/sys/windows"
 )
@@ -53,6 +54,16 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 	if err != nil {
 		return err
 	}
+	// TrusteeValueFromSID stores the SID as a bare uintptr, which the garbage
+	// collector cannot see: x/sys requires the caller to pin it for the
+	// lifetime of the trustee. Without this a moving GC during ACLFromEntries
+	// could leave the trustee pointing at something that is no longer the SID,
+	// and the ACL would be built from whatever is there — the failure mode is
+	// a wrong grant, not a crash, which is the worst kind here.
+	var pinner runtime.Pinner
+	pinner.Pin(sid)
+	defer pinner.Unpin()
+
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,

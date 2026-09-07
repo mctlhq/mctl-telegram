@@ -121,14 +121,25 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Only the subcommands that read or write local state. On Windows,
-	// securing the config directory propagates the inheritable ACEs down the
-	// whole subtree, and that subtree contains media/ — the staging area for
-	// downloads, which can hold a lot of files. `version` and `help` touch no
-	// secret and should not pay for a tree walk.
+	// Everything except the paths that only print text. On Windows, securing
+	// the config directory propagates the inheritable ACEs down the whole
+	// subtree, and that subtree contains media/ — the staging area for
+	// downloads, which can hold a lot of files; a command that touches no
+	// secret should not pay for that walk.
+	//
+	// Written as a denylist rather than a list of the commands that do harden:
+	// a subcommand added later must be hardened by default. Getting that wrong
+	// in this direction costs a tree walk on a command that prints usage;
+	// getting it wrong in the other direction is a silent read against the old
+	// DACL, with no error and nothing in the log.
 	switch os.Args[1] {
-	case "init", "activate", "login", "connect", "daemon":
-		hardenExistingSecrets()
+	case "version", "help", "-h", "--help":
+	default:
+		// `init --help`, `daemon --help` and the flag-based help for the rest
+		// are the same case: they print usage and exit without reading state.
+		if !wantsHelp(os.Args[2:]) {
+			hardenExistingSecrets()
+		}
 	}
 
 	switch os.Args[1] {
