@@ -186,11 +186,23 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 
    The account named is the **caller** — always, on every path. Ownership is
    a gate and never a grantee: `mayRestrict` decides *whether* a permission
-   write may happen, and it is asked once about the config directory, which
-   is what says whose install this is. If the install belongs to another
-   account, nothing is rewritten and a warning is logged; a service running
-   as LocalSystem pointed at the interactive user's profile therefore leaves
-   it alone instead of rewriting those secrets to SYSTEM-only.
+   write may happen, and it is asked about the object that can answer for the
+   set being written. For the config directory's secrets that is the
+   directory itself, which says whose install this is. For the database it is
+   `state.db`: `-wal` and `-shm` are deleted on the last connection close and
+   recreated on the next open, so they are owned by whoever opened it last
+   and can never be the authority, and the directory can be group-owned on an
+   install whose database is plainly ours. If the answer is another account,
+   nothing is rewritten and a warning is logged; a service running as
+   LocalSystem pointed at the interactive user's profile therefore leaves it
+   alone instead of rewriting those secrets to SYSTEM-only.
+
+   Creating takes nothing from anybody, so it is exempt on both paths: a
+   secret with nothing at its target path, and a database that does not exist
+   yet, are protected whatever the gate would say about the install. And
+   declining preserves rather than resets — `os.Rename` carries the temp
+   file's descriptor onto the target, so a protected target would otherwise
+   come back inherited on the next credential refresh.
 
    Both halves of that rule were learned the hard way and are worth keeping:
    granting the caller with no gate hands a service the user's credentials,

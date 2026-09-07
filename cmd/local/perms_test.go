@@ -14,13 +14,6 @@ import (
 // process umask — 0644 on a default account — and recreates the -wal/-shm
 // pair on every open, so narrowing them once at creation would not hold.
 func TestRestrictDBPerms(t *testing.T) {
-	// restrictDBPerms asks installRestrictable, which resolves the config
-	// directory from the home directory. Without this the gate would be
-	// answered about the developer's real install while the database under
-	// test lives in a temp dir — passing, or not, for reasons unrelated to
-	// what is asserted here.
-	setHome(t, t.TempDir())
-
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
 
@@ -292,7 +285,6 @@ func TestMayRestrictOwnDirectory(t *testing.T) {
 // narrowed like the database they carry the pages of.
 func TestDatabaseWeOwnIsProtectedOnAGroupOwnedInstall(t *testing.T) {
 	dir := t.TempDir()
-	setHome(t, t.TempDir())
 	dbPath := filepath.Join(dir, "state.db")
 	for _, p := range []string{dbPath, dbPath + "-wal"} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
@@ -344,6 +336,9 @@ func TestDeclinedGatePreservesTargetPermissions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			// writeFileAtomic asks installRestrictable, which resolves the
+			// config directory from home; without this the gate would be
+			// answered about the developer's real install.
 			setHome(t, t.TempDir())
 			path := filepath.Join(dir, "secret.json")
 			if err := os.WriteFile(path, []byte("old"), tc.seed); err != nil {

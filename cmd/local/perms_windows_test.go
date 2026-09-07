@@ -194,8 +194,6 @@ func assertGrantsOnlyCurrentUser(t *testing.T, path string, acl *windows.ACL) {
 // path as a wrapped syscall.Errno, which os.IsNotExist does not unwrap, so this
 // would fail if restrictDBPerms went back to the legacy helper.
 func TestRestrictDBPermsOnWindows(t *testing.T) {
-	setHome(t, t.TempDir())
-
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
 	for _, p := range []string{dbPath, dbPath + "-wal"} {

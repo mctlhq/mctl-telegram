@@ -244,11 +244,12 @@ var dbRestrictable = func(dbPath string) (bool, string, error) {
 	return allowed, owner, err
 }
 
-// installRestrictable answers whether this process may set permissions anywhere
-// in the install. The question is asked about the config directory and never
-// about an individual file: -wal and -shm are created by this process moments
-// before restrictDBPerms sees them, so a per-file answer says yes about exactly
-// the files the gate exists to protect.
+// installRestrictable answers whether this process may set permissions on the
+// secrets in the config directory, and is asked about the directory itself: it
+// is what says whose install this is, and its three secrets are written and
+// rewritten in place rather than recreated, so no one of them is a better
+// authority than the directory holding them. The database has its own — see
+// dbRestrictable, and the paragraph in restrictDBPerms for why the two differ.
 //
 // It is asked on each write rather than cached, because a cached verdict would
 // outlive the thing it describes; the repeated warning that would otherwise
