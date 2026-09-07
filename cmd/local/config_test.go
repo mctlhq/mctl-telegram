@@ -143,7 +143,7 @@ func TestLoadOrCreateDeviceIdentity_RepairsCorruptRecords(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			t.Setenv("HOME", dir)
+			setHome(t, dir)
 			writeRawDeviceRecord(t, &tc.rec)
 
 			rec, gotPriv, gotPub, err := loadOrCreateDeviceIdentity()
@@ -176,7 +176,7 @@ func TestLoadOrCreateDeviceIdentity_RepairsCorruptRecords(t *testing.T) {
 // existing server-side row bound to a different pubkey for that key yet.
 func TestLoadOrCreateDeviceIdentity_482CaseDoesNotRotateRegistrationKey(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	original := &deviceRecord{DeviceRegistrationKey: "original-482-key"}
 	writeRawDeviceRecord(t, original)
@@ -197,7 +197,7 @@ func TestLoadOrCreateDeviceIdentity_482CaseDoesNotRotateRegistrationKey(t *testi
 // bound to the old, discarded public key.
 func TestLoadOrCreateDeviceIdentity_CorruptionRotatesRegistrationKey(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	rec1, _, _, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -297,7 +297,7 @@ func TestDeviceCredentialUsable(t *testing.T) {
 
 func TestMergeDeviceCredential_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -328,7 +328,7 @@ func TestMergeDeviceCredential_HappyPath(t *testing.T) {
 // replaced the identity) must not be merged.
 func TestMergeDeviceCredential_AbandonsOnIdentityMismatch(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	if _, _, _, err := loadOrCreateDeviceIdentity(); err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
@@ -362,7 +362,7 @@ func TestMergeDeviceCredential_AbandonsOnIdentityMismatch(t *testing.T) {
 // expires LATER than the one being written must not be overwritten.
 func TestMergeDeviceCredential_DoesNotClobberNewerSameDeviceCredential(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, _, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -400,7 +400,7 @@ func TestMergeDeviceCredential_DoesNotClobberNewerSameDeviceCredential(t *testin
 // isolates the merge primitive itself).
 func TestMergeDeviceCredential_DifferentDeviceReplacesRegardlessOfExpiry(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, _, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {

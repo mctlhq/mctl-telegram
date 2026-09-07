@@ -12,7 +12,7 @@ import (
 // the failure they saw was "device credential refresh failed" against an
 // empty URL, which names neither the cause nor the fix.
 func TestServeDaemon_NoServerConfiguredIsNamed(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	if err := saveConfig(&localConfig{APIID: 1, APIHash: "h"}); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}

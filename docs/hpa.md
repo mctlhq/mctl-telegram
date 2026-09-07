@@ -103,10 +103,12 @@ The mctl-gitops kustomize base for this adapter configuration lives under
 
 ## Alerts
 
-Alert rules are defined in `deploy/alerts/mctl-telegram.rules.yaml` as a
-`monitoring.coreos.com/v1` `PrometheusRule` manifest. **That file is a
-non-deployed reference** — nothing applies it, and the three alerts below are
-live in no cluster. It covers:
+The three alerts below are live, defined as a `VMRule` in mctl-gitops at
+`platform-gitops/infra-components/observability/vm-rules/mctl-telegram-ops.yaml`.
+That directory is what ArgoCD reconciles, and it is the only path by which an
+alert reaches this cluster. `deploy/alerts/mctl-telegram.rules.yaml` in this
+repository holds the same expressions as a **non-deployed reference** — see the
+header comment in it before editing anything there.
 
 - **MctlTelegramPoolNearCapacity** (warning at >85%, critical at >95%) — fires
   when the session pool fills up and the cap is positive.
@@ -115,11 +117,13 @@ live in no cluster. It covers:
 - **MctlTelegramOAuthPendingStuck** (warning) — fires when more than 100
   OAuth authorization flows remain in-flight for 15 minutes or longer.
 
-To deploy them, port them into `mctl-gitops` as a `VMRule` under
-`platform-gitops/infra-components/observability/vm-rules/`, alongside
-`mctl-telegram-alerts.yaml`, `mctl-telegram-slo.yaml` and
-`mctl-telegram-canary.yaml`. That directory is what ArgoCD reconciles, and it
-is the only path by which an alert reaches this cluster.
+`MctlTelegramPoolNearCapacity` is deployed but **cannot currently fire**, and
+that is by design rather than a defect. Both of its rules carry
+`and mctl_telegram_pool_capacity > 0`, and the gauge reads `-1` whenever
+`TELEGRAM_MAX_SESSIONS` is 0 or unset, which is the case today. Deploying it
+now means that setting a cap is a configuration change and not also an
+alerting change. Until a cap is set, treat pool saturation as unmonitored: the
+rule exists, it is simply not covering anything yet.
 
 A one-off `kubectl apply` of the manifest here is not a deployment, and it does
 not clean itself up either. The applied object carries no ArgoCD tracking

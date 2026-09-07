@@ -128,7 +128,7 @@ func (s *fakeDevicePoPServer) writeCredentialResponse(w http.ResponseWriter, cal
 // expires_at/jti all populated.
 func TestBootstrapDeviceCredential_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -161,7 +161,7 @@ func TestBootstrapDeviceCredential_HappyPath(t *testing.T) {
 // 409 is handled as success.
 func TestBootstrapDeviceCredential_SecondRunIsNoOp(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -227,7 +227,7 @@ func TestBootstrapDeviceCredential_409RepairsHalfClaimedLineage(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			t.Setenv("HOME", dir)
+			setHome(t, dir)
 
 			_, priv, pub, err := loadOrCreateDeviceIdentity()
 			if err != nil {
@@ -281,7 +281,7 @@ func TestBootstrapDeviceCredential_409RepairsHalfClaimedLineage(t *testing.T) {
 // call.
 func TestBootstrapDeviceCredential_409WithUsableSameDeviceCredentialIsNoOp(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -314,7 +314,7 @@ func TestBootstrapDeviceCredential_409WithUsableSameDeviceCredentialIsNoOp(t *te
 // non-zero (return an error) and write NO credential file.
 func TestBootstrapDeviceCredential_RefreshFailureDuring409RepairFailsLoudly(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -348,7 +348,7 @@ func TestBootstrapDeviceCredential_RefreshFailureDuring409RepairFailsLoudly(t *t
 // naming the device as activated and the step as retryable.
 func TestBootstrapDeviceCredential_OtherFailureReportsActivatedButRetryable(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -230,7 +231,7 @@ func TestRunActivateFlow_UnknownDeviceCodeReportsExpired(t *testing.T) {
 // (no regeneration, no rotation) rather than generating a new one.
 func TestLoadOrCreateDeviceIdentity_PersistsAndReuses(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	rec1, priv1, pub1, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -268,8 +269,12 @@ func TestLoadOrCreateDeviceIdentity_PersistsAndReuses(t *testing.T) {
 	if statErr != nil {
 		t.Fatalf("device identity file not created at %s: %v", p, statErr)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("device identity file has mode %04o, want 0600", got)
+	// See assertMode in e2e_cli_daemon_test.go: NTFS has no POSIX mode, and the
+	// Windows gap is asserted directly in perms_windows_test.go.
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("device identity file has mode %04o, want 0600", got)
+		}
 	}
 }
 

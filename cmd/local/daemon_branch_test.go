@@ -15,7 +15,7 @@ import (
 // record present at all, the legacy path applies (nil, nil, nil).
 func TestSelectDeviceCredentialSource_NoFilesAtAll(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	rec, priv, err := selectDeviceCredentialSource()
 	if err != nil {
@@ -33,7 +33,7 @@ func TestSelectDeviceCredentialSource_NoFilesAtAll(t *testing.T) {
 // mutation this test is designed to catch.
 func TestSelectDeviceCredentialSource_IdentityOnlyUsesLegacyPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	rec, _, _, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -57,7 +57,7 @@ func TestSelectDeviceCredentialSource_IdentityOnlyUsesLegacyPath(t *testing.T) {
 // credential resolves to the device-signed path.
 func TestSelectDeviceCredentialSource_UsableCredentialUsesDeviceSignedPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, priv, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -89,7 +89,7 @@ func TestSelectDeviceCredentialSource_UsableCredentialUsesDeviceSignedPath(t *te
 // `activate`, NOT silently fall back to the legacy path and not panic.
 func TestSelectDeviceCredentialSource_CorruptKeyWithUsableCredentialErrors(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	_, _, pub, err := loadOrCreateDeviceIdentity()
 	if err != nil {
@@ -162,7 +162,7 @@ func makeTestJWT(t *testing.T, scopes []string) string {
 // into a dead service that only a human restart brings back.
 func TestRunDaemon_RefreshFailureRetriesInsteadOfExiting(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 
 	// A device record with usable key material and a usable credential, so the
 	// device-signed branch is the one taken -- pointed at a server that is not
