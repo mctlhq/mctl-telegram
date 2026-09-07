@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,22 @@ func aceAt(t *testing.T, acl *windows.ACL, i uint32) (uint8, uint8, *windows.SID
 		return ace.Header.AceType, ace.Header.AceFlags, nil
 	}
 	return ace.Header.AceType, ace.Header.AceFlags, (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+}
+
+// ownPath makes the current account the owner of path.
+//
+// The tests that exercise the repair need it because the gate asks whether this
+// account owns the install, and a GitHub runner's account is an elevated
+// administrator: files it creates are owned by BUILTIN\Administrators, a group,
+// which the gate deliberately refuses. Setting the owner to oneself needs no
+// privilege; setting it to somebody else would, which is why the divergent case
+// still cannot be built here.
+func ownPath(t *testing.T, path string) {
+	t.Helper()
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, testUserSID(t), nil, nil, nil); err != nil {
+		t.Fatalf("take ownership of %s: %v", path, err)
+	}
 }
 
 func testUserSID(t *testing.T) *windows.SID {
@@ -224,6 +241,9 @@ func TestHardenExistingSecretsOnWindows(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("seed config dir: %v", err)
 	}
+	// An install this account owns; see ownPath for why the runner does not
+	// produce one by itself.
+	ownPath(t, dir)
 	secrets := []string{configFileName, bridgeTokenName, deviceKeyName, "state.db", "state.db-wal"}
 	for _, name := range secrets {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
@@ -302,5 +322,40 @@ func TestInstallNotOursIsLeftAloneOnWindows(t *testing.T) {
 	}
 	if _, protected := dacl(t, filepath.Join(dir, bridgeTokenName)); protected {
 		t.Error("a refreshed bridge token carries a protected DACL; the refresh path is not behind the ownership gate")
+	}
+}
+
+// TestGateReadFailureLeavesReplacedSecretsAloneOnWindows is the sibling of the
+// unix TestGateReadFailureLeavesPermissionsAlone, on the path where it is
+// observable: a bridge token refresh replacing a secret that already exists.
+// Deleting the error branch of the gate in writeFileAtomic makes the error fall
+// through to the write, and this fires.
+func TestGateReadFailureLeavesReplacedSecretsAloneOnWindows(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	tokenPath := filepath.Join(dir, bridgeTokenName)
+	if err := os.WriteFile(tokenPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if _, protected := dacl(t, tokenPath); protected {
+		t.Skip("seeded file is already protected; the runner's profile ACL cannot exercise this")
+	}
+
+	restore := installRestrictable
+	installRestrictable = func() (bool, string, error) {
+		return false, "", errors.New("incorrect function")
+	}
+	t.Cleanup(func() { installRestrictable = restore })
+
+	if err := saveBridgeToken(&bridgeTokenFile{BridgeToken: "x"}); err != nil {
+		t.Fatalf("saveBridgeToken: %v", err)
+	}
+	if _, protected := dacl(t, tokenPath); protected {
+		t.Error("a replaced secret carries a protected DACL after an unanswerable ownership question")
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -41,23 +40,36 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		// deliver that, so the ACL is applied here — to the temp file, before
 		// the rename, so the secret never exists at its final path unprotected.
 		//
-		// Behind the same ownership gate as the other two permission writes,
-		// and this is the path that runs most often: os.Rename carries the temp
-		// file's security descriptor onto the final path, so a daemon under
-		// LocalSystem refreshing the bridge token would replace the interactive
-		// user's secret with one granting SYSTEM alone — on every reconnect,
-		// with hardenExistingSecrets and restrictDBPerms both correctly
-		// declining a few lines away. Declining here leaves the new file
-		// inheriting the config directory's ACL, which is the owner's.
-		allowed, owner, err := installRestrictable()
-		switch {
-		case err != nil && !errors.Is(err, os.ErrNotExist):
-			slog.Warn("could not check who owns this installation; leaving new file permissions alone",
-				"path", path, "err", err)
-		case err == nil && !allowed:
-			slog.Warn("this installation belongs to another account; leaving new file permissions alone",
-				"path", path, "owner", owner)
-		default:
+		// Replacing a secret that already exists goes behind the same ownership
+		// gate as the other two permission writes, and this is the path that
+		// runs most often: os.Rename carries the temp file's security
+		// descriptor onto the final path, so a daemon under LocalSystem
+		// refreshing the bridge token would replace the interactive user's
+		// secret with one granting SYSTEM alone — on every reconnect, with
+		// hardenExistingSecrets and restrictDBPerms both correctly declining a
+		// few lines away. Declining leaves the new file inheriting the config
+		// directory's ACL, which is the owner's.
+		//
+		// Creating one does not. There is nothing at the target path to take,
+		// and declining there would leave a freshly written token under the
+		// inherited ACL — the gap this change exists to close — on exactly the
+		// installs whose directory is group-owned and which therefore never get
+		// a repair pass at all.
+		secure := true
+		if _, err := os.Stat(path); err == nil {
+			allowed, owner, err := installRestrictable()
+			switch {
+			case err != nil && !errors.Is(err, os.ErrNotExist):
+				warnOnce("could not check who owns this installation; leaving replaced file permissions alone",
+					"err", err)
+				secure = false
+			case err == nil && !allowed:
+				warnOnce("this installation belongs to another account; leaving replaced file permissions alone",
+					"owner", owner)
+				secure = false
+			}
+		}
+		if secure {
 			if err := secureFile(tmpPath); err != nil {
 				return fmt.Errorf("restrict temp: %w", err)
 			}

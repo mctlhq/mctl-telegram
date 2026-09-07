@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -196,8 +197,31 @@ func main() {
 	}
 }
 
+// warnOnce logs a message the first time it is seen and swallows repeats.
+//
+// The ownership gate is asked on every write of the bridge token — roughly
+// every five minutes for the lifetime of the daemon — and on every device
+// record write, so a declined install would otherwise emit one identical
+// warning per reconnect. A warning is meant to be the signal to go and look;
+// one per attempt is a log line nobody reads.
+func warnOnce(msg string, args ...any) {
+	if _, seen := warned.LoadOrStore(msg, struct{}{}); seen {
+		return
+	}
+	slog.Warn(msg, args...)
+}
+
+var warned sync.Map
+
 // installRestrictable answers whether this process may set permissions anywhere
-// in the install, decided once from the config directory rather than per file.
+// in the install. The question is asked about the config directory and never
+// about an individual file: -wal and -shm are created by this process moments
+// before restrictDBPerms sees them, so a per-file answer says yes about exactly
+// the files the gate exists to protect.
+//
+// It is asked on each write rather than cached, because a cached verdict would
+// outlive the thing it describes; the repeated warning that would otherwise
+// produce is handled by warnOnce.
 //
 // It is a variable so a test can drive the branch it guards: the divergent case
 // needs a second account or SeRestorePrivilege, and without a seam, replacing

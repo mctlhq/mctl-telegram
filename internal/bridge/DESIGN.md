@@ -200,13 +200,19 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    or a `/COPYALL` restore would name an account nobody can act as, inside a
    PROTECTED DACL.
 
-   One consequence to know before debugging a support report: the gate uses
-   token membership, and a UAC-filtered token carries `Administrators` as
-   deny-only. An install created from an elevated shell is owned by
-   `Administrators`, so a later non-elevated run declines to repair and says
-   so in a warning. That is the safe direction — nothing is seized — but it
-   means "run `init` as Administrator" turns the repair into a no-op for
-   ordinary sessions.
+   The gate compares the owner to the caller's own SID. Token *membership*
+   was tried first and is too permissive in the direction that matters: a
+   LocalSystem service is a member of `BUILTIN\Administrators`, so a
+   group-owned install passed and the repair then granted SYSTEM alone.
+
+   One consequence to know before debugging a support report: an install
+   created from an elevated shell is owned by `Administrators`, a group, so
+   no session repairs it and every run says so in a warning (once per
+   process — the token is rewritten every few minutes and the warning would
+   otherwise repeat). Nothing is seized, and a **newly created** secret is
+   still protected: `writeFileAtomic` consults the gate only when something
+   already exists at the target path, because creating a file takes nothing
+   from anybody.
 4. **Closed for the self-service path by #484; still open, deliberately, for
    legacy `connect --token`.** `activate` never hands a user a token to
    paste: it mints its own device-bound credential end to end through the

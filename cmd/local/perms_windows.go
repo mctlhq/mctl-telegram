@@ -113,18 +113,19 @@ func ownerOnlyACL(path string, inheritance uint32) error {
 // BUILTIN\Administrators (S-1-5-32-544), and an owner-as-grantee rule handed
 // every secret to a group instead of to the user.
 //
-// Membership, not equality, for the same reason: the owner of a file an
-// elevated user creates is often the Administrators group rather than that
-// user, and the process token carries it.
+// Equality, not membership. Membership was tried and is too permissive in the
+// direction that matters: a LocalSystem service's token is a member of
+// BUILTIN\Administrators, so an install whose directory is group-owned — which
+// is what a machine's administrator creating it from an elevated shell produces
+// — passed the gate, and the repair then granted SYSTEM alone. The gate has to
+// answer "is this account the install's owner", and a group is not an account.
 //
-// The limit of that, stated because it decides a support report rather than
-// being a curiosity: CheckTokenMembership does not count a SID marked
-// SE_GROUP_USE_FOR_DENY_ONLY, and a UAC-filtered token carries Administrators
-// that way. So an install created from an elevated shell is owned by
-// Administrators, and every later non-elevated run declines to repair it and
-// logs the owner. That is the safe direction — declining changes nothing and
-// takes nothing away — but it does mean an install made with "run as
-// Administrator" gets no repair pass from an ordinary session.
+// The cost of the strict form, stated because it decides a support report: an
+// install created from an elevated shell is owned by Administrators, so no
+// session repairs it and every run says so in a warning. Nothing is seized and
+// nothing is taken away, and a newly created file is still protected — see
+// writeFileAtomic, which does not consult this gate when there is nothing at
+// the target path to take.
 func mayRestrict(path string) (bool, string, error) {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION)
@@ -141,18 +142,11 @@ func mayRestrict(path string) (bool, string, error) {
 		// explain nothing about why.
 		return false, "", fmt.Errorf("read owner of %s: the object carries no owner", path)
 	}
-	// Token(0), not OpenCurrentProcessToken: CheckTokenMembership requires an
-	// impersonation token and fails with ERROR_NO_IMPERSONATION_TOKEN on a
-	// primary one. The NULL handle makes Windows impersonate the calling
-	// thread's own token for the check, which is the documented way to ask this
-	// question from a process that is not impersonating anybody. Getting this
-	// wrong made the gate error every time and killed the whole Windows repair
-	// pass — CI caught it.
-	member, err := windows.Token(0).IsMember(owner)
+	self, err := currentUserSID()
 	if err != nil {
-		return false, "", fmt.Errorf("check membership of %s: %w", owner, err)
+		return false, owner.String(), err
 	}
-	return member, owner.String(), nil
+	return owner.Equals(self), owner.String(), nil
 }
 
 // currentUserSID reads the SID of the account this process runs as. The token
