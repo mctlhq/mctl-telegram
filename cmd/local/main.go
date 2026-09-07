@@ -116,11 +116,19 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
-	hardenExistingSecrets()
-
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
 		os.Exit(2)
+	}
+
+	// Only the subcommands that read or write local state. On Windows,
+	// securing the config directory propagates the inheritable ACEs down the
+	// whole subtree, and that subtree contains media/ — the staging area for
+	// downloads, which can hold a lot of files. `version` and `help` touch no
+	// secret and should not pay for a tree walk.
+	switch os.Args[1] {
+	case "init", "activate", "login", "connect", "daemon":
+		hardenExistingSecrets()
 	}
 
 	switch os.Args[1] {
@@ -182,6 +190,11 @@ func hardenExistingSecrets() {
 		return
 	}
 	if _, err := os.Stat(dir); err != nil {
+		// A directory that exists but cannot be stat'd is exactly the case
+		// worth naming; a missing one is the normal pre-install state.
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not check the config directory", "path", dir, "err", err)
+		}
 		return
 	}
 	if err := secureDir(dir); err != nil {

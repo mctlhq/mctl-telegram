@@ -200,3 +200,51 @@ func TestRestrictDBPermsOnWindows(t *testing.T) {
 		assertGrantsOnlyCurrentUser(t, p, acl)
 	}
 }
+
+// TestHardenExistingSecretsOnWindows is the counterpart of
+// TestHardenExistingSecretsTightensAnUpgradedInstall in perms_test.go, which
+// asserts modes and therefore cannot run here — on the one platform the repair
+// exists for.
+//
+// It seeds a config directory the way an upgrade from a pre-#563 release leaves
+// it: created and written by code that knows nothing about ACLs, so every file
+// carries the temp directory's inherited, unprotected DACL. What it pins is the
+// part inheritance alone does not give you — the explicit pass over the three
+// known secrets. Dropping that loop and relying on propagation from secureDir
+// fails this test for any child whose DACL is already protected.
+func TestHardenExistingSecretsOnWindows(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	dir := filepath.Join(home, ".config", "mctl-telegram-local")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	secrets := []string{configFileName, bridgeTokenName, deviceKeyName, "state.db", "state.db-wal"}
+	for _, name := range secrets {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	// The premise of the test: before hardening, these carry the profile's
+	// inherited ACL, which grants more than this account.
+	if acl, protected := dacl(t, filepath.Join(dir, configFileName)); protected && acl.AceCount == 1 {
+		t.Skip("seeded files are already owner-only; the runner's profile ACL cannot exercise the repair")
+	}
+
+	hardenExistingSecrets()
+
+	acl, protected := dacl(t, dir)
+	if !protected {
+		t.Error("config directory DACL is not protected after the repair pass")
+	}
+	assertGrantsOnlyCurrentUser(t, dir, acl)
+	for _, name := range secrets {
+		p := filepath.Join(dir, name)
+		fileACL, fileProtected := dacl(t, p)
+		if !fileProtected {
+			t.Errorf("%s: DACL is not protected after the repair pass", name)
+		}
+		assertGrantsOnlyCurrentUser(t, p, fileACL)
+	}
+}
