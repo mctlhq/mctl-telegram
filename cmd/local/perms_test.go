@@ -85,9 +85,11 @@ func TestHardenExistingSecretsTightensAnUpgradedInstall(t *testing.T) {
 	}
 }
 
-// TestHardenExistingSecretsDoesNotCreateTheConfigDir pins the other half: it
-// runs on `version` and `help` and before a first `init`, and must not leave a
-// directory behind for a user who has not installed anything.
+// TestHardenExistingSecretsDoesNotCreateTheConfigDir pins the other half: on a
+// machine with no install it must not leave a directory behind. shouldHarden
+// keeps `version` and `help` away from it entirely, so the case that actually
+// reaches here is a first `init` — which creates the directory when it saves,
+// not before.
 func TestHardenExistingSecretsDoesNotCreateTheConfigDir(t *testing.T) {
 	home := t.TempDir()
 	setHome(t, home)

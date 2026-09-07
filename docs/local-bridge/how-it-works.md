@@ -59,7 +59,10 @@ files and the folder holding them instead carry an explicit permission
 entry naming your account and nobody else — not even Administrators or
 SYSTEM, which means a daemon you install as a Windows *service* running
 as LocalSystem will not be able to read credentials you created as
-yourself.
+yourself. That entry stops the ordinary permission check and nothing
+more: an administrator of the machine can still read the files by other
+means, so the protection is against another ordinary account on the same
+computer, not against whoever administers it.
 
 `revoke_local_bridge_device` denylists the `jti` claimed at first
 issuance. Every later refresh carries that same `jti` forward, so

@@ -94,6 +94,37 @@ This command starts the daemon. --help only prints this text.
 // wantsHelp reports whether args ask for usage. Used by init and daemon,
 // which have no FlagSet of their own — without this, `init --help` and
 // `daemon --help` start those commands instead of showing help.
+// shouldHarden reports whether this invocation reaches local state and must
+// therefore repair its permissions first. It takes os.Args[1:] so the rule is
+// testable; inline in main() nothing could reach it.
+//
+// A denylist, not a list of the commands that do harden: a subcommand added
+// later must be hardened by default. The asymmetry is the whole argument —
+// getting it wrong in this direction costs a tree walk on a command that prints
+// usage, because securing the config directory on Windows re-propagates the
+// inheritable ACEs over everything under it, media/ included. Getting it wrong
+// in the other direction is a read against the old DACL with no error and
+// nothing in the log.
+//
+// The help skip covers only the two subcommands whose usage main() prints
+// itself, before dispatch. For login, activate and connect the FlagSet decides,
+// and it does not agree with a raw argv scan: `login --phone -h` consumes -h as
+// the value of --phone, so the run continues into loadConfig and openLocalStore.
+// Those are hardened rather than guessed about — a wasted walk on a
+// pathological command line is the acceptable half of the trade.
+func shouldHarden(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "version", "help", "-h", "--help":
+		return false
+	case "init", "daemon":
+		return !wantsHelp(args[1:])
+	}
+	return true
+}
+
 func wantsHelp(args []string) bool {
 	for _, a := range args {
 		if a == "--" {
@@ -121,25 +152,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Everything except the paths that only print text. On Windows, securing
-	// the config directory propagates the inheritable ACEs down the whole
-	// subtree, and that subtree contains media/ — the staging area for
-	// downloads, which can hold a lot of files; a command that touches no
-	// secret should not pay for that walk.
-	//
-	// Written as a denylist rather than a list of the commands that do harden:
-	// a subcommand added later must be hardened by default. Getting that wrong
-	// in this direction costs a tree walk on a command that prints usage;
-	// getting it wrong in the other direction is a silent read against the old
-	// DACL, with no error and nothing in the log.
-	switch os.Args[1] {
-	case "version", "help", "-h", "--help":
-	default:
-		// `init --help`, `daemon --help` and the flag-based help for the rest
-		// are the same case: they print usage and exit without reading state.
-		if !wantsHelp(os.Args[2:]) {
-			hardenExistingSecrets()
-		}
+	if shouldHarden(os.Args[1:]) {
+		hardenExistingSecrets()
 	}
 
 	switch os.Args[1] {
@@ -188,8 +202,10 @@ func main() {
 // propagation, so inheritance alone would leave it as it was.
 //
 // It never creates the config directory. A missing one means there is nothing
-// to repair yet — `version`, `help` and a first `init` must not leave a
-// directory behind — and `init` creates it through mkdirSecure when it writes.
+// to repair yet, and a first `init` — the one caller that reaches here with no
+// install, since shouldHarden already turns `version` and `help` away — must not
+// leave a directory behind before it has written anything. `init` creates it
+// through mkdirSecure when it saves.
 //
 // Failures warn rather than exit. This runs on a daemon that may already hold a
 // working session, and refusing to start because a permission could not be

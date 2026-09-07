@@ -29,9 +29,15 @@ import (
 // trade rather than an oversight: SYSTEM and Administrators get no ACE. A
 // daemon started as a Windows service under LocalSystem therefore cannot read a
 // token written by the interactive user, which is the intended consequence of
-// the secrets belonging to one human account. An administrator can still take
-// ownership of the files, as always on Windows; that is a visible, audited act
-// rather than a silent read.
+// the secrets belonging to one human account.
+//
+// What it protects against is the ordinary access check, and no more. An
+// elevated administrator can still read these files without touching the DACL
+// at all — SeBackupPrivilege opens them with backup semantics, and taking
+// ownership is available as well; nothing here installs a SACL, so neither is
+// audited unless the machine's audit policy says so independently. The
+// threat model is another unprivileged account on the same machine, not the
+// machine's administrator.
 func secureFile(path string) error { return ownerOnlyACL(path, windows.NO_INHERITANCE) }
 
 // secureDir makes the ACE inheritable, which is what keeps files created inside
