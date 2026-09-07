@@ -22,20 +22,20 @@ func TestParseIdentity(t *testing.T) {
 	}{
 		{
 			name:     "string id — Telegram's actual shape (spike #48)",
-			claims:   idTokenClaims{ID: json.RawMessage(`"210408407"`), Sub: "1234567890123456789"},
-			wantTGID: 210408407,
+			claims:   idTokenClaims{ID: json.RawMessage(`"500100101"`), Sub: "1234567890123456789"},
+			wantTGID: 500100101,
 			wantSub:  "1234567890123456789",
 		},
 		{
 			name:     "numeric id — tolerated fallback",
-			claims:   idTokenClaims{ID: json.RawMessage(`210408407`), Sub: "s"},
-			wantTGID: 210408407,
+			claims:   idTokenClaims{ID: json.RawMessage(`500100101`), Sub: "s"},
+			wantTGID: 500100101,
 			wantSub:  "s",
 		},
 		{
 			name:     "string id with surrounding whitespace",
-			claims:   idTokenClaims{ID: json.RawMessage(` "210408407" `), Sub: "s"},
-			wantTGID: 210408407,
+			claims:   idTokenClaims{ID: json.RawMessage(` "500100101" `), Sub: "s"},
+			wantTGID: 500100101,
 			wantSub:  "s",
 		},
 		{
@@ -75,7 +75,7 @@ func TestParseIdentity(t *testing.T) {
 		},
 		{
 			name:    "float id — rejected",
-			claims:  idTokenClaims{ID: json.RawMessage(`210408407.5`), Sub: "s"},
+			claims:  idTokenClaims{ID: json.RawMessage(`500100101.5`), Sub: "s"},
 			wantErr: true,
 		},
 	}

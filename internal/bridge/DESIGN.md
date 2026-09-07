@@ -46,12 +46,18 @@ credential lifecycle".
 
 ### Server-side
 
-- **Schema columns**: `telegram_accounts.mode` (`'hosted' | 'local'`,
-  default `'hosted'`) and `telegram_accounts.bridge_token_hash`
-  (`db.go:308,368`). `mode` is the live switch. `bridge_token_hash` is
-  **dead schema**: it is created and migrated (`db.go:116-124`) and never
-  read or written by any code path. Either wire it up or drop it; leaving
-  it suggests a registration check that does not exist.
+- **Schema column**: `telegram_accounts.mode` (`'hosted' | 'local'`,
+  default `'hosted'`) is the live switch, and the only column on that
+  table the bridge reads.
+
+  A sibling `bridge_token_hash` column was declared next to it and never
+  read or written; it is **dropped**, by `dropLegacyColumns` in
+  `internal/db/db.go`, on both dialects. Do not reintroduce it: binding a
+  registered daemon to an issued credential is
+  `local_bridge_devices.current_jti` / `credential_issued_at`, which is per
+  *device* — the granularity the question has — while a column on
+  `telegram_accounts` is per account and cannot represent a user's second
+  daemon at all.
 - **Audit column**: `audit_logs.call_path TEXT DEFAULT 'hosted'`
   distinguishes relay-forwarded calls (`'local'`) from server-side
   hosted calls (`'hosted'`). Included in the hash-chain canonical input
@@ -219,8 +225,14 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    both sweeps unconditionally — the exemption list is no longer required
    for Local Bridge accounts (it remains available for its original,
    unrelated use: long-lived hosted operator/service identities).
-3. **`bridge_token_hash` is never written**, so nothing ties a
-   registered daemon to a specific issued token.
+3. **Fixed (issue #481, then issue #138). Nothing tied a registered daemon
+   to a specific issued token.** The `bridge_token_hash` column declared for
+   it was never written. The binding now exists at device granularity —
+   `local_bridge_devices.current_jti` / `credential_issued_at`, claimed
+   atomically at first issuance, carried forward unchanged by every PoP
+   refresh, and denylisted wholesale by `revoke_local_bridge_device` — and
+   the unused column has been dropped rather than wired up, because it
+   would have been a coarser second answer to a question already answered.
 4. **The relay must run at one replica.** The Hub is in-process, so a
    daemon is reachable only from the pod that holds its websocket. The
    deployment is `strategy: Recreate` with no replica override, which

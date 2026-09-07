@@ -43,7 +43,7 @@ type fakeAuthenticator struct {
 
 func newFakeAuthenticator() *fakeAuthenticator {
 	return &fakeAuthenticator{
-		identity: &telegramoidc.Identity{TelegramID: 210408407, Username: "MashkovD", FirstName: "Dmitry"},
+		identity: &telegramoidc.Identity{TelegramID: 500100101, Username: "dana_tg", FirstName: "Dana"},
 	}
 }
 
@@ -91,7 +91,7 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 		Issuer:              testIssuer,
 		JWTSecret:           testJWTSecret,
 		TelegramOIDC:        newFakeAuthenticator(),
-		AdminTelegramIDs:    map[int64]bool{210408407: true},
+		AdminTelegramIDs:    map[int64]bool{500100101: true},
 		AccessTokenTTL:      1 * time.Hour,
 		CodeTTL:             1 * time.Minute,
 		AllowImplicitClient: true,
@@ -197,7 +197,7 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	// A returning admin already has an MTProto session, so the OIDC callback
 	// issues a code directly. A first-time admin without one is routed through
 	// enable_access instead (see enable_access_test.go).
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	// 1. /oauth/authorize — 302 to Telegram, carrying the server state.
 	verifier, challenge := pkceVerifierAndChallenge()
@@ -245,10 +245,10 @@ func TestFullFlow_PKCEHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify access_token: %v", err)
 	}
-	if c.TelegramID != 210408407 {
+	if c.TelegramID != 500100101 {
 		t.Errorf("TelegramID = %d", c.TelegramID)
 	}
-	if c.Subject != "tg:210408407" {
+	if c.Subject != "tg:500100101" {
 		t.Errorf("Subject = %q", c.Subject)
 	}
 	// Admin allowlist → expect full scopes.
@@ -264,7 +264,7 @@ func TestIssueAuthCode_ExternalRendersInterstitial(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	_, challenge := pkceVerifierAndChallenge()
 	state := stateFromAuthorize(t, mux, challenge)
@@ -316,7 +316,7 @@ func TestDoublePKCE_LegsIndependent(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	clientVerifier, clientChallenge := pkceVerifierAndChallenge()
 	state := stateFromAuthorize(t, mux, clientChallenge)
@@ -1152,7 +1152,7 @@ func TestExchangeConnect_ValidFlow(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	// Drive authorize using the connect client.
 	verifier, challenge := pkceVerifierAndChallenge()
@@ -1204,7 +1204,7 @@ func TestExchangeConnect_WrongVerifier(t *testing.T) {
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	_, challenge := pkceVerifierAndChallenge()
 	connectRedirect := testIssuer + "/telegram/connect/done"
@@ -1243,7 +1243,7 @@ func TestExchangeConnect_ExpiredCode(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.CodeTTL = 1 * time.Second })
 	mux := newMockRouter()
 	srv.Register(mux)
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 
 	verifier, challenge := pkceVerifierAndChallenge()
 	connectRedirect := testIssuer + "/telegram/connect/done"
@@ -1310,11 +1310,11 @@ type codeState struct {
 
 // obtainAuthorizationCode runs authorize + the Telegram OIDC callback and
 // returns the issued authorization_code. The fake authenticator resolves the
-// returning admin (210408407); seedSession gives that admin a session so the
+// returning admin (500100101); seedSession gives that admin a session so the
 // callback issues a code directly instead of diverting into enable_access.
 func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challenge string) codeState {
 	t.Helper()
-	seedSession(t, srv, 210408407)
+	seedSession(t, srv, 500100101)
 	state := stateFromAuthorize(t, mux, challenge)
 	loc := authCodeRedirect(t, callbackWithState(t, mux, state))
 	return codeState{code: loc.Query().Get("code")}

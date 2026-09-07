@@ -253,7 +253,7 @@ func TestActivation_HappyPath_ProvisionsAccountAndDevice(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
 
-	const claimedID = int64(210408407) // matches fakeAuthenticator's default identity
+	const claimedID = int64(500100101) // matches fakeAuthenticator's default identity
 	start, consent := driveToConsent(t, ts, client, claimedID, "device-key-1")
 
 	approveResp := activateApprove(t, ts, client, consent.UserCode, consent.ConsentToken)
@@ -338,7 +338,7 @@ func TestActivation_HappyPath_ProvisionsAccountAndDevice(t *testing.T) {
 // message with a generic one must fail this test.
 func TestActivateStart_RequiresDevicePubkey(t *testing.T) {
 	srv, _ := newActivationHTTPServer(t)
-	body := `{"telegram_id":210408407,"device_registration_key":"no-pubkey-key","device_label":"l"}`
+	body := `{"telegram_id":500100101,"device_registration_key":"no-pubkey-key","device_label":"l"}`
 	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
 	r.RemoteAddr = "203.0.113.50:1000"
 	rec := httptest.NewRecorder()
@@ -359,7 +359,7 @@ func TestActivateStart_RequiresDevicePubkey(t *testing.T) {
 // same way as a missing one.
 func TestActivateStart_RejectsMalformedDevicePubkey(t *testing.T) {
 	srv, _ := newActivationHTTPServer(t)
-	body := `{"telegram_id":210408407,"device_registration_key":"bad-pubkey-key","device_label":"l","device_pubkey":"dG9vc2hvcnQ="}`
+	body := `{"telegram_id":500100101,"device_registration_key":"bad-pubkey-key","device_label":"l","device_pubkey":"dG9vc2hvcnQ="}`
 	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
 	r.RemoteAddr = "203.0.113.51:1000"
 	rec := httptest.NewRecorder()
@@ -375,7 +375,7 @@ func TestActivateStart_RejectsMalformedDevicePubkey(t *testing.T) {
 func TestActivation_IdempotentRetry_SameDeviceKey(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	const claimedID = int64(210408407)
+	const claimedID = int64(500100101)
 
 	for i := 0; i < 2; i++ {
 		_, consent := driveToConsent(t, ts, client, claimedID, "retry-key")
@@ -408,7 +408,7 @@ func TestActivation_ClaimedVsVerifiedMismatch_NoWrites(t *testing.T) {
 
 	before := snapshotDB(t, srv)
 
-	// fakeAuthenticator's default identity verifies as 210408407; claim a
+	// fakeAuthenticator's default identity verifies as 500100101; claim a
 	// different id so the callback's mismatch guard fires.
 	start := activateStart(t, ts, client, 999999999, "mismatch-key")
 	csrf := activationFormCSRF(t, ts, client)
@@ -439,7 +439,7 @@ func TestActivation_ClaimedVsVerifiedMismatch_NoWrites(t *testing.T) {
 func TestActivation_HostedAccountRefused(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	const claimedID = int64(210408407)
+	const claimedID = int64(500100101)
 
 	seedSession(t, srv, claimedID) // inserts an active mode='hosted' row
 
@@ -477,7 +477,7 @@ func TestActivation_Poll_UnknownDeviceCode(t *testing.T) {
 func TestActivation_Poll_BeforeBrowserLeg(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	start := activateStart(t, ts, client, 210408407, "pending-key")
+	start := activateStart(t, ts, client, 500100101, "pending-key")
 	status, poll := activatePoll(t, ts, client, start["device_code"].(string))
 	if status != http.StatusOK || poll["status"] != "pending" {
 		t.Errorf("poll before browser leg = %d %#v, want 200 pending", status, poll)
@@ -491,7 +491,7 @@ func TestActivation_Expiry(t *testing.T) {
 		c.ActivationTTL = 10 * time.Millisecond
 	})
 	client := newActivationClient(t)
-	start := activateStart(t, ts, client, 210408407, "expiring-key")
+	start := activateStart(t, ts, client, 500100101, "expiring-key")
 	time.Sleep(30 * time.Millisecond)
 
 	status, poll := activatePoll(t, ts, client, start["device_code"].(string))
@@ -527,7 +527,7 @@ func TestActivation_PhishingGuard_NoConsentNoWrite(t *testing.T) {
 	// fakeAuthenticator's canned identity) with the attacker's own device
 	// key, then drives the browser leg to completion -- claimed == verified,
 	// so the mismatch guard in finishActivation never fires.
-	start, _ := driveToConsent(t, ts, client, 210408407, "attacker-device-key")
+	start, _ := driveToConsent(t, ts, client, 500100101, "attacker-device-key")
 
 	status, poll := activatePoll(t, ts, client, start["device_code"].(string))
 	if poll["status"] == "done" {
@@ -547,7 +547,7 @@ func TestActivation_ConsentTokenCannotBeForgedOrReplayed(t *testing.T) {
 	client := newActivationClient(t)
 	before := snapshotDB(t, srv)
 
-	_, consent := driveToConsent(t, ts, client, 210408407, "forge-key")
+	_, consent := driveToConsent(t, ts, client, 500100101, "forge-key")
 
 	for _, tok := range []string{"", "wrong-token", consent.ConsentToken + "x"} {
 		resp := activateApprove(t, ts, client, consent.UserCode, tok)
@@ -637,7 +637,7 @@ func activationErrorMessage(t *testing.T, body []byte) string {
 func TestActivation_DoubleApprovalProvisionsOnce(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	_, consent := driveToConsent(t, ts, client, 210408407, "concurrent-key")
+	_, consent := driveToConsent(t, ts, client, 500100101, "concurrent-key")
 
 	var wg sync.WaitGroup
 	statuses := make([]int, 2)
@@ -683,7 +683,7 @@ func TestActivation_NoIndexLeaks(t *testing.T) {
 	client := newActivationClient(t)
 
 	// Resolution (done).
-	start, consent := driveToConsent(t, ts, client, 210408407, "leak-key-done")
+	start, consent := driveToConsent(t, ts, client, 500100101, "leak-key-done")
 	resp := activateApprove(t, ts, client, consent.UserCode, consent.ConsentToken)
 	resp.Body.Close()
 
@@ -751,7 +751,7 @@ func TestActivation_RaceDetector_PollAndBrowserLegConcurrent(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t, func(c *Config) { c.TelegramOIDC = gated })
 	client := newActivationClient(t)
 
-	start := activateStart(t, ts, client, 210408407, "race-key")
+	start := activateStart(t, ts, client, 500100101, "race-key")
 	csrf := activationFormCSRF(t, ts, client)
 	verifyResp := activateVerify(t, ts, client, start["user_code"].(string), csrf)
 	state := stateFromLocation(t, verifyResp.Header.Get("Location"))
@@ -786,7 +786,7 @@ func TestActivation_RaceDetector_SecondVerifyDuringExchange(t *testing.T) {
 	_, ts := newActivationHTTPServer(t, func(c *Config) { c.TelegramOIDC = gated })
 	client := newActivationClient(t)
 
-	start := activateStart(t, ts, client, 210408407, "race-key-2")
+	start := activateStart(t, ts, client, 500100101, "race-key-2")
 	csrf := activationFormCSRF(t, ts, client)
 	verifyResp := activateVerify(t, ts, client, start["user_code"].(string), csrf)
 	state := stateFromLocation(t, verifyResp.Header.Get("Location"))
@@ -822,7 +822,7 @@ func TestActivation_LoginCSRF_NotTransferableBetweenBrowsers(t *testing.T) {
 	browserA := newActivationClient(t)
 	browserB := newActivationClient(t)
 
-	start := activateStart(t, ts, browserA, 210408407, "csrf-key")
+	start := activateStart(t, ts, browserA, 500100101, "csrf-key")
 	csrf := activationFormCSRF(t, ts, browserA)
 	verifyResp := activateVerify(t, ts, browserA, start["user_code"].(string), csrf)
 	state := stateFromLocation(t, verifyResp.Header.Get("Location"))
@@ -853,7 +853,7 @@ func TestActivation_StateCookieReachesCallback(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
 
-	_, consent := driveToConsent(t, ts, client, 210408407, "cookie-key")
+	_, consent := driveToConsent(t, ts, client, 500100101, "cookie-key")
 	if consent.ConsentToken == "" {
 		t.Fatal("expected consent page after single-jar round trip")
 	}
@@ -920,7 +920,7 @@ func TestActivation_RateLimitKeying_TrustedProxyAware(t *testing.T) {
 func TestActivation_CodeFormCSRF(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	start := activateStart(t, ts, client, 210408407, "csrf-form-key")
+	start := activateStart(t, ts, client, 500100101, "csrf-form-key")
 
 	// Prime the cookie jar with a valid CSRF cookie, but post a form with NO
 	// csrf_token field at all.
@@ -961,7 +961,7 @@ func TestActivation_PollNeverLeaksInternalStatus(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
 
-	start, _ := driveToConsent(t, ts, client, 210408407, "internal-status-key")
+	start, _ := driveToConsent(t, ts, client, 500100101, "internal-status-key")
 	status, poll := activatePoll(t, ts, client, start["device_code"].(string))
 	if status != http.StatusOK || poll["status"] != "pending" {
 		t.Errorf("poll while awaiting_consent = %d %#v, want pending", status, poll)
@@ -1012,7 +1012,7 @@ func TestActivation_UserCodeCollisionRegenerates(t *testing.T) {
 func TestActivation_StoreFailureLeavesUsableRetry(t *testing.T) {
 	srv, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
-	_, consent := driveToConsent(t, ts, client, 210408407, "retry-store-key")
+	_, consent := driveToConsent(t, ts, client, 500100101, "retry-store-key")
 
 	// Force EnsureUserByTelegramID (the first store call in the approve
 	// path) to fail once by closing the underlying DB connection's ability
@@ -1059,7 +1059,7 @@ func TestActivation_ReopenFormResumesAwaitingConsent(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
 
-	start, consent1 := driveToConsent(t, ts, client, 210408407, "resume-key")
+	start, consent1 := driveToConsent(t, ts, client, 500100101, "resume-key")
 
 	// Submit the SAME user_code again instead of using the consent page.
 	csrf := activationFormCSRF(t, ts, client)
@@ -1089,7 +1089,7 @@ func TestActivation_Deny_LeavesDatabaseUntouched(t *testing.T) {
 	client := newActivationClient(t)
 	before := snapshotDB(t, srv)
 
-	start, consent := driveToConsent(t, ts, client, 210408407, "deny-key")
+	start, consent := driveToConsent(t, ts, client, 500100101, "deny-key")
 	resp := activateDeny(t, ts, client, consent.UserCode, consent.ConsentToken)
 	resp.Body.Close()
 
@@ -1109,7 +1109,7 @@ func TestActivation_Deny_LeavesDatabaseUntouched(t *testing.T) {
 // recorder plus the minted device_code (empty when the request was refused).
 func startActivationFrom(t *testing.T, srv *Server, remoteAddr, regKey string) (*httptest.ResponseRecorder, string) {
 	t.Helper()
-	body := `{"telegram_id":210408407,"device_registration_key":"` + regKey + `","device_label":"l","device_pubkey":"` + testDevicePubkeyB64(t) + `"}`
+	body := `{"telegram_id":500100101,"device_registration_key":"` + regKey + `","device_label":"l","device_pubkey":"` + testDevicePubkeyB64(t) + `"}`
 	r := httptest.NewRequest("POST", "/api/local-bridge/activate/start", strings.NewReader(body))
 	r.RemoteAddr = remoteAddr
 	rec := httptest.NewRecorder()
@@ -1392,7 +1392,7 @@ func TestActivation_ConsentCannotBeResumedFromAnotherBrowser(t *testing.T) {
 
 	// The victim completes the Telegram leg; the activation now sits in
 	// awaiting_consent with nothing written.
-	start, victimConsent := driveToConsent(t, ts, victim, 210408407, "attacker-device-key")
+	start, victimConsent := driveToConsent(t, ts, victim, 500100101, "attacker-device-key")
 	userCode := start["user_code"].(string)
 
 	// The attacker re-presents the code from a browser that never did the
@@ -1432,7 +1432,7 @@ func TestActivation_ConsentResumesInTheSameBrowser(t *testing.T) {
 	_, ts := newActivationHTTPServer(t)
 	client := newActivationClient(t)
 
-	start, first := driveToConsent(t, ts, client, 210408407, "resume-key")
+	start, first := driveToConsent(t, ts, client, 500100101, "resume-key")
 	csrf := activationFormCSRF(t, ts, client)
 	resp := activateVerify(t, ts, client, start["user_code"].(string), csrf)
 	defer resp.Body.Close()

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	demoTGID     = 210408407 // matches newFakeAuthenticator + admin allowlist
+	demoTGID     = 500100101 // matches newFakeAuthenticator + admin allowlist
 	demoUser     = "openai-reviewer"
 	demoPass     = "s3cret-review-pw"
 	demoCliState = "client-state-abc"

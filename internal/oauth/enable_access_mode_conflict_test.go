@@ -38,14 +38,14 @@ func TestEnableAccess_LocalModeConflict_SurfacesSpecificMessage(t *testing.T) {
 	}
 
 	// Simulate the race: self-service activation provisions an active
-	// mode='local' row for the same widget-proven user (210408407) while the
+	// mode='local' row for the same widget-proven user (500100101) while the
 	// phone/code flow above is still in progress.
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -131,11 +131,11 @@ func TestEnableAccess_LocalModeConflict_RefusedBeforeLogin(t *testing.T) {
 	es := driveToPhone(t, mux)
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 	esTok := driveToPhone(t, mux)
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 		t.Fatal("handleEnableStart never reached startLoginFlow; the pre-flight gate refused instead, so this test is not exercising the re-check")
 	}
 
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		ul.Unlock()
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
@@ -290,11 +290,11 @@ func TestEnableAccess_TerminalRefusalInPasswordStep_ResetsStep(t *testing.T) {
 	// The local row lands while the 2FA screen is up, so the refusal comes out
 	// of handleEnablePassword rather than handleEnableCode.
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -342,11 +342,11 @@ func TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -511,6 +511,12 @@ func TestEnableAccess_TerminalMessageDoesNotOutliveItsCondition(t *testing.T) {
 // A store failure knows only "unknown", and "unknown" must not outrank the
 // retry it offers: leaving a cached refusal on file would let a step fallback
 // replay it to an account that has since been switched back to hosted.
+//
+// This is also the pin for the hoisted clear at the top of handleEnableStart:
+// the only /start calls below are the terminal refusal that sets the message
+// and the mode-check failure that must drop it, so no successful pass-through
+// can account for the message being gone. Deleting the hoisted clear turns
+// this test red.
 func TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
 	esTok := driveToPhone(t, mux)
@@ -592,19 +598,19 @@ func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) 
 			`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username,
 			                               session_encrypted, mode, send_enabled, connected_at)
 			 VALUES ($1, $2, $3, $4, NULL, $5, $6, CURRENT_TIMESTAMP)`,
-			uid, 210408407, "Dmitry", "MashkovD", db.ModeLocal, false); err != nil {
+			uid, 500100101, "Dana", "dana_tg", db.ModeLocal, false); err != nil {
 			return 0, "", "", err
 		}
-		return 210408407, "Dmitry", "MashkovD", nil
+		return 500100101, "Dana", "dana_tg", nil
 	})
 	esTok := driveToPhone(t, mux)
 
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
 	// The hosted row the login's bytes will land on.
-	if err := srv.store.SaveSession(ctx, uid, []byte("previous-session"), 210408407, "Dmitry", "MashkovD"); err != nil {
+	if err := srv.store.SaveSession(ctx, uid, []byte("previous-session"), 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("SaveSession: %v", err)
 	}
 
@@ -659,11 +665,11 @@ func TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge(t *testing.T) {
 	// The bridge row lands in the race window, exactly as in the other
 	// mode-conflict tests.
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -715,11 +721,11 @@ func TestEnableAccess_IdentityMismatch_UnknownRevokesTheBridge(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -789,11 +795,11 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 	}
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -839,11 +845,11 @@ func TestEnableAccess_IdentityMismatch_LocalCleanupFailureSurfaces(t *testing.T)
 	}
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
@@ -874,11 +880,11 @@ func TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry(t *testin
 	}
 
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 210408407, "MashkovD", "Dmitry")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 210408407, "MashkovD", "Dmitry"); err != nil {
+	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 

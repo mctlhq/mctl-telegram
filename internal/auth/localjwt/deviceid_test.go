@@ -73,9 +73,9 @@ func TestVerify_LegacyTokenWithoutDeviceID(t *testing.T) {
 	now := time.Now()
 	legacyPayload := map[string]any{
 		"iss":         testIssuer,
-		"sub":         "tg:210408407",
-		"tg_id":       210408407,
-		"tg_username": "MashkovD",
+		"sub":         "tg:500100101",
+		"tg_id":       500100101,
+		"tg_username": "dana_tg",
 		"iat":         now.Unix(),
 		"exp":         now.Add(1 * time.Hour).Unix(),
 		// Deliberately no "device_id" key -- this is what every token minted
@@ -89,13 +89,13 @@ func TestVerify_LegacyTokenWithoutDeviceID(t *testing.T) {
 	if c.DeviceID != "" {
 		t.Errorf("DeviceID = %q, want empty string for a legacy token", c.DeviceID)
 	}
-	if c.Subject != "tg:210408407" {
+	if c.Subject != "tg:500100101" {
 		t.Errorf("Subject = %q", c.Subject)
 	}
-	if c.TelegramID != 210408407 {
+	if c.TelegramID != 500100101 {
 		t.Errorf("TelegramID = %d", c.TelegramID)
 	}
-	if c.TelegramUsername != "MashkovD" {
+	if c.TelegramUsername != "dana_tg" {
 		t.Errorf("TelegramUsername = %q", c.TelegramUsername)
 	}
 }
