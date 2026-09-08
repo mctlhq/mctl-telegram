@@ -106,14 +106,13 @@ session absence is a local-test assertion unless separately observed live.
 
 | Finding | Status | Resolution |
 | --- | --- | --- |
-| F1 | IMPLEMENTED, RELEASE PENDING | Bridge admission requires a device-bound credential, checks durable device ownership before websocket registration and before every dispatch, and records revocation tombstones so an in-flight admission cannot register after eviction. |
-| F2 | IMPLEMENTED, RELEASE PENDING | `pin_message` now applies the same server, scope and live per-account consent gate as message sending before consuming its confirmation or dispatching locally. |
-| F3 | IMPLEMENTED, RELEASE PENDING | Refresh and grace-replay grants are bounded to the predecessor token's scopes. Removing lookup access can shrink a grant; expanding it requires a fresh OAuth authorization. |
+| F1 | RELEASED in `0.62.3` | Bridge admission requires a device-bound credential, checks durable device ownership before websocket registration and before every dispatch, and records revocation tombstones so an in-flight admission cannot register after eviction. |
+| F2 | RELEASED in `0.62.3` | `pin_message` now applies the same server, scope and live per-account consent gate as message sending before consuming its confirmation or dispatching locally. Blocked attempts are audited. |
+| F3 | RELEASED in `0.62.3` | Refresh and grace-replay grants are bounded to the predecessor token's scopes. A demotion within the stored grant can shrink it; a tier transition, including lookup-allowlist removal, returns `invalid_grant` and requires fresh OAuth authorization. |
 | F4 | RELEASED | [PR #566](https://github.com/mctlhq/mctl-telegram/pull/566) shipped the activation redirect fix in `0.62.2`. |
 
 F1-F3 remain documented below as the evidence and threat model for their
-regression tests. The release status will be updated after the remediation
-change is merged and deployed.
+regression tests. They are deployed in `0.62.3`.
 
 #### Refresh-family migration note
 
