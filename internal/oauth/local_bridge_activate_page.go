@@ -118,7 +118,9 @@ func renderActivationDone(w http.ResponseWriter) {
 // renderActivationPage executes t into a buffer first so a template failure
 // cannot leave a half-written body under an already-sent status, then writes
 // the page. No inline scripts on any activation page, so the CSP forbids
-// scripts outright.
+// scripts outright. The code form POSTs to this origin and the verification
+// handler redirects to Telegram's OIDC origin; form-action must allow that
+// cross-origin redirect or browsers silently stop after the 302.
 func renderActivationPage(w http.ResponseWriter, status int, t *template.Template, data any) {
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
@@ -126,7 +128,7 @@ func renderActivationPage(w http.ResponseWriter, status int, t *template.Templat
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self' https:; base-uri 'none'")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
