@@ -48,6 +48,17 @@ func identityLabel(id *auth.Identity) string {
 // signal.NotifyContext). Using r.Context() would inherit the HTTP server's
 // Timeout middleware and close daemon connections every 60 s.
 func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, nil)
+}
+
+// NewBridgeHandlerWithAdmissionHook is used by deterministic race tests to
+// pause after durable device verification and immediately before hub
+// registration. Production callers should use NewBridgeHandler.
+func NewBridgeHandlerWithAdmissionHook(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, hook func()) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, hook)
+}
+
+func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func()) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
@@ -109,6 +120,9 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		conn.SetReadLimit(MaxMediaFrameBytes)
 
 		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
+		if beforeRegister != nil {
+			beforeRegister()
+		}
 		send, registered := hub.TryRegister(id.UserID, id.DeviceID)
 		if !registered {
 			_ = conn.Close(websocket.StatusPolicyViolation, "device revoked")

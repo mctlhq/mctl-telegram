@@ -23,7 +23,9 @@ refreshing device-bound one.
 
 The daemon repeatedly exchanges this same worker token for a fresh
 short-lived bridge token via `POST /api/bridge/token`, but the worker
-token's own expiry never moves. Once it lapses (up to 90 days after
+token's own expiry never moves. The server binds this lineage to a stable
+synthetic Local Bridge device on the first exchange, so device revocation
+and bridge admission checks apply to this recovery path too. Once it lapses (up to 90 days after
 minting), the fix is an operator re-minting a fresh one and you
 re-running `connect` — not anything the daemon can do by itself.
 

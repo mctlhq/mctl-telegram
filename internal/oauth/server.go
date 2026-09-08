@@ -2046,6 +2046,10 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		return graceServerError
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
+	if len(scopes) == 0 && strings.TrimSpace(child.Scope) != "" {
+		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
+		return graceRejectedSoft
+	}
 	tok, mErr := s.mintAccessToken(child.TelegramID, child.TelegramUsername, groups, scopes)
 	if mErr != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -2133,6 +2137,10 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
+	if len(scopes) == 0 && strings.TrimSpace(rt.Scope) != "" {
+		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
+		return
+	}
 	tok, err := s.mintAccessToken(rt.TelegramID, rt.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)

@@ -588,23 +588,8 @@ func TestToken_RefreshCannotExpandLookupGrantAfterAllowlistRemoval(t *testing.T)
 	form.Set("refresh_token", original)
 	form.Set("client_id", "claude.ai")
 	rec := doTokenRequest(t, mux, form)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("refresh failed: %d %s", rec.Code, rec.Body.String())
-	}
-	var response map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if got := response["scope"]; got != "" {
-		t.Fatalf("scope after lookup removal = %q, want empty", got)
-	}
-	access, _ := response["access_token"].(string)
-	claims, err := localjwt.Verify(access, testJWTSecret, testIssuer)
-	if err != nil {
-		t.Fatalf("verify access token: %v", err)
-	}
-	if len(claims.Scopes) != 0 || len(claims.Groups) != 0 {
-		t.Fatalf("expanded refresh grant: groups=%v scopes=%v", claims.Groups, claims.Scopes)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant", rec.Code, rec.Body.String())
 	}
 }
 
@@ -641,15 +626,8 @@ func TestToken_RefreshGraceRecoveryCannotExpandGrant(t *testing.T) {
 
 	delete(srv.cfg.LookupAdminTelegramIDs, lookupID)
 	replay := doTokenRequest(t, mux, form)
-	if replay.Code != http.StatusOK {
-		t.Fatalf("grace replay failed: %d %s", replay.Code, replay.Body.String())
-	}
-	var response map[string]any
-	if err := json.NewDecoder(replay.Body).Decode(&response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if got := response["scope"]; got != "" {
-		t.Fatalf("grace replay scope after lookup removal = %q, want empty", got)
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("grace replay status = %d %s, want invalid_grant", replay.Code, replay.Body.String())
 	}
 }
 

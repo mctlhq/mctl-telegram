@@ -124,7 +124,7 @@ func newE2EServer(ctx context.Context, t *testing.T) *e2eServer {
 	r := chi.NewRouter()
 	oauthSrv.Register(r)
 	r.With(auth.Middleware(provider, true, nil, rm)).Post("/api/bridge/token",
-		bridge.NewBridgeTokenHandler(provider, e2eSecret, e2eIssuer))
+		bridge.NewBridgeTokenHandler(provider, e2eSecret, e2eIssuer, store))
 	r.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 	mcpSrv := mcpapp.New(store, nil, true).WithHub(hub).WithRevocationCache(revocations)
 	r.Mount("/mcp", auth.Middleware(provider, true, nil, rm)(mcpSrv.HTTPHandler()))

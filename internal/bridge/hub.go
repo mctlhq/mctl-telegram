@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -283,8 +284,7 @@ func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, e
 	if verify != nil {
 		active, err := verify(ctx, userID, dc.deviceID)
 		if err != nil {
-			h.retireConnection(userID, dc, false)
-			return Envelope{}, ErrNoDaemonConnected
+			return Envelope{}, fmt.Errorf("verify bridge device: %w", err)
 		}
 		if !active {
 			h.retireConnection(userID, dc, true)

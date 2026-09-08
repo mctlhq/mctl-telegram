@@ -145,6 +145,30 @@ func (s *Store) RegisterDevice(ctx context.Context, userID int64, label, idempot
 	return existing, nil
 }
 
+// EnsureLegacyBridgeDevice creates the stable device row used by the
+// operator-managed connect --token recovery path. deviceID is derived from
+// the worker token lineage, so repeated bridge-token exchanges address the
+// same row. A revoked row is never replaced or reactivated.
+func (s *Store) EnsureLegacyBridgeDevice(ctx context.Context, userID int64, deviceID string) (bool, error) {
+	if userID <= 0 || deviceID == "" {
+		return false, errors.New("ensure legacy bridge device: user_id and device_id required")
+	}
+	query := `INSERT INTO local_bridge_devices (user_id, device_id, device_label)
+		 VALUES ($1, $2, $3) ON CONFLICT (device_id) DO NOTHING`
+	if !s.isPostgres(ctx) {
+		query = `INSERT OR IGNORE INTO local_bridge_devices (user_id, device_id, device_label)
+		 VALUES ($1, $2, $3)`
+	}
+	if _, err := s.DB.ExecContext(ctx, query, userID, deviceID, "Operator recovery"); err != nil {
+		return false, fmt.Errorf("ensure legacy bridge device: %w", err)
+	}
+	active, err := s.IsActiveDeviceForUser(ctx, userID, deviceID)
+	if err != nil {
+		return false, fmt.Errorf("ensure legacy bridge device: %w", err)
+	}
+	return active, nil
+}
+
 // GetDevice looks up a device by its public device id. Returns
 // ErrDeviceNotFound (checkable via errors.Is) when no row matches.
 func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error) {

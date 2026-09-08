@@ -115,7 +115,12 @@ func TestBridgeHandler_RevocationDuringAuthenticationCannotRegister(t *testing.T
 		release:       make(chan struct{}),
 	}
 	hub := bridge.NewHub()
-	srv := httptest.NewServer(bridge.NewBridgeHandler(hub, provider, store, context.Background()))
+	admitted := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	srv := httptest.NewServer(bridge.NewBridgeHandlerWithAdmissionHook(hub, provider, store, context.Background(), func() {
+		close(admitted)
+		<-releaseAdmission
+	}))
 	t.Cleanup(srv.Close)
 
 	type dialResult struct {
@@ -128,20 +133,24 @@ func TestBridgeHandler_RevocationDuringAuthenticationCannotRegister(t *testing.T
 		dialed <- dialResult{conn: conn, err: dialErr}
 	}()
 	<-provider.authenticated
+	// Let authentication and the durable pre-upgrade check complete, then
+	// pause at the exact check-to-registration window that revocation must
+	// close.
+	close(provider.release)
+	<-admitted
 	if _, err := store.RevokeDeviceAndDenylist(ctx, deviceID, tgID, "test revoke", uid); err != nil {
 		t.Fatalf("revoke device: %v", err)
 	}
 	hub.BlockDevice(uid, deviceID)
-	close(provider.release)
+	close(releaseAdmission)
 
 	result := <-dialed
 	if result.conn != nil {
 		result.conn.CloseNow()
-		t.Fatal("revoked device completed websocket admission")
 	}
-	if result.err == nil {
-		t.Fatal("revoked device dial unexpectedly succeeded")
-	}
+	// The upgrade may fail before the hook depending on timing; that is also
+	// a valid fail-closed outcome. A successful upgrade must still not leave a
+	// routable hub entry.
 	if hub.HasDaemon(uid) {
 		t.Fatal("revoked device became routable after eviction")
 	}

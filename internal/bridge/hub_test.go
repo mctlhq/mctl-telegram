@@ -352,3 +352,18 @@ func TestHub_CallRejectsUnboundCredentialWhenVerifierIsConfigured(t *testing.T) 
 		t.Fatalf("Call error = %v, want ErrNoDaemonConnected", err)
 	}
 }
+
+func TestHub_CallKeepsConnectionOnTransientDeviceCheckError(t *testing.T) {
+	checkErr := errors.New("database unavailable")
+	h := NewHub().WithDeviceVerifier(func(context.Context, int64, string) (bool, error) {
+		return false, checkErr
+	})
+	h.Register(42, "dev_live")
+	_, err := h.Call(context.Background(), 42, EncodeCall("transient", "list_dialogs", nil))
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("Call error = %v, want verifier error", err)
+	}
+	if !h.HasDaemon(42) {
+		t.Fatal("transient verifier failure must not evict the live daemon")
+	}
+}
