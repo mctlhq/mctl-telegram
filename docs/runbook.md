@@ -18,6 +18,7 @@ Canary incidents are out of scope here; see
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
 - [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
+- [Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS](#lookup-admin-tier-and-tg_login_lookup_admins)
 - [JwtFailures — authentication failure spike](#jwtfailures)
 - [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
@@ -44,6 +45,70 @@ re-authorization migration, announce it with the release, and monitor the
 authorization callback until clients have renewed. It is not an OAuth
 service outage unless new authorization-code flows also fail.
 
+---
+
+## Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS
+
+An identity listed in `TG_LOGIN_LOOKUP_ADMINS` resolves to the single scope
+`admin:users:read` and nothing else — no `telegram:*` scope, and not the flat
+`admin:users` that every admin write tool gates. `admin:users:read` opens
+exactly two tools, `list_telegram_identities` and `get_user_audit_log`; every
+other admin tool (`set_telegram_access`, `set_account_send`,
+`set_account_mode`, `provision_local_account`, `revoke_telegram_session`,
+`revoke_worker_token`, `mint_worker_token`) keeps requiring `admin:users` and
+stays closed to this tier.
+
+Because the tier grants no `telegram:*` scope, an MTProto session would be
+unusable for it. A lookup-only identity therefore skips `enable_access`
+entirely and goes straight to the authorization code: onboarding is one
+Telegram Login Widget sign-in, with no phone number, no SMS code and no 2FA
+prompt.
+
+Tier precedence is full admin, then lookup, then client: an id listed in both
+`TG_LOGIN_LOOKUP_ADMINS` and a client allowlist (`TG_LOGIN_CLIENTS` or the DB
+`access_tier` column) resolves to `admin:users:read` alone. That resolution is
+quiet, not an error, so treat a dual listing as a configuration mistake to
+clean up, not as a way to combine the two bundles.
+
+Allowlist an account before its first sign-in. A refresh can only preserve or
+shrink a family's original grant (see "OAuth refresh re-authorization after
+scope changes" above) — it can never widen one — so an id added to
+`TG_LOGIN_LOOKUP_ADMINS` after a refresh-token family already exists cannot
+acquire `admin:users:read` on that family. Getting the scope requires a fresh
+authorization-code flow.
+
+A lookup-only identity is also exempt from the `AUTO_APPROVE_CLIENTS`
+first-sign-in write that would otherwise persist `access_tier='client'` for an
+un-tiered user. Without that exemption, removing the id from
+`TG_LOGIN_LOOKUP_ADMINS` later would promote it to the full client tier off
+the persisted database row instead of de-provisioning it, which is the
+opposite of what an operator removing an id from the allowlist intends.
+
+Removing an id from `TG_LOGIN_LOOKUP_ADMINS` has two different observable
+outcomes on the next token refresh, depending on `AUTO_APPROVE_CLIENTS`:
+
+- If `AUTO_APPROVE_CLIENTS` is on (as in the labs deployment) and the identity
+  still resolves to a scope set outside its original `admin:users:read` grant
+  — open registration promotes an un-tiered user to the client bundle — the
+  refresh fails with `invalid_grant`, `"refresh authorization no longer
+  available"`.
+- If the identity resolves to no scopes at all (open registration off, or the
+  database access tier is explicitly `none`), the refresh instead returns
+  HTTP 200 with a scopeless access token, and the failure only surfaces on the
+  next tool call.
+
+Do not rely on the refresh response code to confirm de-provisioning: verify by
+calling a tool. A positive check is `list_telegram_identities` returning data
+for the identity; a negative check is a write tool such as
+`set_telegram_access` or `mint_worker_token` being refused with a
+missing-scope error.
+
+`TG_LOGIN_LOOKUP_ADMINS` is parsed in `internal/config/config.go` into
+`TGLoginLookupAdmins`, then converted into `oauth.Config.LookupAdminTelegramIDs`.
+It is set per deployment in that deployment's `values.yaml`, alongside
+`TG_LOGIN_ADMINS`; changing it is a mctl-gitops pull request plus a redeploy.
+
+---
 
 <a id="deployment-compatibility"></a>
 ## Deployment compatibility boundaries
