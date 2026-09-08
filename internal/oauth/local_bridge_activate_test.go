@@ -25,6 +25,19 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+func TestRenderActivationForm_AllowsOAuthRedirect(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderActivationForm(rec, activationFormPage{CSRFToken: "csrf"})
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "form-action 'self' https:") {
+		t.Fatalf("activation CSP must allow the Telegram OAuth redirect: %q", csp)
+	}
+	if strings.Contains(csp, "form-action 'self';") {
+		t.Fatalf("activation CSP still blocks cross-origin form redirects: %q", csp)
+	}
+}
+
 // testDevicePubkeyB64 returns a syntactically valid (freshly generated),
 // base64-standard-encoded Ed25519 public key for tests that only care about
 // activate/start accepting device_pubkey, not about the specific bytes.
