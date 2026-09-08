@@ -2045,6 +2045,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return graceServerError
 	}
+	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
 	tok, mErr := s.mintAccessToken(child.TelegramID, child.TelegramUsername, groups, scopes)
 	if mErr != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -2122,14 +2123,16 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
 		return
 	}
-	// Re-resolve scopes from the current identity state: a user demoted since
-	// the token was issued must lose scopes on refresh, not keep them for the
-	// refresh token's full lifetime.
+	// Re-resolve scopes from the current identity state, then intersect them
+	// with the predecessor's grant. Demotions therefore take effect on refresh,
+	// while promotions require a fresh authorization-code flow instead of
+	// silently broadening an existing refresh-token family.
 	groups, scopes, err := s.ResolveScopes(r.Context(), rt.TelegramID)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
+	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
 	tok, err := s.mintAccessToken(rt.TelegramID, rt.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
@@ -2207,6 +2210,28 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeTokenJSON(w, tok, newRefresh, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
+}
+
+// boundRefreshGrant enforces monotonic OAuth refresh privileges. The current
+// identity state may remove scopes from the original grant, but it may never
+// add scopes to that refresh-token family. A completely disjoint transition
+// also drops groups so a scopeless access token carries no newly resolved tier
+// label. Fresh authorization is the only path that can acquire a wider grant.
+func boundRefreshGrant(currentGroups, currentScopes []string, originalScope string) ([]string, []string) {
+	original := make(map[string]struct{})
+	for _, scope := range strings.Fields(originalScope) {
+		original[scope] = struct{}{}
+	}
+	bounded := make([]string, 0, len(currentScopes))
+	for _, scope := range currentScopes {
+		if _, ok := original[scope]; ok {
+			bounded = append(bounded, scope)
+		}
+	}
+	if len(bounded) == 0 {
+		return nil, nil
+	}
+	return currentGroups, bounded
 }
 
 // handleRevoke implements RFC 7009 token revocation for refresh tokens.

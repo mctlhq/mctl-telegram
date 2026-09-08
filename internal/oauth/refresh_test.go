@@ -550,3 +550,119 @@ func TestAuthorizationServerMetadata_AdvertisesRefreshGrant(t *testing.T) {
 		t.Errorf("grant_types_supported missing refresh_token: %v", grants)
 	}
 }
+
+func TestToken_RefreshCannotExpandLookupGrantAfterAllowlistRemoval(t *testing.T) {
+	const lookupID int64 = 777000111
+	srv := newTestServer(t, func(c *Config) {
+		c.AutoApproveClients = true
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), lookupID, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "lookup-refresh-token"
+	if err := srv.store.SaveRefreshToken(context.Background(), original, db.RefreshToken{
+		FamilyID:   "lookup-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: lookupID,
+		Scope:      "admin:users:read",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+
+	delete(srv.cfg.LookupAdminTelegramIDs, lookupID)
+	_, currentScopes, err := srv.ResolveScopes(context.Background(), lookupID)
+	if err != nil {
+		t.Fatalf("resolve scopes after removal: %v", err)
+	}
+	if !strings.Contains(strings.Join(currentScopes, " "), "telegram:messages:send") {
+		t.Fatalf("test setup did not reproduce auto-client expansion: %v", currentScopes)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response["scope"]; got != "" {
+		t.Fatalf("scope after lookup removal = %q, want empty", got)
+	}
+	access, _ := response["access_token"].(string)
+	claims, err := localjwt.Verify(access, testJWTSecret, testIssuer)
+	if err != nil {
+		t.Fatalf("verify access token: %v", err)
+	}
+	if len(claims.Scopes) != 0 || len(claims.Groups) != 0 {
+		t.Fatalf("expanded refresh grant: groups=%v scopes=%v", claims.Groups, claims.Scopes)
+	}
+}
+
+func TestToken_RefreshGraceRecoveryCannotExpandGrant(t *testing.T) {
+	const lookupID int64 = 777000222
+	srv := newTestServer(t, func(c *Config) {
+		c.AutoApproveClients = true
+		c.LookupAdminTelegramIDs = map[int64]bool{lookupID: true}
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), lookupID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "lookup-grace-token"
+	if err := srv.store.SaveRefreshToken(context.Background(), original, db.RefreshToken{
+		FamilyID:   "lookup-grace-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: lookupID,
+		Scope:      "admin:users:read",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, form); rec.Code != http.StatusOK {
+		t.Fatalf("initial refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	delete(srv.cfg.LookupAdminTelegramIDs, lookupID)
+	replay := doTokenRequest(t, mux, form)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("grace replay failed: %d %s", replay.Code, replay.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(replay.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response["scope"]; got != "" {
+		t.Fatalf("grace replay scope after lookup removal = %q, want empty", got)
+	}
+}
+
+func TestBoundRefreshGrantPreservesOrderAndOnlyShrinks(t *testing.T) {
+	groups, scopes := boundRefreshGrant(
+		[]string{"clients"},
+		[]string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send"},
+		"telegram:messages:send telegram:dialogs:read",
+	)
+	if strings.Join(groups, ",") != "clients" {
+		t.Fatalf("groups = %v, want clients", groups)
+	}
+	if got := strings.Join(scopes, " "); got != "telegram:dialogs:read telegram:messages:send" {
+		t.Fatalf("bounded scopes = %q", got)
+	}
+}
