@@ -202,7 +202,8 @@ if the browser behavior is retained, or submit the verification with a
 same-origin script/navigation pattern whose redirect is not governed as an
 external form action. Add a browser-level regression covering the POST,
 302 and Telegram OAuth landing page; the current Go tests do not exercise
-browser CSP enforcement.
+browser CSP enforcement. A targeted implementation and regression test are
+proposed separately in [PR #566](https://github.com/mctlhq/mctl-telegram/pull/566).
 
 ## Test evidence and limitations
 
