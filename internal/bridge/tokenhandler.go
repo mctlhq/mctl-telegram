@@ -49,12 +49,8 @@ type bridgeTokenResponse struct {
 // Signing is HS256, identical algorithm to the legacy sharedhmac path —
 // shared-hmac-legacy bridge verifiers accept these tokens as long as the
 // issuer + audience + secret match.
-func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, stores ...*db.Store) http.HandlerFunc {
+func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, store *db.Store) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
-	var store *db.Store
-	if len(stores) > 0 {
-		store = stores[0]
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
 			slog.Error("bridge token: signer init failed", "err", signerErr)

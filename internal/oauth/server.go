@@ -2045,8 +2045,9 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return graceServerError
 	}
-	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
-	if len(scopes) == 0 && strings.TrimSpace(child.Scope) != "" {
+	resolvedScopes := scopes
+	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
+	if len(scopes) == 0 && len(resolvedScopes) > 0 {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2136,8 +2137,9 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
-	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
-	if len(scopes) == 0 && strings.TrimSpace(rt.Scope) != "" {
+	resolvedScopes := scopes
+	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
+	if len(scopes) == 0 && len(resolvedScopes) > 0 {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
