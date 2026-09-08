@@ -30,9 +30,6 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
   (status, architecture, rollout gates, Channels preview); the single source
   of truth for both Claude and Codex, supersedes any local `~/.claude/plans/*`
   draft
-- `docs/plans/local-bridge-review.md` — canonical Local Bridge review,
-  findings, remediation status, and manual-verification evidence
-
 ## Conventions
 - `go fmt`, `go vet`, `golangci-lint` before commit
 - Error wrapping with `fmt.Errorf("context: %w", err)`, no panics
