@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.62.3](https://github.com/mctlhq/mctl-telegram/compare/0.62.2...0.62.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **bridge:** close device revocation admission race ([985f03a](https://github.com/mctlhq/mctl-telegram/commit/985f03acedc1e5ed99d8f9f8a57f3f226b5f2883))
+* **bridge:** preserve recovery token support with device binding ([2667c0c](https://github.com/mctlhq/mctl-telegram/commit/2667c0cd60ca1b69395be6d68dad7a1f42fc552e))
+* **bridge:** require store-backed device binding ([9160785](https://github.com/mctlhq/mctl-telegram/commit/9160785df07be03e9ab0660f97781cd1a5b47b5a))
+* close Local Bridge authorization gaps ([27e10f6](https://github.com/mctlhq/mctl-telegram/commit/27e10f624d57de7f04377a762b3b41b915e0651d))
+* **mcp:** audit blocked pin attempts ([b45b48b](https://github.com/mctlhq/mctl-telegram/commit/b45b48b1d2bcdb73e388ff7d6b0f63c42c5883a2))
+* **mcp:** enforce send consent for pinning ([4bcce32](https://github.com/mctlhq/mctl-telegram/commit/4bcce32e636ac8331da36fcd10b794ea9593655e))
+* **oauth:** prevent scope expansion on refresh ([f25d46f](https://github.com/mctlhq/mctl-telegram/commit/f25d46f64d230a3b564b9f2d476b305e7d3b933d))
+* **oauth:** reject refresh scope promotions ([88ffd4e](https://github.com/mctlhq/mctl-telegram/commit/88ffd4e75e6a1ca07bd97893bd51fcd51a9f457d))
+
 ## [0.62.2](https://github.com/mctlhq/mctl-telegram/compare/0.62.1...0.62.2) (2026-09-08)
 
 
