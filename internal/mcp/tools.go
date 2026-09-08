@@ -679,6 +679,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		}
 		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID, "telegram:messages:pin")
 		if !canPin {
+			s.audit(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt)
 			return mcplib.NewToolResultError("pin blocked: " + blockReason), nil
 		}
 		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashPinPayload(peer, int64(messageID), unpin)); cerr != nil {

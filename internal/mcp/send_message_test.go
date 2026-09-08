@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -166,6 +167,10 @@ func TestToolPinMessage_ConsentBlocksWithoutConsumingConfirmation(t *testing.T) 
 
 	if res := callPin(t, srv, id, confirmationID); !res.IsError {
 		t.Fatal("pin succeeded while send consent was disabled")
+	}
+	tool, status, msg := latestAudit(t, store, uid)
+	if tool != "pin_message:blocked" || status != "error" || !strings.Contains(msg, "send_enabled=false") {
+		t.Fatalf("blocked pin not audited: tool=%q status=%q msg=%q", tool, status, msg)
 	}
 	select {
 	case env := <-send:
