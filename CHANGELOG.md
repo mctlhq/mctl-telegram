@@ -967,3 +967,4 @@
 * initial scaffold — Go HTTP server with `/healthz` and `/readyz` returning 200
 * multi-stage Dockerfile (golang:1.25-alpine -> alpine:3.20, non-root)
 * release-please + centralized mctl-gitops release-deploy wiring
+
