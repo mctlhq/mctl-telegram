@@ -115,6 +115,16 @@ F1-F3 remain documented below as the evidence and threat model for their
 regression tests. The release status will be updated after the remediation
 change is merged and deployed.
 
+#### Refresh-family migration note
+
+The refresh guard compares the current resolved tier scopes with the scope
+snapshot stored when the family was issued. Therefore a tier-scope addition
+is intentionally treated like any other promotion: refresh returns
+`invalid_grant` and the client must complete a new OAuth authorization-code
+flow. This is an expected re-authorization wave after a scope-bearing
+release, not a service outage. Operators should announce it with the release
+and monitor authorization failures until clients have re-authorized.
+
 ### F1 — P1: device revocation can miss an in-flight websocket admission
 
 Locations: [bridge authentication and registration](https://github.com/mctlhq/mctl-telegram/blob/2cc03c234be346919735a0e8e0ddacf533f354b5/internal/bridge/server.go#L54),
