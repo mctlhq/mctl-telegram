@@ -863,7 +863,7 @@ tags and GitOps quota usage instead of copying values from this plan
 blindly.
 
 Git rules: conventional commit subjects; no `Co-Authored-By` trailers;
-mctl-telegram uses squash merge; no manual release tags; do not merge
+mctl-telegram uses merge commits; no manual release tags; do not merge
 release PR #303; never auto-merge `mctl-gitops`.
 
 Operational rules: no production writes; no Vault secret values in chat,

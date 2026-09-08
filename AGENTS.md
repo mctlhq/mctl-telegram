@@ -66,8 +66,6 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
   automatically in this repo (see #485).
 - Tag format: `MAJOR.MINOR.PATCH` (no `v` prefix)
 - Release flow: pushes to `main` run `release-please`, which maintains a release PR; merging that release PR creates the tag + GitHub release and dispatches the centralized `mctl-gitops/.github/workflows/release-deploy.yaml`. Do **not** create or push tags by hand (see `RELEASE.md`).
-- **Merge strategy: squash merges** (`gh pr merge <N> --squash --delete-branch`) — one clean
-  conventional commit per PR on `main`, for a linear graph and a single changelog line per PR. The
-  repo's squash format is `PR_TITLE` + blank body, so the PR title MUST be a conventional-commit
-  subject (e.g. `fix(telegram): ...`). This repo only (switched 2026-05-30); other mctlhq repos
-  still use merge commits unless rolled out org-wide.
+- **Merge strategy: merge commits** (`gh pr merge <N> --merge --delete-branch`) — never squash or
+  rebase. Feature-branch commits must remain visible in the git graph, matching the workspace-wide
+  mctlhq policy.
