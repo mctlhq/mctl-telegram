@@ -15,6 +15,18 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
+type pausedProvider struct {
+	id            *auth.Identity
+	authenticated chan struct{}
+	release       chan struct{}
+}
+
+func (p *pausedProvider) Authenticate(*http.Request) (*auth.Identity, error) {
+	close(p.authenticated)
+	<-p.release
+	return p.id, nil
+}
+
 // newProvisionTestStore opens an in-memory SQLite DB and applies the schema,
 // mirroring internal/db's own newTestStore helper (unexported, so it cannot
 // be reused directly from this external test package).
@@ -49,8 +61,12 @@ func TestBridgeHandler_AcceptsProvisionedLocalAccount(t *testing.T) {
 	if err := store.ProvisionLocalAccount(ctx, uid, tgID, "Bridge Only", "bridgeonly"); err != nil {
 		t.Fatalf("provision local account: %v", err)
 	}
+	deviceID, err := store.RegisterDevice(ctx, uid, "bridge-only", "bridge-only", nil)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
 
-	provider := &stubProvider{id: &auth.Identity{UserID: uid, Subject: "tg:700000010"}}
+	provider := &stubProvider{id: &auth.Identity{UserID: uid, Subject: "tg:700000010", DeviceID: deviceID}}
 	hub := bridge.NewHub()
 	handler := bridge.NewBridgeHandler(hub, provider, store, context.Background())
 
@@ -74,5 +90,59 @@ func TestBridgeHandler_AcceptsProvisionedLocalAccount(t *testing.T) {
 			t.Fatal("daemon should be registered after a successful dial")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestBridgeHandler_RevocationDuringAuthenticationCannotRegister(t *testing.T) {
+	ctx := context.Background()
+	store := newProvisionTestStore(t)
+	const tgID = 700000011
+	uid, err := store.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := store.ProvisionLocalAccount(ctx, uid, tgID, "Alice", "alice"); err != nil {
+		t.Fatalf("provision local account: %v", err)
+	}
+	deviceID, err := store.RegisterDevice(ctx, uid, "alice-device", "alice-device", nil)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+
+	provider := &pausedProvider{
+		id:            &auth.Identity{UserID: uid, TelegramID: tgID, Subject: "tg:700000011", DeviceID: deviceID},
+		authenticated: make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	hub := bridge.NewHub()
+	srv := httptest.NewServer(bridge.NewBridgeHandler(hub, provider, store, context.Background()))
+	t.Cleanup(srv.Close)
+
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	dialed := make(chan dialResult, 1)
+	go func() {
+		conn, _, dialErr := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+		dialed <- dialResult{conn: conn, err: dialErr}
+	}()
+	<-provider.authenticated
+	if _, err := store.RevokeDeviceAndDenylist(ctx, deviceID, tgID, "test revoke", uid); err != nil {
+		t.Fatalf("revoke device: %v", err)
+	}
+	hub.BlockDevice(uid, deviceID)
+	close(provider.release)
+
+	result := <-dialed
+	if result.conn != nil {
+		result.conn.CloseNow()
+		t.Fatal("revoked device completed websocket admission")
+	}
+	if result.err == nil {
+		t.Fatal("revoked device dial unexpectedly succeeded")
+	}
+	if hub.HasDaemon(uid) {
+		t.Fatal("revoked device became routable after eviction")
 	}
 }

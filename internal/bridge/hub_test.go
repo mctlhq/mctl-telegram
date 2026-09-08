@@ -311,3 +311,44 @@ func TestHub_EvictDevice_NoConnection(t *testing.T) {
 		t.Fatal("EvictDevice on an unregistered user should return false")
 	}
 }
+
+func TestHub_BlockDeviceRefusesLaterRegistration(t *testing.T) {
+	h := NewHub()
+	if h.BlockDevice(42, "dev_revoked") {
+		t.Fatal("blocking an offline device must not report a live eviction")
+	}
+	if send, ok := h.TryRegister(42, "dev_revoked"); ok || send != nil {
+		t.Fatal("a device blocked before admission was registered")
+	}
+	if _, ok := h.TryRegister(42, "dev_other"); !ok {
+		t.Fatal("blocking one device must not block another device for the user")
+	}
+}
+
+func TestHub_CallFailsClosedWhenDurableDeviceCheckRejects(t *testing.T) {
+	h := NewHub().WithDeviceVerifier(func(_ context.Context, userID int64, deviceID string) (bool, error) {
+		return userID == 42 && deviceID != "dev_revoked", nil
+	})
+	send := h.Register(42, "dev_revoked")
+	_, err := h.Call(context.Background(), 42, EncodeCall("blocked", "list_dialogs", nil))
+	if !errors.Is(err, ErrNoDaemonConnected) {
+		t.Fatalf("Call error = %v, want ErrNoDaemonConnected", err)
+	}
+	if h.HasDaemon(42) {
+		t.Fatal("durably revoked device remained registered")
+	}
+	if _, ok := <-send; ok {
+		t.Fatal("revoked device send channel remained open")
+	}
+}
+
+func TestHub_CallRejectsUnboundCredentialWhenVerifierIsConfigured(t *testing.T) {
+	h := NewHub().WithDeviceVerifier(func(context.Context, int64, string) (bool, error) {
+		return true, nil
+	})
+	h.Register(42, "")
+	_, err := h.Call(context.Background(), 42, EncodeCall("legacy", "list_dialogs", nil))
+	if !errors.Is(err, ErrNoDaemonConnected) {
+		t.Fatalf("Call error = %v, want ErrNoDaemonConnected", err)
+	}
+}

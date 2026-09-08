@@ -1326,7 +1326,7 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 		// outside the transaction (a websocket is not transactional) and
 		// safe to repeat (T6b/T6c).
 		if s.Hub != nil {
-			if s.Hub.EvictDevice(id.UserID, deviceID) {
+			if s.Hub.BlockDevice(id.UserID, deviceID) {
 				result.HubEvicted = true
 			}
 		}

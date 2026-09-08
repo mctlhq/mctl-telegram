@@ -188,6 +188,29 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	return &d, nil
 }
 
+// IsActiveDeviceForUser reports whether deviceID names a non-revoked Local
+// Bridge device belonging to userID. It deliberately collapses missing,
+// revoked, and wrong-owner rows to false so admission checks do not disclose
+// another user's device identifiers.
+func (s *Store) IsActiveDeviceForUser(ctx context.Context, userID int64, deviceID string) (bool, error) {
+	if userID <= 0 || deviceID == "" {
+		return false, nil
+	}
+	var one int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT 1 FROM local_bridge_devices
+		 WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL`,
+		userID, deviceID,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check active device: %w", err)
+	}
+	return true, nil
+}
+
 // RevokeDevice records a revocation timestamp and reason without deleting
 // the row. Re-revoking an already-revoked device is a no-op, not an error --
 // the original revoked_at/revoked_reason are left untouched, mirroring

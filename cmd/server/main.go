@@ -513,7 +513,9 @@ func main() {
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
 	// Uses a separate provider that enforces aud=bridge so regular MCP
 	// tokens cannot be used to hijack the bridge channel.
-	hub := bridge.NewHub().WithMetrics(m)
+	hub := bridge.NewHub().
+		WithMetrics(m).
+		WithDeviceVerifier(store.IsActiveDeviceForUser)
 	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
 	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 
