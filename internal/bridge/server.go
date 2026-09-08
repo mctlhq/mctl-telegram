@@ -48,6 +48,17 @@ func identityLabel(id *auth.Identity) string {
 // signal.NotifyContext). Using r.Context() would inherit the HTTP server's
 // Timeout middleware and close daemon connections every 60 s.
 func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, nil)
+}
+
+// NewBridgeHandlerWithAdmissionHook is used by deterministic race tests to
+// pause after durable device verification and immediately before hub
+// registration. Production callers should use NewBridgeHandler.
+func NewBridgeHandlerWithAdmissionHook(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, hook func()) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, hook)
+}
+
+func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func()) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
@@ -64,6 +75,11 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		if id.DeviceID == "" {
+			slog.Info("bridge: credential missing device binding", "user_id", id.UserID)
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
 
 		// Guard: only local-mode accounts may connect as a bridge daemon.
 		mode, err := store.GetAccountMode(r.Context(), id.UserID)
@@ -74,6 +90,16 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		}
 		if mode != "local" {
 			http.Error(w, "account is in hosted mode", http.StatusBadRequest)
+			return
+		}
+		active, err := store.IsActiveDeviceForUser(r.Context(), id.UserID, id.DeviceID)
+		if err != nil {
+			slog.Error("bridge: device lookup failed", "user_id", id.UserID, "device_id", id.DeviceID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !active {
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 
@@ -94,7 +120,14 @@ func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		conn.SetReadLimit(MaxMediaFrameBytes)
 
 		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
-		send := hub.Register(id.UserID, id.DeviceID)
+		if beforeRegister != nil {
+			beforeRegister()
+		}
+		send, registered := hub.TryRegister(id.UserID, id.DeviceID)
+		if !registered {
+			_ = conn.Close(websocket.StatusPolicyViolation, "device revoked")
+			return
+		}
 
 		// Parent context for both goroutines. Cancelling it stops the
 		// reader and the writer cleanly without leaking goroutines.

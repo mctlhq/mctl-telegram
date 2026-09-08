@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 const bridgeTokenTTL = time.Hour
@@ -24,6 +27,9 @@ type bridgeTokenResponse struct {
 // auth.Middleware wired in main.go). This handler issues a new, short-lived JWT
 // with aud="bridge" that the Local Bridge daemon uses to authenticate its
 // websocket connection to GET /bridge.
+// Device-bound MCP credentials retain their device id. Operator recovery
+// credentials are bound to a stable synthetic device derived from their JTI
+// and persisted before the child token is issued.
 //
 // The minting always uses localjwt.Issuer, which produces an HS256 JWT
 // carrying:
@@ -43,7 +49,7 @@ type bridgeTokenResponse struct {
 // Signing is HS256, identical algorithm to the legacy sharedhmac path —
 // shared-hmac-legacy bridge verifiers accept these tokens as long as the
 // issuer + audience + secret match.
-func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string) http.HandlerFunc {
+func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, store *db.Store) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
@@ -57,6 +63,29 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string)
 			// chain, but guard defensively.
 			writeJSONError(w, http.StatusUnauthorized, "authentication required")
 			return
+		}
+
+		deviceID := id.DeviceID
+		if deviceID == "" {
+			// The supported operator recovery path starts from an admin-minted
+			// worker token. Bind its stable jti lineage to a durable synthetic
+			// device so revocation and per-dispatch checks apply to it too.
+			if id.Jti == "" {
+				writeJSONError(w, http.StatusForbidden, "device-bound credential required; run activate to register this device")
+				return
+			}
+			digest := sha256.Sum256([]byte("legacy-local-bridge:" + id.Jti))
+			deviceID = "legacy_" + hex.EncodeToString(digest[:16])
+			active, ensureErr := store.EnsureLegacyBridgeDevice(r.Context(), id.UserID, deviceID)
+			if ensureErr != nil {
+				slog.Error("bridge token: legacy device registration failed", "user_id", id.UserID, "err", ensureErr)
+				writeJSONError(w, http.StatusInternalServerError, "failed to bind bridge device")
+				return
+			}
+			if !active {
+				writeJSONError(w, http.StatusForbidden, "bridge device revoked")
+				return
+			}
 		}
 
 		// Subject preference matches Identity's canonical-identifier order:
@@ -95,7 +124,7 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string)
 			// "succeeds" while the revoked daemon stays connected for the
 			// bridge token's full 1-hour TTL. Empty when id.DeviceID is empty
 			// (every non-device credential), same as the other two fields.
-			DeviceID: id.DeviceID,
+			DeviceID: deviceID,
 		}, bridgeTokenTTL)
 		if err != nil {
 			slog.Error("bridge token: sign failed", "user_id", id.UserID, "err", err)

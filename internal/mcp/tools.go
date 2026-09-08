@@ -635,7 +635,7 @@ func (s *Server) toolPinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
 		mcplib.WithOutputSchema[pinMessageResult](),
-		mcplib.WithDescription(`Pin or unpin a message in a Telegram chat. Requires the operator to have "Pin Messages" admin rights in the target chat.
+		mcplib.WithDescription(`Pin or unpin a message in a Telegram chat. Requires the operator to have "Pin Messages" admin rights in the target chat. Real pinning is allowed only when ALLOW_SEND=true and the account's live send consent is enabled.
 
 Inputs:
   peer — required: "@username", "user:<id>", "chat:<id>", "channel:<id>".
@@ -676,6 +676,11 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		}
 		if confID == "" {
 			return mcplib.NewToolResultError("confirmation_id required — call prepare_pin_message first"), nil
+		}
+		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID, "telegram:messages:pin")
+		if !canPin {
+			s.audit(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt)
+			return mcplib.NewToolResultError("pin blocked: " + blockReason), nil
 		}
 		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashPinPayload(peer, int64(messageID), unpin)); cerr != nil {
 			switch {
@@ -1326,7 +1331,7 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 		// outside the transaction (a websocket is not transactional) and
 		// safe to repeat (T6b/T6c).
 		if s.Hub != nil {
-			if s.Hub.EvictDevice(id.UserID, deviceID) {
+			if s.Hub.BlockDevice(id.UserID, deviceID) {
 				result.HubEvicted = true
 			}
 		}
@@ -1749,7 +1754,11 @@ func isDemoReviewer(id *auth.Identity, demoReviewerTGID int64) bool {
 }
 
 func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64) (real bool, reason string) {
-	if decided, r, reason := evaluateSendGateBeforeAccount(id, allowSend, demoReviewerTGID); decided {
+	return evaluateWriteGate(ctx, store, id, allowSend, demoReviewerTGID, "telegram:messages:send")
+}
+
+func evaluateWriteGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64, requiredScope string) (real bool, reason string) {
+	if decided, r, reason := evaluateWriteGateBeforeAccount(id, allowSend, demoReviewerTGID, requiredScope); decided {
 		return r, reason
 	}
 	if store == nil {
@@ -1772,8 +1781,12 @@ func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, a
 // decided=false means the identity-level conditions all passed and only the
 // per-account flag is left to check.
 func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReviewerTGID int64) (decided, real bool, reason string) {
+	return evaluateWriteGateBeforeAccount(id, allowSend, demoReviewerTGID, "telegram:messages:send")
+}
+
+func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, demoReviewerTGID int64, requiredScope string) (decided, real bool, reason string) {
 	if id == nil {
-		return true, false, "no authenticated identity (send requires auth)"
+		return true, false, "no authenticated identity (write requires auth)"
 	}
 	// Reviewer/demo account: force a dry-run preview unconditionally, ahead of
 	// every other check, so the reviewer always sees the preview-only reason
@@ -1789,8 +1802,8 @@ func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReview
 	if !allowSend {
 		return true, false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
 	}
-	if !id.HasScope("telegram:messages:send") {
-		return true, false, "identity missing telegram:messages:send scope"
+	if !id.HasScope(requiredScope) {
+		return true, false, "identity missing " + requiredScope + " scope"
 	}
 	return false, false, ""
 }

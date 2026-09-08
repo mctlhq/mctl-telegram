@@ -464,7 +464,7 @@ func main() {
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
-			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg)))
+			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg), store))
 	}
 
 	// Read-only MCP worker token endpoint: an admin mints a bounded,
@@ -513,7 +513,9 @@ func main() {
 	// Websocket bridge endpoint: Local Bridge daemons connect here.
 	// Uses a separate provider that enforces aud=bridge so regular MCP
 	// tokens cannot be used to hijack the bridge channel.
-	hub := bridge.NewHub().WithMetrics(m)
+	hub := bridge.NewHub().
+		WithMetrics(m).
+		WithDeviceVerifier(store.IsActiveDeviceForUser)
 	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
 	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
 

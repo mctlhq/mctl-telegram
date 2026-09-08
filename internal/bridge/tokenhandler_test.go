@@ -10,7 +10,22 @@ import (
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
+
+func tokenHandlerStore(t *testing.T) *db.Store {
+	t.Helper()
+	conn, err := db.Open(context.Background(), "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(context.Background(), conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return &db.Store{DB: conn}
+}
 
 const (
 	testHMACSecret      = "test-hmac-secret-bytes-32!!!!!!!"
@@ -32,8 +47,9 @@ func TestBridgeToken_HonoursIssuerArgument(t *testing.T) {
 		Subject:          "tg:42",
 		TelegramID:       42,
 		TelegramUsername: "alice",
+		DeviceID:         "dev-token-test",
 	}
-	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, tokenHandlerStore(t))
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
 	req = req.WithContext(auth.With(context.Background(), id))
 	rec := httptest.NewRecorder()
@@ -74,8 +90,9 @@ func TestBridgeToken_PrefersSubjectOverGitHubLogin(t *testing.T) {
 		UserID:      1,
 		Subject:     "tg:1",
 		GitHubLogin: "legacy-name",
+		DeviceID:    "dev-token-test",
 	}
-	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, tokenHandlerStore(t))
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
 	req = req.WithContext(auth.With(context.Background(), id))
 	rec := httptest.NewRecorder()
@@ -98,7 +115,7 @@ func TestBridgeToken_PrefersSubjectOverGitHubLogin(t *testing.T) {
 }
 
 func TestBridgeToken_AnonymousReturns401(t *testing.T) {
-	h := NewBridgeTokenHandler(&fakeProvider{id: nil}, []byte(testHMACSecret), testBridgeIssuerURL)
+	h := NewBridgeTokenHandler(&fakeProvider{id: nil}, []byte(testHMACSecret), testBridgeIssuerURL, nil)
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
 	// no auth.With(...) — Identity stays nil
 	rec := httptest.NewRecorder()
@@ -122,8 +139,9 @@ func TestBridgeToken_CarriesParentRevocationIdentity(t *testing.T) {
 		TelegramID:       7,
 		Jti:              "parent-jti-abc",
 		OriginalIssuedAt: 1700000000,
+		DeviceID:         "dev-token-test",
 	}
-	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, tokenHandlerStore(t))
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
 	req = req.WithContext(auth.With(context.Background(), id))
 	rec := httptest.NewRecorder()
@@ -169,8 +187,8 @@ func TestBridgeToken_CarriesParentRevocationIdentity(t *testing.T) {
 // token must not invent them. A fabricated jti would denylist-match nothing
 // and a fabricated orig_iat would misdate the credential chain.
 func TestBridgeToken_OmitsRevocationClaimsForInteractiveParent(t *testing.T) {
-	id := &auth.Identity{UserID: 8, Subject: "tg:8", TelegramID: 8}
-	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL)
+	id := &auth.Identity{UserID: 8, Subject: "tg:8", TelegramID: 8, DeviceID: "dev-token-test"}
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, tokenHandlerStore(t))
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil)
 	req = req.WithContext(auth.With(context.Background(), id))
 	rec := httptest.NewRecorder()
@@ -190,5 +208,62 @@ func TestBridgeToken_OmitsRevocationClaimsForInteractiveParent(t *testing.T) {
 	}
 	if strings.Contains(string(body), `"jti"`) || strings.Contains(string(body), `"orig_iat"`) {
 		t.Errorf("derived token invented revocation claims for an interactive parent: %s", body)
+	}
+}
+
+func TestBridgeToken_BindsWorkerLineageToSyntheticDevice(t *testing.T) {
+	store := tokenHandlerStore(t)
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, 8, "worker", "Worker")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	id := &auth.Identity{UserID: uid, Subject: "tg:8", TelegramID: 8, Jti: "worker-jti"}
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, store)
+	req := httptest.NewRequest("POST", "/api/bridge/token", nil).WithContext(auth.With(ctx, id))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handler status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		BridgeToken string `json:"bridge_token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	claims, err := localjwt.Verify(response.BridgeToken, []byte(testHMACSecret), testBridgeIssuerURL)
+	if err != nil || claims.DeviceID == "" {
+		t.Fatalf("bridge token device binding = %q, err=%v", claims.DeviceID, err)
+	}
+	secondRec := httptest.NewRecorder()
+	h(secondRec, req)
+	var second struct {
+		BridgeToken string `json:"bridge_token"`
+	}
+	_ = json.NewDecoder(secondRec.Body).Decode(&second)
+	secondClaims, err := localjwt.Verify(second.BridgeToken, []byte(testHMACSecret), testBridgeIssuerURL)
+	if err != nil || secondClaims.DeviceID != claims.DeviceID {
+		t.Fatalf("synthetic device was not stable: first=%q second=%q err=%v", claims.DeviceID, secondClaims.DeviceID, err)
+	}
+	if _, err := store.RevokeDeviceAndDenylist(ctx, claims.DeviceID, 8, "test", uid); err != nil {
+		t.Fatalf("revoke synthetic device: %v", err)
+	}
+	revokedRec := httptest.NewRecorder()
+	h(revokedRec, req)
+	if revokedRec.Code != http.StatusForbidden {
+		t.Fatalf("revoked synthetic device status = %d, want 403", revokedRec.Code)
+	}
+}
+
+func TestBridgeToken_RejectsUnboundParent(t *testing.T) {
+	store := tokenHandlerStore(t)
+	id := &auth.Identity{UserID: 1, Subject: "tg:1", TelegramID: 1}
+	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, store)
+	req := httptest.NewRequest("POST", "/api/bridge/token", nil).WithContext(auth.With(context.Background(), id))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unbound parent status = %d, want 403", rec.Code)
 	}
 }

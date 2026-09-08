@@ -38,6 +38,35 @@ func TestRegisterDevice_Insert(t *testing.T) {
 	}
 }
 
+func TestIsActiveDeviceForUser(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramID(ctx, 1010, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	otherUID, err := s.EnsureUserByTelegramID(ctx, 1011, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure other user: %v", err)
+	}
+	deviceID, err := s.RegisterDevice(ctx, uid, "alice-device", "active-check", nil)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+	if active, err := s.IsActiveDeviceForUser(ctx, uid, deviceID); err != nil || !active {
+		t.Fatalf("active device check = %v, %v; want true, nil", active, err)
+	}
+	if active, err := s.IsActiveDeviceForUser(ctx, otherUID, deviceID); err != nil || active {
+		t.Fatalf("wrong-owner check = %v, %v; want false, nil", active, err)
+	}
+	if err := s.RevokeDevice(ctx, deviceID, "test"); err != nil {
+		t.Fatalf("revoke device: %v", err)
+	}
+	if active, err := s.IsActiveDeviceForUser(ctx, uid, deviceID); err != nil || active {
+		t.Fatalf("revoked device check = %v, %v; want false, nil", active, err)
+	}
+}
+
 // T2: calling RegisterDevice twice with the same (userID, idempotencyKey)
 // returns the same device_id both times and leaves exactly one row in the
 // table.

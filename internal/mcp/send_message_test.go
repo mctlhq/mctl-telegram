@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -123,6 +124,101 @@ func TestToolSendMessage_LocalBridgeInjectsSendMode(t *testing.T) {
 func toStr(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func callPin(t *testing.T, srv *Server, id *auth.Identity, confirmationID string) *mcplib.CallToolResult {
+	t.Helper()
+	_, handler := srv.toolPinMessage()
+	ctx := auth.With(context.Background(), id)
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+		Name: "pin_message",
+		Arguments: map[string]any{
+			"peer":            "chat:42",
+			"message_id":      float64(7),
+			"confirmation_id": confirmationID,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	return res
+}
+
+func issuePinConfirmation(t *testing.T, srv *Server, userID int64) string {
+	t.Helper()
+	c, err := srv.Confirms.Issue(userID, "pin", HashPinPayload("chat:42", 7, false))
+	if err != nil {
+		t.Fatalf("issue confirmation: %v", err)
+	}
+	return c.ID
+}
+
+func TestToolPinMessage_ConsentBlocksWithoutConsumingConfirmation(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 910)
+	if _, err := store.SetSendEnabled(context.Background(), uid, false); err != nil {
+		t.Fatalf("disable send: %v", err)
+	}
+	hub := bridge.NewHub()
+	send := hub.Register(uid, "dev-pin")
+	srv := &Server{Store: store, Hub: hub, AllowSend: true, Confirms: NewConfirmStore()}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:pin"}}
+	confirmationID := issuePinConfirmation(t, srv, uid)
+
+	if res := callPin(t, srv, id, confirmationID); !res.IsError {
+		t.Fatal("pin succeeded while send consent was disabled")
+	}
+	tool, status, msg := latestAudit(t, store, uid)
+	if tool != "pin_message:blocked" || status != "error" || !strings.Contains(msg, "send_enabled=false") {
+		t.Fatalf("blocked pin not audited: tool=%q status=%q msg=%q", tool, status, msg)
+	}
+	select {
+	case env := <-send:
+		t.Fatalf("blocked pin reached Local Bridge: %#v", env)
+	default:
+	}
+
+	if _, err := store.SetSendEnabled(context.Background(), uid, true); err != nil {
+		t.Fatalf("enable send: %v", err)
+	}
+	go func() {
+		env := <-send
+		hub.Deliver(uid, bridge.EncodeResponse(env.ID, json.RawMessage(`{"status":"pinned","peer":"chat:42","message_id":7}`)))
+	}()
+	if res := callPin(t, srv, id, confirmationID); res.IsError {
+		t.Fatalf("confirmation was consumed by the consent refusal: %s", contentText(res))
+	}
+}
+
+func TestToolPinMessage_RevokedConsentAndServerGateBlockDispatch(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 911)
+	hub := bridge.NewHub()
+	send := hub.Register(uid, "dev-pin")
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:pin"}}
+
+	for _, tc := range []struct {
+		name      string
+		allowSend bool
+	}{
+		{name: "revoked account consent", allowSend: true},
+		{name: "server send disabled", allowSend: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.SetSendEnabled(context.Background(), uid, false); err != nil {
+				t.Fatalf("disable send: %v", err)
+			}
+			srv := &Server{Store: store, Hub: hub, AllowSend: tc.allowSend, Confirms: NewConfirmStore()}
+			if res := callPin(t, srv, id, issuePinConfirmation(t, srv, uid)); !res.IsError {
+				t.Fatal("pin succeeded while write gate was closed")
+			}
+			select {
+			case env := <-send:
+				t.Fatalf("blocked pin reached Local Bridge: %#v", env)
+			default:
+			}
+		})
+	}
 }
 
 // TestToolSendMessage_HintOnlyForSendDisabled covers all four dry-run causes

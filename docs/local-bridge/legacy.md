@@ -21,9 +21,16 @@ An operator mints the token with the `mint_worker_token` MCP tool (or
 read-only scopes, in one static, long-lived credential rather than a
 refreshing device-bound one.
 
+This recovery path requires the current local-jwt worker-token format with a
+JTI. Older pre-JTI worker tokens and shared-hmac/local-dev credentials are not
+accepted by the device-bound bridge endpoint; re-mint the worker token or run
+`activate` to register a device before reconnecting.
+
 The daemon repeatedly exchanges this same worker token for a fresh
 short-lived bridge token via `POST /api/bridge/token`, but the worker
-token's own expiry never moves. Once it lapses (up to 90 days after
+token's own expiry never moves. The server binds this lineage to a stable
+synthetic Local Bridge device on the first exchange, so device revocation
+and bridge admission checks apply to this recovery path too. Once it lapses (up to 90 days after
 minting), the fix is an operator re-minting a fresh one and you
 re-running `connect` — not anything the daemon can do by itself.
 

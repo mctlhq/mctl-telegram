@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -46,10 +47,9 @@ type daemonConn struct {
 	retireOnce   sync.Once
 	pending      sync.Map // map[string]chan Envelope
 	pendingCount atomic.Int64
-	// deviceID is the Local Bridge device this connection authenticated as
-	// (issue-483), empty for a connection whose credential predates device
-	// binding (a rolling-deploy transitional window). EvictDevice only
-	// evicts when this matches the caller's target, mirroring
+	// deviceID is the Local Bridge device this connection authenticated as.
+	// The HTTP bridge handler rejects credentials without this binding.
+	// EvictDevice only evicts when this matches the caller's target, mirroring
 	// UnregisterSend's "only touch the entry if it's still the one we
 	// mean" discipline.
 	deviceID string
@@ -104,19 +104,35 @@ func (dc *daemonConn) retire() {
 // so the same Hub is exercised by tests via in-process channels and
 // by the real /bridge endpoint via the websocket adapter.
 type Hub struct {
-	mu      sync.Mutex
-	conn    map[int64]*daemonConn
-	now     func() time.Time
-	metrics *metrics.Registry
+	mu             sync.Mutex
+	conn           map[int64]*daemonConn
+	blockedDevices map[deviceKey]struct{}
+	verifyDevice   func(context.Context, int64, string) (bool, error)
+	now            func() time.Time
+	metrics        *metrics.Registry
 }
 
-// NewHub builds an empty hub. Wire it into cmd/server/main.go and a
-// future internal/bridge/server.go websocket adapter.
+type deviceKey struct {
+	userID   int64
+	deviceID string
+}
+
+// NewHub builds an empty hub.
 func NewHub() *Hub {
 	return &Hub{
-		conn: map[int64]*daemonConn{},
-		now:  time.Now,
+		conn:           map[int64]*daemonConn{},
+		blockedDevices: map[deviceKey]struct{}{},
+		now:            time.Now,
 	}
+}
+
+// WithDeviceVerifier installs the durable device-state check used before
+// dispatching each bridge call. The in-memory blocklist closes same-process
+// admission races; this verifier also catches revocations committed by a
+// different replica sharing the database.
+func (h *Hub) WithDeviceVerifier(verify func(context.Context, int64, string) (bool, error)) *Hub {
+	h.verifyDevice = verify
+	return h
 }
 
 // WithMetrics wires a *metrics.Registry so daemon connection events are
@@ -133,15 +149,27 @@ func (h *Hub) WithMetrics(m *metrics.Registry) *Hub {
 // the connection's single pump goroutine after retirement.
 //
 // deviceID names which local_bridge_devices row authenticated this
-// connection (issue-483); empty when the connecting identity carries no
-// device binding (a legacy/admin-minted bridge token). It is stored on the
-// entry so EvictDevice can later find and close this specific connection
-// without disturbing a different device's live session for the same user.
+// connection. Production callers require a non-empty binding. It is stored
+// on the entry so EvictDevice can later find and close this specific
+// connection without disturbing a different device's live session for the
+// same user.
 //
 // Cap of 16 is intentional: a daemon falling behind on reads will
 // back-pressure the hub rather than blow memory.
 func (h *Hub) Register(userID int64, deviceID string) chan Envelope {
+	send, _ := h.TryRegister(userID, deviceID)
+	return send
+}
+
+// TryRegister is Register with revocation-aware admission. Once BlockDevice
+// has recorded a device, registration of that exact user/device pair is
+// refused atomically under the same mutex used by the eviction path.
+func (h *Hub) TryRegister(userID int64, deviceID string) (chan Envelope, bool) {
 	h.mu.Lock()
+	if _, blocked := h.blockedDevices[deviceKey{userID: userID, deviceID: deviceID}]; blocked {
+		h.mu.Unlock()
+		return nil, false
+	}
 	prev, replaced := h.conn[userID]
 	dc := newDaemonConn(deviceID)
 	h.conn[userID] = dc
@@ -160,7 +188,7 @@ func (h *Hub) Register(userID int64, deviceID string) chan Envelope {
 	if replaced {
 		prev.retire()
 	}
-	return dc.send
+	return dc.send, true
 }
 
 // Unregister drops the user's daemon connection. Idempotent. The
@@ -210,10 +238,18 @@ func (h *Hub) UnregisterSend(userID int64, send chan Envelope) {
 // the same user could evict the wrong session. An empty deviceID never
 // matches, and repeated eviction after removal is an idempotent no-op.
 func (h *Hub) EvictDevice(userID int64, deviceID string) bool {
+	return h.BlockDevice(userID, deviceID)
+}
+
+// BlockDevice permanently refuses this user/device pair for the lifetime of
+// the process and evicts its current connection, if any. Recording the block
+// even when no connection exists closes revoke-before-register races.
+func (h *Hub) BlockDevice(userID int64, deviceID string) bool {
 	if deviceID == "" {
 		return false
 	}
 	h.mu.Lock()
+	h.blockedDevices[deviceKey{userID: userID, deviceID: deviceID}] = struct{}{}
 	dc, ok := h.conn[userID]
 	if !ok || dc.deviceID != deviceID {
 		h.mu.Unlock()
@@ -236,9 +272,24 @@ func (h *Hub) EvictDevice(userID int64, deviceID string) bool {
 func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, error) {
 	h.mu.Lock()
 	dc, ok := h.conn[userID]
+	verify := h.verifyDevice
 	h.mu.Unlock()
 	if !ok {
 		return Envelope{}, ErrNoDaemonConnected
+	}
+	if verify != nil && dc.deviceID == "" {
+		h.retireConnection(userID, dc, false)
+		return Envelope{}, ErrNoDaemonConnected
+	}
+	if verify != nil {
+		active, err := verify(ctx, userID, dc.deviceID)
+		if err != nil {
+			return Envelope{}, fmt.Errorf("verify bridge device: %w", err)
+		}
+		if !active {
+			h.retireConnection(userID, dc, true)
+			return Envelope{}, ErrNoDaemonConnected
+		}
 	}
 
 	select {
@@ -277,6 +328,24 @@ func (h *Hub) Call(ctx context.Context, userID int64, env Envelope) (Envelope, e
 		return Envelope{}, ErrCallTimeout
 	case <-ctx.Done():
 		return Envelope{}, ctx.Err()
+	}
+}
+
+func (h *Hub) retireConnection(userID int64, target *daemonConn, block bool) {
+	h.mu.Lock()
+	if block && target.deviceID != "" {
+		h.blockedDevices[deviceKey{userID: userID, deviceID: target.deviceID}] = struct{}{}
+	}
+	current, ok := h.conn[userID]
+	if ok && current == target {
+		delete(h.conn, userID)
+		if h.metrics != nil {
+			h.metrics.BridgeActiveDaemons.Dec()
+		}
+	}
+	h.mu.Unlock()
+	if ok && current == target {
+		target.retire()
 	}
 }
 
