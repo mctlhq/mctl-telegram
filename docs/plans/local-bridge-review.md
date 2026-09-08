@@ -87,7 +87,7 @@ session absence is a local-test assertion unless separately observed live.
 | Static checks | PASS | `go vet` on the same package set; `git diff --check`. |
 | Additional OAuth integration | PASS | Synthetic ChatGPT DCR + S256 PKCE + local-account callback + owner token; no hosted session bytes. Telegram provider is stubbed. |
 | Lookup login and refresh | PASS | Initial grant and refresh have only `admin:users:read`; no `telegram_accounts` row created. Removal has a finding below. |
-| Code review findings | FAIL | Four confirmed findings below; no application fixes applied. |
+| Code review findings | REMEDIATION IN PROGRESS | F4 shipped in `0.62.2`; F1-F3 are implemented and covered by regression tests in the remediation change, with release pending. |
 | Test binary preparation | PASS | Release checksum `203642c7925ac1b8c63dc2fdbdc0ed66e304053d77f5f2a241e9cbada82df3c4`; `init --help` succeeds. |
 | Backup and state replacement | PASS | A failed interrupted attempt was repaired manually; original binary checksum matches preflight, original config is present with `0700`, and launchd is running again. The remote helper now restores based on actual backups rather than `started`/`restored` marker state. |
 | Fresh local login and activation | PASS WITH UX BUG | Apple Silicon local review build completed Telegram login and device activation for the review account. The activation form's POST returned the expected 302, but Chromium blocked the redirected Telegram OAuth navigation under `form-action 'self'`; opening the `Location` URL manually completed activation. This does not validate the Intel release binary. |
@@ -101,6 +101,19 @@ session absence is a local-test assertion unless separately observed live.
 | Live lookup login | NOT RUN | No dedicated configured identity; local tests only. |
 
 ## Findings
+
+### Remediation status
+
+| Finding | Status | Resolution |
+| --- | --- | --- |
+| F1 | IMPLEMENTED, RELEASE PENDING | Bridge admission requires a device-bound credential, checks durable device ownership before websocket registration and before every dispatch, and records revocation tombstones so an in-flight admission cannot register after eviction. |
+| F2 | IMPLEMENTED, RELEASE PENDING | `pin_message` now applies the same server, scope and live per-account consent gate as message sending before consuming its confirmation or dispatching locally. |
+| F3 | IMPLEMENTED, RELEASE PENDING | Refresh and grace-replay grants are bounded to the predecessor token's scopes. Removing lookup access can shrink a grant; expanding it requires a fresh OAuth authorization. |
+| F4 | RELEASED | [PR #566](https://github.com/mctlhq/mctl-telegram/pull/566) shipped the activation redirect fix in `0.62.2`. |
+
+F1-F3 remain documented below as the evidence and threat model for their
+regression tests. The release status will be updated after the remediation
+change is merged and deployed.
 
 ### F1 — P1: device revocation can miss an in-flight websocket admission
 
