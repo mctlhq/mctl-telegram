@@ -17,6 +17,7 @@ Canary incidents are out of scope here; see
 - [MctlTelegramNearCapacity — session pool near capacity](#mctltelegramnearcapacity)
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
+- [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
 - [JwtFailures — authentication failure spike](#jwtfailures)
 - [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
@@ -30,6 +31,19 @@ Canary incidents are out of scope here; see
 - [Communication Agent operations](#communication-agent-operations)
 
 ---
+
+<a id="oauth-refresh-reauthorization"></a>
+## OAuth refresh re-authorization after scope changes
+
+After a release that adds a scope to a tier bundle, refresh tokens issued
+before that release may receive `invalid_grant` from `/oauth/token`. This is
+intentional: refresh families cannot silently expand their original grant,
+so clients must repeat the OAuth authorization-code flow to obtain the new
+scope set. Treat a coordinated wave of these responses as an expected
+re-authorization migration, announce it with the release, and monitor the
+authorization callback until clients have renewed. It is not an OAuth
+service outage unless new authorization-code flows also fail.
+
 
 <a id="deployment-compatibility"></a>
 ## Deployment compatibility boundaries
