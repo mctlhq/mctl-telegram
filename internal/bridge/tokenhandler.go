@@ -71,7 +71,7 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 			// worker token. Bind its stable jti lineage to a durable synthetic
 			// device so revocation and per-dispatch checks apply to it too.
 			if id.Jti == "" {
-				writeJSONError(w, http.StatusForbidden, "device-bound credential required")
+				writeJSONError(w, http.StatusForbidden, "device-bound credential required; run activate to register this device")
 				return
 			}
 			digest := sha256.Sum256([]byte("legacy-local-bridge:" + id.Jti))
