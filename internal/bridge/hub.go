@@ -46,10 +46,9 @@ type daemonConn struct {
 	retireOnce   sync.Once
 	pending      sync.Map // map[string]chan Envelope
 	pendingCount atomic.Int64
-	// deviceID is the Local Bridge device this connection authenticated as
-	// (issue-483), empty for a connection whose credential predates device
-	// binding (a rolling-deploy transitional window). EvictDevice only
-	// evicts when this matches the caller's target, mirroring
+	// deviceID is the Local Bridge device this connection authenticated as.
+	// The HTTP bridge handler rejects credentials without this binding.
+	// EvictDevice only evicts when this matches the caller's target, mirroring
 	// UnregisterSend's "only touch the entry if it's still the one we
 	// mean" discipline.
 	deviceID string
@@ -117,8 +116,7 @@ type deviceKey struct {
 	deviceID string
 }
 
-// NewHub builds an empty hub. Wire it into cmd/server/main.go and a
-// future internal/bridge/server.go websocket adapter.
+// NewHub builds an empty hub.
 func NewHub() *Hub {
 	return &Hub{
 		conn:           map[int64]*daemonConn{},
@@ -150,10 +148,10 @@ func (h *Hub) WithMetrics(m *metrics.Registry) *Hub {
 // the connection's single pump goroutine after retirement.
 //
 // deviceID names which local_bridge_devices row authenticated this
-// connection (issue-483); empty when the connecting identity carries no
-// device binding (a legacy/admin-minted bridge token). It is stored on the
-// entry so EvictDevice can later find and close this specific connection
-// without disturbing a different device's live session for the same user.
+// connection. Production callers require a non-empty binding. It is stored
+// on the entry so EvictDevice can later find and close this specific
+// connection without disturbing a different device's live session for the
+// same user.
 //
 // Cap of 16 is intentional: a daemon falling behind on reads will
 // back-pressure the hub rather than blow memory.
