@@ -11,6 +11,8 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - SQLite (local dev) or Postgres (production)
 
 ## Key paths
+- `docs/plans/local-bridge-review.md` — active Local Bridge 0.62.1 review,
+  manual verification procedure and result log.
 - `cmd/server/main.go` — HTTP + MCP entrypoint
 - `cmd/login/main.go` — interactive Telegram login CLI (phone → SMS → 2FA)
 - `cmd/local/` — Local Bridge daemon CLI (M4)
