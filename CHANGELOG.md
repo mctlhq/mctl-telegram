@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.62.2](https://github.com/mctlhq/mctl-telegram/compare/0.62.1...0.62.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **oauth:** allow local bridge oauth redirect ([4d25cf1](https://github.com/mctlhq/mctl-telegram/commit/4d25cf1c79c46423cdfc8bf1905fa5f8e6a7be22))
+
 ## [0.62.1](https://github.com/mctlhq/mctl-telegram/compare/0.62.0...0.62.1) (2026-09-07)
 
 
