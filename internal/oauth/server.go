@@ -2047,7 +2047,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if len(scopes) == 0 && len(resolvedScopes) > 0 {
+	if len(scopes) < len(resolvedScopes) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2139,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if len(scopes) == 0 && len(resolvedScopes) > 0 {
+	if len(scopes) < len(resolvedScopes) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}

@@ -66,7 +66,7 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 		}
 
 		deviceID := id.DeviceID
-		if deviceID == "" && store != nil {
+		if deviceID == "" {
 			// The supported operator recovery path starts from an admin-minted
 			// worker token. Bind its stable jti lineage to a durable synthetic
 			// device so revocation and per-dispatch checks apply to it too.
