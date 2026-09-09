@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -117,11 +118,16 @@ func TestRun_FailsFastOnHealthServerBindError(t *testing.T) {
 func TestRun_FailsFastWhenCredentialDomainIDUnset(t *testing.T) {
 	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENT_API_TOKEN", "test-token")
-	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
-	// leak an unset AGENT_CREDENTIAL_DOMAIN_ID into every test that runs after this
-	// one in the same binary and make the package order-dependent.
-	// requireEnv treats "" as missing, so this covers the same case.
-	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "")
+	// Genuinely ABSENT from the environment, not set-to-empty — the sibling
+	// TestRun_FailsFastWhenCredentialDomainIDEmpty covers the empty case, and
+	// collapsing the two would leave "absent" unexercised. t.Setenv first so
+	// the testing package records the original value and restores it at test
+	// end; a bare os.Unsetenv is never restored and would leak an unset
+	// variable into every test that runs after this one in the same binary.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "placeholder")
+	if err := os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID"); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
 
 	err := run()
 	if err == nil {
@@ -195,11 +201,13 @@ func TestRun_FailsFastWhenCredentialDomainIDTooLong(t *testing.T) {
 // different, pre-existing reason (missing AGENT_JOB_ID) rather than ever
 // mentioning the credential domain var.
 func TestRunMCPServe_UnaffectedByMissingCredentialDomainID(t *testing.T) {
-	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
-	// leak an unset AGENT_CREDENTIAL_DOMAIN_ID into every test that runs after this
-	// one in the same binary and make the package order-dependent.
-	// requireEnv treats "" as missing, so this covers the same case.
-	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "")
+	// Absent, not empty: this test's point is that --mcp-serve does not read
+	// the variable at all. t.Setenv registers the restore, os.Unsetenv makes
+	// it genuinely absent for the duration.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "placeholder")
+	if err := os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID"); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
 	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENT_API_TOKEN", "test-token")
 	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
