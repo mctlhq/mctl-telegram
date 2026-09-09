@@ -110,7 +110,16 @@ scopes, so such a family keeps working; only a family whose grant *degrades* to
 nothing is refused.
 
 The refresh response code is now a reliable de-provisioning check for both
-routes above. To confirm at the tool layer as well, a positive check is
+routes above, including for a family de-provisioned *before* #584 shipped: the
+old handler rotated those successors with an empty scope, so the family's own
+grant no longer records that it ever had one, and the explicit `none` tier is
+what refuses them instead. The one case that still refreshes with no scopes is
+an identity that never held a grant and has no explicit tier — open
+registration off and not on any allowlist. That is not a revocation, and the
+token it renews fails every tool call, but it does mean the refresh code says
+nothing about an identity in that state.
+
+To confirm at the tool layer as well, a positive check is
 `list_telegram_identities` returning data for the identity; a negative check is
 a write tool such as `set_telegram_access` or `mint_worker_token` being refused
 with a missing-scope error.

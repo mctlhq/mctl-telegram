@@ -715,7 +715,7 @@ func TestToken_RefreshGraceRecoveryRefusedAfterTierRevokedToNone(t *testing.T) {
 	mux := newMockRouter()
 	srv.Register(mux)
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "dave", "Dave")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -760,7 +760,7 @@ func TestToken_RefreshSucceedsForFamilyScopelessFromTheStart(t *testing.T) {
 	mux := newMockRouter()
 	srv.Register(mux)
 	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, scopelessID, "erin", "Erin")
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, scopelessID, "alice", "Alice")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -790,5 +790,54 @@ func TestToken_RefreshSucceedsForFamilyScopelessFromTheStart(t *testing.T) {
 	rec := doTokenRequest(t, mux, form)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("refresh status = %d %s, want 200 — a family that never held a grant is not a degradation", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToken_RefreshRefusedForLegacyFamilyAlreadyRotatedToEmptyScope covers the
+// upgrade case Codex raised on #595. The PREVIOUS handler answered a degraded
+// refresh with HTTP 200 and rotated the successor carrying Scope: "", so a
+// family de-provisioned before this fix shipped already looks, by its own
+// grant alone, exactly like a family that never held one. Judging it by
+// originalScope would misread it as never-granted and keep refreshing it until
+// its absolute expiry, leaving the runbook's de-provisioning check false for
+// precisely the identities it matters for.
+//
+// The access tier is independent of the grant and survives that rewriting, so
+// an explicit tier="none" refuses the refresh regardless of what the family's
+// scope column says.
+func TestToken_RefreshRefusedForLegacyFamilyAlreadyRotatedToEmptyScope(t *testing.T) {
+	const legacyID int64 = 777000666
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, legacyID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	// The state the old handler left behind: a live successor whose grant was
+	// already flattened to empty.
+	original := "legacy-poisoned-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "legacy-poisoned-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, legacyID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant — a family flattened by the old handler must not keep refreshing after revocation", rec.Code, rec.Body.String())
 	}
 }

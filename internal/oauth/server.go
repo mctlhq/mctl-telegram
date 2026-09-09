@@ -2047,7 +2047,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope, s.tierRevoked(r.Context(), child.TelegramID)) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2139,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope, s.tierRevoked(r.Context(), rt.TelegramID)) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
@@ -2266,11 +2266,39 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // degenerate state: handleTelegramCallback deliberately issues an authorization
 // code to an identity that will receive no scopes, so refusing every scopeless
 // refresh would break a working flow rather than fix this one. See #584.
-func refreshGrantStillValid(bounded, resolved []string, originalScope string) bool {
+func refreshGrantStillValid(bounded, resolved []string, originalScope string, tierRevoked bool) bool {
 	if len(bounded) < len(resolved) {
 		return false
 	}
-	return len(resolved) > 0 || len(strings.Fields(originalScope)) == 0
+	if len(resolved) > 0 {
+		return true
+	}
+	return len(strings.Fields(originalScope)) == 0 && !tierRevoked
+}
+
+// tierRevoked reports whether an operator has explicitly set this identity's
+// users.access_tier to "none" — the deliberate revocation path, as opposed to
+// merely never having been granted anything.
+//
+// refreshGrantStillValid needs it because a family degraded under the PREVIOUS
+// handler already carries Scope: "" on its live successor: that handler minted
+// a scopeless token at HTTP 200 and rotated the successor with an empty scope,
+// so the family's own grant no longer records that it ever had one. Judging
+// such a family by originalScope alone would misread it as never-granted and
+// keep refreshing it until its absolute expiry, leaving the runbook's
+// de-provisioning check false for exactly the identities it matters for.
+// The access tier is independent of the grant and survives that rewriting.
+//
+// A read error is treated as revoked. This runs only on the path where the
+// identity already resolves to no scopes, so failing closed costs a client
+// nothing it could have used, and failing open would reopen the hole.
+func (s *Server) tierRevoked(ctx context.Context, tgID int64) bool {
+	tier, err := s.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		slog.Warn("oauth refresh: could not read access tier, treating as revoked", "err", err)
+		return true
+	}
+	return tier == db.TierNone
 }
 
 // handleRevoke implements RFC 7009 token revocation for refresh tokens.
