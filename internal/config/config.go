@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -96,6 +98,18 @@ type Config struct {
 	// its own hosted callback domain) is otherwise a code change and a
 	// release for what is a deployment-level trust decision.
 	OAUTHAllowedImplicitHosts []string
+	// OAUTHPreregisteredClients are OAuth clients seeded at startup with an
+	// exact redirect_uri set, parsed from OAUTH_PREREGISTERED_CLIENTS (a JSON
+	// array of {"client_id","redirect_uris",["client_name"]}). They are the
+	// path for a party that cannot use RFC 7591 dynamic registration and whose
+	// callback host must not join the implicit allowlist: an enterprise MCP
+	// gateway, for instance, is registered once with its exact callback and
+	// nothing else about redirect acceptance changes. Unset ⇒ nothing is
+	// seeded and behaviour is identical to before the variable existed.
+	//
+	// The records carry no secret: the authorization server is public-client
+	// + PKCE only and this variable does not widen that contract.
+	OAUTHPreregisteredClients []PreregisteredClient
 	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
 	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// Observability:
@@ -321,6 +335,11 @@ func Load() (*Config, error) {
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
+	preregistered, err := parsePreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))
+	if err != nil {
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+	}
+	c.OAUTHPreregisteredClients = preregistered
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
@@ -568,4 +587,60 @@ func hexNib(b byte) (byte, error) {
 		return b - 'A' + 10, nil
 	}
 	return 0, fmt.Errorf("invalid hex char %q", b)
+}
+
+// PreregisteredClient is one static OAuth client record from
+// OAUTH_PREREGISTERED_CLIENTS. RedirectURIs are matched byte-for-byte by
+// the authorization server; there is no host allowlist, prefix or wildcard
+// semantics for these records, so an operator pastes the callback exactly as
+// the counterpart displays it.
+type PreregisteredClient struct {
+	ClientID     string   `json:"client_id"`
+	ClientName   string   `json:"client_name,omitempty"`
+	RedirectURIs []string `json:"redirect_uris"`
+}
+
+// parsePreregisteredClients decodes the OAUTH_PREREGISTERED_CLIENTS JSON
+// array. It fails closed: a value that is present but malformed aborts
+// startup rather than silently seeding nothing, because the operator who set
+// the variable is relying on the client existing. Unknown keys are rejected
+// so that a record carrying a field this contract does not support (a secret,
+// say) is caught at boot instead of being ignored.
+func parsePreregisteredClients(raw string) ([]PreregisteredClient, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var out []PreregisteredClient
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	if dec.More() {
+		return nil, errors.New("trailing data after the JSON array")
+	}
+	seen := make(map[string]struct{}, len(out))
+	for i := range out {
+		rec := &out[i]
+		rec.ClientID = strings.TrimSpace(rec.ClientID)
+		if rec.ClientID == "" {
+			return nil, fmt.Errorf("record %d: client_id is required", i)
+		}
+		if _, dup := seen[rec.ClientID]; dup {
+			return nil, fmt.Errorf("record %d: duplicate client_id %q", i, rec.ClientID)
+		}
+		seen[rec.ClientID] = struct{}{}
+		if len(rec.RedirectURIs) == 0 {
+			return nil, fmt.Errorf("record %d (%s): redirect_uris must list at least one URI", i, rec.ClientID)
+		}
+		for j, u := range rec.RedirectURIs {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				return nil, fmt.Errorf("record %d (%s): redirect_uris[%d] is empty", i, rec.ClientID, j)
+			}
+			rec.RedirectURIs[j] = u
+		}
+	}
+	return out, nil
 }
