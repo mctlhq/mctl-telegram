@@ -172,8 +172,9 @@ is denied on its own reason and raises no pause alert, so silencing one
 conversation stays silent. The alert does not tell the owner to "resume
 autopilot": no owner-facing Telegram command clears `autopilot_paused`.
 `/mctl continue <id>` releases one conversation; lifting the account-wide
-pause is an operator action through the agent API. If Saved Messages goes completely silent, the cause is the kill
-switch, `mode=off`, or a disabled listener — not a pause by itself. See
+pause is an operator action through the agent API. If Saved Messages goes
+completely silent, the cause is the kill switch, `mode=off`, or a disabled
+listener — not a pause by itself. See
 [`docs/reports/communication-agent-c1.md`](reports/communication-agent-c1.md)
 for the validation history that first surfaced this distinction.
 

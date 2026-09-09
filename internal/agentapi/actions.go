@@ -325,7 +325,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	}
 	// Driven by the PERSISTED row, not by this replay's freshly-evaluated
 	// `result` — the same rule the reload comment above states and the
-	// approval notification below already follows. InsertAgentAction is
+	// approval notification above already follows. InsertAgentAction is
 	// idempotent for job-tied actions: a redelivered job whose action was
 	// first persisted as `approved` (account active at the time) must not
 	// produce a "reply withheld" alert just because the owner paused the
@@ -342,8 +342,8 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		//
 		// Throttled per account, not merely deduped per action. The
 		// per-action_id uniqueness inside InsertOwnerNotification only
-		// collapses redeliveries of the SAME draft; every new inbound
-		// message is a distinct action, and
+		// collapses redeliveries of the SAME draft; every new inbound message
+		// is a distinct action, and
 		// ingestion is gated on listener_enabled, never on autopilot_paused
 		// (internal/agent/listener). An account sitting in the documented
 		// bootstrap default (paused, listener on) would therefore queue one
@@ -386,7 +386,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			// and autopilot stays paused until re-enabled through the agent
 			// API. Naming an action the owner cannot take is the opposite of
 			// the actionability this issue exists to add.
-			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. To keep this from repeating, no further alert of any kind will be raised for this account for %s.", peerLabel, pauseAlertWindowText)
+			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. To keep this from repeating, no further alert of any kind should be raised for this account for %s.", peerLabel, pauseAlertWindowText)
 			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
 			}); nerr != nil {
