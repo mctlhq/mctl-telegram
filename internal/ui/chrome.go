@@ -6,7 +6,7 @@
 //
 // Two tiers are provided:
 //   - "full"  — content pages (landing, docs, security, privacy). Loads
-//     ui.mctl.ai/mctl.css + Google Fonts as progressive enhancement and runs
+//     ui.mctl.ai/<version>/mctl.css + Google Fonts as progressive enhancement and runs
 //     the light/dark toggle JS (the choice persists in localStorage;
 //     it defaults to the OS preference until the user flips it).
 //   - "lite"  — OAuth-flow pages served under a strict CSP
@@ -72,7 +72,7 @@ var defs = `
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://ui.mctl.ai/mctl.css">
+<link rel="stylesheet" href="https://ui.mctl.ai/0.5.0/mctl.css">
 <script>` + prepaintJS + `</script>
 <style>` + componentsCSS + `</style>{{end}}
 

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,7 @@ func TestFullChrome(t *testing.T) {
 
 	for _, s := range []string{
 		`class="topbar"`,
-		"ui.mctl.ai/mctl.css",
+		"ui.mctl.ai/0.5.0/mctl.css",
 		"family=Onest",
 		"JetBrains+Mono",
 		"ui.mctl.ai/brand/favicon-telegram.svg",
@@ -51,12 +52,33 @@ func TestFullChrome(t *testing.T) {
 	}
 }
 
+func TestStylesheetIsVersionPinned(t *testing.T) {
+	// The floating https://ui.mctl.ai/mctl.css has no version in it and a four
+	// hour cache, so a token change upstream restyles this page with no commit
+	// here and nothing to roll back to. The pinned path is served immutable and
+	// mctl-design's CI refuses to edit a published version directory, so an
+	// upgrade becomes an edit made here on purpose (mctl-design#78).
+	//
+	// Asserting the shape, not the exact version: a bump stays a one-line
+	// change, while a revert to the floating URL fails here.
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+	out := render(t, "pin", page, Data{Title: "T", PublicBaseURL: "https://tg.mctl.ai"})
+
+	pinned := regexp.MustCompile(`https://ui\.mctl\.ai/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?/mctl\.css`)
+	if !pinned.MatchString(out) {
+		t.Error("the design-system stylesheet must be version-pinned")
+	}
+	if strings.Contains(out, `"https://ui.mctl.ai/mctl.css"`) {
+		t.Error("the floating (unversioned) stylesheet URL is back")
+	}
+}
+
 func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 	page := `<!doctype html><html lang="en"><head>{{template "ui_head_lite" .}}</head>` +
 		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
-	for _, bad := range []string{"ui.mctl.ai/mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
+	for _, bad := range []string{"mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("lite (strict-CSP) page must not contain %q", bad)
 		}
