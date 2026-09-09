@@ -2047,7 +2047,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope, s.tierRevoked(r.Context(), child.TelegramID)) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope, func() bool { return s.tierRevoked(r.Context(), child.TelegramID) }) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2139,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope, s.tierRevoked(r.Context(), rt.TelegramID)) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope, func() bool { return s.tierRevoked(r.Context(), rt.TelegramID) }) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
@@ -2266,14 +2266,21 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // degenerate state: handleTelegramCallback deliberately issues an authorization
 // code to an identity that will receive no scopes, so refusing every scopeless
 // refresh would break a working flow rather than fix this one. See #584.
-func refreshGrantStillValid(bounded, resolved []string, originalScope string, tierRevoked bool) bool {
+// tierRevoked is a callback rather than a value so the access-tier read
+// happens only on the path that needs it. Any identity that still resolves to
+// scopes returns at the len(resolved) check, and a family that still records a
+// grant returns at the one below — so the common refresh does no extra query.
+func refreshGrantStillValid(bounded, resolved []string, originalScope string, tierRevoked func() bool) bool {
 	if len(bounded) < len(resolved) {
 		return false
 	}
 	if len(resolved) > 0 {
 		return true
 	}
-	return len(strings.Fields(originalScope)) == 0 && !tierRevoked
+	if len(strings.Fields(originalScope)) > 0 {
+		return false
+	}
+	return !tierRevoked()
 }
 
 // tierRevoked reports whether an operator has explicitly set this identity's
