@@ -125,7 +125,17 @@ func ProbeModern(ctx context.Context, cfg ModernConfig) (*ModernResult, error) {
 		Rejected:         initOutcome.jsonrpcErrorCode() == mcp.METHOD_NOT_FOUND,
 	}
 
-	negatives, err := headerNegativeCases(ctx, client, url, pv, targetTool, cfg.ReadOnlyToolArguments, cfg.BearerToken)
+	// The header-negative battery sends real tools/call bodies, and a server
+	// that does not enforce the SEP-2243 headers -- the exact class this probe
+	// targets -- would dispatch them. So it may only ever name a tool the
+	// read-only guard cleared; otherwise it probes with a sentinel name and no
+	// arguments, which still exercises header validation (enforced before
+	// dispatch) but cannot resolve to a real, possibly side-effecting tool.
+	negativeTool, negativeArgs := targetTool, cfg.ReadOnlyToolArguments
+	if cleared, _ := readOnlyGuard(tools, targetTool); !cleared {
+		negativeTool, negativeArgs = unverifiedToolPlaceholder, nil
+	}
+	negatives, err := headerNegativeCases(ctx, client, url, pv, negativeTool, negativeArgs, cfg.BearerToken)
 	if err != nil {
 		return nil, fmt.Errorf("mcpprobe: header negative tests: %w", err)
 	}
@@ -212,6 +222,13 @@ func decodeToolSummaries(result json.RawMessage) []ToolSummary {
 	return summaries
 }
 
+// unverifiedToolPlaceholder is the tool name the header-negative battery
+// uses when the read-only guard refused the configured tool. It is not a
+// tool any server exposes, so even a target that ignores the SEP-2243
+// headers can only answer "unknown tool" -- the header contract is still
+// probed, but no real tool is ever invoked without the guard's clearance.
+const unverifiedToolPlaceholder = "mcpprobe-unverified-tool"
+
 // readOnlyGuard reports whether tools is allowed to name a real tools/call
 // target: found in the list, with readOnlyHint explicitly true. Absence of
 // the annotation (nil) is treated the same as false -- an unannotated tool
@@ -289,9 +306,10 @@ func guardedToolCall(
 // request throughout so that both header contracts (Mcp-Method and Mcp-Name)
 // are exercised by the same battery; it never uses a tool the read-only
 // guard has not cleared, so callers must have already vetted toolName via
-// tools/list. When toolName was not clearable, the negative cases still run
-// -- they probe header validation, which SEP-2243 requires the transport to
-// enforce before dispatch, independent of whether the tool itself exists.
+// tools/list and must pass unverifiedToolPlaceholder instead when the guard
+// refused. The negative cases still run in that case -- they probe header
+// validation, which SEP-2243 requires the transport to enforce before
+// dispatch, independent of whether the tool itself exists.
 func headerNegativeCases(
 	ctx context.Context,
 	client *http.Client,

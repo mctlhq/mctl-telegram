@@ -140,7 +140,11 @@ func ProbeLegacy(ctx context.Context, cfg LegacyConfig) (*LegacyResult, error) {
 	result.ToolsList = toolsListObs
 
 	targetTool := cfg.readOnlyTool()
-	result.ToolCall = legacyGuardedToolCall(ctx, client, url, targetTool, cfg.ReadOnlyToolArguments, tools, sessionID, cfg.BearerToken, sessionHeader)
+	toolCallObs, err := legacyGuardedToolCall(ctx, client, url, targetTool, cfg.ReadOnlyToolArguments, tools, sessionID, cfg.BearerToken, sessionHeader)
+	if err != nil {
+		return nil, err
+	}
+	result.ToolCall = toolCallObs
 
 	return result, nil
 }
@@ -177,6 +181,13 @@ func legacyCallWasRefused(o *httpOutcome) bool {
 // makes in legacy mode, or refuses and records why -- mirroring modern
 // mode's guardedToolCall but with a session header instead of modern
 // per-request `_meta`/headers.
+//
+// It returns an error only when the no-session negative check could not be
+// performed: SessionIDRequired=false must mean "the server accepted the
+// replay", never "the replay never happened", so a transport failure there
+// is surfaced rather than serialized as an observation -- the same contract
+// as the equivalent tools/list check in ProbeLegacy. A failure of the main
+// guarded call is still recorded in the observation (RefusalReason).
 func legacyGuardedToolCall(
 	ctx context.Context,
 	client *http.Client,
@@ -186,14 +197,14 @@ func legacyGuardedToolCall(
 	sessionID string,
 	bearerToken string,
 	sessionHeader func(string) map[string]string,
-) *LegacyCallObservation {
+) (*LegacyCallObservation, error) {
 	obs := &LegacyCallObservation{}
 
 	ok, reason := readOnlyGuard(tools, name)
 	if !ok {
 		obs.Attempted = false
 		obs.RefusalReason = reason
-		return obs
+		return obs, nil
 	}
 
 	if args == nil {
@@ -204,7 +215,7 @@ func legacyGuardedToolCall(
 	if err != nil {
 		obs.Attempted = true
 		obs.RefusalReason = "request failed: " + err.Error()
-		return obs
+		return obs, nil
 	}
 	obs.Attempted = true
 	obs.HTTPStatus = outcome.status
@@ -220,9 +231,10 @@ func legacyGuardedToolCall(
 
 	if sessionID != "" {
 		withoutSession, err := postJSONRPC(ctx, client, url, 5, mcp.MethodToolsCall, params, nil, bearerToken)
-		if err == nil {
-			obs.SessionIDRequired = legacyCallWasRefused(withoutSession)
+		if err != nil {
+			return nil, fmt.Errorf("mcpprobe: legacy tools/call (no session, negative check): %w", err)
 		}
+		obs.SessionIDRequired = legacyCallWasRefused(withoutSession)
 	}
-	return obs
+	return obs, nil
 }

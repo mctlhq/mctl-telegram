@@ -84,6 +84,11 @@ Notes:
   token endpoint does not check one, and pretending otherwise would be
   misleading about what actually protects the flow (PKCE + exact
   redirect_uri, not a shared secret).
+- **Each `redirect_uris` entry must satisfy the same transport policy as
+  `/oauth/register`**: `https` (or `http` on loopback for a native client),
+  no userinfo, no backslash. Startup fails with a pointed error if an entry
+  does not — exact matching alone would otherwise let a typo such as
+  `https://evil.example.test@portal.example.test/cb` through.
 - This works with `OAUTH_ALLOW_IMPLICIT_CLIENT=false` (the default). You do
   not need to enable implicit clients to use a pre-registered client.
 - This client never needs to call `POST /oauth/register`. Pre-registration

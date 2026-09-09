@@ -591,13 +591,45 @@ func parseOAuthPreregisteredClients(raw string) ([]OAUTHPreregisteredClient, err
 			return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris must not be empty", i, c.ClientID)
 		}
 		for j, uri := range c.RedirectURIs {
+			// A backslash is not a valid URI character and parsers disagree on
+			// whether it starts a path or userinfo, so reject before parsing —
+			// same reason internal/oauth does for /oauth/register.
+			if strings.ContainsRune(uri, '\\') {
+				return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris[%d] %q must not contain a backslash", i, c.ClientID, j, uri)
+			}
 			u, err := url.Parse(uri)
 			if err != nil || u.Scheme == "" || u.Host == "" {
 				return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris[%d] %q is not an absolute URL", i, c.ClientID, j, uri)
 			}
+			// Userinfo hides the real host from anything that splits on the
+			// first '@' (https://evil.com@portal.example/cb), so it has no
+			// place in a redirect target on this path either.
+			if u.User != nil {
+				return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris[%d] %q must not contain userinfo", i, c.ClientID, j, uri)
+			}
+			// https, except http on loopback for native clients (RFC 8252
+			// §7.3) — the policy /oauth/register and the implicit branch
+			// enforce, restated here rather than imported because
+			// internal/config does not depend on internal/oauth.
+			if u.Scheme != "https" {
+				if u.Scheme != "http" || !isLoopbackRedirectHost(u.Hostname()) {
+					return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris[%d] scheme %q is not allowed (must be https except for http loopback)", i, c.ClientID, j, u.Scheme)
+				}
+			}
 		}
 	}
 	return clients, nil
+}
+
+// isLoopbackRedirectHost mirrors oauth.isLoopbackHost: the three RFC 8252
+// §7.3 loopback host forms, compared case-insensitively because url.Parse
+// preserves whatever case it was given.
+func isLoopbackRedirectHost(h string) bool {
+	switch strings.ToLower(h) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // splitTrim is strings.Split + TrimSpace per element. Kept private — the
