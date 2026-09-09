@@ -639,6 +639,97 @@ func TestUpsertJobLead_RejectsForeignConversation(t *testing.T) {
 	}
 }
 
+// TestHasOwnerNotificationSince_BothDirections pins that the throttle
+// predicate BOTH matches a recent row and stops matching once the window has
+// moved past it. The suppress direction alone cannot distinguish a working
+// throttle from one permanently stuck on "recent", which would silence the
+// pause alert forever after the first one (claude review P2 on PR #582).
+//
+// The comparison is not trivially safe: created_at is never written by Go —
+// it takes the column DEFAULT, which on SQLite is CURRENT_TIMESTAMP stored
+// as TEXT, while the bind is a driver-encoded time.Time. SQLite orders
+// operands of different storage classes by class before value, so this test
+// is what establishes that the two actually compare as timestamps here.
+// Postgres stores TIMESTAMPTZ and has no such hazard.
+// TestInsertOwnerNotification_IdempotentPerActionID pins the ON CONFLICT
+// (action_id) uniqueness directly. It used to be exercised end-to-end by
+// internal/agentapi's replay assertion, but the per-account pause-alert
+// throttle added on PR #582 now short-circuits that replay before it reaches
+// this insert — so without a store-level test the invariant would have gone
+// uncovered while a test comment still claimed to pin it.
+func TestInsertOwnerNotification_IdempotentPerActionID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "idem-owner")
+	actionID, err := s.InsertAgentAction(ctx, AgentAction{
+		UserID: uid, ActionType: ActionTypeReply, PolicyDecision: PolicyRequireApproval,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+
+	first, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationApproval, ActionID: actionID, Body: "first",
+	})
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	second, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationAlert, ActionID: actionID, Body: "second",
+	})
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+	if second != first {
+		t.Fatalf("second insert for action %d returned id %d, want the existing %d", actionID, second, first)
+	}
+	var n int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM owner_notifications WHERE action_id = $1`, actionID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows for action %d = %d, want 1", actionID, n)
+	}
+}
+
+func TestHasOwnerNotificationSince_BothDirections(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "throttle-owner")
+
+	if _, err := s.InsertOwnerNotification(ctx, OwnerNotification{
+		UserID: uid, Kind: NotificationAlert, Body: "paused",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	inWindow, err := s.HasOwnerNotificationSince(ctx, uid, NotificationAlert, time.Now().UTC().Add(-6*time.Hour))
+	if err != nil {
+		t.Fatalf("in-window: %v", err)
+	}
+	if !inWindow {
+		t.Fatal("a row created just now did not match a 6h-old cutoff: the throttle would never suppress")
+	}
+
+	expired, err := s.HasOwnerNotificationSince(ctx, uid, NotificationAlert, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("expired: %v", err)
+	}
+	if expired {
+		t.Fatal("a row created before the cutoff still matched: the throttle would suppress forever and the owner would never be alerted again")
+	}
+
+	otherKind, err := s.HasOwnerNotificationSince(ctx, uid, NotificationApproval, time.Now().UTC().Add(-6*time.Hour))
+	if err != nil {
+		t.Fatalf("other kind: %v", err)
+	}
+	if otherKind {
+		t.Fatal("an alert row matched a query for approval notifications: kind is not being filtered")
+	}
+}
+
 func TestOwnerNotifications_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

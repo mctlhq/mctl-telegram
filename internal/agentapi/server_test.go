@@ -817,8 +817,14 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 
 	// Replay the identical request (simulating job redelivery resolving to
 	// the same action via the (job_id, action_type) idempotency key) and
-	// confirm InsertOwnerNotification's per-action_id uniqueness keeps the
-	// alert row count at exactly one.
+	// confirm the alert row count stays at exactly one.
+	//
+	// NOTE: since the per-account throttle was added, the replay is stopped
+	// by the throttle BEFORE it reaches InsertOwnerNotification, so this no
+	// longer exercises that function's per-action_id uniqueness — that
+	// invariant is pinned directly by
+	// db.TestInsertOwnerNotification_IdempotentPerActionID. What this still
+	// proves is the outcome the owner sees: one alert, not two.
 	rec2 := h.do("POST", "/actions/propose_reply", req)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("replay status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())

@@ -348,6 +348,16 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		// throttle and answered no on the grounds that Saved Messages is not
 		// a scarce channel; the scarce resource is the shared delivery
 		// batch, not the channel (claude review on PR #582).
+		//
+		// Check-then-insert, deliberately not transactional: two concurrent
+		// propose_reply calls for the same paused account can both observe
+		// recent==false and both insert, since their action_ids differ and
+		// the per-action_id unique index does not collapse them. The bound
+		// is therefore "one per window per in-flight request", not exactly
+		// one — which still converts an unbounded stream (one per inbound
+		// message, forever) into something bounded by request concurrency.
+		// Serialising it would need a lock on a path that must not fail the
+		// propose call; not worth it for an informational notice.
 		recent, rerr := s.Store.HasOwnerNotificationSince(ctx, id.UserID, db.NotificationAlert, time.Now().UTC().Add(-pauseAlertWindow))
 		switch {
 		case rerr != nil:
