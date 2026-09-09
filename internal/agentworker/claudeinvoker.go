@@ -217,16 +217,22 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	return nil
 }
 
-// recordCost is a no-op when either c.Metrics is nil or res.TotalCostUSD is
-// nil (the claude result carried no total_cost_usd key, or it was JSON
-// null — nothing was actually observed to report). Otherwise it increments
-// mctl_agent_job_cost_usd_total, labeled by whether the CLI's own result
-// reported is_error, and best-effort reports the same figure to the agent
-// API so it lands on the job row's cost_usd column. A failure to report is
+// recordCost is a no-op when res.TotalCostUSD is nil — the claude result
+// carried no total_cost_usd key, or it was JSON null, so nothing was
+// actually observed to report. Otherwise it best-effort reports the figure
+// to the agent API so it lands on the job row's cost_usd column, and, when a
+// registry is wired, also increments mctl_agent_job_cost_usd_total labeled
+// by whether the CLI's own result reported is_error. A failure to report is
 // logged as a warning and never changes Run's return value — spend
 // telemetry must not be able to fail a job.
+//
+// The nil-registry check deliberately guards ONLY the counter. cost_usd is a
+// durable accounting record and must not depend on whether an optional
+// telemetry field happens to be set: Metrics is documented as optional, and
+// a future caller that leaves it nil would otherwise silently stop
+// persisting spend (claude review P3 on PR #583).
 func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobEnvelope, res *ClaudeResult) {
-	if c.Metrics == nil || res == nil || res.TotalCostUSD == nil {
+	if res == nil || res.TotalCostUSD == nil {
 		return
 	}
 	cost := *res.TotalCostUSD
@@ -242,7 +248,9 @@ func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobE
 	if res.IsError {
 		result = "error"
 	}
-	c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
+	if c.Metrics != nil {
+		c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
+	}
 	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, cost); err != nil {
 		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
 	}

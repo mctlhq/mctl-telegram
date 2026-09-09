@@ -359,13 +359,28 @@ func TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Error(t *testing.T) {
 // TestClaudeInvoker_Run_NilMetricsIsANoOp guards recordCost/countResultError's
 // nil-safety: a ClaudeInvoker with no Metrics registry must behave exactly
 // as before this proposal.
-func TestClaudeInvoker_Run_NilMetricsIsANoOp(t *testing.T) {
+// TestClaudeInvoker_Run_NilMetricsStillPersistsCost pins the split between
+// the two things recordCost does. Metrics is an optional field, so a nil
+// registry must not stop the durable cost_usd write: coupling an accounting
+// record to whether telemetry happens to be wired would make a future caller
+// silently stop persisting spend (claude review P3 on PR #583). The counter
+// is the only part the nil check guards, and a nil registry must still not
+// panic.
+func TestClaudeInvoker_Run_NilMetricsStillPersistsCost(t *testing.T) {
 	stdout := `{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"result":"ok"}`
 	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
-	statusSrv := jobStatusServer(t, 42, "completed", 1)
-	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL, APIToken: "super-secret-token"}
+	srv, crs := newCostReportingServer(t, 42, "completed", 1)
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "super-secret-token"}
 	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 1 {
+		t.Fatalf("cost reports = %d, want 1 even with a nil metrics registry", len(crs.costReports))
+	}
+	if crs.costReports[0].cost != 0.1 {
+		t.Fatalf("reported cost = %v, want 0.1", crs.costReports[0].cost)
 	}
 }
 

@@ -498,11 +498,22 @@ func (s *Server) handleNotifySummary(w http.ResponseWriter, r *http.Request) {
 // denial surface. The handler is shared by two tools, so a single surface
 // value would merge their denials into one series; the mapping keeps the
 // label a compile-time-fixed set rather than passing the tool name through.
+//
+// Both tools are matched explicitly and an unknown name falls back to
+// metrics.PolicySurfaceUnknown rather than to one of the real surfaces. The
+// two call sites pass literals, so an unknown name can only arrive via a
+// third caller or a rename — and silently attributing its denials to
+// request_owner_approval would corrupt that series instead of showing up as
+// something to fix.
 func policySurfaceForOwnerTool(tool string) string {
-	if tool == "send_owner_summary" {
+	switch tool {
+	case "send_owner_summary":
 		return metrics.PolicySurfaceOwnerSummary
+	case "request_owner_approval":
+		return metrics.PolicySurfaceOwnerApproval
+	default:
+		return metrics.PolicySurfaceUnknown
 	}
-	return metrics.PolicySurfaceOwnerApproval
 }
 
 func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actionType, notificationKind, tool string) {

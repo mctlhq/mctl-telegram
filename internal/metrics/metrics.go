@@ -135,8 +135,8 @@ type Registry struct {
 	// otherwise make label cardinality unbounded) and the call site that
 	// consumed the decision (one of PolicySurface*). Deliberately NOT
 	// labeled by account, conversation or peer: those become cardinality
-	// and, for peers, personal data. Bound: 18 codes (17 + "unknown") x 4
-	// surfaces = 72 series, all compile-time fixed.
+	// and, for peers, personal data. Bound: 18 codes (17 + "unknown") x 6
+	// surfaces = 108 series, all compile-time fixed.
 	AgentPolicyDenialsTotal *prometheus.CounterVec // {reason, surface}
 
 	// AgentJobCostUSDTotal is monotonic total Claude spend attributed to
@@ -172,6 +172,10 @@ const (
 	PolicySurfaceOwnerSummary    = "send_owner_summary"
 	PolicySurfaceExecutorSend    = "executor_send"
 	PolicySurfaceExecutorRecover = "executor_recover"
+	// PolicySurfaceUnknown is the bounded fallback for a surface that could
+	// not be resolved — see policySurfaceForOwnerTool. Its appearance in the
+	// series is the signal that a caller went unmapped.
+	PolicySurfaceUnknown = "unknown"
 )
 
 // CountPolicyDenial increments AgentPolicyDenialsTotal for the given
@@ -363,7 +367,7 @@ func New() *Registry {
 
 	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_policy_denials_total",
-		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 5 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
+		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 6 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
 	}, []string{"reason", "surface"})
 
 	r.AgentJobCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
