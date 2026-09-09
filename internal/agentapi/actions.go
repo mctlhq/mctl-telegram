@@ -298,14 +298,22 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if result.Gate == policy.GateAutopilotPaused {
+	// Driven by the PERSISTED row, not by this replay's freshly-evaluated
+	// `result` — the same rule the reload comment above states and the
+	// approval notification below already follows. InsertAgentAction is
+	// idempotent for job-tied actions: a redelivered job whose action was
+	// first persisted as `approved` (account active at the time) must not
+	// produce a "reply withheld" alert just because the owner paused the
+	// account in between, while the response returned to the worker still
+	// says allow off that same durable row (agy P2 on PR #582).
+	if persisted.Status == db.ActionDenied && persisted.PolicyReasons == policy.ReasonAutopilotPaused {
 		// Deliberately best-effort, unlike the approval-code notification
 		// above: that notification carries the only copy of ApprovalCode, so
 		// losing it strands an otherwise-approvable draft forever. This alert
 		// is purely informational — the denied action row above already
-		// records "autopilot paused for this account" for audit — so a lost
-		// enqueue costs the owner a heads-up, not data, and must not fail an
-		// otherwise-successful propose_reply call (issue #581).
+		// records the pause reason for audit — so a lost enqueue costs the
+		// owner a heads-up, not data, and must not fail an otherwise-
+		// successful propose_reply call (issue #581).
 		// InsertOwnerNotification is idempotent per action_id, so a job
 		// redelivery that resolves to the same actionID does not queue a
 		// second alert.

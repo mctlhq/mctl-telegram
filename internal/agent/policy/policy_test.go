@@ -327,6 +327,41 @@ func TestEvaluate_OwnerFacingAllowedWhilePaused(t *testing.T) {
 	}
 }
 
+// TestEvaluate_ConversationGatesOutrankPause pins the fix for agy's P2 on
+// PR #582: a conversation the owner already took over, closed or paused —
+// or a peer they blocked — must deny on its OWN reason and carry GateNone,
+// even when the account is also paused. A GateAutopilotPaused result makes
+// internal/agentapi queue an owner alert saying a reply was withheld
+// because autopilot is paused; for these conversations that alert is noise
+// about a reply that would have been refused regardless of the pause.
+func TestEvaluate_ConversationGatesOutrankPause(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Input)
+		wantReason string
+	}{
+		{"taken over", func(in *Input) { in.Conversation.State = db.ConversationTakenOver }, "conversation taken over by owner"},
+		{"closed", func(in *Input) { in.Conversation.State = db.ConversationClosed }, "conversation closed"},
+		{"conversation paused", func(in *Input) { in.Conversation.State = db.ConversationPaused }, "conversation paused"},
+		{"sender blocked", func(in *Input) { in.Profile.BlockedSenders = "555" }, "sender is blocked"},
+	}
+	for _, tc := range cases {
+		in := baseInput()
+		in.Profile.AutopilotPaused = true
+		tc.mutate(&in)
+		got := Evaluate(in)
+		if got.Decision != Deny {
+			t.Fatalf("%s: decision = %s (%v), want deny", tc.name, got.Decision, got.Reasons)
+		}
+		if got.Gate != GateNone {
+			t.Fatalf("%s: gate = %q, want GateNone so no owner pause alert is queued", tc.name, got.Gate)
+		}
+		if len(got.Reasons) != 1 || got.Reasons[0] != tc.wantReason {
+			t.Fatalf("%s: reasons = %v, want [%q]", tc.name, got.Reasons, tc.wantReason)
+		}
+	}
+}
+
 // TestEvaluate_AccountWideGatePrecedence pins the relative ordering of the
 // three account-wide gates (kill switch, mode==off, autopilot paused) across
 // all three action types. Kill switch and mode==off remain durable/opt-in

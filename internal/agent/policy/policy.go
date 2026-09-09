@@ -67,6 +67,15 @@ const (
 	GateAutopilotPaused Gate = "autopilot_paused"
 )
 
+// ReasonAutopilotPaused is the exact reason string a pause denial carries.
+// Exported because internal/agentapi matches it against the PERSISTED
+// AgentAction.PolicyReasons to decide whether to queue the owner pause
+// alert; an inline literal there would silently stop matching if this
+// wording ever changed. PolicyReasons is built with strings.Join(reasons,
+// "; ") and a pause denial carries exactly this one reason, so the
+// comparison is an equality check, not a substring search.
+const ReasonAutopilotPaused = "autopilot paused for this account"
+
 // Result contains the policy decision and user-facing/audit reasons.
 type Result struct {
 	Decision Decision
@@ -346,9 +355,6 @@ func Evaluate(in Input) Result {
 	if in.Action.Type == db.ActionTypeOwnerSummary || in.Action.Type == db.ActionTypeOwnerApproval {
 		return Result{Decision: Allow, Reasons: []string{"owner-facing action"}}
 	}
-	if in.Profile.AutopilotPaused {
-		return denyGate(GateAutopilotPaused, "autopilot paused for this account")
-	}
 	switch in.Conversation.State {
 	case db.ConversationActive:
 	case db.ConversationTakenOver:
@@ -362,6 +368,18 @@ func Evaluate(in Input) Result {
 	}
 	if isBlocked(in.Profile.BlockedSenders, in.Conversation.PeerTGID) {
 		return deny("sender is blocked")
+	}
+	// Checked AFTER the per-conversation gates and the blocklist, not before
+	// them, even though pause is an account-wide state. A denial that
+	// reports GateAutopilotPaused makes internal/agentapi queue an owner
+	// alert saying a reply was withheld because autopilot is paused; for a
+	// conversation the owner has already taken over, closed or paused — or a
+	// peer they blocked — that alert is noise about a reply that would have
+	// been denied regardless of the pause. Ordering the durable,
+	// conversation-specific refusals first keeps them silent and leaves the
+	// pause alert for the case it actually describes (agy P2 on PR #582).
+	if in.Profile.AutopilotPaused {
+		return denyGate(GateAutopilotPaused, ReasonAutopilotPaused)
 	}
 
 	switch in.Action.Type {

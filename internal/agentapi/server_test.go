@@ -829,6 +829,80 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 	}
 }
 
+// TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction pins
+// agy's P2 on PR #582. The alert must be driven by the PERSISTED action, not
+// by the replay's freshly-evaluated policy result: an action first persisted
+// while the account was active, whose job is then redelivered after the owner
+// pauses, still resolves to that original row via the (job_id, action_type)
+// idempotency key. Alerting off the fresh evaluation would tell the owner a
+// reply was withheld while the very same response hands the worker the
+// original non-denied decision read from that row.
+func TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction(t *testing.T) {
+	h := newHarness(t)
+	// Guarded mode with an allowlisted intent so the FIRST call resolves to
+	// Allow and persists as `approved` with no notification of its own. That
+	// matters: InsertOwnerNotification's unique index is on action_id alone
+	// (`ON CONFLICT (action_id) ... DO NOTHING`), so an action that already
+	// queued an approval notification would swallow the spurious alert and
+	// hide the very bug this test exists to catch.
+	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
+		UserID: h.userID, Mode: db.AgentModeGuarded,
+		DisclosureText:     "I'm an AI assistant.",
+		IntentAllowlist:    "greet,request_company",
+		MaxAutonomousTurns: 6, MaxMsgsPerMinute: 2, MaxReplyChars: 1200,
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	conv := h.seedConversation(556)
+	jobID := h.seedJob("evt:v1:1:556:redelivery-after-pause", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+		Intent: "request_company", Text: "Could you tell me the company name?",
+	}
+	rec := h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var first actionResponse
+	decodeBody(t, rec, &first)
+	if first.Decision != "allow" {
+		t.Fatalf("setup did not reproduce an ALLOWED action (needed so no notification exists for this action_id): decision=%q reasons=%v", first.Decision, first.Reasons)
+	}
+
+	// The owner pauses only now — after the action was already persisted.
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	rec2 := h.do("POST", "/actions/propose_reply", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("replay status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	var replay actionResponse
+	decodeBody(t, rec2, &replay)
+	if replay.ActionID != first.ActionID {
+		t.Fatalf("replay resolved to a different action: first=%d replay=%d", first.ActionID, replay.ActionID)
+	}
+	if replay.Decision != first.Decision {
+		t.Fatalf("replay decision = %q, want the persisted %q", replay.Decision, first.Decision)
+	}
+
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	for _, n := range notifs {
+		if n.ActionID == first.ActionID && n.Kind == db.NotificationAlert {
+			t.Fatalf("queued a pause alert for an action persisted as %q: %+v", first.Decision, n)
+		}
+	}
+}
+
 // TestProposeReply_KillSwitchDeniesWithoutOwnerAlert is the negative
 // counterpart of TestProposeReply_PausedAccountQueuesOwnerAlert: a
 // kill-switch deny's Gate is GateKillSwitch, not GateAutopilotPaused, so it
