@@ -136,19 +136,25 @@ type Registry struct {
 	// consumed the decision (one of PolicySurface*). Deliberately NOT
 	// labeled by account, conversation or peer: those become cardinality
 	// and, for peers, personal data. Bound: 18 codes (17 + "unknown") x 6
-	// surfaces = 108 series, all compile-time fixed.
+	// surfaces = 108 series, all compile-time fixed and all pre-created at
+	// zero by New() — see issue #591 and the comment on the pre-init loops.
 	AgentPolicyDenialsTotal *prometheus.CounterVec // {reason, surface}
 
 	// AgentJobCostUSDTotal is monotonic total Claude spend attributed to
 	// agent jobs, labeled by whether the CLI's own result reported
 	// is_error. Recorded before CheckResult so a job that fails afterwards
-	// still reports its spend. Bound: 2 series (success, error).
+	// still reports its spend. Bound: 2 series (success, error), both
+	// pre-created at zero by New() — see issue #591: a counter whose first
+	// observed sample is already non-zero yields increase() == 0, because
+	// that sample becomes the baseline.
 	AgentJobCostUSDTotal *prometheus.CounterVec // {result}
 
 	// AgentClaudeResultErrorsTotal counts CheckResult errors consumed by
 	// ClaudeInvoker.Run, labeled by whether the error was classified as a
 	// usage-limit/quota condition or something else. Bound: 2 series
-	// (usage_limit, other).
+	// (usage_limit, other), both pre-created at zero by New() for the
+	// increase() baseline reason recorded on AgentJobCostUSDTotal above
+	// (issue #591).
 	AgentClaudeResultErrorsTotal *prometheus.CounterVec // {class}
 
 	// AgentCredentialDomain is an info-type gauge (constant value 1) set
@@ -176,6 +182,99 @@ const (
 	// not be resolved — see policySurfaceForOwnerTool. Its appearance in the
 	// series is the signal that a caller went unmapped.
 	PolicySurfaceUnknown = "unknown"
+)
+
+// policySurfaces and policyDenyReasons are the label space of
+// AgentPolicyDenialsTotal, mirroring the PolicySurface* constants above and
+// policy.DenyCode. The reasons are duplicated as literals rather than
+// referenced, to keep this package a leaf: internal/agent/policy is a much
+// heavier dependency than a list of strings, and TestDenyCodesMatchMetricsList
+// over there pins the two lists together so they cannot drift.
+var (
+	policySurfaces = []string{
+		PolicySurfaceProposeReply,
+		PolicySurfaceOwnerApproval,
+		PolicySurfaceOwnerSummary,
+		PolicySurfaceExecutorSend,
+		PolicySurfaceExecutorRecover,
+		PolicySurfaceUnknown,
+	}
+	policyDenyReasons = []string{
+		"global_kill",
+		"user_mismatch",
+		"mode_off",
+		"mode_unrecognized",
+		"autopilot_paused",
+		"conversation_taken_over",
+		"conversation_closed",
+		"conversation_paused",
+		"conversation_state_unrecognized",
+		"sender_blocked",
+		"action_type_unrecognized",
+		"peer_mismatch",
+		"no_disclosure_text",
+		"empty_reply",
+		"reply_too_long",
+		"reply_contains_url",
+		"reply_contains_credentials",
+		"unknown",
+	}
+)
+
+// Claude result-error classes — the "class" label on
+// AgentClaudeResultErrorsTotal, set by ClaudeInvoker.countResultError.
+const (
+	ClaudeResultClassUsageLimit = "usage_limit"
+	ClaudeResultClassOther      = "other"
+)
+
+// Job-cost outcomes — the "result" label on AgentJobCostUSDTotal, set by
+// ClaudeInvoker.recordCost from the CLI result's own is_error field.
+const (
+	JobCostResultSuccess = "success"
+	JobCostResultError   = "error"
+)
+
+// jobStatuses is every terminal or transitional value of the "status" label on
+// AgentJobsTotal, mirroring db.JobPending .. db.JobIgnored. Duplicated as
+// literals rather than referenced, because internal/db imports this package and
+// the reverse would be an import cycle; TestJobStatusesMatchMetricsSlice in
+// internal/db pins the two lists together so they cannot drift. Unexported and
+// reached through JobStatuses(), so an importer cannot reassign an element and
+// change what a later New() pre-creates.
+var jobStatuses = []string{
+	"pending",
+	"processing",
+	"completed",
+	"failed",
+	"dead_letter",
+	"ignored",
+}
+
+// PolicyDenyReasons returns a copy of the denial-code label values New()
+// pre-creates. A copy, for the reason given on JobStatuses.
+func PolicyDenyReasons() []string {
+	out := make([]string, len(policyDenyReasons))
+	copy(out, policyDenyReasons)
+	return out
+}
+
+// JobStatuses returns a copy of the job-status label values New() pre-creates.
+// A copy, so a caller cannot mutate the list the constructor reads.
+func JobStatuses() []string {
+	out := make([]string, len(jobStatuses))
+	copy(out, jobStatuses)
+	return out
+}
+
+// claudeResultClasses and jobCostResults complete the set of label-value lists
+// New() writes a zero baseline for; jobStatuses, policySurfaces and
+// policyDenyReasons above are the others. Adding a label value to any of those
+// counters means adding it to the matching list, or the new child goes back to
+// being created lazily on first use.
+var (
+	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
+	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
 )
 
 // CountPolicyDenial increments AgentPolicyDenialsTotal for the given
@@ -419,5 +518,46 @@ func New() *Registry {
 		r.AgentClaudeResultErrorsTotal,
 		r.AgentCredentialDomain,
 	)
+
+	// Give every agent counter an alert reads through increase() a zero
+	// baseline, before any work is accepted. A CounterVec creates its
+	// children lazily, on first increment, so a counter whose first
+	// *observed* sample is already non-zero makes increase() read 0 — that
+	// sample becomes the baseline, and the alert misses the first, and
+	// possibly only, occurrence it exists for. See issue #591.
+	//
+	// Four families, 4 + 6 + 108 = 118 series, every one of them a
+	// compile-time-fixed label set. The per-loop comments below say what
+	// each one costs and what breaks without it.
+	for _, class := range claudeResultClasses {
+		r.AgentClaudeResultErrorsTotal.WithLabelValues(class).Add(0)
+	}
+	for _, result := range jobCostResults {
+		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
+	}
+	// AgentJobsTotal gets the same treatment, for the same reason on the
+	// other side of a division. MctlAgentJobCostHigh divides spend by
+	// increase over the terminal job statuses; a lazily created denominator
+	// makes the first finished job after a server restart read as zero
+	// finished jobs, so the guarded ratio becomes +Inf and the rule can fire
+	// on ordinary spend. Six statuses, closed set.
+	for _, status := range jobStatuses {
+		r.AgentJobsTotal.WithLabelValues(status).Add(0)
+	}
+	// AgentPolicyDenialsTotal too, all 108 combinations. This was originally
+	// left lazy on the grounds that MctlAgentPolicyDenialRateHigh's "> 4"
+	// floor means a single first denial could not fire it anyway. True, and
+	// beside the point: if the first FIVE denials for one reason land between
+	// two scrapes, Prometheus first observes the series at 5, every later
+	// sample reads 5, and increase() over the window is 0 — so the rule
+	// misses its own documented "at least 5 denials" case, in the burst
+	// scenario ("worker hammering a paused account") it exists for. 108 zero
+	// series is a cheap price for the floor meaning what it says.
+	for _, reason := range policyDenyReasons {
+		for _, surface := range policySurfaces {
+			r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Add(0)
+		}
+	}
+
 	return r
 }

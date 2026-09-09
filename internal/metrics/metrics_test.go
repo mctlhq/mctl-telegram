@@ -1,11 +1,13 @@
 package metrics
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // expectedMetricNames lists every metric family that New() must register.
@@ -61,9 +63,14 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
 	reg.BridgeActiveDaemons.Set(0)
 	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
-	reg.AgentPolicyDenialsTotal.WithLabelValues("mode_off", "propose_reply").Add(0)
-	reg.AgentJobCostUSDTotal.WithLabelValues("success").Add(0)
-	reg.AgentClaudeResultErrorsTotal.WithLabelValues("other").Add(0)
+	// The four agent families New() pre-creates — AgentJobCostUSDTotal,
+	// AgentClaudeResultErrorsTotal, AgentJobsTotal and AgentPolicyDenialsTotal
+	// — are deliberately absent from this list. Touching a family the
+	// constructor already materializes would keep this test passing if that
+	// pre-init were deleted, which is the opposite of the point. The list
+	// therefore means exactly one thing: families this test has to force into
+	// existence. TestNew_AgentCounterZeroBaseline and
+	// TestNew_PolicyDenialsZeroBaseline pin the pre-init directly.
 	reg.AgentCredentialDomain.WithLabelValues("test-domain").Set(1)
 
 	mfs, err := reg.Prometheus.Gather()
@@ -218,6 +225,199 @@ func TestNew_RegistersIssue580Metrics(t *testing.T) {
 			if !gotLabels[want] {
 				t.Errorf("%s: missing label %q, got %v", c.name, want, gotLabels)
 			}
+		}
+	}
+}
+
+// TestNew_AgentCounterZeroBaseline pins the issue #591 fix: the two agent
+// counters whose alerts key off increase() must have every child present at
+// zero on a registry that has done no work at all. A child created lazily on
+// first increment produces a first observed sample that is already non-zero,
+// which increase() treats as the baseline and reports as 0 — so the alert
+// misses the first, and possibly only, occurrence it exists for.
+//
+// Asserts on the parsed MetricFamily rather than an exposition dump so a
+// renamed label value fails here rather than silently passing a substring
+// match.
+func TestNew_AgentCounterZeroBaseline(t *testing.T) {
+	reg := New()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	gathered := map[string]*dto.MetricFamily{}
+	for _, mf := range mfs {
+		gathered[mf.GetName()] = mf
+	}
+
+	cases := []struct {
+		family string
+		label  string
+		want   []string
+	}{
+		{
+			family: "mctl_agent_claude_result_errors_total",
+			label:  "class",
+			want:   []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther},
+		},
+		{
+			family: "mctl_agent_job_cost_usd_total",
+			label:  "result",
+			want:   []string{JobCostResultSuccess, JobCostResultError},
+		},
+		{
+			// The denominator of MctlAgentJobCostHigh. Lazy here means the
+			// first completed job after a restart reads as zero completions,
+			// the ratio becomes +Inf, and the rule fires on ordinary spend.
+			family: "mctl_agent_jobs_total",
+			label:  "status",
+			want:   jobStatuses,
+		},
+	}
+
+	for _, tc := range cases {
+		mf, ok := gathered[tc.family]
+		if !ok {
+			t.Errorf("%s: family absent from a freshly constructed registry — its children are still created lazily", tc.family)
+			continue
+		}
+		if got := len(mf.GetMetric()); got != len(tc.want) {
+			t.Errorf("%s: %d children, want %d", tc.family, got, len(tc.want))
+		}
+		seen := map[string]float64{}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == tc.label {
+					seen[lp.GetValue()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+		for _, want := range tc.want {
+			v, ok := seen[want]
+			if !ok {
+				t.Errorf("%s{%s=%q}: missing, have %v", tc.family, tc.label, want, seen)
+				continue
+			}
+			if v != 0 {
+				t.Errorf("%s{%s=%q} = %v, want 0", tc.family, tc.label, want, v)
+			}
+		}
+	}
+}
+
+// TestNew_PolicyDenialsZeroBaseline pins the full 108-series baseline for
+// AgentPolicyDenialsTotal. This counter was originally left lazy because
+// MctlAgentPolicyDenialRateHigh carries a "> 4" floor that a single first
+// denial could not clear. That is true and beside the point: if the first FIVE
+// denials for one reason land between two scrapes, the series is first observed
+// at 5, every later sample reads 5, and increase() over the window is 0 — so
+// the rule misses its own documented "at least 5 denials" case, in exactly the
+// burst scenario it exists for.
+func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
+	reg := New()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	var mf *dto.MetricFamily
+	for _, f := range mfs {
+		if f.GetName() == "mctl_agent_policy_denials_total" {
+			mf = f
+			break
+		}
+	}
+	if mf == nil {
+		t.Fatal("mctl_agent_policy_denials_total absent from a freshly constructed registry")
+	}
+
+	want := len(policyDenyReasons) * len(policySurfaces)
+	if want != 108 {
+		t.Fatalf("label space is %d x %d = %d, want the documented 108 — update the bound in the struct comment and the rule comments if this is deliberate",
+			len(policyDenyReasons), len(policySurfaces), want)
+	}
+	if got := len(mf.GetMetric()); got != want {
+		t.Fatalf("%d children, want %d", got, want)
+	}
+	for _, m := range mf.GetMetric() {
+		if v := m.GetCounter().GetValue(); v != 0 {
+			t.Fatalf("child %v = %v, want 0", m.GetLabel(), v)
+		}
+	}
+}
+
+// TestPolicySurfacesCoverEveryConstant closes the one gap the other drift
+// guards leave. policyDenyReasons is pinned by TestDenyCodesMatchMetricsList
+// and jobStatuses by TestJobStatusesMatchMetricsSlice, both against a source of
+// truth in another package. policySurfaces has no such counterpart: the
+// constants live in this file, so there is nothing external to compare against.
+//
+// TestNew_PolicyDenialsZeroBaseline's `want != 108` check is not a substitute.
+// It derives `want` from the slice, so it fires when a surface is added TO the
+// slice — forcing the documented bound to be updated, which is useful — and is
+// silent in the case that actually matters: a new PolicySurface* constant
+// declared, used at a call site, and never added here. Its 18 children would go
+// back to being created lazily on first use, which is the regression #591
+// exists to fix, and every other test would still pass at 108.
+//
+// Scanning the source is already an idiom here — docs/runbook_test.go regexes
+// this same file for mctl_[a-z_]+ metric names.
+func TestPolicySurfacesCoverEveryConstant(t *testing.T) {
+	// Every .go file in the package, not just metrics.go: PolicySurface* is
+	// only conventionally declared there, and a guard that assumes the
+	// convention fails the moment someone follows a different one.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	var src []byte
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		src = append(src, b...)
+	}
+
+	// `[^"]+` rather than `[a-z_]+`, and an optional type between the name and
+	// the `=`. A narrow pattern goes vacuous in exactly the direction this test
+	// exists to catch: `PolicySurfaceFooV2 = "foo_v2"` (digit) or
+	// `PolicySurfaceFoo string = "foo"` would simply not match, never reach
+	// `declared`, and pass both loops while its 18 denial children went back to
+	// lazy creation. A value that is not a valid label is a different problem,
+	// and better seen as a failure here than as silence.
+	matches := regexp.MustCompile(`PolicySurface\w+\s+(?:\w+\s+)?=\s+"([^"]+)"`).FindAllStringSubmatch(string(src), -1)
+
+	// The count itself is the tripwire. `> 0` only fires when EVERY constant
+	// stops matching — a whole-block rewrite — while the realistic failure is
+	// one new constant in a slightly different style beside five that still
+	// match.
+	if len(matches) != len(policySurfaces) {
+		t.Fatalf("matched %d PolicySurface* declarations but policySurfaces has %d entries — either a constant is written in a style this regex does not match, or the slice and the declarations have drifted", len(matches), len(policySurfaces))
+	}
+
+	declared := map[string]bool{}
+	for _, m := range matches {
+		declared[m[1]] = true
+	}
+	inSlice := map[string]bool{}
+	for _, s := range policySurfaces {
+		inSlice[s] = true
+	}
+
+	for value := range declared {
+		if !inSlice[value] {
+			t.Errorf("PolicySurface constant %q is declared but missing from policySurfaces — its %d denial children would be created lazily", value, len(policyDenyReasons))
+		}
+	}
+	for value := range inSlice {
+		if !declared[value] {
+			t.Errorf("policySurfaces contains %q, which is not a declared PolicySurface* constant", value)
 		}
 	}
 }
