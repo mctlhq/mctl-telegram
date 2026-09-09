@@ -103,12 +103,6 @@ two get there by different routes:
   operating a deployment older than that fix, treat a 200 here as
   uninformative.
 
-One case still refreshes successfully with no scopes, and is not a bug: a
-refresh-token family that never held a grant. `handleTelegramCallback`
-deliberately issues an authorization code to an identity that will receive no
-scopes, so such a family keeps working; only a family whose grant *degrades* to
-nothing is refused.
-
 The refresh response code is now a reliable de-provisioning check for both
 routes above, including for a family de-provisioned *before* #584 shipped. The
 old handler rotated those successors with an empty scope, so the family's live

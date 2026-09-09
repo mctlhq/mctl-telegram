@@ -264,15 +264,20 @@ func (s *Store) SweepExpiredRefreshTokens(ctx context.Context) (int64, error) {
 // Cheap: oauth_refresh_tokens is indexed on family_id, and a family holds a
 // handful of rows.
 func (s *Store) FamilyEverHeldScope(ctx context.Context, familyID string) (bool, error) {
-	var found int
+	// bool, not int: EXISTS is a boolean column under Postgres (pgx, the
+	// production driver) and database/sql has no bool -> int conversion, so an
+	// int scan fails at runtime with "converting driver.Value type bool" while
+	// passing every SQLite test. Every other SELECT EXISTS in this package
+	// scans into a bool for the same reason.
+	var exists bool
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT EXISTS(
 		     SELECT 1 FROM oauth_refresh_tokens
 		     WHERE family_id = $1 AND scope IS NOT NULL AND scope <> ''
 		 )`, familyID,
-	).Scan(&found)
+	).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("query family scope history: %w", err)
 	}
-	return found != 0, nil
+	return exists, nil
 }
