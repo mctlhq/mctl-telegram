@@ -62,7 +62,12 @@ func TestEnvFloat_RejectsNegativeValues(t *testing.T) {
 }
 
 func TestEnvFloat_ReturnsDefaultWhenUnset(t *testing.T) {
-	_ = os.Unsetenv("TEST_ENV_FLOAT")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset TEST_ENV_FLOAT into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// envFloat returns def for an empty value exactly as for an unset one,
+	// so this covers the same case.
+	t.Setenv("TEST_ENV_FLOAT", "")
 	got, err := envFloat("TEST_ENV_FLOAT", 5)
 	if err != nil {
 		t.Fatalf("envFloat: %v", err)
@@ -89,6 +94,7 @@ func TestRun_FailsFastOnHealthServerBindError(t *testing.T) {
 
 	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1") // unreachable; run() must never get here
 	t.Setenv("AGENT_API_TOKEN", "test-token")
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "test-domain")
 	t.Setenv("AGENT_HEALTH_ADDR", ln.Addr().String())
 
 	done := make(chan error, 1)
@@ -101,6 +107,121 @@ func TestRun_FailsFastOnHealthServerBindError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run() did not fail fast on a health server bind conflict")
+	}
+}
+
+// TestRun_FailsFastWhenCredentialDomainIDUnset covers T10: run() must exit
+// non-zero with a clear error when AGENT_CREDENTIAL_DOMAIN_ID is unset or
+// empty, and must never reach the health-server bind (an unreachable
+// AGENT_API_BASE_URL is set deliberately so run() can never get past this
+// check accidentally).
+func TestRun_FailsFastWhenCredentialDomainIDUnset(t *testing.T) {
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	// Genuinely ABSENT from the environment, not set-to-empty — the sibling
+	// TestRun_FailsFastWhenCredentialDomainIDEmpty covers the empty case, and
+	// collapsing the two would leave "absent" unexercised. t.Setenv first so
+	// the testing package records the original value and restores it at test
+	// end; a bare os.Unsetenv is never restored and would leak an unset
+	// variable into every test that runs after this one in the same binary.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "placeholder")
+	if err := os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID"); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() = nil, want an error for an unset AGENT_CREDENTIAL_DOMAIN_ID")
+	}
+	if !strings.Contains(err.Error(), "AGENT_CREDENTIAL_DOMAIN_ID is required") {
+		t.Fatalf("err = %v, want a clear AGENT_CREDENTIAL_DOMAIN_ID message", err)
+	}
+}
+
+func TestRun_FailsFastWhenCredentialDomainIDEmpty(t *testing.T) {
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "")
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() = nil, want an error for an empty AGENT_CREDENTIAL_DOMAIN_ID")
+	}
+	if !strings.Contains(err.Error(), "AGENT_CREDENTIAL_DOMAIN_ID is required") {
+		t.Fatalf("err = %v, want a clear AGENT_CREDENTIAL_DOMAIN_ID message", err)
+	}
+}
+
+// TestValidateDomainID_RejectsDisallowedCharactersAndLength covers the
+// bounded-shape half of T10.
+func TestValidateDomainID_RejectsDisallowedCharactersAndLength(t *testing.T) {
+	if err := validateDomainID("labs-tg-worker-01"); err != nil {
+		t.Fatalf("validateDomainID(valid) = %v, want nil", err)
+	}
+	if err := validateDomainID("vault:secret/data/teams/labs/tg-worker"); err != nil {
+		t.Fatalf("validateDomainID(valid with : and /) = %v, want nil", err)
+	}
+	for _, bad := range []string{
+		"has a space",
+		"has\ttab",
+		"quoted\"value",
+		"emoji😀domain",
+		strings.Repeat("a", 129),
+	} {
+		if err := validateDomainID(bad); err == nil {
+			t.Fatalf("validateDomainID(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+func TestRun_FailsFastWhenCredentialDomainIDHasDisallowedCharacter(t *testing.T) {
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "has a space")
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() = nil, want an error for a disallowed character")
+	}
+}
+
+func TestRun_FailsFastWhenCredentialDomainIDTooLong(t *testing.T) {
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", strings.Repeat("a", 129))
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() = nil, want an error for an over-length value")
+	}
+}
+
+// TestRunMCPServe_UnaffectedByMissingCredentialDomainID guards the DoD that
+// runMCPServe() must not require AGENT_CREDENTIAL_DOMAIN_ID: it fails for a
+// different, pre-existing reason (missing AGENT_JOB_ID) rather than ever
+// mentioning the credential domain var.
+func TestRunMCPServe_UnaffectedByMissingCredentialDomainID(t *testing.T) {
+	// Absent, not empty: this test's point is that --mcp-serve does not read
+	// the variable at all. t.Setenv registers the restore, os.Unsetenv makes
+	// it genuinely absent for the duration.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "placeholder")
+	if err := os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID"); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
+	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("AGENT_API_TOKEN", "test-token")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset AGENT_JOB_ID into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// requireEnv treats "" as missing, so this covers the same case.
+	t.Setenv("AGENT_JOB_ID", "")
+
+	err := runMCPServe()
+	if err == nil {
+		t.Fatal("runMCPServe() = nil, want an error for missing AGENT_JOB_ID")
+	}
+	if strings.Contains(err.Error(), "AGENT_CREDENTIAL_DOMAIN_ID") {
+		t.Fatalf("runMCPServe() must never require AGENT_CREDENTIAL_DOMAIN_ID, err = %v", err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // maxApprovalCodeAttempts bounds the retry loop on the astronomically rare
@@ -239,6 +240,18 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		GlobalKill:       s.globalKill(),
 		Now:              time.Now(),
 	})
+	// Counted from THIS evaluation, deliberately unlike the notification and
+	// response handling below, which read the persisted row so a redelivered
+	// job is not re-judged. The two want different things: the response must
+	// tell the worker what was actually decided for that action, while this
+	// series is an anomaly signal — "how often is policy refusing calls at
+	// this surface". A worker hammering a paused account through repeated
+	// redeliveries is exactly the shape the signal exists to expose, and
+	// counting only newly-persisted denials would hide it behind the
+	// idempotency key.
+	if result.Decision == policy.Deny {
+		s.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceProposeReply)
+	}
 
 	base := db.AgentAction{
 		JobID: req.JobID, Attempt: req.Attempt, ConversationID: req.ConversationID, UserID: id.UserID,
@@ -481,6 +494,28 @@ func (s *Server) handleNotifySummary(w http.ResponseWriter, r *http.Request) {
 	s.handleOwnerFacing(w, r, db.ActionTypeOwnerSummary, db.NotificationSummary, "send_owner_summary")
 }
 
+// policySurfaceForOwnerTool maps handleOwnerFacing's tool name onto its own
+// denial surface. The handler is shared by two tools, so a single surface
+// value would merge their denials into one series; the mapping keeps the
+// label a compile-time-fixed set rather than passing the tool name through.
+//
+// Both tools are matched explicitly and an unknown name falls back to
+// metrics.PolicySurfaceUnknown rather than to one of the real surfaces. The
+// two call sites pass literals, so an unknown name can only arrive via a
+// third caller or a rename — and silently attributing its denials to
+// request_owner_approval would corrupt that series instead of showing up as
+// something to fix.
+func policySurfaceForOwnerTool(tool string) string {
+	switch tool {
+	case "send_owner_summary":
+		return metrics.PolicySurfaceOwnerSummary
+	case "request_owner_approval":
+		return metrics.PolicySurfaceOwnerApproval
+	default:
+		return metrics.PolicySurfaceUnknown
+	}
+}
+
 func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actionType, notificationKind, tool string) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -526,6 +561,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		Action:     policy.Action{Type: actionType, Intent: req.Intent, Text: req.Text},
 		GlobalKill: s.globalKill(), Now: time.Now(),
 	})
+	if result.Decision == policy.Deny {
+		s.m.CountPolicyDenial(string(result.DenyCode()), policySurfaceForOwnerTool(tool))
+	}
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
 	// ONLY after the global gates (kill switch, mode==off) have already had a

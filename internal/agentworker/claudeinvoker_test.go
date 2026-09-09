@@ -10,7 +10,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 func jobStatusServer(t *testing.T, jobID int64, status string, attempt int) *httptest.Server {
@@ -248,6 +254,170 @@ func TestClaudeInvoker_Run_RejectsCompletionByDifferentAttempt(t *testing.T) {
 	}
 }
 
+// costReportingServer handles both GET /jobs/{id} (status check) and
+// POST /jobs/{id}/cost (worker cost report) for T5's recordCost tests, and
+// records every cost report it receives.
+type costReportingServer struct {
+	mu          sync.Mutex
+	costReports []struct {
+		attempt int
+		cost    float64
+	}
+	jobID, attempt int64
+	status         string
+}
+
+func newCostReportingServer(t *testing.T, jobID int64, status string, attempt int) (*httptest.Server, *costReportingServer) {
+	t.Helper()
+	crs := &costReportingServer{jobID: jobID, attempt: int64(attempt), status: status}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/jobs/"+strconv.FormatInt(jobID, 10):
+			writeJSONFixture(w, JobStatus{JobID: jobID, Status: crs.status, Attempt: attempt})
+		case r.Method == http.MethodPost && r.URL.Path == "/jobs/"+strconv.FormatInt(jobID, 10)+"/cost":
+			var body struct {
+				Attempt int     `json:"attempt"`
+				CostUSD float64 `json:"cost_usd"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			crs.mu.Lock()
+			crs.costReports = append(crs.costReports, struct {
+				attempt int
+				cost    float64
+			}{body.Attempt, body.CostUSD})
+			crs.mu.Unlock()
+			writeJSONFixture(w, map[string]any{"recorded": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, crs
+}
+
+// TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Success covers T5's
+// success case: the fixture's total_cost_usd increases
+// mctl_agent_job_cost_usd_total{result="success"}.
+func TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Success(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.25,"result":"handled it"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, crs := newCostReportingServer(t, 42, "completed", 1)
+	m := metrics.New()
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	before := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	after := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if after != before+0.25 {
+		t.Fatalf("cost total = %v, want %v", after, before+0.25)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 1 || crs.costReports[0].cost != 0.25 || crs.costReports[0].attempt != 1 {
+		t.Fatalf("cost reports = %+v", crs.costReports)
+	}
+}
+
+// TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Error covers T5's
+// is_error=true case: the cost must still be recorded (and reported) even
+// though CheckResult subsequently fails Run — proving recordCost runs
+// before the check, not after. Moving recordCost after CheckResult fails
+// this case (the cost report would never happen).
+func TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Error(t *testing.T) {
+	stdout := `{"type":"result","subtype":"error_max_turns","is_error":true,"total_cost_usd":0.42,"result":"ran out of turns"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, crs := newCostReportingServer(t, 7, "processing", 1)
+	m := metrics.New()
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	before := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("error"))
+	err := inv.Run(context.Background(), JobEnvelope{JobID: 7, Attempt: 1})
+	if err == nil {
+		t.Fatal("expected an error from CheckResult")
+	}
+	if !errors.Is(err, ErrClaudeReportedError) {
+		t.Fatalf("err = %v, want ErrClaudeReportedError", err)
+	}
+	after := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("error"))
+	if after != before+0.42 {
+		t.Fatalf("cost total = %v, want %v (recordCost must run before CheckResult)", after, before+0.42)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 1 || crs.costReports[0].cost != 0.42 {
+		t.Fatalf("cost reports = %+v, want one report of 0.42 despite the subsequent CheckResult failure", crs.costReports)
+	}
+
+	classErr := testutil.ToFloat64(m.AgentClaudeResultErrorsTotal.WithLabelValues("other"))
+	if classErr != 1 {
+		t.Fatalf("AgentClaudeResultErrorsTotal{class=other} = %v, want 1", classErr)
+	}
+}
+
+// TestClaudeInvoker_Run_NilMetricsStillPersistsCost pins the split between
+// the two things recordCost does. Metrics is an optional field, so a nil
+// registry must not stop the durable cost_usd write: coupling an accounting
+// record to whether telemetry happens to be wired would make a future caller
+// silently stop persisting spend (claude review P3 on PR #583). The counter
+// is the only part the nil check guards, and a nil registry must still not
+// panic.
+func TestClaudeInvoker_Run_NilMetricsStillPersistsCost(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"result":"ok"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, crs := newCostReportingServer(t, 42, "completed", 1)
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "super-secret-token"}
+	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 1 {
+		t.Fatalf("cost reports = %d, want 1 even with a nil metrics registry", len(crs.costReports))
+	}
+	if crs.costReports[0].cost != 0.1 {
+		t.Fatalf("reported cost = %v, want 0.1", crs.costReports[0].cost)
+	}
+}
+
+// TestClaudeInvoker_Run_MetricsExpositionCarriesNoConversationContent covers
+// T12: after running a job whose result carries a synthetic persona's
+// message body verbatim (Bob, per .claude/CLAUDE.md's fixture-persona
+// rule), the worker registry's own exposition output must contain none of
+// that content, none of the peer handle, and none of the synthetic event
+// id — the new metric families are labeled only by bounded, content-free
+// values (result, class, domain_id).
+func TestClaudeInvoker_Run_MetricsExpositionCarriesNoConversationContent(t *testing.T) {
+	const (
+		peerHandle = "@bob_the_recruiter"
+		eventID    = "evt:v1:1:9001:4242"
+		msgBody    = "Bob asked: are you available for a call about the Staff Engineer role at Acme?"
+	)
+	stdout := `{"type":"result","subtype":"error_during_execution","is_error":true,"total_cost_usd":0.05,"result":"` + msgBody + `"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, _ := newCostReportingServer(t, 55, "processing", 1)
+	m := metrics.New()
+	m.AgentCredentialDomain.WithLabelValues("acct-privacy-test").Set(1)
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	err := inv.Run(context.Background(), JobEnvelope{JobID: 55, EventID: eventID, Attempt: 1})
+	if err == nil {
+		t.Fatal("expected an error from CheckResult")
+	}
+
+	handler := promhttp.HandlerFor(m.Prometheus, promhttp.HandlerOpts{})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	out := rec.Body.String()
+	for _, secret := range []string{peerHandle, eventID, msgBody, "Bob"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("metrics exposition leaked %q: %s", secret, out)
+		}
+	}
+}
+
 func TestClaudeInvoker_Run_RejectsCompletionForDifferentJob(t *testing.T) {
 	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done"}`
 	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
@@ -260,5 +430,32 @@ func TestClaudeInvoker_Run_RejectsCompletionForDifferentJob(t *testing.T) {
 	err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1})
 	if !errors.Is(err, ErrAgentDidNotCompleteJob) {
 		t.Fatalf("Run err = %v, want ErrAgentDidNotCompleteJob", err)
+	}
+}
+
+// TestClaudeInvoker_Run_NegativeCostIsDropped guards recordCost against a
+// negative total_cost_usd from the claude CLI: prometheus.Counter.Add panics
+// on a negative delta and there is no recover() in the worker, so a single
+// bad value would take the poll loop down. The value must be dropped — no
+// counter increment, no cost report — without failing the job.
+func TestClaudeInvoker_Run_NegativeCostIsDropped(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":-0.25,"result":"handled it"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, crs := newCostReportingServer(t, 42, "completed", 1)
+	m := metrics.New()
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	before := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	after := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if after != before {
+		t.Fatalf("cost total = %v, want %v (a negative cost must not be counted)", after, before)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 0 {
+		t.Fatalf("cost reports = %+v, want none for a negative cost", crs.costReports)
 	}
 }

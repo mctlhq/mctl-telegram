@@ -55,8 +55,14 @@ type AgentJob struct {
 	LastError      string
 	ResultActionID int64
 	ResultLeadID   int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// CostUSD is the last-reported Claude spend for this job (see
+	// RecordAgentJobCost). sql.NullFloat64, not float64: an unreported job
+	// must read as SQL NULL, never a false 0 that would understate spend —
+	// the same nullable-added-column shape peer_access_hash's own regression
+	// (agent_schema_test.go) documents getting wrong once already.
+	CostUSD   sql.NullFloat64
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // AgentJobBackoff returns the retry delay before attempt n+1 given n failed
@@ -322,7 +328,7 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		  )
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		           result_action_id, result_lead_id, created_at, updated_at`,
+		           result_action_id, result_lead_id, cost_usd, created_at, updated_at`,
 		JobProcessing, replicaID, now, JobPending, limit, userID,
 	)
 	if err != nil {
@@ -366,10 +372,11 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 			claimedAt                    sql.NullTime
 			lastErr                      sql.NullString
 			resultActionID, resultLeadID sql.NullInt64
+			costUSD                      sql.NullFloat64
 		)
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
-			&resultActionID, &resultLeadID, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
@@ -377,6 +384,7 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 		j.LastError = lastErr.String
 		j.ResultActionID = resultActionID.Int64
 		j.ResultLeadID = resultLeadID.Int64
+		j.CostUSD = costUSD
 		if claimedAt.Valid {
 			j.ClaimedAt = claimedAt.Time
 		}
@@ -390,7 +398,7 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		        result_action_id, result_lead_id, created_at, updated_at
+		        result_action_id, result_lead_id, cost_usd, created_at, updated_at
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
@@ -533,6 +541,41 @@ func (s *Store) CompleteAgentJobWithResult(
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit complete-with-result tx: %w", err)
+	}
+	return nil
+}
+
+// RecordAgentJobCost persists the worker-observed Claude spend for one
+// user-scoped job, fenced on the exact claim attempt the caller was given by
+// ClaimAgentJobs. This is the same claim fencing CompleteAgentJob and
+// CompleteAgentJobWithResult use, so a stale worker whose claim was requeued
+// (and re-claimed by another worker, incrementing attempts) cannot overwrite
+// a newer attempt's recorded cost. Deliberately no status predicate: a cost
+// report can legitimately arrive after the job has already reached a
+// terminal state (it is sent between ParseClaudeResult and CheckResult,
+// which runs after completion is possible) — only the attempt identity
+// matters here, unlike the terminal-transition writers above. Returns
+// ErrAgentJobNotFound on zero rows affected (job id/user mismatch, or a
+// stale attempt), mirroring every other claim-fenced write in this file.
+//
+// last-reported-attempt-wins (a plain SET), not a running sum: this keeps
+// the report idempotent under an HTTP retry. Cumulative spend across
+// retries remains available from mctl_agent_job_cost_usd_total.
+func (s *Store) RecordAgentJobCost(ctx context.Context, userID, jobID int64, attempt int, cost float64) error {
+	if userID <= 0 {
+		return errors.New("user id required")
+	}
+	now := time.Now().UTC()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET cost_usd = $1, updated_at = $2
+		  WHERE id = $3 AND user_id = $4 AND attempts = $5`,
+		cost, now, jobID, userID, attempt,
+	)
+	if err != nil {
+		return fmt.Errorf("record agent job cost: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAgentJobNotFound
 	}
 	return nil
 }

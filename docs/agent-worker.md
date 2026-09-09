@@ -76,14 +76,64 @@ transport is in use.
 |---|---|---|
 | `AGENT_API_BASE_URL` | yes | Full `/api/agent/v1` root, e.g. `https://labs-mctl-telegram.labs.svc:8080/api/agent/v1`. |
 | `AGENT_API_TOKEN` | yes | Long-lived worker bearer token, minted via `POST /api/agent/token` (`aud=agent`, admin-scoped — see `internal/agentapi/tokenhandler.go`). Never logged; passed to the spawned `--mcp-serve` subprocess's env, never to the model's own process env. |
+| `AGENT_CREDENTIAL_DOMAIN_ID` | yes | Non-secret identifier for the credential/quota pool this worker runs against — e.g. a Vault path or account label, **never the credential itself**. Must match `[A-Za-z0-9._:/-]{1,128}`; the poll loop (`run()`) refuses to start without it, and exported as the `mctl_agent_credential_domain{domain_id=...}` info gauge so a claim of quota isolation between deployments has a machine-checkable counterpart. Not required by `--mcp-serve` mode. See the rollout-ordering note below before upgrading an existing deployment. |
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
 | `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. |
 | `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
-| `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz` probe server (default: `:8080`, all interfaces). |
+| `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
+| `AGENT_METRICS_ALLOW_CIDR` | no | Optional CIDR allowlist guarding `/metrics` (see below). Unset means open, matching `cmd/server`'s `METRICS_ALLOW_CIDR` default. A malformed value fails closed (every `/metrics` request gets 403), never silently open. |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
 are internal — set only by the parent worker process on the `--mcp-serve`
 subprocess it spawns per job, never configured by an operator.
+
+### Metrics: `/metrics` on `AGENT_HEALTH_ADDR`
+
+The poll-loop process (`run()`) exposes a Prometheus `/metrics` route on the
+same `AGENT_HEALTH_ADDR` port as the `/livez`/`/healthz`/`/readyz` probes,
+serving the same `internal/metrics.Registry` used by `cmd/server` — reused
+rather than a bespoke worker registry so every `mctl_*` name stays defined in
+exactly one file. It carries:
+
+- `mctl_agent_job_cost_usd_total{result="success"|"error"}` — Claude spend
+  recorded before the job's own `is_error` check, so a job that fails
+  afterwards still reports what it spent.
+- `mctl_agent_claude_result_errors_total{class="usage_limit"|"other"}` —
+  `CheckResult` errors, split out so a usage-limit/quota stop is
+  distinguishable from any other `is_error` result at a glance.
+- `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
+  above.
+
+A handful of server-side scalar families (HTTP, auth, session, bridge, ...)
+are also present at zero since they share the same registry constructor;
+harmless, as vec families with no children simply don't appear.
+
+Guard it with `AGENT_METRICS_ALLOW_CIDR` if the worker's NetworkPolicy alone
+is not enough for your deployment; unset means open, matching `cmd/server`'s
+own `/metrics` default.
+
+The guard covers `/metrics` only. `/livez`, `/healthz` and `/readyz` also
+carry `credential_domain_id` in their bodies and are **not** guarded — they
+must stay reachable for the kubelet, and a CIDR that admits the kubelet
+would admit most of the cluster anyway. The value is a non-secret identifier
+by construction (`[A-Za-z0-9._:/-]{1,128}`, rejected at startup otherwise),
+so this is a scope note rather than a disclosure: setting
+`AGENT_METRICS_ALLOW_CIDR` restricts the metrics surface, not every place
+the worker names its quota domain. Keep the probe port off untrusted
+networks with a NetworkPolicy if that matters for your deployment.
+
+### Rollout ordering: `AGENT_CREDENTIAL_DOMAIN_ID` is a breaking change
+
+`AGENT_CREDENTIAL_DOMAIN_ID` is required by `run()` (not by `--mcp-serve`).
+An already-running agent-worker deployment upgraded straight to a version of
+this binary that requires it will crash-loop until the value is set — the
+failure is loud and immediate (`AGENT_CREDENTIAL_DOMAIN_ID is required`), but
+still an outage until fixed. **Set the value in the deployment's gitops
+values and let it sync BEFORE rolling the new worker image**, not after.
+If a rollout is caught with the image ahead of the config, either add the
+value and re-sync or roll the image back with `mctl_rollback_service` — jobs
+are durable in `agent_jobs` and get requeued by the existing visibility-
+timeout sweeper once a worker returns, so no work is lost either way.
 
 ### Health probe binding: `:8080`, not loopback-only
 

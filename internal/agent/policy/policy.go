@@ -52,28 +52,31 @@ type Input struct {
 	Now              time.Time
 }
 
-// Gate identifies which account-wide control produced a Deny result. It is
-// populated only for the three account-wide gates (global kill switch,
-// mode==off, autopilot paused) and is the zero value (GateNone) for every
-// other deny branch, including the per-conversation gates and validation
-// failures.
-//
-// It has no production consumer: internal/agentapi's owner pause alert
-// cannot use it, because that decision must be read from the PERSISTED
-// action rather than from the current evaluation — a redelivered job whose
-// action was first stored while the account was active must not be
-// re-judged (see handleProposeReply). Gate exists so policy_test.go can pin
-// the relative precedence of the three gates directly, which is what the
-// alert's correctness actually rests on: a denial that reports
-// GateAutopilotPaused is one the API layer would alert about, and the tests
-// assert exactly which inputs do and do not produce it.
-type Gate string
+// DenyCode is a stable, closed-set machine identifier for a denial, safe to
+// use as a Prometheus label value. Result.Reasons stays free text for humans
+// and the audit trail; three of those strings interpolate a runtime value
+// (strconv.Quote of a mode/state/action type) and are therefore unbounded.
+type DenyCode string
 
 const (
-	GateNone            Gate = ""
-	GateKillSwitch      Gate = "kill_switch"
-	GateModeOff         Gate = "mode_off"
-	GateAutopilotPaused Gate = "autopilot_paused"
+	DenyGlobalKill        DenyCode = "global_kill"
+	DenyUserMismatch      DenyCode = "user_mismatch"
+	DenyModeOff           DenyCode = "mode_off"
+	DenyModeUnrecognized  DenyCode = "mode_unrecognized"
+	DenyAutopilotPaused   DenyCode = "autopilot_paused"
+	DenyConvTakenOver     DenyCode = "conversation_taken_over"
+	DenyConvClosed        DenyCode = "conversation_closed"
+	DenyConvPaused        DenyCode = "conversation_paused"
+	DenyConvStateUnknown  DenyCode = "conversation_state_unrecognized"
+	DenySenderBlocked     DenyCode = "sender_blocked"
+	DenyActionTypeUnknown DenyCode = "action_type_unrecognized"
+	DenyPeerMismatch      DenyCode = "peer_mismatch"
+	DenyNoDisclosure      DenyCode = "no_disclosure_text"
+	DenyEmptyReply        DenyCode = "empty_reply"
+	DenyReplyTooLong      DenyCode = "reply_too_long"
+	DenyReplyURL          DenyCode = "reply_contains_url"
+	DenyReplyCredentials  DenyCode = "reply_contains_credentials"
+	DenyUnknown           DenyCode = "unknown" // fallback only
 )
 
 // ReasonAutopilotPaused is the exact reason string a pause denial carries.
@@ -89,16 +92,25 @@ const ReasonAutopilotPaused = "autopilot paused for this account"
 type Result struct {
 	Decision Decision
 	Reasons  []string
-	Gate     Gate
+	// Code is set only when Decision == Deny. Use DenyCode() rather than
+	// reading this field directly so a deny site that forgets to set it
+	// degrades to the bounded DenyUnknown fallback instead of an empty label.
+	Code DenyCode
 }
 
-func deny(reasons ...string) Result { return Result{Decision: Deny, Reasons: reasons} }
+// DenyCode returns r.Code, or DenyUnknown if it is empty — e.g. a future
+// deny(...) call site that omits a code. Safe to call regardless of
+// Decision; callers should still guard on Decision == Deny before treating
+// the result as a denial.
+func (r Result) DenyCode() DenyCode {
+	if r.Code == "" {
+		return DenyUnknown
+	}
+	return r.Code
+}
 
-// denyGate is like deny but also records which account-wide gate produced
-// the denial. Used only by the three account-wide gates (kill switch,
-// mode==off, autopilot paused) that owner-facing actions must still clear.
-func denyGate(gate Gate, reasons ...string) Result {
-	return Result{Decision: Deny, Reasons: reasons, Gate: gate}
+func deny(code DenyCode, reasons ...string) Result {
+	return Result{Decision: Deny, Reasons: reasons, Code: code}
 }
 
 const riskyTLD = `com|net|org|io|ru|me|dev|co|ai|app|xyz|zip|link|click|top|info|biz|site|online|live|shop|store|cloud|tech|space|website|fun|icu|cc|tv|ly|sh|to|gg|fm|gl|be|us|uk|de|fr|es|it|nl|pl|cz|eu|in|id|ua|by|kz|tr|cn|jp|br|mx|ca|au|nz|jobs|agency|careers|career|work|works|team|company|group|consulting|solutions|network|community|recruiting|staffing|hr`
@@ -325,7 +337,7 @@ func phoneDigitsAndGroups(s string) (string, []string) {
 // Evaluate applies hard denials first, then accumulates approval requirements.
 func Evaluate(in Input) Result {
 	if in.GlobalKill {
-		return denyGate(GateKillSwitch, "global kill switch engaged")
+		return deny(DenyGlobalKill, "global kill switch engaged")
 	}
 	// A worker that accidentally pairs one user's AgentProfile with another
 	// user's Conversation must not authorize a reply under the wrong
@@ -336,14 +348,14 @@ func Evaluate(in Input) Result {
 	// Conversation row for them at all.
 	if in.Action.Type == db.ActionTypeReply &&
 		(in.Profile.UserID == 0 || in.Conversation.UserID == 0 || in.Profile.UserID != in.Conversation.UserID) {
-		return deny("profile and conversation belong to different users")
+		return deny(DenyUserMismatch, "profile and conversation belong to different users")
 	}
 	switch in.Profile.Mode {
 	case db.AgentModeObserve, db.AgentModeGuarded:
 	case db.AgentModeOff:
-		return denyGate(GateModeOff, "agent mode is off")
+		return deny(DenyModeOff, "agent mode is off")
 	default:
-		return deny("unrecognized agent mode " + strconv.Quote(in.Profile.Mode))
+		return deny(DenyModeUnrecognized, "unrecognized agent mode "+strconv.Quote(in.Profile.Mode))
 	}
 	// Owner-facing actions notify the human, not the recruiter: they encode
 	// "tell me what happened," not "reply on my behalf." They must still
@@ -367,20 +379,20 @@ func Evaluate(in Input) Result {
 	switch in.Conversation.State {
 	case db.ConversationActive:
 	case db.ConversationTakenOver:
-		return deny("conversation taken over by owner")
+		return deny(DenyConvTakenOver, "conversation taken over by owner")
 	case db.ConversationClosed:
-		return deny("conversation closed")
+		return deny(DenyConvClosed, "conversation closed")
 	case db.ConversationPaused:
-		return deny("conversation paused")
+		return deny(DenyConvPaused, "conversation paused")
 	default:
-		return deny("unrecognized conversation state " + strconv.Quote(in.Conversation.State))
+		return deny(DenyConvStateUnknown, "unrecognized conversation state "+strconv.Quote(in.Conversation.State))
 	}
 	if isBlocked(in.Profile.BlockedSenders, in.Conversation.PeerTGID) {
-		return deny("sender is blocked")
+		return deny(DenySenderBlocked, "sender is blocked")
 	}
 	// Checked AFTER the per-conversation gates and the blocklist, not before
 	// them, even though pause is an account-wide state. A denial that
-	// reports GateAutopilotPaused makes internal/agentapi queue an owner
+	// reports DenyAutopilotPaused makes internal/agentapi queue an owner
 	// alert saying a reply was withheld because autopilot is paused; for a
 	// conversation the owner has already taken over, closed or paused — or a
 	// peer they blocked — that alert is noise about a reply that would have
@@ -388,25 +400,25 @@ func Evaluate(in Input) Result {
 	// conversation-specific refusals first keeps them silent and leaves the
 	// pause alert for the case it actually describes (agy P2 on PR #582).
 	if in.Profile.AutopilotPaused {
-		return denyGate(GateAutopilotPaused, ReasonAutopilotPaused)
+		return deny(DenyAutopilotPaused, ReasonAutopilotPaused)
 	}
 
 	switch in.Action.Type {
 	case db.ActionTypeReply:
 	default:
-		return deny("unrecognized action type " + strconv.Quote(in.Action.Type))
+		return deny(DenyActionTypeUnknown, "unrecognized action type "+strconv.Quote(in.Action.Type))
 	}
 
 	// Zero means the caller did not echo a peer; the executor uses the DB peer.
 	if in.Action.PeerTGID != 0 && in.Action.PeerTGID != in.Conversation.PeerTGID {
-		return deny("reply peer does not match conversation")
+		return deny(DenyPeerMismatch, "reply peer does not match conversation")
 	}
 	if strings.TrimSpace(in.Profile.DisclosureText) == "" {
-		return deny("no disclosure text configured")
+		return deny(DenyNoDisclosure, "no disclosure text configured")
 	}
 	text := in.Action.Text
 	if strings.TrimSpace(text) == "" {
-		return deny("empty reply")
+		return deny(DenyEmptyReply, "empty reply")
 	}
 	maxChars := in.Profile.MaxReplyChars
 	if maxChars <= 0 {
@@ -423,13 +435,13 @@ func Evaluate(in Input) Result {
 		maxChars = telegramMaxMessageLen
 	}
 	if len([]rune(text))+len([]rune(DisclosureSep))+len([]rune(in.Profile.DisclosureText)) > maxChars {
-		return deny("reply exceeds max length once the disclosure is appended")
+		return deny(DenyReplyTooLong, "reply exceeds max length once the disclosure is appended")
 	}
 	if containsURL(text) {
-		return deny("reply contains a URL")
+		return deny(DenyReplyURL, "reply contains a URL")
 	}
 	if containsCredentialLike(text) {
-		return deny("reply contains credentials-like content")
+		return deny(DenyReplyCredentials, "reply contains credentials-like content")
 	}
 
 	var reasons []string

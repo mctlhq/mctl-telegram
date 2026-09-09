@@ -290,6 +290,9 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
 	})
+	if result.Decision == policy.Deny {
+		e.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceExecutorSend)
+	}
 	// A hard Deny always stops the send — RequireApproval is more subtle: it
 	// is not a second vote against a row a HUMAN already approved via
 	// /mctl approve (action.PolicyDecision == PolicyRequireApproval when it
@@ -568,6 +571,13 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
 	})
+	if result.Decision == policy.Deny {
+		// Deliberately NOT counted for the requireApprovalBypassesUnreviewedAllow
+		// escalation computed below — that is a RequireApproval decision, not a
+		// hard Deny, and conflating them would make this counter mean two
+		// different things.
+		e.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceExecutorRecover)
+	}
 	// Mirrors send()'s requireApprovalBypassesUnreviewedAllow exactly: a
 	// PolicyAllow action (guarded-mode auto-approved, no human ever reviewed
 	// this exact draft) whose CURRENT re-evaluation now says RequireApproval

@@ -285,3 +285,68 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 	s.audit(ctx, id.UserID, "complete_agent_job", "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"completed": true})
 }
+
+type reportJobCostRequest struct {
+	Attempt int     `json:"attempt"`
+	CostUSD float64 `json:"cost_usd"`
+}
+
+// handleReportJobCost is POST /jobs/{id}/cost — a worker-only, out-of-band
+// report of the Claude spend observed for one claimed attempt. Modelled on
+// handleJobComplete's shape (identity, decodeStrict, an existing-job check,
+// the same 409-on-stale-claim mapping), but deliberately NOT registered as
+// an MCP tool anywhere (absent from allowedTools and NewMCPServer's tool
+// builders — see internal/agentworker/claudeinvoker.go) and NOT reachable by
+// the model: this is a fact the worker observes after `claude` exits, not a
+// claim the model can assert about its own spend.
+func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(w, r)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	var req reportJobCostRequest
+	if err := decodeStrict(w, r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	// RecordAgentJobCost fences on attempts = $5 with no status predicate, so
+	// attempt 0 would match a never-claimed pending job. ClaimAgentJobs always
+	// hands out attempts >= 1, so no legitimate caller ever sends 0.
+	if req.Attempt <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "attempt must be positive")
+		return
+	}
+	if req.CostUSD < 0 {
+		writeJSONError(w, http.StatusBadRequest, "cost_usd must not be negative")
+		return
+	}
+	ctx := r.Context()
+	if _, err := s.Store.GetAgentJob(ctx, id.UserID, jobID); err != nil {
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			writeJSONError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		logHandlerErr("report_agent_job_cost", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if err := s.Store.RecordAgentJobCost(ctx, id.UserID, jobID, req.Attempt, req.CostUSD); err != nil {
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			// Same "too late" shape as handleJobComplete's own CAS loss: the
+			// claim was requeued and re-claimed under a newer attempt since
+			// the worker last saw it.
+			writeJSONError(w, http.StatusConflict, "job is no longer claimed under that attempt")
+			return
+		}
+		logHandlerErr("report_agent_job_cost", err)
+		writeJSONError(w, http.StatusInternalServerError, "record cost failed")
+		return
+	}
+	s.audit(ctx, id.UserID, "report_agent_job_cost", "ok", "")
+	writeJSON(w, http.StatusOK, map[string]any{"recorded": true})
+}

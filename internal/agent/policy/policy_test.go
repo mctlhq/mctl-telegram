@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,97 @@ func TestEvaluate_DenyRules(t *testing.T) {
 				t.Fatalf("decision = %s (%v), want deny", got.Decision, got.Reasons)
 			}
 		})
+	}
+}
+
+// TestEvaluate_DenyCodes asserts that every deny(...) path returns the
+// expected closed-set DenyCode, and that the set of codes actually returned
+// across the table equals the exported constant set minus DenyUnknown (the
+// fallback is never supposed to be reachable from a real Evaluate call).
+// Swapping any two codes at their deny sites makes this fail.
+func TestEvaluate_DenyCodes(t *testing.T) {
+	cases := []struct {
+		name     string
+		mutate   func(*Input)
+		wantCode DenyCode
+	}{
+		{"global kill", func(in *Input) { in.GlobalKill = true }, DenyGlobalKill},
+		{"profile conversation user mismatch", func(in *Input) { in.Conversation.UserID = in.Profile.UserID + 1 }, DenyUserMismatch},
+		{"mode off", func(in *Input) { in.Profile.Mode = db.AgentModeOff }, DenyModeOff},
+		{"unknown mode", func(in *Input) { in.Profile.Mode = "guard" }, DenyModeUnrecognized},
+		{"autopilot paused", func(in *Input) { in.Profile.AutopilotPaused = true }, DenyAutopilotPaused},
+		{"taken over", func(in *Input) { in.Conversation.State = db.ConversationTakenOver }, DenyConvTakenOver},
+		{"closed", func(in *Input) { in.Conversation.State = db.ConversationClosed }, DenyConvClosed},
+		{"paused", func(in *Input) { in.Conversation.State = db.ConversationPaused }, DenyConvPaused},
+		{"unknown state", func(in *Input) { in.Conversation.State = "paussed" }, DenyConvStateUnknown},
+		{"blocked sender", func(in *Input) { in.Profile.BlockedSenders = "111,555,222" }, DenySenderBlocked},
+		{"unknown action", func(in *Input) { in.Action.Type = "save_job_lead" }, DenyActionTypeUnknown},
+		{"peer mismatch", func(in *Input) { in.Action.PeerTGID = 999 }, DenyPeerMismatch},
+		{"no disclosure", func(in *Input) { in.Profile.DisclosureText = " \n\t" }, DenyNoDisclosure},
+		{"empty reply", func(in *Input) { in.Action.Text = "   " }, DenyEmptyReply},
+		{"too long", func(in *Input) { in.Action.Text = repeatRune(1201) }, DenyReplyTooLong},
+		{"url scheme", func(in *Input) { in.Action.Text = "see https://evil.example/x" }, DenyReplyURL},
+		{"card", func(in *Input) { in.Action.Text = "my card is 4111 1111 1111 1111" }, DenyReplyCredentials},
+	}
+
+	seen := map[DenyCode]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInput()
+			tc.mutate(&in)
+			got := Evaluate(in)
+			if got.Decision != Deny {
+				t.Fatalf("decision = %s (%v), want deny", got.Decision, got.Reasons)
+			}
+			if got.DenyCode() != tc.wantCode {
+				t.Fatalf("DenyCode() = %s, want %s", got.DenyCode(), tc.wantCode)
+			}
+			if got.Code != tc.wantCode {
+				t.Fatalf("Code = %s, want %s", got.Code, tc.wantCode)
+			}
+			seen[tc.wantCode] = true
+		})
+	}
+
+	allCodes := []DenyCode{
+		DenyGlobalKill, DenyUserMismatch, DenyModeOff, DenyModeUnrecognized,
+		DenyAutopilotPaused, DenyConvTakenOver, DenyConvClosed, DenyConvPaused,
+		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
+		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
+		DenyReplyURL, DenyReplyCredentials,
+	}
+	for _, c := range allCodes {
+		if !seen[c] {
+			t.Errorf("DenyCode %q from the exported constant set is never exercised by this table", c)
+		}
+	}
+	if seen[DenyUnknown] {
+		t.Error("DenyUnknown must never be produced by a real Evaluate call")
+	}
+}
+
+// TestResult_DenyCode_FallsBackToUnknown covers the accessor's degrade path:
+// a Result with an empty Code (e.g. a future deny site that forgets to set
+// one) must report DenyUnknown rather than an empty label value.
+func TestResult_DenyCode_FallsBackToUnknown(t *testing.T) {
+	r := Result{Decision: Deny}
+	if got := r.DenyCode(); got != DenyUnknown {
+		t.Fatalf("DenyCode() = %q, want %q", got, DenyUnknown)
+	}
+}
+
+// TestEvaluate_Deterministic asserts Evaluate is a pure function: called
+// twice with the same Input it returns an identical Result, and it takes no
+// metrics registry or other side-effecting dependency to call at all (a
+// property enforced at compile time by Evaluate's signature, not just by
+// this test).
+func TestEvaluate_Deterministic(t *testing.T) {
+	in := baseInput()
+	first := Evaluate(in)
+	second := Evaluate(in)
+	if first.Decision != second.Decision || first.DenyCode() != second.DenyCode() ||
+		strings.Join(first.Reasons, ";") != strings.Join(second.Reasons, ";") {
+		t.Fatalf("Evaluate is not deterministic: first=%+v second=%+v", first, second)
 	}
 }
 
@@ -329,8 +421,9 @@ func TestEvaluate_OwnerFacingAllowedWhilePaused(t *testing.T) {
 
 // TestEvaluate_ConversationGatesOutrankPause pins the fix for agy's P2 on
 // PR #582: a conversation the owner already took over, closed or paused —
-// or a peer they blocked — must deny on its OWN reason and carry GateNone,
-// even when the account is also paused. A GateAutopilotPaused result makes
+// or a peer they blocked — must deny on its OWN reason and carry its own
+// DenyCode, even when the account is also paused. A DenyAutopilotPaused
+// result makes
 // internal/agentapi queue an owner alert saying a reply was withheld
 // because autopilot is paused; for these conversations that alert is noise
 // about a reply that would have been refused regardless of the pause.
@@ -353,8 +446,8 @@ func TestEvaluate_ConversationGatesOutrankPause(t *testing.T) {
 		if got.Decision != Deny {
 			t.Fatalf("%s: decision = %s (%v), want deny", tc.name, got.Decision, got.Reasons)
 		}
-		if got.Gate != GateNone {
-			t.Fatalf("%s: gate = %q, want GateNone so no owner pause alert is queued", tc.name, got.Gate)
+		if got.DenyCode() == DenyAutopilotPaused {
+			t.Fatalf("%s: deny code = %q, want the conversation's own code so no owner pause alert is queued", tc.name, got.DenyCode())
 		}
 		if len(got.Reasons) != 1 || got.Reasons[0] != tc.wantReason {
 			t.Fatalf("%s: reasons = %v, want [%q]", tc.name, got.Reasons, tc.wantReason)
@@ -374,19 +467,19 @@ func TestEvaluate_AccountWideGatePrecedence(t *testing.T) {
 		name       string
 		mutate     func(*Input)
 		wantDecide Decision
-		wantGate   Gate
+		wantCode   DenyCode
 	}{
-		{"kill switch only", func(in *Input) { in.GlobalKill = true }, Deny, GateKillSwitch},
-		{"mode off only", func(in *Input) { in.Profile.Mode = db.AgentModeOff }, Deny, GateModeOff},
-		{"paused only", func(in *Input) { in.Profile.AutopilotPaused = true }, Deny, GateAutopilotPaused},
+		{"kill switch only", func(in *Input) { in.GlobalKill = true }, Deny, DenyGlobalKill},
+		{"mode off only", func(in *Input) { in.Profile.Mode = db.AgentModeOff }, Deny, DenyModeOff},
+		{"paused only", func(in *Input) { in.Profile.AutopilotPaused = true }, Deny, DenyAutopilotPaused},
 		{"kill switch and paused", func(in *Input) {
 			in.GlobalKill = true
 			in.Profile.AutopilotPaused = true
-		}, Deny, GateKillSwitch},
+		}, Deny, DenyGlobalKill},
 		{"mode off and paused", func(in *Input) {
 			in.Profile.Mode = db.AgentModeOff
 			in.Profile.AutopilotPaused = true
-		}, Deny, GateModeOff},
+		}, Deny, DenyModeOff},
 	}
 	for _, actionType := range actionTypes {
 		for _, tc := range cases {
@@ -395,19 +488,19 @@ func TestEvaluate_AccountWideGatePrecedence(t *testing.T) {
 			tc.mutate(&in)
 			got := Evaluate(in)
 			wantDecision := tc.wantDecide
-			wantGate := tc.wantGate
+			wantCode := tc.wantCode
 			// The pause gate does not apply to owner-facing actions: when
 			// pause is the only gate engaged, owner-facing actions are
 			// allowed (issue #581) and carry no gate.
 			if tc.name == "paused only" && actionType != db.ActionTypeReply {
 				wantDecision = Allow
-				wantGate = GateNone
+				wantCode = ""
 			}
 			if got.Decision != wantDecision {
 				t.Fatalf("%s/%s decision = %s (%v), want %s", actionType, tc.name, got.Decision, got.Reasons, wantDecision)
 			}
-			if got.Gate != wantGate {
-				t.Fatalf("%s/%s gate = %q, want %q", actionType, tc.name, got.Gate, wantGate)
+			if wantCode != "" && got.DenyCode() != wantCode {
+				t.Fatalf("%s/%s deny code = %q, want %q", actionType, tc.name, got.DenyCode(), wantCode)
 			}
 		}
 	}
