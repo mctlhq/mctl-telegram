@@ -117,8 +117,13 @@ the first — and possibly only — occurrence they exist for (issue #591).
 `mctl_agent_jobs_total` gets the same treatment for its six statuses, because
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
-`mctl_agent_policy_denials_total` is deliberately left lazy: 108 possible
-series, most of them unreachable combinations.
+`mctl_agent_policy_denials_total` is pre-created too, across its full
+18 x 6 = 108 label space. It was originally left lazy on the grounds that
+`MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
+fire it — true, and beside the point: if the first *five* denials for one
+reason land between two scrapes, the series is first observed at 5, every later
+sample reads 5, `increase()` is 0, and the rule misses its own documented
+"at least 5 denials" case in the burst scenario it exists for.
 
 One residual remains and is accepted rather than solved: the baseline has to be
 *scraped* before it helps. A worker that starts, claims a job and hits the usage

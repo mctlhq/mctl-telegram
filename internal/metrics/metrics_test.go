@@ -267,7 +267,7 @@ func TestNew_AgentCounterZeroBaseline(t *testing.T) {
 			// the ratio becomes +Inf, and the rule fires on ordinary spend.
 			family: "mctl_agent_jobs_total",
 			label:  "status",
-			want:   JobStatuses,
+			want:   jobStatuses,
 		},
 	}
 
@@ -301,22 +301,43 @@ func TestNew_AgentCounterZeroBaseline(t *testing.T) {
 	}
 }
 
-// TestNew_PolicyDenialsNotPreInitialized locks in the other half of the #591
-// decision. AgentPolicyDenialsTotal is deliberately left lazy: 18 denial codes
-// x 6 surfaces is 108 series, most of them combinations that cannot occur, and
+// TestNew_PolicyDenialsZeroBaseline pins the full 108-series baseline for
+// AgentPolicyDenialsTotal. This counter was originally left lazy because
 // MctlAgentPolicyDenialRateHigh carries a "> 4" floor that a single first
-// denial would not clear anyway. Without this test a later well-meaning change
-// could quietly materialize all 108.
-func TestNew_PolicyDenialsNotPreInitialized(t *testing.T) {
+// denial could not clear. That is true and beside the point: if the first FIVE
+// denials for one reason land between two scrapes, the series is first observed
+// at 5, every later sample reads 5, and increase() over the window is 0 — so
+// the rule misses its own documented "at least 5 denials" case, in exactly the
+// burst scenario it exists for.
+func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
 	reg := New()
 
 	mfs, err := reg.Prometheus.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
-	for _, mf := range mfs {
-		if mf.GetName() == "mctl_agent_policy_denials_total" {
-			t.Fatalf("mctl_agent_policy_denials_total has %d pre-created children; it must stay lazy", len(mf.GetMetric()))
+	var mf *dto.MetricFamily
+	for _, f := range mfs {
+		if f.GetName() == "mctl_agent_policy_denials_total" {
+			mf = f
+			break
+		}
+	}
+	if mf == nil {
+		t.Fatal("mctl_agent_policy_denials_total absent from a freshly constructed registry")
+	}
+
+	want := len(policyDenyReasons) * len(policySurfaces)
+	if want != 108 {
+		t.Fatalf("label space is %d x %d = %d, want the documented 108 — update the bound in the struct comment and the rule comments if this is deliberate",
+			len(policyDenyReasons), len(policySurfaces), want)
+	}
+	if got := len(mf.GetMetric()); got != want {
+		t.Fatalf("%d children, want %d", got, want)
+	}
+	for _, m := range mf.GetMetric() {
+		if v := m.GetCounter().GetValue(); v != 0 {
+			t.Fatalf("child %v = %v, want 0", m.GetLabel(), v)
 		}
 	}
 }

@@ -15,16 +15,16 @@ import (
 // metrics.JobStatuses would silently leave that child lazy again.
 func TestJobStatusesMatchMetricsSlice(t *testing.T) {
 	want := []string{JobPending, JobProcessing, JobCompleted, JobFailed, JobDeadLetter, JobIgnored}
-	if len(metrics.JobStatuses) != len(want) {
-		t.Fatalf("metrics.JobStatuses = %v, want the %d db.Job* constants %v", metrics.JobStatuses, len(want), want)
+	if len(metrics.JobStatuses()) != len(want) {
+		t.Fatalf("metrics.JobStatuses = %v, want the %d db.Job* constants %v", metrics.JobStatuses(), len(want), want)
 	}
 	have := map[string]bool{}
-	for _, s := range metrics.JobStatuses {
+	for _, s := range metrics.JobStatuses() {
 		have[s] = true
 	}
 	for _, s := range want {
 		if !have[s] {
-			t.Errorf("db status %q missing from metrics.JobStatuses %v", s, metrics.JobStatuses)
+			t.Errorf("db status %q missing from metrics.JobStatuses %v", s, metrics.JobStatuses())
 		}
 	}
 }
