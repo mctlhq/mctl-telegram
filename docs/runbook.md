@@ -465,7 +465,10 @@ is a non-deployed mirror kept only so this section's anchor is checked by
   for a single `reason` label, denials over 30 minutes exceed 20% of claimed
   agent jobs (`mctl_agent_jobs_total{status="processing"}`) in the same
   window, AND that reason's absolute denial count is at least 5 in the
-  window. The alert carries the `reason` label.
+  window. The alert carries the `reason` label. The floor is written `> 4`
+  rather than `>= 5` because `increase()` extrapolates to a float, so a window
+  holding exactly five denials can evaluate to slightly under 5; do not be
+  surprised to see the rule fire on a value like 4.8.
 - Aggregated by `reason` (the closed-set `policy.DenyCode`), not `surface`:
   `reason` is what determines the operator's first action.
 - No metric counts allowed policy evaluations, so the claimed-job count is
@@ -502,7 +505,7 @@ Denial share and count for the firing reason, over the alert's own window:
 ```promql
 sum by (reason) (rate(mctl_agent_policy_denials_total[30m]))
   /
-scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])))
+scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])) or vector(0))
 
 sum by (reason) (increase(mctl_agent_policy_denials_total[30m]))
 ```
@@ -608,7 +611,7 @@ expression:
 ```promql
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
   /
-sum(increase(mctl_agent_jobs_total{status="completed"}[1h]))
+(sum(increase(mctl_agent_jobs_total{status="completed"}[1h])) or vector(0))
 
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
 ```
