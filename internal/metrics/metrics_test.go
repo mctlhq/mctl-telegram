@@ -61,11 +61,14 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
 	reg.BridgeActiveDaemons.Set(0)
 	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
-	reg.AgentPolicyDenialsTotal.WithLabelValues("mode_off", "propose_reply").Add(0)
-	// AgentJobCostUSDTotal and AgentClaudeResultErrorsTotal are deliberately
-	// absent from this list: New() pre-creates their children at zero, so
-	// touching them here would hide a regression in that pre-init rather
-	// than exercise it. TestNew_AgentCounterZeroBaseline pins it directly.
+	// The four agent families New() pre-creates — AgentJobCostUSDTotal,
+	// AgentClaudeResultErrorsTotal, AgentJobsTotal and AgentPolicyDenialsTotal
+	// — are deliberately absent from this list. Touching a family the
+	// constructor already materializes would keep this test passing if that
+	// pre-init were deleted, which is the opposite of the point. The list
+	// therefore means exactly one thing: families this test has to force into
+	// existence. TestNew_AgentCounterZeroBaseline and
+	// TestNew_PolicyDenialsZeroBaseline pin the pre-init directly.
 	reg.AgentCredentialDomain.WithLabelValues("test-domain").Set(1)
 
 	mfs, err := reg.Prometheus.Gather()

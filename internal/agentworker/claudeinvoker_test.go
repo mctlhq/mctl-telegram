@@ -473,8 +473,9 @@ func TestCountResultError_FirstOccurrenceIsARealIncrease(t *testing.T) {
 	inv := &ClaudeInvoker{Metrics: m}
 
 	for _, class := range []string{metrics.ClaudeResultClassUsageLimit, metrics.ClaudeResultClassOther} {
-		if got := testutil.ToFloat64(m.AgentClaudeResultErrorsTotal.WithLabelValues(class)); got != 0 {
-			t.Fatalf("class=%q baseline = %v, want 0", class, got)
+		got, ok := gatheredCounter(t, m, "mctl_agent_claude_result_errors_total", "class", class)
+		if !ok || got != 0 {
+			t.Fatalf("class=%q baseline: present=%v value=%v, want present at 0", class, ok, got)
 		}
 	}
 
@@ -494,8 +495,9 @@ func TestCountResultError_FirstOccurrenceIsARealIncrease(t *testing.T) {
 func TestRecordCost_FirstJobIsARealIncrease(t *testing.T) {
 	m := metrics.New()
 	for _, result := range []string{metrics.JobCostResultSuccess, metrics.JobCostResultError} {
-		if got := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues(result)); got != 0 {
-			t.Fatalf("result=%q baseline = %v, want 0", result, got)
+		got, ok := gatheredCounter(t, m, "mctl_agent_job_cost_usd_total", "result", result)
+		if !ok || got != 0 {
+			t.Fatalf("result=%q baseline: present=%v value=%v, want present at 0", result, ok, got)
 		}
 	}
 
@@ -514,4 +516,33 @@ func TestRecordCost_FirstJobIsARealIncrease(t *testing.T) {
 	if got := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues(metrics.JobCostResultError)); got != 0 {
 		t.Fatalf("result=error = %v, want 0 — a successful job must not move the error child", got)
 	}
+}
+
+// gatheredCounter reads one CounterVec child through the registry's Gather(),
+// which OBSERVES the registry without mutating it.
+//
+// This matters: testutil.ToFloat64(vec.WithLabelValues(...)) cannot be used to
+// assert a zero baseline, because WithLabelValues *creates* the child at 0 when
+// it is absent. Such an assertion instantiates the very thing it claims to
+// check and passes even with metrics.New()'s pre-init deleted — it pins
+// nothing. Reported as a P3 on #593 against exactly that mistake.
+func gatheredCounter(t *testing.T, m *metrics.Registry, family, label, value string) (float64, bool) {
+	t.Helper()
+	mfs, err := m.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			for _, lp := range metric.GetLabel() {
+				if lp.GetName() == label && lp.GetValue() == value {
+					return metric.GetCounter().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
 }

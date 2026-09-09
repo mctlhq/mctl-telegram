@@ -519,18 +519,16 @@ func New() *Registry {
 		r.AgentCredentialDomain,
 	)
 
-	// Give the two agent counters a zero baseline before any work is
-	// accepted. A CounterVec creates its children lazily, on first
-	// increment, so a counter whose first *observed* sample is already 1
-	// makes increase() read 0 — that sample is the baseline. Both alerts
-	// over these series (MctlAgentClaudeUsageLimit, MctlAgentJobCostHigh)
-	// would then miss the first, and possibly only, occurrence they exist
-	// for. Four series total; see issue #591.
+	// Give every agent counter an alert reads through increase() a zero
+	// baseline, before any work is accepted. A CounterVec creates its
+	// children lazily, on first increment, so a counter whose first
+	// *observed* sample is already non-zero makes increase() read 0 — that
+	// sample becomes the baseline, and the alert misses the first, and
+	// possibly only, occurrence it exists for. See issue #591.
 	//
-	// AgentPolicyDenialsTotal is deliberately excluded: its label space is
-	// 18 x 6 = 108 series, pre-initializing all of them would materialize
-	// combinations that cannot occur, and MctlAgentPolicyDenialRateHigh
-	// carries a "> 4" floor a single first denial would not clear anyway.
+	// Four families, 4 + 6 + 108 = 118 series, every one of them a
+	// compile-time-fixed label set. The per-loop comments below say what
+	// each one costs and what breaks without it.
 	for _, class := range claudeResultClasses {
 		r.AgentClaudeResultErrorsTotal.WithLabelValues(class).Add(0)
 	}
