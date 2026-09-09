@@ -30,6 +30,9 @@ Canary incidents are out of scope here; see
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
 - [Communication Agent operations](#communication-agent-operations)
+- [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
+- [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
+- [MctlAgentJobCostHigh — communication-agent spend per completed job high](#mctlagentjobcosthigh)
 
 ---
 
@@ -286,6 +289,15 @@ action rows, and close the test window if it dead-letters again.
   pause the account, and disable its listener. Inspect the persisted action
   status, `send_random_id`, and Telegram-side outcome. Do not change the
   random ID or reconstruct a different body.
+- [`MctlAgentClaudeUsageLimit`](#mctlagentclaudeusagelimit) (warning): scale
+  the worker to zero rather than letting `Worker.Loop` grind against an
+  exhausted quota, and confirm which credential pool is affected.
+- [`MctlAgentPolicyDenialRateHigh`](#mctlagentpolicydenialratehigh) (warning):
+  read `agent_actions.policy_reasons` for the named `reason` and decide
+  whether it is the guarded system working as designed or a defect.
+- [`MctlAgentJobCostHigh`](#mctlagentjobcosthigh) (warning): close the test
+  window with the four containment controls above before touching
+  credentials.
 
 ### Retention and deletion matrix
 
@@ -350,6 +362,299 @@ not “delete immediately.”
   a separately reviewed dual-key re-encryption migration before replacing
   it. Never replace the key directly; existing ciphertext would become
   unreadable.
+
+---
+
+<a id="mctlagentclaudeusagelimit"></a>
+## MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted
+
+The deployed rule for this alert lives in the `mctl-gitops` copy of
+`mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
+is a non-deployed mirror kept only so this section's anchor is checked by
+`runbook_links_test.go`.
+
+### Symptom
+
+- Alert `MctlAgentClaudeUsageLimit` fires with severity **warning** when
+  `sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[15m])) > 0`.
+- This is a presence test, not a rate threshold: any occurrence in the window
+  fires it.
+- The worker runs against a dedicated Claude credential domain
+  (`AGENT_CREDENTIAL_DOMAIN_ID`, required by `cmd/agent-worker/main.go`'s
+  `run()`), so a usage-limit error here means that isolated pool, not a
+  shared or interactive one, is exhausted.
+- `Worker.Loop` (`internal/agentworker/worker.go`) processes jobs
+  sequentially, so once this fires every subsequent job for this worker
+  replica hits the same wall until the quota window resets — this is not one
+  job failing among many in-flight ones.
+
+### Likely causes
+
+- The dedicated credential's own usage limit, rate limit, quota, or credit
+  balance was exhausted — `isUsageLimitSubtype`
+  (`internal/agentworker/worker.go`) matches `usage_limit`, `rate_limit`,
+  `quota`, `credit_balance`, or `insufficient_credits` in the CLI result's
+  subtype.
+- A burst of jobs (e.g. a test window opened with unexpectedly high traffic)
+  consumed the pool faster than expected.
+- The credential was rotated and the new one was not provisioned with
+  sufficient quota before cutover.
+
+### Diagnostic queries
+
+Confirm the alert is real and see how long it has been firing:
+
+```promql
+sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[15m]))
+```
+
+Rule out the non-quota class to make sure this is not a broader Claude
+failure:
+
+```promql
+sum(increase(mctl_agent_claude_result_errors_total{class="other"}[15m]))
+```
+
+Identify which credential pool is affected — this worker replica's
+configured domain:
+
+```promql
+mctl_agent_credential_domain
+```
+
+### Mitigation
+
+1. Scale the affected account's worker Deployment to zero rather than letting
+   `Worker.Loop` continue grinding against the exhausted pool — jobs stay
+   durable (an unfinished claim is picked up by the visibility-timeout
+   sweeper, `RequeueStaleAgentJobs`).
+2. Confirm which credential domain is affected with the
+   `mctl_agent_credential_domain` query above.
+3. Wait for the quota window to reset, or provision a replacement credential
+   with sufficient quota per the "Credential rotation" procedure above.
+4. Scale the worker back up and verify with the diagnostic query above that
+   the class stays at zero before resuming a test window.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day unless it is blocking an
+  active, intentional test window, in which case treat it as urgent for the
+  duration of that window.
+- Escalate to whoever owns the Claude credential/billing relationship if the
+  pool is exhausted outside of an expected high-traffic period.
+
+### Postmortem trigger
+
+Open a postmortem if the quota exhaustion caused jobs to dead-letter
+(`MctlAgentDeadLetter`) or blocked an owner-facing notification during an
+active test window.
+
+---
+
+<a id="mctlagentpolicydenialratehigh"></a>
+## MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high
+
+The deployed rule for this alert lives in the `mctl-gitops` copy of
+`mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
+is a non-deployed mirror kept only so this section's anchor is checked by
+`runbook_links_test.go`.
+
+### Symptom
+
+- Alert `MctlAgentPolicyDenialRateHigh` fires with severity **warning** when,
+  for a single `reason` label, denials over 30 minutes exceed 20% of claimed
+  agent jobs (`mctl_agent_jobs_total{status="processing"}`) in the same
+  window, AND that reason's absolute denial count is at least 5 in the
+  window. The alert carries the `reason` label. The floor is written `> 4`
+  rather than `>= 5` because `increase()` extrapolates to a float, so a window
+  holding exactly five denials can evaluate to slightly under 5; do not be
+  surprised to see the rule fire on a value like 4.8.
+- Aggregated by `reason` (the closed-set `policy.DenyCode`), not `surface`:
+  `reason` is what determines the operator's first action.
+- No metric counts allowed policy evaluations, so the claimed-job count is
+  used as a proxy denominator for "opportunities to be denied", not an exact
+  base rate.
+- The ratio can legitimately exceed 1: `internal/agentapi/actions.go` and
+  `internal/agent/executor/executor.go` count a denial from each policy
+  evaluation, including redeliveries of the same job, so a worker hammering a
+  paused account inflates the numerator above the claim count. That is the
+  anomaly signal this alert is designed to catch, not a bug.
+- The 20% threshold and the 5-denial floor are both provisional: no
+  production baseline exists yet, because the agent runs guarded between test
+  windows (see the four containment controls above). Re-derive both from the
+  first week of real production data.
+
+### Likely causes
+
+- **Expected, system-working-as-designed denials**: `autopilot_paused` or
+  `conversation_taken_over` for one or more accounts under an active guard —
+  check whether this coincides with a deliberate pause or takeover.
+- **A new or runaway denial reason**: `global_kill`,
+  `reply_contains_credentials`, `reply_contains_url`, or a spike of `unknown`
+  (the `policy.DenyUnknown` fallback, which by construction means a code path
+  went unmapped) each indicate something worth investigating rather than
+  routine guarding.
+- **Redelivery amplification**: a worker retrying the same job against a
+  paused or blocked account repeatedly, inflating the ratio above what the
+  claim count alone would suggest.
+
+### Diagnostic queries
+
+Denial share and count for the firing reason, over the alert's own window:
+
+```promql
+sum by (reason) (rate(mctl_agent_policy_denials_total[30m]))
+  /
+scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])) or vector(0))
+
+sum by (reason) (increase(mctl_agent_policy_denials_total[30m]))
+```
+
+Break the denials down by call site to see where the decision was consumed:
+
+```promql
+sum by (reason, surface) (increase(mctl_agent_policy_denials_total[30m]))
+```
+
+Read the actual denial text (metadata only, not message content) for the
+account(s) involved:
+
+```sql
+SELECT id, user_id, conversation_id, policy_reasons, created_at
+FROM agent_actions
+WHERE policy_reasons IS NOT NULL
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+### Mitigation
+
+1. Identify the firing `reason` from the alert label and the query above.
+2. If the reason is `autopilot_paused` or `conversation_taken_over`, this is
+   the guarded system working as designed — confirm the pause/takeover was
+   intentional and no action is needed beyond noting it.
+3. If the reason is `global_kill`, `unknown`, `action_type_unrecognized`, or a
+   content-safety denial (`reply_contains_credentials`,
+   `reply_contains_url`), treat it as a defect signal: inspect the
+   `agent_actions` rows above and, if the pattern is a redelivery loop against
+   one account, pause that account's autopilot and investigate the retry
+   source.
+4. If `unknown` is firing, that specifically means a code path went unmapped
+   in `policySurfaceForOwnerTool` or a similar dispatch — file it as a bug
+   rather than treating it as routine denial volume.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day, sooner if the reason is
+  `unknown` or `global_kill`.
+- Escalate to whoever owns the affected account's containment controls if the
+  denial pattern suggests the account should be paused but is not.
+
+### Postmortem trigger
+
+Open a postmortem if a denial-rate spike traced back to an unmapped `unknown`
+surface, or if it revealed that an account's autopilot pause was not actually
+in effect when expected.
+
+---
+
+<a id="mctlagentjobcosthigh"></a>
+## MctlAgentJobCostHigh — communication-agent spend per completed job high
+
+The deployed rule for this alert lives in the `mctl-gitops` copy of
+`mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
+is a non-deployed mirror kept only so this section's anchor is checked by
+`runbook_links_test.go`.
+
+### Symptom
+
+- Alert `MctlAgentJobCostHigh` fires with severity **warning** when total
+  Claude spend divided by completed jobs over the last hour exceeds $0.50,
+  AND total spend in the window exceeds $0.50 (the absolute-spend floor).
+- The numerator (`mctl_agent_job_cost_usd_total`) includes both
+  `result="success"` and `result="error"` spend, because
+  `ClaudeInvoker.recordCost` (`internal/agentworker/claudeinvoker.go:197`)
+  runs before the CLI result's `is_error` check (`:199`) — a job that fails
+  after spending still reports its cost.
+- The denominator is completed jobs
+  (`mctl_agent_jobs_total{status="completed"}`, `db.JobCompleted`) — dollars
+  per delivered outcome, not per attempt. Money burned on failed, retried, or
+  dead-lettered jobs raises this ratio; that is intended.
+- With nonzero spend and zero completions in the window, the ratio renders as
+  `+Inf`, which compares true and fires the alert. This is deliberate: paying
+  for nothing is worth a page.
+- $0.50/job is a provisional, unmeasured threshold: no cost figure exists
+  anywhere in this repository as observed data. Re-derive it from the first
+  week of real `mctl_agent_job_cost_usd_total` data, and if the operator sets
+  `AGENT_MAX_BUDGET_USD` (a per-invocation CLI cap that aggregates nothing —
+  never a substitute for this alert), keep this threshold below that cap so
+  the alert precedes the CLI's hard stop.
+
+### Likely causes
+
+- A retry storm: jobs failing and retrying repeatedly, each attempt spending
+  without ever reaching `completed`.
+- A looping model burning tokens within a single job (the per-job
+  `AGENT_MAX_BUDGET_USD` cap, if set, bounds this per invocation but not in
+  aggregate).
+- Genuinely higher-complexity conversations in the window driving up
+  per-job cost without any malfunction.
+- Very low completion volume in the window, making the ratio noisy — check
+  the absolute-spend floor is also clearing before treating this as
+  significant.
+
+### Diagnostic queries
+
+Spend per completed job and total spend, matching the alert's own
+expression:
+
+```promql
+sum(increase(mctl_agent_job_cost_usd_total[1h]))
+  /
+(sum(increase(mctl_agent_jobs_total{status="completed"}[1h])) or vector(0))
+
+sum(increase(mctl_agent_job_cost_usd_total[1h]))
+```
+
+Split spend by result to see whether failed jobs are driving the cost:
+
+```promql
+sum by (result) (increase(mctl_agent_job_cost_usd_total[1h]))
+```
+
+Completion volume by status, to see whether jobs are failing/retrying instead
+of completing:
+
+```promql
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+```
+
+### Mitigation
+
+1. Use the split-by-result query to confirm whether failed jobs are driving
+   the cost. If so, this is likely a retry storm — check
+   [`MctlAgentDeadLetter`](#communication-agent-operations) and the
+   dead-letter handling procedure above.
+2. Close the test window using the four containment controls (kill switch,
+   listener, autopilot pause, worker replicas to zero) before touching
+   credentials, per the Communication Agent operations section above.
+3. If a single account or conversation is responsible for a disproportionate
+   share, pause that account specifically rather than closing the whole
+   window.
+4. Re-derive the $0.50/job threshold once a week of real data exists, and
+   check it against `AGENT_MAX_BUDGET_USD` if set.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day.
+- Escalate to whoever owns the Claude credential/billing relationship if
+  cumulative spend for the window is unexpectedly large in absolute terms.
+
+### Postmortem trigger
+
+Open a postmortem if the high-cost window traced back to a retry storm that
+also produced dead-lettered jobs, or if spend continued after the test window
+should have been closed.
 
 ---
 
