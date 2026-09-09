@@ -103,13 +103,21 @@ exactly one file. It carries:
   distinguishable from any other `is_error` result at a glance.
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
+- `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
+  (108 children), all at a **constant zero**. These are server-side families:
+  `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
+  `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
+  — none of which run in this process. They appear here because `metrics.New()`
+  is shared and pre-creates their children (see below), so on a worker they are
+  exposition weight and nothing else. A worker "reporting policy denials" is
+  reporting zero, always.
 
 A handful of server-side scalar families (HTTP, auth, session, bridge, ...)
-are also present at zero since they share the same registry constructor;
-harmless, as vec families with no children simply don't appear.
+are also present at zero since they share the same registry constructor.
 
-The two counters above are the deliberate exception to that last clause:
-`metrics.New()` pre-creates all four of their children at `0`, so they are
+Vec families with no children simply don't appear — which is why the four
+pre-created agent families are the exception worth spelling out:
+`metrics.New()` pre-creates all their children at `0`, so they are
 present on a worker that has never claimed a job. Without that baseline a
 counter's first observed sample would already be `1`, `increase()` would treat
 it as the baseline and report `0`, and the alerts over these series would miss
