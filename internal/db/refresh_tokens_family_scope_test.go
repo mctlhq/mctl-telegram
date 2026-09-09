@@ -43,22 +43,30 @@ func TestFamilyEverHeldScope_Postgres(t *testing.T) {
 	}
 	store := NewStore(conn, crypt)
 
-	uid, err := store.EnsureUserByTelegramID(ctx, 500100202, "dana_tg", "Dana")
+	const tgID int64 = 500100202
+	uid, err := store.EnsureUserByTelegramID(ctx, tgID, "dana_tg", "Dana")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
 
 	const scopeless, granted = "pg-family-scopeless", "pg-family-granted"
 	t.Cleanup(func() {
-		_, _ = conn.ExecContext(context.Background(),
+		ctx := context.Background()
+		_, _ = conn.ExecContext(ctx,
 			`DELETE FROM oauth_refresh_tokens WHERE family_id IN ($1, $2)`, scopeless, granted)
+		// The users row too. Both conventions exist in this package
+		// (store_access_tier_test.go deletes its user, local_bridge_devices_test.go
+		// does not); follow the one that leaves the shared CI database as it
+		// found it. The FK is ON DELETE CASCADE, so ordering here is belt and
+		// braces rather than load-bearing.
+		_, _ = conn.ExecContext(ctx, `DELETE FROM users WHERE telegram_login_id = $1`, tgID)
 	})
 
 	mk := func(family, token, scope string) {
 		t.Helper()
 		if err := store.SaveRefreshToken(ctx, token, RefreshToken{
 			FamilyID: family, UserID: uid, ClientID: "claude.ai",
-			TelegramID: 500100202, Scope: scope,
+			TelegramID: tgID, Scope: scope,
 			ExpiresAt: time.Now().Add(time.Hour),
 		}); err != nil {
 			t.Fatalf("save %s: %v", token, err)
