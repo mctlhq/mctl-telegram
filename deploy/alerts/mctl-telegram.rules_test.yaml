@@ -3,10 +3,10 @@
 # Run by the promtool-check job in .github/workflows/build.yml, which extracts
 # .spec from the PrometheusRule CRD into a bare rules file first.
 #
-# The point of these two cases is the pair, not either alone. Asserting only
-# that a rollout stays silent would have passed on the old, permanently-quiet
-# expression and proved nothing; asserting only that a flap fires would not
-# catch a threshold lowered until every deploy pages someone.
+# The point of a silence/firing pair is the pair, not either alone. Asserting
+# only that a rollout stays silent would have passed on the old,
+# permanently-quiet expression and proved nothing; asserting only that a flap
+# fires would not catch a threshold lowered until every deploy pages someone.
 rule_files:
   - /tmp/rules.yaml
 
@@ -121,16 +121,35 @@ tests:
         alertname: MctlAgentPolicyDenialRateHigh
         exp_alerts: []
 
-  # T4b: stays silent. A single denial in a near-idle window: the share
-  # (1/1 = 100%) clears the 20% threshold on its own, but the absolute count
-  # (1) does not clear the >= 5 floor. Kills a dropped floor clause — without
-  # it, this exact input would fire.
+  # T4b: stays silent. Six claims against three denials over the 30m window:
+  # the share (3/6 = 0.50) clears the 20% threshold, but the extrapolated
+  # denial count (3.0 on Prometheus 2.x, about 3.10 on 3.x) does not clear the
+  # > 4 floor. The > 4 clause, not the share, is what suppresses the alert
+  # here. Kills a dropped floor clause — without it, this exact input would
+  # fire.
+  #
+  # Both series rise between t=1m and t=15m, strictly inside the window on
+  # either range-selector convention, then hold flat for the last 15m (a
+  # burst that has since stopped). This matters because a series that steps
+  # once at t=1m and then stays flat — the previous input here — degenerates
+  # under Prometheus 3.0's range selectors: 2.x range selectors are closed on
+  # both ends, so the t=0 sample falls inside [30m] and the step is real, but
+  # 3.0 made range selectors left-open, so t=0 drops out, the flat series
+  # reads as a constant, both rate()s are 0, the share is 0/0 = NaN, and the
+  # case goes silent for arithmetic reasons regardless of the floor clause —
+  # it stops testing the floor at all. Rising inside the window keeps the
+  # share real and non-NaN on both versions, so only the floor holds the
+  # alert down.
+  #
+  # Inputs are byte-identical to the mctl-gitops case "denials below the
+  # absolute floor stay silent despite a high share"
+  # (mctlhq/mctl-gitops#1110), so this case stays a faithful mirror.
   - interval: 1m
     input_series:
       - series: 'mctl_agent_jobs_total{status="processing"}'
-        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+        values: '0 0 1 1 2 2 3 3 4 4 5 5 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6'
       - series: 'mctl_agent_policy_denials_total{reason="unknown"}'
-        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+        values: '0 0 0 0 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
     alert_rule_test:
       - eval_time: 30m
         alertname: MctlAgentPolicyDenialRateHigh
