@@ -141,19 +141,43 @@ this workload-specific boundary.
 <a id="communication-agent-operations"></a>
 ## Communication Agent operations
 
-The communication agent has three independent containment controls:
+The communication agent has four independent containment controls:
 
 - `AGENT_KILL_SWITCH=true` denies new agent actions at the server policy and
-  executor layers.
+  executor layers, including owner-facing notifications (send_owner_summary,
+  request_owner_approval).
 - `agent_profiles.listener_enabled=false` stops Telegram ingestion for that
   account after the supervisor reconciles.
-- `agent_profiles.autopilot_paused=true` denies autonomous replies for that
-  account.
+- `agent_profiles.autopilot_paused=true` denies autonomous recruiter-facing
+  replies for that account, but does NOT stop owner notifications: the owner
+  keeps receiving send_owner_summary/request_owner_approval messages, plus an
+  alert to Saved Messages when a reply is withheld for this reason —
+  normally at most one per account per 6 hours, because `owner_notifications` is
+  drained oldest-first system-wide and an unthrottled stream would delay
+  other accounts' approval codes (issue #581).
 - worker Deployment replicas `0` stops model job processing.
 
 No one control substitutes for the others. The closed state between test
 windows is all four controls together: kill switch true, listener disabled,
 autopilot paused, and worker replicas zero.
+
+**What to expect from a paused account.** With `autopilot_paused=true` and
+nothing else engaged: recruiter-facing replies are denied and recorded in
+`agent_actions` with `policy_reasons="autopilot paused for this account"`;
+the owner continues to receive Saved Messages: a throttled pause alert
+(normally at most one per 6 hours — the check is not serialised, so two
+concurrent withheld replies can each raise one) and any send_owner_summary
+/ request_owner_approval notifications the agent raises independently of
+pause. A conversation the owner has already taken over, closed or paused —
+or a peer they blocked — is denied on its own reason and raises no pause
+alert, so silencing one conversation stays silent. The alert does not tell
+the owner to "resume autopilot": no owner-facing Telegram command clears
+`autopilot_paused`. `/mctl continue <id>` releases one conversation;
+lifting the account-wide pause is an operator action through the agent
+API. If Saved Messages goes completely silent, the cause is the kill
+switch, `mode=off`, or a disabled listener — not a pause by itself. See
+[`docs/reports/communication-agent-c1.md`](reports/communication-agent-c1.md)
+for the validation history that first surfaced this distinction.
 
 ### Safe bootstrap and test-window procedure
 
@@ -206,7 +230,7 @@ invocation.
 | `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |
 | `AGENT_TEST_CRASH_AFTER_RESERVE` | `false` | **TEST-ONLY.** Hard-exits the process (code 137) immediately after `send_random_id` is persisted and an action is CASed to `executing`, before the Telegram RPC — for the `random_id`/`RecoverStuck` crash-recovery drill. Every send handled by the pod is hit while set, not just a chosen one. Must never be `true` outside a deliberate, bounded drill window. |
 | profile `listener_enabled` | `false` | Per-account Telegram ingest switch. |
-| profile `autopilot_paused` | `true` on bootstrap | Per-account autonomous action pause. |
+| profile `autopilot_paused` | `true` on bootstrap | Per-account pause on autonomous recruiter-facing replies. Does not stop owner-facing notifications (send_owner_summary, request_owner_approval, or the throttled pause alert described above) — issue #581. |
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
 | worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
 

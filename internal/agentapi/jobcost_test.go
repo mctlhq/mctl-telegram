@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // TestHandleReportJobCost_RecordsForClaimedAttempt covers the happy path:
@@ -43,11 +44,36 @@ func TestHandleReportJobCost_StaleAttemptReturnsConflict(t *testing.T) {
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:cost-stale", conv.ID)
 
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
-	if err != nil || len(claimed) != 1 {
-		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	ctx := context.Background()
+	first, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", first, err)
 	}
-	staleAttempt := claimed[0].Attempts - 1
+
+	// Age the claim out and let another replica take it, so attempt 1 becomes
+	// genuinely stale while staying POSITIVE. Subtracting one from a first
+	// claim would produce attempt 0, which the handler now rejects as a bad
+	// request before the fence is ever consulted — that path is covered by
+	// TestHandleReportJobCost_RejectsNonPositiveAttempt, and using it here
+	// would test the validator instead of the claim fence this test is named
+	// for.
+	if _, err := h.store.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET claimed_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-10*time.Minute), jobID,
+	); err != nil {
+		t.Fatalf("backdate claim: %v", err)
+	}
+	if _, _, err := h.store.RequeueStaleAgentJobs(ctx, 5*time.Minute); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	second, err := h.store.ClaimAgentJobs(ctx, "other-replica", h.userID, 1)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("re-claim: jobs=%+v err=%v", second, err)
+	}
+	if second[0].Attempts <= first[0].Attempts {
+		t.Fatalf("re-claim attempts = %d, want > %d", second[0].Attempts, first[0].Attempts)
+	}
+	staleAttempt := first[0].Attempts
 
 	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/cost", reportJobCostRequest{
 		Attempt: staleAttempt, CostUSD: 9.99,

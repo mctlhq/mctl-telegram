@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -754,6 +755,275 @@ func TestHandleProposeReply_UnknownConversation(t *testing.T) {
 	}
 }
 
+// TestProposeReply_PausedAccountQueuesOwnerAlert covers issue #581: a reply
+// withheld because the account is paused must queue a deterministic owner
+// alert (Phase B), distinct from the kill-switch and mode=off deny paths
+// which must NOT queue one (autopilot_paused is the only Gate that does).
+// The alert body must never contain the draft reply text or a phone number.
+func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:paused-alert", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+
+	draftText := "My number is +1 415 555 1212, call me!"
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Text: draftText,
+	}
+	rec := h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", resp.Decision)
+	}
+
+	assertOneAlert := func() int64 {
+		notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+		if err != nil {
+			t.Fatalf("list pending notifications: %v", err)
+		}
+		var matches []db.OwnerNotification
+		for _, n := range notifs {
+			if n.ActionID == resp.ActionID && n.Kind == db.NotificationAlert {
+				matches = append(matches, n)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("alert notifications for action %d = %d, want 1 (%+v)", resp.ActionID, len(matches), matches)
+		}
+		body := matches[0].Body
+		if strings.Contains(body, draftText) {
+			t.Fatalf("alert body contains draft text: %q", body)
+		}
+		// draftText's phone number (+1 415 555 1212): check the digit run
+		// directly rather than reaching into policy's unexported phone
+		// detector, since the alert body must never carry it regardless of
+		// how it is phrased.
+		if strings.Contains(body, "415") || strings.Contains(body, "5551212") {
+			t.Fatalf("alert body contains phone-like content: %q", body)
+		}
+		return matches[0].ID
+	}
+	firstID := assertOneAlert()
+
+	// Replay the identical request (simulating job redelivery resolving to
+	// the same action via the (job_id, action_type) idempotency key) and
+	// confirm the alert row count stays at exactly one.
+	//
+	// NOTE: since the per-account throttle was added, the replay is stopped
+	// by the throttle BEFORE it reaches InsertOwnerNotification, so this no
+	// longer exercises that function's per-action_id uniqueness — that
+	// invariant is pinned directly by
+	// db.TestInsertOwnerNotification_IdempotentPerActionID. What this still
+	// proves is the outcome the owner sees: one alert, not two.
+	rec2 := h.do("POST", "/actions/propose_reply", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("replay status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	secondID := assertOneAlert()
+	if secondID != firstID {
+		t.Fatalf("replay queued a different alert row: first=%d second=%d", firstID, secondID)
+	}
+}
+
+// TestProposeReply_PauseAlertIsThrottledAcrossConversations pins the bound
+// on alert volume (claude review P2 on PR #582). Ingestion is gated on
+// listener_enabled, never on autopilot_paused, so a paused account keeps
+// receiving inbound messages and each one is a DISTINCT action —
+// InsertOwnerNotification's per-action_id uniqueness does not bound them.
+// owner_notifications is drained oldest-50 system-wide, so an unbounded
+// producer here delays other accounts' approval codes.
+func TestProposeReply_PauseAlertIsThrottledAcrossConversations(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	const drafts = 3
+	actionIDs := make(map[int64]bool, drafts)
+	for i := 0; i < drafts; i++ {
+		peer := int64(900 + i)
+		conv := h.seedConversation(peer)
+		jobID := h.seedJob("evt:v1:1:"+strconv.FormatInt(peer, 10)+":throttle", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim %d: jobs=%+v err=%v", i, claimed, err)
+		}
+		rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+			ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Could you tell me the company name?",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("draft %d status = %d, body=%s", i, rec.Code, rec.Body.String())
+		}
+		var resp actionResponse
+		decodeBody(t, rec, &resp)
+		if resp.Decision != "deny" {
+			t.Fatalf("draft %d decision = %q, want deny", i, resp.Decision)
+		}
+		actionIDs[resp.ActionID] = true
+	}
+	if len(actionIDs) != drafts {
+		t.Fatalf("expected %d distinct actions, got %d — the test would not exercise cross-action volume", drafts, len(actionIDs))
+	}
+
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	alerts := 0
+	for _, n := range notifs {
+		if n.Kind == db.NotificationAlert {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("alert notifications = %d across %d denied drafts, want exactly 1 (throttled)", alerts, drafts)
+	}
+}
+
+// TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction pins
+// agy's P2 on PR #582. The alert must be driven by the PERSISTED action, not
+// by the replay's freshly-evaluated policy result: an action first persisted
+// while the account was active, whose job is then redelivered after the owner
+// pauses, still resolves to that original row via the (job_id, action_type)
+// idempotency key. Alerting off the fresh evaluation would tell the owner a
+// reply was withheld while the very same response hands the worker the
+// original non-denied decision read from that row.
+func TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction(t *testing.T) {
+	h := newHarness(t)
+	// Guarded mode with an allowlisted intent so the FIRST call resolves to
+	// Allow and persists as `approved` with no notification of its own. That
+	// matters: InsertOwnerNotification's unique index is on action_id alone
+	// (`ON CONFLICT (action_id) ... DO NOTHING`), so an action that already
+	// queued an approval notification would swallow the spurious alert and
+	// hide the very bug this test exists to catch.
+	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
+		UserID: h.userID, Mode: db.AgentModeGuarded,
+		DisclosureText:     "I'm an AI assistant.",
+		IntentAllowlist:    "greet,request_company",
+		MaxAutonomousTurns: 6, MaxMsgsPerMinute: 2, MaxReplyChars: 1200,
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	conv := h.seedConversation(556)
+	jobID := h.seedJob("evt:v1:1:556:redelivery-after-pause", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+
+	req := proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+		Intent: "request_company", Text: "Could you tell me the company name?",
+	}
+	rec := h.do("POST", "/actions/propose_reply", req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var first actionResponse
+	decodeBody(t, rec, &first)
+	if first.Decision != "allow" {
+		t.Fatalf("setup did not reproduce an ALLOWED action (needed so no notification exists for this action_id): decision=%q reasons=%v", first.Decision, first.Reasons)
+	}
+
+	// The owner pauses only now — after the action was already persisted.
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	rec2 := h.do("POST", "/actions/propose_reply", req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("replay status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	var replay actionResponse
+	decodeBody(t, rec2, &replay)
+	if replay.ActionID != first.ActionID {
+		t.Fatalf("replay resolved to a different action: first=%d replay=%d", first.ActionID, replay.ActionID)
+	}
+	if replay.Decision != first.Decision {
+		t.Fatalf("replay decision = %q, want the persisted %q", replay.Decision, first.Decision)
+	}
+
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	for _, n := range notifs {
+		if n.ActionID == first.ActionID && n.Kind == db.NotificationAlert {
+			t.Fatalf("queued a pause alert for an action persisted as %q: %+v", first.Decision, n)
+		}
+	}
+}
+
+// TestProposeReply_KillSwitchDeniesWithoutOwnerAlert is the negative
+// counterpart of TestProposeReply_PausedAccountQueuesOwnerAlert: a
+// kill-switch deny's Gate is GateKillSwitch, not GateAutopilotPaused, so it
+// must not queue the pause alert.
+func TestProposeReply_KillSwitchDeniesWithoutOwnerAlert(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	h.srv.GlobalKill = true
+	conv := h.seedConversation(555)
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{ConversationID: conv.ID, Text: "hello"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", resp.Decision)
+	}
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	for _, n := range notifs {
+		if n.ActionID == resp.ActionID {
+			t.Fatalf("kill-switch deny queued an alert, want none: %+v", n)
+		}
+	}
+}
+
+// TestProposeReply_ModeOffDeniesWithoutOwnerAlert is the mode==off
+// counterpart of TestProposeReply_KillSwitchDeniesWithoutOwnerAlert.
+func TestProposeReply_ModeOffDeniesWithoutOwnerAlert(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeOff)
+	conv := h.seedConversation(555)
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{ConversationID: conv.ID, Text: "hello"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("decision = %q, want deny", resp.Decision)
+	}
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	for _, n := range notifs {
+		if n.ActionID == resp.ActionID {
+			t.Fatalf("mode-off deny queued an alert, want none: %+v", n)
+		}
+	}
+}
+
 func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeObserve)
@@ -1061,6 +1331,50 @@ func TestHandleOwnerFacing_KillSwitchBlocksNotification(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("owner_notifications count = %d, want 0", count)
+	}
+}
+
+// TestHandleOwnerFacing_PausedAccountStillNotifiesOwner guards against issue
+// #581: autopilot_paused is a per-account gate on autonomous replies, not a
+// durable opt-out like the kill switch or mode==off, so it must not silence
+// the two owner-messaging endpoints the way TestHandleOwnerFacing_
+// KillSwitchBlocksNotification proves the kill switch still does.
+func TestHandleOwnerFacing_PausedAccountStillNotifiesOwner(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		req  any
+	}{
+		{"/notify/summary", ownerNotifyRequest{Text: "Daily digest"}},
+		{"/actions/request_owner_approval", ownerNotifyRequest{Text: "Approve this reply?"}},
+	} {
+		rec := h.do("POST", tc.path, tc.req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200, body=%s", tc.path, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			ActionID       int64 `json:"action_id"`
+			NotificationID int64 `json:"notification_id"`
+		}
+		decodeBody(t, rec, &body)
+		if body.NotificationID == 0 {
+			t.Fatalf("%s notification_id = 0, want nonzero (paused must not silence owner-facing actions)", tc.path)
+		}
+		action, err := h.store.GetAgentAction(context.Background(), h.userID, body.ActionID)
+		if err != nil {
+			t.Fatalf("%s lookup action: %v", tc.path, err)
+		}
+		if action.Status != db.ActionExecuted {
+			t.Fatalf("%s action status = %q, want executed", tc.path, action.Status)
+		}
+		if action.PolicyDecision != string(policy.Allow) {
+			t.Fatalf("%s policy decision = %q, want allow", tc.path, action.PolicyDecision)
+		}
 	}
 }
 

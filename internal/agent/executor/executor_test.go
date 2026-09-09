@@ -350,6 +350,39 @@ func TestExecutor_Approve_KillSwitchDeniesAtSendTime(t *testing.T) {
 	}
 }
 
+// TestExecutor_Approve_AutopilotPausedDeniesAtSendTime is a regression guard
+// for issue #581: the fix there only exempts owner-facing actions
+// (send_owner_summary, request_owner_approval) from the autopilot-pause
+// gate — a reply must still be denied at send time when the account is
+// paused, exactly like the kill-switch and takeover cases above. This test
+// must pass both before and after that fix.
+func TestExecutor_Approve_AutopilotPausedDeniesAtSendTime(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+
+	if err := store.SetAgentAutopilotPaused(ctx, uid, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+	err := exec.Approve(ctx, uid, code)
+	if err == nil {
+		t.Fatal("expected policy-deny error")
+	}
+	if !strings.Contains(err.Error(), "autopilot paused for this account") {
+		t.Fatalf("approve err = %q, want it to mention autopilot paused", err.Error())
+	}
+	action, gerr := store.GetAgentAction(ctx, uid, actionID)
+	if gerr != nil {
+		t.Fatalf("get action: %v", gerr)
+	}
+	if action.Status != db.ActionDenied {
+		t.Fatalf("status = %q, want denied (autopilot pause must still deny replies at send time)", action.Status)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+}
+
 // TestExecutor_Approve_TakeoverDeniesAtSendTime is the "concurrent owner
 // reply cancels pending" case: a takeover flips conversation state, which
 // the re-check-before-send picks up even though it happened after approval.

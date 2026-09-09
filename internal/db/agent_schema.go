@@ -430,6 +430,14 @@ func agentSchemaSQLite() []string {
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
+		// Serves HasOwnerNotificationSince's (user_id, kind, created_at)
+		// lookup. owner_notifications is never pruned — PurgeExpiredAgentContent
+		// only nulls body_encrypted, and the sole DELETE is the per-user
+		// account purge — so the table accumulates for the life of the
+		// deployment while this predicate runs once per denied reply on a
+		// paused account. Same reasoning as the composite index behind
+		// ListRecentAgentOutgoingTimestamps.
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_user_kind_created ON owner_notifications(user_id, kind, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
@@ -642,6 +650,14 @@ func agentSchemaPG() []string {
 		// be allowed to queue a second copy of the same owner summary/approval.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_notifications_action ON owner_notifications(action_id) WHERE action_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_pending ON owner_notifications(status, created_at) WHERE status = 'pending'`,
+		// Serves HasOwnerNotificationSince's (user_id, kind, created_at)
+		// lookup. owner_notifications is never pruned — PurgeExpiredAgentContent
+		// only nulls body_encrypted, and the sole DELETE is the per-user
+		// account purge — so the table accumulates for the life of the
+		// deployment while this predicate runs once per denied reply on a
+		// paused account. Same reasoning as the composite index behind
+		// ListRecentAgentOutgoingTimestamps.
+		`CREATE INDEX IF NOT EXISTS idx_owner_notifications_user_kind_created ON owner_notifications(user_id, kind, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_jobs (
 			id BIGSERIAL PRIMARY KEY,
 			event_id TEXT NOT NULL,

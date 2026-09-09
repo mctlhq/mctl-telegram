@@ -79,6 +79,15 @@ const (
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
 
+// ReasonAutopilotPaused is the exact reason string a pause denial carries.
+// Exported because internal/agentapi matches it against the PERSISTED
+// AgentAction.PolicyReasons to decide whether to queue the owner pause
+// alert; an inline literal there would silently stop matching if this
+// wording ever changed. PolicyReasons is the "; "-joined reason list, and
+// the caller compares whole elements of it rather than the joined string,
+// so appending a second reason to this denial does not break the match.
+const ReasonAutopilotPaused = "autopilot paused for this account"
+
 // Result contains the policy decision and user-facing/audit reasons.
 type Result struct {
 	Decision Decision
@@ -348,16 +357,22 @@ func Evaluate(in Input) Result {
 	default:
 		return deny(DenyModeUnrecognized, "unrecognized agent mode "+strconv.Quote(in.Profile.Mode))
 	}
-	if in.Profile.AutopilotPaused {
-		return deny(DenyAutopilotPaused, "autopilot paused for this account")
-	}
 	// Owner-facing actions notify the human, not the recruiter: they encode
 	// "tell me what happened," not "reply on my behalf." They must still
-	// clear every account-wide gate above (kill switch, mode, autopilot
-	// pause) but must never be silenced by a per-conversation instruction
-	// below (taken over / closed / paused, or that peer being blocked) —
-	// those gates exist to keep the agent quiet toward the recruiter, not
-	// to keep the owner uninformed.
+	// clear the global kill switch and mode==off above — those are durable,
+	// opt-in states the owner deliberately chose — but they are exempt from
+	// the autopilot-pause gate below and from every per-conversation gate
+	// further down (taken over / closed / paused, or that peer being
+	// blocked).
+	//
+	// autopilot_paused is deliberately NOT one of the gates owner-facing
+	// actions must clear: pause is the default state for every brand-new
+	// profile, the agent itself can enter it via pause_autopilot, and it is
+	// a temporary hold — the owner intends to come back, not opt out for
+	// good. Silencing owner notifications on pause would make the product
+	// silent-by-default and would let the agent stand itself down without
+	// being able to explain why. Kill switch and mode==off remain
+	// durable/opt-in states and still deny owner-facing actions unchanged.
 	if in.Action.Type == db.ActionTypeOwnerSummary || in.Action.Type == db.ActionTypeOwnerApproval {
 		return Result{Decision: Allow, Reasons: []string{"owner-facing action"}}
 	}
@@ -374,6 +389,18 @@ func Evaluate(in Input) Result {
 	}
 	if isBlocked(in.Profile.BlockedSenders, in.Conversation.PeerTGID) {
 		return deny(DenySenderBlocked, "sender is blocked")
+	}
+	// Checked AFTER the per-conversation gates and the blocklist, not before
+	// them, even though pause is an account-wide state. A denial that
+	// reports DenyAutopilotPaused makes internal/agentapi queue an owner
+	// alert saying a reply was withheld because autopilot is paused; for a
+	// conversation the owner has already taken over, closed or paused — or a
+	// peer they blocked — that alert is noise about a reply that would have
+	// been denied regardless of the pause. Ordering the durable,
+	// conversation-specific refusals first keeps them silent and leaves the
+	// pause alert for the case it actually describes (agy P2 on PR #582).
+	if in.Profile.AutopilotPaused {
+		return deny(DenyAutopilotPaused, ReasonAutopilotPaused)
 	}
 
 	switch in.Action.Type {

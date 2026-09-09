@@ -139,6 +139,31 @@ type actionResponse struct {
 	ApprovalCode string   `json:"approval_code,omitempty"`
 }
 
+// pauseAlertWindow bounds how often an account is told that autopilot pause
+// withheld a reply. See the throttle in handleProposeReply for why an
+// unbounded stream is unsafe.
+const pauseAlertWindow = 6 * time.Hour
+
+// pauseAlertWindowText is pauseAlertWindow written for a human. time.Duration
+// renders as "6h0m0s", which has no place in a message the owner reads in
+// Saved Messages; keep the two in step by hand rather than pulling in a
+// formatter for one string.
+const pauseAlertWindowText = "6 hours"
+
+// hasReason reports whether the persisted "; "-joined reason list contains
+// want as a whole element. Deliberately not an equality check on the joined
+// string: a future change that appends a second reason to the pause denial
+// would silently stop matching, and the owner alert would quietly stop
+// firing with no test failing (claude review P3 on PR #582).
+func hasReason(joined, want string) bool {
+	for _, r := range strings.Split(joined, "; ") {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
 // handleProposeReply is POST /actions/propose_reply. There is deliberately no
 // peer parameter in the request: the peer is derived server-side from the
 // conversation row, so a caller can never direct a send anywhere the
@@ -302,6 +327,76 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Driven by the PERSISTED row, not by this replay's freshly-evaluated
+	// `result` — the same rule the reload comment above states and the
+	// approval notification above already follows. InsertAgentAction is
+	// idempotent for job-tied actions: a redelivered job whose action was
+	// first persisted as `approved` (account active at the time) must not
+	// produce a "reply withheld" alert just because the owner paused the
+	// account in between, while the response returned to the worker still
+	// says allow off that same durable row (agy P2 on PR #582).
+	if persisted.Status == db.ActionDenied && hasReason(persisted.PolicyReasons, policy.ReasonAutopilotPaused) {
+		// Deliberately best-effort, unlike the approval-code notification
+		// above: that notification carries the only copy of ApprovalCode, so
+		// losing it strands an otherwise-approvable draft forever. This alert
+		// is purely informational — the denied action row above already
+		// records the pause reason for audit — so a lost enqueue costs the
+		// owner a heads-up, not data, and must not fail an otherwise-
+		// successful propose_reply call (issue #581).
+		//
+		// Throttled per account, not merely deduped per action. The
+		// per-action_id uniqueness inside InsertOwnerNotification only collapses
+		// redeliveries of the SAME draft; every new inbound message is a
+		// distinct action, and ingestion is gated on listener_enabled, never on
+		// autopilot_paused (internal/agent/listener). An account sitting in the
+		// documented bootstrap default (paused, listener on) would therefore
+		// queue one alert per inbound DM forever — and owner_notifications is
+		// drained oldest-50 SYSTEM-WIDE, so that backlog delays other accounts'
+		// approval codes. The proposal's open question 3 asked whether to
+		// throttle and answered no on the grounds that Saved Messages is not a
+		// scarce channel; the scarce resource is the shared delivery batch, not
+		// the channel (claude review on PR #582).
+		//
+		// Check-then-insert, deliberately not transactional: two concurrent
+		// propose_reply calls for the same paused account can both observe
+		// recent==false and both insert, since their action_ids differ and
+		// the per-action_id unique index does not collapse them. The bound
+		// is therefore "one per window per in-flight request", not exactly
+		// one — which still converts an unbounded stream (one per inbound
+		// message, forever) into something bounded by request concurrency.
+		// Serialising it would need a lock on a path that must not fail the
+		// propose call; not worth it for an informational notice.
+		recent, rerr := s.Store.HasOwnerNotificationSince(ctx, id.UserID, db.NotificationAlert, time.Now().UTC().Add(-pauseAlertWindow))
+		switch {
+		case rerr != nil:
+			// Fail closed on the throttle check: skipping the alert costs the
+			// owner one heads-up, queueing an unbounded stream costs every
+			// account's approval delivery.
+			logHandlerErr("propose_reply", fmt.Errorf("pause-alert throttle check (user_id=%d): %w", id.UserID, rerr))
+		case recent:
+			// Already told within the window; stay quiet.
+		default:
+			peerLabel := "a conversation"
+			switch {
+			case strings.TrimSpace(conv.PeerDisplayName) != "":
+				peerLabel = conv.PeerDisplayName
+			case strings.TrimSpace(conv.PeerUsername) != "":
+				peerLabel = "@" + conv.PeerUsername
+			}
+			// Deliberately does NOT say "resume autopilot": no owner-facing
+			// Telegram command clears autopilot_paused. control/router.go
+			// says so explicitly — /mctl continue resumes one conversation
+			// and autopilot stays paused until re-enabled through the agent
+			// API. Naming an action the owner cannot take is the opposite of
+			// the actionability this issue exists to add.
+			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. To keep this from repeating, no further alert of any kind should be raised for this account for %s.", peerLabel, pauseAlertWindowText)
+			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
+			}); nerr != nil {
+				logHandlerErr("propose_reply", fmt.Errorf("queue autopilot-pause alert (action_id=%d user_id=%d): %w", actionID, id.UserID, nerr))
+			}
+		}
+	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
 	responseReasons := result.Reasons
 	if persisted.PolicyReasons != "" {
@@ -440,12 +535,13 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	}
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
-	// ONLY after the global gates (kill switch, mode==off, autopilot paused)
-	// have already had a chance to deny — see policy.go's ordering. A Deny
-	// here can now only come from one of those account-wide gates (never
-	// conversation state or the sender blocklist), and it must actually stop
-	// the notification from going out: the emergency kill switch exists
-	// precisely to silence every owner-facing message too, not just replies.
+	// ONLY after the global gates (kill switch, mode==off) have already had a
+	// chance to deny — see policy.go's ordering. A Deny here can now only come
+	// from one of those two account-wide gates (never conversation state, the
+	// sender blocklist, or autopilot paused — owner-facing actions are exempt
+	// from the pause gate, issue #581), and it must actually stop the
+	// notification from going out: the emergency kill switch exists precisely
+	// to silence every owner-facing message too, not just replies.
 	status := db.ActionExecuted
 	if result.Decision != policy.Allow {
 		status = db.ActionDenied

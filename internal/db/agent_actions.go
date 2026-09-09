@@ -1225,6 +1225,43 @@ func (s *Store) ListPendingOwnerNotifications(ctx context.Context, limit int) ([
 	return out, rows.Err()
 }
 
+// HasOwnerNotificationSince reports whether userID already has a
+// notification of the given kind created at or after `since`.
+//
+// It exists to bound a producer that is otherwise unbounded: an account left
+// paused with its listener on is denied one reply per inbound message, and
+// one alert per denial would queue rows without limit. That is not merely a
+// nuisance for the owner — ListPendingOwnerNotifications drains the oldest
+// 50 pending rows SYSTEM-WIDE, so one chatty paused account can push other
+// accounts' approval-code notifications past position 50 and delay them.
+// See that function's own doc comment for the earlier starvation finding of
+// exactly this shape (agy/claude review on PR #582).
+//
+// Deliberately ignores status: pending, sent and failed rows all count. A
+// row that failed delivery means the channel to that owner is down, so
+// re-queueing sooner would not reach them either — and counting failures is
+// what keeps the bound honest during exactly the outage it exists to
+// protect against. Omitting the status filter is a choice, not an oversight.
+func (s *Store) HasOwnerNotificationSince(ctx context.Context, userID int64, kind string, since time.Time) (bool, error) {
+	if userID <= 0 {
+		return false, errors.New("user id required")
+	}
+	var one int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT 1 FROM owner_notifications
+		  WHERE user_id = $1 AND kind = $2 AND created_at >= $3
+		  LIMIT 1`,
+		userID, kind, since.UTC(),
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("has owner notification since: %w", err)
+	}
+	return true, nil
+}
+
 // InsertOwnerNotification persists a pending notification and returns its
 // id. Idempotent per action_id (when non-zero): a job that redelivers after
 // its action insert already resolved via the (job_id, action_type)
