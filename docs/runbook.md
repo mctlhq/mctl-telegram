@@ -110,14 +110,21 @@ scopes, so such a family keeps working; only a family whose grant *degrades* to
 nothing is refused.
 
 The refresh response code is now a reliable de-provisioning check for both
-routes above, including for a family de-provisioned *before* #584 shipped: the
-old handler rotated those successors with an empty scope, so the family's own
-grant no longer records that it ever had one, and the explicit `none` tier is
-what refuses them instead. The one case that still refreshes with no scopes is
-an identity that never held a grant and has no explicit tier — open
-registration off and not on any allowlist. That is not a revocation, and the
-token it renews fails every tool call, but it does mean the refresh code says
-nothing about an identity in that state.
+routes above, including for a family de-provisioned *before* #584 shipped. The
+old handler rotated those successors with an empty scope, so the family's live
+grant no longer records that it ever had one — but rotation revokes predecessor
+rows rather than deleting them, so the family's history still does, and that is
+what refuses them. An explicit `none` tier refuses as well, covering an operator
+revoking an identity that genuinely never held scopes.
+
+The only refresh that still succeeds with no scopes is a family that never held
+a grant on any row AND has no explicit tier. That is the deliberate flow, not a
+revocation: `handleTelegramCallback` issues an authorization code to an identity
+that will receive no scopes rather than walk it through `enable_access` for a
+session it could not use.
+
+A `server_error` here is not a de-provisioning signal — it means the check
+itself could not run. Retry; do not read it as either outcome.
 
 To confirm at the tool layer as well, a positive check is
 `list_telegram_identities` returning data for the identity; a negative check is

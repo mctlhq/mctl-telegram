@@ -841,3 +841,71 @@ func TestToken_RefreshRefusedForLegacyFamilyAlreadyRotatedToEmptyScope(t *testin
 		t.Fatalf("refresh status = %d %s, want invalid_grant — a family flattened by the old handler must not keep refreshing after revocation", rec.Code, rec.Body.String())
 	}
 }
+
+// TestToken_RefreshRefusedForLegacyFamilyDegradedByAllowlistRemoval is the
+// second Codex P1 on #595. The first version of the fix leaned on an explicit
+// access_tier of "none", which covers set_telegram_access but not the other
+// route to a scopeless identity: removal from TG_LOGIN_LOOKUP_ADMINS (or the
+// client bootstrap list) with AUTO_APPROVE_CLIENTS off leaves the DB tier
+// unset. A family degraded that way by a pre-#584 server carries Scope: "" on
+// its live row AND no tier, so neither signal catches it.
+//
+// The family's own history does: rotation revokes predecessor rows rather than
+// deleting them, so a grant that ever existed is still on disk.
+func TestToken_RefreshRefusedForLegacyFamilyDegradedByAllowlistRemoval(t *testing.T) {
+	const legacyID int64 = 777000777
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, legacyID, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	// The identity resolves to nothing and has NO explicit tier — the exact
+	// gap the tier check alone leaves open.
+	_, currentScopes, err := srv.ResolveScopes(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("resolve scopes: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+	if tier, err := srv.store.GetAccessTier(ctx, legacyID); err != nil || tier == db.TierNone {
+		t.Fatalf("test setup must leave the tier unset, got %q err=%v", tier, err)
+	}
+
+	// The predecessor the old handler degraded: revoked, but still on disk
+	// carrying the grant this family once had.
+	if err := srv.store.SaveRefreshToken(ctx, "legacy-allowlist-predecessor", db.RefreshToken{
+		FamilyID:   "legacy-allowlist-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "admin:users:read",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save predecessor: %v", err)
+	}
+	// The successor it rotated to, with the grant flattened away.
+	original := "legacy-allowlist-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "legacy-allowlist-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save successor: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant — a family whose history shows a grant must not keep refreshing", rec.Code, rec.Body.String())
+	}
+}

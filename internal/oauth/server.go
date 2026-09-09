@@ -2047,7 +2047,12 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope, func() bool { return s.tierRevoked(r.Context(), child.TelegramID) }) {
+	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, child.FamilyID, child.TelegramID)
+	if vErr != nil {
+		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
+		return graceServerError
+	}
+	if !stillValid {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2144,12 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope, func() bool { return s.tierRevoked(r.Context(), rt.TelegramID) }) {
+	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, rt.FamilyID, rt.TelegramID)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
+		return
+	}
+	if !stillValid {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
@@ -2266,46 +2276,55 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // degenerate state: handleTelegramCallback deliberately issues an authorization
 // code to an identity that will receive no scopes, so refusing every scopeless
 // refresh would break a working flow rather than fix this one. See #584.
-// tierRevoked is a callback rather than a value so the access-tier read
-// happens only on the path that needs it. Any identity that still resolves to
-// scopes returns at the len(resolved) check, and a family that still records a
-// grant returns at the one below — so the common refresh does no extra query.
-func refreshGrantStillValid(bounded, resolved []string, originalScope string, tierRevoked func() bool) bool {
+// refreshGrantStillValid decides whether a refresh may proceed for an identity
+// that has just been re-resolved and bounded. It separates cases the raw length
+// comparison it replaces conflated, because boundRefreshGrant returns
+// (nil, nil) both when the intersection is empty and when there was nothing to
+// intersect:
+//
+//   - A promotion — the identity now resolves to scopes this family never held
+//     — is refused. Those scopes are already gone from bounded, so bounded is
+//     shorter than resolved. This is #572's rule and is unchanged.
+//   - A degradation to nothing is refused too, but only when the family EVER
+//     held a grant. Previously both sides were empty, "0 < 0" was false, and
+//     the handler fell through: it minted a scopeless access token at HTTP 200
+//     and told an operator who had just de-provisioned the identity that the
+//     credential still worked. The failure surfaced only at the next tool call.
+//
+// A family that never held a grant still refreshes. That is not a degenerate
+// state: handleTelegramCallback deliberately issues an authorization code to an
+// identity that will receive no scopes, so refusing every scopeless refresh
+// would break a working flow rather than fix this one. See #584.
+//
+// "Ever held" is answered from the family's own history rather than from the
+// grant in hand, because the pre-#584 handler rotated degraded successors with
+// Scope: "" — so a family de-provisioned back then is indistinguishable from a
+// never-granted one by its live row alone, whatever route de-provisioned it.
+// An explicit access_tier of "none" also refuses, covering an operator
+// revoking an identity that genuinely never held scopes.
+//
+// Errors are returned, never folded into "revoked": a transient storage
+// failure must produce server_error, not invalid_grant, or a client will treat
+// a recoverable blip as terminal and discard a valid refresh token.
+func (s *Server) refreshGrantStillValid(ctx context.Context, bounded, resolved []string, familyID string, tgID int64) (bool, error) {
 	if len(bounded) < len(resolved) {
-		return false
+		return false, nil
 	}
 	if len(resolved) > 0 {
-		return true
+		return true, nil
 	}
-	if len(strings.Fields(originalScope)) > 0 {
-		return false
+	everHeld, err := s.store.FamilyEverHeldScope(ctx, familyID)
+	if err != nil {
+		return false, err
 	}
-	return !tierRevoked()
-}
-
-// tierRevoked reports whether an operator has explicitly set this identity's
-// users.access_tier to "none" — the deliberate revocation path, as opposed to
-// merely never having been granted anything.
-//
-// refreshGrantStillValid needs it because a family degraded under the PREVIOUS
-// handler already carries Scope: "" on its live successor: that handler minted
-// a scopeless token at HTTP 200 and rotated the successor with an empty scope,
-// so the family's own grant no longer records that it ever had one. Judging
-// such a family by originalScope alone would misread it as never-granted and
-// keep refreshing it until its absolute expiry, leaving the runbook's
-// de-provisioning check false for exactly the identities it matters for.
-// The access tier is independent of the grant and survives that rewriting.
-//
-// A read error is treated as revoked. This runs only on the path where the
-// identity already resolves to no scopes, so failing closed costs a client
-// nothing it could have used, and failing open would reopen the hole.
-func (s *Server) tierRevoked(ctx context.Context, tgID int64) bool {
+	if everHeld {
+		return false, nil
+	}
 	tier, err := s.store.GetAccessTier(ctx, tgID)
 	if err != nil {
-		slog.Warn("oauth refresh: could not read access tier, treating as revoked", "err", err)
-		return true
+		return false, err
 	}
-	return tier == db.TierNone
+	return tier != db.TierNone, nil
 }
 
 // handleRevoke implements RFC 7009 token revocation for refresh tokens.
