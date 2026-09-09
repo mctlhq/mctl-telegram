@@ -391,9 +391,12 @@ spec:
         # termination outage (the exact runaway this rule is for) is precisely
         # when every one of these label values can be missing. Without the
         # guard the rule would be silent in its own headline scenario.
-        # mctl-telegram#591 additionally pre-creates all six job statuses at
-        # zero on startup, so on a scraped current image the series exist even
-        # when idle; the guard stays for older images and for a scrape gap.
+        # mctl-telegram#591 (PR mctlhq/mctl-telegram#593, NOT yet on main at
+        # the time of writing) adds a zero baseline for all six job statuses at
+        # registry construction, so once that ships and a current image is
+        # scraped the series exist even when idle. The guard is not redundant
+        # after it: it still covers older images, a scrape gap before the
+        # baseline is first observed, and a total loss of the emitting target.
         #
         # Thresholds: MEASURED, not guessed. Both were $0.50 and both were
         # wrong, in opposite directions. Source is 7.3 h of VictoriaMetrics
