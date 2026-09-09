@@ -339,12 +339,11 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		// records the pause reason for audit — so a lost enqueue costs the
 		// owner a heads-up, not data, and must not fail an otherwise-
 		// successful propose_reply call (issue #581).
-		// InsertOwnerNotification is idempotent per action_id, so a job
-		// redelivery that resolves to the same actionID does not queue a
-		// second alert.
+		//
 		// Throttled per account, not merely deduped per action. The
-		// action_id uniqueness below only collapses redeliveries of the SAME
-		// draft; every new inbound message is a distinct action, and
+		// per-action_id uniqueness inside InsertOwnerNotification only
+		// collapses redeliveries of the SAME draft; every new inbound
+		// message is a distinct action, and
 		// ingestion is gated on listener_enabled, never on autopilot_paused
 		// (internal/agent/listener). An account sitting in the documented
 		// bootstrap default (paused, listener on) would therefore queue one

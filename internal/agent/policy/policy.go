@@ -80,9 +80,9 @@ const (
 // Exported because internal/agentapi matches it against the PERSISTED
 // AgentAction.PolicyReasons to decide whether to queue the owner pause
 // alert; an inline literal there would silently stop matching if this
-// wording ever changed. PolicyReasons is built with strings.Join(reasons,
-// "; ") and a pause denial carries exactly this one reason, so the
-// comparison is an equality check, not a substring search.
+// wording ever changed. PolicyReasons is the "; "-joined reason list, and
+// the caller compares whole elements of it rather than the joined string,
+// so appending a second reason to this denial does not break the match.
 const ReasonAutopilotPaused = "autopilot paused for this account"
 
 // Result contains the policy decision and user-facing/audit reasons.
