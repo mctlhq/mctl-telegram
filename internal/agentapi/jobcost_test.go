@@ -66,3 +66,45 @@ func TestHandleReportJobCost_UnknownJobReturnsNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestHandleReportJobCost_RejectsNonPositiveAttempt guards the claim fence:
+// RecordAgentJobCost carries no status predicate, so attempt 0 would match a
+// never-claimed pending job (attempts = 0). ClaimAgentJobs only ever hands
+// out attempts >= 1, so the handler rejects it outright.
+func TestHandleReportJobCost_RejectsNonPositiveAttempt(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:cost-attempt-zero", conv.ID)
+
+	for _, attempt := range []int{0, -1} {
+		rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/cost", reportJobCostRequest{
+			Attempt: attempt, CostUSD: 1.5,
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("attempt=%d: status = %d, want 400, body=%s", attempt, rec.Code, rec.Body.String())
+		}
+	}
+
+	job, err := h.store.GetAgentJob(context.Background(), h.userID, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CostUSD.Valid {
+		t.Fatalf("CostUSD = %+v, want unset (no cost may land on an unclaimed job)", job.CostUSD)
+	}
+}
+
+// TestHandleReportJobCost_RejectsNegativeCost keeps spend accounting from
+// being corrupted by a negative figure.
+func TestHandleReportJobCost_RejectsNegativeCost(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:cost-negative", conv.ID)
+
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/cost", reportJobCostRequest{
+		Attempt: 1, CostUSD: -1,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+}

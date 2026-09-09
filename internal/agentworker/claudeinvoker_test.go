@@ -420,3 +420,30 @@ func TestClaudeInvoker_Run_RejectsCompletionForDifferentJob(t *testing.T) {
 		t.Fatalf("Run err = %v, want ErrAgentDidNotCompleteJob", err)
 	}
 }
+
+// TestClaudeInvoker_Run_NegativeCostIsDropped guards recordCost against a
+// negative total_cost_usd from the claude CLI: prometheus.Counter.Add panics
+// on a negative delta and there is no recover() in the worker, so a single
+// bad value would take the poll loop down. The value must be dropped — no
+// counter increment, no cost report — without failing the job.
+func TestClaudeInvoker_Run_NegativeCostIsDropped(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":-0.25,"result":"handled it"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, crs := newCostReportingServer(t, 42, "completed", 1)
+	m := metrics.New()
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	before := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	after := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues("success"))
+	if after != before {
+		t.Fatalf("cost total = %v, want %v (a negative cost must not be counted)", after, before)
+	}
+	crs.mu.Lock()
+	defer crs.mu.Unlock()
+	if len(crs.costReports) != 0 {
+		t.Fatalf("cost reports = %+v, want none for a negative cost", crs.costReports)
+	}
+}

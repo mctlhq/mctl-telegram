@@ -229,12 +229,21 @@ func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobE
 	if c.Metrics == nil || res == nil || res.TotalCostUSD == nil {
 		return
 	}
+	cost := *res.TotalCostUSD
+	if cost < 0 {
+		// prometheus.Counter.Add panics on a negative delta, and the value
+		// comes straight from the claude CLI's total_cost_usd — nothing
+		// upstream constrains its sign. Drop it rather than take the
+		// poll-loop process down, and keep the DB write honest too.
+		slog.Warn("agent-worker: ignoring negative reported job cost", "job_id", job.JobID)
+		return
+	}
 	result := "success"
 	if res.IsError {
 		result = "error"
 	}
-	c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(*res.TotalCostUSD)
-	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, *res.TotalCostUSD); err != nil {
+	c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
+	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, cost); err != nil {
 		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
 	}
 }

@@ -314,6 +314,17 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// RecordAgentJobCost fences on attempts = $5 with no status predicate, so
+	// attempt 0 would match a never-claimed pending job. ClaimAgentJobs always
+	// hands out attempts >= 1, so no legitimate caller ever sends 0.
+	if req.Attempt <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "attempt must be positive")
+		return
+	}
+	if req.CostUSD < 0 {
+		writeJSONError(w, http.StatusBadRequest, "cost_usd must not be negative")
+		return
+	}
 	ctx := r.Context()
 	if _, err := s.Store.GetAgentJob(ctx, id.UserID, jobID); err != nil {
 		if errors.Is(err, db.ErrAgentJobNotFound) {
