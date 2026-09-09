@@ -288,14 +288,24 @@ spec:
         # so a worker hammering a paused account inflates the numerator above
         # the claim count — that is the anomaly signal, not a bug.
         #
-        # Threshold: no production baseline exists in this repository. The
-        # agent runs guarded (kill switch, listener flag, autopilot pause,
-        # worker replicas 0 — the four containment controls in
-        # docs/runbook.md's Communication Agent operations section), so no
-        # steady-state denial share has been observed here. 0.20 is taken on
-        # the conservative side: one denial in five claimed jobs, sustained
-        # over half an hour, for a single reason. This must be re-derived from
-        # the first week of real production data.
+        # Threshold: still unmeasured, and unlike MctlAgentJobCostHigh below
+        # it could not be re-derived on 2026-09-09, because
+        # mctl_agent_policy_denials_total does not exist in VictoriaMetrics at
+        # all — not a single denial has been counted in this deployment. The
+        # counter is also created lazily, so its absence conflates "no denials"
+        # with "no baseline" and there is no way to tell them apart from the
+        # series alone. PR mctlhq/mctl-telegram#593 (NOT yet on main at the
+        # time of writing) adds a zero baseline for all 108 combinations, which
+        # is the precondition for ever deriving this number: until it ships and
+        # a current image is scraped, an empty result here means nothing.
+        #
+        # 0.20 therefore stands as originally taken, on the conservative side:
+        # one denial in five claimed jobs, sustained over half an hour, for a
+        # single reason. Re-derive it once the counter has actually moved.
+        # Note that a denominator of claimed jobs is correct HERE — denials are
+        # counted per evaluation including redeliveries, so the ratio can
+        # legitimately exceed 1, and that inflation is the "worker hammering a
+        # paused account" signal this counter exists for.
         #
         # The `> 4` floor exists because a share computed from a low-volume
         # denominator is arithmetic, not evidence: without it, one denial
@@ -343,18 +353,28 @@ spec:
         # claudeinvoker.go:197) runs before countResultError (:199) — a job
         # that fails afterwards still reports its spend.
         #
-        # Denominator: completed jobs (mctl_agent_jobs_total{status=
-        # "completed"}, db.JobCompleted in internal/db/agent_jobs.go), the
-        # terminal success state bound to a durable result_action_id — never
-        # status="succeeded", which is not a label value this code can ever
-        # emit (see internal/db/agent_jobs.go's status constants). The ratio
-        # therefore reads as dollars per delivered outcome: money burned on
-        # failed, retried, or dead-lettered jobs raises the number, which is
-        # the intended behaviour — a retry storm that spends without
-        # completing anything is exactly the runaway this alert is for.
-        # Dividing by status="processing" (claims) was rejected because
-        # retries raise that denominator too, which would flatten exactly the
-        # failure mode this alert exists to catch.
+        # Denominator: every TERMINAL job status — completed, ignored, failed
+        # and dead_letter, the four end states in db's
+        # "pending -> processing -> completed | failed | ignored" plus the
+        # attempts-exhausted path (internal/db/agent_jobs.go). Never
+        # status="succeeded", which is not a label value this code can emit.
+        # The ratio reads as dollars per job the agent FINISHED.
+        #
+        # This was status="completed" alone until issue mctlhq/mctl-telegram#596,
+        # on the argument that it read as dollars per *delivered outcome*. The
+        # argument was sound and the premise was false: measured against
+        # VictoriaMetrics on 2026-09-09, mctl_agent_jobs_total{status=
+        # "completed"} had never been incremented at all. Jobs on this
+        # deployment terminate as `ignored` — the agent deciding no reply is
+        # warranted, which is a normal outcome that costs money. The
+        # denominator was therefore permanently empty, `or vector(0)` made the
+        # ratio +Inf on every evaluation, this clause constrained nothing, and
+        # the rule had silently degenerated into "hourly spend > $0.50".
+        #
+        # Retries still raise the ratio, which was the original intent: a retry
+        # increments status="processing", which is not terminal and is not in
+        # this denominator. Dividing by claims was rejected for exactly that
+        # reason and stays rejected.
         #
         # sum() on both sides: mctl_agent_job_cost_usd_total is emitted by the
         # agent-worker process (cmd/agent-worker/main.go) while
@@ -362,51 +382,78 @@ spec:
         # (internal/agent/queue/queue.go), so their instance/pod labels differ
         # and a label-matched division could never produce a sample.
         #
-        # Divide-by-zero: spend with zero completions evaluates the ratio to
+        # Divide-by-zero: spend with zero terminal jobs evaluates the ratio to
         # +Inf, which compares true — deliberate, since paying for nothing is
         # worth a page. The second clause (absolute spend floor) guards
         # against a stray fraction of a cent in an idle hour firing this.
         #
         # That only holds with `or vector(0)`. sum() over an ABSENT series
         # returns an empty vector rather than 0, and dividing by an empty
-        # vector yields an empty vector — no +Inf, no alert. The label value
-        # `completed` is only emitted once a job has actually completed, so a
-        # total-completion outage (the exact runaway this rule is for) is
-        # precisely when the series can be missing. Without the guard the rule
-        # would be silent in its own headline scenario.
+        # vector yields an empty vector — no +Inf, no alert. A total
+        # termination outage (the exact runaway this rule is for) is precisely
+        # when every one of these label values can be missing. Without the
+        # guard the rule would be silent in its own headline scenario.
+        # mctl-telegram#591 (PR mctlhq/mctl-telegram#593, NOT yet on main at
+        # the time of writing) adds a zero baseline for all six job statuses at
+        # registry construction, so once that ships and a current image is
+        # scraped the series exist even when idle. The guard is not redundant
+        # after it: it still covers older images, a scrape gap before the
+        # baseline is first observed, and a total loss of the emitting target.
         #
-        # Threshold: no cost figure exists anywhere in this repository (grep
-        # for total_cost_usd/cost_usd finds only the plumbing in
-        # claudeinvoker.go and docs/agent-worker.md); AGENT_MAX_BUDGET_USD is
-        # an operator value set in gitops, applied by the CLI only when > 0,
-        # and is a per-job ceiling inside one invocation, not an aggregate —
-        # it is not a substitute for this alert. $0.50 per completed job is
-        # taken on the conservative side and is provisional: re-derive it from
-        # the first week of real mctl_agent_job_cost_usd_total data, and if
-        # AGENT_MAX_BUDGET_USD is set, keep this threshold below that cap so
-        # the alert precedes the CLI's hard stop.
+        # Thresholds: MEASURED, not guessed. Both were $0.50 and both were
+        # wrong, in opposite directions. Source is 7.3 h of VictoriaMetrics
+        # data from 08:40 UTC 2026-09-09 — the moment
+        # mctl_agent_job_cost_usd_total first appeared — sampled at a
+        # 10-minute step over a 1 h window (44-45 points), preview deployment,
+        # guarded mode, one account's real inbound traffic:
+        #
+        #   hourly spend        p50 $0.165  p95 $0.400  p99 $0.482
+        #   terminal jobs / h   p50 13      p95 31      max 36
+        #   $ per terminal job  p50 $0.0129 p95 $0.0160 p99 $0.0203
+        #
+        # 0.10 per terminal job is ~5x the observed p99: it catches a 5x
+        # per-job cost regression and is immune to normal variance. The old
+        # $0.50 was ~25x p99 and could never have fired.
+        #
+        # 1.00 per hour is ~2x the observed p99 hourly spend. The old $0.50
+        # sat AT the noise ceiling (p99 $0.482, zero of 44 windows above it),
+        # so with the ratio clause dead it would have begun paging on ordinary
+        # traffic within days. This clause's only job is to gate the ratio
+        # against low-volume arithmetic; with a working denominator it is no
+        # longer the de-facto trigger, which is why it can be raised without
+        # losing coverage.
+        #
+        # Re-derive after a full week of data, and again after any change to
+        # guarded-mode traffic (intent_allowlist, sender_allowlist, listener
+        # scope) — the numbers above describe one account's DM volume, not a
+        # steady state anyone has committed to. AGENT_MAX_BUDGET_USD is still
+        # not a substitute: it is an operator value applied by the CLI only
+        # when > 0, a per-job ceiling inside one invocation, aggregating
+        # nothing. If it is set, keep the per-job threshold below that cap so
+        # this alert precedes the CLI's hard stop.
         - alert: MctlAgentJobCostHigh
           expr: |
             (
               sum(increase(mctl_agent_job_cost_usd_total[1h]))
               /
-              (sum(increase(mctl_agent_jobs_total{status="completed"}[1h])) or vector(0))
-            ) > 0.50
+              (sum(increase(mctl_agent_jobs_total{status=~"^(completed|ignored|failed|dead_letter)$"}[1h])) or vector(0))
+            ) > 0.10
             and
-            sum(increase(mctl_agent_job_cost_usd_total[1h])) > 0.50
+            sum(increase(mctl_agent_job_cost_usd_total[1h])) > 1.00
           for: 0m
           labels:
             severity: warning
             service: mctl-telegram
           annotations:
-            summary: "Communication-agent spend per completed job is high"
+            summary: "Communication-agent spend per finished job is high"
             description: >
-              Claude spend per completed communication-agent job over the
-              last hour is above $0.50, with total spend in the window above
-              $0.50. This is dollars per delivered outcome, not per attempt —
-              a retry storm that spends without completing jobs raises this
-              ratio. May render as +Inf when spend occurred with zero
-              completions in the window; that is intended.
+              Claude spend per finished communication-agent job over the last
+              hour is above $0.10, with total spend in the window above $1.00.
+              This is dollars per job the agent finished — completed, ignored,
+              failed or dead-lettered — not per attempt, so a retry storm that
+              spends without finishing jobs raises this ratio. May render as
+              +Inf when spend occurred with zero finished jobs in the window;
+              that is intended.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentjobcosthigh"
 
     - name: mctl-telegram-tool-availability
