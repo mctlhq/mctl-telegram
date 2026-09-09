@@ -356,9 +356,6 @@ func TestClaudeInvoker_Run_RecordsCostBeforeCheckResult_Error(t *testing.T) {
 	}
 }
 
-// TestClaudeInvoker_Run_NilMetricsIsANoOp guards recordCost/countResultError's
-// nil-safety: a ClaudeInvoker with no Metrics registry must behave exactly
-// as before this proposal.
 // TestClaudeInvoker_Run_NilMetricsStillPersistsCost pins the split between
 // the two things recordCost does. Metrics is an optional field, so a nil
 // registry must not stop the durable cost_usd write: coupling an accounting

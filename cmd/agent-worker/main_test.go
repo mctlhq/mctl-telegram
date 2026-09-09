@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +61,11 @@ func TestEnvFloat_RejectsNegativeValues(t *testing.T) {
 }
 
 func TestEnvFloat_ReturnsDefaultWhenUnset(t *testing.T) {
-	_ = os.Unsetenv("TEST_ENV_FLOAT")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset TEST_ENV_FLOAT into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// requireEnv treats "" as missing, so this covers the same case.
+	t.Setenv("TEST_ENV_FLOAT", "")
 	got, err := envFloat("TEST_ENV_FLOAT", 5)
 	if err != nil {
 		t.Fatalf("envFloat: %v", err)
@@ -113,7 +116,11 @@ func TestRun_FailsFastOnHealthServerBindError(t *testing.T) {
 func TestRun_FailsFastWhenCredentialDomainIDUnset(t *testing.T) {
 	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENT_API_TOKEN", "test-token")
-	_ = os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset AGENT_CREDENTIAL_DOMAIN_ID into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// requireEnv treats "" as missing, so this covers the same case.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "")
 
 	err := run()
 	if err == nil {
@@ -187,10 +194,18 @@ func TestRun_FailsFastWhenCredentialDomainIDTooLong(t *testing.T) {
 // different, pre-existing reason (missing AGENT_JOB_ID) rather than ever
 // mentioning the credential domain var.
 func TestRunMCPServe_UnaffectedByMissingCredentialDomainID(t *testing.T) {
-	_ = os.Unsetenv("AGENT_CREDENTIAL_DOMAIN_ID")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset AGENT_CREDENTIAL_DOMAIN_ID into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// requireEnv treats "" as missing, so this covers the same case.
+	t.Setenv("AGENT_CREDENTIAL_DOMAIN_ID", "")
 	t.Setenv("AGENT_API_BASE_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENT_API_TOKEN", "test-token")
-	_ = os.Unsetenv("AGENT_JOB_ID")
+	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
+	// leak an unset AGENT_JOB_ID into every test that runs after this
+	// one in the same binary and make the package order-dependent.
+	// requireEnv treats "" as missing, so this covers the same case.
+	t.Setenv("AGENT_JOB_ID", "")
 
 	err := runMCPServe()
 	if err == nil {
