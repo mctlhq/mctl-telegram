@@ -11,6 +11,12 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+// ErrInvalidOptions wraps every rejection of the caller's configuration, so
+// a command-line front end can tell "you invoked me wrong" from "the
+// endpoint could not be reached". The two deserve different exit codes and
+// different reactions.
+var ErrInvalidOptions = errors.New("invalid probe options")
+
 // Mode selects which protocol path a run exercises. The two are deliberately
 // separate: they negotiate differently, they carry different headers, and
 // conflating their results is how a server gets described as modern on the
@@ -91,6 +97,14 @@ type Options struct {
 }
 
 func (o *Options) normalize() error {
+	if err := o.validate(); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidOptions, err)
+	}
+	o.applyDefaults()
+	return nil
+}
+
+func (o *Options) validate() error {
 	if strings.TrimSpace(o.URL) == "" {
 		return errors.New("URL is required")
 	}
@@ -123,27 +137,26 @@ func (o *Options) normalize() error {
 		return fmt.Errorf("unknown Mode %q", o.Mode)
 	}
 	switch o.Source {
-	case "":
-		o.Source = SourceDirect
-	case SourceInProcess, SourceDirect, SourceGateway:
+	case "", SourceInProcess, SourceDirect, SourceGateway:
 	default:
 		return fmt.Errorf("unknown Source %q", o.Source)
+	}
+	return nil
+}
+
+func (o *Options) applyDefaults() {
+	if o.Source == "" {
+		o.Source = SourceDirect
 	}
 	if o.Tool == "" {
 		o.Tool = DefaultTool
 	}
 	if o.HTTPClient == nil {
-		o.HTTPClient = &http.Client{
-			Timeout: defaultTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		o.HTTPClient = NewHTTPClient(defaultTimeout)
 	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return nil
 }
 
 func isLegacyVersion(v string) bool {
@@ -161,4 +174,19 @@ func (o *Options) protocolVersion() string {
 		return mcp.ProtocolVersion20260728
 	}
 	return o.LegacyVersion
+}
+
+// NewHTTPClient returns the client the probe uses by default: a per-request
+// timeout and no redirect following, since a followed redirect would measure
+// a different endpoint than the one the operator named.
+func NewHTTPClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }

@@ -103,6 +103,7 @@ Key variables:
 | `ALLOWED_ORIGINS`             | optional; comma-separated Origin allowlist for `/mcp` (DNS-rebinding protection). No-Origin requests always pass; defaults to the `PUBLIC_BASE_URL` origin |
 | `OAUTH_ACCESS_TOKEN_TTL`      | optional, default `1h`                                                      |
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
+| `OAUTH_PREREGISTERED_CLIENTS` | optional; JSON array of `{"client_id","redirect_uris"}` seeded as static clients with byte-exact redirect matching. For a counterpart that cannot use dynamic registration; carries no secret. See [SECURITY.md](SECURITY.md) and [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
 
 > `OAUTH_JWT_SECRET` is a deprecated alias of `OAUTH_JWT_SIGNING_KEY`. It is
 > still accepted as a fallback but logs a warning at startup. Use
