@@ -909,3 +909,38 @@ func TestToken_RefreshRefusedForLegacyFamilyDegradedByAllowlistRemoval(t *testin
 		t.Fatalf("refresh status = %d %s, want invalid_grant — a family whose history shows a grant must not keep refreshing", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRefreshGrantStillValid_StorageErrorPropagates pins the server_error
+// branch #584 deliberately introduced. An earlier revision folded a failed
+// lookup into "revoked", which the handler renders as invalid_grant — and a
+// client can treat that as terminal and discard a refresh token that was never
+// invalid, permanently breaking the never-granted flow after a recoverable
+// database blip. docs/runbook.md now tells operators that a server_error here
+// is not a de-provisioning signal, so the distinction has to hold.
+//
+// Reviewed as untestable, on the grounds that Server.store is a concrete
+// *db.Store with no seam to inject a failing FamilyEverHeldScope, and that
+// closing the connection makes LookupRefreshToken or ResolveScopes fail first
+// at a different 500 site. Both are true of the HTTP path. They are not true of
+// the helper, which is a method and can be called directly — so the invariant
+// is pinned here rather than recorded as a known gap.
+//
+// What this covers: a storage failure yields (false, error), never (false, nil).
+// Only the second is silently indistinguishable from "revoked" at the call
+// site; the four lines that map a non-nil error to server_error are visible
+// beside it.
+func TestRefreshGrantStillValid_StorageErrorPropagates(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	// Force every store call on this path to fail.
+	if err := srv.store.DB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	ok, err := srv.refreshGrantStillValid(context.Background(), nil, nil, "any-family", 777000888)
+	if err == nil {
+		t.Fatal("want an error when the store is unavailable — returning (false, nil) makes a storage failure indistinguishable from a revocation, and the handler then answers invalid_grant")
+	}
+	if ok {
+		t.Fatal("want ok=false alongside the error, so a caller that ignores err still fails closed")
+	}
+}
