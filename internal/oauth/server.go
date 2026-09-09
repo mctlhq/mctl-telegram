@@ -2047,7 +2047,12 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if len(scopes) < len(resolvedScopes) {
+	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, child.FamilyID, child.TelegramID)
+	if vErr != nil {
+		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
+		return graceServerError
+	}
+	if !stillValid {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2144,12 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if len(scopes) < len(resolvedScopes) {
+	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, rt.FamilyID, rt.TelegramID)
+	if err != nil {
+		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
+		return
+	}
+	if !stillValid {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
@@ -2242,6 +2252,57 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 		return nil, nil
 	}
 	return currentGroups, bounded
+}
+
+// refreshGrantStillValid decides whether a refresh may proceed for an identity
+// that has just been re-resolved and bounded. It separates cases the raw length
+// comparison it replaces conflated, because boundRefreshGrant returns
+// (nil, nil) both when the intersection is empty and when there was nothing to
+// intersect:
+//
+//   - A promotion — the identity now resolves to scopes this family never held
+//     — is refused. Those scopes are already gone from bounded, so bounded is
+//     shorter than resolved. This is #572's rule and is unchanged.
+//   - A degradation to nothing is refused too, but only when the family EVER
+//     held a grant. Previously both sides were empty, "0 < 0" was false, and
+//     the handler fell through: it minted a scopeless access token at HTTP 200
+//     and told an operator who had just de-provisioned the identity that the
+//     credential still worked. The failure surfaced only at the next tool call.
+//
+// A family that never held a grant still refreshes. That is not a degenerate
+// state: handleTelegramCallback deliberately issues an authorization code to an
+// identity that will receive no scopes, so refusing every scopeless refresh
+// would break a working flow rather than fix this one. See #584.
+//
+// "Ever held" is answered from the family's own history rather than from the
+// grant in hand, because the pre-#584 handler rotated degraded successors with
+// Scope: "" — so a family de-provisioned back then is indistinguishable from a
+// never-granted one by its live row alone, whatever route de-provisioned it.
+// An explicit access_tier of "none" also refuses, covering an operator
+// revoking an identity that genuinely never held scopes.
+//
+// Errors are returned, never folded into "revoked": a transient storage
+// failure must produce server_error, not invalid_grant, or a client will treat
+// a recoverable blip as terminal and discard a valid refresh token.
+func (s *Server) refreshGrantStillValid(ctx context.Context, bounded, resolved []string, familyID string, tgID int64) (bool, error) {
+	if len(bounded) < len(resolved) {
+		return false, nil
+	}
+	if len(resolved) > 0 {
+		return true, nil
+	}
+	everHeld, err := s.store.FamilyEverHeldScope(ctx, familyID)
+	if err != nil {
+		return false, err
+	}
+	if everHeld {
+		return false, nil
+	}
+	tier, err := s.store.GetAccessTier(ctx, tgID)
+	if err != nil {
+		return false, err
+	}
+	return tier != db.TierNone, nil
 }
 
 // handleRevoke implements RFC 7009 token revocation for refresh tokens.

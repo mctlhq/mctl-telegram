@@ -248,3 +248,36 @@ func (s *Store) SweepExpiredRefreshTokens(ctx context.Context) (int64, error) {
 	n, _ := res.RowsAffected()
 	return n, nil
 }
+
+// FamilyEverHeldScope reports whether ANY row in a refresh-token family — the
+// live one or any revoked predecessor — was issued with a non-empty scope.
+//
+// It exists to tell two states apart that a family's current grant alone
+// cannot. A server predating mctl-telegram#584 answered a degraded refresh
+// with HTTP 200 and rotated the successor carrying Scope: "", so a family
+// de-provisioned back then looks exactly like one that was scopeless from
+// birth — and the second is a deliberate flow (handleTelegramCallback issues
+// authorization codes to identities that will receive no scopes) that must
+// keep working. Rotation revokes predecessor rows rather than deleting them,
+// so the family's history is still on disk and settles the question.
+//
+// Cheap: oauth_refresh_tokens is indexed on family_id, and a family holds a
+// handful of rows.
+func (s *Store) FamilyEverHeldScope(ctx context.Context, familyID string) (bool, error) {
+	// bool, not int: EXISTS is a boolean column under Postgres (pgx, the
+	// production driver) and database/sql has no bool -> int conversion, so an
+	// int scan fails at runtime with "converting driver.Value type bool" while
+	// passing every SQLite test. Every other SELECT EXISTS in this package
+	// scans into a bool for the same reason.
+	var exists bool
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT EXISTS(
+		     SELECT 1 FROM oauth_refresh_tokens
+		     WHERE family_id = $1 AND scope IS NOT NULL AND scope <> ''
+		 )`, familyID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("query family scope history: %w", err)
+	}
+	return exists, nil
+}

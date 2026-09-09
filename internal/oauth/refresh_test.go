@@ -644,3 +644,303 @@ func TestBoundRefreshGrantPreservesOrderAndOnlyShrinks(t *testing.T) {
 		t.Fatalf("bounded scopes = %q", got)
 	}
 }
+
+// clientBundleScope is the scope string ResolveScopes hands a client-tier
+// identity, spelled out so the tests below can seed a refresh-token family
+// whose grant already equals the resolved set — the precondition for a refresh
+// that succeeds before revocation and must fail after it.
+const clientBundleScope = "telegram:dialogs:read telegram:messages:read telegram:messages:send telegram:messages:pin account:manage"
+
+// TestToken_RefreshRefusedAfterTierRevokedToNone covers issue #584. An
+// operator running set_telegram_access(tier="none") is the deliberate
+// revocation path. Before the fix, the identity resolved to no scopes at all,
+// so the monotonicity guard compared 0 < 0, fell through, and answered HTTP
+// 200 with a scopeless access token — telling the caller the credential still
+// worked while every subsequent tool call failed at its own scope gate. Worse,
+// the successor was rotated carrying Scope: "", anchoring the family at empty.
+func TestToken_RefreshRefusedAfterTierRevokedToNone(t *testing.T) {
+	const revokedID int64 = 777000333
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "revoked-tier-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "revoked-tier-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: revokedID,
+		Scope:      clientBundleScope,
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+
+	if err := srv.store.SetAccessTier(ctx, revokedID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+	_, currentScopes, err := srv.ResolveScopes(ctx, revokedID)
+	if err != nil {
+		t.Fatalf("resolve scopes after revocation: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_grant") {
+		t.Fatalf("refresh body = %s, want invalid_grant", rec.Body.String())
+	}
+}
+
+// TestToken_RefreshGraceRecoveryRefusedAfterTierRevokedToNone is the same
+// revocation seen through the rotation grace window, which carried an
+// independent copy of the same length comparison. The first refresh succeeds
+// (grant equals resolution), the tier is then revoked, and replaying the now
+// rotated-out predecessor must not recover a scopeless token.
+func TestToken_RefreshGraceRecoveryRefusedAfterTierRevokedToNone(t *testing.T) {
+	const revokedID int64 = 777000444
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "dana_tg", "Dana")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "revoked-tier-grace-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "revoked-tier-grace-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: revokedID,
+		Scope:      clientBundleScope,
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, form); rec.Code != http.StatusOK {
+		t.Fatalf("initial refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if err := srv.store.SetAccessTier(ctx, revokedID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+	replay := doTokenRequest(t, mux, form)
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("grace replay status = %d %s, want invalid_grant", replay.Code, replay.Body.String())
+	}
+}
+
+// TestToken_RefreshSucceedsForFamilyScopelessFromTheStart is the guard that
+// keeps #584's fix narrow. "Scopeless" is a real state in this system, not
+// only a degraded one: handleTelegramCallback deliberately issues an
+// authorization code to an identity that will receive no scopes, rather than
+// walk it through enable_access for a session it could not use. Refusing every
+// scopeless refresh would break that flow instead of fixing the revocation
+// case, so a family that never held a grant must keep refreshing.
+func TestToken_RefreshSucceedsForFamilyScopelessFromTheStart(t *testing.T) {
+	const scopelessID int64 = 777000555
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, scopelessID, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	_, currentScopes, err := srv.ResolveScopes(ctx, scopelessID)
+	if err != nil {
+		t.Fatalf("resolve scopes: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+
+	original := "scopeless-from-the-start-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "scopeless-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: scopelessID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d %s, want 200 — a family that never held a grant is not a degradation", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToken_RefreshRefusedForLegacyFamilyAlreadyRotatedToEmptyScope covers the
+// upgrade case Codex raised on #595. The PREVIOUS handler answered a degraded
+// refresh with HTTP 200 and rotated the successor carrying Scope: "", so a
+// family de-provisioned before this fix shipped already looks, by its own
+// grant alone, exactly like a family that never held one. Judging it by
+// originalScope would misread it as never-granted and keep refreshing it until
+// its absolute expiry, leaving the runbook's de-provisioning check false for
+// precisely the identities it matters for.
+//
+// The access tier is independent of the grant and survives that rewriting, so
+// an explicit tier="none" refuses the refresh regardless of what the family's
+// scope column says.
+func TestToken_RefreshRefusedForLegacyFamilyAlreadyRotatedToEmptyScope(t *testing.T) {
+	const legacyID int64 = 777000666
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, legacyID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	// The state the old handler left behind: a live successor whose grant was
+	// already flattened to empty.
+	original := "legacy-poisoned-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "legacy-poisoned-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	if err := srv.store.SetAccessTier(ctx, legacyID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant — a family flattened by the old handler must not keep refreshing after revocation", rec.Code, rec.Body.String())
+	}
+}
+
+// TestToken_RefreshRefusedForLegacyFamilyDegradedByAllowlistRemoval is the
+// second Codex P1 on #595. The first version of the fix leaned on an explicit
+// access_tier of "none", which covers set_telegram_access but not the other
+// route to a scopeless identity: removal from TG_LOGIN_LOOKUP_ADMINS (or the
+// client bootstrap list) with AUTO_APPROVE_CLIENTS off leaves the DB tier
+// unset. A family degraded that way by a pre-#584 server carries Scope: "" on
+// its live row AND no tier, so neither signal catches it.
+//
+// The family's own history does: rotation revokes predecessor rows rather than
+// deleting them, so a grant that ever existed is still on disk.
+func TestToken_RefreshRefusedForLegacyFamilyDegradedByAllowlistRemoval(t *testing.T) {
+	const legacyID int64 = 777000777
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, legacyID, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	// The identity resolves to nothing and has NO explicit tier — the exact
+	// gap the tier check alone leaves open.
+	_, currentScopes, err := srv.ResolveScopes(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("resolve scopes: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+	if tier, err := srv.store.GetAccessTier(ctx, legacyID); err != nil || tier == db.TierNone {
+		t.Fatalf("test setup must leave the tier unset, got %q err=%v", tier, err)
+	}
+
+	// The predecessor the old handler degraded: revoked, but still on disk
+	// carrying the grant this family once had.
+	if err := srv.store.SaveRefreshToken(ctx, "legacy-allowlist-predecessor", db.RefreshToken{
+		FamilyID:   "legacy-allowlist-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "admin:users:read",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save predecessor: %v", err)
+	}
+	// The successor it rotated to, with the grant flattened away.
+	original := "legacy-allowlist-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "legacy-allowlist-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: legacyID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save successor: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant — a family whose history shows a grant must not keep refreshing", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRefreshGrantStillValid_StorageErrorPropagates pins the server_error
+// branch #584 deliberately introduced. An earlier revision folded a failed
+// lookup into "revoked", which the handler renders as invalid_grant — and a
+// client can treat that as terminal and discard a refresh token that was never
+// invalid, permanently breaking the never-granted flow after a recoverable
+// database blip. docs/runbook.md now tells operators that a server_error here
+// is not a de-provisioning signal, so the distinction has to hold.
+//
+// Reviewed as untestable, on the grounds that Server.store is a concrete
+// *db.Store with no seam to inject a failing FamilyEverHeldScope, and that
+// closing the connection makes LookupRefreshToken or ResolveScopes fail first
+// at a different 500 site. Both are true of the HTTP path. They are not true of
+// the helper, which is a method and can be called directly — so the invariant
+// is pinned here rather than recorded as a known gap.
+//
+// What this covers: a storage failure yields (false, error), never (false, nil).
+// Only the second is silently indistinguishable from "revoked" at the call
+// site; the four lines that map a non-nil error to server_error are visible
+// beside it.
+func TestRefreshGrantStillValid_StorageErrorPropagates(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	// Force every store call on this path to fail.
+	if err := srv.store.DB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	ok, err := srv.refreshGrantStillValid(context.Background(), nil, nil, "any-family", 777000888)
+	if err == nil {
+		t.Fatal("want an error when the store is unavailable — returning (false, nil) makes a storage failure indistinguishable from a revocation, and the handler then answers invalid_grant")
+	}
+	if ok {
+		t.Fatal("want ok=false alongside the error, so a caller that ignores err still fails closed")
+	}
+}
