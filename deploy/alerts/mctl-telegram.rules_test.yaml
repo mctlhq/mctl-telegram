@@ -157,14 +157,16 @@ tests:
 
   # --- MctlAgentJobCostHigh (issue #587) ---
   #
-  # T5: fires. $60 spent over the hour against 60 completed jobs is $1.00 per
-  # completed job (above the $0.50 threshold), and total spend clears the
-  # $0.50 absolute floor.
+  # T5: fires. $60 spent over the hour against 60 finished jobs is $1.00 per
+  # finished job, above the $0.10 threshold, and total spend clears the $1.00
+  # absolute floor. Seeded as `ignored` deliberately (issue #596): that is the
+  # terminal status this deployment actually produces, and a case built on
+  # `completed` would have passed against the old, broken denominator too.
   - interval: 1m
     input_series:
       - series: 'mctl_agent_job_cost_usd_total{result="success"}'
         values: '0+1x60'
-      - series: 'mctl_agent_jobs_total{status="completed"}'
+      - series: 'mctl_agent_jobs_total{status="ignored"}'
         values: '0+1x60'
     alert_rule_test:
       - eval_time: 60m
@@ -174,27 +176,54 @@ tests:
               severity: warning
               service: mctl-telegram
             exp_annotations:
-              summary: "Communication-agent spend per completed job is high"
-              description: "Claude spend per completed communication-agent job over the last hour is above $0.50, with total spend in the window above $0.50. This is dollars per delivered outcome, not per attempt — a retry storm that spends without completing jobs raises this ratio. May render as +Inf when spend occurred with zero completions in the window; that is intended.\n"
+              summary: "Communication-agent spend per finished job is high"
+              description: "Claude spend per finished communication-agent job over the last hour is above $0.10, with total spend in the window above $1.00. This is dollars per job the agent finished — completed, ignored, failed or dead-lettered — not per attempt, so a retry storm that spends without finishing jobs raises this ratio. May render as +Inf when spend occurred with zero finished jobs in the window; that is intended.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentjobcosthigh"
 
-  # T6: stays silent. $20 spent over the hour against 100 completed jobs is
-  # $0.20 per completed job — ordinary spend at ordinary completion volume,
-  # below the $0.50 threshold. Kills a lowered threshold.
-  - interval: 3m
+  # T6: stays silent, and is the case that discriminates the fix. $4.80 spent
+  # against 60 finished jobs split evenly across all four terminal statuses is
+  # $0.08 per job, just under the 0.10 threshold, while total spend is well
+  # over the $1.00 floor — so the silence can only come from the ratio clause.
+  #
+  # Drop ANY ONE status from the denominator regex and the divisor falls to 45,
+  # the ratio rises to $0.1067, and this case fires. Revert to the old
+  # completed-only denominator and it fires at $0.32. Measured reality is
+  # ~$0.013 per finished job, so $0.08 is already ~6x normal.
+  - interval: 4m
     input_series:
       - series: 'mctl_agent_job_cost_usd_total{result="success"}'
-        values: '0+1x20'
+        values: '0+0.32x15'
       - series: 'mctl_agent_jobs_total{status="completed"}'
-        values: '0+5x20'
+        values: '0+1x15'
+      - series: 'mctl_agent_jobs_total{status="ignored"}'
+        values: '0+1x15'
+      - series: 'mctl_agent_jobs_total{status="failed"}'
+        values: '0+1x15'
+      - series: 'mctl_agent_jobs_total{status="dead_letter"}'
+        values: '0+1x15'
     alert_rule_test:
       - eval_time: 60m
         alertname: MctlAgentJobCostHigh
         exp_alerts: []
 
-  # T7: fires with the completions series ABSENT entirely. This is the case
-  # agy flagged as a P2 and it is the rule's headline scenario: spend
-  # continues while nothing completes. sum() over an absent series returns an
+  # T6b: stays silent for the opposite reason — the ratio is well over 0.10
+  # but hourly spend ($0.90) is under the $1.00 floor, so a near-idle window
+  # cannot page. This clause was raised from $0.50 in #596: observed p99 hourly
+  # spend is $0.482, which the old floor sat directly on top of.
+  - interval: 10m
+    input_series:
+      - series: 'mctl_agent_job_cost_usd_total{result="success"}'
+        values: '0+0.15x6'
+      - series: 'mctl_agent_jobs_total{status="ignored"}'
+        values: '0+1x6'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: MctlAgentJobCostHigh
+        exp_alerts: []
+
+  # T7: fires with every terminal-status series ABSENT entirely. This is the
+  # case agy flagged as a P2 and it is the rule's headline scenario: spend
+  # continues while nothing finishes. sum() over an absent series returns an
   # empty vector, not 0, so without `or vector(0)` in the denominator the
   # division yields an empty vector and this input produces no alert at all.
   # Deleting that guard makes this case fail.
@@ -210,8 +239,8 @@ tests:
               severity: warning
               service: mctl-telegram
             exp_annotations:
-              summary: "Communication-agent spend per completed job is high"
-              description: "Claude spend per completed communication-agent job over the last hour is above $0.50, with total spend in the window above $0.50. This is dollars per delivered outcome, not per attempt — a retry storm that spends without completing jobs raises this ratio. May render as +Inf when spend occurred with zero completions in the window; that is intended.\n"
+              summary: "Communication-agent spend per finished job is high"
+              description: "Claude spend per finished communication-agent job over the last hour is above $0.10, with total spend in the window above $1.00. This is dollars per job the agent finished — completed, ignored, failed or dead-lettered — not per attempt, so a retry storm that spends without finishing jobs raises this ratio. May render as +Inf when spend occurred with zero finished jobs in the window; that is intended.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentjobcosthigh"
 
   # T8: fires with the claim series ABSENT entirely — the denial-rule twin of
