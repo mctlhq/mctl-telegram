@@ -342,8 +342,8 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		//
 		// Throttled per account, not merely deduped per action. The
 		// per-action_id uniqueness inside InsertOwnerNotification only
-		// collapses redeliveries of the SAME draft; every new inbound message
-		// is a distinct action, and
+		// collapses redeliveries of the SAME draft; every new inbound
+		// message is a distinct action, and
 		// ingestion is gated on listener_enabled, never on autopilot_paused
 		// (internal/agent/listener). An account sitting in the documented
 		// bootstrap default (paused, listener on) would therefore queue one

@@ -1236,6 +1236,12 @@ func (s *Store) ListPendingOwnerNotifications(ctx context.Context, limit int) ([
 // accounts' approval-code notifications past position 50 and delay them.
 // See that function's own doc comment for the earlier starvation finding of
 // exactly this shape (agy/claude review on PR #582).
+//
+// Deliberately ignores status: pending, sent and failed rows all count. A
+// row that failed delivery means the channel to that owner is down, so
+// re-queueing sooner would not reach them either — and counting failures is
+// what keeps the bound honest during exactly the outage it exists to
+// protect against. Omitting the status filter is a choice, not an oversight.
 func (s *Store) HasOwnerNotificationSince(ctx context.Context, userID int64, kind string, since time.Time) (bool, error) {
 	if userID <= 0 {
 		return false, errors.New("user id required")
