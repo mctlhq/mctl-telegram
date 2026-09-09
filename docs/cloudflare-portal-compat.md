@@ -40,19 +40,23 @@ Produced by `go test ./internal/mcpprobe/` and reproduced by hand with the CLI.
 
 | path | discover | tools/list | read-only call | session | binding enforced |
 |---|---|---|---|---|---|
-| modern `2026-07-28` | PASS | PASS | PASS | none minted | PASS, all five negatives |
+| modern `2026-07-28` | PASS | PASS | PASS | none minted | PASS, all six negatives |
 | legacy `2025-06-18` | n/a | PASS | PASS | minted, required, any well-formed value accepted | n/a |
 
 Two findings worth stating plainly, because both contradict what was assumed before the probe existed:
 
 1. **The modern path already works, unchanged.** The server advertises `2026-07-28` and serves
    `server/discover` today. It mints no session identifier on that path, and it enforces the routing
-   headers: `initialize` is refused as a removed method, and a missing or mismatched `Mcp-Method` or
-   `Mcp-Name` is refused before the request reaches dispatch.
+   headers: `initialize` is refused as a removed method, and a missing `Mcp-Protocol-Version` or a
+   missing or mismatched `Mcp-Method` or `Mcp-Name` is refused before the request reaches dispatch.
 2. **The legacy path requires the session header, but not the issuer.** A request that carries no
    identifier is refused; a request carrying a well-formed identifier the server never issued is served.
    Validation is of shape, not existence. A router in front of this server must forward the header and
    need not pin a request to the process that issued it.
+3. **Restricting the advertised protocol versions does not disable the legacy path.** A server built with
+   only `2026-07-28` advertised still completed a full legacy session: `initialize` answered 200,
+   negotiated `2025-06-18`, minted a session and served `tools/call`. Retiring legacy is therefore a code
+   change, not a configuration flag. That work belongs to #568.
 
 ### `direct-deployed` — PENDING-OPERATOR
 

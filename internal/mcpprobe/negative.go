@@ -51,6 +51,21 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 	deleted := (*string)(nil)
 	mismatched := string(mcp.MethodPromptsList)
 
+	// The protocol version header is part of the same binding. A request
+	// whose metadata declares the modern version while the header is absent
+	// is self-contradictory, and a server that serves it anyway is not
+	// enforcing the version it claims to speak.
+	r.addNegative(expectRejection(ctx, c, Step{
+		Label:  "missing_protocol_version_header",
+		Method: string(mcp.MethodToolsList),
+	}, rpcRequest{
+		method:          mcp.MethodToolsList,
+		id:              next(),
+		modern:          true,
+		protocolVersion: version,
+		headerOverrides: map[string]*string{mcp.HeaderProtocolVersion: deleted},
+	}, ReasonHeaderMismatch))
+
 	r.addNegative(expectRejection(ctx, c, Step{
 		Label:  "missing_method_header",
 		Method: string(mcp.MethodToolsList),

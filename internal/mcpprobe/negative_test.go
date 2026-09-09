@@ -25,6 +25,7 @@ func TestModernNegatives_HeaderFaultsAreRejectedBeforeDispatch(t *testing.T) {
 	}
 
 	for _, label := range []string{
+		"missing_protocol_version_header",
 		"missing_method_header",
 		"mismatched_method_header",
 		"missing_name_header",

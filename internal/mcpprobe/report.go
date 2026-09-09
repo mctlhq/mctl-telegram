@@ -240,6 +240,7 @@ func mandatoryNegatives(mode Mode) []string {
 	}
 	return []string{
 		"modern_initialize_removed",
+		"missing_protocol_version_header",
 		"missing_method_header",
 		"mismatched_method_header",
 		"missing_name_header",
