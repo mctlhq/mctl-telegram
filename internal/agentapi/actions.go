@@ -341,18 +341,17 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		// successful propose_reply call (issue #581).
 		//
 		// Throttled per account, not merely deduped per action. The
-		// per-action_id uniqueness inside InsertOwnerNotification only
-		// collapses redeliveries of the SAME draft; every new inbound
-		// message is a distinct action, and
-		// ingestion is gated on listener_enabled, never on autopilot_paused
-		// (internal/agent/listener). An account sitting in the documented
-		// bootstrap default (paused, listener on) would therefore queue one
-		// alert per inbound DM forever — and owner_notifications is drained
-		// oldest-50 SYSTEM-WIDE, so that backlog delays other accounts'
+		// per-action_id uniqueness inside InsertOwnerNotification only collapses
+		// redeliveries of the SAME draft; every new inbound message is a
+		// distinct action, and ingestion is gated on listener_enabled, never on
+		// autopilot_paused (internal/agent/listener). An account sitting in the
+		// documented bootstrap default (paused, listener on) would therefore
+		// queue one alert per inbound DM forever — and owner_notifications is
+		// drained oldest-50 SYSTEM-WIDE, so that backlog delays other accounts'
 		// approval codes. The proposal's open question 3 asked whether to
-		// throttle and answered no on the grounds that Saved Messages is not
-		// a scarce channel; the scarce resource is the shared delivery
-		// batch, not the channel (claude review on PR #582).
+		// throttle and answered no on the grounds that Saved Messages is not a
+		// scarce channel; the scarce resource is the shared delivery batch, not
+		// the channel (claude review on PR #582).
 		//
 		// Check-then-insert, deliberately not transactional: two concurrent
 		// propose_reply calls for the same paused account can both observe
