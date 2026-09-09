@@ -32,7 +32,7 @@ Canary incidents are out of scope here; see
 - [Communication Agent operations](#communication-agent-operations)
 - [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
-- [MctlAgentJobCostHigh — communication-agent spend per completed job high](#mctlagentjobcosthigh)
+- [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
 
 ---
 
@@ -578,7 +578,7 @@ in effect when expected.
 ---
 
 <a id="mctlagentjobcosthigh"></a>
-## MctlAgentJobCostHigh — communication-agent spend per completed job high
+## MctlAgentJobCostHigh — communication-agent spend per finished job high
 
 The deployed rule for this alert lives in the `mctl-gitops` copy of
 `mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
@@ -588,49 +588,59 @@ is a non-deployed mirror kept only so this section's anchor is checked by
 ### Symptom
 
 - Alert `MctlAgentJobCostHigh` fires with severity **warning** when total
-  Claude spend divided by completed jobs over the last hour exceeds $0.50,
-  AND total spend in the window exceeds $0.50 (the absolute-spend floor).
+  Claude spend divided by finished jobs over the last hour exceeds $0.10,
+  AND total spend in the window exceeds $1.00 (the absolute-spend floor).
 - The numerator (`mctl_agent_job_cost_usd_total`) includes both
   `result="success"` and `result="error"` spend, because
   `ClaudeInvoker.recordCost` (`internal/agentworker/claudeinvoker.go:197`)
   runs before the CLI result's `is_error` check (`:199`) — a job that fails
   after spending still reports its cost.
-- The denominator is completed jobs
-  (`mctl_agent_jobs_total{status="completed"}`, `db.JobCompleted`) — dollars
-  per delivered outcome, not per attempt. Money burned on failed, retried, or
-  dead-lettered jobs raises this ratio; that is intended.
-- With nonzero spend and zero completions in the window, the ratio renders as
-  `+Inf`, which compares true and fires the alert. This is deliberate: paying
-  for nothing is worth a page.
-- $0.50/job is a provisional, unmeasured threshold: no cost figure exists
-  anywhere in this repository as observed data. Re-derive it from the first
-  week of real `mctl_agent_job_cost_usd_total` data, and if the operator sets
-  `AGENT_MAX_BUDGET_USD` (a per-invocation CLI cap that aggregates nothing —
-  never a substitute for this alert), keep this threshold below that cap so
-  the alert precedes the CLI's hard stop.
+- The denominator is every **terminal** job status — `completed`, `ignored`,
+  `failed`, `dead_letter` — so the ratio reads as dollars per job the agent
+  *finished*. `ignored` counts: the agent deciding no reply is warranted is a
+  normal outcome, and it costs money. Retries still raise the ratio, because a
+  retry increments `processing`, which is not terminal and is not counted here.
+- Until issue #596 the denominator was `completed` alone, on the argument that
+  it read as dollars per *delivered* outcome. That argument was sound and its
+  premise was false: `mctl_agent_jobs_total{status="completed"}` had never been
+  incremented on this deployment, so the denominator was permanently absent,
+  the ratio was `+Inf` on every evaluation, and the rule had degenerated into
+  "hourly spend > $0.50".
+- With nonzero spend and zero finished jobs in the window, the ratio still
+  renders as `+Inf`, which compares true and fires the alert. This is
+  deliberate: paying for nothing is worth a page.
+- Both thresholds are **measured**, from 7.3 h of real data on 2026-09-09:
+  $ per finished job ran p50 $0.0129 / p95 $0.0160 / p99 $0.0203, and hourly
+  spend ran p50 $0.165 / p95 $0.400 / p99 $0.482. $0.10 per job is ~5x that
+  p99; $1.00 per hour is ~2x. Re-derive after a full week, and after any
+  change to guarded-mode traffic (`intent_allowlist`, `sender_allowlist`,
+  listener scope) — those numbers describe one account's DM volume. If the
+  operator sets `AGENT_MAX_BUDGET_USD` (a per-invocation CLI cap that
+  aggregates nothing — never a substitute for this alert), keep the per-job
+  threshold below that cap so the alert precedes the CLI's hard stop.
 
 ### Likely causes
 
 - A retry storm: jobs failing and retrying repeatedly, each attempt spending
-  without ever reaching `completed`.
+  without ever reaching a terminal status.
 - A looping model burning tokens within a single job (the per-job
   `AGENT_MAX_BUDGET_USD` cap, if set, bounds this per invocation but not in
   aggregate).
 - Genuinely higher-complexity conversations in the window driving up
   per-job cost without any malfunction.
-- Very low completion volume in the window, making the ratio noisy — check
-  the absolute-spend floor is also clearing before treating this as
+- Very low volume of finished jobs in the window, making the ratio noisy —
+  check the absolute-spend floor is also clearing before treating this as
   significant.
 
 ### Diagnostic queries
 
-Spend per completed job and total spend, matching the alert's own
+Spend per finished job and total spend, matching the alert's own
 expression:
 
 ```promql
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
   /
-(sum(increase(mctl_agent_jobs_total{status="completed"}[1h])) or vector(0))
+(sum(increase(mctl_agent_jobs_total{status=~"^(completed|ignored|failed|dead_letter)$"}[1h])) or vector(0))
 
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
 ```
@@ -641,8 +651,9 @@ Split spend by result to see whether failed jobs are driving the cost:
 sum by (result) (increase(mctl_agent_job_cost_usd_total[1h]))
 ```
 
-Completion volume by status, to see whether jobs are failing/retrying instead
-of completing:
+Volume by status, to see whether jobs are failing/retrying instead of
+finishing — and, since `ignored` normally dominates here, whether the mix
+itself has shifted:
 
 ```promql
 sum by (status) (increase(mctl_agent_jobs_total[1h]))
@@ -660,8 +671,9 @@ sum by (status) (increase(mctl_agent_jobs_total[1h]))
 3. If a single account or conversation is responsible for a disproportionate
    share, pause that account specifically rather than closing the whole
    window.
-4. Re-derive the $0.50/job threshold once a week of real data exists, and
-   check it against `AGENT_MAX_BUDGET_USD` if set.
+4. Re-derive the $0.10/job and $1.00/hour thresholds once a full week of data
+   exists — the current values come from 7.3 h — and check the per-job one
+   against `AGENT_MAX_BUDGET_USD` if set.
 
 ### Escalation
 
