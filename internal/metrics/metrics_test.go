@@ -364,13 +364,41 @@ func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
 // Scanning the source is already an idiom here — docs/runbook_test.go regexes
 // this same file for mctl_[a-z_]+ metric names.
 func TestPolicySurfacesCoverEveryConstant(t *testing.T) {
-	src, err := os.ReadFile("metrics.go")
+	// Every .go file in the package, not just metrics.go: PolicySurface* is
+	// only conventionally declared there, and a guard that assumes the
+	// convention fails the moment someone follows a different one.
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("read metrics.go: %v", err)
+		t.Fatalf("read package dir: %v", err)
 	}
-	matches := regexp.MustCompile(`PolicySurface\w+\s+=\s+"([a-z_]+)"`).FindAllStringSubmatch(string(src), -1)
-	if len(matches) == 0 {
-		t.Fatal("found no PolicySurface* constants — the regex has drifted from the declaration style, which would make this guard silently vacuous")
+	var src []byte
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		src = append(src, b...)
+	}
+
+	// `[^"]+` rather than `[a-z_]+`, and an optional type between the name and
+	// the `=`. A narrow pattern goes vacuous in exactly the direction this test
+	// exists to catch: `PolicySurfaceFooV2 = "foo_v2"` (digit) or
+	// `PolicySurfaceFoo string = "foo"` would simply not match, never reach
+	// `declared`, and pass both loops while its 18 denial children went back to
+	// lazy creation. A value that is not a valid label is a different problem,
+	// and better seen as a failure here than as silence.
+	matches := regexp.MustCompile(`PolicySurface\w+\s+(?:\w+\s+)?=\s+"([^"]+)"`).FindAllStringSubmatch(string(src), -1)
+
+	// The count itself is the tripwire. `> 0` only fires when EVERY constant
+	// stops matching — a whole-block rewrite — while the realistic failure is
+	// one new constant in a slightly different style beside five that still
+	// match.
+	if len(matches) != len(policySurfaces) {
+		t.Fatalf("matched %d PolicySurface* declarations but policySurfaces has %d entries — either a constant is written in a style this regex does not match, or the slice and the declarations have drifted", len(matches), len(policySurfaces))
 	}
 
 	declared := map[string]bool{}
