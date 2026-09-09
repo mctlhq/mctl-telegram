@@ -138,14 +138,16 @@ type actionResponse struct {
 	ApprovalCode string   `json:"approval_code,omitempty"`
 }
 
-// handleProposeReply is POST /actions/propose_reply. There is deliberately no
-// peer parameter in the request: the peer is derived server-side from the
-// conversation row, so a caller can never direct a send anywhere the
-// listener didn't already establish a conversation.
 // pauseAlertWindow bounds how often an account is told that autopilot pause
 // withheld a reply. See the throttle in handleProposeReply for why an
 // unbounded stream is unsafe.
 const pauseAlertWindow = 6 * time.Hour
+
+// pauseAlertWindowText is pauseAlertWindow written for a human. time.Duration
+// renders as "6h0m0s", which has no place in a message the owner reads in
+// Saved Messages; keep the two in step by hand rather than pulling in a
+// formatter for one string.
+const pauseAlertWindowText = "6 hours"
 
 // hasReason reports whether the persisted "; "-joined reason list contains
 // want as a whole element. Deliberately not an equality check on the joined
@@ -161,6 +163,10 @@ func hasReason(joined, want string) bool {
 	return false
 }
 
+// handleProposeReply is POST /actions/propose_reply. There is deliberately no
+// peer parameter in the request: the peer is derived server-side from the
+// conversation row, so a caller can never direct a send anywhere the
+// listener didn't already establish a conversation.
 func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -381,7 +387,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			// and autopilot stays paused until re-enabled through the agent
 			// API. Naming an action the owner cannot take is the opposite of
 			// the actionability this issue exists to add.
-			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. Further withheld replies in the next %s will not repeat this notice.", peerLabel, pauseAlertWindow)
+			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. To keep this from repeating, no further alert of any kind will be raised for this account for %s.", peerLabel, pauseAlertWindowText)
 			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
 			}); nerr != nil {

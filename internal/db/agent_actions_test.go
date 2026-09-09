@@ -639,18 +639,6 @@ func TestUpsertJobLead_RejectsForeignConversation(t *testing.T) {
 	}
 }
 
-// TestHasOwnerNotificationSince_BothDirections pins that the throttle
-// predicate BOTH matches a recent row and stops matching once the window has
-// moved past it. The suppress direction alone cannot distinguish a working
-// throttle from one permanently stuck on "recent", which would silence the
-// pause alert forever after the first one (claude review P2 on PR #582).
-//
-// The comparison is not trivially safe: created_at is never written by Go —
-// it takes the column DEFAULT, which on SQLite is CURRENT_TIMESTAMP stored
-// as TEXT, while the bind is a driver-encoded time.Time. SQLite orders
-// operands of different storage classes by class before value, so this test
-// is what establishes that the two actually compare as timestamps here.
-// Postgres stores TIMESTAMPTZ and has no such hazard.
 // TestInsertOwnerNotification_IdempotentPerActionID pins the ON CONFLICT
 // (action_id) uniqueness directly. It used to be exercised end-to-end by
 // internal/agentapi's replay assertion, but the per-account pause-alert
@@ -694,6 +682,18 @@ func TestInsertOwnerNotification_IdempotentPerActionID(t *testing.T) {
 	}
 }
 
+// TestHasOwnerNotificationSince_BothDirections pins that the throttle
+// predicate BOTH matches a recent row and stops matching once the window has
+// moved past it. The suppress direction alone cannot distinguish a working
+// throttle from one permanently stuck on "recent", which would silence the
+// pause alert forever after the first one (claude review P2 on PR #582).
+//
+// The comparison is not trivially safe: created_at is never written by Go —
+// it takes the column DEFAULT, which on SQLite is CURRENT_TIMESTAMP stored
+// as TEXT, while the bind is a driver-encoded time.Time. SQLite orders
+// operands of different storage classes by class before value, so this test
+// is what establishes that the two actually compare as timestamps here.
+// Postgres stores TIMESTAMPTZ and has no such hazard.
 func TestHasOwnerNotificationSince_BothDirections(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

@@ -228,7 +228,7 @@ invocation.
 | `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |
 | `AGENT_TEST_CRASH_AFTER_RESERVE` | `false` | **TEST-ONLY.** Hard-exits the process (code 137) immediately after `send_random_id` is persisted and an action is CASed to `executing`, before the Telegram RPC — for the `random_id`/`RecoverStuck` crash-recovery drill. Every send handled by the pod is hit while set, not just a chosen one. Must never be `true` outside a deliberate, bounded drill window. |
 | profile `listener_enabled` | `false` | Per-account Telegram ingest switch. |
-| profile `autopilot_paused` | `true` on bootstrap | Per-account pause on autonomous recruiter-facing replies. Does not stop owner-facing notifications (send_owner_summary, request_owner_approval, or the per-draft pause alert) — issue #581. |
+| profile `autopilot_paused` | `true` on bootstrap | Per-account pause on autonomous recruiter-facing replies. Does not stop owner-facing notifications (send_owner_summary, request_owner_approval, or the throttled pause alert described above) — issue #581. |
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
 | worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
 
