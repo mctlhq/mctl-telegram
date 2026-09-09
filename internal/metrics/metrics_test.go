@@ -29,6 +29,10 @@ var expectedMetricNames = []string{
 	"mctl_telegram_replica_id",
 	"mctl_bridge_active_daemons",
 	"mctl_bridge_calls_total",
+	"mctl_agent_policy_denials_total",
+	"mctl_agent_job_cost_usd_total",
+	"mctl_agent_claude_result_errors_total",
+	"mctl_agent_credential_domain",
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
@@ -57,6 +61,10 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
 	reg.BridgeActiveDaemons.Set(0)
 	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
+	reg.AgentPolicyDenialsTotal.WithLabelValues("mode_off", "propose_reply").Add(0)
+	reg.AgentJobCostUSDTotal.WithLabelValues("success").Add(0)
+	reg.AgentClaudeResultErrorsTotal.WithLabelValues("other").Add(0)
+	reg.AgentCredentialDomain.WithLabelValues("test-domain").Set(1)
 
 	mfs, err := reg.Prometheus.Gather()
 	if err != nil {
@@ -156,5 +164,60 @@ mctl_telegram_replica_id{replica_id="pod-1"} 1
 `
 	if err := testutil.CollectAndCompare(reg.TelegramReplicaID, strings.NewReader(expected)); err != nil {
 		t.Errorf("CollectAndCompare: %v", err)
+	}
+}
+
+// TestNew_RegistersIssue580Metrics locks in the type and label-name set of
+// each of the four families this proposal adds. Deleting one of these names
+// from New()'s MustRegister block, or renaming a label, must fail this test.
+func TestNew_RegistersIssue580Metrics(t *testing.T) {
+	reg := New()
+	reg.AgentPolicyDenialsTotal.WithLabelValues("mode_off", "propose_reply").Inc()
+	reg.AgentJobCostUSDTotal.WithLabelValues("success").Add(0.01)
+	reg.AgentClaudeResultErrorsTotal.WithLabelValues("usage_limit").Inc()
+	reg.AgentCredentialDomain.WithLabelValues("acct-a").Set(1)
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	gathered := map[string]*dto.MetricFamily{}
+	for _, mf := range mfs {
+		gathered[mf.GetName()] = mf
+	}
+
+	cases := []struct {
+		name       string
+		wantType   dto.MetricType
+		wantLabels []string
+	}{
+		{"mctl_agent_policy_denials_total", dto.MetricType_COUNTER, []string{"reason", "surface"}},
+		{"mctl_agent_job_cost_usd_total", dto.MetricType_COUNTER, []string{"result"}},
+		{"mctl_agent_claude_result_errors_total", dto.MetricType_COUNTER, []string{"class"}},
+		{"mctl_agent_credential_domain", dto.MetricType_GAUGE, []string{"domain_id"}},
+	}
+	for _, c := range cases {
+		mf, ok := gathered[c.name]
+		if !ok {
+			t.Fatalf("metric family %q not found in gathered output", c.name)
+		}
+		if mf.GetType() != c.wantType {
+			t.Errorf("%s: type = %v, want %v", c.name, mf.GetType(), c.wantType)
+		}
+		if len(mf.GetMetric()) == 0 {
+			t.Fatalf("%s: no series gathered", c.name)
+		}
+		gotLabels := map[string]bool{}
+		for _, lp := range mf.GetMetric()[0].GetLabel() {
+			gotLabels[lp.GetName()] = true
+		}
+		if len(gotLabels) != len(c.wantLabels) {
+			t.Errorf("%s: label set = %v, want %v", c.name, gotLabels, c.wantLabels)
+		}
+		for _, want := range c.wantLabels {
+			if !gotLabels[want] {
+				t.Errorf("%s: missing label %q, got %v", c.name, want, gotLabels)
+			}
+		}
 	}
 }

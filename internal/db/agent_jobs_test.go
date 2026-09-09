@@ -309,6 +309,82 @@ func TestCompleteAgentJobWithResult_PreservesLeadAssociationAcrossUpserts(t *tes
 	}
 }
 
+// TestRecordAgentJobCost_SetsValueForMatchingAttempt covers T9: a call
+// fenced on the correct claim attempt persists the cost and leaves it
+// readable via GetAgentJob as a valid (non-NULL) value.
+func TestRecordAgentJobCost_SetsValueForMatchingAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "cost-owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:cost")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	attempt := claimed[0].Attempts
+
+	if err := s.RecordAgentJobCost(ctx, uid, jid, attempt, 0.42); err != nil {
+		t.Fatalf("record cost: %v", err)
+	}
+	job, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !job.CostUSD.Valid || job.CostUSD.Float64 != 0.42 {
+		t.Fatalf("CostUSD = %+v, want valid 0.42", job.CostUSD)
+	}
+}
+
+// TestRecordAgentJobCost_StaleAttemptReturnsNotFoundAndLeavesValueUntouched
+// covers T9's stale-attempt case: dropping the "attempts = $attempt"
+// predicate would let a stale worker whose claim was requeued and re-claimed
+// overwrite a newer attempt's recorded cost — this asserts both the error
+// and that the previously-recorded value survives the rejected call.
+func TestRecordAgentJobCost_StaleAttemptReturnsNotFoundAndLeavesValueUntouched(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "cost-owner-2")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:cost-2")
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	attempt := claimed[0].Attempts
+	if err := s.RecordAgentJobCost(ctx, uid, jid, attempt, 1.23); err != nil {
+		t.Fatalf("record cost: %v", err)
+	}
+
+	if err := s.RecordAgentJobCost(ctx, uid, jid, attempt-1, 9.99); !errors.Is(err, ErrAgentJobNotFound) {
+		t.Fatalf("stale attempt err = %v, want ErrAgentJobNotFound", err)
+	}
+
+	job, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !job.CostUSD.Valid || job.CostUSD.Float64 != 1.23 {
+		t.Fatalf("CostUSD after rejected stale write = %+v, want unchanged valid 1.23", job.CostUSD)
+	}
+}
+
+// TestRecordAgentJobCost_UnreportedJobKeepsCostUSDInvalid covers T9's third
+// case: a job that never had its cost reported must keep CostUSD.Valid ==
+// false (SQL NULL), never a false 0.
+func TestRecordAgentJobCost_UnreportedJobKeepsCostUSDInvalid(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "cost-owner-3")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:cost-3")
+
+	job, err := s.GetAgentJob(ctx, uid, jid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if job.CostUSD.Valid {
+		t.Fatalf("CostUSD.Valid = true for a never-reported job, want false")
+	}
+}
+
 func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)

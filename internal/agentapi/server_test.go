@@ -179,6 +179,7 @@ func TestHandlers_RequireAuth(t *testing.T) {
 		{"POST", "/notify/summary"},
 		{"POST", "/autopilot/pause"},
 		{"POST", "/jobs/1/complete"},
+		{"POST", "/jobs/1/cost"},
 	} {
 		rec := h.doAnon(tc.method, tc.path)
 		if rec.Code != http.StatusUnauthorized {

@@ -128,6 +128,56 @@ type Registry struct {
 	// single persistently-failing retry from inflating this past the actual
 	// number of distinct restart episodes (Codex finding on #307).
 	AgentExecutorRestartsTotal prometheus.Counter
+
+	// AgentPolicyDenialsTotal counts hard policy denials, labeled by the
+	// closed-set denial code (policy.DenyCode, never the free-text reason —
+	// three of those interpolate a runtime value via strconv.Quote and would
+	// otherwise make label cardinality unbounded) and the call site that
+	// consumed the decision (one of PolicySurface*). Deliberately NOT
+	// labeled by account, conversation or peer: those become cardinality
+	// and, for peers, personal data. Bound: 18 codes (17 + "unknown") x 4
+	// surfaces = 72 series, all compile-time fixed.
+	AgentPolicyDenialsTotal *prometheus.CounterVec // {reason, surface}
+
+	// AgentJobCostUSDTotal is monotonic total Claude spend attributed to
+	// agent jobs, labeled by whether the CLI's own result reported
+	// is_error. Recorded before CheckResult so a job that fails afterwards
+	// still reports its spend. Bound: 2 series (success, error).
+	AgentJobCostUSDTotal *prometheus.CounterVec // {result}
+
+	// AgentClaudeResultErrorsTotal counts CheckResult errors consumed by
+	// ClaudeInvoker.Run, labeled by whether the error was classified as a
+	// usage-limit/quota condition or something else. Bound: 2 series
+	// (usage_limit, other).
+	AgentClaudeResultErrorsTotal *prometheus.CounterVec // {class}
+
+	// AgentCredentialDomain is an info-type gauge (constant value 1) set
+	// once at agent-worker startup, labeled by the operator-configured
+	// AGENT_CREDENTIAL_DOMAIN_ID — following the TelegramReplicaID
+	// precedent. Bound: one series per running worker replica's configured
+	// domain id, a small deployment-time constant, never a Telegram id,
+	// username, peer, or the credential itself.
+	AgentCredentialDomain *prometheus.GaugeVec // {domain_id}
+}
+
+// Policy-denial surfaces — the call site that consumed a policy.Deny
+// decision. Used as the "surface" label on AgentPolicyDenialsTotal.
+const (
+	PolicySurfaceProposeReply    = "propose_reply"
+	PolicySurfaceOwnerNotify     = "owner_notify"
+	PolicySurfaceExecutorSend    = "executor_send"
+	PolicySurfaceExecutorRecover = "executor_recover"
+)
+
+// CountPolicyDenial increments AgentPolicyDenialsTotal for the given
+// closed-set denial reason code and consuming surface, so call sites do not
+// need to repeat the label order. Nil-safe: a nil *Registry is a no-op,
+// matching every other optional-metrics call site in this codebase.
+func (r *Registry) CountPolicyDenial(reason, surface string) {
+	if r == nil {
+		return
+	}
+	r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Inc()
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -306,6 +356,26 @@ func New() *Registry {
 		Help: "Actions observed stuck in executing for the first time (not counted again on later sweeps while still stuck).",
 	})
 
+	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_policy_denials_total",
+		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 4 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
+	}, []string{"reason", "surface"})
+
+	r.AgentJobCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_job_cost_usd_total",
+		Help: "Total Claude spend (total_cost_usd) attributed to communication-agent jobs, labeled by result (bounded: success, error). Recorded before the job's is_error check, so a job that fails afterwards still reports its spend.",
+	}, []string{"result"})
+
+	r.AgentClaudeResultErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_claude_result_errors_total",
+		Help: "Total CheckResult errors observed by ClaudeInvoker.Run, labeled by class (bounded: usage_limit, other).",
+	}, []string{"class"})
+
+	r.AgentCredentialDomain = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "mctl_agent_credential_domain",
+		Help: "Info gauge (always 1) identifying the credential domain an agent-worker replica is running against. Label domain_id is sourced from AGENT_CREDENTIAL_DOMAIN_ID, a non-secret operator-chosen identifier (e.g. a Vault path or account label) bounded to 128 characters of [A-Za-z0-9._:/-].",
+	}, []string{"domain_id"})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
@@ -335,6 +405,10 @@ func New() *Registry {
 		r.AgentActionsExecutingStuck,
 		r.AgentApprovalLatencySeconds,
 		r.AgentExecutorRestartsTotal,
+		r.AgentPolicyDenialsTotal,
+		r.AgentJobCostUSDTotal,
+		r.AgentClaudeResultErrorsTotal,
+		r.AgentCredentialDomain,
 	)
 	return r
 }

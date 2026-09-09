@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // version is set via -ldflags "-X main.version=..." at build time (see
@@ -69,6 +71,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// A worker must never run unattributably against an unknown quota pool —
+	// this is required (not optional) so a claim of quota isolation between
+	// deployments has a machine-checkable counterpart. See docs/agent-worker.md
+	// for the rollout ordering this implies (set the value before rolling
+	// the image).
+	credentialDomainID, err := requireEnv("AGENT_CREDENTIAL_DOMAIN_ID")
+	if err != nil {
+		return err
+	}
+	if err := validateDomainID(credentialDomainID); err != nil {
+		return err
+	}
 
 	self, err := os.Executable()
 	if err != nil {
@@ -80,6 +94,9 @@ func run() error {
 		return err
 	}
 
+	m := metrics.New()
+	m.AgentCredentialDomain.WithLabelValues(credentialDomainID).Set(1)
+
 	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
 	invoker := &agentworker.ClaudeInvoker{
 		ClaudeBin:    os.Getenv("AGENT_CLAUDE_BIN"),
@@ -88,6 +105,7 @@ func run() error {
 		APIToken:     apiToken,
 		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 		MaxBudgetUSD: maxBudgetUSD,
+		Metrics:      m,
 	}
 	health := &agentworker.Health{}
 	worker := agentworker.NewWorker(client, invoker).WithHealth(health)
@@ -106,7 +124,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("start health server: listen on %s: %w", healthAddr, err)
 	}
-	healthSrv := newHealthServer(healthAddr, health)
+	healthSrv := newHealthServer(healthAddr, health, m, credentialDomainID, os.Getenv("AGENT_METRICS_ALLOW_CIDR"))
 	healthErrCh := make(chan error, 1)
 	go func() {
 		if err := healthSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -197,6 +215,22 @@ func requireEnv(key string) (string, error) {
 		return "", errors.New(key + " is required")
 	}
 	return v, nil
+}
+
+// domainIDPattern bounds AGENT_CREDENTIAL_DOMAIN_ID to a shape safe for use
+// as a Prometheus label value: no whitespace, no quotes, nothing a pasted
+// credential or a free-text blob would accidentally satisfy.
+var domainIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,128}$`)
+
+// validateDomainID rejects a credential-domain identifier containing
+// characters outside [A-Za-z0-9._:/-] or exceeding 128 characters. This is a
+// non-secret operator-chosen label (e.g. a Vault path or account label),
+// never the credential itself.
+func validateDomainID(id string) error {
+	if !domainIDPattern.MatchString(id) {
+		return errors.New("AGENT_CREDENTIAL_DOMAIN_ID must match [A-Za-z0-9._:/-]{1,128}")
+	}
+	return nil
 }
 
 // envFloat fails loudly on a set-but-unparseable value rather than silently

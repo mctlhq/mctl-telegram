@@ -3,6 +3,7 @@ package agentworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -261,6 +262,45 @@ func TestClient_CompleteJob_FallsBackToLegacyShape(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+// TestClient_ReportJobCost_SendsAttemptAndCost covers T8: the request body
+// and path shape for the worker-only cost report.
+func TestClient_ReportJobCost_SendsAttemptAndCost(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeJSONFixture(w, map[string]any{"recorded": true})
+	})
+	if err := client.ReportJobCost(context.Background(), 42, 2, 0.37); err != nil {
+		t.Fatalf("ReportJobCost: %v", err)
+	}
+	if gotPath != "/jobs/42/cost" {
+		t.Fatalf("path = %q, want /jobs/42/cost", gotPath)
+	}
+	if gotBody["attempt"].(float64) != 2 {
+		t.Fatalf("attempt = %#v, want 2", gotBody["attempt"])
+	}
+	if gotBody["cost_usd"].(float64) != 0.37 {
+		t.Fatalf("cost_usd = %#v, want 0.37", gotBody["cost_usd"])
+	}
+}
+
+// TestClient_ReportJobCost_SurfacesAPIError covers T8's non-2xx requirement.
+func TestClient_ReportJobCost_SurfacesAPIError(t *testing.T) {
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"job is no longer claimed under that attempt"}`, http.StatusConflict)
+	})
+	err := client.ReportJobCost(context.Background(), 42, 1, 0.1)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", apiErr.StatusCode)
 	}
 }
 

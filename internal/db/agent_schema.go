@@ -142,6 +142,15 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"BIGINT", "INTEGER"); err != nil {
 		return err
 	}
+	// agent_jobs.cost_usd: total Claude spend for the last reported attempt
+	// (issue-580). Deliberately NO DEFAULT — an existing row must be NULL
+	// ("we never measured this job"), which a DEFAULT 0 would silently turn
+	// into "this job was free" and understate spend on every pre-existing
+	// row.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "cost_usd",
+		"DOUBLE PRECISION", "REAL"); err != nil {
+		return err
+	}
 
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can bind a lead-only result. Unlike the columns
@@ -435,6 +444,7 @@ func agentSchemaSQLite() []string {
 			last_error TEXT,
 			result_action_id INTEGER,
 			result_lead_id INTEGER,
+			cost_usd REAL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -646,6 +656,7 @@ func agentSchemaPG() []string {
 			last_error TEXT,
 			result_action_id BIGINT,
 			result_lead_id BIGINT,
+			cost_usd DOUBLE PRECISION,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

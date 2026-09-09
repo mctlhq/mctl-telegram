@@ -3,6 +3,7 @@ package agentworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -322,5 +323,156 @@ func TestCheckResult_ExcludesResultTextFromError(t *testing.T) {
 func TestParseClaudeResult_MalformedJSONIsAnError(t *testing.T) {
 	if _, err := ParseClaudeResult([]byte("not json")); err == nil {
 		t.Fatal("expected an error for malformed stdout")
+	}
+}
+
+// TestParseClaudeResult_TotalCostUSD_DistinguishesAbsentFromZero is the
+// explicit "exercised with a payload that actually lacks the field, not
+// merely a zero value" requirement: a missing key and a JSON null must both
+// yield nil, while an explicit 0 must yield a non-nil pointer to 0. Reverting
+// TotalCostUSD to a plain float64 makes the first two cases indistinguishable
+// from the third and fails this test.
+func TestParseClaudeResult_TotalCostUSD_DistinguishesAbsentFromZero(t *testing.T) {
+	t.Run("key absent", func(t *testing.T) {
+		res, err := ParseClaudeResult([]byte(`{"type":"result","subtype":"success","is_error":false}`))
+		if err != nil {
+			t.Fatalf("ParseClaudeResult: %v", err)
+		}
+		if res.TotalCostUSD != nil {
+			t.Fatalf("TotalCostUSD = %v, want nil when the key is absent", *res.TotalCostUSD)
+		}
+	})
+	t.Run("explicit null", func(t *testing.T) {
+		res, err := ParseClaudeResult([]byte(`{"type":"result","subtype":"success","is_error":false,"total_cost_usd":null}`))
+		if err != nil {
+			t.Fatalf("ParseClaudeResult: %v", err)
+		}
+		if res.TotalCostUSD != nil {
+			t.Fatalf("TotalCostUSD = %v, want nil for JSON null", *res.TotalCostUSD)
+		}
+	})
+	t.Run("explicit zero", func(t *testing.T) {
+		res, err := ParseClaudeResult([]byte(`{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0}`))
+		if err != nil {
+			t.Fatalf("ParseClaudeResult: %v", err)
+		}
+		if res.TotalCostUSD == nil {
+			t.Fatal("TotalCostUSD = nil, want a non-nil pointer to 0 for an explicit 0 value")
+		}
+		if *res.TotalCostUSD != 0 {
+			t.Fatalf("TotalCostUSD = %v, want 0", *res.TotalCostUSD)
+		}
+	})
+}
+
+// TestCheckResult_ClassifiesUsageLimitSubtypes covers T6: a usage-limit
+// subtype must satisfy errors.Is for BOTH ErrClaudeUsageLimit and the
+// general ErrClaudeReportedError, and must never leak res.Result text.
+// Unrelated is_error subtypes must satisfy only the general sentinel.
+// Widening the match to any is_error result (not just a usage-limit
+// subtype) fails the unrelated-fixture cases below.
+func TestCheckResult_ClassifiesUsageLimitSubtypes(t *testing.T) {
+	usageLimitCases := []string{
+		"usage_limit", "rate_limit_error", "quota_exceeded",
+		"credit_balance_too_low", "insufficient_credits", "USAGE_LIMIT_REACHED",
+	}
+	for _, subtype := range usageLimitCases {
+		t.Run(subtype, func(t *testing.T) {
+			const secret = "my SSN is 123-45-6789, please don't tell anyone"
+			res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: true, Result: secret}
+			err := CheckResult(res)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !errors.Is(err, ErrClaudeUsageLimit) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrClaudeUsageLimit)", err)
+			}
+			if !errors.Is(err, ErrClaudeReportedError) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrClaudeReportedError) too", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("err = %q, must not contain the raw result text", err.Error())
+			}
+		})
+	}
+
+	unrelatedCases := []string{"error_max_turns", "error_during_execution"}
+	for _, subtype := range unrelatedCases {
+		t.Run(subtype, func(t *testing.T) {
+			res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: true}
+			err := CheckResult(res)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !errors.Is(err, ErrClaudeReportedError) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrClaudeReportedError)", err)
+			}
+			if errors.Is(err, ErrClaudeUsageLimit) {
+				t.Fatalf("err = %v, must NOT match ErrClaudeUsageLimit for an unrelated subtype", err)
+			}
+		})
+	}
+}
+
+// TestWorker_Loop_TreatsUsageLimitAndGenericErrorsIdentically locks in that
+// Worker.Loop's retry/backoff/dead-letter-adjacent behaviour (it has none of
+// its own — see worker.go's doc comment; this only asserts the loop keeps
+// polling, applies no extra sleep, and returns nil on ctx cancel) is
+// byte-for-byte identical whether Runner.Run returns a usage-limit error or
+// a generic ErrClaudeReportedError. Adding any early return or extra backoff
+// for the usage-limit class fails this test.
+func TestWorker_Loop_TreatsUsageLimitAndGenericErrorsIdentically(t *testing.T) {
+	usageLimitErr := fmt.Errorf("job 1: %w: subtype=usage_limit (result: 0 bytes, see run logs)", ErrClaudeUsageLimit)
+	genericErr := fmt.Errorf("job 2: %w: subtype=error_max_turns (result: 0 bytes, see run logs)", ErrClaudeReportedError)
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"usage_limit", usageLimitErr},
+		{"generic", genericErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poller := &fakePoller{results: []pollResult{
+				{jobs: []JobEnvelope{{JobID: 1}}},
+				{jobs: []JobEnvelope{{JobID: 2}}},
+				{jobs: nil},
+			}}
+			runner := &fakeRunner{toErr: tc.err}
+			health := &Health{}
+			w := NewWorker(poller, runner).WithHealth(health)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			var loopErr error
+			go func() {
+				loopErr = w.Loop(ctx)
+				close(done)
+			}()
+
+			deadline := time.Now().Add(2 * time.Second)
+			for atomic.LoadInt32(&runner.ran) < 2 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Loop did not exit after cancel")
+			}
+
+			if loopErr != nil {
+				t.Fatalf("Loop err = %v, want nil on an ordinary ctx-cancel shutdown", loopErr)
+			}
+			if errors.Is(loopErr, ErrFatalAuth) {
+				t.Fatal("Loop must never treat a CheckResult-class error as fatal auth")
+			}
+			if health.Alive() {
+				t.Fatal("health.Alive() after Loop returned = true, want false")
+			}
+			if atomic.LoadInt32(&runner.ran) < 2 {
+				t.Fatalf("runner.ran = %d, want at least 2 (loop must keep polling and running jobs after a CheckResult-class error)", runner.ran)
+			}
+		})
 	}
 }

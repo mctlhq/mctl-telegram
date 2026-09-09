@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // mcpConfigTempFile writes cfg to a 0600 temp file and returns its path.
@@ -75,6 +78,10 @@ type ClaudeInvoker struct {
 	// MaxBudgetUSD, if > 0, is passed as --max-budget-usd so a single job
 	// cannot spend past this even if the model loops.
 	MaxBudgetUSD float64
+	// Metrics is optional (nil is a no-op, matching every other optional
+	// registry field in this codebase) — when set, Run records the parsed
+	// job cost and CheckResult error class onto it.
+	Metrics *metrics.Registry
 }
 
 // mcpConfig is the JSON shape `claude --mcp-config` expects for an inline
@@ -183,7 +190,13 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	if parseErr != nil {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
+	client := NewClient(c.APIBaseURL, c.APIToken, nil)
+	// Recorded BEFORE CheckResult so a job that fails the check below still
+	// reports what it spent — spend telemetry must not be gated on the run
+	// having succeeded.
+	c.recordCost(ctx, client, job, res)
 	if err := CheckResult(res); err != nil {
+		c.countResultError(err)
 		return err
 	}
 
@@ -193,7 +206,7 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	// instead. Requiring the same attempt preserves the claim fencing used by
 	// complete_agent_job and prevents a stale invocation from taking credit
 	// for a newer worker's completion.
-	status, err := NewClient(c.APIBaseURL, c.APIToken, nil).GetJobStatus(ctx, job.JobID)
+	status, err := client.GetJobStatus(ctx, job.JobID)
 	if err != nil {
 		return fmt.Errorf("verify job %d completion: %w", job.JobID, err)
 	}
@@ -202,6 +215,42 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 			ErrAgentDidNotCompleteJob, job.JobID, status.JobID, status.Status, status.Attempt, job.Attempt)
 	}
 	return nil
+}
+
+// recordCost is a no-op when either c.Metrics is nil or res.TotalCostUSD is
+// nil (the claude result carried no total_cost_usd key, or it was JSON
+// null — nothing was actually observed to report). Otherwise it increments
+// mctl_agent_job_cost_usd_total, labeled by whether the CLI's own result
+// reported is_error, and best-effort reports the same figure to the agent
+// API so it lands on the job row's cost_usd column. A failure to report is
+// logged as a warning and never changes Run's return value — spend
+// telemetry must not be able to fail a job.
+func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobEnvelope, res *ClaudeResult) {
+	if c.Metrics == nil || res == nil || res.TotalCostUSD == nil {
+		return
+	}
+	result := "success"
+	if res.IsError {
+		result = "error"
+	}
+	c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(*res.TotalCostUSD)
+	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, *res.TotalCostUSD); err != nil {
+		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
+	}
+}
+
+// countResultError increments mctl_agent_claude_result_errors_total for a
+// CheckResult error, classifying it as usage_limit or other. No-op on a nil
+// registry.
+func (c *ClaudeInvoker) countResultError(err error) {
+	if c.Metrics == nil || err == nil {
+		return
+	}
+	class := "other"
+	if errors.Is(err, ErrClaudeUsageLimit) {
+		class = "usage_limit"
+	}
+	c.Metrics.AgentClaudeResultErrorsTotal.WithLabelValues(class).Inc()
 }
 
 // jobPrompt is deliberately minimal AND deliberately job-identity-free: the

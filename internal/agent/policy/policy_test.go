@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,97 @@ func TestEvaluate_DenyRules(t *testing.T) {
 				t.Fatalf("decision = %s (%v), want deny", got.Decision, got.Reasons)
 			}
 		})
+	}
+}
+
+// TestEvaluate_DenyCodes asserts that every deny(...) path returns the
+// expected closed-set DenyCode, and that the set of codes actually returned
+// across the table equals the exported constant set minus DenyUnknown (the
+// fallback is never supposed to be reachable from a real Evaluate call).
+// Swapping any two codes at their deny sites makes this fail.
+func TestEvaluate_DenyCodes(t *testing.T) {
+	cases := []struct {
+		name     string
+		mutate   func(*Input)
+		wantCode DenyCode
+	}{
+		{"global kill", func(in *Input) { in.GlobalKill = true }, DenyGlobalKill},
+		{"profile conversation user mismatch", func(in *Input) { in.Conversation.UserID = in.Profile.UserID + 1 }, DenyUserMismatch},
+		{"mode off", func(in *Input) { in.Profile.Mode = db.AgentModeOff }, DenyModeOff},
+		{"unknown mode", func(in *Input) { in.Profile.Mode = "guard" }, DenyModeUnrecognized},
+		{"autopilot paused", func(in *Input) { in.Profile.AutopilotPaused = true }, DenyAutopilotPaused},
+		{"taken over", func(in *Input) { in.Conversation.State = db.ConversationTakenOver }, DenyConvTakenOver},
+		{"closed", func(in *Input) { in.Conversation.State = db.ConversationClosed }, DenyConvClosed},
+		{"paused", func(in *Input) { in.Conversation.State = db.ConversationPaused }, DenyConvPaused},
+		{"unknown state", func(in *Input) { in.Conversation.State = "paussed" }, DenyConvStateUnknown},
+		{"blocked sender", func(in *Input) { in.Profile.BlockedSenders = "111,555,222" }, DenySenderBlocked},
+		{"unknown action", func(in *Input) { in.Action.Type = "save_job_lead" }, DenyActionTypeUnknown},
+		{"peer mismatch", func(in *Input) { in.Action.PeerTGID = 999 }, DenyPeerMismatch},
+		{"no disclosure", func(in *Input) { in.Profile.DisclosureText = " \n\t" }, DenyNoDisclosure},
+		{"empty reply", func(in *Input) { in.Action.Text = "   " }, DenyEmptyReply},
+		{"too long", func(in *Input) { in.Action.Text = repeatRune(1201) }, DenyReplyTooLong},
+		{"url scheme", func(in *Input) { in.Action.Text = "see https://evil.example/x" }, DenyReplyURL},
+		{"card", func(in *Input) { in.Action.Text = "my card is 4111 1111 1111 1111" }, DenyReplyCredentials},
+	}
+
+	seen := map[DenyCode]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInput()
+			tc.mutate(&in)
+			got := Evaluate(in)
+			if got.Decision != Deny {
+				t.Fatalf("decision = %s (%v), want deny", got.Decision, got.Reasons)
+			}
+			if got.DenyCode() != tc.wantCode {
+				t.Fatalf("DenyCode() = %s, want %s", got.DenyCode(), tc.wantCode)
+			}
+			if got.Code != tc.wantCode {
+				t.Fatalf("Code = %s, want %s", got.Code, tc.wantCode)
+			}
+			seen[tc.wantCode] = true
+		})
+	}
+
+	allCodes := []DenyCode{
+		DenyGlobalKill, DenyUserMismatch, DenyModeOff, DenyModeUnrecognized,
+		DenyAutopilotPaused, DenyConvTakenOver, DenyConvClosed, DenyConvPaused,
+		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
+		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
+		DenyReplyURL, DenyReplyCredentials,
+	}
+	for _, c := range allCodes {
+		if !seen[c] {
+			t.Errorf("DenyCode %q from the exported constant set is never exercised by this table", c)
+		}
+	}
+	if seen[DenyUnknown] {
+		t.Error("DenyUnknown must never be produced by a real Evaluate call")
+	}
+}
+
+// TestResult_DenyCode_FallsBackToUnknown covers the accessor's degrade path:
+// a Result with an empty Code (e.g. a future deny site that forgets to set
+// one) must report DenyUnknown rather than an empty label value.
+func TestResult_DenyCode_FallsBackToUnknown(t *testing.T) {
+	r := Result{Decision: Deny}
+	if got := r.DenyCode(); got != DenyUnknown {
+		t.Fatalf("DenyCode() = %q, want %q", got, DenyUnknown)
+	}
+}
+
+// TestEvaluate_Deterministic asserts Evaluate is a pure function: called
+// twice with the same Input it returns an identical Result, and it takes no
+// metrics registry or other side-effecting dependency to call at all (a
+// property enforced at compile time by Evaluate's signature, not just by
+// this test).
+func TestEvaluate_Deterministic(t *testing.T) {
+	in := baseInput()
+	first := Evaluate(in)
+	second := Evaluate(in)
+	if first.Decision != second.Decision || first.DenyCode() != second.DenyCode() ||
+		strings.Join(first.Reasons, ";") != strings.Join(second.Reasons, ";") {
+		t.Fatalf("Evaluate is not deterministic: first=%+v second=%+v", first, second)
 	}
 }
 

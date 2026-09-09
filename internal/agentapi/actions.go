@@ -10,6 +10,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // maxApprovalCodeAttempts bounds the retry loop on the astronomically rare
@@ -214,6 +215,9 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		GlobalKill:       s.globalKill(),
 		Now:              time.Now(),
 	})
+	if result.Decision == policy.Deny {
+		s.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceProposeReply)
+	}
 
 	base := db.AgentAction{
 		JobID: req.JobID, Attempt: req.Attempt, ConversationID: req.ConversationID, UserID: id.UserID,
@@ -431,6 +435,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		Action:     policy.Action{Type: actionType, Intent: req.Intent, Text: req.Text},
 		GlobalKill: s.globalKill(), Now: time.Now(),
 	})
+	if result.Decision == policy.Deny {
+		s.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceOwnerNotify)
+	}
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
 	// ONLY after the global gates (kill switch, mode==off, autopilot paused)

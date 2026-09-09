@@ -123,4 +123,8 @@ func (s *Server) Register(mux registrar) {
 	mux.Post("/autopilot/pause", s.handleAutopilotPause)
 	mux.Post("/jobs/claim", s.handleClaimJobs)
 	mux.Post("/jobs/{id}/complete", s.handleJobComplete)
+	// Worker-only cost report — deliberately absent from allowedTools and
+	// NewMCPServer's tool list (internal/agentworker) so the model can never
+	// assert its own spend. See handleReportJobCost's doc comment.
+	mux.Post("/jobs/{id}/cost", s.handleReportJobCost)
 }

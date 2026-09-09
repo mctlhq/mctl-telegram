@@ -369,6 +369,59 @@ func TestExecutor_Approve_TakeoverDeniesAtSendTime(t *testing.T) {
 	}
 }
 
+// TestExecutor_Send_DenyIncrementsPolicyDenialCounter asserts a hard
+// send-time Deny increments AgentPolicyDenialsTotal labeled by the exact
+// DenyCode and surface="executor_send" by exactly 1, and that neither a
+// successful send nor a RequireApproval-only escalation touches it.
+func TestExecutor_Send_DenyIncrementsPolicyDenialCounter(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+
+	exec.GlobalKill = func() bool { return true }
+	before := testutil.ToFloat64(exec.m.AgentPolicyDenialsTotal.WithLabelValues(
+		string(policy.DenyGlobalKill), metrics.PolicySurfaceExecutorSend))
+	if err := exec.Approve(ctx, uid, code); err == nil {
+		t.Fatal("expected policy-deny error")
+	}
+	after := testutil.ToFloat64(exec.m.AgentPolicyDenialsTotal.WithLabelValues(
+		string(policy.DenyGlobalKill), metrics.PolicySurfaceExecutorSend))
+	if after != before+1 {
+		t.Fatalf("AgentPolicyDenialsTotal{reason=%s,surface=executor_send} = %v, want %v",
+			policy.DenyGlobalKill, after, before+1)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+}
+
+// TestExecutor_Send_AllowDoesNotIncrementPolicyDenialCounter guards the
+// Decision == Deny guard: a successful send must not touch the counter.
+func TestExecutor_Send_AllowDoesNotIncrementPolicyDenialCounter(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+	_, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	mfs, err := exec.m.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "mctl_agent_policy_denials_total" {
+			for _, sample := range mf.GetMetric() {
+				if sample.GetCounter().GetValue() > 0 {
+					t.Fatalf("policy denial counter incremented for a non-deny decision: %+v", sample)
+				}
+			}
+		}
+	}
+}
+
 func TestExecutor_SendGateBlocksFreshAndRecoveryRPCs(t *testing.T) {
 	exec, sender, store, uid, conv := newTestExecutor(t)
 	ctx := context.Background()
@@ -835,6 +888,83 @@ func TestExecutor_RecoverStuck_KillSwitchDeniesInsteadOfRetrying(t *testing.T) {
 	}
 	if action.Status != db.ActionDenied {
 		t.Fatalf("status = %q, want denied", action.Status)
+	}
+}
+
+// TestExecutor_RecoverStuck_DenyIncrementsPolicyDenialCounter is the
+// crash-recovery counterpart of TestExecutor_Send_DenyIncrementsPolicyDenialCounter:
+// a hard Deny found by recoverOne's policy re-check increments
+// AgentPolicyDenialsTotal labeled surface="executor_recover".
+func TestExecutor_RecoverStuck_DenyIncrementsPolicyDenialCounter(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+	actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+	}
+	reserveActionForRecovery(t, store, uid, actionID, 99, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
+
+	exec.GlobalKill = func() bool { return true }
+	before := testutil.ToFloat64(exec.m.AgentPolicyDenialsTotal.WithLabelValues(
+		string(policy.DenyGlobalKill), metrics.PolicySurfaceExecutorRecover))
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	after := testutil.ToFloat64(exec.m.AgentPolicyDenialsTotal.WithLabelValues(
+		string(policy.DenyGlobalKill), metrics.PolicySurfaceExecutorRecover))
+	if after != before+1 {
+		t.Fatalf("AgentPolicyDenialsTotal{reason=%s,surface=executor_recover} = %v, want %v",
+			policy.DenyGlobalKill, after, before+1)
+	}
+}
+
+// TestExecutor_RecoverStuck_UnreviewedApprovalEscalationDoesNotIncrementPolicyDenialCounter
+// asserts that the requireApprovalBypassesUnreviewedAllow escalation — a
+// RequireApproval decision, not a hard Deny — never touches
+// AgentPolicyDenialsTotal, even though recoverOne denies the action row for
+// it exactly like a real policy Deny.
+func TestExecutor_RecoverStuck_UnreviewedApprovalEscalationDoesNotIncrementPolicyDenialCounter(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	exec.m = metrics.New()
+	ctx := context.Background()
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		MaxAutonomousTurns: 1, IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile with turn budget 1: %v", err)
+	}
+	if err := store.IncrementAutonomousTurns(ctx, uid, conv.ID); err != nil {
+		t.Fatalf("consume turn budget: %v", err)
+	}
+	stuckID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Sure, let's set up a call.", PolicyDecision: db.PolicyAllow,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed stuck-to-be action: %v", err)
+	}
+	reserveActionForRecovery(t, store, uid, stuckID, 4242, "Sure, let's set up a call."+policy.DisclosureSep+"I'm an AI assistant.")
+
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send calls = %d, want 0", len(sender.calls))
+	}
+	mfs, err := exec.m.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "mctl_agent_policy_denials_total" {
+			for _, sample := range mf.GetMetric() {
+				if sample.GetCounter().GetValue() > 0 {
+					t.Fatalf("policy denial counter incremented for a RequireApproval escalation, not a hard Deny: %+v", sample)
+				}
+			}
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -169,13 +170,18 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // subtype=success|error_*, is_error, duration_ms, num_turns, total_cost_usd,
 // result) — not guessed.
 type ClaudeResult struct {
-	Type         string  `json:"type"`
-	Subtype      string  `json:"subtype"`
-	IsError      bool    `json:"is_error"`
-	DurationMS   int64   `json:"duration_ms"`
-	NumTurns     int     `json:"num_turns"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	Result       string  `json:"result"`
+	Type       string `json:"type"`
+	Subtype    string `json:"subtype"`
+	IsError    bool   `json:"is_error"`
+	DurationMS int64  `json:"duration_ms"`
+	NumTurns   int    `json:"num_turns"`
+	// TotalCostUSD is a pointer so a missing key or a JSON null (no spend
+	// observed) is distinguishable from a genuinely free run (a real 0.0) —
+	// json.Unmarshal leaves a pointer field nil in both of those absent
+	// cases, whereas a plain float64 field cannot tell "absent" from "zero".
+	// A false zero here would silently understate persisted spend.
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	Result       string   `json:"result"`
 }
 
 // ParseClaudeResult extracts the final JSON result object from `claude -p
@@ -194,6 +200,33 @@ func ParseClaudeResult(stdout []byte) (*ClaudeResult, error) {
 // --max-budget-usd cap, or an internal SDK error) — a distinct case from a
 // nonzero exit or a malformed result, worth telling apart in logs/metrics.
 var ErrClaudeReportedError = errors.New("claude reported is_error=true")
+
+// ErrClaudeUsageLimit is the quota/usage-limit subclass of
+// ErrClaudeReportedError. Declaring it by wrapping the general error means
+// an error built on top of it satisfies errors.Is for BOTH, so no existing
+// caller that tests the general case changes behaviour.
+var ErrClaudeUsageLimit = fmt.Errorf("%w: usage limit or quota exhausted", ErrClaudeReportedError)
+
+// usageLimitSubtypes are matched as lowercase substrings of res.Subtype. The
+// exact subtype string the `claude` CLI emits on a usage-limit/quota stop is
+// not evidenced anywhere in this codebase (only success, error_max_turns,
+// and error_during_execution appear in fixtures) — this is a documented
+// token set, not a captured value. res.Result is deliberately NOT inspected:
+// it can carry model-derived Telegram content and is prompt-injectable,
+// exactly as CheckResult's doc comment explains for the error string itself.
+var usageLimitSubtypes = []string{"usage_limit", "rate_limit", "quota", "credit_balance", "insufficient_credits"}
+
+// isUsageLimitSubtype reports whether subtype (case-insensitively) contains
+// one of usageLimitSubtypes.
+func isUsageLimitSubtype(subtype string) bool {
+	lower := strings.ToLower(subtype)
+	for _, s := range usageLimitSubtypes {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
 
 // CheckResult turns a parsed ClaudeResult into an error iff IsError is set,
 // wrapping ErrClaudeReportedError with the CLI's own subtype for context.
@@ -217,5 +250,9 @@ func CheckResult(res *ClaudeResult) error {
 	if subtype == "" {
 		subtype = "unknown"
 	}
-	return fmt.Errorf("%w: subtype=%s (result: %d bytes, see run logs)", ErrClaudeReportedError, subtype, len(res.Result))
+	sentinel := ErrClaudeReportedError
+	if isUsageLimitSubtype(res.Subtype) {
+		sentinel = ErrClaudeUsageLimit
+	}
+	return fmt.Errorf("%w: subtype=%s (result: %d bytes, see run logs)", sentinel, subtype, len(res.Result))
 }

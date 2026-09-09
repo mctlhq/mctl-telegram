@@ -51,6 +51,14 @@ var sensitiveKeys = map[string]struct{}{
 	// key, so logging it is not a disclosure, and redacting it would make
 	// debugging device-mismatch reports (wrong key / wrong device) harder
 	// for no security benefit -- see the call site that logs it.
+	//
+	// credential_domain_id and cost_usd (agent-worker policy-denial/job-cost
+	// observability, issue-580) are likewise DELIBERATELY absent: both are
+	// non-secret by construction — credential_domain_id is an
+	// operator-chosen label (a Vault path or account label, never the
+	// credential itself) bounded to [A-Za-z0-9._:/-]{1,128}, and cost_usd is
+	// a dollar figure — and redacting either would defeat the entire
+	// purpose of the metric/log line they appear on.
 	"user_code":               {},
 	"device_code":             {},
 	"consent_token":           {},

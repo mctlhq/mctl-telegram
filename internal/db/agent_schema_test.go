@@ -188,6 +188,99 @@ func TestMigrate_UpgradesPreExistingConversationsWithoutPeerAccessHash(t *testin
 	}
 }
 
+// TestMigrate_UpgradesPreExistingAgentJobsWithoutCostColumn is modelled on
+// TestMigrate_UpgradesPreExistingConversationsWithoutPeerAccessHash: hand-
+// create agent_jobs in its pre-#580 shape (no cost_usd column) with a seeded
+// row, run Migrate, and assert the column exists, an addColumnIfMissing pass
+// with no DEFAULT left the pre-existing row's value SQL NULL (never 0), and
+// the real GetAgentJob path still works against the upgraded table. Adding
+// DEFAULT 0 to the addColumnIfMissing call, or removing it entirely, fails
+// this test.
+func TestMigrate_UpgradesPreExistingAgentJobsWithoutCostColumn(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Pre-#580 shape: no cost_usd column at all. Minimal columns needed for
+	// the migration's later CREATE TABLE IF NOT EXISTS to be a true no-op on
+	// this table (users must exist first for the FK, but SQLite does not
+	// enforce it at INSERT time here since foreign_keys pragma is off by
+	// default for this raw ExecContext).
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE agent_jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_id TEXT NOT NULL,
+		user_id INTEGER NOT NULL,
+		conversation_id INTEGER,
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		max_attempts INTEGER NOT NULL DEFAULT 5,
+		next_run_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		claimed_by TEXT,
+		claimed_at DATETIME,
+		last_error TEXT,
+		result_action_id INTEGER,
+		result_lead_id INTEGER,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed pre-existing agent_jobs: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, github_login TEXT UNIQUE NOT NULL, email TEXT, provider TEXT NOT NULL DEFAULT 'local-dev', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+	); err != nil {
+		t.Fatalf("seed users table: %v", err)
+	}
+	res, err := conn.ExecContext(ctx, `INSERT INTO users(github_login) VALUES('cost-owner')`)
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	uid, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("user id: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO agent_jobs(event_id, user_id) VALUES('evt:v1:1:1:1', $1)`, uid,
+	); err != nil {
+		t.Fatalf("seed pre-existing agent_jobs row: %v", err)
+	}
+
+	if err := Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var count int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('agent_jobs') WHERE name = 'cost_usd'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("check cost_usd column: %v", err)
+	}
+	if count != 1 {
+		t.Fatal("agent_jobs.cost_usd column not added by migration")
+	}
+
+	var costUSD sql.NullFloat64
+	if err := conn.QueryRowContext(ctx,
+		`SELECT cost_usd FROM agent_jobs WHERE event_id = 'evt:v1:1:1:1'`,
+	).Scan(&costUSD); err != nil {
+		t.Fatalf("read upgraded cost_usd: %v", err)
+	}
+	if costUSD.Valid {
+		t.Fatalf("cost_usd = %v, want SQL NULL for a pre-existing row (no DEFAULT)", costUSD.Float64)
+	}
+
+	store := &Store{DB: conn}
+	job, err := store.GetAgentJob(ctx, uid, 1)
+	if err != nil {
+		t.Fatalf("GetAgentJob on upgraded row: %v", err)
+	}
+	if job.CostUSD.Valid {
+		t.Fatal("job.CostUSD.Valid = true, want false (never measured)")
+	}
+}
+
 func TestMigrate_CreatesPendingNotificationSweepIndex(t *testing.T) {
 	ctx := context.Background()
 	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)

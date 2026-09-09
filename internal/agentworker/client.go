@@ -413,3 +413,13 @@ func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, stat
 	legacyBody := map[string]any{"attempt": attempt, "status": status, "note": note}
 	return c.do(ctx, http.MethodPost, path, legacyBody, nil)
 }
+
+// ReportJobCost calls POST /jobs/{id}/cost — a worker-only, out-of-band
+// report of the Claude spend observed for this exact claimed attempt. Not an
+// MCP tool: this method is never exposed through agentAPI/NewMCPServer, so
+// the model has no path to call it. Non-2xx responses surface as *APIError.
+func (c *Client) ReportJobCost(ctx context.Context, jobID int64, attempt int, cost float64) error {
+	body := map[string]any{"attempt": attempt, "cost_usd": cost}
+	path := "/jobs/" + strconv.FormatInt(jobID, 10) + "/cost"
+	return c.do(ctx, http.MethodPost, path, body, nil)
+}
