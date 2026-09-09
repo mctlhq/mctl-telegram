@@ -240,6 +240,15 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		GlobalKill:       s.globalKill(),
 		Now:              time.Now(),
 	})
+	// Counted from THIS evaluation, deliberately unlike the notification and
+	// response handling below, which read the persisted row so a redelivered
+	// job is not re-judged. The two want different things: the response must
+	// tell the worker what was actually decided for that action, while this
+	// series is an anomaly signal — "how often is policy refusing calls at
+	// this surface". A worker hammering a paused account through repeated
+	// redeliveries is exactly the shape the signal exists to expose, and
+	// counting only newly-persisted denials would hide it behind the
+	// idempotency key.
 	if result.Decision == policy.Deny {
 		s.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceProposeReply)
 	}
@@ -485,6 +494,17 @@ func (s *Server) handleNotifySummary(w http.ResponseWriter, r *http.Request) {
 	s.handleOwnerFacing(w, r, db.ActionTypeOwnerSummary, db.NotificationSummary, "send_owner_summary")
 }
 
+// policySurfaceForOwnerTool maps handleOwnerFacing's tool name onto its own
+// denial surface. The handler is shared by two tools, so a single surface
+// value would merge their denials into one series; the mapping keeps the
+// label a compile-time-fixed set rather than passing the tool name through.
+func policySurfaceForOwnerTool(tool string) string {
+	if tool == "send_owner_summary" {
+		return metrics.PolicySurfaceOwnerSummary
+	}
+	return metrics.PolicySurfaceOwnerApproval
+}
+
 func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actionType, notificationKind, tool string) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -531,7 +551,7 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		GlobalKill: s.globalKill(), Now: time.Now(),
 	})
 	if result.Decision == policy.Deny {
-		s.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceOwnerNotify)
+		s.m.CountPolicyDenial(string(result.DenyCode()), policySurfaceForOwnerTool(tool))
 	}
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but

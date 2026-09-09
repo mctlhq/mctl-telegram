@@ -111,6 +111,32 @@ func TestHealthServer_MetricsRoute_RefusedOutsideAllowCIDR(t *testing.T) {
 	assertStatus(t, srv.Handler, "/readyz", http.StatusServiceUnavailable)
 }
 
+// TestHealthServer_MetricsRoute_MalformedAllowCIDRFailsClosed covers the one
+// security-relevant branch in metricsHandler that had no test: a typo in
+// AGENT_METRICS_ALLOW_CIDR must refuse every request, not silently serve
+// metrics to everyone. Without this, refactoring the parse-error path to
+// `return h.ServeHTTP` would break nothing.
+func TestHealthServer_MetricsRoute_MalformedAllowCIDRFailsClosed(t *testing.T) {
+	m := metrics.New()
+	srv := newHealthServer(":0", &agentworker.Health{}, m, "acct-42", "not-a-cidr")
+
+	// Refused from inside what a well-formed allowlist would have permitted,
+	// and from outside it — the guard is closed regardless of source.
+	for _, addr := range []string{"10.0.0.7:5555", "203.0.113.5:12345"} {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.RemoteAddr = addr
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("/metrics from %s: status = %d, want 403 on a malformed allow CIDR", addr, rec.Code)
+		}
+	}
+
+	// The probes stay reachable: a bad metrics allowlist must not take
+	// liveness down with it.
+	assertStatus(t, srv.Handler, "/livez", http.StatusOK)
+}
+
 func assertStatus(t *testing.T, h http.Handler, path string, want int) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)

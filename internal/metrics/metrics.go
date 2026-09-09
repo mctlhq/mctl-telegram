@@ -163,8 +163,13 @@ type Registry struct {
 // Policy-denial surfaces — the call site that consumed a policy.Deny
 // decision. Used as the "surface" label on AgentPolicyDenialsTotal.
 const (
-	PolicySurfaceProposeReply    = "propose_reply"
-	PolicySurfaceOwnerNotify     = "owner_notify"
+	PolicySurfaceProposeReply = "propose_reply"
+	// Owner-facing denials are split per tool: handleOwnerFacing is the
+	// shared body for request_owner_approval and send_owner_summary, and a
+	// single "owner_notify" value made the two indistinguishable on a
+	// dashboard. Still a compile-time-fixed set, so no cardinality cost.
+	PolicySurfaceOwnerApproval   = "request_owner_approval"
+	PolicySurfaceOwnerSummary    = "send_owner_summary"
 	PolicySurfaceExecutorSend    = "executor_send"
 	PolicySurfaceExecutorRecover = "executor_recover"
 )
@@ -358,7 +363,7 @@ func New() *Registry {
 
 	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_policy_denials_total",
-		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 4 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
+		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 5 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
 	}, []string{"reason", "surface"})
 
 	r.AgentJobCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

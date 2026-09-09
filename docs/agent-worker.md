@@ -112,6 +112,16 @@ Guard it with `AGENT_METRICS_ALLOW_CIDR` if the worker's NetworkPolicy alone
 is not enough for your deployment; unset means open, matching `cmd/server`'s
 own `/metrics` default.
 
+The guard covers `/metrics` only. `/livez`, `/healthz` and `/readyz` also
+carry `credential_domain_id` in their bodies and are **not** guarded — they
+must stay reachable for the kubelet, and a CIDR that admits the kubelet
+would admit most of the cluster anyway. The value is a non-secret identifier
+by construction (`[A-Za-z0-9._:/-]{1,128}`, rejected at startup otherwise),
+so this is a scope note rather than a disclosure: setting
+`AGENT_METRICS_ALLOW_CIDR` restricts the metrics surface, not every place
+the worker names its quota domain. Keep the probe port off untrusted
+networks with a NetworkPolicy if that matters for your deployment.
+
 ### Rollout ordering: `AGENT_CREDENTIAL_DOMAIN_ID` is a breaking change
 
 `AGENT_CREDENTIAL_DOMAIN_ID` is required by `run()` (not by `--mcp-serve`).
