@@ -258,8 +258,8 @@ func TestClaudeInvoker_Run_RejectsCompletionByDifferentAttempt(t *testing.T) {
 // POST /jobs/{id}/cost (worker cost report) for T5's recordCost tests, and
 // records every cost report it receives.
 type costReportingServer struct {
-	mu           sync.Mutex
-	costReports  []struct {
+	mu          sync.Mutex
+	costReports []struct {
 		attempt int
 		cost    float64
 	}
@@ -363,7 +363,7 @@ func TestClaudeInvoker_Run_NilMetricsIsANoOp(t *testing.T) {
 	stdout := `{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.1,"result":"ok"}`
 	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
 	statusSrv := jobStatusServer(t, 42, "completed", 1)
-	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL, APIToken: "tok"}
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: statusSrv.URL, APIToken: "super-secret-token"}
 	if err := inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
