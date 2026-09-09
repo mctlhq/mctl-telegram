@@ -1,8 +1,19 @@
   /*
    * Inline fallback for the mctl design tokens — keeps the page readable if
-   * ui.mctl.ai/mctl.css fails to load. When the CDN stylesheet loads it is
-   * sourced AFTER this block and overrides every token (equal specificity,
-   * later wins). Default accent is terracotta; there is no accent picker.
+   * the CDN stylesheet fails to load. When it loads it is sourced AFTER this
+   * block and overrides every token (equal specificity, later wins). Default
+   * accent is terracotta; there is no accent picker.
+   *
+   * Mirrors @mctlhq/css 0.5.0, which is what chrome.go pins. This is a hand-
+   * picked subset, not a copy of the whole sheet: only the tokens these pages
+   * actually read, so it stays small enough to inline on the strict-CSP pages.
+   *
+   * Refreshing it is deliberate work, not a sync: bump the pinned version in
+   * chrome.go, diff the new sheet against these values, and carry over what
+   * changed. `curl -s https://ui.mctl.ai/<version>/mctl.css` prints it, and its
+   * first line names the version it was built from. The pinned path is served
+   * immutable and mctl-design's CI refuses to edit a published version
+   * directory, so this file can only fall behind on purpose (mctl-design#78).
    */
   :root {
     --mctl-accent-terracotta-primary: #e25a3c;
