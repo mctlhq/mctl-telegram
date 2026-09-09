@@ -141,19 +141,34 @@ this workload-specific boundary.
 <a id="communication-agent-operations"></a>
 ## Communication Agent operations
 
-The communication agent has three independent containment controls:
+The communication agent has four independent containment controls:
 
 - `AGENT_KILL_SWITCH=true` denies new agent actions at the server policy and
-  executor layers.
+  executor layers, including owner-facing notifications (send_owner_summary,
+  request_owner_approval).
 - `agent_profiles.listener_enabled=false` stops Telegram ingestion for that
   account after the supervisor reconciles.
-- `agent_profiles.autopilot_paused=true` denies autonomous replies for that
-  account.
+- `agent_profiles.autopilot_paused=true` denies autonomous recruiter-facing
+  replies for that account, but does NOT stop owner notifications: the owner
+  keeps receiving send_owner_summary/request_owner_approval messages, plus a
+  per-draft alert to Saved Messages each time a reply is withheld for this
+  reason (issue #581).
 - worker Deployment replicas `0` stops model job processing.
 
 No one control substitutes for the others. The closed state between test
 windows is all four controls together: kill switch true, listener disabled,
 autopilot paused, and worker replicas zero.
+
+**What to expect from a paused account.** With `autopilot_paused=true` and
+nothing else engaged: recruiter-facing replies are denied and recorded in
+`agent_actions` with `policy_reasons="autopilot paused for this account"`;
+the owner continues to receive Saved Messages, both the per-draft pause
+alert queued for each denied reply and any send_owner_summary /
+request_owner_approval notifications the agent raises independently of
+pause. If Saved Messages goes completely silent, the cause is the kill
+switch, `mode=off`, or a disabled listener — not a pause by itself. See
+[`docs/reports/communication-agent-c1.md`](reports/communication-agent-c1.md)
+for the validation history that first surfaced this distinction.
 
 ### Safe bootstrap and test-window procedure
 
@@ -206,7 +221,7 @@ invocation.
 | `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |
 | `AGENT_TEST_CRASH_AFTER_RESERVE` | `false` | **TEST-ONLY.** Hard-exits the process (code 137) immediately after `send_random_id` is persisted and an action is CASed to `executing`, before the Telegram RPC — for the `random_id`/`RecoverStuck` crash-recovery drill. Every send handled by the pod is hit while set, not just a chosen one. Must never be `true` outside a deliberate, bounded drill window. |
 | profile `listener_enabled` | `false` | Per-account Telegram ingest switch. |
-| profile `autopilot_paused` | `true` on bootstrap | Per-account autonomous action pause. |
+| profile `autopilot_paused` | `true` on bootstrap | Per-account pause on autonomous recruiter-facing replies. Does not stop owner-facing notifications (send_owner_summary, request_owner_approval, or the per-draft pause alert) — issue #581. |
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
 | worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
 

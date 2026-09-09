@@ -52,13 +52,36 @@ type Input struct {
 	Now              time.Time
 }
 
+// Gate identifies which account-wide control produced a Deny result. It is
+// populated only for the three durable/opt-in account-wide gates (global
+// kill switch, mode==off, autopilot paused) so callers can react
+// specifically to a pause deny (see GateAutopilotPaused) without string
+// matching on Reasons. It is the zero value (GateNone) for every other deny
+// branch, including per-conversation gates and validation failures.
+type Gate string
+
+const (
+	GateNone            Gate = ""
+	GateKillSwitch      Gate = "kill_switch"
+	GateModeOff         Gate = "mode_off"
+	GateAutopilotPaused Gate = "autopilot_paused"
+)
+
 // Result contains the policy decision and user-facing/audit reasons.
 type Result struct {
 	Decision Decision
 	Reasons  []string
+	Gate     Gate
 }
 
 func deny(reasons ...string) Result { return Result{Decision: Deny, Reasons: reasons} }
+
+// denyGate is like deny but also records which account-wide gate produced
+// the denial. Used only by the three account-wide gates (kill switch,
+// mode==off, autopilot paused) that owner-facing actions must still clear.
+func denyGate(gate Gate, reasons ...string) Result {
+	return Result{Decision: Deny, Reasons: reasons, Gate: gate}
+}
 
 const riskyTLD = `com|net|org|io|ru|me|dev|co|ai|app|xyz|zip|link|click|top|info|biz|site|online|live|shop|store|cloud|tech|space|website|fun|icu|cc|tv|ly|sh|to|gg|fm|gl|be|us|uk|de|fr|es|it|nl|pl|cz|eu|in|id|ua|by|kz|tr|cn|jp|br|mx|ca|au|nz|jobs|agency|careers|career|work|works|team|company|group|consulting|solutions|network|community|recruiting|staffing|hr`
 
@@ -284,7 +307,7 @@ func phoneDigitsAndGroups(s string) (string, []string) {
 // Evaluate applies hard denials first, then accumulates approval requirements.
 func Evaluate(in Input) Result {
 	if in.GlobalKill {
-		return deny("global kill switch engaged")
+		return denyGate(GateKillSwitch, "global kill switch engaged")
 	}
 	// A worker that accidentally pairs one user's AgentProfile with another
 	// user's Conversation must not authorize a reply under the wrong
@@ -300,22 +323,31 @@ func Evaluate(in Input) Result {
 	switch in.Profile.Mode {
 	case db.AgentModeObserve, db.AgentModeGuarded:
 	case db.AgentModeOff:
-		return deny("agent mode is off")
+		return denyGate(GateModeOff, "agent mode is off")
 	default:
 		return deny("unrecognized agent mode " + strconv.Quote(in.Profile.Mode))
 	}
-	if in.Profile.AutopilotPaused {
-		return deny("autopilot paused for this account")
-	}
 	// Owner-facing actions notify the human, not the recruiter: they encode
 	// "tell me what happened," not "reply on my behalf." They must still
-	// clear every account-wide gate above (kill switch, mode, autopilot
-	// pause) but must never be silenced by a per-conversation instruction
-	// below (taken over / closed / paused, or that peer being blocked) —
-	// those gates exist to keep the agent quiet toward the recruiter, not
-	// to keep the owner uninformed.
+	// clear the global kill switch and mode==off above — those are durable,
+	// opt-in states the owner deliberately chose — but they are exempt from
+	// the autopilot-pause gate below and from every per-conversation gate
+	// further down (taken over / closed / paused, or that peer being
+	// blocked).
+	//
+	// autopilot_paused is deliberately NOT one of the gates owner-facing
+	// actions must clear: pause is the default state for every brand-new
+	// profile, the agent itself can enter it via pause_autopilot, and it is
+	// a temporary hold — the owner intends to come back, not opt out for
+	// good. Silencing owner notifications on pause would make the product
+	// silent-by-default and would let the agent stand itself down without
+	// being able to explain why. Kill switch and mode==off remain
+	// durable/opt-in states and still deny owner-facing actions unchanged.
 	if in.Action.Type == db.ActionTypeOwnerSummary || in.Action.Type == db.ActionTypeOwnerApproval {
 		return Result{Decision: Allow, Reasons: []string{"owner-facing action"}}
+	}
+	if in.Profile.AutopilotPaused {
+		return denyGate(GateAutopilotPaused, "autopilot paused for this account")
 	}
 	switch in.Conversation.State {
 	case db.ConversationActive:

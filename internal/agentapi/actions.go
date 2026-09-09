@@ -298,6 +298,31 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if result.Gate == policy.GateAutopilotPaused {
+		// Deliberately best-effort, unlike the approval-code notification
+		// above: that notification carries the only copy of ApprovalCode, so
+		// losing it strands an otherwise-approvable draft forever. This alert
+		// is purely informational — the denied action row above already
+		// records "autopilot paused for this account" for audit — so a lost
+		// enqueue costs the owner a heads-up, not data, and must not fail an
+		// otherwise-successful propose_reply call (issue #581).
+		// InsertOwnerNotification is idempotent per action_id, so a job
+		// redelivery that resolves to the same actionID does not queue a
+		// second alert.
+		peerLabel := "a conversation"
+		switch {
+		case strings.TrimSpace(conv.PeerDisplayName) != "":
+			peerLabel = conv.PeerDisplayName
+		case strings.TrimSpace(conv.PeerUsername) != "":
+			peerLabel = "@" + conv.PeerUsername
+		}
+		alertBody := fmt.Sprintf("Autopilot is paused for this account: a reply to %s was withheld (%s). Resume autopilot to let the agent reply again.", peerLabel, persisted.PolicyReasons)
+		if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+			UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
+		}); nerr != nil {
+			logHandlerErr("propose_reply", fmt.Errorf("queue autopilot-pause alert (action_id=%d user_id=%d): %w", actionID, id.UserID, nerr))
+		}
+	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
 	responseReasons := result.Reasons
 	if persisted.PolicyReasons != "" {
@@ -433,12 +458,13 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	})
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
-	// ONLY after the global gates (kill switch, mode==off, autopilot paused)
-	// have already had a chance to deny — see policy.go's ordering. A Deny
-	// here can now only come from one of those account-wide gates (never
-	// conversation state or the sender blocklist), and it must actually stop
-	// the notification from going out: the emergency kill switch exists
-	// precisely to silence every owner-facing message too, not just replies.
+	// ONLY after the global gates (kill switch, mode==off) have already had a
+	// chance to deny — see policy.go's ordering. A Deny here can now only come
+	// from one of those two account-wide gates (never conversation state, the
+	// sender blocklist, or autopilot paused — owner-facing actions are exempt
+	// from the pause gate, issue #581), and it must actually stop the
+	// notification from going out: the emergency kill switch exists precisely
+	// to silence every owner-facing message too, not just replies.
 	status := db.ActionExecuted
 	if result.Decision != policy.Allow {
 		status = db.ActionDenied
