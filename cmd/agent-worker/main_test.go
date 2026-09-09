@@ -64,7 +64,8 @@ func TestEnvFloat_ReturnsDefaultWhenUnset(t *testing.T) {
 	// t.Setenv, not os.Unsetenv: the latter is never restored, so it would
 	// leak an unset TEST_ENV_FLOAT into every test that runs after this
 	// one in the same binary and make the package order-dependent.
-	// requireEnv treats "" as missing, so this covers the same case.
+	// envFloat returns def for an empty value exactly as for an unset one,
+	// so this covers the same case.
 	t.Setenv("TEST_ENV_FLOAT", "")
 	got, err := envFloat("TEST_ENV_FLOAT", 5)
 	if err != nil {
