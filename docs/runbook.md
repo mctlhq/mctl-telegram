@@ -402,6 +402,11 @@ is a non-deployed mirror kept only so this section's anchor is checked by
 
 ### Diagnostic queries
 
+Both classes of this counter are pre-created at zero when the worker builds its
+registry (issue #591), so on an idle worker these queries return `0` rather
+than "no data". An empty result means the worker is not being scraped at all,
+which is a different problem from a quiet one.
+
 Confirm the alert is real and see how long it has been firing:
 
 ```promql

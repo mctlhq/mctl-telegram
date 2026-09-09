@@ -142,13 +142,18 @@ type Registry struct {
 	// AgentJobCostUSDTotal is monotonic total Claude spend attributed to
 	// agent jobs, labeled by whether the CLI's own result reported
 	// is_error. Recorded before CheckResult so a job that fails afterwards
-	// still reports its spend. Bound: 2 series (success, error).
+	// still reports its spend. Bound: 2 series (success, error), both
+	// pre-created at zero by New() — see issue #591: a counter whose first
+	// observed sample is already non-zero yields increase() == 0, because
+	// that sample becomes the baseline.
 	AgentJobCostUSDTotal *prometheus.CounterVec // {result}
 
 	// AgentClaudeResultErrorsTotal counts CheckResult errors consumed by
 	// ClaudeInvoker.Run, labeled by whether the error was classified as a
 	// usage-limit/quota condition or something else. Bound: 2 series
-	// (usage_limit, other).
+	// (usage_limit, other), both pre-created at zero by New() for the
+	// increase() baseline reason recorded on AgentJobCostUSDTotal above
+	// (issue #591).
 	AgentClaudeResultErrorsTotal *prometheus.CounterVec // {class}
 
 	// AgentCredentialDomain is an info-type gauge (constant value 1) set
@@ -176,6 +181,29 @@ const (
 	// not be resolved — see policySurfaceForOwnerTool. Its appearance in the
 	// series is the signal that a caller went unmapped.
 	PolicySurfaceUnknown = "unknown"
+)
+
+// Claude result-error classes — the "class" label on
+// AgentClaudeResultErrorsTotal, set by ClaudeInvoker.countResultError.
+const (
+	ClaudeResultClassUsageLimit = "usage_limit"
+	ClaudeResultClassOther      = "other"
+)
+
+// Job-cost outcomes — the "result" label on AgentJobCostUSDTotal, set by
+// ClaudeInvoker.recordCost from the CLI result's own is_error field.
+const (
+	JobCostResultSuccess = "success"
+	JobCostResultError   = "error"
+)
+
+// claudeResultClasses and jobCostResults are the single source of truth for
+// the zero baseline New() writes for those two counters. Adding a label value
+// to either counter means adding it here, or the new child goes back to being
+// created lazily on first use.
+var (
+	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
+	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
 )
 
 // CountPolicyDenial increments AgentPolicyDenialsTotal for the given
@@ -419,5 +447,25 @@ func New() *Registry {
 		r.AgentClaudeResultErrorsTotal,
 		r.AgentCredentialDomain,
 	)
+
+	// Give the two agent counters a zero baseline before any work is
+	// accepted. A CounterVec creates its children lazily, on first
+	// increment, so a counter whose first *observed* sample is already 1
+	// makes increase() read 0 — that sample is the baseline. Both alerts
+	// over these series (MctlAgentClaudeUsageLimit, MctlAgentJobCostHigh)
+	// would then miss the first, and possibly only, occurrence they exist
+	// for. Four series total; see issue #591.
+	//
+	// AgentPolicyDenialsTotal is deliberately excluded: its label space is
+	// 18 x 6 = 108 series, pre-initializing all of them would materialize
+	// combinations that cannot occur, and MctlAgentPolicyDenialRateHigh
+	// carries a "> 4" floor a single first denial would not clear anyway.
+	for _, class := range claudeResultClasses {
+		r.AgentClaudeResultErrorsTotal.WithLabelValues(class).Add(0)
+	}
+	for _, result := range jobCostResults {
+		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
+	}
+
 	return r
 }

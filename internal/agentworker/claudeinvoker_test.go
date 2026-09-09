@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -457,5 +458,60 @@ func TestClaudeInvoker_Run_NegativeCostIsDropped(t *testing.T) {
 	defer crs.mu.Unlock()
 	if len(crs.costReports) != 0 {
 		t.Fatalf("cost reports = %+v, want none for a negative cost", crs.costReports)
+	}
+}
+
+// TestCountResultError_FirstOccurrenceIsARealIncrease pins the emitting half
+// of issue #591. The pre-assertion is the point: on a worker that has done no
+// work, the usage_limit child must already exist at zero, so the first denial
+// is a 0 -> 1 transition that Prometheus increase() can observe. Before the
+// fix the child was created on first increment, its first observed sample was
+// 1, and MctlAgentClaudeUsageLimit read increase() == 0 in exactly the
+// scenario it describes — a pool exhausted with no second increment coming.
+func TestCountResultError_FirstOccurrenceIsARealIncrease(t *testing.T) {
+	m := metrics.New()
+	inv := &ClaudeInvoker{Metrics: m}
+
+	for _, class := range []string{metrics.ClaudeResultClassUsageLimit, metrics.ClaudeResultClassOther} {
+		if got := testutil.ToFloat64(m.AgentClaudeResultErrorsTotal.WithLabelValues(class)); got != 0 {
+			t.Fatalf("class=%q baseline = %v, want 0", class, got)
+		}
+	}
+
+	inv.countResultError(fmt.Errorf("run claude: %w", ErrClaudeUsageLimit))
+
+	if got := testutil.ToFloat64(m.AgentClaudeResultErrorsTotal.WithLabelValues(metrics.ClaudeResultClassUsageLimit)); got != 1 {
+		t.Fatalf("class=usage_limit = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.AgentClaudeResultErrorsTotal.WithLabelValues(metrics.ClaudeResultClassOther)); got != 0 {
+		t.Fatalf("class=other = %v, want 0 — only the classified child may move", got)
+	}
+}
+
+// TestRecordCost_FirstJobIsARealIncrease is the cost counterpart. Both
+// children must read zero on a registry that has never seen a job, so a
+// single expensive first job is an increase MctlAgentJobCostHigh can see.
+func TestRecordCost_FirstJobIsARealIncrease(t *testing.T) {
+	m := metrics.New()
+	for _, result := range []string{metrics.JobCostResultSuccess, metrics.JobCostResultError} {
+		if got := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues(result)); got != 0 {
+			t.Fatalf("result=%q baseline = %v, want 0", result, got)
+		}
+	}
+
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.75,"result":"done"}`
+	bin, _, _, _ := fakeClaudeScript(t, stdout, 0)
+	srv, _ := newCostReportingServer(t, 91, "completed", 1)
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok", Metrics: m}
+
+	if err := inv.Run(context.Background(), JobEnvelope{JobID: 91, Attempt: 1}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues(metrics.JobCostResultSuccess)); got != 0.75 {
+		t.Fatalf("result=success = %v, want 0.75", got)
+	}
+	if got := testutil.ToFloat64(m.AgentJobCostUSDTotal.WithLabelValues(metrics.JobCostResultError)); got != 0 {
+		t.Fatalf("result=error = %v, want 0 — a successful job must not move the error child", got)
 	}
 }

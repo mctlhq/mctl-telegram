@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // expectedMetricNames lists every metric family that New() must register.
@@ -62,8 +62,10 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.BridgeActiveDaemons.Set(0)
 	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
 	reg.AgentPolicyDenialsTotal.WithLabelValues("mode_off", "propose_reply").Add(0)
-	reg.AgentJobCostUSDTotal.WithLabelValues("success").Add(0)
-	reg.AgentClaudeResultErrorsTotal.WithLabelValues("other").Add(0)
+	// AgentJobCostUSDTotal and AgentClaudeResultErrorsTotal are deliberately
+	// absent from this list: New() pre-creates their children at zero, so
+	// touching them here would hide a regression in that pre-init rather
+	// than exercise it. TestNew_AgentCounterZeroBaseline pins it directly.
 	reg.AgentCredentialDomain.WithLabelValues("test-domain").Set(1)
 
 	mfs, err := reg.Prometheus.Gather()
@@ -218,6 +220,95 @@ func TestNew_RegistersIssue580Metrics(t *testing.T) {
 			if !gotLabels[want] {
 				t.Errorf("%s: missing label %q, got %v", c.name, want, gotLabels)
 			}
+		}
+	}
+}
+
+// TestNew_AgentCounterZeroBaseline pins the issue #591 fix: the two agent
+// counters whose alerts key off increase() must have every child present at
+// zero on a registry that has done no work at all. A child created lazily on
+// first increment produces a first observed sample that is already non-zero,
+// which increase() treats as the baseline and reports as 0 — so the alert
+// misses the first, and possibly only, occurrence it exists for.
+//
+// Asserts on the parsed MetricFamily rather than an exposition dump so a
+// renamed label value fails here rather than silently passing a substring
+// match.
+func TestNew_AgentCounterZeroBaseline(t *testing.T) {
+	reg := New()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	gathered := map[string]*dto.MetricFamily{}
+	for _, mf := range mfs {
+		gathered[mf.GetName()] = mf
+	}
+
+	cases := []struct {
+		family string
+		label  string
+		want   []string
+	}{
+		{
+			family: "mctl_agent_claude_result_errors_total",
+			label:  "class",
+			want:   []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther},
+		},
+		{
+			family: "mctl_agent_job_cost_usd_total",
+			label:  "result",
+			want:   []string{JobCostResultSuccess, JobCostResultError},
+		},
+	}
+
+	for _, tc := range cases {
+		mf, ok := gathered[tc.family]
+		if !ok {
+			t.Errorf("%s: family absent from a freshly constructed registry — its children are still created lazily", tc.family)
+			continue
+		}
+		if got := len(mf.GetMetric()); got != len(tc.want) {
+			t.Errorf("%s: %d children, want %d", tc.family, got, len(tc.want))
+		}
+		seen := map[string]float64{}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == tc.label {
+					seen[lp.GetValue()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+		for _, want := range tc.want {
+			v, ok := seen[want]
+			if !ok {
+				t.Errorf("%s{%s=%q}: missing, have %v", tc.family, tc.label, want, seen)
+				continue
+			}
+			if v != 0 {
+				t.Errorf("%s{%s=%q} = %v, want 0", tc.family, tc.label, want, v)
+			}
+		}
+	}
+}
+
+// TestNew_PolicyDenialsNotPreInitialized locks in the other half of the #591
+// decision. AgentPolicyDenialsTotal is deliberately left lazy: 18 denial codes
+// x 6 surfaces is 108 series, most of them combinations that cannot occur, and
+// MctlAgentPolicyDenialRateHigh carries a "> 4" floor that a single first
+// denial would not clear anyway. Without this test a later well-meaning change
+// could quietly materialize all 108.
+func TestNew_PolicyDenialsNotPreInitialized(t *testing.T) {
+	reg := New()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "mctl_agent_policy_denials_total" {
+			t.Fatalf("mctl_agent_policy_denials_total has %d pre-created children; it must stay lazy", len(mf.GetMetric()))
 		}
 	}
 }

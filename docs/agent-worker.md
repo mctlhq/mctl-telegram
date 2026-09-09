@@ -108,6 +108,15 @@ A handful of server-side scalar families (HTTP, auth, session, bridge, ...)
 are also present at zero since they share the same registry constructor;
 harmless, as vec families with no children simply don't appear.
 
+The two counters above are the deliberate exception to that last clause:
+`metrics.New()` pre-creates all four of their children at `0`, so they are
+present on a worker that has never claimed a job. Without that baseline a
+counter's first observed sample would already be `1`, `increase()` would treat
+it as the baseline and report `0`, and the alerts over these series would miss
+the first — and possibly only — occurrence they exist for (issue #591).
+`mctl_agent_policy_denials_total` is deliberately left lazy: 108 possible
+series, most of them unreachable combinations.
+
 Guard it with `AGENT_METRICS_ALLOW_CIDR` if the worker's NetworkPolicy alone
 is not enough for your deployment; unset means open, matching `cmd/server`'s
 own `/metrics` default.
