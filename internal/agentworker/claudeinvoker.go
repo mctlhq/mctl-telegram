@@ -244,9 +244,9 @@ func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobE
 		slog.Warn("agent-worker: ignoring negative reported job cost", "job_id", job.JobID)
 		return
 	}
-	result := "success"
+	result := metrics.JobCostResultSuccess
 	if res.IsError {
-		result = "error"
+		result = metrics.JobCostResultError
 	}
 	if c.Metrics != nil {
 		c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
@@ -263,9 +263,9 @@ func (c *ClaudeInvoker) countResultError(err error) {
 	if c.Metrics == nil || err == nil {
 		return
 	}
-	class := "other"
+	class := metrics.ClaudeResultClassOther
 	if errors.Is(err, ErrClaudeUsageLimit) {
-		class = "usage_limit"
+		class = metrics.ClaudeResultClassUsageLimit
 	}
 	c.Metrics.AgentClaudeResultErrorsTotal.WithLabelValues(class).Inc()
 }

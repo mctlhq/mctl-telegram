@@ -421,6 +421,31 @@ is a non-deployed mirror kept only so this section's anchor is checked by
 
 ### Diagnostic queries
 
+Both classes of this counter are pre-created at zero when the registry is built
+(issue #591), so these queries return `0` on an idle worker rather than "no
+data".
+
+Do not read a `0` here as proof that a worker is being scraped. `cmd/server`
+shares the same registry constructor, so every API-server target exports these
+children at zero too, and an unscoped query still answers `0` when every
+agent-worker target has disappeared. To ask about the worker specifically,
+scope by pod — the label this repository's own dashboards and the
+`MctlAgentJobCostHigh` rule comment use to tell the two processes apart:
+
+```promql
+sum(mctl_agent_credential_domain{pod=~".*agent-worker.*"})
+```
+
+`mctl_agent_credential_domain` is set only in `cmd/agent-worker`'s startup path,
+so a result here means a worker is being scraped. Read the empty case
+carefully: it means no worker target matched *this selector*, which is usually
+"no worker is scraped" but would also be true if the deployment were renamed.
+Confirm against the scrape definition in mctl-gitops
+(`bootstrap/templates/mctl-platform/mctl-telegram-agent-preview-monitor.yaml`)
+before concluding there is a scrape outage. Scoping by `job` works today
+(`job="labs-agent-worker-preview-base-service"`) but the job name is defined by
+that VMServiceScrape, not by anything in this repository.
+
 Confirm the alert is real and see how long it has been firing:
 
 ```promql

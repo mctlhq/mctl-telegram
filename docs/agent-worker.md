@@ -103,10 +103,44 @@ exactly one file. It carries:
   distinguishable from any other `is_error` result at a glance.
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
+- `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
+  (108 children), all at a **constant zero**. These are server-side families:
+  `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
+  `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
+  — none of which run in this process. They appear here because `metrics.New()`
+  is shared and pre-creates their children (see below), so on a worker they are
+  exposition weight and nothing else. A worker "reporting policy denials" is
+  reporting zero, always.
 
 A handful of server-side scalar families (HTTP, auth, session, bridge, ...)
-are also present at zero since they share the same registry constructor;
-harmless, as vec families with no children simply don't appear.
+are also present at zero since they share the same registry constructor.
+
+Vec families with no children simply don't appear — which is why the four
+pre-created agent families are the exception worth spelling out:
+`metrics.New()` pre-creates all their children at `0`, so they are
+present on a worker that has never claimed a job. Without that baseline a
+counter's first observed sample would already be `1`, `increase()` would treat
+it as the baseline and report `0`, and the alerts over these series would miss
+the first — and possibly only — occurrence they exist for (issue #591).
+`mctl_agent_jobs_total` gets the same treatment for its six statuses, because
+it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
+first completed job after a restart read as zero completions.
+`mctl_agent_policy_denials_total` is pre-created too, across its full
+18 x 6 = 108 label space. It was originally left lazy on the grounds that
+`MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
+fire it — true, and beside the point: if the first *five* denials for one
+reason land between two scrapes, the series is first observed at 5, every later
+sample reads 5, `increase()` is 0, and the rule misses its own documented
+"at least 5 denials" case in the burst scenario it exists for.
+
+One residual remains and is accepted rather than solved: the baseline has to be
+*scraped* before it helps. A worker that starts, claims a job and hits the usage
+limit inside a single scrape interval still presents `1` as its first observed
+sample. The window is now bounded by one scrape interval instead of unbounded,
+which is the whole of the available cheap fix — closing it completely would mean
+gating job acceptance on an observed scrape, coupling the agent's work to its
+own monitoring, or writing "a newly appearing positive series" into both copies
+of every alert expression. #591 weighed and rejected both.
 
 Guard it with `AGENT_METRICS_ALLOW_CIDR` if the worker's NetworkPolicy alone
 is not enough for your deployment; unset means open, matching `cmd/server`'s
