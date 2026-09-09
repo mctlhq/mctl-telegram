@@ -829,6 +829,63 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 	}
 }
 
+// TestProposeReply_PauseAlertIsThrottledAcrossConversations pins the bound
+// on alert volume (claude review P2 on PR #582). Ingestion is gated on
+// listener_enabled, never on autopilot_paused, so a paused account keeps
+// receiving inbound messages and each one is a DISTINCT action —
+// InsertOwnerNotification's per-action_id uniqueness does not bound them.
+// owner_notifications is drained oldest-50 system-wide, so an unbounded
+// producer here delays other accounts' approval codes.
+func TestProposeReply_PauseAlertIsThrottledAcrossConversations(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	if err := h.store.SetAgentAutopilotPaused(context.Background(), h.userID, true); err != nil {
+		t.Fatalf("set autopilot paused: %v", err)
+	}
+
+	const drafts = 3
+	actionIDs := make(map[int64]bool, drafts)
+	for i := 0; i < drafts; i++ {
+		peer := int64(900 + i)
+		conv := h.seedConversation(peer)
+		jobID := h.seedJob("evt:v1:1:"+strconv.FormatInt(peer, 10)+":throttle", conv.ID)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim %d: jobs=%+v err=%v", i, claimed, err)
+		}
+		rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+			ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts,
+			Text: "Could you tell me the company name?",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("draft %d status = %d, body=%s", i, rec.Code, rec.Body.String())
+		}
+		var resp actionResponse
+		decodeBody(t, rec, &resp)
+		if resp.Decision != "deny" {
+			t.Fatalf("draft %d decision = %q, want deny", i, resp.Decision)
+		}
+		actionIDs[resp.ActionID] = true
+	}
+	if len(actionIDs) != drafts {
+		t.Fatalf("expected %d distinct actions, got %d — the test would not exercise cross-action volume", drafts, len(actionIDs))
+	}
+
+	notifs, err := h.store.ListPendingOwnerNotifications(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("list pending notifications: %v", err)
+	}
+	alerts := 0
+	for _, n := range notifs {
+		if n.Kind == db.NotificationAlert {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("alert notifications = %d across %d denied drafts, want exactly 1 (throttled)", alerts, drafts)
+	}
+}
+
 // TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction pins
 // agy's P2 on PR #582. The alert must be driven by the PERSISTED action, not
 // by the replay's freshly-evaluated policy result: an action first persisted

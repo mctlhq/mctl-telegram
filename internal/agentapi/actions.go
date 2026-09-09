@@ -142,6 +142,25 @@ type actionResponse struct {
 // peer parameter in the request: the peer is derived server-side from the
 // conversation row, so a caller can never direct a send anywhere the
 // listener didn't already establish a conversation.
+// pauseAlertWindow bounds how often an account is told that autopilot pause
+// withheld a reply. See the throttle in handleProposeReply for why an
+// unbounded stream is unsafe.
+const pauseAlertWindow = 6 * time.Hour
+
+// hasReason reports whether the persisted "; "-joined reason list contains
+// want as a whole element. Deliberately not an equality check on the joined
+// string: a future change that appends a second reason to the pause denial
+// would silently stop matching, and the owner alert would quietly stop
+// firing with no test failing (claude review P3 on PR #582).
+func hasReason(joined, want string) bool {
+	for _, r := range strings.Split(joined, "; ") {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -306,7 +325,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	// produce a "reply withheld" alert just because the owner paused the
 	// account in between, while the response returned to the worker still
 	// says allow off that same durable row (agy P2 on PR #582).
-	if persisted.Status == db.ActionDenied && persisted.PolicyReasons == policy.ReasonAutopilotPaused {
+	if persisted.Status == db.ActionDenied && hasReason(persisted.PolicyReasons, policy.ReasonAutopilotPaused) {
 		// Deliberately best-effort, unlike the approval-code notification
 		// above: that notification carries the only copy of ApprovalCode, so
 		// losing it strands an otherwise-approvable draft forever. This alert
@@ -317,18 +336,47 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		// InsertOwnerNotification is idempotent per action_id, so a job
 		// redelivery that resolves to the same actionID does not queue a
 		// second alert.
-		peerLabel := "a conversation"
+		// Throttled per account, not merely deduped per action. The
+		// action_id uniqueness below only collapses redeliveries of the SAME
+		// draft; every new inbound message is a distinct action, and
+		// ingestion is gated on listener_enabled, never on autopilot_paused
+		// (internal/agent/listener). An account sitting in the documented
+		// bootstrap default (paused, listener on) would therefore queue one
+		// alert per inbound DM forever — and owner_notifications is drained
+		// oldest-50 SYSTEM-WIDE, so that backlog delays other accounts'
+		// approval codes. The proposal's open question 3 asked whether to
+		// throttle and answered no on the grounds that Saved Messages is not
+		// a scarce channel; the scarce resource is the shared delivery
+		// batch, not the channel (claude review on PR #582).
+		recent, rerr := s.Store.HasOwnerNotificationSince(ctx, id.UserID, db.NotificationAlert, time.Now().UTC().Add(-pauseAlertWindow))
 		switch {
-		case strings.TrimSpace(conv.PeerDisplayName) != "":
-			peerLabel = conv.PeerDisplayName
-		case strings.TrimSpace(conv.PeerUsername) != "":
-			peerLabel = "@" + conv.PeerUsername
-		}
-		alertBody := fmt.Sprintf("Autopilot is paused for this account: a reply to %s was withheld (%s). Resume autopilot to let the agent reply again.", peerLabel, persisted.PolicyReasons)
-		if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
-			UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
-		}); nerr != nil {
-			logHandlerErr("propose_reply", fmt.Errorf("queue autopilot-pause alert (action_id=%d user_id=%d): %w", actionID, id.UserID, nerr))
+		case rerr != nil:
+			// Fail closed on the throttle check: skipping the alert costs the
+			// owner one heads-up, queueing an unbounded stream costs every
+			// account's approval delivery.
+			logHandlerErr("propose_reply", fmt.Errorf("pause-alert throttle check (user_id=%d): %w", id.UserID, rerr))
+		case recent:
+			// Already told within the window; stay quiet.
+		default:
+			peerLabel := "a conversation"
+			switch {
+			case strings.TrimSpace(conv.PeerDisplayName) != "":
+				peerLabel = conv.PeerDisplayName
+			case strings.TrimSpace(conv.PeerUsername) != "":
+				peerLabel = "@" + conv.PeerUsername
+			}
+			// Deliberately does NOT say "resume autopilot": no owner-facing
+			// Telegram command clears autopilot_paused. control/router.go
+			// says so explicitly — /mctl continue resumes one conversation
+			// and autopilot stays paused until re-enabled through the agent
+			// API. Naming an action the owner cannot take is the opposite of
+			// the actionability this issue exists to add.
+			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. Further withheld replies in the next %s will not repeat this notice.", peerLabel, pauseAlertWindow)
+			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
+			}); nerr != nil {
+				logHandlerErr("propose_reply", fmt.Errorf("queue autopilot-pause alert (action_id=%d user_id=%d): %w", actionID, id.UserID, nerr))
+			}
 		}
 	}
 	s.audit(ctx, id.UserID, "propose_reply", "ok", "")

@@ -53,11 +53,20 @@ type Input struct {
 }
 
 // Gate identifies which account-wide control produced a Deny result. It is
-// populated only for the three durable/opt-in account-wide gates (global
-// kill switch, mode==off, autopilot paused) so callers can react
-// specifically to a pause deny (see GateAutopilotPaused) without string
-// matching on Reasons. It is the zero value (GateNone) for every other deny
-// branch, including per-conversation gates and validation failures.
+// populated only for the three account-wide gates (global kill switch,
+// mode==off, autopilot paused) and is the zero value (GateNone) for every
+// other deny branch, including the per-conversation gates and validation
+// failures.
+//
+// It has no production consumer: internal/agentapi's owner pause alert
+// cannot use it, because that decision must be read from the PERSISTED
+// action rather than from the current evaluation — a redelivered job whose
+// action was first stored while the account was active must not be
+// re-judged (see handleProposeReply). Gate exists so policy_test.go can pin
+// the relative precedence of the three gates directly, which is what the
+// alert's correctness actually rests on: a denial that reports
+// GateAutopilotPaused is one the API layer would alert about, and the tests
+// assert exactly which inputs do and do not produce it.
 type Gate string
 
 const (

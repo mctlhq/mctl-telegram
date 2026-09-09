@@ -150,9 +150,11 @@ The communication agent has four independent containment controls:
   account after the supervisor reconciles.
 - `agent_profiles.autopilot_paused=true` denies autonomous recruiter-facing
   replies for that account, but does NOT stop owner notifications: the owner
-  keeps receiving send_owner_summary/request_owner_approval messages, plus a
-  per-draft alert to Saved Messages each time a reply is withheld for this
-  reason (issue #581).
+  keeps receiving send_owner_summary/request_owner_approval messages, plus an
+  alert to Saved Messages when a reply is withheld for this reason — at most
+  one such alert per account per 6 hours, because `owner_notifications` is
+  drained oldest-first system-wide and an unthrottled stream would delay
+  other accounts' approval codes (issue #581).
 - worker Deployment replicas `0` stops model job processing.
 
 No one control substitutes for the others. The closed state between test
@@ -162,12 +164,15 @@ autopilot paused, and worker replicas zero.
 **What to expect from a paused account.** With `autopilot_paused=true` and
 nothing else engaged: recruiter-facing replies are denied and recorded in
 `agent_actions` with `policy_reasons="autopilot paused for this account"`;
-the owner continues to receive Saved Messages, both the per-draft pause
-alert queued for each denied reply and any send_owner_summary /
-request_owner_approval notifications the agent raises independently of
-pause. A conversation the owner has already taken over, closed or paused —
-or a peer they blocked — is denied on its own reason and raises no pause
-alert, so silencing one conversation stays silent. If Saved Messages goes completely silent, the cause is the kill
+the owner continues to receive Saved Messages: a throttled pause alert (at
+most one per 6 hours) and any send_owner_summary / request_owner_approval
+notifications the agent raises independently of pause. A conversation the
+owner has already taken over, closed or paused — or a peer they blocked —
+is denied on its own reason and raises no pause alert, so silencing one
+conversation stays silent. The alert does not tell the owner to "resume
+autopilot": no owner-facing Telegram command clears `autopilot_paused`.
+`/mctl continue <id>` releases one conversation; lifting the account-wide
+pause is an operator action through the agent API. If Saved Messages goes completely silent, the cause is the kill
 switch, `mode=off`, or a disabled listener — not a pause by itself. See
 [`docs/reports/communication-agent-c1.md`](reports/communication-agent-c1.md)
 for the validation history that first surfaced this distinction.
