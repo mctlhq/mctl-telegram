@@ -793,6 +793,13 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	for _, id := range cfg.TGLoginLookupAdmins {
 		lookupAdmins[id] = true
 	}
+	preregisteredClients := make([]oauth.PreregisteredClient, 0, len(cfg.OAUTHPreregisteredClients))
+	for _, c := range cfg.OAUTHPreregisteredClients {
+		preregisteredClients = append(preregisteredClients, oauth.PreregisteredClient{
+			ClientID:     c.ClientID,
+			RedirectURIs: c.RedirectURIs,
+		})
+	}
 	// oauth.New performs OIDC discovery against Telegram — a network call at
 	// boot. It is fail-closed: a discovery failure aborts startup rather than
 	// running a server that cannot authenticate anyone.
@@ -816,6 +823,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		CodeTTL:                  cfg.OAUTHCodeTTL,
 		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
+		PreregisteredClients:     preregisteredClients,
 		RegisterRatePerMin:       cfg.OAUTHRegisterRatePerMin,
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,

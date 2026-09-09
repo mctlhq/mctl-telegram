@@ -37,6 +37,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -370,6 +371,19 @@ type Config struct {
 	// entry; oldest-evict on insert keeps the public surface bounded.
 	// Defaults to 256.
 	MaxPendingEnable int
+	// PreregisteredClients configures OAuth clients accepted at
+	// /oauth/authorize by exact client_id + exact redirect_uri, without RFC
+	// 7591 dynamic registration — the path a Cloudflare MCP Portal-style
+	// integration uses instead of DCR or the implicit-host allowlist (issue
+	// #585 / design.md section 4). New seeds each entry into s.clients with
+	// zero CreatedAt, exactly like the built-in ConnectClientID, so
+	// validateClient's existing exact-match branch covers them; nothing
+	// about /oauth/authorize, /oauth/token, or AllowedImplicitHosts changes
+	// for any other client. No secret field: these remain public clients
+	// (token_endpoint_auth_method=none) using PKCE-S256 like every other
+	// mctl OAuth client. Sourced from OAUTH_PREREGISTERED_CLIENTS via
+	// internal/config, which validates the records before they reach here.
+	PreregisteredClients []PreregisteredClient
 	// UseDBForOAuth routes pending-auth, auth-codes, and client-registrations
 	// through the Postgres-backed store methods (InsertOAuthPending, etc.)
 	// instead of the in-memory maps. Set to true when DATABASE_URL starts with
@@ -674,6 +688,24 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
+	// Pre-register any operator-configured exact-redirect public clients
+	// (e.g. the Cloudflare MCP Portal) the same way: zero CreatedAt, no
+	// /oauth/register call needed, exact redirect_uri matching via the same
+	// validateClient path above rather than the implicit-host allowlist.
+	// internal/config has already validated these records (non-empty
+	// client_id/redirect_uris, no collision with ConnectClientID); this
+	// loop trusts that and only guards defensively.
+	for _, pc := range cfg.PreregisteredClients {
+		if pc.ClientID == "" || pc.ClientID == ConnectClientID {
+			continue
+		}
+		s.clients[pc.ClientID] = &clientReg{
+			ClientID:     pc.ClientID,
+			ClientName:   pc.ClientID,
+			RedirectURIs: slices.Clone(pc.RedirectURIs),
+			CreatedAt:    time.Time{}, // zero — never swept, same as ConnectClientID
+		}
+	}
 	return s, nil
 }
 
@@ -720,6 +752,19 @@ func trustedProxyCIDRsFromEnv() []netip.Prefix {
 // ConnectClientID is the client_id for the built-in self-connect OAuth client.
 // It is pre-registered in oauth.New and used by internal/web/connect.go.
 const ConnectClientID = "mctl_self_connect"
+
+// PreregisteredClient is one operator-configured OAuth client accepted at
+// /oauth/authorize by exact client_id + exact redirect_uri, without RFC 7591
+// dynamic registration. See Config.PreregisteredClients.
+type PreregisteredClient struct {
+	// ClientID is the exact client_id /oauth/authorize and /oauth/token must
+	// receive. Must not equal ConnectClientID.
+	ClientID string
+	// RedirectURIs are the exact redirect_uri values accepted for this
+	// client_id. validateClient requires a byte-for-byte match — no host,
+	// path, query, or port variant is accepted implicitly.
+	RedirectURIs []string
+}
 
 // ExchangeConnect redeems a one-time PKCE-bound authorization code on behalf
 // of the built-in mctl_self_connect client. It mirrors the PKCE verification

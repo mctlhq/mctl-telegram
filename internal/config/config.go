@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -96,6 +97,18 @@ type Config struct {
 	// its own hosted callback domain) is otherwise a code change and a
 	// release for what is a deployment-level trust decision.
 	OAUTHAllowedImplicitHosts []string
+	// OAUTHPreregisteredClients configures OAuth clients accepted at
+	// /oauth/authorize by exact client_id + exact redirect_uri, without RFC
+	// 7591 dynamic registration -- the path a Cloudflare MCP Portal-style
+	// integration uses (issue #585). Set via OAUTH_PREREGISTERED_CLIENTS as
+	// a JSON array: [{"client_id":"...","redirect_uris":["https://..."]}].
+	// This is a SEPARATE surface from OAUTHAllowedImplicitHosts: it is never
+	// added to that allowlist, and it works with
+	// OAUTH_ALLOW_IMPLICIT_CLIENT=false. No client-secret field -- these
+	// remain public clients (token_endpoint_auth_method=none) using
+	// PKCE-S256 like every other mctl OAuth client. Unset ⇒ empty ⇒ no
+	// behavior change for any existing client.
+	OAUTHPreregisteredClients []OAUTHPreregisteredClient
 	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
 	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// Observability:
@@ -321,6 +334,11 @@ func Load() (*Config, error) {
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
+	preregistered, err := parseOAuthPreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))
+	if err != nil {
+		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
+	}
+	c.OAUTHPreregisteredClients = preregistered
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
@@ -525,6 +543,61 @@ func parseStringCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// OAUTHPreregisteredClient is one entry of OAUTH_PREREGISTERED_CLIENTS: an
+// OAuth client accepted at /oauth/authorize by exact client_id + exact
+// redirect_uri, without RFC 7591 dynamic registration. No secret field —
+// these are public clients (token_endpoint_auth_method=none) plus PKCE,
+// same as every other mctl OAuth client. See oauth.PreregisteredClient,
+// which cmd/server converts this into.
+type OAUTHPreregisteredClient struct {
+	ClientID     string   `json:"client_id"`
+	RedirectURIs []string `json:"redirect_uris"`
+}
+
+// oauthConnectClientID mirrors oauth.ConnectClientID. internal/config does
+// not import internal/oauth (no package needs the dependency in that
+// direction), so the reserved id is restated here rather than imported; the
+// oauth package also defensively skips it if this check is ever bypassed by
+// a caller that builds Config by hand instead of through Load.
+const oauthConnectClientID = "mctl_self_connect"
+
+// parseOAuthPreregisteredClients parses and validates OAUTH_PREREGISTERED_CLIENTS:
+// a JSON array of {"client_id": "...", "redirect_uris": ["..."]} records. An
+// empty/unset value returns (nil, nil) — no behavior change from before this
+// variable existed.
+func parseOAuthPreregisteredClients(raw string) ([]OAUTHPreregisteredClient, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var clients []OAUTHPreregisteredClient
+	if err := json.Unmarshal([]byte(raw), &clients); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	seen := make(map[string]bool, len(clients))
+	for i, c := range clients {
+		if c.ClientID == "" {
+			return nil, fmt.Errorf("entry %d: client_id is required", i)
+		}
+		if c.ClientID == oauthConnectClientID {
+			return nil, fmt.Errorf("entry %d: client_id %q is reserved for the built-in self-connect client", i, c.ClientID)
+		}
+		if seen[c.ClientID] {
+			return nil, fmt.Errorf("entry %d: duplicate client_id %q", i, c.ClientID)
+		}
+		seen[c.ClientID] = true
+		if len(c.RedirectURIs) == 0 {
+			return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris must not be empty", i, c.ClientID)
+		}
+		for j, uri := range c.RedirectURIs {
+			u, err := url.Parse(uri)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				return nil, fmt.Errorf("entry %d (client_id %q): redirect_uris[%d] %q is not an absolute URL", i, c.ClientID, j, uri)
+			}
+		}
+	}
+	return clients, nil
 }
 
 // splitTrim is strings.Split + TrimSpace per element. Kept private — the
