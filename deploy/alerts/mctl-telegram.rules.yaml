@@ -292,10 +292,12 @@ spec:
         # it could not be re-derived on 2026-09-09, because
         # mctl_agent_policy_denials_total does not exist in VictoriaMetrics at
         # all — not a single denial has been counted in this deployment. The
-        # counter was also created lazily until mctl-telegram#591, so its
-        # absence conflated "no denials" with "no baseline"; it now appears at
-        # zero once a current image is scraped, which is the precondition for
-        # ever deriving this number.
+        # counter is also created lazily, so its absence conflates "no denials"
+        # with "no baseline" and there is no way to tell them apart from the
+        # series alone. PR mctlhq/mctl-telegram#593 (NOT yet on main at the
+        # time of writing) adds a zero baseline for all 108 combinations, which
+        # is the precondition for ever deriving this number: until it ships and
+        # a current image is scraped, an empty result here means nothing.
         #
         # 0.20 therefore stands as originally taken, on the conservative side:
         # one denial in five claimed jobs, sustained over half an hour, for a
