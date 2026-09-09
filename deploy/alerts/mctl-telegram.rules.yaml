@@ -297,18 +297,33 @@ spec:
         # over half an hour, for a single reason. This must be re-derived from
         # the first week of real production data.
         #
-        # The `>= 5` floor exists because a share computed from a low-volume
+        # The `> 4` floor exists because a share computed from a low-volume
         # denominator is arithmetic, not evidence: without it, one denial
         # during a near-idle window reads as 100%.
+        #
+        # `> 4` rather than `>= 5`: increase() extrapolates to a float, so a
+        # window holding exactly five denials can evaluate to 4.8 and miss an
+        # integer boundary. This file's own header records that failure for
+        # `>= 2` against an interpolated 1.97. `> 4` keeps the intent ("at
+        # least five") without sitting on the boundary.
+        #
+        # `or vector(0)` on the denominator: sum() over an ABSENT series
+        # returns an empty vector, not 0 — so before any job has ever been
+        # claimed, scalar() would yield NaN, `NaN > 0.20` is false, and the
+        # rule would stay silent while denials climbed. Owner-facing denials
+        # (request_owner_approval, send_owner_summary) do not go through
+        # Queue.Claim, so that state is reachable rather than theoretical.
+        # With the guard the denominator is 0, the ratio is +Inf, and the
+        # floor clause still requires real denial volume before it fires.
         - alert: MctlAgentPolicyDenialRateHigh
           expr: |
             (
               sum by (reason) (rate(mctl_agent_policy_denials_total[30m]))
               /
-              scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])))
+              scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])) or vector(0))
             ) > 0.20
             and
-            sum by (reason) (increase(mctl_agent_policy_denials_total[30m])) >= 5
+            sum by (reason) (increase(mctl_agent_policy_denials_total[30m])) > 4
           for: 0m
           labels:
             severity: warning
@@ -352,6 +367,14 @@ spec:
         # worth a page. The second clause (absolute spend floor) guards
         # against a stray fraction of a cent in an idle hour firing this.
         #
+        # That only holds with `or vector(0)`. sum() over an ABSENT series
+        # returns an empty vector rather than 0, and dividing by an empty
+        # vector yields an empty vector — no +Inf, no alert. The label value
+        # `completed` is only emitted once a job has actually completed, so a
+        # total-completion outage (the exact runaway this rule is for) is
+        # precisely when the series can be missing. Without the guard the rule
+        # would be silent in its own headline scenario.
+        #
         # Threshold: no cost figure exists anywhere in this repository (grep
         # for total_cost_usd/cost_usd finds only the plumbing in
         # claudeinvoker.go and docs/agent-worker.md); AGENT_MAX_BUDGET_USD is
@@ -367,7 +390,7 @@ spec:
             (
               sum(increase(mctl_agent_job_cost_usd_total[1h]))
               /
-              sum(increase(mctl_agent_jobs_total{status="completed"}[1h]))
+              (sum(increase(mctl_agent_jobs_total{status="completed"}[1h])) or vector(0))
             ) > 0.50
             and
             sum(increase(mctl_agent_job_cost_usd_total[1h])) > 0.50
