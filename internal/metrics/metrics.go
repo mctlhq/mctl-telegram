@@ -197,10 +197,24 @@ const (
 	JobCostResultError   = "error"
 )
 
-// claudeResultClasses and jobCostResults are the single source of truth for
-// the zero baseline New() writes for those two counters. Adding a label value
-// to either counter means adding it here, or the new child goes back to being
-// created lazily on first use.
+// JobStatuses is every terminal or transitional value of the "status" label on
+// AgentJobsTotal, mirroring db.JobPending .. db.JobIgnored. Duplicated as
+// literals rather than referenced, because internal/db imports this package and
+// the reverse would be an import cycle; TestJobStatusesMatchMetricsSlice in
+// internal/db pins the two lists together so they cannot drift.
+var JobStatuses = []string{
+	"pending",
+	"processing",
+	"completed",
+	"failed",
+	"dead_letter",
+	"ignored",
+}
+
+// claudeResultClasses, jobCostResults and JobStatuses are the single source of
+// truth for the zero baseline New() writes for those counters. Adding a label
+// value to any of them means adding it here, or the new child goes back to
+// being created lazily on first use.
 var (
 	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
 	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
@@ -465,6 +479,15 @@ func New() *Registry {
 	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
+	}
+	// AgentJobsTotal gets the same treatment, for the same reason on the
+	// other side of a division. MctlAgentJobCostHigh divides spend by
+	// increase(mctl_agent_jobs_total{status="completed"}[1h]); a lazily
+	// created denominator makes the first completed job after a server
+	// restart read as zero completions, so the guarded ratio becomes +Inf
+	// and the rule can fire on ordinary spend. Six statuses, closed set.
+	for _, status := range JobStatuses {
+		r.AgentJobsTotal.WithLabelValues(status).Add(0)
 	}
 
 	return r

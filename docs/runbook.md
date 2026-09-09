@@ -402,10 +402,23 @@ is a non-deployed mirror kept only so this section's anchor is checked by
 
 ### Diagnostic queries
 
-Both classes of this counter are pre-created at zero when the worker builds its
-registry (issue #591), so on an idle worker these queries return `0` rather
-than "no data". An empty result means the worker is not being scraped at all,
-which is a different problem from a quiet one.
+Both classes of this counter are pre-created at zero when the registry is built
+(issue #591), so these queries return `0` on an idle worker rather than "no
+data".
+
+Do not read a `0` here as proof that a worker is being scraped. `cmd/server`
+shares the same registry constructor, so every API-server target exports these
+children at zero too, and an unscoped query still answers `0` when every
+agent-worker target has disappeared. To ask about the worker specifically,
+scope by job:
+
+```promql
+sum(mctl_agent_credential_domain{job=~".*agent-worker.*"})
+```
+
+`mctl_agent_credential_domain` is set only in `cmd/agent-worker`'s startup path,
+so an empty result there means no worker is being scraped — which is a
+different problem from a quiet worker.
 
 Confirm the alert is real and see how long it has been firing:
 

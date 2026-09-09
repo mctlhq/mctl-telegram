@@ -114,8 +114,20 @@ present on a worker that has never claimed a job. Without that baseline a
 counter's first observed sample would already be `1`, `increase()` would treat
 it as the baseline and report `0`, and the alerts over these series would miss
 the first — and possibly only — occurrence they exist for (issue #591).
+`mctl_agent_jobs_total` gets the same treatment for its six statuses, because
+it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
+first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is deliberately left lazy: 108 possible
 series, most of them unreachable combinations.
+
+One residual remains and is accepted rather than solved: the baseline has to be
+*scraped* before it helps. A worker that starts, claims a job and hits the usage
+limit inside a single scrape interval still presents `1` as its first observed
+sample. The window is now bounded by one scrape interval instead of unbounded,
+which is the whole of the available cheap fix — closing it completely would mean
+gating job acceptance on an observed scrape, coupling the agent's work to its
+own monitoring, or writing "a newly appearing positive series" into both copies
+of every alert expression. #591 weighed and rejected both.
 
 Guard it with `AGENT_METRICS_ALLOW_CIDR` if the worker's NetworkPolicy alone
 is not enough for your deployment; unset means open, matching `cmd/server`'s

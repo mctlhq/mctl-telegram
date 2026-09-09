@@ -261,6 +261,14 @@ func TestNew_AgentCounterZeroBaseline(t *testing.T) {
 			label:  "result",
 			want:   []string{JobCostResultSuccess, JobCostResultError},
 		},
+		{
+			// The denominator of MctlAgentJobCostHigh. Lazy here means the
+			// first completed job after a restart reads as zero completions,
+			// the ratio becomes +Inf, and the rule fires on ordinary spend.
+			family: "mctl_agent_jobs_total",
+			label:  "status",
+			want:   JobStatuses,
+		},
 	}
 
 	for _, tc := range cases {
