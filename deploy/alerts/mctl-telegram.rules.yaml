@@ -196,6 +196,13 @@ spec:
 
     - name: mctl-telegram-agent
       rules:
+        # The three alerts below (MctlAgentClaudeUsageLimit,
+        # MctlAgentPolicyDenialRateHigh, MctlAgentJobCostHigh) are mirror-only,
+        # same as every other rule in this file: editing them here changes
+        # nothing in the cluster. The deployed copy is the operator's separate
+        # change to platform-gitops/infra-components/observability/vm-rules/
+        # mctl-telegram-ops.yaml in mctl-gitops. They are added here only so
+        # runbook_links_test.go can check their runbook_url anchors.
         - alert: MctlAgentDeadLetter
           expr: increase(mctl_agent_dead_letter_total[15m]) > 0
           for: 0m
@@ -224,6 +231,160 @@ spec:
               not manually resend because Telegram may have accepted the
               original random_id.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#communication-agent-operations"
+
+        # Not a rate threshold: a presence test. The worker runs against a
+        # dedicated Claude credential domain (AGENT_CREDENTIAL_DOMAIN_ID is
+        # required by cmd/agent-worker/main.go's run(); the C1 report records
+        # the isolated OAuth token provisioned specifically so worker spend
+        # never shares a pool with interactive sessions or claude-review.yml).
+        # Nothing in normal operation consumes that pool except the worker,
+        # so one usage-limit stop means the isolated pool is exhausted, and
+        # because Worker.Loop (internal/agentworker/worker.go) processes jobs
+        # sequentially, every subsequent job hits the same wall until the
+        # quota window resets. Any occurrence is therefore actionable; a
+        # nonzero-count threshold would only delay the page.
+        # `> 0` rather than `>= 1` follows this file's own header note about
+        # increase() extrapolating to a float (an exactly-two-window sample
+        # can interpolate to 1.97 and miss `>= 2`).
+        # sum() collapses replicas so a multi-pod worker Deployment raises one
+        # alert, not one per pod. 15m matches MctlAgentDeadLetter above.
+        - alert: MctlAgentClaudeUsageLimit
+          expr: |
+            sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Communication-agent Claude credential hit its usage limit"
+            description: >
+              The agent-worker's dedicated Claude credential
+              (mctl_agent_claude_result_errors_total{class="usage_limit"})
+              reported a usage-limit/quota error in the last 15 minutes.
+              Worker.Loop processes jobs sequentially, so every job after this
+              one blocks on the same exhausted pool until the quota window
+              resets.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentclaudeusagelimit"
+
+        # Aggregated by `reason`, not `surface`: `reason` is the label an
+        # operator acts on (autopilot_paused/conversation_taken_over are the
+        # guarded system working as designed; global_kill,
+        # reply_contains_credentials, or a spike of `unknown` each imply a
+        # different response), and grouping by `reason` makes each reason
+        # clear the threshold on its own so a benign steady stream cannot mask
+        # a new reason appearing beside it.
+        #
+        # Denominator: no metric counts allowed policy evaluations —
+        # CountPolicyDenial (internal/metrics/metrics.go) fires only on
+        # policy.Deny (internal/agentapi/actions.go,
+        # internal/agent/executor/executor.go) — so a true denial rate is not
+        # computable from what #583 registered.
+        # mctl_agent_jobs_total{status="processing"}, incremented once per
+        # claim in Queue.Claim (internal/agent/queue/queue.go), is the closest
+        # available proxy for "opportunities to be denied" and is emitted by
+        # the same process as the denials, so no cross-target label surgery is
+        # needed. The ratio can legitimately exceed 1: actions.go counts a
+        # denial from each evaluation, including redeliveries of the same job,
+        # so a worker hammering a paused account inflates the numerator above
+        # the claim count — that is the anomaly signal, not a bug.
+        #
+        # Threshold: no production baseline exists in this repository. The
+        # agent runs guarded (kill switch, listener flag, autopilot pause,
+        # worker replicas 0 — the four containment controls in
+        # docs/runbook.md's Communication Agent operations section), so no
+        # steady-state denial share has been observed here. 0.20 is taken on
+        # the conservative side: one denial in five claimed jobs, sustained
+        # over half an hour, for a single reason. This must be re-derived from
+        # the first week of real production data.
+        #
+        # The `>= 5` floor exists because a share computed from a low-volume
+        # denominator is arithmetic, not evidence: without it, one denial
+        # during a near-idle window reads as 100%.
+        - alert: MctlAgentPolicyDenialRateHigh
+          expr: |
+            (
+              sum by (reason) (rate(mctl_agent_policy_denials_total[30m]))
+              /
+              scalar(sum(rate(mctl_agent_jobs_total{status="processing"}[30m])))
+            ) > 0.20
+            and
+            sum by (reason) (increase(mctl_agent_policy_denials_total[30m])) >= 5
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Communication-agent policy-denial share is high for reason {{ $labels.reason }}"
+            description: >
+              {{ $labels.reason }} denials are above 20% of claimed agent jobs
+              over the last 30 minutes, with at least 5 denials in the window.
+              Check agent_actions.policy_reasons to decide whether this is the
+              guarded system working as designed or a new/runaway denial
+              reason.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentpolicydenialratehigh"
+
+        # Numerator: all spend, both result="success" and result="error",
+        # because ClaudeInvoker.recordCost (internal/agentworker/
+        # claudeinvoker.go:197) runs before countResultError (:199) — a job
+        # that fails afterwards still reports its spend.
+        #
+        # Denominator: completed jobs (mctl_agent_jobs_total{status=
+        # "completed"}, db.JobCompleted in internal/db/agent_jobs.go), the
+        # terminal success state bound to a durable result_action_id — never
+        # status="succeeded", which is not a label value this code can ever
+        # emit (see internal/db/agent_jobs.go's status constants). The ratio
+        # therefore reads as dollars per delivered outcome: money burned on
+        # failed, retried, or dead-lettered jobs raises the number, which is
+        # the intended behaviour — a retry storm that spends without
+        # completing anything is exactly the runaway this alert is for.
+        # Dividing by status="processing" (claims) was rejected because
+        # retries raise that denominator too, which would flatten exactly the
+        # failure mode this alert exists to catch.
+        #
+        # sum() on both sides: mctl_agent_job_cost_usd_total is emitted by the
+        # agent-worker process (cmd/agent-worker/main.go) while
+        # mctl_agent_jobs_total is emitted by the server process
+        # (internal/agent/queue/queue.go), so their instance/pod labels differ
+        # and a label-matched division could never produce a sample.
+        #
+        # Divide-by-zero: spend with zero completions evaluates the ratio to
+        # +Inf, which compares true — deliberate, since paying for nothing is
+        # worth a page. The second clause (absolute spend floor) guards
+        # against a stray fraction of a cent in an idle hour firing this.
+        #
+        # Threshold: no cost figure exists anywhere in this repository (grep
+        # for total_cost_usd/cost_usd finds only the plumbing in
+        # claudeinvoker.go and docs/agent-worker.md); AGENT_MAX_BUDGET_USD is
+        # an operator value set in gitops, applied by the CLI only when > 0,
+        # and is a per-job ceiling inside one invocation, not an aggregate —
+        # it is not a substitute for this alert. $0.50 per completed job is
+        # taken on the conservative side and is provisional: re-derive it from
+        # the first week of real mctl_agent_job_cost_usd_total data, and if
+        # AGENT_MAX_BUDGET_USD is set, keep this threshold below that cap so
+        # the alert precedes the CLI's hard stop.
+        - alert: MctlAgentJobCostHigh
+          expr: |
+            (
+              sum(increase(mctl_agent_job_cost_usd_total[1h]))
+              /
+              sum(increase(mctl_agent_jobs_total{status="completed"}[1h]))
+            ) > 0.50
+            and
+            sum(increase(mctl_agent_job_cost_usd_total[1h])) > 0.50
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Communication-agent spend per completed job is high"
+            description: >
+              Claude spend per completed communication-agent job over the
+              last hour is above $0.50, with total spend in the window above
+              $0.50. This is dollars per delivered outcome, not per attempt —
+              a retry storm that spends without completing jobs raises this
+              ratio. May render as +Inf when spend occurred with zero
+              completions in the window; that is intended.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentjobcosthigh"
 
     - name: mctl-telegram-tool-availability
       rules:
