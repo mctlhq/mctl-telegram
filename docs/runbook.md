@@ -621,7 +621,7 @@ expression:
 ```promql
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
   /
-(sum(increase(mctl_agent_jobs_total{status=~"completed|ignored|failed|dead_letter"}[1h])) or vector(0))
+(sum(increase(mctl_agent_jobs_total{status=~"^(completed|ignored|failed|dead_letter)$"}[1h])) or vector(0))
 
 sum(increase(mctl_agent_job_cost_usd_total[1h]))
 ```
