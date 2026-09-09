@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -341,6 +343,53 @@ func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
 	for _, m := range mf.GetMetric() {
 		if v := m.GetCounter().GetValue(); v != 0 {
 			t.Fatalf("child %v = %v, want 0", m.GetLabel(), v)
+		}
+	}
+}
+
+// TestPolicySurfacesCoverEveryConstant closes the one gap the other drift
+// guards leave. policyDenyReasons is pinned by TestDenyCodesMatchMetricsList
+// and jobStatuses by TestJobStatusesMatchMetricsSlice, both against a source of
+// truth in another package. policySurfaces has no such counterpart: the
+// constants live in this file, so there is nothing external to compare against.
+//
+// TestNew_PolicyDenialsZeroBaseline's `want != 108` check is not a substitute.
+// It derives `want` from the slice, so it fires when a surface is added TO the
+// slice — forcing the documented bound to be updated, which is useful — and is
+// silent in the case that actually matters: a new PolicySurface* constant
+// declared, used at a call site, and never added here. Its 18 children would go
+// back to being created lazily on first use, which is the regression #591
+// exists to fix, and every other test would still pass at 108.
+//
+// Scanning the source is already an idiom here — docs/runbook_test.go regexes
+// this same file for mctl_[a-z_]+ metric names.
+func TestPolicySurfacesCoverEveryConstant(t *testing.T) {
+	src, err := os.ReadFile("metrics.go")
+	if err != nil {
+		t.Fatalf("read metrics.go: %v", err)
+	}
+	matches := regexp.MustCompile(`PolicySurface\w+\s+=\s+"([a-z_]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(matches) == 0 {
+		t.Fatal("found no PolicySurface* constants — the regex has drifted from the declaration style, which would make this guard silently vacuous")
+	}
+
+	declared := map[string]bool{}
+	for _, m := range matches {
+		declared[m[1]] = true
+	}
+	inSlice := map[string]bool{}
+	for _, s := range policySurfaces {
+		inSlice[s] = true
+	}
+
+	for value := range declared {
+		if !inSlice[value] {
+			t.Errorf("PolicySurface constant %q is declared but missing from policySurfaces — its %d denial children would be created lazily", value, len(policyDenyReasons))
+		}
+	}
+	for value := range inSlice {
+		if !declared[value] {
+			t.Errorf("policySurfaces contains %q, which is not a declared PolicySurface* constant", value)
 		}
 	}
 }
