@@ -2047,7 +2047,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	if len(scopes) < len(resolvedScopes) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, child.Scope) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2139,7 +2139,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	resolvedScopes := scopes
 	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	if len(scopes) < len(resolvedScopes) {
+	if !refreshGrantStillValid(scopes, resolvedScopes, rt.Scope) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
@@ -2242,6 +2242,35 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 		return nil, nil
 	}
 	return currentGroups, bounded
+}
+
+// refreshGrantStillValid decides whether a refresh may proceed for an identity
+// that has just been re-resolved and bounded. It separates two cases the raw
+// length comparison it replaces conflated, because boundRefreshGrant returns
+// (nil, nil) both when the intersection is empty and when there was nothing to
+// intersect:
+//
+//   - A promotion — the identity now resolves to scopes this family never held
+//     — is refused. Those scopes are already gone from bounded, so bounded is
+//     shorter than resolved. This is #572's rule and is unchanged.
+//   - A degradation to nothing is refused too, but only when the family HAD a
+//     grant. Previously both sides were empty, "0 < 0" was false, and the
+//     handler fell through: it minted a scopeless access token at HTTP 200 and
+//     told an operator who had just run set_telegram_access(tier="none") that
+//     the credential still worked. The failure only surfaced at the next tool
+//     call, against the tool's own scope gate. handleTokenRefresh additionally
+//     rotated a successor carrying Scope: "", permanently anchoring the family
+//     at empty.
+//
+// A family that was scopeless from the start still refreshes. That is not a
+// degenerate state: handleTelegramCallback deliberately issues an authorization
+// code to an identity that will receive no scopes, so refusing every scopeless
+// refresh would break a working flow rather than fix this one. See #584.
+func refreshGrantStillValid(bounded, resolved []string, originalScope string) bool {
+	if len(bounded) < len(resolved) {
+		return false
+	}
+	return len(resolved) > 0 || len(strings.Fields(originalScope)) == 0
 }
 
 // handleRevoke implements RFC 7009 token revocation for refresh tokens.

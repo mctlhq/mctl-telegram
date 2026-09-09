@@ -87,24 +87,33 @@ un-tiered user. Without that exemption, removing the id from
 the persisted database row instead of de-provisioning it, which is the
 opposite of what an operator removing an id from the allowlist intends.
 
-Removing an id from `TG_LOGIN_LOOKUP_ADMINS` has two different observable
-outcomes on the next token refresh, depending on `AUTO_APPROVE_CLIENTS`:
+Removing an id from `TG_LOGIN_LOOKUP_ADMINS` fails the next token refresh with
+`invalid_grant`, `"refresh authorization no longer available"`, and so does
+revoking the database access tier with `set_telegram_access(tier="none")`. The
+two get there by different routes:
 
-- If `AUTO_APPROVE_CLIENTS` is on (as in the labs deployment) and the identity
+- If `AUTO_APPROVE_CLIENTS` is on (as in the labs deployment), the identity
   still resolves to a scope set outside its original `admin:users:read` grant
-  — open registration promotes an un-tiered user to the client bundle — the
-  refresh fails with `invalid_grant`, `"refresh authorization no longer
-  available"`.
+  — open registration promotes an un-tiered user to the client bundle — and
+  the refresh is refused as a promotion.
 - If the identity resolves to no scopes at all (open registration off, or the
-  database access tier is explicitly `none`), the refresh instead returns
-  HTTP 200 with a scopeless access token, and the failure only surfaces on the
-  next tool call.
+  access tier is explicitly `none`), the refresh is refused as a degradation.
+  Until #584 this second case answered HTTP 200 with a *scopeless* access
+  token, and the failure only surfaced on the next tool call. If you are
+  operating a deployment older than that fix, treat a 200 here as
+  uninformative.
 
-Do not rely on the refresh response code to confirm de-provisioning: verify by
-calling a tool. A positive check is `list_telegram_identities` returning data
-for the identity; a negative check is a write tool such as
-`set_telegram_access` or `mint_worker_token` being refused with a
-missing-scope error.
+One case still refreshes successfully with no scopes, and is not a bug: a
+refresh-token family that never held a grant. `handleTelegramCallback`
+deliberately issues an authorization code to an identity that will receive no
+scopes, so such a family keeps working; only a family whose grant *degrades* to
+nothing is refused.
+
+The refresh response code is now a reliable de-provisioning check for both
+routes above. To confirm at the tool layer as well, a positive check is
+`list_telegram_identities` returning data for the identity; a negative check is
+a write tool such as `set_telegram_access` or `mint_worker_token` being refused
+with a missing-scope error.
 
 `TG_LOGIN_LOOKUP_ADMINS` is parsed in `internal/config/config.go` into
 `TGLoginLookupAdmins`, then converted into `oauth.Config.LookupAdminTelegramIDs`.

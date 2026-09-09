@@ -644,3 +644,151 @@ func TestBoundRefreshGrantPreservesOrderAndOnlyShrinks(t *testing.T) {
 		t.Fatalf("bounded scopes = %q", got)
 	}
 }
+
+// clientBundleScope is the scope string ResolveScopes hands a client-tier
+// identity, spelled out so the tests below can seed a refresh-token family
+// whose grant already equals the resolved set — the precondition for a refresh
+// that succeeds before revocation and must fail after it.
+const clientBundleScope = "telegram:dialogs:read telegram:messages:read telegram:messages:send telegram:messages:pin account:manage"
+
+// TestToken_RefreshRefusedAfterTierRevokedToNone covers issue #584. An
+// operator running set_telegram_access(tier="none") is the deliberate
+// revocation path. Before the fix, the identity resolved to no scopes at all,
+// so the monotonicity guard compared 0 < 0, fell through, and answered HTTP
+// 200 with a scopeless access token — telling the caller the credential still
+// worked while every subsequent tool call failed at its own scope gate. Worse,
+// the successor was rotated carrying Scope: "", anchoring the family at empty.
+func TestToken_RefreshRefusedAfterTierRevokedToNone(t *testing.T) {
+	const revokedID int64 = 777000333
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "revoked-tier-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "revoked-tier-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: revokedID,
+		Scope:      clientBundleScope,
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+
+	if err := srv.store.SetAccessTier(ctx, revokedID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+	_, currentScopes, err := srv.ResolveScopes(ctx, revokedID)
+	if err != nil {
+		t.Fatalf("resolve scopes after revocation: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refresh status = %d %s, want invalid_grant", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_grant") {
+		t.Fatalf("refresh body = %s, want invalid_grant", rec.Body.String())
+	}
+}
+
+// TestToken_RefreshGraceRecoveryRefusedAfterTierRevokedToNone is the same
+// revocation seen through the rotation grace window, which carried an
+// independent copy of the same length comparison. The first refresh succeeds
+// (grant equals resolution), the tier is then revoked, and replaying the now
+// rotated-out predecessor must not recover a scopeless token.
+func TestToken_RefreshGraceRecoveryRefusedAfterTierRevokedToNone(t *testing.T) {
+	const revokedID int64 = 777000444
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, revokedID, "dave", "Dave")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	original := "revoked-tier-grace-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "revoked-tier-grace-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: revokedID,
+		Scope:      clientBundleScope,
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	if rec := doTokenRequest(t, mux, form); rec.Code != http.StatusOK {
+		t.Fatalf("initial refresh failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if err := srv.store.SetAccessTier(ctx, revokedID, db.TierNone); err != nil {
+		t.Fatalf("set access tier none: %v", err)
+	}
+	replay := doTokenRequest(t, mux, form)
+	if replay.Code != http.StatusBadRequest {
+		t.Fatalf("grace replay status = %d %s, want invalid_grant", replay.Code, replay.Body.String())
+	}
+}
+
+// TestToken_RefreshSucceedsForFamilyScopelessFromTheStart is the guard that
+// keeps #584's fix narrow. "Scopeless" is a real state in this system, not
+// only a degraded one: handleTelegramCallback deliberately issues an
+// authorization code to an identity that will receive no scopes, rather than
+// walk it through enable_access for a session it could not use. Refusing every
+// scopeless refresh would break that flow instead of fixing the revocation
+// case, so a family that never held a grant must keep refreshing.
+func TestToken_RefreshSucceedsForFamilyScopelessFromTheStart(t *testing.T) {
+	const scopelessID int64 = 777000555
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, scopelessID, "erin", "Erin")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	_, currentScopes, err := srv.ResolveScopes(ctx, scopelessID)
+	if err != nil {
+		t.Fatalf("resolve scopes: %v", err)
+	}
+	if len(currentScopes) != 0 {
+		t.Fatalf("test setup did not reproduce the scopeless resolution: %v", currentScopes)
+	}
+
+	original := "scopeless-from-the-start-token"
+	if err := srv.store.SaveRefreshToken(ctx, original, db.RefreshToken{
+		FamilyID:   "scopeless-family",
+		UserID:     uid,
+		ClientID:   "claude.ai",
+		TelegramID: scopelessID,
+		Scope:      "",
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", original)
+	form.Set("client_id", "claude.ai")
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d %s, want 200 — a family that never held a grant is not a degradation", rec.Code, rec.Body.String())
+	}
+}
