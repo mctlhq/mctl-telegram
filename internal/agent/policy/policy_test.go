@@ -294,7 +294,9 @@ func TestEvaluate_OwnerFacingStillDeniedByAccountWideGates(t *testing.T) {
 	}{
 		{"global kill", func(in *Input) { in.GlobalKill = true }},
 		{"mode off", func(in *Input) { in.Profile.Mode = db.AgentModeOff }},
-		{"autopilot paused", func(in *Input) { in.Profile.AutopilotPaused = true }},
+		// The "autopilot paused" case moved to
+		// TestEvaluate_OwnerFacingAllowedWhilePaused below: owner-facing
+		// actions are now allowed while paused (issue #581).
 	}
 	for _, actionType := range []string{db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval} {
 		for _, c := range cases {
@@ -303,6 +305,109 @@ func TestEvaluate_OwnerFacingStillDeniedByAccountWideGates(t *testing.T) {
 			c.mutate(&in)
 			if got := Evaluate(in); got.Decision != Deny {
 				t.Fatalf("%s/%s decision = %s, want deny", actionType, c.name, got.Decision)
+			}
+		}
+	}
+}
+
+// TestEvaluate_OwnerFacingAllowedWhilePaused covers issue #581: autopilot
+// pause is the default state for every new profile and a temporary hold the
+// agent itself can enter (pause_autopilot), not a durable opt-out like the
+// kill switch or mode==off. Owner-facing actions must still reach the owner
+// while paused, or the owner would never learn the agent went quiet.
+func TestEvaluate_OwnerFacingAllowedWhilePaused(t *testing.T) {
+	for _, actionType := range []string{db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval} {
+		in := baseInput()
+		in.Action.Type = actionType
+		in.Profile.AutopilotPaused = true
+		got := Evaluate(in)
+		if got.Decision != Allow {
+			t.Fatalf("actionType=%s decision = %s (%v), want allow", actionType, got.Decision, got.Reasons)
+		}
+	}
+}
+
+// TestEvaluate_ConversationGatesOutrankPause pins the fix for agy's P2 on
+// PR #582: a conversation the owner already took over, closed or paused —
+// or a peer they blocked — must deny on its OWN reason and carry GateNone,
+// even when the account is also paused. A GateAutopilotPaused result makes
+// internal/agentapi queue an owner alert saying a reply was withheld
+// because autopilot is paused; for these conversations that alert is noise
+// about a reply that would have been refused regardless of the pause.
+func TestEvaluate_ConversationGatesOutrankPause(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Input)
+		wantReason string
+	}{
+		{"taken over", func(in *Input) { in.Conversation.State = db.ConversationTakenOver }, "conversation taken over by owner"},
+		{"closed", func(in *Input) { in.Conversation.State = db.ConversationClosed }, "conversation closed"},
+		{"conversation paused", func(in *Input) { in.Conversation.State = db.ConversationPaused }, "conversation paused"},
+		{"sender blocked", func(in *Input) { in.Profile.BlockedSenders = "555" }, "sender is blocked"},
+	}
+	for _, tc := range cases {
+		in := baseInput()
+		in.Profile.AutopilotPaused = true
+		tc.mutate(&in)
+		got := Evaluate(in)
+		if got.Decision != Deny {
+			t.Fatalf("%s: decision = %s (%v), want deny", tc.name, got.Decision, got.Reasons)
+		}
+		if got.Gate != GateNone {
+			t.Fatalf("%s: gate = %q, want GateNone so no owner pause alert is queued", tc.name, got.Gate)
+		}
+		if len(got.Reasons) != 1 || got.Reasons[0] != tc.wantReason {
+			t.Fatalf("%s: reasons = %v, want [%q]", tc.name, got.Reasons, tc.wantReason)
+		}
+	}
+}
+
+// TestEvaluate_AccountWideGatePrecedence pins the relative ordering of the
+// three account-wide gates (kill switch, mode==off, autopilot paused) across
+// all three action types. Kill switch and mode==off remain durable/opt-in
+// states that deny owner-facing actions too; autopilot paused only denies
+// ActionTypeReply (issue #581). When multiple gates apply at once, the
+// outermost gate (kill switch, then mode==off) must be the one reported.
+func TestEvaluate_AccountWideGatePrecedence(t *testing.T) {
+	actionTypes := []string{db.ActionTypeReply, db.ActionTypeOwnerSummary, db.ActionTypeOwnerApproval}
+	cases := []struct {
+		name       string
+		mutate     func(*Input)
+		wantDecide Decision
+		wantGate   Gate
+	}{
+		{"kill switch only", func(in *Input) { in.GlobalKill = true }, Deny, GateKillSwitch},
+		{"mode off only", func(in *Input) { in.Profile.Mode = db.AgentModeOff }, Deny, GateModeOff},
+		{"paused only", func(in *Input) { in.Profile.AutopilotPaused = true }, Deny, GateAutopilotPaused},
+		{"kill switch and paused", func(in *Input) {
+			in.GlobalKill = true
+			in.Profile.AutopilotPaused = true
+		}, Deny, GateKillSwitch},
+		{"mode off and paused", func(in *Input) {
+			in.Profile.Mode = db.AgentModeOff
+			in.Profile.AutopilotPaused = true
+		}, Deny, GateModeOff},
+	}
+	for _, actionType := range actionTypes {
+		for _, tc := range cases {
+			in := baseInput()
+			in.Action.Type = actionType
+			tc.mutate(&in)
+			got := Evaluate(in)
+			wantDecision := tc.wantDecide
+			wantGate := tc.wantGate
+			// The pause gate does not apply to owner-facing actions: when
+			// pause is the only gate engaged, owner-facing actions are
+			// allowed (issue #581) and carry no gate.
+			if tc.name == "paused only" && actionType != db.ActionTypeReply {
+				wantDecision = Allow
+				wantGate = GateNone
+			}
+			if got.Decision != wantDecision {
+				t.Fatalf("%s/%s decision = %s (%v), want %s", actionType, tc.name, got.Decision, got.Reasons, wantDecision)
+			}
+			if got.Gate != wantGate {
+				t.Fatalf("%s/%s gate = %q, want %q", actionType, tc.name, got.Gate, wantGate)
 			}
 		}
 	}
