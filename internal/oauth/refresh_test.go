@@ -936,7 +936,7 @@ func TestRefreshGrantStillValid_StorageErrorPropagates(t *testing.T) {
 		t.Fatalf("close db: %v", err)
 	}
 
-	ok, err := srv.refreshGrantStillValid(context.Background(), nil, nil, "any-family", 777000888)
+	ok, err := srv.refreshGrantStillValid(context.Background(), nil, "any-family", 777000888)
 	if err == nil {
 		t.Fatal("want an error when the store is unavailable — returning (false, nil) makes a storage failure indistinguishable from a revocation, and the handler then answers invalid_grant")
 	}

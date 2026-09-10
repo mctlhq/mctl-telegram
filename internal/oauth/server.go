@@ -2126,9 +2126,8 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return graceServerError
 	}
-	resolvedScopes := scopes
-	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, child.FamilyID, child.TelegramID)
+	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
+	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, child.FamilyID, child.TelegramID)
 	if vErr != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
 		return graceServerError
@@ -2223,9 +2222,8 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
-	resolvedScopes := scopes
-	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, rt.FamilyID, rt.TelegramID)
+	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
+	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, rt.FamilyID, rt.TelegramID)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
 		return
@@ -2371,7 +2369,7 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // Errors are returned, never folded into "revoked": a transient storage
 // failure must produce server_error, not invalid_grant, or a client will treat
 // a recoverable blip as terminal and discard a valid refresh token.
-func (s *Server) refreshGrantStillValid(ctx context.Context, bounded, resolved []string, familyID string, tgID int64) (bool, error) {
+func (s *Server) refreshGrantStillValid(ctx context.Context, bounded []string, familyID string, tgID int64) (bool, error) {
 	if len(bounded) > 0 {
 		return true, nil
 	}
