@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/coder/websocket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -159,5 +160,47 @@ func TestClaimedIdentity_ToleratesGarbage(t *testing.T) {
 		if got := claimedIdentity(req); got != (claimedIdentityFields{}) {
 			t.Errorf("Authorization %q: got %+v, want zero", h, got)
 		}
+	}
+}
+
+// A device blocked in the hub while the server runs is refused after the
+// websocket upgrade, past every pre-upgrade check. That refusal must move
+// the same counter as the others: a daemon in that state redials every
+// minute, and an uncounted refusal there is the #612 shape again.
+func TestBridgeHandler_HubBlockedDeviceIsCounted(t *testing.T) {
+	ctx := context.Background()
+	store := tokenHandlerStore(t)
+	uid, err := store.EnsureUserByTelegramID(ctx, 700000012, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := store.ProvisionLocalAccount(ctx, uid, 700000012, "Carol", "carol"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	deviceID, err := store.RegisterDevice(ctx, uid, "carol-laptop", "carol-laptop", nil)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+
+	hub := NewHub()
+	hub.BlockDevice(uid, deviceID)
+	m := metrics.New()
+	id := &auth.Identity{UserID: uid, Subject: "tg:700000012", TelegramID: 700000012, DeviceID: deviceID}
+	srv := httptest.NewServer(NewBridgeHandlerWithMetrics(hub, &fakeProvider{id: id}, store, ctx, m))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("read succeeded; the blocked device should have been closed")
+	}
+	if hub.HasDaemon(uid) {
+		t.Fatal("blocked device became routable")
+	}
+	if got := testutil.ToFloat64(m.AuthFailuresTotal.WithLabelValues("device_revoked", "bridge")); got != 1 {
+		t.Fatalf("mctl_auth_failures_total{reason=device_revoked,provider=bridge} = %v, want 1", got)
 	}
 }

@@ -166,6 +166,11 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		}
 		send, registered := hub.TryRegister(id.UserID, id.DeviceID)
 		if !registered {
+			// The hub's in-memory block set is the one refusal after the
+			// upgrade: the device was revoked while this process ran and the
+			// daemon is still dialling. It is a refusal like the others and
+			// is counted and named like them, or it would loop unseen.
+			refuse("device_revoked", nil, id)
 			_ = conn.Close(websocket.StatusPolicyViolation, "device revoked")
 			return
 		}

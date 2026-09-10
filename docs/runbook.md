@@ -1637,7 +1637,8 @@ crosses into sustained timeouts.
   the verifier's set (`jwt_expired`, `jwt_invalid_signature`,
   `jwt_invalid_issuer`, …) plus the handlers' own: `no_token`,
   `no_device_binding` (a credential without a device — the #612 shape),
-  `device_inactive` (revoked device).
+  `device_inactive` (device revoked in the store), `device_revoked` (device
+  blocked in the hub after the upgrade — revoked while the server ran).
 - One log line per refusal: `bridge: authentication failed` on `/bridge`
   with the **claimed** numeric identifiers of the token (`claimed_tg_id`,
   `claimed_exp`, `claimed_iat` — read unverified; they say *which* daemon,
@@ -1676,8 +1677,12 @@ crosses into sustained timeouts.
 
 ### Resolution
 
-1. Read the claimed identity from the log line and find the host running
-   that daemon (`claimed_tg_id` → account; `claimed_device_id` → device).
+1. Read the identity from the log line and find the host running that
+   daemon: `claimed_tg_id` → account, always present when the token was a
+   JWT at all; `device_id` → device, present only when the token verified
+   (`no_device_binding`, `device_inactive`, `device_revoked`). When the
+   token did not verify there is no device to name — the account is the
+   only handle, and the host is found from it.
 2. On the host: upgrade the binary, run
    `mctl-telegram-local activate --server https://tg.mctl.ai` (the account
    owner approves the device in a browser), restart the service.
