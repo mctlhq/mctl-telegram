@@ -213,9 +213,12 @@ spec:
         # by a passer-by and must not page. Every reason below needs a token
         # the server signed: Verify checks the HMAC before expiry, issuer and
         # audience; the revocation check and the three device reasons come
-        # after the token verified. `other` stays out even though it is
-        # mixed (malformed JWT is forgeable); the one unforgeable case that
-        # used to land there, a revoked worker token, has its own reason.
+        # after the token verified. `other` stays out because it is mixed:
+        # a malformed JWT (forgeable) shares it with two post-verification
+        # store failures -- "check worker token revocation: ..." and
+        # "ensure user: ..." -- which refuse the whole fleet at once but are
+        # a store outage, announced by the database alerts, not a daemon on
+        # a dead credential. A revoked worker token has its own reason.
         # All reasons stay in the metric and the log for the operator.
         - alert: MctlBridgeAuthFailing
           expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5

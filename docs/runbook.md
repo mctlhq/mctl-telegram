@@ -1643,10 +1643,13 @@ crosses into sustained timeouts.
   tightened audience policy loops the whole fleet under the issuer /
   audience reasons, an operator's eviction under `token_revoked`. `/bridge`
   is public and unrated, so reasons reachable without a signed token —
-  `no_token`, `bearer_scheme_error`, `jwt_invalid_signature`, `other`
-  (malformed JWT) — are counted and logged but never page: a scanner
-  sending `Basic` credentials for ten minutes is background noise, not a
-  daemon.
+  `no_token`, `bearer_scheme_error`, `jwt_invalid_signature`, `other` —
+  are counted and logged but never page: a scanner sending `Basic`
+  credentials for ten minutes is background noise, not a daemon. `other`
+  is mixed: besides a malformed JWT it holds the two post-verification
+  store failures (`check worker token revocation: …`, `ensure user: …`),
+  which refuse the whole fleet at once but are a store outage — the
+  database alerts own that — not a daemon on a dead credential.
   `provider="bridge"` is emitted by both the websocket endpoint `/bridge`
   and the token endpoint `POST /api/bridge/token`; the `reason` label is
   the verifier's set (`jwt_expired`, `jwt_invalid_signature`,
