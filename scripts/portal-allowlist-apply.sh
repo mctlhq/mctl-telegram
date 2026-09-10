@@ -84,6 +84,6 @@ if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi
 res=$(cf -X PUT "$base/portals/$portal" --data "$body" | must_succeed "update portal")
 # The summary is the record that the allowlist landed, so it must not be
 # able to print nothing: -e fails on a null/empty selection.
-jq -er --arg s "$server" '[.result.servers // [] | .[] | select(.server_id==$s)] | first
+jq -er --arg s "$server" '[.result.servers // [] | .[] | select(.server_id==$s)] | first | select(. != null)
   | "applied: default_disabled=\(.default_disabled) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res" \
   || { echo "update returned success but no mapping for '$server' in the response; verify the portal by hand" >&2; exit 1; }
