@@ -113,9 +113,13 @@ tests:
 
   # T5: fires. A refusal that needs a verified token -- the #612 shape,
   # a legacy credential with no device binding -- is the daemon's own.
+  # A post-verification refusal of a different kind (an operator's
+  # revocation) fires on its own reason too.
   - interval: 1m
     input_series:
       - series: 'mctl_auth_failures_total{reason="no_device_binding",provider="bridge"}'
+        values: '0+1x40'
+      - series: 'mctl_auth_failures_total{reason="token_revoked",provider="bridge"}'
         values: '0+1x40'
     alert_rule_test:
       - eval_time: 30m
@@ -128,6 +132,14 @@ tests:
             exp_annotations:
               summary: "mctl-telegram Local Bridge daemon is being refused (no_device_binding)"
               description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason no_device_binding. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              reason: token_revoked
+            exp_annotations:
+              summary: "mctl-telegram Local Bridge daemon is being refused (token_revoked)"
+              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason token_revoked. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
   # --- MctlAgentClaudeUsageLimit (issue #587) ---

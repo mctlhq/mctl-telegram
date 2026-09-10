@@ -1036,6 +1036,10 @@ Open a postmortem if:
   var).
 - **`bearer_scheme_error`**: The `Authorization` header is malformed —
   missing the `Bearer ` prefix or the header is absent entirely.
+- **`token_revoked`**: The token verified but its `jti` (or its account /
+  origin anchor) is on the revocation list — an operator's
+  `revoke_worker_token` / device eviction doing its job. A daemon looping
+  here has been evicted and needs a new credential, not a retry.
 - **`other`**: Catch-all for unexpected validation errors; check pod logs.
 - **Provider context:** `provider` label values are `local-jwt`,
   `shared-hmac`, and `local-dev`.
@@ -1631,14 +1635,18 @@ crosses into sustained timeouts.
 - Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
   bridge refuses more than 5 daemon credentials in 15 minutes for 10
   minutes running
-  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|no_device_binding|device_inactive|device_revoked"}[15m])) > 5`).
-  The alert is an allowlist of the reasons a real daemon produces, each of
-  which needs a token the server signed (`Verify` checks the HMAC before
-  the expiry; the device reasons come after verification). `/bridge` is
-  public and unrated, so reasons reachable without one — `no_token`,
-  `bearer_scheme_error`, `jwt_invalid_signature`, `other` — are counted and
-  logged but never page: a scanner sending `Basic` credentials for ten
-  minutes is background noise, not a daemon.
+  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5`).
+  The alert is an allowlist of reasons that need a token the server signed
+  (`Verify` checks the HMAC before expiry, issuer and audience; the
+  revocation check and the device reasons come after verification), which
+  is also the set a real daemon produces — a changed `BRIDGE_ISSUER` or a
+  tightened audience policy loops the whole fleet under the issuer /
+  audience reasons, an operator's eviction under `token_revoked`. `/bridge`
+  is public and unrated, so reasons reachable without a signed token —
+  `no_token`, `bearer_scheme_error`, `jwt_invalid_signature`, `other`
+  (malformed JWT) — are counted and logged but never page: a scanner
+  sending `Basic` credentials for ten minutes is background noise, not a
+  daemon.
   `provider="bridge"` is emitted by both the websocket endpoint `/bridge`
   and the token endpoint `POST /api/bridge/token`; the `reason` label is
   the verifier's set (`jwt_expired`, `jwt_invalid_signature`,

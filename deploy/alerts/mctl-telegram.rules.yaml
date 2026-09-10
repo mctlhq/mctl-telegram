@@ -210,13 +210,15 @@ spec:
         # Allowlist, not denylist: /bridge is public and behind no rate
         # limiter, so any reason reachable without a signed token (no_token,
         # bearer_scheme_error, jwt_invalid_signature, other) can be produced
-        # by a passer-by and must not page. The four reasons below are the
-        # ones a real daemon produces, and each needs a token the server
-        # signed: Verify checks the HMAC before the expiry, and the three
-        # device reasons are reached only after the token verified. They all
-        # stay in the metric and the log for the operator.
+        # by a passer-by and must not page. Every reason below needs a token
+        # the server signed: Verify checks the HMAC before expiry, issuer and
+        # audience; the revocation check and the three device reasons come
+        # after the token verified. `other` stays out even though it is
+        # mixed (malformed JWT is forgeable); the one unforgeable case that
+        # used to land there, a revoked worker token, has its own reason.
+        # All reasons stay in the metric and the log for the operator.
         - alert: MctlBridgeAuthFailing
-          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|no_device_binding|device_inactive|device_revoked"}[15m])) > 5
+          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5
           for: 10m
           labels:
             severity: warning

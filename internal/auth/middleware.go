@@ -137,6 +137,10 @@ func classifyAuthError(msg string) string {
 		return "jwt_missing_audience"
 	case strings.Contains(msg, "JWT audience") && strings.Contains(msg, "does not match"):
 		return "jwt_wrong_audience"
+	case strings.Contains(msg, "token revoked"):
+		// Post-verification: only a token the server signed reaches the
+		// revocation check, so this is an operator's eviction, not noise.
+		return "token_revoked"
 	case strings.Contains(msg, "Bearer"):
 		return "bearer_scheme_error"
 	default:

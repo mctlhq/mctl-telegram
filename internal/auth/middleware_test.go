@@ -362,3 +362,15 @@ func TestMiddlewareWithHTML_UnauthorizedIsNoStore(t *testing.T) {
 		}
 	}
 }
+
+// A revoked worker token is refused only after its signature verified, so it
+// must not disappear into the forgeable `other` bucket: the bridge alert
+// counts it, and an operator's eviction of a daemon is then visible.
+func TestClassifyAuthError_RevokedTokenHasItsOwnReason(t *testing.T) {
+	if got := ClassifyAuthError("worker token revoked"); got != "token_revoked" {
+		t.Fatalf("ClassifyAuthError(worker token revoked) = %q, want token_revoked", got)
+	}
+	if got := ClassifyAuthError("malformed JWT"); got != "other" {
+		t.Fatalf("ClassifyAuthError(malformed JWT) = %q, want other", got)
+	}
+}
