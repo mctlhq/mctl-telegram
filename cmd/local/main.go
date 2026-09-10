@@ -600,20 +600,31 @@ func serveDaemon(parent context.Context) error {
 	// unchanged. A device record whose credential looks present but whose
 	// signing key material is unusable is a hard stop naming `activate`,
 	// never a silent downgrade to legacy.
-	var bt *bridgeTokenFile
+	// primed is the credential handed to runDaemon as already current. It
+	// is set only when the refresh here succeeded: runDaemon trusts a primed
+	// credential and dials with it at once, so a stale token must never
+	// travel that way -- the loop's own expiry check is what keeps a known
+	// expired token off the wire.
+	var bt, primed *bridgeTokenFile
 	rec, priv, selErr := selectDeviceCredentialSource()
 	if selErr != nil {
 		return selErr
 	}
 	if rec != nil {
+		// A refresh failure here is not a verdict on the device: the PoP
+		// endpoints answer one generic 403 for the fail budget, an expired
+		// nonce and a revoked device alike, and a 5xx or DNS failure says
+		// nothing at all. Start and let the loop retry on its ladder; a
+		// revoked device shows as the server's refusal in the logs.
 		refreshed, refreshErr := refreshDeviceCredential(parent, cfg, rec.DeviceID, priv)
 		if refreshErr != nil {
-			return fmt.Errorf("device credential refresh failed: %w\n"+
-				"If this device was revoked or its key material is compromised, run `mctl-telegram-local activate` to re-register it",
-				refreshErr)
+			slog.Warn("device credential refresh failed before start; will retry from the connect loop",
+				"device_id", rec.DeviceID, "err", refreshErr,
+				"action", "if this keeps failing, the device may have been revoked: run `mctl-telegram-local activate --server "+cfg.Server+"` to re-register it")
+		} else {
+			bt, primed = refreshed, refreshed
+			slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
 		}
-		bt = refreshed
-		slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
 	} else {
 		bt, err = loadBridgeToken()
 		if err != nil {
@@ -628,19 +639,28 @@ func serveDaemon(parent context.Context) error {
 		// process could resolve by itself. That is precisely the restart a
 		// service manager performs after a reboot.
 		//
-		// Refresh here instead, and only give up when the refresh itself fails,
-		// which is the case a human genuinely has to act on.
+		// Refresh here instead, and give up only when the server has judged
+		// the credential (401/403), which is the case a human genuinely has
+		// to act on. A refresh that merely failed -- server down, DNS, a
+		// reset -- is not a verdict: start anyway, unprimed, so the loop
+		// re-reads the token from disk, sees it expired and waits on its
+		// backoff ladder instead of dialing with it (see runDaemon). A blip
+		// at boot then costs a wait, not a restart.
 		if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
 			slog.Info("bridge token expired or expiring; refreshing before start",
 				"expires_at", expiry.Format(time.RFC3339))
-			refreshed, refreshErr := refreshBridgeToken(parent, cfg, bt)
-			if refreshErr != nil {
-				return fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
-					"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
-					expiry.Format(time.RFC3339), refreshErr)
+			switch refreshed, refreshErr := refreshBridgeToken(parent, cfg, bt); {
+			case refreshErr == nil:
+				bt, primed = refreshed, refreshed
+				slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
+			case isRefusedRefresh(refreshErr):
+				return fmt.Errorf("bridge token expired (at %s) and the server refused to refresh it: %w\n"+
+					"Run `mctl-telegram-local activate --server %s` to register this device",
+					expiry.Format(time.RFC3339), refreshErr, cfg.Server)
+			default:
+				slog.Warn("bridge token refresh failed before start; will retry from the connect loop",
+					"expires_at", expiry.Format(time.RFC3339), "err", refreshErr)
 			}
-			bt = refreshed
-			slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
 		}
 	}
 
@@ -671,8 +691,12 @@ func serveDaemon(parent context.Context) error {
 		}
 	}()
 
-	slog.Info("daemon starting", "server", cfg.Server, "expires_at", bt.ExpiresAt, "user_id", uid)
-	if err := runDaemon(ctx, cfg, pool, uid, bt); err != nil && !errors.Is(err, context.Canceled) {
+	expiresAt := "unknown"
+	if bt != nil {
+		expiresAt = bt.ExpiresAt
+	}
+	slog.Info("daemon starting", "server", cfg.Server, "expires_at", expiresAt, "user_id", uid)
+	if err := runDaemon(ctx, cfg, pool, uid, primed); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	slog.Info("daemon stopped")

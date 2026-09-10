@@ -1036,6 +1036,10 @@ Open a postmortem if:
   var).
 - **`bearer_scheme_error`**: The `Authorization` header is malformed —
   missing the `Bearer ` prefix or the header is absent entirely.
+- **`token_revoked`**: The token verified but its `jti` (or its account /
+  origin anchor) is on the revocation list — an operator's
+  `revoke_worker_token` / device eviction doing its job. A daemon looping
+  here has been evicted and needs a new credential, not a retry.
 - **`other`**: Catch-all for unexpected validation errors; check pod logs.
 - **Provider context:** `provider` label values are `local-jwt`,
   `shared-hmac`, and `local-dev`.
@@ -1620,6 +1624,90 @@ sum(increase(mctl_login_phone_step_total{result="timeout"}[30m]))
 
 Open a postmortem if the p95 stays above 45 s for more than 2 hours, or if it
 crosses into sustained timeouts.
+
+---
+
+<a id="mctlbridgeauthfailing"></a>
+## MctlBridgeAuthFailing — /bridge refusing a daemon
+
+### Symptom
+
+- Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
+  bridge refuses more than 5 daemon credentials in 15 minutes for 10
+  minutes running
+  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5`).
+  The alert is an allowlist of reasons that need a token the server signed
+  (`Verify` checks the HMAC before expiry, issuer and audience; the
+  revocation check and the device reasons come after verification), which
+  is also the set a real daemon produces — a changed `BRIDGE_ISSUER` or a
+  tightened audience policy loops the whole fleet under the issuer /
+  audience reasons, an operator's eviction under `token_revoked`. `/bridge`
+  is public and unrated, so reasons reachable without a signed token —
+  `no_token`, `bearer_scheme_error`, `jwt_invalid_signature`, `other` —
+  are counted and logged but never page: a scanner sending `Basic`
+  credentials for ten minutes is background noise, not a daemon. `other`
+  is mixed: besides a malformed JWT it holds the two post-verification
+  store failures (`check worker token revocation: …`, `ensure user: …`),
+  which refuse the whole fleet at once but are a store outage — the
+  database alerts own that — not a daemon on a dead credential.
+  `provider="bridge"` is emitted by both the websocket endpoint `/bridge`
+  and the token endpoint `POST /api/bridge/token`; the `reason` label is
+  the verifier's set (`jwt_expired`, `jwt_invalid_signature`,
+  `jwt_invalid_issuer`, …) plus the handlers' own: `no_token`,
+  `no_device_binding` (a credential without a device — the #612 shape),
+  `device_inactive` (device revoked in the store), `device_revoked` (device
+  blocked in the hub after the upgrade — revoked while the server ran).
+- One log line per refusal: `bridge: authentication failed` on `/bridge`
+  with the **claimed** numeric identifiers of the token (`claimed_tg_id`,
+  `claimed_exp`, `claimed_iat` — read unverified; they say *which* daemon,
+  never decide anything) and `user_id`/`device_id` when the token did
+  verify; `bridge token: credential refused` on the token endpoint with
+  `user_id`, `jti`, `device_id`.
+- What is **not** under `provider="bridge"`: a `401` that `auth.Middleware`
+  issues in front of the token endpoint (an expired or malformed MCP token
+  on the legacy `connect --token` path) is labelled by the middleware's
+  provider name (`local-jwt`, `shared-hmac`) like every other API auth
+  failure, and the device-signed refresh path's `403`s are deliberately
+  generic (per-IP fail budget, expired nonce, revoked device all look the
+  same) and are not counted. A 0.63.1+ legacy daemon exits on a refused
+  refresh and is restarted by its service manager on its throttle, so its
+  refusals keep coming at that cadence; the device-signed daemon keeps
+  retrying instead, and a revoked device on that path is visible only in
+  the daemon's own log.
+- Why `MctlBridgeDaemonsFlapping` stays silent: a refused daemon never
+  reaches `Register`, so `mctl_bridge_connections_total` does not move.
+  The two alerts cover disjoint failures.
+
+### Likely causes
+
+- **Legacy credential after device binding became mandatory (0.62.3,
+  #612).** A daemon on the `connect --token` path refreshes its bridge
+  token through `POST /api/bridge/token`; since `9160785` that endpoint
+  answers `403 device-bound credential required` to a credential without
+  a device binding. Daemons older than 0.63.1 then kept dialing `/bridge`
+  with the expired bridge token once a minute. From 0.63.1 the daemon
+  exits on a 401/403 refresh with an `action` line; older binaries must be
+  upgraded and re-activated.
+- **Revoked device or lapsed worker token.** Same 401/403 shape; the
+  daemon log says which.
+- **Clock skew on the daemon host** producing `jwt_expired` on a fresh
+  token — check `claimed_exp` against the server time.
+
+### Resolution
+
+1. Read the identity from the log line and find the host running that
+   daemon: `claimed_tg_id` → account, always present when the token was a
+   JWT at all; `device_id` → device, present only when the token verified
+   *and* carried a device (`device_inactive`, `device_revoked`). For
+   `no_device_binding` — the #612 shape, and the common one — the field is
+   empty by definition, and for a token that did not verify there is no
+   device to name either: the account is the only handle, and the host is
+   found from it.
+2. On the host: upgrade the binary, run
+   `mctl-telegram-local activate --server https://tg.mctl.ai` (the account
+   owner approves the device in a browser), restart the service.
+3. The alert resolves once the refusals stop; the daemon's own
+   `bridge connected` line is the confirmation.
 
 ---
 

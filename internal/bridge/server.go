@@ -2,8 +2,11 @@ package bridge
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 const pingInterval = 25 * time.Second
@@ -48,35 +52,71 @@ func identityLabel(id *auth.Identity) string {
 // signal.NotifyContext). Using r.Context() would inherit the HTTP server's
 // Timeout middleware and close daemon connections every 60 s.
 func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context) http.HandlerFunc {
-	return newBridgeHandler(hub, provider, store, serverCtx, nil)
+	return newBridgeHandler(hub, provider, store, serverCtx, nil, nil)
+}
+
+// NewBridgeHandlerWithMetrics is NewBridgeHandler with authentication
+// failures counted in m.AuthFailuresTotal under provider="bridge". The
+// bridge endpoint does not sit behind auth.Middleware (it upgrades to a
+// websocket), so without this the one failure mode a daemon has -- being
+// refused at the door -- produced no metric and could not alert (#612).
+func NewBridgeHandlerWithMetrics(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, m *metrics.Registry) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, nil, m)
 }
 
 // NewBridgeHandlerWithAdmissionHook is used by deterministic race tests to
 // pause after durable device verification and immediately before hub
 // registration. Production callers should use NewBridgeHandler.
 func NewBridgeHandlerWithAdmissionHook(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, hook func()) http.HandlerFunc {
-	return newBridgeHandler(hub, provider, store, serverCtx, hook)
+	return newBridgeHandler(hub, provider, store, serverCtx, hook, nil)
 }
 
-func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func()) http.HandlerFunc {
+func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func(), m *metrics.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
+		// Every way this handler refuses a daemon goes through refuse(): one
+		// counter under provider="bridge" with a bounded reason set, and one
+		// log line naming the daemon. A daemon refused here is the one
+		// incident this endpoint has, and a refusal that moves no counter
+		// and names nobody is how one ran unnoticed for two days (#612).
+		// Numeric claims are read unverified, as identifiers for the
+		// operator; they decide nothing, and the token itself is never
+		// logged.
+		refuse := func(reason string, err error, id *auth.Identity) {
+			if m != nil {
+				m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
+			}
+			c := claimedIdentity(r)
+			attrs := []any{"reason", reason,
+				"claimed_tg_id", c.TelegramID, "claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt}
+			if id != nil {
+				attrs = append(attrs, "user_id", id.UserID, "device_id", id.DeviceID)
+			}
+			if err != nil {
+				// Do not echo err.Error() to the client: JWT parsers include
+				// algorithm names, claim paths and token fragments.
+				attrs = append(attrs, "err", err)
+			}
+			slog.Warn("bridge: authentication failed", attrs...)
+		}
+
 		id, err := provider.Authenticate(r)
 		if err != nil {
-			// Do not echo err.Error(): JWT parsers include algorithm names,
-			// claim paths and token fragments. Log server-side only.
-			slog.Info("bridge: authentication failed", "err", err)
+			refuse(auth.ClassifyAuthError(err.Error()), err, nil)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 		if id == nil {
+			refuse("no_token", nil, nil)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="mctl-telegram-bridge"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
 		if id.DeviceID == "" {
-			slog.Info("bridge: credential missing device binding", "user_id", id.UserID)
+			// The device-binding variant of #612: a bridge token that still
+			// verifies but was minted for a credential without a device.
+			refuse("no_device_binding", nil, id)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -99,6 +139,7 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			return
 		}
 		if !active {
+			refuse("device_inactive", nil, id)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -119,15 +160,22 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		// limit would close the connection on the first real download.
 		conn.SetReadLimit(MaxMediaFrameBytes)
 
-		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
 		if beforeRegister != nil {
 			beforeRegister()
 		}
 		send, registered := hub.TryRegister(id.UserID, id.DeviceID)
 		if !registered {
+			// The hub's in-memory block set is the one refusal after the
+			// upgrade: the device was revoked while this process ran and the
+			// daemon is still dialling. It is a refusal like the others and
+			// is counted and named like them, or it would loop unseen.
+			refuse("device_revoked", nil, id)
 			_ = conn.Close(websocket.StatusPolicyViolation, "device revoked")
 			return
 		}
+		// Logged after registration: a connection the hub refused never
+		// connected, and must not read as if it had.
+		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
 
 		// Parent context for both goroutines. Cancelling it stops the
 		// reader and the writer cleanly without leaking goroutines.
@@ -228,4 +276,60 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		_ = conn.Close(websocket.StatusNormalClosure, "done")
 		slog.Info("bridge: daemon disconnected", "user_id", id.UserID, "login", identityLabel(id))
 	}
+}
+
+// claimedIdentityFields is what the bridge handler logs about a token it
+// refused: the numeric identifiers among its claims, read without verifying
+// anything. The bearer verifier has already rejected the token, so nothing
+// here is trusted; it is context for an operator reading the log. Only
+// numbers are taken on purpose -- tg_id names the account as well as sub
+// ("tg:<id>") would, and a number cannot carry free text from an
+// unauthenticated caller into the log.
+type claimedIdentityFields struct {
+	TelegramID int64
+	ExpiresAt  string
+	IssuedAt   string
+}
+
+// maxClaimedPayloadLen bounds what an unauthenticated caller can make this
+// decode: /bridge sits in front of any credential check and behind no rate
+// limiter. A real payload is a few hundred bytes.
+const maxClaimedPayloadLen = 4096
+
+// claimedIdentity decodes the payload of the bearer JWT on r, if any, into
+// the fields above. It is total on purpose -- it runs on the failure path:
+// an oversized payload, a non-JWT bearer or a claim of the wrong type yields
+// zero values for what could not be read and never an error, and every
+// field is decoded on its own so one odd claim does not drop the others.
+func claimedIdentity(r *http.Request) claimedIdentityFields {
+	var out claimedIdentityFields
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return out
+	}
+	parts := strings.Split(strings.TrimSpace(h[len(prefix):]), ".")
+	if len(parts) != 3 || len(parts[1]) > maxClaimedPayloadLen {
+		return out
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return out
+	}
+	var c map[string]any
+	if json.Unmarshal(payload, &c) != nil {
+		return out
+	}
+	// NumericDate and tg_id are JSON numbers (RFC 7519 §2); a fraction or an
+	// exponent form is still a number.
+	if v, ok := c["tg_id"].(float64); ok {
+		out.TelegramID = int64(v)
+	}
+	if v, ok := c["exp"].(float64); ok && v > 0 {
+		out.ExpiresAt = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+	}
+	if v, ok := c["iat"].(float64); ok && v > 0 {
+		out.IssuedAt = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+	}
+	return out
 }

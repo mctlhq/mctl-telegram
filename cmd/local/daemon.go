@@ -97,7 +97,7 @@ func exchangeForBridgeToken(ctx context.Context, cfg *localConfig, bearerToken s
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &tokenEndpointError{Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	var tok struct {
 		BridgeToken string `json:"bridge_token"`
@@ -110,6 +110,30 @@ func exchangeForBridgeToken(ctx context.Context, cfg *localConfig, bearerToken s
 		return nil, fmt.Errorf("server returned empty bridge_token")
 	}
 	return &bridgeTokenFile{BridgeToken: tok.BridgeToken, ExpiresAt: tok.ExpiresAt}, nil
+}
+
+// tokenEndpointError is a non-200 answer from POST /api/bridge/token. The
+// status is what tells a refusal from a blip: 401 and 403 mean the server
+// has looked at the credential and said no, and asking again with the same
+// credential cannot change that.
+type tokenEndpointError struct {
+	Status int
+	Body   string
+}
+
+func (e *tokenEndpointError) Error() string {
+	return fmt.Sprintf("server returned %d: %s", e.Status, e.Body)
+}
+
+// refused reports whether err is the token endpoint rejecting the
+// credential itself (401/403), as opposed to being unreachable or broken.
+// The split is deliberate, not exhaustive: auth.Middleware also answers
+// 401 when the provider's own store lookup fails, so a store outage reads
+// as a verdict here and moves a legacy daemon from the backoff ladder onto
+// its service manager's restart throttle -- quieter than the loop it
+// replaces, and self-healing once the store is back.
+func (e *tokenEndpointError) refused() bool {
+	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
 
 // refreshBridgeToken exchanges bt.MCPToken for a fresh bridge token and
@@ -225,11 +249,16 @@ var dispatchToolCall = dispatchCall
 // while the machine was asleep still refreshes normally, and this is one
 // extra round trip per session start, not per call.
 //
-// primed carries a credential the caller has ALREADY refreshed — runDaemonCmd
-// refreshes once before prompting for the passphrase, so that a revoked or
-// unusable device fails before the user types anything. Without threading it
-// through, the first loop iteration would refresh again immediately: two PoP
-// round trips on every start, for one connection.
+// primed carries a credential the caller has ALREADY refreshed -- serveDaemon
+// refreshes once before prompting for the passphrase, so that a legacy token
+// the server refuses fails before the user types anything, and so that the
+// first loop iteration does not refresh again immediately: two round trips
+// on every start, for one connection. primed is nil whenever that pre-start
+// refresh did not succeed, and the nil is load-bearing: the loop then reads
+// the credential from disk and runs its own expiry check, which is the only
+// thing keeping a known-expired token off the wire. A primed credential is
+// trusted as current and dialed with at once, so a caller must never prime
+// with a token it could not renew.
 func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64, primed *bridgeTokenFile) error {
 	backoff := reconnectBase
 	for {
@@ -254,12 +283,18 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 				// place -- DNS, a timeout, the server restarting. Returning
 				// here would turn a transient blip into a dead service that
 				// only a human restart brings back, which is exactly what the
-				// reconnect loop exists to prevent. A genuinely revoked device
-				// also ends up here and also keeps retrying; what tells an
-				// operator that is the server's refusal in the logs, not a
-				// crashed daemon.
+				// reconnect loop exists to prevent.
+				//
+				// Unlike the legacy path below, a 401/403 here is NOT read as
+				// a verdict: the PoP endpoints answer a deliberately generic
+				// 403 for the per-IP fail budget and for an expired nonce or
+				// a lost race, all of which clear on their own, and a revoked
+				// device is not distinguishable from them by status. A
+				// genuinely revoked device keeps retrying; what tells an
+				// operator that is the server's refusal in the logs.
 				slog.Warn("device credential refresh failed; retrying",
-					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff)
+					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff,
+					"action", "if this keeps failing, the device may have been revoked: run `mctl-telegram-local activate --server "+cfg.Server+"` to re-register it")
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
@@ -281,11 +316,45 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 			}
 			if expiry, expErr := bridgeTokenExpiry(bt); expErr == nil && !expiry.IsZero() && time.Until(expiry) <= tokenRefreshAdv {
 				slog.Info("bridge token nearing expiry, refreshing", "expires_at", expiry.Format(time.RFC3339))
-				if newBT, refreshErr := refreshBridgeToken(ctx, cfg, bt); refreshErr != nil {
-					slog.Warn("bridge token refresh failed; attempting to connect anyway", "err", refreshErr)
-				} else {
+				newBT, refreshErr := refreshBridgeToken(ctx, cfg, bt)
+				switch {
+				case refreshErr == nil:
 					bt = newBT
 					slog.Info("bridge token refreshed", "expires_at", newBT.ExpiresAt)
+				case isRefusedRefresh(refreshErr):
+					// The server has judged the stored credential and refused
+					// it. Nothing this loop can do changes that answer: the
+					// legacy MCP token has lapsed, been revoked, or (since
+					// device binding became mandatory) is no longer a kind of
+					// credential the endpoint accepts. Dialing /bridge with the
+					// bridge token we already hold would only add a 401 per
+					// retry to the server's log -- which is exactly how one of
+					// these ran unnoticed for two days (#612). Exit non-zero
+					// so the service manager restarts on its throttle and the
+					// daemon log says what the operator has to do.
+					slog.Error("bridge token refresh refused by the server; the daemon cannot recover on its own",
+						"err", refreshErr,
+						"action", "run `mctl-telegram-local activate --server "+cfg.Server+"` to register this device, or `connect` again with a freshly minted token")
+					return fmt.Errorf("bridge token refresh refused: %w", refreshErr)
+				case time.Now().After(expiry):
+					// A transient failure (the server unreachable, a 5xx) with
+					// a token that has already lapsed: connecting would be
+					// refused with certainty, so wait and refresh again
+					// instead of adding a doomed dial to every retry.
+					slog.Warn("bridge token expired and refresh failed; waiting before retrying",
+						"err", refreshErr, "wait", backoff)
+					select {
+					case <-time.After(backoff):
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					backoff *= 2
+					if backoff > reconnectMax {
+						backoff = reconnectMax
+					}
+					continue
+				default:
+					slog.Warn("bridge token refresh failed; attempting to connect anyway", "err", refreshErr)
 				}
 			}
 		}
@@ -309,6 +378,13 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 			backoff = reconnectMax
 		}
 	}
+}
+
+// isRefusedRefresh reports whether a refresh error is the token endpoint's
+// verdict on the credential (401/403) rather than a transport failure.
+func isRefusedRefresh(err error) bool {
+	var te *tokenEndpointError
+	return errors.As(err, &te) && te.refused()
 }
 
 // daemonSession runs one websocket connection to the bridge server until it

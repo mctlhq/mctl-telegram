@@ -194,6 +194,47 @@ spec:
               a token rotation problem, or network instability on the daemon host.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
 
+        # A daemon refused at /bridge never registers, so the flapping alert
+        # above cannot see it: mctl_bridge_connections_total only moves on a
+        # successful Register. The pilot daemon that lost its credential on
+        # the 0.62.3 rollout (#612) failed authentication once a minute for
+        # two days with no metric moving at all. This counts the refusals
+        # themselves (provider="bridge" is emitted only by the bridge
+        # handler and the bridge token endpoint). Summed per reason across
+        # replicas, so a two-pod deployment does not halve the rate.
+        # Threshold from the daemon's mechanics: its reconnect
+        # ladder caps at 60s, so a stuck daemon produces ~15 refusals per
+        # 15 minutes; a token that expired mid-session produces one or two
+        # before the refresh lands, hence > 5, and `for: 10m` outlasts a
+        # single rollout.
+        # Allowlist, not denylist: /bridge is public and behind no rate
+        # limiter, so any reason reachable without a signed token (no_token,
+        # bearer_scheme_error, jwt_invalid_signature, other) can be produced
+        # by a passer-by and must not page. Every reason below needs a token
+        # the server signed: Verify checks the HMAC before expiry, issuer and
+        # audience; the revocation check and the three device reasons come
+        # after the token verified. `other` stays out because it is mixed:
+        # a malformed JWT (forgeable) shares it with two post-verification
+        # store failures -- "check worker token revocation: ..." and
+        # "ensure user: ..." -- which refuse the whole fleet at once but are
+        # a store outage, announced by the database alerts, not a daemon on
+        # a dead credential. A revoked worker token has its own reason.
+        # All reasons stay in the metric and the log for the operator.
+        - alert: MctlBridgeAuthFailing
+          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5
+          for: 10m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram Local Bridge daemon is being refused ({{ $labels.reason }})"
+            description: >
+              The bridge refused {{ $value | humanize }} daemon credentials in the last
+              15 minutes with reason {{ $labels.reason }}. The daemon is looping on a
+              credential the server no longer accepts; the server log names it
+              ("bridge: authentication failed" / "bridge token: credential refused").
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
+
     - name: mctl-telegram-agent
       rules:
         # The three alerts below (MctlAgentClaudeUsageLimit,

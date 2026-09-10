@@ -464,7 +464,7 @@ func main() {
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
-			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg), store))
+			bridge.NewBridgeTokenHandlerWithMetrics(provider, []byte(secret), selectBridgeIssuer(cfg), store, m))
 	}
 
 	// Read-only MCP worker token endpoint: an admin mints a bounded,
@@ -517,7 +517,7 @@ func main() {
 		WithMetrics(m).
 		WithDeviceVerifier(store.IsActiveDeviceForUser)
 	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
-	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
+	mux.Get("/bridge", bridge.NewBridgeHandlerWithMetrics(hub, bridgeProvider, store, ctx, m))
 
 	// Communication-agent HTTP surface: off by default like every other
 	// agent PR (AGENT_ENABLED). Two auth boundaries, same shape as the

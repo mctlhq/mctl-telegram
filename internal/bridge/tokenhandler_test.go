@@ -9,9 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 func tokenHandlerStore(t *testing.T) *db.Store {
@@ -259,11 +262,17 @@ func TestBridgeToken_BindsWorkerLineageToSyntheticDevice(t *testing.T) {
 func TestBridgeToken_RejectsUnboundParent(t *testing.T) {
 	store := tokenHandlerStore(t)
 	id := &auth.Identity{UserID: 1, Subject: "tg:1", TelegramID: 1}
-	h := NewBridgeTokenHandler(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, store)
+	m := metrics.New()
+	h := NewBridgeTokenHandlerWithMetrics(&fakeProvider{id: id}, []byte(testHMACSecret), testBridgeIssuerURL, store, m)
 	req := httptest.NewRequest("POST", "/api/bridge/token", nil).WithContext(auth.With(context.Background(), id))
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("unbound parent status = %d, want 403", rec.Code)
+	}
+	// The refusal is what MctlBridgeAuthFailing watches; the exact label pair
+	// is pinned because a typo in either would leave the alert silent for good.
+	if got := testutil.ToFloat64(m.AuthFailuresTotal.WithLabelValues("no_device_binding", "bridge")); got != 1 {
+		t.Fatalf("mctl_auth_failures_total{reason=no_device_binding,provider=bridge} = %v, want 1", got)
 	}
 }
