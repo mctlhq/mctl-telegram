@@ -64,6 +64,17 @@ func TestBridgeHandler_AuthFailureIsCountedAndNamesTheClaimedDaemon(t *testing.T
 	}
 }
 
+// exp and iat are NumericDate: a fractional value is still a timestamp, and
+// the identifying claims next to it must survive it.
+func TestClaimedIdentity_AcceptsFractionalNumericDate(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/bridge", nil)
+	req.Header.Set("Authorization", "Bearer "+unsignedJWT(`{"sub":"tg:1","tg_id":1,"exp":1788866352.5,"iat":1788862752.0}`))
+	got := claimedIdentity(req)
+	if got.Subject != "tg:1" || got.TelegramID != 1 || got.ExpiresAt != "2026-09-08T11:19:12Z" || got.IssuedAt != "2026-09-08T10:19:12Z" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 // No bearer, a non-JWT bearer, and an undecodable payload all degrade to
 // empty fields rather than a panic or a skipped log line.
 func TestClaimedIdentity_ToleratesGarbage(t *testing.T) {

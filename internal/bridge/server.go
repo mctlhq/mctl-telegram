@@ -287,22 +287,25 @@ func claimedIdentity(r *http.Request) claimedIdentityFields {
 	if err != nil {
 		return out
 	}
+	// NumericDate is any JSON number (RFC 7519 §2), so exp/iat are read as
+	// floats: a token from another issuer must not lose its sub and tg_id
+	// from the log because its timestamps carry a fraction.
 	var c struct {
-		Sub      string `json:"sub"`
-		TgID     int64  `json:"tg_id"`
-		DeviceID string `json:"device_id"`
-		Exp      int64  `json:"exp"`
-		Iat      int64  `json:"iat"`
+		Sub      string  `json:"sub"`
+		TgID     int64   `json:"tg_id"`
+		DeviceID string  `json:"device_id"`
+		Exp      float64 `json:"exp"`
+		Iat      float64 `json:"iat"`
 	}
 	if json.Unmarshal(payload, &c) != nil {
 		return out
 	}
 	out.Subject, out.TelegramID, out.DeviceID = c.Sub, c.TgID, c.DeviceID
 	if c.Exp > 0 {
-		out.ExpiresAt = time.Unix(c.Exp, 0).UTC().Format(time.RFC3339)
+		out.ExpiresAt = time.Unix(int64(c.Exp), 0).UTC().Format(time.RFC3339)
 	}
 	if c.Iat > 0 {
-		out.IssuedAt = time.Unix(c.Iat, 0).UTC().Format(time.RFC3339)
+		out.IssuedAt = time.Unix(int64(c.Iat), 0).UTC().Format(time.RFC3339)
 	}
 	return out
 }
