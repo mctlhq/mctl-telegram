@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.63.0](https://github.com/mctlhq/mctl-telegram/compare/0.62.3...0.63.0) (2026-09-10)
+
+
+### Features
+
+* **agents:** issue-575-docs-runbook-document-the-tg-login-looku ([6ca3867](https://github.com/mctlhq/mctl-telegram/commit/6ca386780b71498e491d4570eb6000ccb34bf5aa))
+* **agents:** issue-580-feat-agent-worker-policy-denial-and-job ([b41b16c](https://github.com/mctlhq/mctl-telegram/commit/b41b16c0d97ca926e011b00698860d5d608da322))
+* **agents:** issue-580-feat-agent-worker-policy-denial-and-job ([78df1e4](https://github.com/mctlhq/mctl-telegram/commit/78df1e4f7ec52be88a651ae3cf04e149e18a5540))
+* **agents:** issue-581-fix-agent-autopilot-paused-also-silences ([a126437](https://github.com/mctlhq/mctl-telegram/commit/a12643779320f6f612fd18c4bab7eebb6a14ab7e))
+* **agents:** issue-587-feat-alerts-quota-policy-denial-and-job ([6086ae6](https://github.com/mctlhq/mctl-telegram/commit/6086ae6fc20607327c1a7f988ce6b56d8f086169))
+* **agents:** issue-590-test-alerts-the-denial-floor-promtool-ca ([f40d44a](https://github.com/mctlhq/mctl-telegram/commit/f40d44abb2aaba0685357c35ac22ad674e8daf57))
+* **alerts:** quota, policy-denial and job-cost alerts for the communication agent ([f06d32b](https://github.com/mctlhq/mctl-telegram/commit/f06d32b878987197f638205f2708fadcbfb3529d))
+* **mcpprobe:** command-line front end and operator documentation ([5fa02d8](https://github.com/mctlhq/mctl-telegram/commit/5fa02d8fa7db8adaa762cb96df67be055a043233))
+* **mcpprobe:** modern and legacy MCP conformance probe ([a9d2195](https://github.com/mctlhq/mctl-telegram/commit/a9d2195200130a054cd330aa762aa93c64eb43d9))
+* **mcpprobe:** modern/legacy MCP conformance probe and pre-registered OAuth clients ([2afa713](https://github.com/mctlhq/mctl-telegram/commit/2afa7131a43ade5311a6079b3ac840f781d9a4d7))
+* **oauth:** pre-registered exact-redirect public clients ([1f394af](https://github.com/mctlhq/mctl-telegram/commit/1f394af4a5182e01d58136f643377fcc5f31ca77))
+* **ui:** pin the design-system stylesheet to a version ([af8fe30](https://github.com/mctlhq/mctl-telegram/commit/af8fe309ea8383c2aaa78bad29b90815166aee16))
+* **ui:** pin the design-system stylesheet to a version ([3d03a45](https://github.com/mctlhq/mctl-telegram/commit/3d03a45732864d0d1359f9195c9c1f438c0ef3ff))
+
+
+### Bug Fixes
+
+* address review findings ([0073625](https://github.com/mctlhq/mctl-telegram/commit/0073625cebedb3c870be2c276d0b637488e26624))
+* **agent-worker:** persist job cost even without a metrics registry ([92d6a11](https://github.com/mctlhq/mctl-telegram/commit/92d6a11646e02ce4b7cfeaedc6b82b74e2a86e87))
+* **agent-worker:** split the owner denial surface, test the fail-closed CIDR branch ([f2d6a5e](https://github.com/mctlhq/mctl-telegram/commit/f2d6a5efea8a7644f0d61242eb0b4053bfbd459b))
+* **agent:** drive the pause alert from durable state and let conversation gates outrank pause ([a6482a7](https://github.com/mctlhq/mctl-telegram/commit/a6482a75191690136b4e014877e08367e54cef70))
+* **agents:** correct auth token and gofmt in new cost tests ([c19db8e](https://github.com/mctlhq/mctl-telegram/commit/c19db8e5159046b956f1a4d7dc17fb090c7f8ac7))
+* **agents:** issue-581-fix-agent-autopilot-paused-also-silences ([56815be](https://github.com/mctlhq/mctl-telegram/commit/56815be86e531c956a3209d475364cf460683a79))
+* **agent:** throttle the pause alert, and stop telling the owner to do something they cannot ([d996c4a](https://github.com/mctlhq/mctl-telegram/commit/d996c4a23f340f4f39019c608309217d13b212d1))
+* **alerts:** guard the absent-denominator paths the reviewers found ([9b750d9](https://github.com/mctlhq/mctl-telegram/commit/9b750d97da6b0f99c3110241bba05b0c255ffb4f))
+* **alerts:** mirror the job-cost denominator fix and the measured thresholds ([b3d8d51](https://github.com/mctlhq/mctl-telegram/commit/b3d8d5177085a5477151163fd40f9cbc82885036))
+* **alerts:** mirror the job-cost denominator fix and the measured thresholds ([384cc91](https://github.com/mctlhq/mctl-telegram/commit/384cc91d3504e6d9a28ca05926937039a58a16ac)), closes [#596](https://github.com/mctlhq/mctl-telegram/issues/596)
+* **db:** scan SELECT EXISTS into a bool, and cover it on Postgres ([074958f](https://github.com/mctlhq/mctl-telegram/commit/074958fa461564ee74fa07f8465162824cc4bac8))
+* **mcpprobe:** a negative probe needs a working baseline to mean anything ([587093c](https://github.com/mctlhq/mctl-telegram/commit/587093c6455775d4a0180561fb707b3f65d24e9f))
+* **mcpprobe:** an unmeasured run must not exit zero ([cea352c](https://github.com/mctlhq/mctl-telegram/commit/cea352c55bf02c38fca392629e267fb023af8e04))
+* **mcpprobe:** close the outstanding review nits ([63851e0](https://github.com/mctlhq/mctl-telegram/commit/63851e0a4c753b1dd285eaddea1b98b1297ba98d))
+* **mcpprobe:** keep the verdict inside its own enum ([57c0c5b](https://github.com/mctlhq/mctl-telegram/commit/57c0c5b9bff6a5b7b4a44380ace453aaa2f2da7f))
+* **mcpprobe:** parse escaped quotes in the WWW-Authenticate challenge ([d821884](https://github.com/mctlhq/mctl-telegram/commit/d82188425e93198e22a3167fb7215b3aa30bad2a))
+* **mcpprobe:** parse escaped quotes in the WWW-Authenticate challenge ([7cb800e](https://github.com/mctlhq/mctl-telegram/commit/7cb800e2e2dcacef3c888b51730ca527819cb8d1))
+* **metrics:** baseline policy denials too, and stop exporting a mutable slice ([f6db8cf](https://github.com/mctlhq/mctl-telegram/commit/f6db8cf2131239864b0c7cfeb1d7803a2234567d))
+* **metrics:** baseline the job-status denominator, and correct the runbook ([d4b47ea](https://github.com/mctlhq/mctl-telegram/commit/d4b47ea4c560454d089d70400b8eacc9426a781f))
+* **metrics:** give the two agent counters a zero baseline at startup ([b23f045](https://github.com/mctlhq/mctl-telegram/commit/b23f045575e5aa70788d9fda6491819af65c2b56))
+* **metrics:** give the two agent counters a zero baseline at startup ([ced25a3](https://github.com/mctlhq/mctl-telegram/commit/ced25a3de6c9a5ce34998adac5e5c205555e1e03)), closes [#591](https://github.com/mctlhq/mctl-telegram/issues/591)
+* **oauth:** judge a degraded family by its history, not by one signal ([769f056](https://github.com/mctlhq/mctl-telegram/commit/769f0562402937403ce94aec54e1ef2b40eddbb2))
+* **oauth:** refuse a refresh whose grant degrades to no scopes ([85a3a21](https://github.com/mctlhq/mctl-telegram/commit/85a3a21f4335e148898093e4259c59b359249c44))
+* **oauth:** refuse a refresh whose grant degrades to no scopes ([009df91](https://github.com/mctlhq/mctl-telegram/commit/009df917c0e3cbeb2cf43c3d4141d070d250b473)), closes [#584](https://github.com/mctlhq/mctl-telegram/issues/584)
+* **oauth:** refuse legacy families the old handler already flattened ([87b0c4c](https://github.com/mctlhq/mctl-telegram/commit/87b0c4c14b6a1b203d658c390a170c3a3a22694c))
+
+
+### Performance Improvements
+
+* **oauth:** read the access tier only on the path that needs it ([680858f](https://github.com/mctlhq/mctl-telegram/commit/680858fee3e2a84a57867d5cd4321d6f8b3b5ffa))
+
 ## [0.62.3](https://github.com/mctlhq/mctl-telegram/compare/0.62.2...0.62.3) (2026-09-08)
 
 
