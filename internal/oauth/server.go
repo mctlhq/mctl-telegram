@@ -307,6 +307,19 @@ type Config struct {
 	// cannot smuggle in a phishing destination by bypassing the implicit
 	// check via prior registration.
 	AllowedImplicitHosts []string
+	// PreregisteredClients are static public clients seeded into the client
+	// registry at construction, next to the built-in self-connect client.
+	// Each is matched by exact client_id and byte-for-byte redirect_uri; the
+	// implicit-host allowlist above plays no part, so registering one never
+	// widens what an unregistered client_id may redirect to. No secret is
+	// carried: the token endpoint remains PKCE-only for every client.
+	//
+	// In the server binary this comes from OAUTH_PREREGISTERED_CLIENTS. It is
+	// the intended path for a counterpart that cannot perform RFC 7591
+	// registration (an enterprise MCP gateway with a fixed callback, for
+	// example) and whose callback host should not be trusted for anything
+	// but this one client.
+	PreregisteredClients []PreregisteredClient
 	// ClientRegistrationTTL bounds how long a dynamically-registered client
 	// is kept in memory before the sweeper evicts it. Defaults to 24h.
 	// Set to a negative duration to disable eviction (not recommended in
@@ -674,7 +687,66 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
+	// Operator-supplied static clients share the built-in client's
+	// zero-CreatedAt semantics: they are never swept and never count toward
+	// the dynamic registration cap. Validation is fail-closed because the
+	// operator who configured the record is relying on it existing.
+	for i, c := range cfg.PreregisteredClients {
+		if err := validatePreregisteredClient(c); err != nil {
+			return nil, fmt.Errorf("oauth: preregistered client %d: %w", i, err)
+		}
+		if _, exists := s.clients[c.ClientID]; exists {
+			return nil, fmt.Errorf("oauth: preregistered client %d: client_id %q is already registered", i, c.ClientID)
+		}
+		s.clients[c.ClientID] = &clientReg{
+			ClientID:     c.ClientID,
+			ClientName:   c.ClientName,
+			RedirectURIs: append([]string(nil), c.RedirectURIs...),
+			CreatedAt:    time.Time{}, // zero — never swept
+		}
+	}
 	return s, nil
+}
+
+// PreregisteredClient is a static public OAuth client seeded at construction.
+// See Config.PreregisteredClients.
+type PreregisteredClient struct {
+	ClientID     string
+	ClientName   string
+	RedirectURIs []string
+}
+
+// validatePreregisteredClient applies the redirect_uri shape rules shared with
+// dynamic registration (scheme, userinfo, backslash) to a static record. The
+// host allowlist deliberately does not apply — exact registration is the
+// boundary for these clients — but a fragment is rejected because RFC 6749
+// §3.1.2 forbids it and an exact-match comparison would otherwise carry it
+// into the redirect.
+func validatePreregisteredClient(c PreregisteredClient) error {
+	if strings.TrimSpace(c.ClientID) == "" {
+		return errors.New("client_id is required")
+	}
+	if len(c.RedirectURIs) == 0 {
+		return fmt.Errorf("client %q: at least one redirect_uri is required", c.ClientID)
+	}
+	for _, raw := range c.RedirectURIs {
+		u, err := validateRedirectURIShape(raw)
+		if err != nil {
+			return fmt.Errorf("client %q: %w", c.ClientID, err)
+		}
+		if u.Fragment != "" || strings.Contains(raw, "#") {
+			return fmt.Errorf("client %q: redirect_uri must not contain a fragment", c.ClientID)
+		}
+		// The shape check does not require an authority, and for the implicit
+		// path it need not: an empty host cannot match the allowlist, so the
+		// allowlist is the backstop. Pre-registration deliberately skips that
+		// allowlist, which leaves nothing checking the authority — "https:///cb"
+		// would otherwise be seeded as a valid exact-match target.
+		if u.Host == "" {
+			return fmt.Errorf("client %q: redirect_uri must have a host", c.ClientID)
+		}
+	}
+	return nil
 }
 
 // defaultTrustedProxyCIDRs are the cluster's own pod and service ranges —
@@ -2629,30 +2701,9 @@ func (s *Server) allowRegister(ip string) bool {
 // forms — "localhost", IPv4 "127.0.0.1", and IPv6 "::1" — under http (no
 // TLS required) so a native client on an IPv6-only host is not locked out.
 func (s *Server) validateImplicitRedirectURI(raw string) error {
-	// A backslash is not a valid URI character, and parsers disagree on it:
-	// some read it as a path separator, others as part of userinfo. That
-	// disagreement is what turns a host allowlist into an open redirect, since
-	// the host approved here need not be the host a browser dials. Reject
-	// before parsing so the two can never diverge.
-	if strings.ContainsRune(raw, '\\') {
-		return errors.New("redirect_uri must not contain a backslash")
-	}
-	u, err := url.Parse(raw)
+	u, err := validateRedirectURIShape(raw)
 	if err != nil {
-		return fmt.Errorf("redirect_uri %q is not a valid URL: %w", raw, err)
-	}
-	// Userinfo has no place in a redirect target, and accepting it defeats the
-	// host checks below: https://evil.com@claude.ai/cb and
-	// http://evil.com@localhost/cb both parse with an approved host while
-	// reading as evil.com to anything that splits on the first '@' or renders
-	// the URL to a user.
-	if u.User != nil {
-		return errors.New("redirect_uri must not contain userinfo")
-	}
-	if u.Scheme != "https" {
-		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
-			return fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
-		}
+		return err
 	}
 	host := u.Hostname()
 	hostWithPort := u.Host
@@ -2677,6 +2728,39 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 		return nil
 	}
 	return fmt.Errorf("redirect_uri host %q is not in the allowlist", host)
+}
+
+// validateRedirectURIShape applies the host-independent redirect_uri rules
+// shared by the implicit/DCR path and static pre-registration: no backslash,
+// parseable, no userinfo, https except for http on a loopback host. It
+// returns the parsed URL so callers can apply their own host policy on top.
+func validateRedirectURIShape(raw string) (*url.URL, error) {
+	// A backslash is not a valid URI character, and parsers disagree on it:
+	// some read it as a path separator, others as part of userinfo. That
+	// disagreement is what turns a host allowlist into an open redirect, since
+	// the host approved here need not be the host a browser dials. Reject
+	// before parsing so the two can never diverge.
+	if strings.ContainsRune(raw, '\\') {
+		return nil, errors.New("redirect_uri must not contain a backslash")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("redirect_uri %q is not a valid URL: %w", raw, err)
+	}
+	// Userinfo has no place in a redirect target, and accepting it defeats the
+	// host checks below: https://evil.com@claude.ai/cb and
+	// http://evil.com@localhost/cb both parse with an approved host while
+	// reading as evil.com to anything that splits on the first '@' or renders
+	// the URL to a user.
+	if u.User != nil {
+		return nil, errors.New("redirect_uri must not contain userinfo")
+	}
+	if u.Scheme != "https" {
+		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+			return nil, fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
+		}
+	}
+	return u, nil
 }
 
 // isLoopbackHost is true for the three RFC 8252 §7.3 loopback host forms.

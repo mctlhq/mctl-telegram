@@ -816,6 +816,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		CodeTTL:                  cfg.OAUTHCodeTTL,
 		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
+		PreregisteredClients:     preregisteredClients(cfg.OAUTHPreregisteredClients),
 		RegisterRatePerMin:       cfg.OAUTHRegisterRatePerMin,
 		TGAPIID:                  cfg.TGAPIID,
 		TGAPIHash:                cfg.TGAPIHash,
@@ -849,6 +850,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"client_count", len(clients),
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
+		"preregistered_clients", len(cfg.OAUTHPreregisteredClients),
 		"demo_reviewer", cfg.DemoReviewerEnabled,
 	)
 	if cfg.DemoReviewerEnabled {
@@ -1039,4 +1041,23 @@ func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
 			ScopesSupported:      oauth.DCRNegotiableScopes,
 		})
 	}
+}
+
+// preregisteredClients converts the config records into the oauth package's
+// own type. internal/config must not import internal/oauth, and oauth.New is
+// the only place allowed to touch the client registry, so the conversion
+// lives here rather than either package reaching into the other.
+func preregisteredClients(in []config.PreregisteredClient) []oauth.PreregisteredClient {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]oauth.PreregisteredClient, 0, len(in))
+	for _, c := range in {
+		out = append(out, oauth.PreregisteredClient{
+			ClientID:     c.ClientID,
+			ClientName:   c.ClientName,
+			RedirectURIs: append([]string(nil), c.RedirectURIs...),
+		})
+	}
+	return out
 }
