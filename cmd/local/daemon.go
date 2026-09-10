@@ -169,7 +169,7 @@ func refreshDeviceCredential(ctx context.Context, cfg *localConfig, deviceID str
 		return nil, fmt.Errorf("refresh device credential: %w", err)
 	}
 	if status != http.StatusOK || cred == nil {
-		return nil, fmt.Errorf("device refresh: server returned %d: %s", status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("device refresh: %w", &tokenEndpointError{Status: status, Body: strings.TrimSpace(string(body))})
 	}
 	pub, ok := priv.Public().(ed25519.PublicKey)
 	if !ok {
@@ -266,6 +266,17 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 			primed = nil
 		case rec != nil:
 			newBT, refreshErr := refreshDeviceCredential(ctx, cfg, rec.DeviceID, priv)
+			if refreshErr != nil && isRefusedRefresh(refreshErr) {
+				// The server has judged this device (revoked, or a lineage it
+				// no longer knows) and retrying cannot change that. Same rule
+				// as the legacy path below: exit with the action, let the
+				// service manager restart on its throttle, and leave the
+				// server-side counter to say how often (#612).
+				slog.Error("device credential refresh refused by the server; the daemon cannot recover on its own",
+					"device_id", rec.DeviceID, "err", refreshErr,
+					"action", "run `mctl-telegram-local activate --server "+cfg.Server+"` to register this device again")
+				return fmt.Errorf("device credential refresh refused: %w", refreshErr)
+			}
 			if refreshErr != nil {
 				// Back off and retry rather than exiting. This runs on every
 				// reconnect, so the failure it sees most often is the same
@@ -273,10 +284,7 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 				// place -- DNS, a timeout, the server restarting. Returning
 				// here would turn a transient blip into a dead service that
 				// only a human restart brings back, which is exactly what the
-				// reconnect loop exists to prevent. A genuinely revoked device
-				// also ends up here and also keeps retrying; what tells an
-				// operator that is the server's refusal in the logs, not a
-				// crashed daemon.
+				// reconnect loop exists to prevent.
 				slog.Warn("device credential refresh failed; retrying",
 					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff)
 				select {

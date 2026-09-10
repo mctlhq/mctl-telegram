@@ -66,10 +66,9 @@ tests:
               severity: warning
               service: mctl-telegram
               reason: jwt_expired
-              provider: bridge
             exp_annotations:
-              summary: "mctl-telegram Local Bridge daemon is being refused at /bridge (jwt_expired)"
-              description: "/bridge refused 15 daemon connections in the last 15 minutes with reason jwt_expired. The daemon is looping on a credential the server no longer accepts; the server log names it (claimed_sub / claimed_tg_id on \"bridge: authentication failed\").\n"
+              summary: "mctl-telegram Local Bridge daemon is being refused (jwt_expired)"
+              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason jwt_expired. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
   # T2: silent. A token that expired mid-session is refused once or twice

@@ -464,7 +464,7 @@ func main() {
 	// AUTH_MODE switch as selectBridgeProvider.
 	if secret := cfg.OAUTHJWTSecret; secret != "" {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/bridge/token",
-			bridge.NewBridgeTokenHandler(provider, []byte(secret), selectBridgeIssuer(cfg), store))
+			bridge.NewBridgeTokenHandlerWithMetrics(provider, []byte(secret), selectBridgeIssuer(cfg), store, m))
 	}
 
 	// Read-only MCP worker token endpoint: an admin mints a bounded,

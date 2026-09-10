@@ -1629,15 +1629,26 @@ crosses into sustained timeouts.
 ### Symptom
 
 - Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
-  bridge endpoint refuses more than 5 connections in 15 minutes for 10
-  minutes running (`increase(mctl_auth_failures_total{provider="bridge"}[15m]) > 5`).
-  The `reason` label is the same set the HTTP middleware uses
-  (`jwt_expired`, `jwt_invalid_signature`, `jwt_invalid_issuer`, …).
-- The server log has one `bridge: authentication failed` line per refusal
-  with `reason` and the **claimed** identity of the token — `claimed_sub`,
-  `claimed_tg_id`, `claimed_device_id`, `claimed_exp`, `claimed_iat`. These
-  are read from the token without verification (the verifier has already
-  refused it) and are there to say *which* daemon, never to decide anything.
+  bridge refuses more than 5 daemon credentials in 15 minutes for 10
+  minutes running
+  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge"}[15m])) > 5`).
+  `provider="bridge"` is emitted by both the websocket endpoint `/bridge`
+  and the token endpoint `POST /api/bridge/token`; the `reason` label is
+  the verifier's set (`jwt_expired`, `jwt_invalid_signature`,
+  `jwt_invalid_issuer`, …) plus the handlers' own: `no_token`,
+  `no_device_binding` (a credential without a device — the #612 shape),
+  `device_inactive` (revoked device).
+- One log line per refusal: `bridge: authentication failed` on `/bridge`
+  with the **claimed** identity of the token (`claimed_sub`,
+  `claimed_tg_id`, `claimed_device_id`, `claimed_exp`, `claimed_iat`, read
+  unverified and clipped — they say *which* daemon, never decide anything)
+  and `user_id`/`device_id` when the token did verify; `bridge token:
+  credential refused` on the token endpoint with `user_id`, `jti`,
+  `device_id`.
+- A daemon on 0.63.1 or later exits on a refused refresh (both the legacy
+  and the device-signed path) and is restarted by its service manager on
+  its throttle, so the refusals continue at that cadence and this alert
+  still fires; older daemons loop on `/bridge` once a minute.
 - Why `MctlBridgeDaemonsFlapping` stays silent: a refused daemon never
   reaches `Register`, so `mctl_bridge_connections_total` does not move.
   The two alerts cover disjoint failures.

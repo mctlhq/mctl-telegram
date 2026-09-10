@@ -349,7 +349,10 @@ func fetchDeviceNonce(ctx context.Context, server, deviceID string) (*deviceNonc
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Typed so the daemon can tell a verdict (401/403: revoked or
+		// unknown device) from a blip; same shape as the bridge token
+		// endpoint's answers.
+		return nil, &tokenEndpointError{Status: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	var out deviceNonceResponse
 	if err := json.Unmarshal(body, &out); err != nil {

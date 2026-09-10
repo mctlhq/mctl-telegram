@@ -75,35 +75,48 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
-		id, err := provider.Authenticate(r)
-		if err != nil {
-			// Do not echo err.Error(): JWT parsers include algorithm names,
-			// claim paths and token fragments. Log server-side only.
-			//
-			// The claims are logged unverified, as identifiers for the
-			// operator: a daemon that is refused here is the one incident
-			// this endpoint has, and the line naming which daemon is the
-			// difference between a minute and two days of looking (#612).
-			// They are never used for a decision; the token itself is not
-			// logged.
-			reason := auth.ClassifyAuthError(err.Error())
+		// Every way this handler refuses a daemon goes through refuse(): one
+		// counter under provider="bridge" with a bounded reason set, and one
+		// log line naming the daemon. A daemon refused here is the one
+		// incident this endpoint has, and a refusal that moves no counter
+		// and names nobody is how one ran unnoticed for two days (#612).
+		// Claims are read unverified, as identifiers for the operator; they
+		// decide nothing, and the token itself is never logged.
+		refuse := func(reason string, err error, id *auth.Identity) {
 			if m != nil {
 				m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
 			}
 			c := claimedIdentity(r)
-			slog.Info("bridge: authentication failed", "err", err, "reason", reason,
+			attrs := []any{"reason", reason,
 				"claimed_sub", c.Subject, "claimed_tg_id", c.TelegramID, "claimed_device_id", c.DeviceID,
-				"claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt)
+				"claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt}
+			if id != nil {
+				attrs = append(attrs, "user_id", id.UserID, "device_id", id.DeviceID)
+			}
+			if err != nil {
+				// Do not echo err.Error() to the client: JWT parsers include
+				// algorithm names, claim paths and token fragments.
+				attrs = append(attrs, "err", err)
+			}
+			slog.Warn("bridge: authentication failed", attrs...)
+		}
+
+		id, err := provider.Authenticate(r)
+		if err != nil {
+			refuse(auth.ClassifyAuthError(err.Error()), err, nil)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 		if id == nil {
+			refuse("no_token", nil, nil)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="mctl-telegram-bridge"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
 		if id.DeviceID == "" {
-			slog.Info("bridge: credential missing device binding", "user_id", id.UserID)
+			// The device-binding variant of #612: a bridge token that still
+			// verifies but was minted for a credential without a device.
+			refuse("no_device_binding", nil, id)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -126,6 +139,7 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			return
 		}
 		if !active {
+			refuse("device_inactive", nil, id)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -269,9 +283,29 @@ type claimedIdentityFields struct {
 	IssuedAt   string
 }
 
+// Bounds on what an unauthenticated caller can push into the log through
+// the claims: /bridge sits in front of any credential check and behind no
+// rate limiter, so an unbounded copy of sub would be a free log
+// amplifier. A real payload is a few hundred bytes; a real sub is
+// "tg:<id>" and a real device_id a UUID.
+const (
+	maxClaimedPayloadLen = 4096
+	maxClaimedFieldLen   = 128
+)
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
 // claimedIdentity decodes the payload of the bearer JWT on r, if any, into
-// the identifying fields above. Malformed input yields zero values; it
-// never fails, because it runs on the failure path.
+// the identifying fields above. It is total on purpose -- it runs on the
+// failure path: an oversized payload, a non-JWT bearer or a field of the
+// wrong type yields zero values for what could not be read and never an
+// error, and every field is decoded on its own so one odd claim does not
+// drop the others.
 func claimedIdentity(r *http.Request) claimedIdentityFields {
 	var out claimedIdentityFields
 	h := r.Header.Get("Authorization")
@@ -280,32 +314,33 @@ func claimedIdentity(r *http.Request) claimedIdentityFields {
 		return out
 	}
 	parts := strings.Split(strings.TrimSpace(h[len(prefix):]), ".")
-	if len(parts) != 3 {
+	if len(parts) != 3 || len(parts[1]) > maxClaimedPayloadLen {
 		return out
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return out
 	}
-	// NumericDate is any JSON number (RFC 7519 §2), so exp/iat are read as
-	// floats: a token from another issuer must not lose its sub and tg_id
-	// from the log because its timestamps carry a fraction.
-	var c struct {
-		Sub      string  `json:"sub"`
-		TgID     int64   `json:"tg_id"`
-		DeviceID string  `json:"device_id"`
-		Exp      float64 `json:"exp"`
-		Iat      float64 `json:"iat"`
-	}
+	var c map[string]any
 	if json.Unmarshal(payload, &c) != nil {
 		return out
 	}
-	out.Subject, out.TelegramID, out.DeviceID = c.Sub, c.TgID, c.DeviceID
-	if c.Exp > 0 {
-		out.ExpiresAt = time.Unix(int64(c.Exp), 0).UTC().Format(time.RFC3339)
+	if v, ok := c["sub"].(string); ok {
+		out.Subject = clip(v, maxClaimedFieldLen)
 	}
-	if c.Iat > 0 {
-		out.IssuedAt = time.Unix(int64(c.Iat), 0).UTC().Format(time.RFC3339)
+	if v, ok := c["device_id"].(string); ok {
+		out.DeviceID = clip(v, maxClaimedFieldLen)
+	}
+	// NumericDate and tg_id are JSON numbers (RFC 7519 §2); a fraction or an
+	// exponent form is still a number.
+	if v, ok := c["tg_id"].(float64); ok {
+		out.TelegramID = int64(v)
+	}
+	if v, ok := c["exp"].(float64); ok && v > 0 {
+		out.ExpiresAt = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+	}
+	if v, ok := c["iat"].(float64); ok && v > 0 {
+		out.IssuedAt = time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
 	}
 	return out
 }

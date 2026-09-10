@@ -11,6 +11,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 const bridgeTokenTTL = time.Hour
@@ -50,7 +51,28 @@ type bridgeTokenResponse struct {
 // shared-hmac-legacy bridge verifiers accept these tokens as long as the
 // issuer + audience + secret match.
 func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, store *db.Store) http.HandlerFunc {
+	return newBridgeTokenHandler(provider, secret, issuer, store, nil)
+}
+
+// NewBridgeTokenHandlerWithMetrics is NewBridgeTokenHandler with the two
+// credential refusals (no device binding, revoked device) counted in
+// m.AuthFailuresTotal under provider="bridge". They are emitted after
+// auth.Middleware has admitted the caller, so the middleware's own counter
+// never sees them; without this a daemon exiting on the refusal (0.63.1+)
+// restarts on its service throttle and hits this endpoint every 30 s with
+// nothing moving anywhere (#612).
+func NewBridgeTokenHandlerWithMetrics(provider auth.Provider, secret []byte, issuer string, store *db.Store, m *metrics.Registry) http.HandlerFunc {
+	return newBridgeTokenHandler(provider, secret, issuer, store, m)
+}
+
+func newBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, store *db.Store, m *metrics.Registry) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
+	refuse := func(reason string, id *auth.Identity) {
+		if m != nil {
+			m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
+		}
+		slog.Warn("bridge token: credential refused", "reason", reason, "user_id", id.UserID, "jti", id.Jti, "device_id", id.DeviceID)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
 			slog.Error("bridge token: signer init failed", "err", signerErr)
@@ -71,6 +93,7 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 			// worker token. Bind its stable jti lineage to a durable synthetic
 			// device so revocation and per-dispatch checks apply to it too.
 			if id.Jti == "" {
+				refuse("no_device_binding", id)
 				writeJSONError(w, http.StatusForbidden, "device-bound credential required; run activate to register this device")
 				return
 			}
@@ -83,6 +106,7 @@ func NewBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 				return
 			}
 			if !active {
+				refuse("device_inactive", id)
 				writeJSONError(w, http.StatusForbidden, "bridge device revoked")
 				return
 			}
