@@ -158,3 +158,39 @@ func TestProbeModern_ReadOnlyGuardRefusesUnknownTool(t *testing.T) {
 		t.Fatal("guard let an unknown tool through to tools/call")
 	}
 }
+
+// The header-negative battery sends real tools/call bodies. Against a server
+// that does not enforce the SEP-2243 headers -- the class this probe surveys
+// -- those bodies are dispatched, so the battery may never name a tool the
+// read-only guard refused (requirements.md acceptance criterion C). This
+// pins that substitution: it fails if the sentinel fallback in ProbeModern is
+// removed, which the guard tests above cannot detect because their mcp-go
+// fixture rejects the battery on headers before dispatch either way.
+func TestProbeModern_HeaderNegativesNeverNameAGuardRefusedTool(t *testing.T) {
+	srv, rec := newHeaderTolerantFixture(t)
+
+	result, err := mcpprobe.ProbeModern(context.Background(), mcpprobe.ModernConfig{
+		BaseURL:      srv.URL,
+		ReadOnlyTool: "send_message",
+	})
+	if err != nil {
+		t.Fatalf("ProbeModern: %v", err)
+	}
+
+	if result.ToolCall.Attempted {
+		t.Fatal("guard let the non-read-only tool through to tools/call")
+	}
+	if len(result.HeaderNegativeTests) == 0 {
+		t.Fatal("no header negative cases recorded")
+	}
+
+	names := rec.snapshot()
+	if len(names) == 0 {
+		t.Fatal("fixture saw no tools/call at all; the header-negative battery never ran")
+	}
+	for _, n := range names {
+		if n == "send_message" {
+			t.Fatalf("a tools/call named the guard-refused tool: recorded names = %v", names)
+		}
+	}
+}
