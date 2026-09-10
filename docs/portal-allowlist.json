@@ -1,0 +1,128 @@
+{
+  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise, and refuses `enabled: true` on any tool whose readOnlyHint is not true. Apply with scripts/portal-allowlist-apply.sh.",
+  "portal": "mcp",
+  "server": "tg",
+  "default_disabled": true,
+  "tools": [
+    {
+      "name": "delete_messages",
+      "enabled": false
+    },
+    {
+      "name": "delete_telegram_account",
+      "enabled": false
+    },
+    {
+      "name": "disconnect_telegram_account",
+      "enabled": false
+    },
+    {
+      "name": "edit_message",
+      "enabled": false
+    },
+    {
+      "name": "forward_messages",
+      "enabled": false
+    },
+    {
+      "name": "get_media",
+      "enabled": false
+    },
+    {
+      "name": "get_messages",
+      "enabled": false
+    },
+    {
+      "name": "get_my_audit_log",
+      "enabled": false
+    },
+    {
+      "name": "get_my_identity",
+      "enabled": true
+    },
+    {
+      "name": "get_my_send_status",
+      "enabled": true
+    },
+    {
+      "name": "get_unread_messages",
+      "enabled": false
+    },
+    {
+      "name": "get_user_audit_log",
+      "enabled": false
+    },
+    {
+      "name": "list_dialogs",
+      "enabled": true
+    },
+    {
+      "name": "list_telegram_identities",
+      "enabled": false
+    },
+    {
+      "name": "mint_worker_token",
+      "enabled": false
+    },
+    {
+      "name": "pin_message",
+      "enabled": false
+    },
+    {
+      "name": "prepare_get_media",
+      "enabled": false
+    },
+    {
+      "name": "prepare_pin_message",
+      "enabled": false
+    },
+    {
+      "name": "provision_local_account",
+      "enabled": false
+    },
+    {
+      "name": "revoke_local_bridge_device",
+      "enabled": false
+    },
+    {
+      "name": "revoke_telegram_session",
+      "enabled": false
+    },
+    {
+      "name": "revoke_worker_token",
+      "enabled": false
+    },
+    {
+      "name": "search_messages",
+      "enabled": false
+    },
+    {
+      "name": "send_media",
+      "enabled": false
+    },
+    {
+      "name": "send_message",
+      "enabled": false
+    },
+    {
+      "name": "set_account_mode",
+      "enabled": false
+    },
+    {
+      "name": "set_account_send",
+      "enabled": false
+    },
+    {
+      "name": "set_reaction",
+      "enabled": false
+    },
+    {
+      "name": "set_send_consent",
+      "enabled": false
+    },
+    {
+      "name": "set_telegram_access",
+      "enabled": false
+    }
+  ]
+}

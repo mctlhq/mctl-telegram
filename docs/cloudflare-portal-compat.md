@@ -135,3 +135,16 @@ observed upstream, that cell stays `PENDING-OPERATOR`.
 A note on spelling: the protocol version header is case-insensitive, so `Mcp-Protocol-Version` and
 `MCP-Protocol-Version` are the same header to any Go server or HTTP/2 hop. Nothing depends on which form
 a client sends.
+
+## Portal tool allowlist — the drift guard
+
+The portal exposes a tool only when its mapping carries an explicit `enabled: true` for it, and hides a tool it has an entry for with `enabled: false`; what it does with a tool it has **no** entry for depends on `default_disabled`, which is why the mapping is kept at `default_disabled: true` plus an explicit entry for every tool. The measured behaviour behind that choice is finding 6 in mctlhq/.github#44.
+
+That configuration is only as good as its coverage, and the upstream tool set changes with releases. `docs/portal-allowlist.json` is the source of truth; `internal/mcp/portal_allowlist_test.go` fails the build when the set of tools this server registers differs from the file in either direction, or when a tool is marked enabled without `readOnlyHint: true`. Adding a tool therefore forces a decision in the same PR. After the release, the operator re-applies the file:
+
+```
+CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh --dry-run
+CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh
+```
+
+The script refuses to apply when the portal's synced tool list and the file disagree, so a stale sync is caught before it is written. CI holds no Cloudflare credential by design (#1111); the apply step is the one manual link, and this section is where it is written down.
