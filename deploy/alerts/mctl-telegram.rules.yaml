@@ -207,12 +207,16 @@ spec:
         # 15 minutes; a token that expired mid-session produces one or two
         # before the refresh lands, hence > 5, and `for: 10m` outlasts a
         # single rollout.
-        # `no_token` is excluded: /bridge is public and unauthenticated, so
-        # a bare request with no credential counts there, and no daemon ever
-        # sends one -- keeping it in would let any passer-by fire the alert.
-        # It stays in the metric and the log for the operator.
+        # Allowlist, not denylist: /bridge is public and behind no rate
+        # limiter, so any reason reachable without a signed token (no_token,
+        # bearer_scheme_error, jwt_invalid_signature, other) can be produced
+        # by a passer-by and must not page. The four reasons below are the
+        # ones a real daemon produces, and each needs a token the server
+        # signed: Verify checks the HMAC before the expiry, and the three
+        # device reasons are reached only after the token verified. They all
+        # stay in the metric and the log for the operator.
         - alert: MctlBridgeAuthFailing
-          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason!="no_token"}[15m])) > 5
+          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|no_device_binding|device_inactive|device_revoked"}[15m])) > 5
           for: 10m
           labels:
             severity: warning

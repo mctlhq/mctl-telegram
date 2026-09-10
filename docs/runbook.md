@@ -1631,10 +1631,14 @@ crosses into sustained timeouts.
 - Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
   bridge refuses more than 5 daemon credentials in 15 minutes for 10
   minutes running
-  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason!="no_token"}[15m])) > 5`).
-  `no_token` is counted and logged but excluded from the alert: `/bridge` is
-  public, a bare unauthenticated request produces it, and no daemon ever
-  sends one — it must not be a way for a stranger to page.
+  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|no_device_binding|device_inactive|device_revoked"}[15m])) > 5`).
+  The alert is an allowlist of the reasons a real daemon produces, each of
+  which needs a token the server signed (`Verify` checks the HMAC before
+  the expiry; the device reasons come after verification). `/bridge` is
+  public and unrated, so reasons reachable without one — `no_token`,
+  `bearer_scheme_error`, `jwt_invalid_signature`, `other` — are counted and
+  logged but never page: a scanner sending `Basic` credentials for ten
+  minutes is background noise, not a daemon.
   `provider="bridge"` is emitted by both the websocket endpoint `/bridge`
   and the token endpoint `POST /api/bridge/token`; the `reason` label is
   the verifier's set (`jwt_expired`, `jwt_invalid_signature`,

@@ -93,17 +93,42 @@ tests:
         alertname: MctlBridgeAuthFailing
         exp_alerts: []
 
-  # T4: silent. `no_token` is what an unauthenticated request to the public
-  # /bridge produces; no daemon sends one, and it must not be a way for a
-  # stranger to fire the alert.
+  # T4: silent. Reasons an unauthenticated caller can produce at the public
+  # /bridge -- a bare request, a Basic header, an unsigned token -- are
+  # counted but must not be a way for a stranger to fire the alert.
   - interval: 1m
     input_series:
       - series: 'mctl_auth_failures_total{reason="no_token",provider="bridge"}'
+        values: '0+1x40'
+      - series: 'mctl_auth_failures_total{reason="bearer_scheme_error",provider="bridge"}'
+        values: '0+1x40'
+      - series: 'mctl_auth_failures_total{reason="jwt_invalid_signature",provider="bridge"}'
+        values: '0+1x40'
+      - series: 'mctl_auth_failures_total{reason="other",provider="bridge"}'
         values: '0+1x40'
     alert_rule_test:
       - eval_time: 30m
         alertname: MctlBridgeAuthFailing
         exp_alerts: []
+
+  # T5: fires. A refusal that needs a verified token -- the #612 shape,
+  # a legacy credential with no device binding -- is the daemon's own.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="no_device_binding",provider="bridge"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              reason: no_device_binding
+            exp_annotations:
+              summary: "mctl-telegram Local Bridge daemon is being refused (no_device_binding)"
+              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason no_device_binding. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
   # --- MctlAgentClaudeUsageLimit (issue #587) ---
   #
