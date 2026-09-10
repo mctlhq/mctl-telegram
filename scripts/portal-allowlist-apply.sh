@@ -61,13 +61,15 @@ mapped=$(jq --arg s "$server" '[.result.servers // [] | .[] | select(.server_id 
 # the portal sees -- a deployment running with MCP_TOOL_FILTER=read-only
 # registers a subset, and the file must still cover the full set the test
 # holds it to -- so this is subset, not equality.
-synced=$(jq -r '.result.tools // [] | .[].name' <<<"$server_body" | sort)
+# LC_ALL=C on both sorts so comm and sort cannot disagree on ordering.
+synced=$(jq -r '.result.tools // [] | .[].name' <<<"$server_body" | LC_ALL=C sort)
 [ -n "$synced" ] || { echo "server '$server': the API returned no synced tools (result.tools is missing or empty); has it connected?" >&2; exit 1; }
-listed=$(jq -r '.tools[].name' "$file" | sort)
+listed=$(jq -r '.tools[].name' "$file" | LC_ALL=C sort)
 uncovered=$(comm -23 <(echo "$synced") <(echo "$listed"))
 if [ -n "$uncovered" ]; then
   echo "synced tools with no decision in $file:" >&2
   echo "$uncovered" >&2
+  echo "if a recent release removed these tools, the portal has not re-synced yet: wait and re-run. Do not add them back to the file -- the guard test rejects entries for tools the server no longer registers." >&2
   exit 1
 fi
 
@@ -89,12 +91,17 @@ body=$(jq --arg s "$server" --slurpfile a "$file" --rawfile synced_raw <(echo "$
       else . end)' <<<"$current")
 
 if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi
+# The number of decisions going out; the summary must see the same number
+# coming back, or a portal that silently drops names it does not recognise
+# would read as a clean apply.
+sent=$(jq --arg s "$server" '[.servers[] | select(.server_id==$s)][0].updated_tools | length' <<<"$body")
 res=$(cf -X PUT "$base/portals/$portal" --data "$body" | must_succeed "update portal")
 # The summary is the record that the allowlist landed, so it must not be
 # able to print nothing. select(. != null) drops an empty selection before
 # the string is built; with no output at all, jq -e exits 4 and the ||
 # branch runs. -e alone would not do this: a string interpolated from
 # null is still a truthy string.
-jq -er --arg s "$server" '[.result.servers // [] | .[] | select(.server_id==$s)] | first | select(. != null)
-  | "applied: default_disabled=\(.default_disabled) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res" \
-  || { echo "update returned success but no mapping for '$server' in the response; verify the portal by hand" >&2; exit 1; }
+jq -er --arg s "$server" --argjson sent "$sent" '[.result.servers // [] | .[] | select(.server_id==$s)] | first | select(. != null)
+  | select((.updated_tools | length) == $sent)
+  | "applied: default_disabled=\(.default_disabled) tools=\(.updated_tools|length) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res" \
+  || { echo "update returned success but the response has no mapping for '$server' or fewer than $sent updated_tools; verify the portal by hand" >&2; exit 1; }
