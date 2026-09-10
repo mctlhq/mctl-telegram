@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -50,7 +51,7 @@ func TestBridgeHandler_AuthFailureIsCountedAndNamesTheClaimedDaemon(t *testing.T
 		t.Fatalf("mctl_auth_failures_total{reason=jwt_expired,provider=bridge} = %v, want 1", got)
 	}
 	line := buf.String()
-	for _, want := range []string{`claimed_sub=tg:700000011`, `claimed_tg_id=700000011`, `claimed_exp=2026-09-08T11:19:12Z`, `reason=jwt_expired`} {
+	for _, want := range []string{`claimed_tg_id=700000011`, `claimed_exp=2026-09-08T11:19:12Z`, `claimed_iat=2026-09-08T10:19:12Z`, `reason=jwt_expired`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log line lacks %q:\n%s", want, line)
 		}
@@ -64,11 +65,12 @@ func TestBridgeHandler_AuthFailureIsCountedAndNamesTheClaimedDaemon(t *testing.T
 	}
 }
 
-// An unauthenticated caller must not be able to push a megabyte into the
-// log through the claims: an oversized payload yields nothing, and a long
-// sub is clipped.
+// An unauthenticated caller must not be able to push anything free-form into
+// the log through the claims: an oversized payload yields nothing, and the
+// fields that are logged are numbers, so a long sub is simply not read while
+// the numeric claim beside it still is.
 func TestClaimedIdentity_IsBounded(t *testing.T) {
-	big := unsignedJWT(`{"sub":"` + strings.Repeat("a", 8000) + `"}`)
+	big := unsignedJWT(`{"sub":"` + strings.Repeat("a", 8000) + `","tg_id":700000011}`)
 	req := httptest.NewRequest(http.MethodGet, "/bridge", nil)
 	req.Header.Set("Authorization", "Bearer "+big)
 	if got := claimedIdentity(req); got != (claimedIdentityFields{}) {
@@ -77,35 +79,61 @@ func TestClaimedIdentity_IsBounded(t *testing.T) {
 	long := unsignedJWT(`{"sub":"` + strings.Repeat("b", 500) + `","tg_id":700000011}`)
 	req = httptest.NewRequest(http.MethodGet, "/bridge", nil)
 	req.Header.Set("Authorization", "Bearer "+long)
-	got := claimedIdentity(req)
-	if len(got.Subject) != maxClaimedFieldLen || got.TelegramID != 700000011 {
-		t.Fatalf("long sub not clipped or sibling claim lost: len(sub)=%d tg_id=%d", len(got.Subject), got.TelegramID)
+	if got := claimedIdentity(req); got.TelegramID != 700000011 {
+		t.Fatalf("numeric claim lost beside a long sub: %+v", got)
 	}
 }
 
 // One claim of the wrong type must not drop the others: the helper decodes
-// field by field, so a device_id sent as a number still leaves sub in place.
+// field by field, so a tg_id sent as a string still leaves exp in place.
 func TestClaimedIdentity_FieldsAreIndependent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/bridge", nil)
-	req.Header.Set("Authorization", "Bearer "+unsignedJWT(`{"sub":"tg:700000011","device_id":42,"tg_id":"not-a-number","exp":1788866352}`))
+	req.Header.Set("Authorization", "Bearer "+unsignedJWT(`{"sub":"tg:700000011","tg_id":"not-a-number","exp":1788866352}`))
 	got := claimedIdentity(req)
-	if got.Subject != "tg:700000011" || got.DeviceID != "" || got.TelegramID != 0 || got.ExpiresAt != "2026-09-08T11:19:12Z" {
+	if got.TelegramID != 0 || got.ExpiresAt != "2026-09-08T11:19:12Z" {
 		t.Fatalf("got %+v", got)
 	}
 }
 
-// Every refusal branch counts and names the daemon, not only the verifier's.
+// Every refusal branch counts under provider=bridge and names the daemon,
+// not only the verifier's: no token, a verified token without a device
+// binding (the #612 shape), and a revoked device.
 func TestBridgeHandler_EveryRefusalIsCounted(t *testing.T) {
-	m := metrics.New()
-	// nil identity, no error: the "no token" branch.
-	h := NewBridgeHandlerWithMetrics(NewHub(), failProvider{err: nil}, nil, context.Background(), m)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/bridge", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	ctx := context.Background()
+	store := tokenHandlerStore(t)
+	uid, err := store.EnsureUserByTelegramID(ctx, 700000012, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
 	}
-	if got := testutil.ToFloat64(m.AuthFailuresTotal.WithLabelValues("no_token", "bridge")); got != 1 {
-		t.Fatalf("no_token counter = %v, want 1", got)
+	if err := store.ProvisionLocalAccount(ctx, uid, 700000012, "Carol", "carol"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	deviceID, err := store.RegisterDevice(ctx, uid, "carol-laptop", "carol-laptop", nil)
+	if err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+	if err := store.RevokeDevice(ctx, deviceID, "test"); err != nil {
+		t.Fatalf("revoke device: %v", err)
+	}
+
+	m := metrics.New()
+	for _, tc := range []struct {
+		reason string
+		id     *auth.Identity
+	}{
+		{"no_token", nil},
+		{"no_device_binding", &auth.Identity{UserID: uid, Subject: "tg:700000012", TelegramID: 700000012}},
+		{"device_inactive", &auth.Identity{UserID: uid, Subject: "tg:700000012", TelegramID: 700000012, DeviceID: deviceID}},
+	} {
+		h := NewBridgeHandlerWithMetrics(NewHub(), &fakeProvider{id: tc.id}, store, ctx, m)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/bridge", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401", tc.reason, rec.Code)
+		}
+		if got := testutil.ToFloat64(m.AuthFailuresTotal.WithLabelValues(tc.reason, "bridge")); got != 1 {
+			t.Fatalf("mctl_auth_failures_total{reason=%s,provider=bridge} = %v, want 1", tc.reason, got)
+		}
 	}
 }
 
@@ -115,7 +143,7 @@ func TestClaimedIdentity_AcceptsFractionalNumericDate(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/bridge", nil)
 	req.Header.Set("Authorization", "Bearer "+unsignedJWT(`{"sub":"tg:1","tg_id":1,"exp":1788866352.5,"iat":1788862752.0}`))
 	got := claimedIdentity(req)
-	if got.Subject != "tg:1" || got.TelegramID != 1 || got.ExpiresAt != "2026-09-08T11:19:12Z" || got.IssuedAt != "2026-09-08T10:19:12Z" {
+	if got.TelegramID != 1 || got.ExpiresAt != "2026-09-08T11:19:12Z" || got.IssuedAt != "2026-09-08T10:19:12Z" {
 		t.Fatalf("got %+v", got)
 	}
 }

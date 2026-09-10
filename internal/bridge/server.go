@@ -80,16 +80,16 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		// log line naming the daemon. A daemon refused here is the one
 		// incident this endpoint has, and a refusal that moves no counter
 		// and names nobody is how one ran unnoticed for two days (#612).
-		// Claims are read unverified, as identifiers for the operator; they
-		// decide nothing, and the token itself is never logged.
+		// Numeric claims are read unverified, as identifiers for the
+		// operator; they decide nothing, and the token itself is never
+		// logged.
 		refuse := func(reason string, err error, id *auth.Identity) {
 			if m != nil {
 				m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
 			}
 			c := claimedIdentity(r)
 			attrs := []any{"reason", reason,
-				"claimed_sub", c.Subject, "claimed_tg_id", c.TelegramID, "claimed_device_id", c.DeviceID,
-				"claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt}
+				"claimed_tg_id", c.TelegramID, "claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt}
 			if id != nil {
 				attrs = append(attrs, "user_id", id.UserID, "device_id", id.DeviceID)
 			}
@@ -272,40 +272,28 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 }
 
 // claimedIdentityFields is what the bridge handler logs about a token it
-// refused: the identifying claims, read without verifying anything. The
-// bearer verifier has already rejected the token, so nothing here is
-// trusted; it is context for an operator reading the log.
+// refused: the numeric identifiers among its claims, read without verifying
+// anything. The bearer verifier has already rejected the token, so nothing
+// here is trusted; it is context for an operator reading the log. Only
+// numbers are taken on purpose -- tg_id names the account as well as sub
+// ("tg:<id>") would, and a number cannot carry free text from an
+// unauthenticated caller into the log.
 type claimedIdentityFields struct {
-	Subject    string
 	TelegramID int64
-	DeviceID   string
 	ExpiresAt  string
 	IssuedAt   string
 }
 
-// Bounds on what an unauthenticated caller can push into the log through
-// the claims: /bridge sits in front of any credential check and behind no
-// rate limiter, so an unbounded copy of sub would be a free log
-// amplifier. A real payload is a few hundred bytes; a real sub is
-// "tg:<id>" and a real device_id a UUID.
-const (
-	maxClaimedPayloadLen = 4096
-	maxClaimedFieldLen   = 128
-)
-
-func clip(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
-}
+// maxClaimedPayloadLen bounds what an unauthenticated caller can make this
+// decode: /bridge sits in front of any credential check and behind no rate
+// limiter. A real payload is a few hundred bytes.
+const maxClaimedPayloadLen = 4096
 
 // claimedIdentity decodes the payload of the bearer JWT on r, if any, into
-// the identifying fields above. It is total on purpose -- it runs on the
-// failure path: an oversized payload, a non-JWT bearer or a field of the
-// wrong type yields zero values for what could not be read and never an
-// error, and every field is decoded on its own so one odd claim does not
-// drop the others.
+// the fields above. It is total on purpose -- it runs on the failure path:
+// an oversized payload, a non-JWT bearer or a claim of the wrong type yields
+// zero values for what could not be read and never an error, and every
+// field is decoded on its own so one odd claim does not drop the others.
 func claimedIdentity(r *http.Request) claimedIdentityFields {
 	var out claimedIdentityFields
 	h := r.Header.Get("Authorization")
@@ -324,12 +312,6 @@ func claimedIdentity(r *http.Request) claimedIdentityFields {
 	var c map[string]any
 	if json.Unmarshal(payload, &c) != nil {
 		return out
-	}
-	if v, ok := c["sub"].(string); ok {
-		out.Subject = clip(v, maxClaimedFieldLen)
-	}
-	if v, ok := c["device_id"].(string); ok {
-		out.DeviceID = clip(v, maxClaimedFieldLen)
 	}
 	// NumericDate and tg_id are JSON numbers (RFC 7519 §2); a fraction or an
 	// exponent form is still a number.

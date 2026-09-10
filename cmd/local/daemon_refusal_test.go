@@ -119,37 +119,3 @@ func TestIsRefusedRefresh(t *testing.T) {
 		}
 	}
 }
-
-// The device-signed path gets the same verdict: a 403 from the device
-// refresh endpoint is the server saying this device is revoked or unknown,
-// and the daemon exits naming activate rather than retrying forever.
-func TestRunDaemon_RefusedDeviceRefreshExits(t *testing.T) {
-	dir := t.TempDir()
-	setHome(t, dir)
-	_, _, pub, err := loadOrCreateDeviceIdentity()
-	if err != nil {
-		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
-	}
-	future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	if _, err := mergeDeviceCredential(pub, "dev_revoked", "a.b.c", future, "jti1"); err != nil {
-		t.Fatalf("mergeDeviceCredential: %v", err)
-	}
-	var bridgeDials atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/bridge" {
-			bridgeDials.Add(1)
-		}
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":"device revoked"}`))
-	}))
-	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err = runDaemon(ctx, &localConfig{Server: srv.URL}, nil, 1, nil)
-	if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("daemon did not exit on a refused device refresh: %v", err)
-	}
-	if n := bridgeDials.Load(); n != 0 {
-		t.Fatalf("daemon dialed /bridge %d times after a refused refresh", n)
-	}
-}

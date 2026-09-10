@@ -1639,16 +1639,22 @@ crosses into sustained timeouts.
   `no_device_binding` (a credential without a device — the #612 shape),
   `device_inactive` (revoked device).
 - One log line per refusal: `bridge: authentication failed` on `/bridge`
-  with the **claimed** identity of the token (`claimed_sub`,
-  `claimed_tg_id`, `claimed_device_id`, `claimed_exp`, `claimed_iat`, read
-  unverified and clipped — they say *which* daemon, never decide anything)
-  and `user_id`/`device_id` when the token did verify; `bridge token:
-  credential refused` on the token endpoint with `user_id`, `jti`,
-  `device_id`.
-- A daemon on 0.63.1 or later exits on a refused refresh (both the legacy
-  and the device-signed path) and is restarted by its service manager on
-  its throttle, so the refusals continue at that cadence and this alert
-  still fires; older daemons loop on `/bridge` once a minute.
+  with the **claimed** numeric identifiers of the token (`claimed_tg_id`,
+  `claimed_exp`, `claimed_iat` — read unverified; they say *which* daemon,
+  never decide anything) and `user_id`/`device_id` when the token did
+  verify; `bridge token: credential refused` on the token endpoint with
+  `user_id`, `jti`, `device_id`.
+- What is **not** under `provider="bridge"`: a `401` that `auth.Middleware`
+  issues in front of the token endpoint (an expired or malformed MCP token
+  on the legacy `connect --token` path) is labelled by the middleware's
+  provider name (`localjwt`, `sharedhmac`) like every other API auth
+  failure, and the device-signed refresh path's `403`s are deliberately
+  generic (per-IP fail budget, expired nonce, revoked device all look the
+  same) and are not counted. A 0.63.1+ legacy daemon exits on a refused
+  refresh and is restarted by its service manager on its throttle, so its
+  refusals keep coming at that cadence; the device-signed daemon keeps
+  retrying instead, and a revoked device on that path is visible only in
+  the daemon's own log.
 - Why `MctlBridgeDaemonsFlapping` stays silent: a refused daemon never
   reaches `Register`, so `mctl_bridge_connections_total` does not move.
   The two alerts cover disjoint failures.
