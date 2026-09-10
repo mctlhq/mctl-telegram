@@ -143,9 +143,6 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 	}, ReasonHeaderMismatch, callBaseline))
 }
 
-// expectRejection runs a request that must not succeed. A 2xx with no
-// JSON-RPC error is the failure case here: it means the server accepted
-// something the protocol says it must refuse.
 // expectRejection runs a request that must not succeed, and — this is the
 // part that makes the result mean anything — only counts a rejection as
 // evidence when the unmutated request is known to have succeeded.
@@ -157,6 +154,9 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 // had no part in. The summary would still fail the run, but the per-cell
 // claim is the entire point of this probe, so being wrong there is worse
 // than being silent.
+//
+// A 2xx with no JSON-RPC error is the failure case: the server accepted
+// something the protocol says it must refuse.
 //
 // baselinePassed says whether the same method succeeded unmutated earlier in
 // this run. When it did not, the case is reported as unmeasured rather than

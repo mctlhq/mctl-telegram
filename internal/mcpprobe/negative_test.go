@@ -2,6 +2,7 @@ package mcpprobe
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -111,15 +112,20 @@ func TestModernNegatives_AuthRefusalIsNotEnforcement(t *testing.T) {
 	}
 }
 
-// TestModernNegatives_UnauthenticatedCellIsMarkedAsSuch pins the distinction
-// between "measured and refused" and "could not be measured" when the probe
-// itself reaches the endpoint but is turned away.
-func TestModernNegatives_UnauthenticatedCellIsMarkedAsSuch(t *testing.T) {
+// TestModernNegatives_AuthRefusalOnItsOwnRequestIsNotEnforcement covers the
+// remaining shape: the baseline holds, so the probe knows the endpoint works,
+// and yet this particular request is turned away by something that never
+// looked at the protocol.
+//
+// The fixture models an edge that refuses what it cannot route: a request
+// with no Mcp-Method header gets 403 before any protocol validation. The
+// positive calls carry the header and succeed, so the baseline is genuinely
+// established — and the probe must still decline to call that 403 evidence
+// of the modern binding, because it is not.
+func TestModernNegatives_AuthRefusalOnItsOwnRequestIsNotEnforcement(t *testing.T) {
 	_, url := newFake(t, func(f *fakeServer) {
 		f.modern = true
-		// tools/list succeeds, so the baseline holds; only the negative's own
-		// request is turned away.
-		f.unauthorizedMethods = map[string]bool{}
+		f.unroutableIsForbidden = true
 	})
 
 	report, err := Run(context.Background(), Options{
@@ -128,7 +134,42 @@ func TestModernNegatives_UnauthenticatedCellIsMarkedAsSuch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// With a healthy server every negative is genuinely measured.
+
+	// The baseline really did hold: the positive path completed.
+	if got := stepByLabel(t, report.Steps, "tools_list").Outcome; got != OutcomePass {
+		t.Fatalf("tools_list = %s; the fixture was meant to serve the unmutated calls", got)
+	}
+
+	missing := stepByLabel(t, report.Negatives, "missing_method_header")
+	if missing.Outcome != OutcomeSkipped || missing.Reason != ReasonUnauthenticatedProbe {
+		t.Errorf("missing_method_header = %+v, want SKIPPED/unauthenticated-probe: a 403 from an "+
+			"edge that never parsed the request is not proof the server enforces the binding", missing)
+	}
+	if missing.HTTPStatus != http.StatusForbidden {
+		t.Errorf("missing_method_header status = %d, want 403", missing.HTTPStatus)
+	}
+	// And a case whose header survives routing is still measured normally.
+	mismatched := stepByLabel(t, report.Negatives, "mismatched_method_header")
+	if mismatched.Outcome != OutcomePass {
+		t.Errorf("mismatched_method_header = %+v, want PASS; it carries a header and is a real "+
+			"protocol refusal", mismatched)
+	}
+	if report.Summary == OutcomePass {
+		t.Error("summary = PASS although one mandatory negative was never measured")
+	}
+}
+
+// TestModernNegatives_AllMeasuredAgainstAConformingServer is the control: with
+// nothing interfering, every mandatory negative is genuinely exercised.
+func TestModernNegatives_AllMeasuredAgainstAConformingServer(t *testing.T) {
+	_, url := newFake(t, func(f *fakeServer) { f.modern = true })
+
+	report, err := Run(context.Background(), Options{
+		URL: url, Mode: ModeModern, Source: SourceInProcess, SkipOAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	for _, label := range mandatoryNegatives(ModeModern) {
 		s := stepByLabel(t, report.Negatives, label)
 		if s.Outcome != OutcomePass {

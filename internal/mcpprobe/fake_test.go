@@ -36,6 +36,12 @@ type fakeServer struct {
 	// an endpoint that serves discovery anonymously but wants a bearer for
 	// the capability calls.
 	unauthorizedMethods map[string]bool
+	// unroutableIsForbidden answers 403 to a request carrying no Mcp-Method
+	// header, before any protocol validation. This models an edge that
+	// refuses what it cannot route: the positive calls carry the header and
+	// pass, while a probe that deliberately removed it is turned away by
+	// something that never examined the protocol at all.
+	unroutableIsForbidden bool
 	// legacyOnly makes server/discover an unknown method, which is how a
 	// pre-2026-07-28 server behaves.
 	legacyOnly bool
@@ -78,6 +84,15 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	method := mcp.MCPMethod(body.Method)
+
+	// Placed before every protocol check on purpose: this models an edge in
+	// front of the server, not the server itself. A check that ran after
+	// validation would be indistinguishable from the server's own refusal,
+	// which is precisely the confusion the probe must not fall into.
+	if f.unroutableIsForbidden && r.Header.Get(mcp.HeaderMethod) == "" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
 	if f.modern {
 		if r.Header.Get(mcp.HeaderProtocolVersion) != mcp.ProtocolVersion20260728 {
