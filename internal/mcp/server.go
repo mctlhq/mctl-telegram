@@ -175,6 +175,19 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 }
 
 func (s *Server) HTTPHandler() http.Handler {
+	return mcpserver.NewStreamableHTTPServer(
+		s.newMCPServer(),
+		mcpserver.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			return r.Context()
+		}),
+	)
+}
+
+// newMCPServer builds the MCP server with every tool registered. It is the
+// single place the tool set is enumerated, which is what lets
+// portal_allowlist_test.go hold docs/portal-allowlist.json to the same list
+// without a second hand-maintained copy.
+func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	v := s.Version
 	if v == "" {
 		v = "dev"
@@ -304,13 +317,7 @@ func (s *Server) HTTPHandler() http.Handler {
 		t, h := s.toolSetReaction()
 		s.addTool(srv, t, h)
 	}
-
-	return mcpserver.NewStreamableHTTPServer(
-		srv,
-		mcpserver.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
-			return r.Context()
-		}),
-	)
+	return srv
 }
 
 // Tiny helper used by tool implementations.
