@@ -71,13 +71,21 @@ if [ -n "$uncovered" ]; then
   exit 1
 fi
 
-body=$(jq --arg s "$server" --slurpfile a "$file" '
-  .result
+# The write is the mirror of the read check: only tools the portal has
+# synced go into updated_tools, because the API rejects a name it has not
+# seen (error 7001), and a file entry for a not-yet-synced tool would
+# otherwise turn a legitimate apply into a refusal. A missing "enabled"
+# is written as false, never as null -- the guard test refuses the file
+# in that state, and the PUT must not be the second place it could slip.
+body=$(jq --arg s "$server" --slurpfile a "$file" --rawfile synced_raw <(echo "$synced") '
+  ($synced_raw | split("\n") | map(select(. != ""))) as $synced
+  | .result
   | del(.created_at, .created_by, .modified_at, .modified_by)
   | .servers |= map(
       if .server_id == $s then
         .default_disabled = $a[0].default_disabled
-        | .updated_tools = [ $a[0].tools[] | {name, enabled} ]
+        | .updated_tools = [ $a[0].tools[] | select(.name as $n | $synced | index($n) != null)
+                             | {name, enabled: (.enabled // false)} ]
       else . end)' <<<"$current")
 
 if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi

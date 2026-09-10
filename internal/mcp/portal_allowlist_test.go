@@ -15,8 +15,11 @@ type portalAllowlist struct {
 	Server          string `json:"server"`
 	DefaultDisabled bool   `json:"default_disabled"`
 	Tools           []struct {
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
+		Name string `json:"name"`
+		// Enabled is a pointer so that a missing or misspelled key is a
+		// test failure, not a silent false. "Explicit decision for every
+		// tool" has to be enforced here or it is enforced nowhere.
+		Enabled *bool `json:"enabled"`
 		// Reason is required on an enabled tool: readOnlyHint says a tool
 		// has no side effects, not that its output belongs on a shared
 		// surface. get_messages is read-only and returns message bodies.
@@ -67,8 +70,13 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 		if _, dup := listed[tool.Name]; dup {
 			t.Errorf("%s: listed twice", tool.Name)
 		}
-		listed[tool.Name] = tool.Enabled
-		if tool.Enabled && len(tool.Reason) < 40 {
+		if tool.Enabled == nil {
+			t.Errorf("%s: no \"enabled\" key; every entry must carry an explicit decision", tool.Name)
+			listed[tool.Name] = false
+			continue
+		}
+		listed[tool.Name] = *tool.Enabled
+		if *tool.Enabled && len(tool.Reason) < 40 {
 			t.Errorf("%s: enabled without a reason saying what it exposes and why that is acceptable on a shared surface", tool.Name)
 		}
 	}
