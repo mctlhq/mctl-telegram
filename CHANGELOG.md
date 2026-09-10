@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.64.0](https://github.com/mctlhq/mctl-telegram/compare/0.63.1...0.64.0) (2026-09-10)
+
+
+### Features
+
+* **mcp:** pin the portal tool allowlist in the repository ([73508d0](https://github.com/mctlhq/mctl-telegram/commit/73508d058fa9134a988c8c6eb6d134b534bfe745))
+
+
+### Bug Fixes
+
+* **alerts:** count every post-verification refusal, give a revoked token its own reason ([c64a588](https://github.com/mctlhq/mctl-telegram/commit/c64a588ce3cc1a8e62f41440ba65731ac3bffdc8)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **alerts:** MctlBridgeAuthFailing counts only reasons that need a signed token ([6fe64f3](https://github.com/mctlhq/mctl-telegram/commit/6fe64f3cce4107b8f128b383d3fc3d1b6afbd6c5)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **alerts:** no_token cannot fire MctlBridgeAuthFailing; activate hint on the loop's warning ([25cf9ed](https://github.com/mctlhq/mctl-telegram/commit/25cf9ed8a5267517ca6d121a2b93b2824b4ec3e3)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **bridge:** a refused refresh stops the daemon, and a refused daemon is counted and named ([87f930b](https://github.com/mctlhq/mctl-telegram/commit/87f930b032d76c8deff34c8d22265f5be7510fab))
+* **bridge:** a refused refresh stops the daemon, and a refused daemon is counted and named ([46cc236](https://github.com/mctlhq/mctl-telegram/commit/46cc236a5fd606ed0e01cb60bb354e012391c69a)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **bridge:** count and name every refusal, bound the claimed identity, same verdict on the device path ([505a1f9](https://github.com/mctlhq/mctl-telegram/commit/505a1f99c3325abf8698a5e85dd8aeaf1e0feb4f))
+* **bridge:** count the hub-blocked refusal, name the right log fields in the runbook ([c06f571](https://github.com/mctlhq/mctl-telegram/commit/c06f5719a72c297d683d31b776cea8f2d2787dc2)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **bridge:** device path keeps retrying (its 403 is generic), numeric claims only, counters pinned by tests ([d3acbbc](https://github.com/mctlhq/mctl-telegram/commit/d3acbbc13e533b14148f3446b134f7d65473f10b))
+* **bridge:** log the device actually refused, connect line after registration, runbook labels ([c601a86](https://github.com/mctlhq/mctl-telegram/commit/c601a860d540ad85c6609daa19fd687bedd6ce87)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **bridge:** read exp/iat of a refused token as NumericDate ([9c7aecc](https://github.com/mctlhq/mctl-telegram/commit/9c7aecc426931e6a0db0d720287d42b8724460b9))
+* **local:** never prime the loop with a token the startup refresh could not renew ([fe56dfc](https://github.com/mctlhq/mctl-telegram/commit/fe56dfcf24c9f49be543fcf78b0302bcdec31eb6)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **local:** startup refresh distinguishes a refusal from a blip ([6eacd7f](https://github.com/mctlhq/mctl-telegram/commit/6eacd7f8a5f9cbd1d6de38a2980a109ef6ad1b42)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+* **scripts:** compare the applied decisions as a set, pin comm locale, name the reason floor ([ad43772](https://github.com/mctlhq/mctl-telegram/commit/ad437727518e39450304e5224dabc03f9883025c))
+* **scripts:** verify the apply response carries every decision sent, pin sort locale ([bf4c640](https://github.com/mctlhq/mctl-telegram/commit/bf4c640d4b4fdf616e8ade6f79768d0dee546b94))
+
 ## [0.63.1](https://github.com/mctlhq/mctl-telegram/compare/0.63.0...0.63.1) (2026-09-10)
 
 
