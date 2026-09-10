@@ -67,11 +67,13 @@ func NewBridgeTokenHandlerWithMetrics(provider auth.Provider, secret []byte, iss
 
 func newBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string, store *db.Store, m *metrics.Registry) http.HandlerFunc {
 	signer, signerErr := localjwt.NewIssuer(secret, issuer)
-	refuse := func(reason string, id *auth.Identity) {
+	// deviceID is the device the handler actually judged: the token's own
+	// binding, or the synthetic legacy device resolved from its jti.
+	refuse := func(reason string, id *auth.Identity, deviceID string) {
 		if m != nil {
 			m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
 		}
-		slog.Warn("bridge token: credential refused", "reason", reason, "user_id", id.UserID, "jti", id.Jti, "device_id", id.DeviceID)
+		slog.Warn("bridge token: credential refused", "reason", reason, "user_id", id.UserID, "jti", id.Jti, "device_id", deviceID)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if signerErr != nil {
@@ -93,7 +95,7 @@ func newBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 			// worker token. Bind its stable jti lineage to a durable synthetic
 			// device so revocation and per-dispatch checks apply to it too.
 			if id.Jti == "" {
-				refuse("no_device_binding", id)
+				refuse("no_device_binding", id, "")
 				writeJSONError(w, http.StatusForbidden, "device-bound credential required; run activate to register this device")
 				return
 			}
@@ -106,7 +108,7 @@ func newBridgeTokenHandler(provider auth.Provider, secret []byte, issuer string,
 				return
 			}
 			if !active {
-				refuse("device_inactive", id)
+				refuse("device_inactive", id, deviceID)
 				writeJSONError(w, http.StatusForbidden, "bridge device revoked")
 				return
 			}

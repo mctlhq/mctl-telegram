@@ -1648,7 +1648,7 @@ crosses into sustained timeouts.
 - What is **not** under `provider="bridge"`: a `401` that `auth.Middleware`
   issues in front of the token endpoint (an expired or malformed MCP token
   on the legacy `connect --token` path) is labelled by the middleware's
-  provider name (`localjwt`, `sharedhmac`) like every other API auth
+  provider name (`local-jwt`, `shared-hmac`) like every other API auth
   failure, and the device-signed refresh path's `403`s are deliberately
   generic (per-IP fail budget, expired nonce, revoked device all look the
   same) and are not counted. A 0.63.1+ legacy daemon exits on a refused
@@ -1680,9 +1680,11 @@ crosses into sustained timeouts.
 1. Read the identity from the log line and find the host running that
    daemon: `claimed_tg_id` → account, always present when the token was a
    JWT at all; `device_id` → device, present only when the token verified
-   (`no_device_binding`, `device_inactive`, `device_revoked`). When the
-   token did not verify there is no device to name — the account is the
-   only handle, and the host is found from it.
+   *and* carried a device (`device_inactive`, `device_revoked`). For
+   `no_device_binding` — the #612 shape, and the common one — the field is
+   empty by definition, and for a token that did not verify there is no
+   device to name either: the account is the only handle, and the host is
+   found from it.
 2. On the host: upgrade the binary, run
    `mctl-telegram-local activate --server https://tg.mctl.ai` (the account
    owner approves the device in a browser), restart the service.

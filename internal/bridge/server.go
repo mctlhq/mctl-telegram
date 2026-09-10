@@ -160,7 +160,6 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		// limit would close the connection on the first real download.
 		conn.SetReadLimit(MaxMediaFrameBytes)
 
-		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
 		if beforeRegister != nil {
 			beforeRegister()
 		}
@@ -174,6 +173,9 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 			_ = conn.Close(websocket.StatusPolicyViolation, "device revoked")
 			return
 		}
+		// Logged after registration: a connection the hub refused never
+		// connected, and must not read as if it had.
+		slog.Info("bridge: daemon connected", "user_id", id.UserID, "login", identityLabel(id), "device_id", id.DeviceID)
 
 		// Parent context for both goroutines. Cancelling it stops the
 		// reader and the writer cleanly without leaking goroutines.
