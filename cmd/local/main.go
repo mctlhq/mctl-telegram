@@ -628,19 +628,27 @@ func serveDaemon(parent context.Context) error {
 		// process could resolve by itself. That is precisely the restart a
 		// service manager performs after a reboot.
 		//
-		// Refresh here instead, and only give up when the refresh itself fails,
-		// which is the case a human genuinely has to act on.
+		// Refresh here instead, and give up only when the server has judged
+		// the credential (401/403), which is the case a human genuinely has
+		// to act on. A refresh that merely failed -- server down, DNS, a
+		// reset -- is not a verdict: start anyway and let the loop retry on
+		// its backoff ladder; it will not dial with the stale token (see
+		// runDaemon), so a blip at boot costs a wait, not a restart.
 		if expiry, expiryErr := bridgeTokenExpiry(bt); expiryErr == nil && time.Until(expiry) <= tokenRefreshAdv {
 			slog.Info("bridge token expired or expiring; refreshing before start",
 				"expires_at", expiry.Format(time.RFC3339))
-			refreshed, refreshErr := refreshBridgeToken(parent, cfg, bt)
-			if refreshErr != nil {
-				return fmt.Errorf("bridge token expired (at %s) and could not be refreshed: %w\n"+
-					"Run `mctl-telegram-local connect --token <new-token>` with a current MCP token",
-					expiry.Format(time.RFC3339), refreshErr)
+			switch refreshed, refreshErr := refreshBridgeToken(parent, cfg, bt); {
+			case refreshErr == nil:
+				bt = refreshed
+				slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
+			case isRefusedRefresh(refreshErr):
+				return fmt.Errorf("bridge token expired (at %s) and the server refused to refresh it: %w\n"+
+					"Run `mctl-telegram-local activate --server %s` to register this device",
+					expiry.Format(time.RFC3339), refreshErr, cfg.Server)
+			default:
+				slog.Warn("bridge token refresh failed before start; will retry from the connect loop",
+					"expires_at", expiry.Format(time.RFC3339), "err", refreshErr)
 			}
-			bt = refreshed
-			slog.Info("bridge token refreshed", "expires_at", bt.ExpiresAt)
 		}
 	}
 

@@ -127,6 +127,11 @@ func (e *tokenEndpointError) Error() string {
 
 // refused reports whether err is the token endpoint rejecting the
 // credential itself (401/403), as opposed to being unreachable or broken.
+// The split is deliberate, not exhaustive: auth.Middleware also answers
+// 401 when the provider's own store lookup fails, so a store outage reads
+// as a verdict here and moves a legacy daemon from the backoff ladder onto
+// its service manager's restart throttle -- quieter than the loop it
+// replaces, and self-healing once the store is back.
 func (e *tokenEndpointError) refused() bool {
 	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
