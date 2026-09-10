@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.63.1](https://github.com/mctlhq/mctl-telegram/compare/0.63.0...0.63.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **oauth:** bound the authorization_code grant to the requested scope ([76deccf](https://github.com/mctlhq/mctl-telegram/commit/76deccfd908018e120d101b2789daa14d206a37e))
+* **oauth:** bound the authorization_code grant to the requested scope ([01df585](https://github.com/mctlhq/mctl-telegram/commit/01df585996d15437b67547d5198b50a110b2e329))
+
 ## [0.63.0](https://github.com/mctlhq/mctl-telegram/compare/0.62.3...0.63.0) (2026-09-10)
 
 
