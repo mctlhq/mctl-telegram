@@ -54,10 +54,24 @@ func TestServeDaemon_TransientStartupRefreshStartsUnprimedWithoutDialing(t *test
 	defer srv.Close()
 	startableLegacyHome(t, srv.URL)
 
-	// One pre-start attempt plus at least one from the loop (reconnectBase
-	// is 2s) fit in a 5s window; the daemon must still be running at the end.
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(5*time.Second, cancel)
+	// Stop as soon as the loop has made its own refresh attempt (the
+	// pre-start one plus one from the loop, which follows reconnectBase =
+	// 2s), leaving a moment for a dial to happen if one is going to. The
+	// 30s parent turns a daemon that never gets there into a timeout
+	// rather than a fixed cost on every run.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	go func() {
+		for tokenCalls.Load() < 2 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
 	if err := serveDaemon(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("daemon gave up on a transient startup failure: %v", err)
 	}

@@ -207,8 +207,12 @@ spec:
         # 15 minutes; a token that expired mid-session produces one or two
         # before the refresh lands, hence > 5, and `for: 10m` outlasts a
         # single rollout.
+        # `no_token` is excluded: /bridge is public and unauthenticated, so
+        # a bare request with no credential counts there, and no daemon ever
+        # sends one -- keeping it in would let any passer-by fire the alert.
+        # It stays in the metric and the log for the operator.
         - alert: MctlBridgeAuthFailing
-          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge"}[15m])) > 5
+          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason!="no_token"}[15m])) > 5
           for: 10m
           labels:
             severity: warning

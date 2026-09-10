@@ -293,7 +293,8 @@ func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userI
 				// genuinely revoked device keeps retrying; what tells an
 				// operator that is the server's refusal in the logs.
 				slog.Warn("device credential refresh failed; retrying",
-					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff)
+					"device_id", rec.DeviceID, "err", refreshErr, "wait", backoff,
+					"action", "if this keeps failing, the device may have been revoked: run `mctl-telegram-local activate --server "+cfg.Server+"` to re-register it")
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():

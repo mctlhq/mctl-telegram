@@ -93,6 +93,18 @@ tests:
         alertname: MctlBridgeAuthFailing
         exp_alerts: []
 
+  # T4: silent. `no_token` is what an unauthenticated request to the public
+  # /bridge produces; no daemon sends one, and it must not be a way for a
+  # stranger to fire the alert.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="no_token",provider="bridge"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts: []
+
   # --- MctlAgentClaudeUsageLimit (issue #587) ---
   #
   # T1: fires. The dedicated Claude credential reports a usage-limit error;
