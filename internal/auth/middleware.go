@@ -117,6 +117,11 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 	}
 }
 
+// ClassifyAuthError is classifyAuthError for callers outside this package
+// that authenticate without the middleware (the bridge websocket handler),
+// so their failures land in the same mctl_auth_failures_total reason set.
+func ClassifyAuthError(msg string) string { return classifyAuthError(msg) }
+
 // classifyAuthError maps a well-known error string to one of the standard
 // reason labels. The error strings are stable literals defined in
 // sharedhmac/verifier.go and localjwt/issuer.go.

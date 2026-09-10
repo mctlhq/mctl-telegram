@@ -1623,6 +1623,52 @@ crosses into sustained timeouts.
 
 ---
 
+<a id="mctlbridgeauthfailing"></a>
+## MctlBridgeAuthFailing — /bridge refusing a daemon
+
+### Symptom
+
+- Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
+  bridge endpoint refuses more than 5 connections in 15 minutes for 10
+  minutes running (`increase(mctl_auth_failures_total{provider="bridge"}[15m]) > 5`).
+  The `reason` label is the same set the HTTP middleware uses
+  (`jwt_expired`, `jwt_invalid_signature`, `jwt_invalid_issuer`, …).
+- The server log has one `bridge: authentication failed` line per refusal
+  with `reason` and the **claimed** identity of the token — `claimed_sub`,
+  `claimed_tg_id`, `claimed_device_id`, `claimed_exp`, `claimed_iat`. These
+  are read from the token without verification (the verifier has already
+  refused it) and are there to say *which* daemon, never to decide anything.
+- Why `MctlBridgeDaemonsFlapping` stays silent: a refused daemon never
+  reaches `Register`, so `mctl_bridge_connections_total` does not move.
+  The two alerts cover disjoint failures.
+
+### Likely causes
+
+- **Legacy credential after device binding became mandatory (0.62.3,
+  #612).** A daemon on the `connect --token` path refreshes its bridge
+  token through `POST /api/bridge/token`; since `9160785` that endpoint
+  answers `403 device-bound credential required` to a credential without
+  a device binding. Daemons older than 0.63.1 then kept dialing `/bridge`
+  with the expired bridge token once a minute. From 0.63.1 the daemon
+  exits on a 401/403 refresh with an `action` line; older binaries must be
+  upgraded and re-activated.
+- **Revoked device or lapsed worker token.** Same 401/403 shape; the
+  daemon log says which.
+- **Clock skew on the daemon host** producing `jwt_expired` on a fresh
+  token — check `claimed_exp` against the server time.
+
+### Resolution
+
+1. Read the claimed identity from the log line and find the host running
+   that daemon (`claimed_tg_id` → account; `claimed_device_id` → device).
+2. On the host: upgrade the binary, run
+   `mctl-telegram-local activate --server https://tg.mctl.ai` (the account
+   owner approves the device in a browser), restart the service.
+3. The alert resolves once the refusals stop; the daemon's own
+   `bridge connected` line is the confirmation.
+
+---
+
 <a id="mctlbridgedaemonsflapping"></a>
 ## MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting
 

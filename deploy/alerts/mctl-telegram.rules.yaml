@@ -194,6 +194,32 @@ spec:
               a token rotation problem, or network instability on the daemon host.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgedaemonsflapping"
 
+        # A daemon refused at /bridge never registers, so the flapping alert
+        # above cannot see it: mctl_bridge_connections_total only moves on a
+        # successful Register. The pilot daemon that lost its credential on
+        # the 0.62.3 rollout (#612) failed authentication once a minute for
+        # two days with no metric moving at all. This counts the refusals
+        # themselves (provider="bridge" is emitted only by the bridge
+        # handler). Threshold from the daemon's mechanics: its reconnect
+        # ladder caps at 60s, so a stuck daemon produces ~15 refusals per
+        # 15 minutes; a token that expired mid-session produces one or two
+        # before the refresh lands, hence > 5, and `for: 10m` outlasts a
+        # single rollout.
+        - alert: MctlBridgeAuthFailing
+          expr: increase(mctl_auth_failures_total{provider="bridge"}[15m]) > 5
+          for: 10m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram Local Bridge daemon is being refused at /bridge ({{ $labels.reason }})"
+            description: >
+              /bridge refused {{ $value | humanize }} daemon connections in the last
+              15 minutes with reason {{ $labels.reason }}. The daemon is looping on a
+              credential the server no longer accepts; the server log names it
+              (claimed_sub / claimed_tg_id on "bridge: authentication failed").
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
+
     - name: mctl-telegram-agent
       rules:
         # The three alerts below (MctlAgentClaudeUsageLimit,

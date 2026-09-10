@@ -50,6 +50,50 @@ tests:
         alertname: MctlBridgeDaemonsFlapping
         exp_alerts: []
 
+  # --- MctlBridgeAuthFailing (issue #612) ---
+  #
+  # T1: fires. A daemon stuck on a refused refresh dials once a minute and is
+  # refused every time (the 0.62.3 pilot: 60s ladder, `JWT expired`).
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="jwt_expired",provider="bridge"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              reason: jwt_expired
+              provider: bridge
+            exp_annotations:
+              summary: "mctl-telegram Local Bridge daemon is being refused at /bridge (jwt_expired)"
+              description: "/bridge refused 15 daemon connections in the last 15 minutes with reason jwt_expired. The daemon is looping on a credential the server no longer accepts; the server log names it (claimed_sub / claimed_tg_id on \"bridge: authentication failed\").\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
+
+  # T2: silent. A token that expired mid-session is refused once or twice
+  # before the daemon's refresh lands; that is normal and must not page.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="jwt_expired",provider="bridge"}'
+        values: '0 0 0 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts: []
+
+  # T3: silent. HTTP-middleware failures (another provider label) never
+  # count against the bridge alert.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="jwt_expired",provider="local-jwt"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts: []
+
   # --- MctlAgentClaudeUsageLimit (issue #587) ---
   #
   # T1: fires. The dedicated Claude credential reports a usage-limit error;

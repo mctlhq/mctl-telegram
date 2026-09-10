@@ -517,7 +517,7 @@ func main() {
 		WithMetrics(m).
 		WithDeviceVerifier(store.IsActiveDeviceForUser)
 	bridgeProvider := selectBridgeProvider(cfg, store, workerTokenRevocationCache)
-	mux.Get("/bridge", bridge.NewBridgeHandler(hub, bridgeProvider, store, ctx))
+	mux.Get("/bridge", bridge.NewBridgeHandlerWithMetrics(hub, bridgeProvider, store, ctx, m))
 
 	// Communication-agent HTTP surface: off by default like every other
 	// agent PR (AGENT_ENABLED). Two auth boundaries, same shape as the

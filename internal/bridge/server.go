@@ -2,8 +2,11 @@ package bridge
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 const pingInterval = 25 * time.Second
@@ -48,17 +52,26 @@ func identityLabel(id *auth.Identity) string {
 // signal.NotifyContext). Using r.Context() would inherit the HTTP server's
 // Timeout middleware and close daemon connections every 60 s.
 func NewBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context) http.HandlerFunc {
-	return newBridgeHandler(hub, provider, store, serverCtx, nil)
+	return newBridgeHandler(hub, provider, store, serverCtx, nil, nil)
+}
+
+// NewBridgeHandlerWithMetrics is NewBridgeHandler with authentication
+// failures counted in m.AuthFailuresTotal under provider="bridge". The
+// bridge endpoint does not sit behind auth.Middleware (it upgrades to a
+// websocket), so without this the one failure mode a daemon has -- being
+// refused at the door -- produced no metric and could not alert (#612).
+func NewBridgeHandlerWithMetrics(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, m *metrics.Registry) http.HandlerFunc {
+	return newBridgeHandler(hub, provider, store, serverCtx, nil, m)
 }
 
 // NewBridgeHandlerWithAdmissionHook is used by deterministic race tests to
 // pause after durable device verification and immediately before hub
 // registration. Production callers should use NewBridgeHandler.
 func NewBridgeHandlerWithAdmissionHook(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, hook func()) http.HandlerFunc {
-	return newBridgeHandler(hub, provider, store, serverCtx, hook)
+	return newBridgeHandler(hub, provider, store, serverCtx, hook, nil)
 }
 
-func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func()) http.HandlerFunc {
+func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverCtx context.Context, beforeRegister func(), m *metrics.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Authenticate before upgrading — upgrading first wastes resources if
 		// the token is invalid and makes error reporting harder.
@@ -66,7 +79,21 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		if err != nil {
 			// Do not echo err.Error(): JWT parsers include algorithm names,
 			// claim paths and token fragments. Log server-side only.
-			slog.Info("bridge: authentication failed", "err", err)
+			//
+			// The claims are logged unverified, as identifiers for the
+			// operator: a daemon that is refused here is the one incident
+			// this endpoint has, and the line naming which daemon is the
+			// difference between a minute and two days of looking (#612).
+			// They are never used for a decision; the token itself is not
+			// logged.
+			reason := auth.ClassifyAuthError(err.Error())
+			if m != nil {
+				m.AuthFailuresTotal.WithLabelValues(reason, "bridge").Inc()
+			}
+			c := claimedIdentity(r)
+			slog.Info("bridge: authentication failed", "err", err, "reason", reason,
+				"claimed_sub", c.Subject, "claimed_tg_id", c.TelegramID, "claimed_device_id", c.DeviceID,
+				"claimed_exp", c.ExpiresAt, "claimed_iat", c.IssuedAt)
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -228,4 +255,54 @@ func newBridgeHandler(hub *Hub, provider auth.Provider, store *db.Store, serverC
 		_ = conn.Close(websocket.StatusNormalClosure, "done")
 		slog.Info("bridge: daemon disconnected", "user_id", id.UserID, "login", identityLabel(id))
 	}
+}
+
+// claimedIdentityFields is what the bridge handler logs about a token it
+// refused: the identifying claims, read without verifying anything. The
+// bearer verifier has already rejected the token, so nothing here is
+// trusted; it is context for an operator reading the log.
+type claimedIdentityFields struct {
+	Subject    string
+	TelegramID int64
+	DeviceID   string
+	ExpiresAt  string
+	IssuedAt   string
+}
+
+// claimedIdentity decodes the payload of the bearer JWT on r, if any, into
+// the identifying fields above. Malformed input yields zero values; it
+// never fails, because it runs on the failure path.
+func claimedIdentity(r *http.Request) claimedIdentityFields {
+	var out claimedIdentityFields
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return out
+	}
+	parts := strings.Split(strings.TrimSpace(h[len(prefix):]), ".")
+	if len(parts) != 3 {
+		return out
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return out
+	}
+	var c struct {
+		Sub      string `json:"sub"`
+		TgID     int64  `json:"tg_id"`
+		DeviceID string `json:"device_id"`
+		Exp      int64  `json:"exp"`
+		Iat      int64  `json:"iat"`
+	}
+	if json.Unmarshal(payload, &c) != nil {
+		return out
+	}
+	out.Subject, out.TelegramID, out.DeviceID = c.Sub, c.TgID, c.DeviceID
+	if c.Exp > 0 {
+		out.ExpiresAt = time.Unix(c.Exp, 0).UTC().Format(time.RFC3339)
+	}
+	if c.Iat > 0 {
+		out.IssuedAt = time.Unix(c.Iat, 0).UTC().Format(time.RFC3339)
+	}
+	return out
 }
