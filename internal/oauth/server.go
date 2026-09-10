@@ -863,6 +863,9 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	if err != nil {
 		return "", fmt.Errorf("server_error: could not resolve scopes: %w", err)
 	}
+	// Same bound as handleTokenAuthCode, so the two exchange paths mint the
+	// same token for the same code even though this one is discarded.
+	scopes = narrowGrant(scopes, entry.Scope)
 	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		return "", fmt.Errorf("server_error: could not mint token: %w", err)
@@ -1988,6 +1991,12 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
+	// Bound the grant to what the client asked for at /oauth/authorize. The
+	// refresh path already does this against the original grant
+	// (boundRefreshGrant); without it here, the original grant itself was the
+	// identity's entire entitlement and the log line below was the only place
+	// the difference showed (#607).
+	scopes = narrowGrant(scopes, entry.Scope)
 	// Diagnostic: requested-vs-granted scope reconciliation.
 	slog.Info("oauth: token authorization_code grant",
 		"user_agent", r.Header.Get("User-Agent"),
@@ -2117,9 +2126,8 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return graceServerError
 	}
-	resolvedScopes := scopes
-	groups, scopes = boundRefreshGrant(groups, resolvedScopes, child.Scope)
-	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, child.FamilyID, child.TelegramID)
+	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
+	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, child.FamilyID, child.TelegramID)
 	if vErr != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
 		return graceServerError
@@ -2214,9 +2222,8 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve scopes", http.StatusInternalServerError)
 		return
 	}
-	resolvedScopes := scopes
-	groups, scopes = boundRefreshGrant(groups, resolvedScopes, rt.Scope)
-	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, resolvedScopes, rt.FamilyID, rt.TelegramID)
+	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
+	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, rt.FamilyID, rt.TelegramID)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
 		return
@@ -2333,9 +2340,15 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // intersect:
 //
 //   - A promotion — the identity now resolves to scopes this family never held
-//     — is refused. Those scopes are already gone from bounded, so bounded is
-//     shorter than resolved. This is #572's rule and is unchanged.
-//   - A degradation to nothing is refused too, but only when the family EVER
+//     — proceeds with the bounded grant. Those scopes are already gone from
+//     bounded, which is the whole of #572's guarantee: a refresh can preserve
+//     or shrink a grant, never widen it. Until #607 this case was refused
+//     outright, detected as "bounded shorter than resolved"; that test cannot
+//     survive narrowed grants, where the entitlement is wider than the grant
+//     from the first exchange onward, and it was never what kept the token
+//     from widening. A promoted identity keeps its old scopes until it runs
+//     a fresh authorization-code flow, which it needs for the new ones anyway.
+//   - A degradation to nothing is refused, but only when the family EVER
 //     held a grant. Previously both sides were empty, "0 < 0" was false, and
 //     the handler fell through: it minted a scopeless access token at HTTP 200
 //     and told an operator who had just de-provisioned the identity that the
@@ -2356,11 +2369,8 @@ func boundRefreshGrant(currentGroups, currentScopes []string, originalScope stri
 // Errors are returned, never folded into "revoked": a transient storage
 // failure must produce server_error, not invalid_grant, or a client will treat
 // a recoverable blip as terminal and discard a valid refresh token.
-func (s *Server) refreshGrantStillValid(ctx context.Context, bounded, resolved []string, familyID string, tgID int64) (bool, error) {
-	if len(bounded) < len(resolved) {
-		return false, nil
-	}
-	if len(resolved) > 0 {
+func (s *Server) refreshGrantStillValid(ctx context.Context, bounded []string, familyID string, tgID int64) (bool, error) {
+	if len(bounded) > 0 {
 		return true, nil
 	}
 	everHeld, err := s.store.FamilyEverHeldScope(ctx, familyID)
