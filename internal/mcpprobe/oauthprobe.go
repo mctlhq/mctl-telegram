@@ -186,33 +186,80 @@ func probeChallenge(ctx context.Context, c *http.Client, mcpURL, expectMetadata 
 }
 
 // parseChallengeParams reads the auth-param list of a WWW-Authenticate
-// header. Only quoted and bare token values are handled, which is all the
-// scheme uses in practice.
+// header.
+//
+// The quoted-string grammar of RFC 7235 (via RFC 7230 §3.2.6) allows a
+// backslash to escape any character inside quotes, including a quote and a
+// backslash itself. That matters here because the two values this probe
+// reports — the realm and the resource_metadata pointer — are written by the
+// server, and on the Portal row they will be written by a third party. A
+// parser that treats every quote as a delimiter mis-splits the moment one is
+// escaped, and then reports a wrong realm or a missing metadata pointer as if
+// it had measured them. A wrong observation is worse here than no observation.
 func parseChallengeParams(header string) map[string]string {
 	out := map[string]string{}
 	rest := strings.TrimSpace(header)
-	if i := strings.IndexByte(rest, ' '); i >= 0 {
-		rest = rest[i+1:]
-	} else {
+	i := strings.IndexByte(rest, ' ')
+	if i < 0 {
+		// Scheme only, no auth-params.
 		return out
 	}
+	rest = rest[i+1:]
 	for _, part := range splitChallengeParts(rest) {
 		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
 			continue
 		}
-		out[strings.ToLower(strings.TrimSpace(key))] = strings.Trim(strings.TrimSpace(value), `"`)
+		out[strings.ToLower(strings.TrimSpace(key))] = unquoteChallengeValue(strings.TrimSpace(value))
 	}
 	return out
 }
 
-// splitChallengeParts splits on commas that are not inside a quoted value.
+// unquoteChallengeValue strips the delimiters of a quoted-string and resolves
+// its backslash escapes. A bare token is returned unchanged: it has no
+// escaping, so touching it would corrupt a legitimate value containing a
+// backslash.
+func unquoteChallengeValue(v string) string {
+	if len(v) < 2 || v[0] != '"' {
+		return v
+	}
+	var b strings.Builder
+	escaped := false
+	for _, r := range v[1:] {
+		switch {
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '"':
+			// Closing delimiter. Anything after it is not part of the value.
+			return b.String()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	// Unterminated quote: return what was read rather than the raw input, so
+	// the caller never sees a stray delimiter in a reported value.
+	return b.String()
+}
+
+// splitChallengeParts splits on commas that are not inside a quoted value,
+// honouring backslash escapes so that an escaped quote does not flip the
+// in-quotes state and hand the rest of the header to the wrong parameter.
 func splitChallengeParts(s string) []string {
 	var parts []string
 	var current strings.Builder
 	inQuotes := false
+	escaped := false
 	for _, r := range s {
 		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case inQuotes && r == '\\':
+			current.WriteRune(r)
+			escaped = true
 		case r == '"':
 			inQuotes = !inQuotes
 			current.WriteRune(r)

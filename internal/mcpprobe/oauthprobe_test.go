@@ -191,3 +191,80 @@ func TestOAuthProbe_ReportsAnUnprotectedEndpoint(t *testing.T) {
 			report.Unauthenticated)
 	}
 }
+
+// TestParseChallengeParams_HonoursQuotedStringEscapes pins the parser against
+// the grammar rather than against the one challenge this server happens to
+// emit. On the Portal row the challenge is written by a third party, and the
+// realm is exactly the kind of human-facing string that acquires a quote.
+//
+// Each case is a header that an earlier, escape-blind splitter read wrongly:
+// it flipped its in-quotes state on the escaped quote, so the comma that
+// follows was treated as part of the value and resource_metadata — the
+// pointer a client needs to find discovery at all — went missing. The probe
+// would then have reported a malformed challenge from a well-formed one.
+func TestParseChallengeParams_HonoursQuotedStringEscapes(t *testing.T) {
+	const metadata = "https://tg.test/.well-known/oauth-protected-resource/mcp"
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   map[string]string
+	}{
+		{
+			name:   "plain",
+			header: `Bearer realm="mctl-telegram", resource_metadata="` + metadata + `"`,
+			want:   map[string]string{"realm": "mctl-telegram", "resource_metadata": metadata},
+		},
+		{
+			name:   "escaped quote in realm",
+			header: `Bearer realm="mctl \"labs\"", resource_metadata="` + metadata + `"`,
+			want:   map[string]string{"realm": `mctl "labs"`, "resource_metadata": metadata},
+		},
+		{
+			// An ODD number of escaped quotes is what actually breaks an
+			// escape-blind splitter. With a pair, the two spurious state
+			// flips cancel and the split lands correctly by accident, so a
+			// test that only uses pairs proves nothing about the splitter.
+			name:   "single escaped quote leaves the splitter mid-string",
+			header: `Bearer realm="say \"hi", resource_metadata="` + metadata + `"`,
+			want:   map[string]string{"realm": `say "hi`, "resource_metadata": metadata},
+		},
+		{
+			name:   "escaped backslash before the closing quote",
+			header: `Bearer realm="mctl\\", resource_metadata="` + metadata + `"`,
+			want:   map[string]string{"realm": `mctl\`, "resource_metadata": metadata},
+		},
+		{
+			name:   "comma inside a quoted realm",
+			header: `Bearer realm="mctl, labs", resource_metadata="` + metadata + `"`,
+			want:   map[string]string{"realm": "mctl, labs", "resource_metadata": metadata},
+		},
+		{
+			name:   "bare token value",
+			header: `Bearer error=invalid_token, realm="mctl-telegram"`,
+			want:   map[string]string{"error": "invalid_token", "realm": "mctl-telegram"},
+		},
+		{
+			name:   "scheme only",
+			header: `Bearer`,
+			want:   map[string]string{},
+		},
+		{
+			name:   "unterminated quote yields the text read, not a stray delimiter",
+			header: `Bearer realm="mctl-telegram`,
+			want:   map[string]string{"realm": "mctl-telegram"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseChallengeParams(tc.header)
+			for k, want := range tc.want {
+				if got[k] != want {
+					t.Errorf("%s = %q, want %q (all = %v)", k, got[k], want, got)
+				}
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("parsed %v, want exactly %v", got, tc.want)
+			}
+		})
+	}
+}
