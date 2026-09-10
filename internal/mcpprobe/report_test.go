@@ -214,7 +214,21 @@ func TestFinalize_UnsetOutcomeIsNotAPass(t *testing.T) {
 		{Label: "tools_call_readonly"}, // deliberately unset
 	}}
 	r.finalize()
-	if r.Summary == OutcomePass {
-		t.Fatal("summary = PASS although one mandatory step carries no outcome at all")
+	if r.Summary != OutcomeFail {
+		t.Fatalf("summary = %q, want FAIL: an outcome nobody set is a failure, and the "+
+			"verdict must stay inside the enum the type documents", r.Summary)
+	}
+
+	// And it must not outrank a real measured failure: a report carrying both
+	// has to say FAIL, not "nothing was measured".
+	both := &Report{Mode: ModeLegacy, Steps: []Step{
+		{Label: "initialize", Outcome: OutcomePass},
+		{Label: "tools_list", Outcome: OutcomeFail},
+		{Label: "tools_call_readonly"}, // unset
+	}}
+	both.finalize()
+	if both.Summary != OutcomeFail {
+		t.Errorf("summary = %q, want FAIL; a measured conformance failure reported as "+
+			"unmeasured is the inversion the exit codes exist to prevent", both.Summary)
 	}
 }

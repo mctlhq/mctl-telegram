@@ -252,11 +252,6 @@ func mandatoryNegatives(mode Mode) []string {
 // carries up the weakest one present, so a single measured failure fails the
 // run and a single unexecuted cell keeps it out of PASS.
 var outcomeRank = map[Outcome]int{
-	// The zero Outcome is ranked worst on purpose. A map miss yields 0,
-	// which is PASS's rank, so an outcome nobody set would otherwise
-	// aggregate exactly like a pass — fail-open in the function whose whole
-	// job is to fail closed.
-	Outcome(""):    5,
 	OutcomePass:    0,
 	OutcomeSkipped: 1,
 	OutcomePending: 2,
@@ -274,6 +269,18 @@ var outcomeRank = map[Outcome]int{
 func (r *Report) finalize() {
 	worst := OutcomePass
 	consider := func(o Outcome) {
+		// An outcome the enum does not name — the zero value above all —
+		// counts as a failure, because a map miss would otherwise return
+		// PASS's rank and an outcome nobody set would aggregate exactly like
+		// a pass. It is normalised to OutcomeFail rather than carried up as
+		// itself: Summary must stay inside the closed set the type
+		// documents, and ranking the unnamed value above FAIL would let one
+		// forgotten field outrank a real measured failure and report it as
+		// "nothing was measured" — the inverse of the distinction the exit
+		// codes exist to make.
+		if _, named := outcomeRank[o]; !named {
+			o = OutcomeFail
+		}
 		if outcomeRank[o] > outcomeRank[worst] {
 			worst = o
 		}

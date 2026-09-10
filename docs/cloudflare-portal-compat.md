@@ -25,9 +25,18 @@ go run ./cmd/mcpprobe -url https://<host>/mcp -mode legacy -legacy-version 2025-
 
 `-json` emits the same report as JSON for pasting into an issue. `-source` labels the evidence and must
 be honest: `in-process-current-main` is what a test binary produces, `direct-deployed` is a run against a
-deployed endpoint, and `cloudflare-portal` is a run through a configured gateway. Exit status is 0 when
-the run produced no finding, 1 when it did or the endpoint could not be reached, and 2 when the probe
-itself was invoked wrongly.
+deployed endpoint, and `cloudflare-portal` is a run through a configured gateway. Exit status distinguishes four
+outcomes, because "the endpoint is wrong" and "nothing was measured" call for different reactions:
+
+| code | meaning |
+|---|---|
+| 0 | every mandatory cell ran and passed |
+| 1 | a conformance failure was measured, or the endpoint could not be reached |
+| 2 | the probe itself was invoked wrongly |
+| 3 | the run completed but a mandatory cell never executed, so it proves nothing |
+
+Code 3 is the one to watch against a gateway: an edge that answers a protocol violation with `401` or
+`403` leaves every negative unmeasured, and a pipeline reading only "not 1" would call that a pass.
 
 Only one tool is ever invoked, and only when the server's own `tools/list` annotation reports it
 read-only. A tool with no annotation is refused: silence is not a promise of safety.

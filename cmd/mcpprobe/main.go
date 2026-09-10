@@ -113,7 +113,7 @@ func run() int {
 		printTable(report)
 	}
 
-	return exitCodeForSummary(string(report.Summary))
+	return exitCodeForSummary(report.Summary)
 }
 
 // exitCodeForSummary maps a run verdict to a process exit code.
@@ -126,11 +126,11 @@ func run() int {
 // violation with 401, every negative is recorded as unmeasured, the summary
 // is SKIPPED, and a pipeline reading the exit code alone would conclude the
 // binding was verified.
-func exitCodeForSummary(summary string) int {
+func exitCodeForSummary(summary mcpprobe.Outcome) int {
 	switch summary {
-	case "PASS":
+	case mcpprobe.OutcomePass:
 		return exitOK
-	case "FAIL", "BLOCKED":
+	case mcpprobe.OutcomeFail, mcpprobe.OutcomeBlocked:
 		return exitFinding
 	default:
 		// SKIPPED and PENDING-OPERATOR: the run completed, and it did not
