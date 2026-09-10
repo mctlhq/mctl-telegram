@@ -93,9 +93,14 @@ revoking the database access tier with `set_telegram_access(tier="none")`. The
 two get there by different routes:
 
 - If `AUTO_APPROVE_CLIENTS` is on (as in the labs deployment), the identity
-  still resolves to a scope set outside its original `admin:users:read` grant
-  — open registration promotes an un-tiered user to the client bundle — and
-  the refresh is refused as a promotion.
+  now resolves to the client bundle — open registration promotes an un-tiered
+  user — which has nothing in common with its original `admin:users:read`
+  grant. The bounded grant is therefore empty, and an empty grant for a family
+  that once held one is refused. (Before #607 this case was refused earlier,
+  as a "promotion" detected by the entitlement being wider than the grant;
+  that detection is gone because a grant is now routinely narrower than the
+  entitlement by the client's own request, see SECURITY.md. The outcome here
+  is the same.)
 - If the identity resolves to no scopes at all (open registration off, or the
   access tier is explicitly `none`), the refresh is refused as a degradation.
   Until #584 this second case answered HTTP 200 with a *scopeless* access
