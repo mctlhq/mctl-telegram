@@ -65,7 +65,7 @@ mapped=$(jq --arg s "$server" '[.result.servers // [] | .[] | select(.server_id 
 synced=$(jq -r '.result.tools // [] | .[].name' <<<"$server_body" | LC_ALL=C sort)
 [ -n "$synced" ] || { echo "server '$server': the API returned no synced tools (result.tools is missing or empty); has it connected?" >&2; exit 1; }
 listed=$(jq -r '.tools[].name' "$file" | LC_ALL=C sort)
-uncovered=$(comm -23 <(echo "$synced") <(echo "$listed"))
+uncovered=$(LC_ALL=C comm -23 <(echo "$synced") <(echo "$listed"))
 if [ -n "$uncovered" ]; then
   echo "synced tools with no decision in $file:" >&2
   echo "$uncovered" >&2
@@ -91,10 +91,10 @@ body=$(jq --arg s "$server" --slurpfile a "$file" --rawfile synced_raw <(echo "$
       else . end)' <<<"$current")
 
 if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi
-# The number of decisions going out; the summary must see the same number
-# coming back, or a portal that silently drops names it does not recognise
-# would read as a clean apply.
-sent=$(jq --arg s "$server" '[.servers[] | select(.server_id==$s)][0].updated_tools | length' <<<"$body")
+# The decisions going out, as a sorted {name, enabled} projection; the
+# summary must see exactly the same set coming back, or a portal that
+# silently drops, flips or pads decisions would read as a clean apply.
+sent=$(jq -c --arg s "$server" '[.servers[] | select(.server_id==$s)][0].updated_tools | map({name, enabled}) | sort_by(.name)' <<<"$body")
 res=$(cf -X PUT "$base/portals/$portal" --data "$body" | must_succeed "update portal")
 # The summary is the record that the allowlist landed, so it must not be
 # able to print nothing. select(. != null) drops an empty selection before
@@ -102,6 +102,6 @@ res=$(cf -X PUT "$base/portals/$portal" --data "$body" | must_succeed "update po
 # branch runs. -e alone would not do this: a string interpolated from
 # null is still a truthy string.
 jq -er --arg s "$server" --argjson sent "$sent" '[.result.servers // [] | .[] | select(.server_id==$s)] | first | select(. != null)
-  | select((.updated_tools | length) == $sent)
+  | select((.updated_tools | map({name, enabled}) | sort_by(.name)) == $sent)
   | "applied: default_disabled=\(.default_disabled) tools=\(.updated_tools|length) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res" \
-  || { echo "update returned success but the response has no mapping for '$server' or fewer than $sent updated_tools; verify the portal by hand" >&2; exit 1; }
+  || { echo "update returned success but the response's updated_tools for '$server' are not the decisions sent (missing mapping, dropped, flipped or extra entries); verify the portal by hand" >&2; exit 1; }

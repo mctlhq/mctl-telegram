@@ -40,6 +40,11 @@ type portalAllowlist struct {
 //     entry says why its output is acceptable on a shared surface. The
 //     hint rules out side effects; the reason is the privacy decision, made
 //     in the same diff and reviewable there.
+//
+// minReasonLen is a floor on the privacy decision, not a quality bar: it
+// rejects a placeholder, not a short sentence.
+const minReasonLen = 40
+
 func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	raw, err := os.ReadFile("../../docs/portal-allowlist.json")
 	if err != nil {
@@ -76,8 +81,8 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 			continue
 		}
 		listed[tool.Name] = *tool.Enabled
-		if *tool.Enabled && len(tool.Reason) < 40 {
-			t.Errorf("%s: enabled without a reason saying what it exposes and why that is acceptable on a shared surface", tool.Name)
+		if *tool.Enabled && len(tool.Reason) < minReasonLen {
+			t.Errorf("%s: enabled but reason is %d chars (minimum %d): say what the tool exposes and why that is acceptable on a shared surface", tool.Name, len(tool.Reason), minReasonLen)
 		}
 	}
 
