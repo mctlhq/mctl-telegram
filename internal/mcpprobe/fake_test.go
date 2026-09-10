@@ -67,6 +67,21 @@ func (f *fakeServer) record(method string) {
 	f.dispatched = append(f.dispatched, method)
 }
 
+// noteSession and lastSessionID share the mutex that guards dispatched: the
+// handler goroutine writes, the test goroutine reads, and there is no
+// happens-before edge between them without it.
+func (f *fakeServer) noteSession(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastSession = id
+}
+
+func (f *fakeServer) lastSessionID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSession
+}
+
 func (f *fakeServer) dispatchedMethods() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -130,7 +145,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	f.lastSession = r.Header.Get(mcp.HeaderSessionID)
+	f.noteSession(r.Header.Get(mcp.HeaderSessionID))
 	f.record(body.Method)
 
 	switch method {

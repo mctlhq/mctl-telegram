@@ -43,7 +43,7 @@ func TestLegacyRun_MintsAndRequiresSession(t *testing.T) {
 	if len(report.Negatives) != 0 {
 		t.Errorf("legacy run recorded %d negatives, want none", len(report.Negatives))
 	}
-	if fake.lastSession != fakeSessionID {
+	if fake.lastSessionID() != fakeSessionID {
 		t.Errorf("probe did not send the minted session id on later calls")
 	}
 	// A server that tracks real sessions refuses one it never issued.

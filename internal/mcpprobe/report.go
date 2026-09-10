@@ -252,6 +252,11 @@ func mandatoryNegatives(mode Mode) []string {
 // carries up the weakest one present, so a single measured failure fails the
 // run and a single unexecuted cell keeps it out of PASS.
 var outcomeRank = map[Outcome]int{
+	// The zero Outcome is ranked worst on purpose. A map miss yields 0,
+	// which is PASS's rank, so an outcome nobody set would otherwise
+	// aggregate exactly like a pass — fail-open in the function whose whole
+	// job is to fail closed.
+	Outcome(""):    5,
 	OutcomePass:    0,
 	OutcomeSkipped: 1,
 	OutcomePending: 2,

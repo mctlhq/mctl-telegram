@@ -31,9 +31,15 @@ import (
 // invoked at all are different outcomes and get different codes, so a
 // pipeline can tell "the endpoint is wrong" from "you called me wrong".
 const (
-	exitOK      = 0
+	exitOK = 0
+	// exitFinding: the probe ran and the endpoint failed conformance, or the
+	// endpoint could not be reached at all.
 	exitFinding = 1
-	exitUsage   = 2
+	// exitUsage: the probe itself was invoked wrongly.
+	exitUsage = 2
+	// exitUnmeasured: the probe ran cleanly but a mandatory cell never
+	// executed, so the run proves nothing either way.
+	exitUnmeasured = 3
 )
 
 func main() {
@@ -107,11 +113,30 @@ func run() int {
 		printTable(report)
 	}
 
-	switch report.Summary {
-	case mcpprobe.OutcomeFail, mcpprobe.OutcomeBlocked:
+	return exitCodeForSummary(string(report.Summary))
+}
+
+// exitCodeForSummary maps a run verdict to a process exit code.
+//
+// Only a run that measured everything and liked what it saw exits 0.
+// finalize goes to some trouble to keep an unmeasured run out of PASS, and
+// this is its only consumer: collapsing SKIPPED and PENDING-OPERATOR into
+// success would hand that distinction back. It is reachable in exactly the
+// row this tool exists for — against a gateway that answers a protocol
+// violation with 401, every negative is recorded as unmeasured, the summary
+// is SKIPPED, and a pipeline reading the exit code alone would conclude the
+// binding was verified.
+func exitCodeForSummary(summary string) int {
+	switch summary {
+	case "PASS":
+		return exitOK
+	case "FAIL", "BLOCKED":
 		return exitFinding
 	default:
-		return exitOK
+		// SKIPPED and PENDING-OPERATOR: the run completed, and it did not
+		// establish what it was asked to. Distinct from both, so a caller
+		// can tell "this endpoint is wrong" from "go run it yourself".
+		return exitUnmeasured
 	}
 }
 

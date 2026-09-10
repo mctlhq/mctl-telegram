@@ -202,3 +202,19 @@ func TestFinalize_FailClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestFinalize_UnsetOutcomeIsNotAPass covers the one value the enum does not
+// name. A map miss on outcomeRank yields zero — PASS's rank — so an outcome
+// nobody set would aggregate exactly like a pass, in the function whose whole
+// job is to fail closed.
+func TestFinalize_UnsetOutcomeIsNotAPass(t *testing.T) {
+	r := &Report{Mode: ModeLegacy, Steps: []Step{
+		{Label: "initialize", Outcome: OutcomePass},
+		{Label: "tools_list", Outcome: OutcomePass},
+		{Label: "tools_call_readonly"}, // deliberately unset
+	}}
+	r.finalize()
+	if r.Summary == OutcomePass {
+		t.Fatal("summary = PASS although one mandatory step carries no outcome at all")
+	}
+}
