@@ -249,11 +249,16 @@ var dispatchToolCall = dispatchCall
 // while the machine was asleep still refreshes normally, and this is one
 // extra round trip per session start, not per call.
 //
-// primed carries a credential the caller has ALREADY refreshed — runDaemonCmd
-// refreshes once before prompting for the passphrase, so that a revoked or
-// unusable device fails before the user types anything. Without threading it
-// through, the first loop iteration would refresh again immediately: two PoP
-// round trips on every start, for one connection.
+// primed carries a credential the caller has ALREADY refreshed -- serveDaemon
+// refreshes once before prompting for the passphrase, so that a legacy token
+// the server refuses fails before the user types anything, and so that the
+// first loop iteration does not refresh again immediately: two round trips
+// on every start, for one connection. primed is nil whenever that pre-start
+// refresh did not succeed, and the nil is load-bearing: the loop then reads
+// the credential from disk and runs its own expiry check, which is the only
+// thing keeping a known-expired token off the wire. A primed credential is
+// trusted as current and dialed with at once, so a caller must never prime
+// with a token it could not renew.
 func runDaemon(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, userID int64, primed *bridgeTokenFile) error {
 	backoff := reconnectBase
 	for {

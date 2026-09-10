@@ -619,7 +619,8 @@ func serveDaemon(parent context.Context) error {
 		refreshed, refreshErr := refreshDeviceCredential(parent, cfg, rec.DeviceID, priv)
 		if refreshErr != nil {
 			slog.Warn("device credential refresh failed before start; will retry from the connect loop",
-				"device_id", rec.DeviceID, "err", refreshErr)
+				"device_id", rec.DeviceID, "err", refreshErr,
+				"action", "if this keeps failing, the device may have been revoked: run `mctl-telegram-local activate --server "+cfg.Server+"` to re-register it")
 		} else {
 			bt, primed = refreshed, refreshed
 			slog.Info("device credential refreshed", "device_id", rec.DeviceID, "expires_at", bt.ExpiresAt)
