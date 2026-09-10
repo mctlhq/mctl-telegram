@@ -8,9 +8,24 @@
 #
 #   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh [--dry-run]
 #
-# The full portal body is read first and sent back whole, as the API
-# overwrites unspecified fields; only the server mapping is rewritten.
+# What is sent: the portal body exactly as read, minus the read-only
+# timestamps, with only the target server's mapping rewritten. The API
+# overwrites unspecified fields, so nothing else is projected away; a field
+# Cloudflare adds later survives an apply untouched. (Verified against the
+# live API: a PUT of the full GET body is accepted.)
+#
+# The token never appears on a command line: curl reads it from a config
+# handed over a file descriptor, so it is in neither the process table nor
+# the shell history. Same discipline as mcpprobe's --token-env.
 set -euo pipefail
+
+case "${1:-}" in
+  "")          dry_run=0 ;;
+  --dry-run)   dry_run=1 ;;
+  *) echo "usage: $0 [--dry-run]  (unknown argument: $1)" >&2; exit 2 ;;
+esac
+[ $# -le 1 ] || { echo "usage: $0 [--dry-run]" >&2; exit 2; }
+
 here=$(cd "$(dirname "$0")/.." && pwd)
 file="$here/docs/portal-allowlist.json"
 : "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN}"
@@ -19,30 +34,46 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
 base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/ai-controls/mcp"
-auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
 
-current=$(curl -sS "${auth[@]}" "$base/portals/$portal")
-jq -e .success >/dev/null <<<"$current" || { echo "read portal failed: $current" >&2; exit 1; }
+# curl config on a file descriptor: the Authorization header is not an argument.
+cf() { curl -sS -K <(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$CLOUDFLARE_API_TOKEN") "$@"; }
+must_succeed() { # $1 = label, stdin = API envelope; prints the envelope on success
+  local body; body=$(cat)
+  if ! jq -e .success >/dev/null 2>&1 <<<"$body"; then
+    echo "$1 failed: $(jq -c '.errors // .' 2>/dev/null <<<"$body" || echo "$body")" >&2; exit 1
+  fi
+  printf '%s' "$body"
+}
+
+current=$(cf "$base/portals/$portal" | must_succeed "read portal")
+server_body=$(cf "$base/servers/$server" | must_succeed "read server")
+
+# The mapping must exist: rewriting a server that is not on the portal would
+# be a silent no-op, and a silent no-op here is exactly the drift this guard
+# exists to prevent.
+mapped=$(jq --arg s "$server" '[.result.servers[] | select(.server_id == $s)] | length' <<<"$current")
+[ "$mapped" = 1 ] || { echo "portal '$portal' has $mapped mapping(s) for server '$server'; expected exactly one" >&2; exit 1; }
 
 # Every tool the upstream has synced must be covered; a synced tool with no
-# decision is exactly the drift this guard exists for.
-synced=$(curl -sS "${auth[@]}" "$base/servers/$server" | jq -r '.result.tools[].name' | sort)
+# decision is the drift itself.
+synced=$(jq -r '.result.tools[].name' <<<"$server_body" | sort)
 listed=$(jq -r '.tools[].name' "$file" | sort)
 if ! diff <(echo "$synced") <(echo "$listed") >/dev/null; then
-  echo "tool set mismatch between the portal's synced list and $file:" >&2
+  echo "tool set mismatch between the portal's synced list and $file (< synced, > file):" >&2
   diff <(echo "$synced") <(echo "$listed") >&2 || true
   exit 1
 fi
 
-body=$(jq --arg server "$server" --slurpfile a "$file" '
+body=$(jq --arg s "$server" --slurpfile a "$file" '
   .result
-  | {id, name, description, hostname, code_mode, secure_web_gateway,
-     servers: [ .servers[] | if .server_id == $server then
-        {server_id, on_behalf, default_disabled: $a[0].default_disabled,
-         updated_tools: [ $a[0].tools[] | {name, enabled} ]}
-       else {server_id, on_behalf, default_disabled, updated_tools} end ]}' <<<"$current")
+  | del(.created_at, .created_by, .modified_at, .modified_by)
+  | .servers |= map(
+      if .server_id == $s then
+        .default_disabled = $a[0].default_disabled
+        | .updated_tools = [ $a[0].tools[] | {name, enabled} ]
+      else . end)' <<<"$current")
 
-if [ "${1:-}" = "--dry-run" ]; then jq . <<<"$body"; exit 0; fi
-res=$(curl -sS -X PUT "${auth[@]}" "$base/portals/$portal" --data "$body")
-jq -e .success >/dev/null <<<"$res" || { echo "update failed: $res" >&2; exit 1; }
-jq -r --arg server "$server" '.result.servers[] | select(.server_id==$server) | "applied: default_disabled=\(.default_disabled) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res"
+if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi
+res=$(cf -X PUT "$base/portals/$portal" --data "$body" | must_succeed "update portal")
+jq -r --arg s "$server" '.result.servers[] | select(.server_id==$s)
+  | "applied: default_disabled=\(.default_disabled) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' <<<"$res"

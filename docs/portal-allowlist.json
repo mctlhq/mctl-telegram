@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise, and refuses `enabled: true` on any tool whose readOnlyHint is not true. Apply with scripts/portal-allowlist-apply.sh.",
+  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must declare readOnlyHint=true AND carry a `reason` that says what the tool exposes and why that is acceptable on a shared surface: readOnlyHint is a side-effect hint, not a privacy classification, and several read-only tools return message bodies. Apply with scripts/portal-allowlist-apply.sh.",
   "portal": "mcp",
   "server": "tg",
   "default_disabled": true,
@@ -38,11 +38,13 @@
     },
     {
       "name": "get_my_identity",
-      "enabled": true
+      "enabled": true,
+      "reason": "Returns the caller's own telegram_id, username and display name; nothing about other people or messages. It is the identity check the aggregate portal relies on."
     },
     {
       "name": "get_my_send_status",
-      "enabled": true
+      "enabled": true,
+      "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers."
     },
     {
       "name": "get_unread_messages",
@@ -54,7 +56,8 @@
     },
     {
       "name": "list_dialogs",
-      "enabled": true
+      "enabled": true,
+      "reason": "Returns the caller's own dialog list (peer ids, titles, unread counts) and no message bodies. Chosen as the one catalogue-shaped read the pilot needs; get_messages/search_messages stay off because they return message text."
     },
     {
       "name": "list_telegram_identities",

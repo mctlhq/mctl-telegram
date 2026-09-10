@@ -17,6 +17,10 @@ type portalAllowlist struct {
 	Tools           []struct {
 		Name    string `json:"name"`
 		Enabled bool   `json:"enabled"`
+		// Reason is required on an enabled tool: readOnlyHint says a tool
+		// has no side effects, not that its output belongs on a shared
+		// surface. get_messages is read-only and returns message bodies.
+		Reason string `json:"reason,omitempty"`
 	} `json:"tools"`
 }
 
@@ -29,8 +33,10 @@ type portalAllowlist struct {
 // Two invariants:
 //   - the set of names in the file equals the set of tools newMCPServer
 //     registers — no missing tool, no stale entry;
-//   - a tool may be enabled only if it declares readOnlyHint=true, which is
-//     the whole content of "curated read-only surface".
+//   - a tool may be enabled only if it declares readOnlyHint=true AND the
+//     entry says why its output is acceptable on a shared surface. The
+//     hint rules out side effects; the reason is the privacy decision, made
+//     in the same diff and reviewable there.
 func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	raw, err := os.ReadFile("../../docs/portal-allowlist.json")
 	if err != nil {
@@ -47,9 +53,13 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 		t.Fatal("default_disabled must be true: it is the half of the configuration that hides a tool the list does not know about")
 	}
 
-	registered := (&Server{}).newMCPServer().ListTools()
-	if len(registered) == 0 {
-		t.Fatal("no tools registered — the enumeration this test relies on is broken")
+	// Enumerate through the unfiltered server. ToolFilter "" means "all"
+	// today (toolPassesFilter); the comparison against the read-only-only
+	// variant proves this is the full set rather than trusting the default.
+	registered := (&Server{ToolFilter: ""}).newMCPServer().ListTools()
+	readOnlyOnly := (&Server{ToolFilter: "read-only"}).newMCPServer().ListTools()
+	if len(registered) == 0 || len(registered) <= len(readOnlyOnly) {
+		t.Fatalf("enumeration is not the unfiltered tool set: all=%d read-only=%d", len(registered), len(readOnlyOnly))
 	}
 
 	listed := make(map[string]bool, len(list.Tools))
@@ -58,6 +68,9 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 			t.Errorf("%s: listed twice", tool.Name)
 		}
 		listed[tool.Name] = tool.Enabled
+		if tool.Enabled && len(tool.Reason) < 40 {
+			t.Errorf("%s: enabled without a reason saying what it exposes and why that is acceptable on a shared surface", tool.Name)
+		}
 	}
 
 	var missing, stale, unsafe []string
