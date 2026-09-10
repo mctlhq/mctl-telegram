@@ -3,6 +3,7 @@ package mcpprobe
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -24,6 +25,12 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 	// nothing has been established about this endpoint — including whether
 	// it validates anything — so sending more traffic measures nothing and
 	// the cases are recorded as unmeasured instead.
+	// Each negative is gated on the positive step for the same method: the
+	// tools/list cases need an unmutated tools/list to have worked, and the
+	// tools/call cases need the guarded read-only call to have worked.
+	listBaseline := stepOutcome(r, "tools_list") == OutcomePass
+	callBaseline := stepOutcome(r, "tools_call_readonly") == OutcomePass
+
 	if stepOutcome(r, "discover") != OutcomePass {
 		for _, label := range mandatoryNegatives(ModeModern) {
 			r.addNegative(Step{Label: label, Outcome: OutcomeSkipped, Reason: ReasonPrerequisiteFailed})
@@ -46,7 +53,7 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 			"capabilities":    map[string]any{},
 			"clientInfo":      map[string]any{"name": probeClientName, "version": probeClientVersion},
 		},
-	}, ReasonMethodNotFound))
+	}, ReasonMethodNotFound, listBaseline))
 
 	deleted := (*string)(nil)
 	mismatched := string(mcp.MethodPromptsList)
@@ -64,7 +71,7 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		modern:          true,
 		protocolVersion: version,
 		headerOverrides: map[string]*string{mcp.HeaderProtocolVersion: deleted},
-	}, ReasonHeaderMismatch))
+	}, ReasonHeaderMismatch, listBaseline))
 
 	r.addNegative(expectRejection(ctx, c, Step{
 		Label:  "missing_method_header",
@@ -75,7 +82,7 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		modern:          true,
 		protocolVersion: version,
 		headerOverrides: map[string]*string{mcp.HeaderMethod: deleted},
-	}, ReasonHeaderMismatch))
+	}, ReasonHeaderMismatch, listBaseline))
 
 	r.addNegative(expectRejection(ctx, c, Step{
 		Label:  "mismatched_method_header",
@@ -86,7 +93,7 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		modern:          true,
 		protocolVersion: version,
 		headerOverrides: map[string]*string{mcp.HeaderMethod: &mismatched},
-	}, ReasonHeaderMismatch))
+	}, ReasonHeaderMismatch, listBaseline))
 
 	// The name-header cases need a tools/call, the only probed method whose
 	// binding requires one. They are guarded by the same read-only check as
@@ -119,7 +126,7 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		modern:          true,
 		protocolVersion: version,
 		headerOverrides: map[string]*string{mcp.HeaderName: deleted},
-	}, ReasonHeaderMismatch))
+	}, ReasonHeaderMismatch, callBaseline))
 
 	otherName, _ := mcp.EncodeHeaderValue(o.Tool + "_not_this_one")
 	r.addNegative(expectRejection(ctx, c, Step{
@@ -133,13 +140,32 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		modern:          true,
 		protocolVersion: version,
 		headerOverrides: map[string]*string{mcp.HeaderName: &otherName},
-	}, ReasonHeaderMismatch))
+	}, ReasonHeaderMismatch, callBaseline))
 }
 
 // expectRejection runs a request that must not succeed. A 2xx with no
 // JSON-RPC error is the failure case here: it means the server accepted
 // something the protocol says it must refuse.
-func expectRejection(ctx context.Context, c *rpcClient, step Step, req rpcRequest, want Reason) Step {
+// expectRejection runs a request that must not succeed, and — this is the
+// part that makes the result mean anything — only counts a rejection as
+// evidence when the unmutated request is known to have succeeded.
+//
+// Without that baseline the cell is a false positive waiting to happen. An
+// endpoint that serves discovery anonymously but wants a bearer for
+// tools/list answers 401 to every one of these probes, and a naive reading
+// would record "the binding is enforced" from a refusal the mutated header
+// had no part in. The summary would still fail the run, but the per-cell
+// claim is the entire point of this probe, so being wrong there is worse
+// than being silent.
+//
+// baselinePassed says whether the same method succeeded unmutated earlier in
+// this run. When it did not, the case is reported as unmeasured rather than
+// guessed.
+func expectRejection(ctx context.Context, c *rpcClient, step Step, req rpcRequest, want Reason, baselinePassed bool) Step {
+	if !baselinePassed {
+		step.Outcome, step.Reason = OutcomeSkipped, ReasonPrerequisiteFailed
+		return step
+	}
 	out, err := c.do(ctx, req)
 	if err != nil && !errors.Is(err, errMalformedBody) {
 		step.Outcome, step.Reason = OutcomeFail, ReasonTransport
@@ -148,6 +174,11 @@ func expectRejection(ctx context.Context, c *rpcClient, step Step, req rpcReques
 	step.HTTPStatus = out.httpStatus
 	step.JSONRPCode = out.errorCode
 	switch {
+	case out.httpStatus == http.StatusUnauthorized || out.httpStatus == http.StatusForbidden:
+		// An authentication refusal is not a protocol refusal, even though
+		// both are refusals. Recording it as enforcement would credit the
+		// server for a check it never performed.
+		step.Outcome, step.Reason = OutcomeSkipped, ReasonUnauthenticatedProbe
 	case out.errorCode != nil:
 		step.Outcome, step.Reason = OutcomePass, want
 	case out.httpStatus >= 400:

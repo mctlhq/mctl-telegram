@@ -71,3 +71,68 @@ func TestModernNegatives_ToleratedFaultFailsTheRun(t *testing.T) {
 		t.Errorf("summary = %s, want FAIL", report.Summary)
 	}
 }
+
+// TestModernNegatives_AuthRefusalIsNotEnforcement is the regression for a
+// false positive that survived the first review round.
+//
+// A negative probe proves something only when the same request succeeds
+// unmutated. Against an endpoint that serves discovery anonymously but wants
+// a bearer for the capability calls, the probe cannot tell a header refusal
+// from an authentication one, because it never saw the unmutated request
+// work. Reporting enforcement from that would be the exact failure this
+// package exists to prevent: a cell that is green for a reason unrelated to
+// the claim it makes.
+func TestModernNegatives_AuthRefusalIsNotEnforcement(t *testing.T) {
+	_, url := newFake(t, func(f *fakeServer) {
+		f.modern = true
+		f.unauthorizedMethods = map[string]bool{
+			string(mcp.MethodToolsList):  true,
+			string(mcp.MethodToolsCall):  true,
+			string(mcp.MethodInitialize): true,
+		}
+	})
+
+	report, err := Run(context.Background(), Options{
+		URL: url, Mode: ModeModern, Source: SourceInProcess, SkipOAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, s := range report.Negatives {
+		if s.Outcome == OutcomePass {
+			t.Errorf("%s claimed enforcement (status %d) although the unmutated request "+
+				"never succeeded; with no working baseline a refusal cannot be attributed "+
+				"to the mutated header", s.Label, s.HTTPStatus)
+		}
+	}
+	if report.Summary == OutcomePass {
+		t.Error("summary = PASS although nothing was actually measured")
+	}
+}
+
+// TestModernNegatives_UnauthenticatedCellIsMarkedAsSuch pins the distinction
+// between "measured and refused" and "could not be measured" when the probe
+// itself reaches the endpoint but is turned away.
+func TestModernNegatives_UnauthenticatedCellIsMarkedAsSuch(t *testing.T) {
+	_, url := newFake(t, func(f *fakeServer) {
+		f.modern = true
+		// tools/list succeeds, so the baseline holds; only the negative's own
+		// request is turned away.
+		f.unauthorizedMethods = map[string]bool{}
+	})
+
+	report, err := Run(context.Background(), Options{
+		URL: url, Mode: ModeModern, Source: SourceInProcess, SkipOAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// With a healthy server every negative is genuinely measured.
+	for _, label := range mandatoryNegatives(ModeModern) {
+		s := stepByLabel(t, report.Negatives, label)
+		if s.Outcome != OutcomePass {
+			t.Errorf("%s = %+v, want PASS against a conforming server", label, s)
+		}
+	}
+}

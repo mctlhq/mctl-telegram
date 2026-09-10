@@ -32,6 +32,10 @@ type fakeServer struct {
 	acceptAnySession bool
 	// modern enables the 2026-07-28 binding.
 	modern bool
+	// unauthorizedMethods answer 401 regardless of anything else, modelling
+	// an endpoint that serves discovery anonymously but wants a bearer for
+	// the capability calls.
+	unauthorizedMethods map[string]bool
 	// legacyOnly makes server/discover an unknown method, which is how a
 	// pre-2026-07-28 server behaves.
 	legacyOnly bool
@@ -91,6 +95,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeRPCError(w, http.StatusNotFound, body.ID, -32601)
 			return
 		}
+	}
+
+	if f.unauthorizedMethods[body.Method] {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
 	}
 
 	if f.legacyOnly && method == mcp.MethodServerDiscover {
