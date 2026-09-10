@@ -29,3 +29,17 @@ func TestExitCodeForSummary(t *testing.T) {
 		}
 	}
 }
+
+// TestExitCodeForUnknownSummary pins the direction of the unpinned arm. Every
+// named outcome has a row above; the only case left is a verdict this binary
+// does not recognise, and the safe reading of an unreasoned verdict is that
+// the endpoint is wrong — the stronger of the two non-zero codes, not the
+// weaker.
+func TestExitCodeForUnknownSummary(t *testing.T) {
+	if got := exitCodeForSummary(mcpprobe.Outcome("SOMETHING-ADDED-LATER")); got != exitFinding {
+		t.Errorf("unknown summary -> exit %d, want %d", got, exitFinding)
+	}
+	if got := exitCodeForSummary(mcpprobe.Outcome("")); got != exitFinding {
+		t.Errorf("empty summary -> exit %d, want %d", got, exitFinding)
+	}
+}

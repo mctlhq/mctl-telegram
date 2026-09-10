@@ -52,7 +52,7 @@ Produced by `go test ./internal/mcpprobe/` and reproduced by hand with the CLI.
 | modern `2026-07-28` | PASS | PASS | PASS | none minted | PASS, all six negatives |
 | legacy `2025-06-18` | n/a | PASS | PASS | minted, required, any well-formed value accepted | n/a |
 
-Two findings worth stating plainly, because both contradict what was assumed before the probe existed:
+Three findings worth stating plainly. The first two contradict what was assumed before the probe existed and come from probe runs; the third was verified by a separate experiment rather than by a probe, and is marked as such because this document's whole argument is that a claim must say how it was obtained:
 
 1. **The modern path already works, unchanged.** The server advertises `2026-07-28` and serves
    `server/discover` today. It mints no session identifier on that path, and it enforces the routing

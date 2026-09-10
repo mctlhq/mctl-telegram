@@ -70,6 +70,9 @@ func runModern(ctx context.Context, c *rpcClient, o *Options, r *Report) error {
 		return nil
 	}
 
+	// Session observation continues past discovery: the claim is that the
+	// modern path mints no identifier at all, and a run that only inspected
+	// the first response would not have measured the later ones.
 	listed := probeToolsList(ctx, c, r, rpcRequest{
 		method:          mcp.MethodToolsList,
 		id:              next(),
@@ -105,6 +108,7 @@ func probeToolsList(ctx context.Context, c *rpcClient, r *Report, req rpcRequest
 	}
 	step.HTTPStatus = out.httpStatus
 	step.JSONRPCode = out.errorCode
+	noteSession(r, out)
 	switch {
 	case errors.Is(err, errMalformedBody):
 		step.Outcome, step.Reason = OutcomeFail, ReasonMalformedBody
@@ -147,6 +151,7 @@ func probeReadOnlyCall(ctx context.Context, c *rpcClient, o *Options, r *Report,
 	}
 	step.HTTPStatus = out.httpStatus
 	step.JSONRPCode = out.errorCode
+	noteSession(r, out)
 	switch {
 	case errors.Is(err, errMalformedBody):
 		step.Outcome, step.Reason = OutcomeFail, ReasonMalformedBody

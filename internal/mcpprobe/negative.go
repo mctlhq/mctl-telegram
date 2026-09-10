@@ -25,9 +25,13 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 	// nothing has been established about this endpoint — including whether
 	// it validates anything — so sending more traffic measures nothing and
 	// the cases are recorded as unmeasured instead.
-	// Each negative is gated on the positive step for the same method: the
-	// tools/list cases need an unmutated tools/list to have worked, and the
-	// tools/call cases need the guarded read-only call to have worked.
+	// Each negative is gated on a positive step that proves the endpoint
+	// answers this kind of request: the tools/list cases need an unmutated
+	// tools/list to have worked, and the tools/call cases need the guarded
+	// read-only call to have worked. The initialize case has no positive of
+	// its own by design — initialize is the removed method — so it borrows
+	// the tools/list baseline, which is what establishes that an
+	// authenticated request gets served at all.
 	listBaseline := stepOutcome(r, "tools_list") == OutcomePass
 	callBaseline := stepOutcome(r, "tools_call_readonly") == OutcomePass
 
@@ -128,7 +132,24 @@ func runModernNegatives(ctx context.Context, c *rpcClient, o *Options, r *Report
 		headerOverrides: map[string]*string{mcp.HeaderName: deleted},
 	}, ReasonHeaderMismatch, callBaseline))
 
-	otherName, _ := mcp.EncodeHeaderValue(o.Tool + "_not_this_one")
+	// If the encoding fails, the override would set an empty Mcp-Name — a
+	// third mutation, distinct from both the deleted header the previous
+	// case tests and the mismatched value this one is named for. The step
+	// would still be labelled and reported as a mismatch, and nothing in the
+	// report would say the mutation was not the one claimed. Unreachable for
+	// an ASCII tool name, and recorded as unmeasured rather than mislabelled
+	// if it ever is not.
+	otherName, ok := mcp.EncodeHeaderValue(o.Tool + "_not_this_one")
+	if !ok {
+		r.addNegative(Step{
+			Label:   "mismatched_name_header",
+			Method:  string(mcp.MethodToolsCall),
+			Tool:    o.Tool,
+			Outcome: OutcomeSkipped,
+			Reason:  ReasonNotApplicable,
+		})
+		return
+	}
 	r.addNegative(expectRejection(ctx, c, Step{
 		Label:  "mismatched_name_header",
 		Method: string(mcp.MethodToolsCall),

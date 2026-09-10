@@ -737,6 +737,14 @@ func validatePreregisteredClient(c PreregisteredClient) error {
 		if u.Fragment != "" || strings.Contains(raw, "#") {
 			return fmt.Errorf("client %q: redirect_uri must not contain a fragment", c.ClientID)
 		}
+		// The shape check does not require an authority, and for the implicit
+		// path it need not: an empty host cannot match the allowlist, so the
+		// allowlist is the backstop. Pre-registration deliberately skips that
+		// allowlist, which leaves nothing checking the authority — "https:///cb"
+		// would otherwise be seeded as a valid exact-match target.
+		if u.Host == "" {
+			return fmt.Errorf("client %q: redirect_uri must have a host", c.ClientID)
+		}
 	}
 	return nil
 }

@@ -57,12 +57,18 @@ const (
 
 // Report is the whole result of a run.
 //
-// Every field below is a label, a number, a boolean or a closed enum. There
-// is deliberately no field typed json.RawMessage, map[string]any, any or
-// []byte anywhere in this type or its children: a value the server chose —
-// a tool result, an error message, a session identifier — has nowhere to go.
-// That is what makes the redaction guarantee structural. A change that adds
-// such a field will be caught by the reflection guard in report_test.go.
+// Every field below is a label, a number, a boolean, a closed enum, or a
+// bounded identifier the server chose to publish about itself. There is
+// deliberately no field typed json.RawMessage, map[string]any, any or []byte
+// anywhere in this type or its children, so a tool result body, a bearer
+// token or a session identifier has nowhere to go. A change that adds such a
+// field is caught by the reflection guard in report_test.go.
+//
+// The guarantee is about shape, not length: a handful of fields do carry
+// server-chosen text — the server name and version from discovery, tool
+// names, the advertised token endpoint auth methods. Those are the endpoint's
+// own public identifiers, which a compatibility report exists to quote, and
+// they are the only strings here that did not originate in this package.
 type Report struct {
 	Schema          string       `json:"schema"`
 	Timestamp       time.Time    `json:"timestamp"`
@@ -330,5 +336,3 @@ func stepOutcome(r *Report, label string) Outcome {
 // boolPtr is a local helper; the report uses pointers wherever "unset" and
 // "false" mean different things.
 func boolPtr(b bool) *bool { return &b }
-
-func intPtr(i int) *int { return &i }

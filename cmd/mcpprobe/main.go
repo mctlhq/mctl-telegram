@@ -132,11 +132,17 @@ func exitCodeForSummary(summary mcpprobe.Outcome) int {
 		return exitOK
 	case mcpprobe.OutcomeFail, mcpprobe.OutcomeBlocked:
 		return exitFinding
-	default:
-		// SKIPPED and PENDING-OPERATOR: the run completed, and it did not
-		// establish what it was asked to. Distinct from both, so a caller
-		// can tell "this endpoint is wrong" from "go run it yourself".
+	case mcpprobe.OutcomeSkipped, mcpprobe.OutcomePending:
+		// The run completed and did not establish what it was asked to.
+		// Distinct from both, so a caller can tell "this endpoint is wrong"
+		// from "go run it yourself".
 		return exitUnmeasured
+	default:
+		// An outcome this binary does not recognise is the stronger of the
+		// two non-zero codes, not the weaker. A verdict added to the enum
+		// later means something nobody here has reasoned about, and the safe
+		// reading of an unreasoned verdict is that the endpoint is wrong.
+		return exitFinding
 	}
 }
 

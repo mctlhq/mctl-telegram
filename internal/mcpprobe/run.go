@@ -33,11 +33,16 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	switch o.Mode {
 	case ModeModern:
 		if err := runModern(ctx, client, &o, report); err != nil {
+			// Finalize even on the way out: a report that escapes without a
+			// verdict carries the zero Outcome, and a caller reading Summary
+			// would see a value the enum does not name.
+			report.finalize()
 			return report, err
 		}
 		runModernNegatives(ctx, client, &o, report)
 	case ModeLegacy:
 		if err := runLegacy(ctx, client, &o, report); err != nil {
+			report.finalize()
 			return report, err
 		}
 	}

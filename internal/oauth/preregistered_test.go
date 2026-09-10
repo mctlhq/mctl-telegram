@@ -241,3 +241,32 @@ func TestPreregisteredClient_LoopbackHTTPAccepted(t *testing.T) {
 		t.Fatalf("loopback callback rejected: %v", err)
 	}
 }
+
+// TestNew_RejectsHostlessPreregisteredRedirect covers the one authority check
+// the shared shape helper does not make. For the implicit path the host
+// allowlist is the backstop, so a missing authority is caught downstream;
+// pre-registration deliberately skips that allowlist, which leaves nothing
+// checking it.
+func TestNew_RejectsHostlessPreregisteredRedirect(t *testing.T) {
+	for _, uri := range []string{"https:///servers-callback", "https://"} {
+		cfg := Config{
+			Issuer:           testIssuer,
+			JWTSecret:        testJWTSecret,
+			TelegramOIDC:     newFakeAuthenticator(),
+			AdminTelegramIDs: map[int64]bool{500100101: true},
+			AccessTokenTTL:   1 * time.Hour,
+			CodeTTL:          1 * time.Minute,
+			PreregisteredClients: []PreregisteredClient{{
+				ClientID: "hostless", RedirectURIs: []string{uri},
+			}},
+		}
+		_, err := New(context.Background(), cfg, newTestStore(t))
+		if err == nil {
+			t.Errorf("New accepted a redirect_uri with no host: %q", uri)
+			continue
+		}
+		if !strings.Contains(err.Error(), "must have a host") {
+			t.Errorf("error for %q = %v, want it to name the missing host", uri, err)
+		}
+	}
+}
