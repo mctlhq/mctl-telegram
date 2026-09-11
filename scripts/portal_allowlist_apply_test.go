@@ -34,15 +34,45 @@ func TestApplyPreflight(t *testing.T) {
 		guard string
 		// guardName lets a case rename the guard out from under the script.
 		guardName string
+		// guardImports is the fixture guard's import block, when it needs one.
+		guardImports string
 		// dropGo runs the script with a PATH that has no go.
 		dropGo bool
+		// wantOK is set for a case that must get all the way through the
+		// pre-flight; want is then matched against the --dry-run body.
+		wantOK bool
 		want   string
 	}{{
-		name: "a committed file the guard passes reaches the API",
-		// "read portal failed" comes from the stub curl, which is only
-		// called after every pre-flight check has passed. It is the
-		// positive case: there is no earlier success to observe.
-		want: "read portal failed",
+		name: "a committed file the guard passes is applied",
+		// The positive case: there is no earlier success to observe, so it
+		// is asserted on the body the dry run prints, which only exists
+		// once every pre-flight check has passed.
+		wantOK: true,
+		want:   `"name": "get_my_send_status"`,
+	}, {
+		name: "the guard test does not get the Cloudflare credential",
+		// The pre-flight is the one step that runs code from the checkout.
+		// The fixture's guard fails if the token is in its environment, so
+		// this case goes red the moment the script stops removing it.
+		guard: `if os.Getenv("CLOUDFLARE_API_TOKEN") != "" || os.Getenv("CLOUDFLARE_ACCOUNT_ID") != "" {
+		t.Fatal("the guard test was handed the Cloudflare credential")
+	}`,
+		guardImports: `"os"`,
+		wantOK:       true,
+		want:         `"server_id": "tg"`,
+	}, {
+		name: "an edit made after the check is not what gets applied",
+		// The guard test runs between the check and the build of the PUT
+		// body, which is the TOCTOU window itself: here it rewrites the file
+		// on disk to enable a mutating tool and then passes. The body is
+		// built from the committed blob, so the edit is not in it.
+		guard: `if err := os.WriteFile("../../docs/portal-allowlist.json", []byte(` + "`" + `{"portal":"mcp","server":"tg","default_disabled":true,
+ "tools":[{"name":"get_my_send_status","enabled":true,"reason":"r"},{"name":"send_message","enabled":true,"reason":"poisoned"}]}` + "`" + `), 0o644); err != nil {
+		t.Fatal(err)
+	}`,
+		guardImports: `"os"`,
+		wantOK:       true,
+		want:         `"name": "send_message",` + "\n" + `          "enabled": false`,
 	}, {
 		name:  "an uncommitted edit is refused",
 		setup: func(t *testing.T, dir string) { writeAllowlist(t, dir, "mcp", "tg", "edited") },
@@ -98,7 +128,7 @@ func TestApplyPreflight(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dir := newFixture(t, tc.guardName, tc.guard)
+			dir := newFixture(t, tc.guardName, tc.guardImports, tc.guard)
 			if tc.setup != nil {
 				tc.setup(t, dir)
 			}
@@ -117,8 +147,11 @@ func TestApplyPreflight(t *testing.T) {
 				"CLOUDFLARE_ACCOUNT_ID=stub-account",
 			)
 			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("the script succeeded; it reads a stub API and cannot:\n%s", out)
+			if tc.wantOK && err != nil {
+				t.Fatalf("the script failed, but this case must reach the dry-run body: %v\n%s", err, out)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("the script succeeded; this case must be refused:\n%s", out)
 			}
 			if !strings.Contains(string(out), tc.want) {
 				t.Fatalf("output does not contain %q:\n%s", tc.want, out)
@@ -132,7 +165,7 @@ func TestApplyPreflight(t *testing.T) {
 // committed allowlist. The stub directory shadows curl so no case reaches the
 // network; a case that gets that far has passed every pre-flight check, which
 // is what the positive case asserts.
-func newFixture(t *testing.T, guardName, guardBody string) string {
+func newFixture(t *testing.T, guardName, guardImports, guardBody string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if guardName == "" {
@@ -146,10 +179,13 @@ func newFixture(t *testing.T, guardName, guardBody string) string {
 	}
 	write(t, filepath.Join(dir, "scripts", "portal-allowlist-apply.sh"), string(script), 0o755)
 	write(t, filepath.Join(dir, "go.mod"), "module fixture\n\ngo 1.26.6\n", 0o644)
+	imports := "\"testing\""
+	if guardImports != "" {
+		imports += "\n\t" + guardImports
+	}
 	write(t, filepath.Join(dir, "internal", "mcp", "guard_test.go"),
-		"package mcp\n\nimport \"testing\"\n\nfunc "+guardName+"(t *testing.T) {\n\t"+guardBody+"\n}\n", 0o644)
-	write(t, filepath.Join(dir, "stub", "curl"),
-		"#!/bin/sh\nprintf '%s' '{\"success\":false,\"errors\":[{\"code\":0,\"message\":\"stub curl: no network in tests\"}]}'\n", 0o755)
+		"package mcp\n\nimport (\n\t"+imports+"\n)\n\nfunc "+guardName+"(t *testing.T) {\n\t"+guardBody+"\n}\n", 0o644)
+	write(t, filepath.Join(dir, "stub", "curl"), stubCurl, 0o755)
 	writeAllowlist(t, dir, "mcp", "tg", "")
 
 	git(t, dir, "init", "-q", "-b", "main")
@@ -159,6 +195,19 @@ func newFixture(t *testing.T, guardName, guardBody string) string {
 	git(t, dir, "commit", "-qm", "fixture")
 	return dir
 }
+
+// stubCurl answers the two reads the script makes, so a case that passes the
+// pre-flight produces a real --dry-run body instead of a network error. It
+// never answers a PUT: the tests only ever run --dry-run.
+const stubCurl = `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    */servers/*) printf '%s' '{"success":true,"result":{"tools":[{"name":"get_my_send_status"},{"name":"send_message"}]}}'; exit 0 ;;
+    */portals/*) printf '%s' '{"success":true,"result":{"created_at":"t","servers":[{"server_id":"tg","default_disabled":true,"updated_tools":[]}]}}'; exit 0 ;;
+  esac
+done
+printf '%s' '{"success":false,"errors":[{"code":0,"message":"stub curl: unexpected call"}]}'
+`
 
 func writeAllowlist(t *testing.T, dir, portal, server, reason string) {
 	t.Helper()
