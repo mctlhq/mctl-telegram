@@ -8,6 +8,9 @@
 #
 #   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh [--dry-run]
 #
+# Run it from a checkout with Go installed: the file is only applied when it
+# matches HEAD and the guard test passes for it.
+#
 # What is sent: the portal body exactly as read, minus the four top-level
 # timestamps (created_at, created_by, modified_at, modified_by), with only
 # the target server's mapping rewritten. Nested read-only fields on the
@@ -34,7 +37,54 @@ file="$here/docs/portal-allowlist.json"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID}"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
-portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
+# The invariant -- an enabled tool is one the server records as read-only --
+# lives in the Go test, because the record is Go source. This path publishes
+# what is on disk, so it consults the same test first: an edit that has not
+# passed the guard is not applied, whether it is uncommitted or merely not
+# yet through CI. Both checks are cheap next to a PUT that changes what a
+# shared surface exposes.
+git -C "$here" rev-parse --git-dir >/dev/null 2>&1 \
+  || { echo "$here is not a git checkout, so the file cannot be compared against the committed one; run this from a clone" >&2; exit 1; }
+# Tracked first, then unchanged. `git diff HEAD -- <path>` compares a path HEAD
+# has; it says nothing about one HEAD does not, so a file removed from the index
+# and left on disk sails through the comparison below whatever it contains.
+git -C "$here" ls-files --error-unmatch -- docs/portal-allowlist.json >/dev/null 2>&1 \
+  || { echo "docs/portal-allowlist.json is not tracked in $here; what is applied must be the committed file" >&2; exit 1; }
+# HEAD, not the index: a staged edit is as unreviewed as an unstaged one, and
+# the bare `git diff` form compares against the index and would pass it.
+if ! git -C "$here" diff --quiet HEAD -- docs/portal-allowlist.json; then
+  echo "docs/portal-allowlist.json differs from HEAD; commit it (and let the guard test run) before applying" >&2; exit 1
+fi
+# What is applied is the committed blob, not the copy on disk. The comparison
+# above says the two are identical; reading the blob is what makes that
+# guarantee hold all the way to the PUT, which is built further down and would
+# otherwise re-read a path that had since been edited.
+vetted=$(git -C "$here" show HEAD:docs/portal-allowlist.json)
+portal=$(jq -r .portal <<<"$vetted"); server=$(jq -r .server <<<"$vetted")
+
+# The file names its own target, so a file that names a different one would
+# rewrite a mapping this repository does not own. Pinned here as well as in
+# the guard test, because this is the side that does the writing.
+[ "$portal" = mcp ] && [ "$server" = tg ] || { echo "$file targets portal=$portal server=$server; expected mcp/tg" >&2; exit 1; }
+command -v go >/dev/null \
+  || { echo "go is not installed here, so the guard test cannot run; refusing to apply from a host that cannot verify the file" >&2; exit 1; }
+# `go test -run` exits 0 when its pattern matches nothing -- a renamed, deleted
+# or moved guard would read as a pass. The run must therefore name the test as
+# passed, not merely exit well. The output is kept and printed on failure: the
+# test says which tool is undecided or unreasoned, and an operator who is being
+# refused should not have to re-run it by hand to find out.
+# The credential is taken out of the test's environment: this is the one step
+# that runs code from the checkout, and an operator previewing an unfamiliar
+# branch should not hand it a portal token through os.Getenv. It narrows the
+# obvious path, not the trust decision -- a test runs as the operator and a
+# checkout you would not trust with a token is one you should not build.
+if ! guard_out=$(cd "$here" && env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID go test -v ./internal/mcp/ -run '^TestPortalAllowlist_CoversEveryRegisteredTool$' -count=1 2>&1) \
+   || ! grep -q '^--- PASS: TestPortalAllowlist_CoversEveryRegisteredTool' <<<"$guard_out"; then
+  echo "the guard test did not pass for the current file; refusing to apply" >&2
+  printf '%s\n' "$guard_out" >&2
+  exit 1
+fi
+
 base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/ai-controls/mcp"
 
 # curl config on a file descriptor: the Authorization header is not an argument.
@@ -64,7 +114,7 @@ mapped=$(jq --arg s "$server" '[.result.servers // [] | .[] | select(.server_id 
 # LC_ALL=C on both sorts so comm and sort cannot disagree on ordering.
 synced=$(jq -r '.result.tools // [] | .[].name' <<<"$server_body" | LC_ALL=C sort)
 [ -n "$synced" ] || { echo "server '$server': the API returned no synced tools (result.tools is missing or empty); has it connected?" >&2; exit 1; }
-listed=$(jq -r '.tools[].name' "$file" | LC_ALL=C sort)
+listed=$(jq -r '.tools[].name' <<<"$vetted" | LC_ALL=C sort)
 uncovered=$(LC_ALL=C comm -23 <(echo "$synced") <(echo "$listed"))
 if [ -n "$uncovered" ]; then
   echo "synced tools with no decision in $file:" >&2
@@ -79,14 +129,14 @@ fi
 # otherwise turn a legitimate apply into a refusal. A missing "enabled"
 # is written as false, never as null -- the guard test refuses the file
 # in that state, and the PUT must not be the second place it could slip.
-body=$(jq --arg s "$server" --slurpfile a "$file" --rawfile synced_raw <(echo "$synced") '
+body=$(jq --arg s "$server" --argjson a "$vetted" --rawfile synced_raw <(echo "$synced") '
   ($synced_raw | split("\n") | map(select(. != ""))) as $synced
   | .result
   | del(.created_at, .created_by, .modified_at, .modified_by)
   | .servers |= map(
       if .server_id == $s then
-        .default_disabled = $a[0].default_disabled
-        | .updated_tools = [ $a[0].tools[] | select(.name as $n | $synced | index($n) != null)
+        .default_disabled = $a.default_disabled
+        | .updated_tools = [ $a.tools[] | select(.name as $n | $synced | index($n) != null)
                              | {name, enabled: (.enabled // false)} ]
       else . end)' <<<"$current")
 
