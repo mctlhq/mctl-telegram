@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.64.1](https://github.com/mctlhq/mctl-telegram/compare/0.64.0...0.64.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **alerts:** mirror the MctlBridgeAuthFailing shape the cluster runs ([bc0a5d6](https://github.com/mctlhq/mctl-telegram/commit/bc0a5d6096a5799a7665bb9fe0223dc2b3d37f73))
+* **alerts:** mirror the shape the cluster runs — lookback shorter than the hold ([6ef9938](https://github.com/mctlhq/mctl-telegram/commit/6ef99380803abb3966387addc5cf90e4b5c0630b)), closes [#612](https://github.com/mctlhq/mctl-telegram/issues/612)
+
 ## [0.64.0](https://github.com/mctlhq/mctl-telegram/compare/0.63.1...0.64.0) (2026-09-10)
 
 
