@@ -136,10 +136,12 @@ func TestApplyPreflight(t *testing.T) {
 			cmd := exec.Command("bash", filepath.Join(dir, "scripts", "portal-allowlist-apply.sh"), "--dry-run")
 			path := filepath.Join(dir, "stub") + string(os.PathListSeparator) + os.Getenv("PATH")
 			if tc.dropGo {
-				path = filepath.Join(dir, "stub")
-				for _, d := range []string{"/usr/bin", "/bin"} {
-					path += string(os.PathListSeparator) + d
-				}
+				// Not a trimmed PATH: on a host where go, git and jq share a
+				// directory (a Homebrew prefix, say) trimming it would take
+				// the others with it and the script would refuse for the
+				// wrong reason. The sandbox links in exactly what the script
+				// needs before the go check, and nothing else.
+				path = sandboxWithoutGo(t, dir)
 			}
 			cmd.Env = append(os.Environ(),
 				"PATH="+path,
@@ -208,6 +210,31 @@ for a in "$@"; do
 done
 printf '%s' '{"success":false,"errors":[{"code":0,"message":"stub curl: unexpected call"}]}'
 `
+
+// sandboxWithoutGo returns a PATH holding the stub curl and a link to each
+// tool the script reaches for before it looks for go -- and no go, whatever
+// the host's layout is.
+func sandboxWithoutGo(t *testing.T, dir string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "nogo")
+	mkdirAll(t, dir, "nogo")
+	for _, tool := range []string{"bash", "sh", "dirname", "git", "jq"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s is not on PATH", tool)
+		}
+		if err := os.Symlink(src, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(dir, "stub", "curl"), filepath.Join(bin, "curl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "go")); err == nil {
+		t.Fatal("the sandbox has a go on it; the case would prove nothing")
+	}
+	return bin
+}
 
 func writeAllowlist(t *testing.T, dir, portal, server, reason string) {
 	t.Helper()
