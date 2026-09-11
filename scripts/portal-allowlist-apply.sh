@@ -37,8 +37,9 @@ file="$here/docs/portal-allowlist.json"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID}"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
-# The invariant -- an enabled tool is one the server records as read-only --
-# lives in the Go test, because the record is Go source. This path publishes
+# The invariant -- an enabled tool carries a reason and names the upstream
+# gate that decides per identity what it may do -- lives in the Go test,
+# because the list of real gates is Go source. This path publishes
 # what is on disk, so it consults the same test first: an edit that has not
 # passed the guard is not applied, whether it is uncommitted or merely not
 # yet through CI. Both checks are cheap next to a PUT that changes what a

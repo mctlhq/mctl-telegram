@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,15 @@ type portalAllowlist struct {
 		// has no side effects, not that its output belongs on a shared
 		// surface. get_messages is read-only and returns message bodies.
 		Reason string `json:"reason,omitempty"`
+		// UpstreamGate names the server-side check that decides, per
+		// identity, what the call may do: a scope, the send gate, an admin
+		// scope, or the authenticated identity for self-only reads. The
+		// portal allowlist cannot see users; this field records where the
+		// access control actually lives. Required on every enabled tool,
+		// and it must name a check the server really performs (see
+		// knownGates below), so a made-up gate is as much a failure as a
+		// missing one.
+		UpstreamGate string `json:"upstream_gate,omitempty"`
 	} `json:"tools"`
 }
 
@@ -36,14 +46,33 @@ type portalAllowlist struct {
 // Two invariants:
 //   - the set of names in the file equals the set of tools newMCPServer
 //     registers — no missing tool, no stale entry;
-//   - a tool may be enabled only if it declares readOnlyHint=true AND the
-//     entry says why its output is acceptable on a shared surface. The
-//     hint rules out side effects; the reason is the privacy decision, made
-//     in the same diff and reviewable there.
+//   - a tool may be enabled only if the entry says why its output is
+//     acceptable on a shared surface AND names the upstream gate that
+//     decides per identity what the call may do. The portal switch is
+//     per-server and user-blind; the gate is the access control, and the
+//     entry is where that dependency is written down and reviewed
+//     (decision 2026-09-12 on mctlhq/.github#35: every tool on, upstream
+//     decides).
 //
 // minReasonLen is a floor on the privacy decision, not a quality bar: it
 // rejects a placeholder, not a short sentence.
 const minReasonLen = 40
+
+// knownGates are the server-side checks a tool may cite. Each is a
+// substring of a real gate: a scope string passed to requireScope /
+// requireAnyScope / evaluateWriteGate, the ALLOW_SEND flag, or the
+// authenticated identity itself for tools that only ever act on the
+// caller. A gate the server does not have cannot be cited.
+var knownGates = []string{
+	"telegram:dialogs:read",
+	"telegram:messages:read",
+	"telegram:messages:send",
+	"telegram:messages:pin",
+	"account:manage",
+	"admin:users",
+	"ALLOW_SEND",
+	"authenticated identity",
+}
 
 func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	raw, err := os.ReadFile("../../docs/portal-allowlist.json")
@@ -84,17 +113,15 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 		if *tool.Enabled && len(tool.Reason) < minReasonLen {
 			t.Errorf("%s: enabled but reason is %d chars (minimum %d): say what the tool exposes and why that is acceptable on a shared surface", tool.Name, len(tool.Reason), minReasonLen)
 		}
+		if *tool.Enabled && !citesKnownGate(tool.UpstreamGate) {
+			t.Errorf("%s: enabled but upstream_gate %q names no server-side check (want one of %v)", tool.Name, tool.UpstreamGate, knownGates)
+		}
 	}
 
-	var missing, stale, unsafe []string
-	for name, st := range registered {
-		enabled, ok := listed[name]
-		if !ok {
+	var missing, stale []string
+	for name := range registered {
+		if _, ok := listed[name]; !ok {
 			missing = append(missing, name)
-			continue
-		}
-		if enabled && (st.Tool.Annotations.ReadOnlyHint == nil || !*st.Tool.Annotations.ReadOnlyHint) {
-			unsafe = append(unsafe, name)
 		}
 	}
 	for name := range listed {
@@ -104,14 +131,23 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	}
 	sort.Strings(missing)
 	sort.Strings(stale)
-	sort.Strings(unsafe)
 	if len(missing) > 0 {
 		t.Errorf("tools registered by the server but absent from docs/portal-allowlist.json (add each with an explicit enabled decision): %v", missing)
 	}
 	if len(stale) > 0 {
 		t.Errorf("entries in docs/portal-allowlist.json for tools the server no longer registers: %v", stale)
 	}
-	if len(unsafe) > 0 {
-		t.Errorf("enabled on the portal but not readOnlyHint=true: %v", unsafe)
+}
+
+// citesKnownGate reports whether gate names at least one check the server
+// performs. Substring match on purpose: a compound gate such as
+// "ALLOW_SEND + telegram:messages:send + per-account send consent" cites
+// several, and the send tools are gated on all of them.
+func citesKnownGate(gate string) bool {
+	for _, k := range knownGates {
+		if strings.Contains(gate, k) {
+			return true
+		}
 	}
+	return false
 }
