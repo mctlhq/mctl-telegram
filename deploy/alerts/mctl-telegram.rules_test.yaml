@@ -67,8 +67,8 @@ tests:
               service: mctl-telegram
               reason: jwt_expired
             exp_annotations:
-              summary: "mctl-telegram Local Bridge daemon is being refused (jwt_expired)"
-              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason jwt_expired. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
+              summary: "mctl-telegram Local Bridge is refusing daemon credentials (jwt_expired)"
+              description: "The bridge refused 5 daemon credentials in the last 5 minutes with reason jwt_expired, and has been doing so for ten minutes. At least one daemon is looping on a credential the server no longer accepts; the counter carries no daemon label, so the server log is what names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
   # T2: silent. A token that expired mid-session is refused once or twice
@@ -79,6 +79,20 @@ tests:
         values: '0 0 0 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2'
     alert_rule_test:
       - eval_time: 30m
+        alertname: MctlBridgeAuthFailing
+        exp_alerts: []
+
+  # T2b: silent. A burst is not a loop, and the hold alone cannot tell them
+  # apart: a 15m lookback keeps ten refusals from one minute above the
+  # threshold for fifteen minutes, outlasting `for: 10m`. The lookback is
+  # shorter than the hold so the burst ages out first. Evaluated at 15m --
+  # the moment the wider window would have fired.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_auth_failures_total{reason="jwt_expired",provider="bridge"}'
+        values: '0 0 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10'
+    alert_rule_test:
+      - eval_time: 15m
         alertname: MctlBridgeAuthFailing
         exp_alerts: []
 
@@ -130,16 +144,16 @@ tests:
               service: mctl-telegram
               reason: no_device_binding
             exp_annotations:
-              summary: "mctl-telegram Local Bridge daemon is being refused (no_device_binding)"
-              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason no_device_binding. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
+              summary: "mctl-telegram Local Bridge is refusing daemon credentials (no_device_binding)"
+              description: "The bridge refused 5 daemon credentials in the last 5 minutes with reason no_device_binding, and has been doing so for ten minutes. At least one daemon is looping on a credential the server no longer accepts; the counter carries no daemon label, so the server log is what names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
           - exp_labels:
               severity: warning
               service: mctl-telegram
               reason: token_revoked
             exp_annotations:
-              summary: "mctl-telegram Local Bridge daemon is being refused (token_revoked)"
-              description: "The bridge refused 15 daemon credentials in the last 15 minutes with reason token_revoked. The daemon is looping on a credential the server no longer accepts; the server log names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
+              summary: "mctl-telegram Local Bridge is refusing daemon credentials (token_revoked)"
+              description: "The bridge refused 5 daemon credentials in the last 5 minutes with reason token_revoked, and has been doing so for ten minutes. At least one daemon is looping on a credential the server no longer accepts; the counter carries no daemon label, so the server log is what names it (\"bridge: authentication failed\" / \"bridge token: credential refused\").\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
   # --- MctlAgentClaudeUsageLimit (issue #587) ---

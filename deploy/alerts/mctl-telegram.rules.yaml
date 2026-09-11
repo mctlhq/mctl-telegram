@@ -202,11 +202,20 @@ spec:
         # themselves (provider="bridge" is emitted only by the bridge
         # handler and the bridge token endpoint). Summed per reason across
         # replicas, so a two-pod deployment does not halve the rate.
-        # Threshold from the daemon's mechanics: its reconnect
-        # ladder caps at 60s, so a stuck daemon produces ~15 refusals per
-        # 15 minutes; a token that expired mid-session produces one or two
-        # before the refresh lands, hence > 5, and `for: 10m` outlasts a
-        # single rollout.
+        # The lookback is deliberately SHORTER than the hold. With a 15m
+        # window and `for: 10m` a one-minute burst of six refusals keeps the
+        # expression above the threshold for the full fifteen minutes it stays
+        # in the window, outlasting the hold and firing -- `for` cannot
+        # suppress a burst the window still remembers. At [5m] > 2 the burst
+        # ages out inside the hold, while the failure this alert exists for --
+        # a daemon whose reconnect ladder caps at 60s, refused on every dial --
+        # sustains ~5 per window indefinitely and fires. A token that expired
+        # mid-session produces one or two before the refresh lands.
+        #
+        # The aggregate is fleet-wide because the counter carries no daemon
+        # label (reason and provider only), so the summary must not name "a
+        # daemon": N unrelated daemons refused once each produce a spike, not
+        # a sustained series, and only a genuine loop holds for ten minutes.
         # Allowlist, not denylist: /bridge is public and behind no rate
         # limiter, so any reason reachable without a signed token (no_token,
         # bearer_scheme_error, jwt_invalid_signature, other) can be produced
@@ -221,18 +230,20 @@ spec:
         # a dead credential. A revoked worker token has its own reason.
         # All reasons stay in the metric and the log for the operator.
         - alert: MctlBridgeAuthFailing
-          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5
+          expr: sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[5m])) > 2
           for: 10m
           labels:
             severity: warning
             service: mctl-telegram
           annotations:
-            summary: "mctl-telegram Local Bridge daemon is being refused ({{ $labels.reason }})"
+            summary: "mctl-telegram Local Bridge is refusing daemon credentials ({{ $labels.reason }})"
             description: >
               The bridge refused {{ $value | humanize }} daemon credentials in the last
-              15 minutes with reason {{ $labels.reason }}. The daemon is looping on a
-              credential the server no longer accepts; the server log names it
-              ("bridge: authentication failed" / "bridge token: credential refused").
+              5 minutes with reason {{ $labels.reason }}, and has been doing so for ten
+              minutes. At least one daemon is looping on a credential the server no
+              longer accepts; the counter carries no daemon label, so the server log is
+              what names it ("bridge: authentication failed" / "bridge token: credential
+              refused").
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
     - name: mctl-telegram-agent
