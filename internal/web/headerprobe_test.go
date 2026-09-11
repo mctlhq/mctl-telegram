@@ -2,13 +2,18 @@ package web
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 )
 
 // captureProbe runs one request through an enabled probe and returns the
@@ -53,13 +58,22 @@ func probeRequest(headers map[string]string, body string) *http.Request {
 	return req
 }
 
+// headersOf returns the headers group with the probeKeyPrefix stripped, so a
+// test names a header the way the request did.
 func headersOf(t *testing.T, rec map[string]any) map[string]any {
 	t.Helper()
-	h, ok := rec["headers"].(map[string]any)
+	group, ok := rec["headers"].(map[string]any)
 	if !ok {
 		t.Fatalf("record has no headers group: %v", rec)
 	}
-	return h
+	out := make(map[string]any, len(group))
+	for k, v := range group {
+		if !strings.HasPrefix(k, "h:") {
+			t.Errorf("header key %q is missing the probe prefix", k)
+		}
+		out[strings.TrimPrefix(k, "h:")] = v
+	}
+	return out
 }
 
 // The disabled probe must be inert, not merely quiet: a measurement tool left
@@ -212,5 +226,167 @@ func TestHeaderProbe_AnnotatesRepeatedHeaderValues(t *testing.T) {
 	v, _ := headersOf(t, recs[0])["x-edge-hop"].(string)
 	if !strings.Contains(v, "one") || !strings.Contains(v, "two") || !strings.Contains(v, "values=2") {
 		t.Errorf("repeated values must be shown and counted, got %q", v)
+	}
+}
+
+// Host is the finding that makes a header table wrong rather than incomplete:
+// net/http deletes it from r.Header, so a probe that reports only r.Header
+// publishes "no Host on this route", which on a route question is a false
+// negative. httptest.NewRequest cannot show this -- it fills r.Host from the
+// URL either way -- so this test drives a real server over a real socket.
+func TestHeaderProbe_ReportsHostAndTransferFactsFromARealRequest(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := httptest.NewServer(HeaderProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Header["Host"]; ok {
+			t.Error("precondition changed: net/http now leaves Host in r.Header")
+		}
+		_, _ = io.ReadAll(r.Body)
+	}), true))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &rec); err != nil {
+		t.Fatalf("log line is not JSON: %v (%q)", err, buf.String())
+	}
+	h := headersOf(t, rec)
+	if h["host"] == nil || h["host"] == "" {
+		t.Errorf("host must be reported even though net/http removed it from r.Header: %v", rec)
+	}
+	if names, _ := rec["header_names"].(string); !strings.Contains(names, "host") {
+		t.Errorf("header_names must list host, got %q", names)
+	}
+	if rc, _ := rec["reconstructed"].(string); !strings.Contains(rc, "host") {
+		t.Errorf("host came from the request struct and must be marked as reconstructed, got %q", rc)
+	}
+	if h["content-length"] == nil {
+		t.Errorf("content-length must be reported, got %v", h)
+	}
+}
+
+// The probe sits ahead of auth with no rate limiter, so one request must not
+// be able to become an unbounded log line.
+func TestHeaderProbe_CapsHeaderCountAndSaysHowManyItDropped(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	for i := 0; i < 200; i++ {
+		req.Header.Set("X-Flood-"+strconv.Itoa(i), "x")
+	}
+	recs, _ := captureProbe(t, req)
+
+	h := headersOf(t, recs[0])
+	if len(h) > 64 {
+		t.Errorf("logged %d headers, want at most 64", len(h))
+	}
+	omitted, _ := recs[0]["headers_omitted"].(float64)
+	if omitted <= 0 {
+		t.Errorf("headers_omitted must report the drop, got %v", recs[0]["headers_omitted"])
+	}
+	if names, _ := rec0Names(recs[0]); strings.Count(names, ",")+1 > 64 {
+		t.Errorf("header_names must be capped too, got %d entries", strings.Count(names, ",")+1)
+	}
+}
+
+func rec0Names(rec map[string]any) (string, bool) {
+	s, ok := rec["header_names"].(string)
+	return s, ok
+}
+
+// What the operator reads in production goes through audit.RedactingHandler,
+// which rewrites any attribute whose key is exactly one of its sensitive names
+// and recurses into groups to do it. The fingerprint must survive that, or the
+// same-value-across-calls evidence is gone precisely for the credential-bearing
+// headers.
+func TestHeaderProbe_FingerprintSurvivesTheProductionRedactingHandler(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(audit.NewRedactingHandler(slog.NewJSONHandler(&buf, nil))))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := HeaderProbe(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), true)
+	h.ServeHTTP(httptest.NewRecorder(), probeRequest(map[string]string{
+		"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.secret-value.sig",
+		"Cf-Ray":        "9c1f0b3ea0e1abcd-DME",
+	}, ""))
+
+	out := buf.String()
+	if strings.Contains(out, "secret-value") {
+		t.Fatalf("production handler chain leaked the credential: %s", out)
+	}
+	if !strings.Contains(out, "fp=") {
+		t.Errorf("the fingerprint must survive the redacting handler: %s", out)
+	}
+	if !strings.Contains(out, "9c1f0b3ea0e1abcd-DME") {
+		t.Errorf("a non-secret edge id must survive the redacting handler: %s", out)
+	}
+}
+
+// A credential can ride in the value of a header whose name looks innocent.
+// Referer with a token in the query is the case that actually happens.
+func TestHeaderProbe_RedactsSecretsCarriedInValues(t *testing.T) {
+	recs, _ := captureProbe(t, probeRequest(map[string]string{
+		"Referer":                 "https://example.test/cb?access_token=abcdef123456&x=1",
+		"Cf-Access-Jwt-Assertion": "eyJhbGciOiJSUzI1NiJ9.assertion-payload.sig",
+		// Deliberately not JWT-shaped: only the NAME rule can catch this one,
+		// so the test fails if "jwt" is dropped from probeSecretHeaderParts.
+		"X-Acme-Jwt": "opaque-not-base64-value",
+	}, ""))
+
+	raw, _ := json.Marshal(recs[0])
+	for _, secret := range []string{"abcdef123456", "assertion-payload", "opaque-not-base64-value"} {
+		if bytes.Contains(raw, []byte(secret)) {
+			t.Errorf("probe leaked %q: %s", secret, raw)
+		}
+	}
+	h := headersOf(t, recs[0])
+	for _, name := range []string{"referer", "cf-access-jwt-assertion", "x-acme-jwt"} {
+		v, _ := h[name].(string)
+		if !strings.HasPrefix(v, "[redacted len=") {
+			t.Errorf("%s must be redacted, got %q", name, v)
+		}
+	}
+}
+
+// Truncation must not emit an invalid rune fragment.
+func TestHeaderProbe_TruncatesOnARuneBoundary(t *testing.T) {
+	recs, _ := captureProbe(t, probeRequest(map[string]string{
+		// One ASCII byte shifts every rune boundary off the 256-byte cut, so a
+		// byte slice lands mid-rune.
+		"X-Long": "x" + strings.Repeat("й", 400),
+	}, ""))
+
+	v, _ := headersOf(t, recs[0])["x-long"].(string)
+	if !strings.Contains(v, "truncated len=") {
+		t.Fatalf("long value must be truncated, got %q", v)
+	}
+	if strings.ContainsRune(v, '�') {
+		t.Errorf("truncation split a rune: %q", v)
+	}
+}
+
+// The fingerprint is keyed, not a bare digest: an unsalted hash of a
+// low-entropy secret is an offline verification oracle for anyone who can read
+// the logs.
+func TestHeaderProbe_FingerprintIsSaltedNotABareDigest(t *testing.T) {
+	const value = "Bearer short"
+	sum := sha256.Sum256([]byte(value))
+	bare := "fp=" + hex.EncodeToString(sum[:4])
+	if got := fingerprint(value); got == bare {
+		t.Fatalf("fingerprint is an unsalted SHA-256 digest: %s", got)
+	}
+	if fingerprint(value) != fingerprint(value) {
+		t.Error("fingerprint must be stable within a process")
 	}
 }
