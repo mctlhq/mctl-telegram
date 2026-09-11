@@ -1633,9 +1633,14 @@ crosses into sustained timeouts.
 ### Symptom
 
 - Alert `MctlBridgeAuthFailing` fires with severity **warning** when the
-  bridge refuses more than 5 daemon credentials in 15 minutes for 10
+  bridge refuses more than 2 daemon credentials in 5 minutes for 10
   minutes running
-  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[15m])) > 5`).
+  (`sum by (reason) (increase(mctl_auth_failures_total{provider="bridge",reason=~"jwt_expired|jwt_invalid_issuer|jwt_missing_audience|jwt_wrong_audience|token_revoked|no_device_binding|device_inactive|device_revoked"}[5m])) > 2`).
+  The lookback is shorter than the hold on purpose: a burst that a 15-minute
+  window would still be reporting after ten minutes would fire, while at five
+  minutes it ages out and only a sustained loop survives. The counter carries
+  no daemon label, so the alert is fleet-wide and the log is what names the
+  host.
   The alert is an allowlist of reasons that need a token the server signed
   (`Verify` checks the HMAC before expiry, issuer and audience; the
   revocation check and the device reasons come after verification), which
