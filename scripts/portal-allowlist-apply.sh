@@ -8,6 +8,9 @@
 #
 #   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh [--dry-run]
 #
+# Run it from a checkout with Go installed: the file is only applied when it
+# matches HEAD and the guard test passes for it.
+#
 # What is sent: the portal body exactly as read, minus the four top-level
 # timestamps (created_at, created_by, modified_at, modified_by), with only
 # the target server's mapping rewritten. Nested read-only fields on the
@@ -35,6 +38,25 @@ file="$here/docs/portal-allowlist.json"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
+
+# The invariant -- an enabled tool is one the server records as read-only --
+# lives in the Go test, because the record is Go source. This path publishes
+# what is on disk, so it consults the same test first: an edit that has not
+# passed the guard is not applied, whether it is uncommitted or merely not
+# yet through CI. Both checks are cheap next to a PUT that changes what a
+# shared surface exposes.
+git -C "$here" rev-parse --git-dir >/dev/null 2>&1 \
+  || { echo "$here is not a git checkout, so the file cannot be compared against the committed one; run this from a clone" >&2; exit 1; }
+# HEAD, not the index: a staged edit is as unreviewed as an unstaged one, and
+# the bare `git diff` form compares against the index and would pass it.
+if ! git -C "$here" diff --quiet HEAD -- docs/portal-allowlist.json; then
+  echo "docs/portal-allowlist.json differs from HEAD; commit it (and let the guard test run) before applying" >&2; exit 1
+fi
+command -v go >/dev/null \
+  || { echo "go is not installed here, so the guard test cannot run; refusing to apply from a host that cannot verify the file" >&2; exit 1; }
+( cd "$here" && go test ./internal/mcp/ -run 'TestPortalAllowlist_CoversEveryRegisteredTool' -count=1 >/dev/null ) \
+  || { echo "internal/mcp/portal_allowlist_test.go fails for the current file; refusing to apply" >&2; exit 1; }
+
 base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/ai-controls/mcp"
 
 # curl config on a file descriptor: the Authorization header is not an argument.
