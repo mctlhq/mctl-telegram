@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.64.2](https://github.com/mctlhq/mctl-telegram/compare/0.64.1...0.64.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **scripts:** close the two ways the pre-flight could pass an unchecked file ([cd82731](https://github.com/mctlhq/mctl-telegram/commit/cd8273168dddaa883e945b562100bd83a8b9ab1e))
+* **scripts:** keep the credential out of the guard test, apply the committed blob ([1650c98](https://github.com/mctlhq/mctl-telegram/commit/1650c982fa2f117784a4c1090e386d5e2ad964ea))
+* **scripts:** pin the apply to its own portal mapping ([ecccbe0](https://github.com/mctlhq/mctl-telegram/commit/ecccbe0f28702b461a45be30d2e667dfad6e3a53))
+* **scripts:** portal-allowlist apply refuses a file the guard test has not passed ([d2dab49](https://github.com/mctlhq/mctl-telegram/commit/d2dab49bcb1f440c0e38eb913dfa693c98503bd6))
+* **scripts:** the apply refuses a file the guard test has not passed ([d77dc16](https://github.com/mctlhq/mctl-telegram/commit/d77dc16fdbdf6f54f2436db9cd53117a0ce2c3f8)), closes [#614](https://github.com/mctlhq/mctl-telegram/issues/614)
+
 ## [0.64.1](https://github.com/mctlhq/mctl-telegram/compare/0.64.0...0.64.1) (2026-09-11)
 
 
