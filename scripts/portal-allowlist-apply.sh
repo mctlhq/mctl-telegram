@@ -52,6 +52,10 @@ git -C "$here" rev-parse --git-dir >/dev/null 2>&1 \
 if ! git -C "$here" diff --quiet HEAD -- docs/portal-allowlist.json; then
   echo "docs/portal-allowlist.json differs from HEAD; commit it (and let the guard test run) before applying" >&2; exit 1
 fi
+# The file names its own target, so a file that names a different one would
+# rewrite a mapping this repository does not own. Pinned here as well as in
+# the guard test, because this is the side that does the writing.
+[ "$portal" = mcp ] && [ "$server" = tg ] || { echo "$file targets portal=$portal server=$server; expected mcp/tg" >&2; exit 1; }
 command -v go >/dev/null \
   || { echo "go is not installed here, so the guard test cannot run; refusing to apply from a host that cannot verify the file" >&2; exit 1; }
 ( cd "$here" && go test ./internal/mcp/ -run 'TestPortalAllowlist_CoversEveryRegisteredTool' -count=1 >/dev/null ) \
