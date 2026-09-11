@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -272,8 +273,13 @@ func TestHeaderProbe_ReportsHostAndTransferFactsFromARealRequest(t *testing.T) {
 	if rc, _ := rec["reconstructed"].(string); !strings.Contains(rc, "host") {
 		t.Errorf("host came from the request struct and must be marked as reconstructed, got %q", rc)
 	}
+	// content-length arrived as a real header here (the request has a body),
+	// so it is read from r.Header and must NOT be listed as reconstructed.
 	if h["content-length"] == nil {
-		t.Errorf("content-length must be reported, got %v", h)
+		t.Errorf("content-length arrived and must be reported, got %v", h)
+	}
+	if rc, _ := rec["reconstructed"].(string); strings.Contains(rc, "content-length") {
+		t.Errorf("content-length came from r.Header and must not be marked reconstructed, got %q", rc)
 	}
 }
 
@@ -388,5 +394,79 @@ func TestHeaderProbe_FingerprintIsSaltedNotABareDigest(t *testing.T) {
 	}
 	if fingerprint(value) != fingerprint(value) {
 		t.Error("fingerprint must be stable within a process")
+	}
+}
+
+// A bodyless GET carries no Content-Length at all, and net/http reports
+// ContentLength 0 for it. Synthesizing `content-length: 0` would put a header
+// on the table that never arrived -- the same class of error this probe fixed
+// for Host, in the opposite direction.
+func TestHeaderProbe_DoesNotInventAContentLengthHeader(t *testing.T) {
+	recs, _ := captureProbe(t, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+
+	h := headersOf(t, recs[0])
+	if _, claimed := h["content-length"]; claimed {
+		t.Errorf("a bodyless GET carried no content-length; probe must not add one: %v", h)
+	}
+	if names, _ := recs[0]["header_names"].(string); strings.Contains(names, "content-length") {
+		t.Errorf("header_names must not list a header that did not arrive, got %q", names)
+	}
+	if _, ok := recs[0]["content_length"]; !ok {
+		t.Error("the body length must still be reported as its own field")
+	}
+}
+
+// One long address header must not become several MiB of log output: the
+// address branch masks every comma-separated part, and an unparseable part
+// costs a fingerprint, so expansion -- not truncation -- was the default.
+func TestHeaderProbe_BoundsALongAddressHeader(t *testing.T) {
+	flood := strings.TrimSuffix(strings.Repeat("a,", 20000), ",")
+	recs, _ := captureProbe(t, probeRequest(map[string]string{"X-Forwarded-For": flood}, ""))
+
+	v, _ := headersOf(t, recs[0])["x-forwarded-for"].(string)
+	if len(v) > 4*probeValueMax {
+		t.Errorf("address header expanded to %d bytes from a %d-byte value", len(v), len(flood))
+	}
+	if !strings.Contains(v, "fp=") || !strings.Contains(v, "len=") || !strings.Contains(v, "hops]") {
+		t.Errorf("a capped address header must carry its fingerprint, true length and dropped-hop count, got %q", v)
+	}
+}
+
+// The output bound above can be met while still doing the work: strings.Split
+// on a hostile value allocates one element per comma before anything is
+// rendered. This pins the work itself, not just what it prints.
+func TestHeaderProbe_DoesNotMaterializeEveryHopOfAFloodedAddressHeader(t *testing.T) {
+	flood := strings.TrimSuffix(strings.Repeat("a,", 200000), ",")
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_ = sanitizeHeader("x-forwarded-for", []string{flood})
+	runtime.ReadMemStats(&after)
+
+	// One element per hop would be ~200k * 16 bytes of slice header alone.
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Errorf("sanitizing a %d-byte address header allocated %d bytes", len(flood), grew)
+	}
+}
+
+// The cap drops the tail of a sorted list, so a flood under early-alphabet
+// names must not be able to push the correlation candidates off the line.
+func TestHeaderProbe_CapKeepsTheCorrelationCandidates(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	for i := 0; i < 200; i++ {
+		req.Header.Set("A-Flood-"+strconv.Itoa(i), "x")
+	}
+	req.Header.Set("Cf-Ray", "9c1f0b3ea0e1abcd-DME")
+	req.Header.Set("Traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	recs, _ := captureProbe(t, req)
+
+	h := headersOf(t, recs[0])
+	for _, name := range []string{"cf-ray", "traceparent", "host"} {
+		if _, ok := h[name]; !ok {
+			t.Errorf("%s must survive the cap, got keys %v", name, len(h))
+		}
+	}
+	if omitted, _ := recs[0]["headers_omitted"].(float64); omitted <= 0 {
+		t.Error("headers_omitted must report the drop")
 	}
 }

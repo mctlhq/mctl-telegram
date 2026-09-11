@@ -56,8 +56,9 @@ func HeaderProbe(next http.Handler, enabled bool) http.Handler {
 
 		omitted := 0
 		if len(names) > probeMaxHeaders {
-			omitted = len(names) - probeMaxHeaders
-			names = names[:probeMaxHeaders]
+			kept := probeKeep(names)
+			omitted = len(names) - len(kept)
+			names = kept
 		}
 
 		attrs := make([]any, 0, len(names))
@@ -90,10 +91,56 @@ func HeaderProbe(next http.Handler, enabled bool) http.Handler {
 			// from r.Header, so the table says where each fact came from.
 			"reconstructed", strings.Join(reconstructed, ","),
 			"headers_omitted", omitted,
+			// The body length as net/http resolved it: -1 means chunked or
+			// unknown. Not a header, and never reported as one.
+			"content_length", r.ContentLength,
 			slog.Group("headers", attrs...),
 		)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// probeKeepPrefixes are the names a capped line must not lose. Sorting before
+// capping means the cap always drops the tail of the alphabet, so a flood sent
+// under `a-*` names would evict cf-ray, host and traceparent from the observed
+// set -- turning a log-volume nuisance into a hole in the measurement itself.
+var probeKeepPrefixes = []string{
+	"host", "cf-", "mcp-", "trace", "forwarded", "x-forwarded-", "x-real-ip",
+	"x-request-id", "x-correlation-", "x-amzn-trace-id", "content-type", "accept",
+	"user-agent", "transfer-encoding",
+}
+
+// probeKeep trims a sorted name list to probeMaxHeaders, keeping the
+// correlation candidates first and filling the remaining budget in order.
+func probeKeep(names []string) []string {
+	kept := make([]string, 0, probeMaxHeaders)
+	rest := make([]string, 0, len(names))
+	for _, name := range names {
+		if probeIsKeepName(name) {
+			if len(kept) < probeMaxHeaders {
+				kept = append(kept, name)
+			}
+			continue
+		}
+		rest = append(rest, name)
+	}
+	for _, name := range rest {
+		if len(kept) >= probeMaxHeaders {
+			break
+		}
+		kept = append(kept, name)
+	}
+	sort.Strings(kept)
+	return kept
+}
+
+func probeIsKeepName(name string) bool {
+	for _, prefix := range probeKeepPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // probeHeaders returns every header name the ingress saw, lowercased, together
@@ -105,6 +152,14 @@ func HeaderProbe(next http.Handler, enabled bool) http.Handler {
 // alone would publish a table with no Host on any line -- and on a measurement
 // of which route a call arrived through, a missing Host is indistinguishable
 // from "the Portal did not send one".
+//
+// Content-Length is deliberately NOT rebuilt here. net/http deletes it exactly
+// when the request was chunked, and there it is -1: unknown, not a header value
+// anyone sent. Rebuilding it from r.ContentLength would have added
+// `content-length: 0` to every bodyless GET -- a header that never arrived, on
+// a table whose entire purpose is to say what arrived. The body length is
+// reported as its own `content_length` field instead, where -1 reads as
+// "chunked or unknown" and nothing claims it was a header.
 //
 // HTTP/2 pseudo-headers (:authority, :scheme, :path) are a different case: the
 // net/http server never exposes them, :authority is surfaced as r.Host, and no
@@ -128,9 +183,6 @@ func probeHeaders(r *http.Request) (map[string][]string, []string) {
 	}
 	if len(r.TransferEncoding) > 0 {
 		add("transfer-encoding", strings.Join(r.TransferEncoding, ", "))
-	}
-	if r.ContentLength >= 0 {
-		add("content-length", strconv.FormatInt(r.ContentLength, 10))
 	}
 	sort.Strings(reconstructed)
 	return observed, reconstructed
@@ -185,6 +237,8 @@ const (
 	// probeKeyPrefix keeps header keys out of audit.RedactingHandler's exact-key
 	// match -- see the call site.
 	probeKeyPrefix = "h:"
+	// probeMaxAddrHops bounds a forwarding chain; see maskAddrList.
+	probeMaxAddrHops = 32
 )
 
 // sanitizeHeader renders one header's values for the probe log. The returned
@@ -198,7 +252,18 @@ func sanitizeHeader(lowerName string, values []string) string {
 	case isProbeSecretHeader(lowerName), hasProbeSecretValue(joined):
 		out = redactedWithFingerprint(joined)
 	case isProbeAddrHeader(lowerName):
+		// maskAddrList is bounded by hop count, which is what this branch needed:
+		// masking is an EXPANSION -- a hop that does not parse as an address
+		// becomes an 11-byte fingerprint -- so a 1 MiB X-Forwarded-For of
+		// "a,a,a,..." would otherwise turn into several MiB of log output plus
+		// half a million HMACs, per request, on an unauthenticated path.
+		// probeMaxHeaders bounds how many headers are rendered and does nothing
+		// for one long one. The fingerprint is taken over the FULL value, so
+		// cross-call comparison is unaffected.
 		out = maskAddrList(joined) + " " + fingerprint(joined)
+		if len(joined) > probeValueMax {
+			out += " [len=" + strconv.Itoa(len(joined)) + "]"
+		}
 	case len(joined) > probeValueMax:
 		// Truncation is on a rune boundary: a byte slice through a multi-byte
 		// rune emits an invalid fragment that slog renders as U+FFFD.
@@ -281,12 +346,30 @@ func fingerprint(v string) string {
 	return "fp=" + hex.EncodeToString(mac.Sum(nil)[:4])
 }
 
+// maskAddrList masks every hop. It also caps the hop count: masking is an
+// expansion (an unparseable hop becomes an 11-byte fingerprint), so truncating
+// the input alone still lets one header multiply into kilobytes. A real
+// forwarding chain is a handful of hops; anything past the cap is counted, not
+// rendered.
 func maskAddrList(v string) string {
-	parts := strings.Split(v, ",")
-	for i, p := range parts {
-		parts[i] = maskAddr(strings.TrimSpace(p))
+	// SplitN, not Split: the point is that a hostile value never materializes
+	// one slice element per comma. The tail comes back as a single unsplit
+	// string, which is counted and dropped rather than rendered.
+	parts := strings.SplitN(v, ",", probeMaxAddrHops+1)
+	extra := 0
+	if len(parts) > probeMaxAddrHops {
+		extra = strings.Count(parts[probeMaxAddrHops], ",") + 1
+		parts = parts[:probeMaxAddrHops]
 	}
-	return strings.Join(parts, ", ")
+	masked := make([]string, len(parts))
+	for i, p := range parts {
+		masked[i] = maskAddr(strings.TrimSpace(p))
+	}
+	out := strings.Join(masked, ", ")
+	if extra > 0 {
+		out += " [+" + strconv.Itoa(extra) + " hops]"
+	}
+	return out
 }
 
 // maskAddr keeps the network-ish prefix of an address and drops the host part:

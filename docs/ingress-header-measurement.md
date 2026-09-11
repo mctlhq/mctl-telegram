@@ -32,12 +32,17 @@ One `header_probe` line per request, at info level:
 | `header_names` | The complete sorted set of arriving header names (capped, see below) |
 | `reconstructed` | Names rebuilt from the request struct rather than read from `r.Header` |
 | `headers_omitted` | How many names the per-line cap dropped; `0` on any real request |
+| `content_length` | Body length as `net/http` resolved it; `-1` means chunked or unknown |
 | `headers.h:*` | One sanitized value per header |
 
 `r.Header` is not the arriving header set: `net/http` moves `Host` into `r.Host` and deletes it from
 the map, moves `Transfer-Encoding` into `r.TransferEncoding`, and drops `Content-Length` on a chunked
-request. The probe rebuilds those three and names them in `reconstructed`, so a missing `Host` on the
-table means the Portal did not send one rather than that Go removed it. HTTP/2 pseudo-headers
+request. The probe rebuilds `Host` and `Transfer-Encoding` and names them in `reconstructed`, so a
+missing `Host` on the table means the Portal did not send one rather than that Go removed it.
+`Content-Length` is deliberately not rebuilt: `net/http` deletes it exactly when the request was
+chunked, and there it is `-1` -- unknown, not a value anyone sent -- while a bodyless GET would have
+produced a `content-length: 0` that never arrived. The body length is reported in its own
+`content_length` field instead, so nothing on the header table claims to be a header that was not. HTTP/2 pseudo-headers
 (`:authority`, `:scheme`, `:path`) cannot be recovered at all -- `:authority` surfaces as `Host` and
 the rest are gone; read `proto` before drawing conclusions about them.
 
@@ -59,7 +64,13 @@ Sanitization, pinned by `internal/web/headerprobe_test.go`:
   prefix, each hop separately, plus a fingerprint;
 - everything else is verbatim, truncated at 256 bytes on a rune boundary;
 - at most 64 headers are rendered per line, the rest counted in `headers_omitted`: the probe runs
-  ahead of auth with no rate limiter, and one request must not become an unbounded line;
+  ahead of auth with no rate limiter, and one request must not become an unbounded line. The cap
+  keeps the correlation candidates (`host`, `cf-*`, `mcp-*`, `trace*`, forwarding and content
+  negotiation headers) first, so a flood of early-alphabet names cannot evict `cf-ray` from the
+  table;
+- an address header is masked hop by hop, at most 32 hops, with the remainder counted (`[+N hops]`):
+  masking expands (an unparseable hop costs an 11-byte fingerprint), so a long one would otherwise
+  multiply into the log rather than be truncated by it;
 - repeated values are shown and counted (`[values=2]`).
 
 The fingerprint is a truncated HMAC-SHA-256 under a random per-process key. It exists so that "the
