@@ -47,6 +47,11 @@ portal=$(jq -r .portal "$file"); server=$(jq -r .server "$file")
 # shared surface exposes.
 git -C "$here" rev-parse --git-dir >/dev/null 2>&1 \
   || { echo "$here is not a git checkout, so the file cannot be compared against the committed one; run this from a clone" >&2; exit 1; }
+# Tracked first, then unchanged. `git diff HEAD -- <path>` compares a path HEAD
+# has; it says nothing about one HEAD does not, so a file removed from the index
+# and left on disk sails through the comparison below whatever it contains.
+git -C "$here" ls-files --error-unmatch -- docs/portal-allowlist.json >/dev/null 2>&1 \
+  || { echo "docs/portal-allowlist.json is not tracked in $here; what is applied must be the committed file" >&2; exit 1; }
 # HEAD, not the index: a staged edit is as unreviewed as an unstaged one, and
 # the bare `git diff` form compares against the index and would pass it.
 if ! git -C "$here" diff --quiet HEAD -- docs/portal-allowlist.json; then
@@ -58,8 +63,17 @@ fi
 [ "$portal" = mcp ] && [ "$server" = tg ] || { echo "$file targets portal=$portal server=$server; expected mcp/tg" >&2; exit 1; }
 command -v go >/dev/null \
   || { echo "go is not installed here, so the guard test cannot run; refusing to apply from a host that cannot verify the file" >&2; exit 1; }
-( cd "$here" && go test ./internal/mcp/ -run 'TestPortalAllowlist_CoversEveryRegisteredTool' -count=1 >/dev/null ) \
-  || { echo "internal/mcp/portal_allowlist_test.go fails for the current file; refusing to apply" >&2; exit 1; }
+# `go test -run` exits 0 when its pattern matches nothing -- a renamed, deleted
+# or moved guard would read as a pass. The run must therefore name the test as
+# passed, not merely exit well. The output is kept and printed on failure: the
+# test says which tool is undecided or unreasoned, and an operator who is being
+# refused should not have to re-run it by hand to find out.
+if ! guard_out=$(cd "$here" && go test -v ./internal/mcp/ -run '^TestPortalAllowlist_CoversEveryRegisteredTool$' -count=1 2>&1) \
+   || ! grep -q '^--- PASS: TestPortalAllowlist_CoversEveryRegisteredTool' <<<"$guard_out"; then
+  echo "the guard test did not pass for the current file; refusing to apply" >&2
+  printf '%s\n' "$guard_out" >&2
+  exit 1
+fi
 
 base="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access/ai-controls/mcp"
 
