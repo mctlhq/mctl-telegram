@@ -118,6 +118,13 @@ type Config struct {
 	// open without authentication — suitable for Kubernetes PodMonitor scrape
 	// patterns where network policy provides the access control.
 	MetricsAllowCIDR string // METRICS_ALLOW_CIDR, optional
+	// MCPHeaderProbe turns on the TEMPORARY inbound-header probe on MCP_PATH
+	// (see internal/web.HeaderProbe). It exists for the Phase 3 correlation
+	// measurement, mctlhq/mctl-telegram#617 Slice 1: which request identifiers
+	// actually reach this ingress, and are they stable across calls. Default
+	// false; it logs sanitized header names/values and never the body. Remove
+	// the flag together with the middleware once #617 Slice 1 is reported.
+	MCPHeaderProbe bool // MCP_HEADER_PROBE, temporary, default false
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
@@ -277,6 +284,7 @@ func Load() (*Config, error) {
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
+	c.MCPHeaderProbe = envBool("MCP_HEADER_PROBE", false)
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
 	c.TGAPIRatePerSec = envFloat("TG_API_RATE_PER_SEC", 0)
 	c.TGAPIRateBurst = envInt("TG_API_RATE_BURST", 0)
