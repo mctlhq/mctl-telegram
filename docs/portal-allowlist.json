@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must carry a `reason` that says what the tool exposes and why that is acceptable on a shared surface, and an `upstream_gate` naming the server-side check (scope, send gate, admin scope, or the authenticated identity for self-only reads) that decides per identity what the call may do. The portal allowlist is a per-server on/off switch that cannot see users; the upstream gate is the access control (decision 2026-09-12, mctlhq/.github#35). Apply with scripts/portal-allowlist-apply.sh.",
+  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must carry a `reason` that says what the tool exposes and why that is acceptable on a shared surface, and `upstream_gates`: the exact set of server-side checks the handler performs (scope tokens from requireScope/requireAnyScope, `send-gate` for evaluateSendGate/evaluateWriteGate, or `self-only` for a tool the test knows acts on the caller alone). The guard test re-derives that set from the Go source and fails on any difference, so the field cannot drift from the code. The portal allowlist is a per-server on/off switch that cannot see users; the upstream gate is the access control (decision 2026-09-12, mctlhq/.github#35). Apply with scripts/portal-allowlist-apply.sh.",
   "portal": "mcp",
   "server": "tg",
   "default_disabled": true,
@@ -7,181 +7,250 @@
     {
       "name": "delete_messages",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Revokes messages in the caller's own dialogs; runs through evaluateSendGate, dry run unless the full send gate is open."
     },
     {
       "name": "delete_telegram_account",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Self-service hard delete of the caller's own account row on this server (not the Telegram account). Irreversible for the caller only; no other account can be named."
     },
     {
       "name": "disconnect_telegram_account",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach."
     },
     {
       "name": "edit_message",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Edits the caller's own sent message; runs through evaluateSendGate, so without the send scope and consent it is a dry run."
     },
     {
       "name": "forward_messages",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Forwards messages between the caller's own dialogs; runs through evaluateSendGate, dry run unless the full send gate is open."
     },
     {
       "name": "get_media",
       "enabled": true,
-      "upstream_gate": "telegram:messages:read",
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
       "reason": "Downloads media bytes of the caller's own message, only with a confirmation id from prepare_get_media; gated on telegram:messages:read and the server byte cap."
     },
     {
       "name": "get_messages",
       "enabled": true,
-      "upstream_gate": "telegram:messages:read",
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
       "reason": "Returns message bodies from the caller's own dialogs, wrapped as untrusted content; gated upstream on the caller's telegram:messages:read scope."
     },
     {
       "name": "get_my_audit_log",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Returns the caller's own audit rows with peers redacted at write time; no message bodies, no other users."
     },
     {
       "name": "get_my_identity",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Returns the caller's own telegram_id, username and display name; nothing about other people or messages. It is the identity check the aggregate portal relies on."
     },
     {
       "name": "get_my_send_status",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers."
     },
     {
       "name": "get_unread_messages",
       "enabled": true,
-      "upstream_gate": "telegram:messages:read",
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
       "reason": "Returns unread message bodies of the caller's own Telegram account only; the upstream gates it on the caller's telegram:messages:read scope and there is no way to name another account."
     },
     {
       "name": "get_user_audit_log",
       "enabled": true,
-      "upstream_gate": "admin:users or admin:users:read",
+      "upstream_gates": [
+        "admin:users",
+        "admin:users:read"
+      ],
       "reason": "Admin-only read of any user's audit rows (peers redacted); refused upstream without admin:users(:read)."
     },
     {
       "name": "list_dialogs",
       "enabled": true,
-      "upstream_gate": "telegram:dialogs:read",
+      "upstream_gates": [
+        "telegram:dialogs:read"
+      ],
       "reason": "Returns the caller's own dialog list (peer ids, titles, unread counts), no message bodies. Scope-gated upstream per identity."
     },
     {
       "name": "list_telegram_identities",
       "enabled": true,
-      "upstream_gate": "admin:users or admin:users:read",
+      "upstream_gates": [
+        "admin:users",
+        "admin:users:read"
+      ],
       "reason": "Admin-only listing of every signed-in Telegram user with access tier and session state; the upstream refuses it with scope-denied for anyone without admin:users(:read). Only TG_LOGIN_ADMINS hold that scope."
     },
     {
       "name": "mint_worker_token",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only minting of a bounded worker/Local Bridge credential; refused upstream without admin:users. The credential is returned to the admin caller only."
     },
     {
       "name": "pin_message",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:pin + per-account send consent + confirmation id",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:pin"
+      ],
       "reason": "Pins a message in the caller's own dialog; requires the telegram:messages:pin scope, the open send gate and a confirmation id from prepare_pin_message."
     },
     {
       "name": "prepare_get_media",
       "enabled": true,
-      "upstream_gate": "telegram:messages:read",
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
       "reason": "Issues a confirmation id for one (peer, message_id) of the caller's own account; no bytes leave; gated on telegram:messages:read."
     },
     {
       "name": "prepare_pin_message",
       "enabled": true,
-      "upstream_gate": "authenticated identity",
+      "upstream_gates": [
+        "self-only"
+      ],
       "reason": "Issues a confirmation id for a later pin_message on the caller's own dialog; performs no Telegram action by itself."
     },
     {
       "name": "provision_local_account",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only creation of a fresh local-mode account; refused upstream without admin:users."
     },
     {
       "name": "revoke_local_bridge_device",
       "enabled": true,
-      "upstream_gate": "account:manage",
+      "upstream_gates": [
+        "account:manage"
+      ],
       "reason": "Revokes a Local Bridge device of the caller's OWN account; containment action with no cross-account reach. Gated on account:manage."
     },
     {
       "name": "revoke_telegram_session",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only revocation of a user's MTProto session; refused upstream without admin:users."
     },
     {
       "name": "revoke_worker_token",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only revocation of a minted worker token; containment action, refused upstream without admin:users."
     },
     {
       "name": "search_messages",
       "enabled": true,
-      "upstream_gate": "telegram:messages:read",
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
       "reason": "Full-text search over the caller's own dialogs; returns message bodies; gated upstream on telegram:messages:read."
     },
     {
       "name": "send_media",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Sends a media message as the caller; same three-part send gate as send_message plus an explicit telegram:messages:send scope check."
     },
     {
       "name": "send_message",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Sends a Telegram message as the caller. The upstream evaluateSendGate requires the server-wide ALLOW_SEND flag, the caller's telegram:messages:send scope (clients do not hold it) and the per-account send_enabled consent; when any is missing it dry-runs and reports why."
     },
     {
       "name": "set_account_mode",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only switch of a user's account mode (hosted/local); refused upstream without admin:users."
     },
     {
       "name": "set_account_send",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only flip of a user's send_enabled gate; refused upstream without admin:users."
     },
     {
       "name": "set_reaction",
       "enabled": true,
-      "upstream_gate": "ALLOW_SEND + telegram:messages:send + per-account send consent",
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
       "reason": "Sets an emoji reaction as the caller; runs through evaluateSendGate, dry run unless the full send gate is open."
     },
     {
       "name": "set_send_consent",
       "enabled": true,
-      "upstream_gate": "account:manage",
+      "upstream_gates": [
+        "account:manage"
+      ],
       "reason": "Lets the caller grant or revoke real sending for their OWN account only; there is no telegram_id argument. Gated on the account:manage scope."
     },
     {
       "name": "set_telegram_access",
       "enabled": true,
-      "upstream_gate": "admin:users",
+      "upstream_gates": [
+        "admin:users"
+      ],
       "reason": "Admin-only grant/revoke of the client access tier; refused upstream without admin:users."
     }
   ]
