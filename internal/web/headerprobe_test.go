@@ -451,10 +451,13 @@ func TestHeaderProbe_DoesNotMaterializeEveryHopOfAFloodedAddressHeader(t *testin
 
 // The cap drops the tail of a sorted list, so a flood under early-alphabet
 // names must not be able to push the correlation candidates off the line.
-func TestHeaderProbe_CapKeepsTheCorrelationCandidates(t *testing.T) {
+func TestHeaderProbe_CapKeepsTheCorrelationCandidatesAgainstAnInsiderFlood(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
 	for i := 0; i < 200; i++ {
-		req.Header.Set("A-Flood-"+strconv.Itoa(i), "x")
+		// Named to match a keep prefix and to sort ahead of cf-ray, host and
+		// traceparent: a flood from OUTSIDE the keep set lands in `rest` and
+		// only exercises the path that already worked.
+		req.Header.Set("Accept-Flood-"+strconv.Itoa(i), "x")
 	}
 	req.Header.Set("Cf-Ray", "9c1f0b3ea0e1abcd-DME")
 	req.Header.Set("Traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")

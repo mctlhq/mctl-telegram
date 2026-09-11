@@ -112,17 +112,27 @@ var probeKeepPrefixes = []string{
 
 // probeKeep trims a sorted name list to probeMaxHeaders, keeping the
 // correlation candidates first and filling the remaining budget in order.
+//
+// Each prefix gets at most probeMaxPerPrefix names. Without that, the protected
+// budget is itself floodable: `accept` is a keep prefix and `accept-flood-*`
+// sorts before cf-ray, host and traceparent, so 64 of them fill `kept` and
+// evict all three -- the exact outcome this function exists to prevent, just
+// from inside the guarantee instead of outside it. Four per prefix keeps one
+// cf-ray while denying a cf-* flood the line.
 func probeKeep(names []string) []string {
 	kept := make([]string, 0, probeMaxHeaders)
 	rest := make([]string, 0, len(names))
+	perPrefix := make(map[string]int, len(probeKeepPrefixes))
 	for _, name := range names {
-		if probeIsKeepName(name) {
-			if len(kept) < probeMaxHeaders {
-				kept = append(kept, name)
-			}
+		prefix, ok := probeKeepPrefix(name)
+		if !ok || perPrefix[prefix] >= probeMaxPerPrefix {
+			rest = append(rest, name)
 			continue
 		}
-		rest = append(rest, name)
+		perPrefix[prefix]++
+		if len(kept) < probeMaxHeaders {
+			kept = append(kept, name)
+		}
 	}
 	for _, name := range rest {
 		if len(kept) >= probeMaxHeaders {
@@ -134,13 +144,14 @@ func probeKeep(names []string) []string {
 	return kept
 }
 
-func probeIsKeepName(name string) bool {
+// probeKeepPrefix reports which keep prefix a name belongs to, if any.
+func probeKeepPrefix(name string) (string, bool) {
 	for _, prefix := range probeKeepPrefixes {
 		if strings.HasPrefix(name, prefix) {
-			return true
+			return prefix, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // probeHeaders returns every header name the ingress saw, lowercased, together
@@ -239,6 +250,9 @@ const (
 	probeKeyPrefix = "h:"
 	// probeMaxAddrHops bounds a forwarding chain; see maskAddrList.
 	probeMaxAddrHops = 32
+	// probeMaxPerPrefix bounds how many names one keep prefix may contribute to
+	// a capped line; see probeKeep.
+	probeMaxPerPrefix = 4
 )
 
 // sanitizeHeader renders one header's values for the probe log. The returned

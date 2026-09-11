@@ -66,8 +66,8 @@ Sanitization, pinned by `internal/web/headerprobe_test.go`:
 - at most 64 headers are rendered per line, the rest counted in `headers_omitted`: the probe runs
   ahead of auth with no rate limiter, and one request must not become an unbounded line. The cap
   keeps the correlation candidates (`host`, `cf-*`, `mcp-*`, `trace*`, forwarding and content
-  negotiation headers) first, so a flood of early-alphabet names cannot evict `cf-ray` from the
-  table;
+  negotiation headers) first, at most 4 names per prefix -- without that per-prefix bound a flood
+  named `accept-flood-*` would compete inside the protected budget and evict `cf-ray` from it;
 - an address header is masked hop by hop, at most 32 hops, with the remainder counted (`[+N hops]`):
   masking expands (an unparseable hop costs an 11-byte fingerprint), so a long one would otherwise
   multiply into the log rather than be truncated by it;
