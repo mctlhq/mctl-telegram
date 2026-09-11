@@ -2,9 +2,13 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,63 +91,116 @@ const (
 	gateSend     = "send-gate"
 )
 
-var (
-	reNewTool   = regexp.MustCompile(`mcplib\.NewTool\(\s*"([^"]+)"`)
-	reScopeCall = regexp.MustCompile(`require(?:Any)?Scope\(id,\s*((?:"[^"]+"\s*,?\s*)+)\)`)
-	reScopeStr  = regexp.MustCompile(`"([^"]+)"`)
-	reSendGate  = regexp.MustCompile(`evaluateSendGate\(`)
-	reWriteGate = regexp.MustCompile(`evaluateWriteGate\([^)]*"([^"]+)"\)`)
-)
-
 // gatesFromSource derives, per registered tool, the set of checks its
-// handler performs, by reading the registration functions in tools.go and
-// media_tools.go. A registration is the text from its mcplib.NewTool("name"
-// call to the next top-level func: every handler closure is registered
-// inside that same function, and the shared gate helpers (evaluateSendGate
-// and friends) are top-level funcs, so the boundary keeps a helper's body
-// from being read as a caller's check. The scan is textual on purpose — the
-// handlers are closures, not values the test could introspect — and the
-// equality check on the registered tool set proves it did not miss one.
-func gatesFromSource(t *testing.T, files ...string) map[string]map[string]bool {
-	t.Helper()
-	var src strings.Builder
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		src.Write(b)
-		src.WriteString("\n")
-	}
-	text := src.String()
+// handler performs, from the Go AST of the given files. Each tool is
+// registered by one top-level function that builds the mcplib.NewTool
+// value and its handler closure (toolSendMessage, toolGetMedia, ...). The
+// scan attributes to a tool every gate call made anywhere inside the
+// function that contains its NewTool call: requireScope / requireAnyScope
+// (string-literal scopes), evaluateSendGate, and evaluateWriteGate (its
+// string-literal scope). It is the AST, so comments and strings cannot
+// impersonate a call, and a function that registers two tools is refused
+// outright rather than letting one tool's checks vouch for the other's.
+// A handler defined outside its tool's function is read as gate-less,
+// which fails closed: the tool can then be enabled only via selfOnlyTools.
+func gatesFromSource(fset *token.FileSet, files ...*ast.File) (map[string]map[string]bool, error) {
 	out := map[string]map[string]bool{}
-	locs := reNewTool.FindAllStringSubmatchIndex(text, -1)
-	for _, loc := range locs {
-		name := text[loc[2]:loc[3]]
-		seg := text[loc[1]:]
-		if end := strings.Index(seg, "\nfunc "); end >= 0 {
-			seg = seg[:end]
-		}
-		if _, dup := out[name]; dup {
-			t.Fatalf("%s: registered twice in the scanned sources", name)
-		}
-		gates := map[string]bool{}
-		for _, m := range reScopeCall.FindAllStringSubmatch(seg, -1) {
-			for _, sm := range reScopeStr.FindAllStringSubmatch(m[1], -1) {
-				gates[sm[1]] = true
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
 			}
+			var names []string
+			gates := map[string]bool{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch calleeName(call.Fun) {
+				case "NewTool":
+					if lit := stringLit(call.Args, 0); lit != "" {
+						names = append(names, lit)
+					}
+				case "requireScope", "requireAnyScope":
+					for i := 1; i < len(call.Args); i++ {
+						if lit := stringLit(call.Args, i); lit != "" {
+							gates[lit] = true
+						}
+					}
+				case "evaluateSendGate":
+					gates[gateSend] = true
+					gates["telegram:messages:send"] = true
+				case "evaluateWriteGate":
+					gates[gateSend] = true
+					if lit := stringLit(call.Args, len(call.Args)-1); lit != "" {
+						gates[lit] = true
+					}
+				}
+				return true
+			})
+			switch len(names) {
+			case 0:
+				continue
+			case 1:
+			default:
+				return nil, fmt.Errorf("%s registers %d tools (%v) in one function; one function per tool, or the checks of one would vouch for the other", fset.Position(fn.Pos()), len(names), names)
+			}
+			if _, dup := out[names[0]]; dup {
+				return nil, fmt.Errorf("%s: tool %q registered twice", fset.Position(fn.Pos()), names[0])
+			}
+			out[names[0]] = gates
 		}
-		if reSendGate.MatchString(seg) {
-			gates[gateSend] = true
-			gates["telegram:messages:send"] = true
-		}
-		for _, m := range reWriteGate.FindAllStringSubmatch(seg, -1) {
-			gates[gateSend] = true
-			gates[m[1]] = true
-		}
-		out[name] = gates
 	}
-	return out
+	return out, nil
+}
+
+// calleeName returns the bare identifier a call targets: f, pkg.f or
+// recv.f all yield "f". Package qualification is not checked because the
+// gate helpers are unexported functions of this package and NewTool is
+// only ever mcplib's; a same-named local would be a change to this package
+// that the reviewer sees.
+func calleeName(fun ast.Expr) string {
+	switch e := fun.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		return e.Sel.Name
+	}
+	return ""
+}
+
+// stringLit returns the unquoted value of args[i] when it is a string
+// literal, else "". A scope passed through a variable is not a gate the
+// scan can vouch for, and reads as absent — the failing direction.
+func stringLit(args []ast.Expr, i int) string {
+	if i < 0 || i >= len(args) {
+		return ""
+	}
+	lit, ok := args[i].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	v, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+func parseSources(t *testing.T, paths ...string) (*token.FileSet, []*ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, p := range paths {
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		files = append(files, f)
+	}
+	return fset, files
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -183,7 +240,11 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// The source scan must see exactly the tools the server registers; a
 	// registration the regex missed would otherwise read as "no gates" and
 	// could only be enabled via selfOnlyTools, but the honest failure is here.
-	fromSource := gatesFromSource(t, "tools.go", "media_tools.go")
+	fset, parsed := parseSources(t, "tools.go", "media_tools.go")
+	fromSource, err := gatesFromSource(fset, parsed...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name := range registered {
 		if _, ok := fromSource[name]; !ok {
 			t.Errorf("%s: registered by the server but not found by the source scan (tools.go, media_tools.go); extend gatesFromSource if registrations moved", name)
@@ -272,5 +333,128 @@ func checkGates(t *testing.T, name string, claimed, actual map[string]bool) {
 		if !claimed[g] {
 			t.Errorf("%s: handler performs %q but upstream_gates omits it (claimed: %v)", name, g, sortedKeys(claimed))
 		}
+	}
+}
+
+// TestGatesFromSource pins the scan itself against the shapes agy named on
+// #629: a gate that exists only in a comment or a string, two tools in one
+// function, multi-line and variable arguments, and the two write-gate
+// helpers. Each case is a source snippet, not a fixture file, so the case
+// and its expectation are read together.
+func TestGatesFromSource(t *testing.T) {
+	parse := func(t *testing.T, src string) (*token.FileSet, *ast.File) {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "snippet.go", "package mcp\n"+src, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse snippet: %v", err)
+		}
+		return fset, f
+	}
+	cases := []struct {
+		name string
+		src  string
+		want map[string][]string
+		err  string
+	}{
+		{
+			name: "scope in a comment and a string is not a gate",
+			src: `func (s *Server) toolA() {
+	tool := mcplib.NewTool("a")
+	// requireScope(id, "admin:users")
+	_ = "requireScope(id, \"admin:users\")"
+	_ = tool
+}`,
+			want: map[string][]string{"a": {}},
+		},
+		{
+			name: "multi-line requireAnyScope and evaluateWriteGate",
+			src: `func (s *Server) toolB() {
+	tool := mcplib.NewTool(
+		"b",
+	)
+	h := func() {
+		if err := requireAnyScope(id,
+			"admin:users",
+			"admin:users:read"); err != nil {
+			return
+		}
+		_, _ = evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID,
+			"telegram:messages:pin")
+	}
+	_, _ = tool, h
+}`,
+			want: map[string][]string{"b": {"admin:users", "admin:users:read", "send-gate", "telegram:messages:pin"}},
+		},
+		{
+			name: "evaluateSendGate implies the send scope",
+			src: `func (s *Server) toolC() {
+	tool := mcplib.NewTool("c")
+	_, _ = evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+	_ = tool
+}`,
+			want: map[string][]string{"c": {"send-gate", "telegram:messages:send"}},
+		},
+		{
+			name: "scope through a variable is not vouched for",
+			src: `func (s *Server) toolD() {
+	tool := mcplib.NewTool("d")
+	scope := "admin:users"
+	_ = requireScope(id, scope)
+	_ = tool
+}`,
+			want: map[string][]string{"d": {}},
+		},
+		{
+			name: "two tools in one function are refused",
+			src: `func (s *Server) toolE() {
+	a := mcplib.NewTool("e1")
+	b := mcplib.NewTool("e2")
+	_ = requireScope(id, "admin:users")
+	_, _ = a, b
+}`,
+			err: "registers 2 tools",
+		},
+		{
+			name: "same tool registered twice is refused",
+			src: `func (s *Server) toolF() { _ = mcplib.NewTool("f") }
+func (s *Server) toolF2() { _ = mcplib.NewTool("f") }`,
+			err: "registered twice",
+		},
+		{
+			name: "functions without a registration are ignored",
+			src: `func helper() { _ = requireScope(id, "admin:users") }
+func (s *Server) toolG() { _ = mcplib.NewTool("g"); _ = requireScope(id, "account:manage") }`,
+			want: map[string][]string{"g": {"account:manage"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fset, f := parse(t, tc.src)
+			got, err := gatesFromSource(fset, f)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("want error containing %q, got %v", tc.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("tools: got %v, want %v", got, tc.want)
+			}
+			for name, want := range tc.want {
+				g, ok := got[name]
+				if !ok {
+					t.Fatalf("tool %q not found in %v", name, got)
+				}
+				gotKeys := sortedKeys(g)
+				sort.Strings(want)
+				if fmt.Sprint(gotKeys) != fmt.Sprint(want) {
+					t.Errorf("%s: gates got %v, want %v", name, gotKeys, want)
+				}
+			}
+		})
 	}
 }
