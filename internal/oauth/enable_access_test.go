@@ -113,22 +113,28 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		if needPw {
 			if _, err := askPassword(ctx); err != nil {
-				return 0, "", "", err
+				return telegram.LoginResult{}, err
 			}
 		}
 		if failErr != nil {
-			return 0, "", "", failErr
+			return telegram.LoginResult{}, failErr
 		}
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
-		return 500100101, "Dana", "dana_tg", nil
+		return telegram.LoginResult{
+			TelegramID:   500100101,
+			DisplayName:  "Dana",
+			Username:     "dana_tg",
+			FirstName:    "Dana",
+			LanguageCode: "en",
+		}, nil
 	}
 }
 
@@ -142,14 +148,18 @@ func stubLoginWrongAccount() LoginFunc {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
-		return 999000111, "Someone Else", "someoneelse", nil
+		return telegram.LoginResult{
+			TelegramID:  999000111,
+			DisplayName: "Someone Else",
+			Username:    "someoneelse",
+		}, nil
 	}
 }
 

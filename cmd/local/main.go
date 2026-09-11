@@ -449,7 +449,7 @@ func runLogin(args []string) {
 		return strings.TrimSpace(string(pw)), nil
 	}
 
-	tgID, displayName, username, err := tg.Login(
+	loginRes, err := tg.Login(
 		ctx, cfg.APIID, cfg.APIHash, store, uid, *phone, askCode, askPassword,
 	)
 	if err != nil {
@@ -464,18 +464,18 @@ func runLogin(args []string) {
 		}
 		die(fmt.Errorf("reload session: %w", err))
 	}
-	if err := store.SaveSession(ctx, uid, pt, tgID, displayName, username); err != nil {
+	if err := store.SaveSession(ctx, uid, pt, loginRes.TelegramID, loginRes.DisplayName, loginRes.Username); err != nil {
 		die(fmt.Errorf("save session metadata: %w", err))
 	}
 
-	if cfg.TelegramID != tgID {
-		cfg.TelegramID = tgID
+	if cfg.TelegramID != loginRes.TelegramID {
+		cfg.TelegramID = loginRes.TelegramID
 		if err := saveConfig(cfg); err != nil {
 			die(fmt.Errorf("persist telegram id: %w", err))
 		}
 	}
 
-	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s).\n", tgID, displayName, username)
+	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s).\n", loginRes.TelegramID, loginRes.DisplayName, loginRes.Username)
 	fmt.Println("activate will use this id unless you pass --telegram-id.")
 }
 

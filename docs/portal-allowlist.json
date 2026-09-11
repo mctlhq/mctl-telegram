@@ -39,7 +39,7 @@
     {
       "name": "get_my_identity",
       "enabled": true,
-      "reason": "Returns the caller's own telegram_id, username and display name; nothing about other people or messages. It is the identity check the aggregate portal relies on."
+      "reason": "Returns the caller's own telegram_id, username, display name, first/last name, language code, last-seen and onboarding timestamps, and their provenance; nothing about other people or messages. It is the identity check the aggregate portal relies on."
     },
     {
       "name": "get_my_send_status",

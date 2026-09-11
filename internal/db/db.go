@@ -159,6 +159,33 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// Client identity attributes and provenance (issue-620, #438 slice 1).
+	// All five are nullable with no DEFAULT so existing rows stay untouched
+	// and NULL keeps its "unknown" meaning. identity_captured_at is the whole
+	// provenance mechanism: IS NULL means capture never ran for this row (so
+	// every optional attribute below reads "not_captured"); once set, an
+	// empty attribute means the source supplied nothing ("not_supplied") and
+	// a non-empty one means "verified". See attrProvenance in store.go.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_first_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_last_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_language_code",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "identity_captured_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "onboarding_completed_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "client_name",
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
@@ -257,6 +284,26 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("backfill: %w\nstmt: %s", err, s)
 		}
+	}
+	// Backfill users.onboarding_completed_at from the earliest finalised
+	// telegram_accounts row (telegram_user_id IS NOT NULL) for rows where it
+	// is still NULL. A finalised session is a verified server-side record
+	// that the user completed onboarding, so this is derivation from a real
+	// record, not inference — unlike first/last name, which are NOT
+	// backfilled from telegram_display_name (see db_test.go / design.md).
+	// One statement, portable across both dialects (MIN, a correlated
+	// sub-query and IS NULL need no dialect split); WHERE ... IS NULL makes
+	// it a no-op on every run after the first.
+	if _, err := dbConn.ExecContext(ctx,
+		`UPDATE users
+		    SET onboarding_completed_at = (
+		          SELECT MIN(ta.connected_at) FROM telegram_accounts ta
+		           WHERE ta.user_id = users.id AND ta.telegram_user_id IS NOT NULL)
+		  WHERE onboarding_completed_at IS NULL
+		    AND EXISTS (SELECT 1 FROM telegram_accounts ta
+		                 WHERE ta.user_id = users.id AND ta.telegram_user_id IS NOT NULL)`,
+	); err != nil {
+		return fmt.Errorf("backfill onboarding_completed_at: %w", err)
 	}
 	// Communication-agent domain tables (M6). Kept in a separate file so the
 	// agent schema evolves without touching the core auth/session tables.

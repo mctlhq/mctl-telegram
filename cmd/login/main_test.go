@@ -9,6 +9,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // newLoginTestStore returns a Store on a per-test in-memory SQLite database
@@ -212,11 +213,11 @@ func TestRunLoginOrRepair_RepairsWhenTheLoginFails(t *testing.T) {
 	}
 
 	sentinel := errors.New("self: RPC error")
-	_, _, _, err := runLoginOrRepair(ctx, store, uid, func() (int64, string, string, error) {
+	_, err := runLoginOrRepair(ctx, store, uid, func() (telegram.LoginResult, error) {
 		if wErr := store.UpdateSessionBlob(ctx, uid, []byte("post-auth-session")); wErr != nil {
 			t.Fatalf("UpdateSessionBlob: %v", wErr)
 		}
-		return 0, "", "", sentinel
+		return telegram.LoginResult{}, sentinel
 	})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("runLoginOrRepair err=%v, want the login's own error", err)
@@ -240,18 +241,18 @@ func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
 		t.Fatalf("ProvisionLocalAccount: %v", err)
 	}
 
-	tgID, displayName, username, err := runLoginOrRepair(ctx, store, uid,
-		func() (int64, string, string, error) {
+	res, err := runLoginOrRepair(ctx, store, uid,
+		func() (telegram.LoginResult, error) {
 			if wErr := store.UpdateSessionBlob(ctx, uid, []byte("post-auth-session")); wErr != nil {
 				t.Fatalf("UpdateSessionBlob: %v", wErr)
 			}
-			return 500100101, "Dana", "dana_tg", nil
+			return telegram.LoginResult{TelegramID: 500100101, DisplayName: "Dana", Username: "dana_tg"}, nil
 		})
 	if err != nil {
 		t.Fatalf("runLoginOrRepair: %v", err)
 	}
-	if tgID != 500100101 || displayName != "Dana" || username != "dana_tg" {
-		t.Fatalf("the login's own results were not passed through: %d %q %q", tgID, displayName, username)
+	if res.TelegramID != 500100101 || res.DisplayName != "Dana" || res.Username != "dana_tg" {
+		t.Fatalf("the login's own results were not passed through: %d %q %q", res.TelegramID, res.DisplayName, res.Username)
 	}
 
 	// Compared by content, not equality: the store adds a version byte at

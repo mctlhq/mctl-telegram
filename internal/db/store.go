@@ -230,6 +230,56 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 	return id, nil
 }
 
+// TelegramIdentityAttrs is one verified snapshot of a Telegram identity,
+// consumed by CaptureTelegramIdentity. Fields are optional: a caller with only
+// a subset of these (e.g. no language code) still stamps identity_captured_at
+// for the rest, which is what makes ProvenanceNotSupplied reachable rather
+// than a permanent ProvenanceNotCaptured.
+type TelegramIdentityAttrs struct {
+	Username     string
+	FirstName    string
+	LastName     string
+	DisplayName  string
+	LanguageCode string
+}
+
+// CaptureTelegramIdentity records one verified snapshot of a Telegram
+// identity's attributes for userID and stamps users.identity_captured_at,
+// unconditionally — even when every optional field of attrs is empty, so a
+// source that was genuinely consulted and supplied nothing reads
+// ProvenanceNotSupplied rather than ProvenanceNotCaptured.
+//
+// Uses the same COALESCE(NULLIF($n,”), column) shape EnsureUserByTelegramID
+// already uses for its best-effort refresh, so a partial snapshot (e.g. a
+// login that only knows a username) never erases a richer value a previous
+// capture already stored.
+//
+// Deliberately not folded into EnsureUserByTelegramID: two of that function's
+// call sites only ever have a username, and stamping identity_captured_at
+// there would mislabel first/last name NotSupplied instead of NotCaptured.
+// Capture is only honest when the call site could plausibly have supplied
+// every attribute it stamps.
+func (s *Store) CaptureTelegramIdentity(ctx context.Context, userID int64, a TelegramIdentityAttrs) error {
+	if userID <= 0 {
+		return errors.New("capture telegram identity: user id must be positive")
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE users
+		    SET telegram_username = COALESCE(NULLIF($1,''), telegram_username),
+		        telegram_first_name = COALESCE(NULLIF($2,''), telegram_first_name),
+		        telegram_last_name = COALESCE(NULLIF($3,''), telegram_last_name),
+		        telegram_display_name = COALESCE(NULLIF($4,''), telegram_display_name),
+		        telegram_language_code = COALESCE(NULLIF($5,''), telegram_language_code),
+		        identity_captured_at = $6
+		  WHERE id = $7`,
+		a.Username, a.FirstName, a.LastName, a.DisplayName, a.LanguageCode,
+		time.Now().UTC(), userID,
+	); err != nil {
+		return fmt.Errorf("capture telegram identity: %w", err)
+	}
+	return nil
+}
+
 // UserIDByTelegramID resolves a Telegram user id to the internal users.id
 // WITHOUT creating a row — the read-only counterpart of
 // EnsureUserByTelegramID. It accepts both login identities and finalised
@@ -279,15 +329,78 @@ const (
 	ModeHosted = "hosted"
 )
 
+// Provenance values reported for each identity attribute in IdentityProvenance.
+// Verified/NotSupplied are only reachable once identity capture has run for a
+// row (users.identity_captured_at is set); NotCaptured is reported for every
+// optional attribute while that column is still NULL. Derived is used for
+// attributes computed from another verified server-side record (last_seen_at,
+// onboarding_completed_at) rather than taken directly from a Telegram-supplied
+// value.
+const (
+	ProvenanceVerified    = "verified"
+	ProvenanceDerived     = "derived"
+	ProvenanceNotSupplied = "not_supplied"
+	ProvenanceNotCaptured = "not_captured"
+)
+
+// IdentityProvenance explains, per attribute, why an IdentityRow field is
+// empty (or where a non-empty value came from). One of ProvenanceVerified,
+// ProvenanceDerived, ProvenanceNotSupplied or ProvenanceNotCaptured.
+type IdentityProvenance struct {
+	Username              string `json:"username"`
+	FirstName             string `json:"first_name"`
+	LastName              string `json:"last_name"`
+	DisplayName           string `json:"display_name"`
+	LanguageCode          string `json:"language_code"`
+	LastSeenAt            string `json:"last_seen_at"`
+	OnboardingCompletedAt string `json:"onboarding_completed_at"`
+}
+
+// attrProvenance decides the provenance of one Telegram-supplied attribute.
+// capturedAt is users.identity_captured_at for the row; value is the
+// attribute's current column value.
+//
+//   - capturedAt NULL: capture has never run against this row -> NotCaptured,
+//     regardless of value (a value should never be non-empty in this state,
+//     but the predicate does not depend on that).
+//   - capturedAt set, value empty: a source that could have supplied this was
+//     consulted and supplied nothing -> NotSupplied.
+//   - capturedAt set, value non-empty: -> Verified.
+func attrProvenance(capturedAt sql.NullTime, value string) string {
+	if !capturedAt.Valid {
+		return ProvenanceNotCaptured
+	}
+	if value == "" {
+		return ProvenanceNotSupplied
+	}
+	return ProvenanceVerified
+}
+
 // IdentityRow is the admin-facing projection of a users row: who has
 // authenticated, their access tier, and whether they hold an active session.
+// CreatedAt doubles as "first seen" — it is NOT NULL on both dialects and
+// needs no provenance entry.
 type IdentityRow struct {
-	TelegramID  int64     `json:"telegram_id"`
-	Username    string    `json:"username,omitempty"`
-	DisplayName string    `json:"display_name,omitempty"`
-	AccessTier  string    `json:"access_tier"`
-	HasSession  bool      `json:"has_session"`
-	CreatedAt   time.Time `json:"created_at"`
+	TelegramID   int64     `json:"telegram_id"`
+	Username     string    `json:"username,omitempty"`
+	DisplayName  string    `json:"display_name,omitempty"`
+	FirstName    string    `json:"first_name,omitempty"`
+	LastName     string    `json:"last_name,omitempty"`
+	LanguageCode string    `json:"language_code,omitempty"`
+	AccessTier   string    `json:"access_tier"`
+	HasSession   bool      `json:"has_session"`
+	CreatedAt    time.Time `json:"created_at"`
+	// LastSeenAt is the later of telegram_accounts.last_used_at and
+	// oauth_refresh_tokens.created_at for the user; nil when neither exists.
+	// Provenance is always "derived" when present.
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	// OnboardingCompletedAt is users.onboarding_completed_at: the earliest
+	// finalised telegram_accounts row's connected_at, backfilled by Migrate.
+	// nil when the user has no finalised session.
+	OnboardingCompletedAt *time.Time `json:"onboarding_completed_at,omitempty"`
+	// Provenance explains, per attribute, why a field above is empty (or
+	// where a non-empty value came from) — see IdentityProvenance.
+	Provenance IdentityProvenance `json:"provenance"`
 	// ConnectedVia lists distinct OAuth client names (e.g. "Claude", "ChatGPT")
 	// for which this user holds a non-expired, non-revoked refresh token. Empty
 	// when the user has never completed an OAuth flow or all tokens predate
@@ -346,28 +459,159 @@ func (s *Store) GrantClientTierIfUnset(ctx context.Context, tgID int64) (granted
 	return false, nil
 }
 
-// GetLoginIdentity returns the Telegram login projection for users.id: the
-// widget/OIDC telegram_login_id plus any captured username and display name.
-// Missing attributes come back empty rather than guessed. A missing users
-// row is not an error — all three values are zero.
-func (s *Store) GetLoginIdentity(ctx context.Context, userID int64) (tgID int64, username, displayName string, err error) {
+// fillIdentityProvenance derives r.Provenance from r's already-scanned fields
+// plus users.identity_captured_at (capturedAt). Shared by ListIdentities and
+// GetIdentity so the two read paths render provenance identically.
+func fillIdentityProvenance(r *IdentityRow, capturedAt sql.NullTime) {
+	r.Provenance = IdentityProvenance{
+		Username:     attrProvenance(capturedAt, r.Username),
+		FirstName:    attrProvenance(capturedAt, r.FirstName),
+		LastName:     attrProvenance(capturedAt, r.LastName),
+		DisplayName:  attrProvenance(capturedAt, r.DisplayName),
+		LanguageCode: attrProvenance(capturedAt, r.LanguageCode),
+	}
+	if r.OnboardingCompletedAt != nil {
+		r.Provenance.OnboardingCompletedAt = ProvenanceDerived
+	} else {
+		r.Provenance.OnboardingCompletedAt = ProvenanceNotCaptured
+	}
+	if r.LastSeenAt != nil {
+		r.Provenance.LastSeenAt = ProvenanceDerived
+	} else {
+		r.Provenance.LastSeenAt = ProvenanceNotCaptured
+	}
+}
+
+// identityLastSeenExpr is the correlated sub-query for LastSeenAt, shared by
+// ListIdentities and GetIdentity: the later of telegram_accounts.last_used_at
+// and oauth_refresh_tokens.created_at for the user, or NULL when neither
+// table has a row for them. No bind parameters of its own — u.id is bound by
+// the enclosing query's FROM users u.
+const identityLastSeenExpr = `(SELECT MAX(v) FROM (
+	               SELECT MAX(ta2.last_used_at) AS v FROM telegram_accounts ta2 WHERE ta2.user_id = u.id
+	               UNION ALL
+	               SELECT MAX(rt.created_at) AS v FROM oauth_refresh_tokens rt WHERE rt.user_id = u.id
+	             ) combined) AS last_seen_at`
+
+// identityTimeLayouts are the formats modernc.org/sqlite's driver tries on a
+// column whose declared type it CAN resolve via sqlite3_column_decltype.
+// identityLastSeenExpr has no such type: it is a MAX() over a UNION of two
+// subqueries, with no direct origin column for SQLite to report a decltype
+// for, so the driver hands back a raw TEXT value instead of auto-parsing it
+// into time.Time the way it does for an ordinary column read (see
+// modernc.org/sqlite's rows.go/conn.go). Postgres's driver (pgx) has no such
+// limitation — it always returns time.Time for a timestamptz-typed
+// expression — so scanComputedTime's string branch only ever needs to
+// satisfy SQLite's own text formats.
+var identityTimeLayouts = []string{
+	// modernc.org/sqlite's own write path: a bound time.Time argument with no
+	// configured _time_format falls back to Go's time.Time.String() (see the
+	// driver's conn.go formatTime), which is exactly what every time.Time
+	// this codebase binds as a query argument goes through. Tried first
+	// because it is what identityLastSeenExpr's inputs were actually written
+	// as.
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+// scanComputedTime converts a driver-scanned value for identityLastSeenExpr
+// (or any other column with no reliable declared type) into a *time.Time.
+func scanComputedTime(v any) (*time.Time, error) {
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case time.Time:
+		return &t, nil
+	case string:
+		if t == "" {
+			return nil, nil
+		}
+		for _, layout := range identityTimeLayouts {
+			if parsed, err := time.Parse(layout, t); err == nil {
+				parsed = parsed.UTC()
+				return &parsed, nil
+			}
+		}
+		return nil, fmt.Errorf("scan computed time: unrecognised format %q", t)
+	case []byte:
+		return scanComputedTime(string(t))
+	default:
+		return nil, fmt.Errorf("scan computed time: unsupported driver value type %T", v)
+	}
+}
+
+// GetIdentity returns the Telegram identity projection for one users.id: the
+// same column set and provenance rules ListIdentities applies to the whole
+// roster, filtered to a single row. Missing attributes come back empty
+// (Provenance explains why) rather than guessed. Returns (nil, nil) when the
+// row is absent — replaces the former GetLoginIdentity, which had the same
+// "missing row is not an error" contract but only three fields.
+func (s *Store) GetIdentity(ctx context.Context, userID int64) (*IdentityRow, error) {
+	now := time.Now().UTC()
+	idleCutoff := now.Add(-idleSessionTTL)
+	query := `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
+	        u.telegram_first_name, u.telegram_last_name, u.telegram_language_code,
+	        u.access_tier, u.created_at, u.identity_captured_at, u.onboarding_completed_at,
+	        EXISTS(SELECT 1 FROM telegram_accounts ta
+	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
+	                 AND ta.telegram_user_id IS NOT NULL
+	                 AND (ta.expires_at IS NULL OR ta.expires_at > $2)
+	                 AND (ta.last_used_at IS NULL OR ta.last_used_at > $3`
+	args := []any{userID, now, idleCutoff}
+	if clause, exemptArgs := s.ttlExemptClause(4); clause != "" {
+		query += " OR ta.telegram_user_id IN " + clause
+		args = append(args, exemptArgs...)
+	}
+	query += `)) AS has_session,
+	        ` + identityLastSeenExpr + `
+	   FROM users u
+	  WHERE u.id = $1`
 	var (
-		id sql.NullInt64
-		u  sql.NullString
-		d  sql.NullString
+		r             IdentityRow
+		tgID          sql.NullInt64
+		username      sql.NullString
+		display       sql.NullString
+		firstName     sql.NullString
+		lastName      sql.NullString
+		langCode      sql.NullString
+		tier          sql.NullString
+		capturedAt    sql.NullTime
+		onboardedAt   sql.NullTime
+		lastSeenAtRaw any
 	)
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT telegram_login_id, telegram_username, telegram_display_name
-		   FROM users WHERE id = $1`,
-		userID,
-	).Scan(&id, &u, &d)
+	err := s.DB.QueryRowContext(ctx, query, args...).Scan(
+		&tgID, &username, &display, &firstName, &lastName, &langCode,
+		&tier, &r.CreatedAt, &capturedAt, &onboardedAt, &r.HasSession, &lastSeenAtRaw,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, "", "", fmt.Errorf("get login identity: %w", err)
+		return nil, fmt.Errorf("get identity: %w", err)
 	}
-	return id.Int64, u.String, d.String, nil
+	r.TelegramID = tgID.Int64
+	r.Username = username.String
+	r.DisplayName = display.String
+	r.FirstName = firstName.String
+	r.LastName = lastName.String
+	r.LanguageCode = langCode.String
+	r.AccessTier = tier.String
+	if onboardedAt.Valid {
+		t := onboardedAt.Time
+		r.OnboardingCompletedAt = &t
+	}
+	lastSeenAt, err := scanComputedTime(lastSeenAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("get identity: %w", err)
+	}
+	r.LastSeenAt = lastSeenAt
+	fillIdentityProvenance(&r, capturedAt)
+	return &r, nil
 }
 
 // GetAccessTier returns the explicit users.access_tier value for a Telegram
@@ -404,7 +648,8 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
 	query := `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
-	        u.access_tier, u.created_at,
+	        u.telegram_first_name, u.telegram_last_name, u.telegram_language_code,
+	        u.access_tier, u.created_at, u.identity_captured_at, u.onboarding_completed_at,
 	        EXISTS(SELECT 1 FROM telegram_accounts ta
 	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
 	                 AND ta.telegram_user_id IS NOT NULL
@@ -415,7 +660,8 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 		query += " OR ta.telegram_user_id IN " + clause
 		args = append(args, exemptArgs...)
 	}
-	query += `))
+	query += `)) AS has_session,
+	        ` + identityLastSeenExpr + `
 	   FROM users u
 	  WHERE u.telegram_login_id IS NOT NULL
 	  ORDER BY u.id DESC`
@@ -427,17 +673,37 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	var out []IdentityRow
 	for rows.Next() {
 		var (
-			r        IdentityRow
-			username sql.NullString
-			display  sql.NullString
-			tier     sql.NullString
+			r             IdentityRow
+			username      sql.NullString
+			display       sql.NullString
+			firstName     sql.NullString
+			lastName      sql.NullString
+			langCode      sql.NullString
+			tier          sql.NullString
+			capturedAt    sql.NullTime
+			onboardedAt   sql.NullTime
+			lastSeenAtRaw any
 		)
-		if err := rows.Scan(&r.TelegramID, &username, &display, &tier, &r.CreatedAt, &r.HasSession); err != nil {
+		if err := rows.Scan(&r.TelegramID, &username, &display, &firstName, &lastName, &langCode,
+			&tier, &r.CreatedAt, &capturedAt, &onboardedAt, &r.HasSession, &lastSeenAtRaw); err != nil {
 			return nil, fmt.Errorf("scan identity: %w", err)
 		}
 		r.Username = username.String
 		r.DisplayName = display.String
+		r.FirstName = firstName.String
+		r.LastName = lastName.String
+		r.LanguageCode = langCode.String
 		r.AccessTier = tier.String // "" when the column is NULL (unset)
+		if onboardedAt.Valid {
+			t := onboardedAt.Time
+			r.OnboardingCompletedAt = &t
+		}
+		lastSeenAt, err := scanComputedTime(lastSeenAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("scan identity: %w", err)
+		}
+		r.LastSeenAt = lastSeenAt
+		fillIdentityProvenance(&r, capturedAt)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {

@@ -80,8 +80,7 @@ func main() {
 		die(err)
 	}
 
-	var tgID int64
-	var displayName, username string
+	var loginRes telegram.LoginResult
 
 	// From the moment either login entrypoint is entered, a failure has to run
 	// the repair. gotd persists through the SessionStore as soon as it has an
@@ -100,8 +99,8 @@ func main() {
 	if *useQR {
 		slog.Info("qr login starting", "user_id", uid, "github_login", cfg.OperatorLogin)
 		var qrErr error
-		tgID, displayName, username, qrErr = runLoginOrRepair(ctx, store, uid,
-			func() (int64, string, string, error) {
+		loginRes, qrErr = runLoginOrRepair(ctx, store, uid,
+			func() (telegram.LoginResult, error) {
 				return telegram.LoginQR(
 					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid,
 					func(_ context.Context, url, asciiArt string) error {
@@ -142,8 +141,8 @@ func main() {
 		}
 		slog.Info("phone login starting", "user_id", uid, "github_login", cfg.OperatorLogin, "phone", *phone)
 		var loginErr error
-		tgID, displayName, username, loginErr = runLoginOrRepair(ctx, store, uid,
-			func() (int64, string, string, error) {
+		loginRes, loginErr = runLoginOrRepair(ctx, store, uid,
+			func() (telegram.LoginResult, error) {
 				return telegram.Login(
 					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid, *phone, askCode, askPassword,
 				)
@@ -172,7 +171,7 @@ func main() {
 		die(errors.New("session bytes missing after login"))
 	}
 
-	if err := store.SaveSession(ctx, uid, pt, tgID, displayName, username); err != nil {
+	if err := store.SaveSession(ctx, uid, pt, loginRes.TelegramID, loginRes.DisplayName, loginRes.Username); err != nil {
 		// SaveSession revokes prior + reinserts with the just-stored bytes — for
 		// idempotence on partial-failure recovery flows. Errors here mean the DB
 		// is unhappy; surface and exit non-zero so the operator retries.
@@ -181,7 +180,7 @@ func main() {
 	}
 
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s) bound to operator %q.\n",
-		tgID, displayName, username, cfg.OperatorLogin)
+		loginRes.TelegramID, loginRes.DisplayName, loginRes.Username, cfg.OperatorLogin)
 }
 
 // runLoginOrRepair runs one of the telegram login entrypoints and repairs a
@@ -199,14 +198,14 @@ func main() {
 // are the ones SaveSession is about to adopt, and clearing them here would
 // break every hosted login rather than only the failing ones.
 func runLoginOrRepair(ctx context.Context, store *db.Store, uid int64,
-	login func() (int64, string, string, error),
-) (int64, string, string, error) {
-	tgID, displayName, username, err := login()
+	login func() (telegram.LoginResult, error),
+) (telegram.LoginResult, error) {
+	res, err := login()
 	if err != nil {
 		repairStraySession(ctx, store, uid)
-		return 0, "", "", err
+		return telegram.LoginResult{}, err
 	}
-	return tgID, displayName, username, nil
+	return res, nil
 }
 
 // refuseIfLocal refuses a hosted connect while a Local Bridge account is

@@ -33,9 +33,9 @@ func LoginQR(
 	userID int64,
 	show func(ctx context.Context, url, asciiArt string) error,
 	cfgs ...LoginConfig,
-) (telegramUserID int64, displayName, username string, err error) {
+) (LoginResult, error) {
 	if apiID == 0 || apiHash == "" {
-		return 0, "", "", errors.New("TG_API_ID / TG_API_HASH must be set before login")
+		return LoginResult{}, errors.New("TG_API_ID / TG_API_HASH must be set before login")
 	}
 	var cfg LoginConfig
 	if len(cfgs) > 0 {
@@ -59,6 +59,7 @@ func LoginQR(
 		Middlewares: loginMiddlewares(cfg),
 	})
 
+	var res LoginResult
 	runErr := client.Run(ctx, func(ctx context.Context) error {
 		qr := qrlogin.NewQR(client.API(), apiID, apiHash, qrlogin.Options{
 			// Migrate wires the DC-migration callback so QR auth succeeds for
@@ -78,27 +79,30 @@ func LoginQR(
 		if !ok {
 			return fmt.Errorf("unexpected auth user type %T", auth.User)
 		}
-		telegramUserID = user.ID
-		displayName = strings.TrimSpace(user.FirstName + " " + user.LastName)
-		if displayName == "" {
-			displayName = user.Username
+		res.TelegramID = user.ID
+		res.FirstName = user.FirstName
+		res.LastName = user.LastName
+		res.Username = user.Username
+		res.LanguageCode = user.LangCode
+		res.DisplayName = strings.TrimSpace(user.FirstName + " " + user.LastName)
+		if res.DisplayName == "" {
+			res.DisplayName = user.Username
 		}
-		username = user.Username
 		// Trigger a session flush so SessionStorage sees the post-auth bytes.
 		_, _ = client.API().HelpGetConfig(ctx)
 		return nil
 	})
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return 0, "", "", runErr
+		return LoginResult{}, runErr
 	}
 
 	if _, err := sessStore.LoadSession(ctx); err != nil {
 		if errors.Is(err, session.ErrNotFound) {
-			return 0, "", "", errors.New("qr login completed but no session bytes were persisted")
+			return LoginResult{}, errors.New("qr login completed but no session bytes were persisted")
 		}
-		return 0, "", "", err
+		return LoginResult{}, err
 	}
-	return telegramUserID, displayName, username, nil
+	return res, nil
 }
 
 // renderQR encodes url as a QR code and returns an ASCII-art string suitable
