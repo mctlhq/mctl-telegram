@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -386,5 +387,68 @@ func TestListIdentities_ProvenanceAndLastSeen(t *testing.T) {
 	}
 	if bob.Provenance.LastSeenAt != ProvenanceNotCaptured {
 		t.Errorf("bob LastSeenAt provenance = %q, want %q", bob.Provenance.LastSeenAt, ProvenanceNotCaptured)
+	}
+}
+
+// TestMigrate_IndexesTheIdentityLastSeenCorrelation guards the two indexes
+// identityLastSeenExpr depends on.
+//
+// Review of PR #627 found the sub-query correlating on
+// oauth_refresh_tokens(user_id) and telegram_accounts(user_id) with neither
+// usable: the token table was indexed only on token_hash and family_id, and
+// idx_telegram_accounts_user_active is partial on `revoked_at IS NULL`, a
+// predicate this sub-query deliberately does not carry -- a revoked account's
+// last use is still when the user was last seen. GetIdentity, a point read on
+// the get_my_identity hot path, therefore scanned the whole token table on
+// every call, and ListIdentities was O(users x tokens).
+//
+// Asserting on the index names rather than on a query plan keeps this true for
+// both dialects from a SQLite-only test: the same two CREATE INDEX statements
+// are issued from the Postgres schema block, and a plan assertion would only
+// ever have covered the dialect the test runs on.
+func TestMigrate_IndexesTheIdentityLastSeenCorrelation(t *testing.T) {
+	ctx := context.Background()
+	conn := openMigrated(t, "file:"+t.Name()+"?mode=memory&cache=shared")
+
+	for _, want := range []struct {
+		index string
+		table string
+	}{
+		{"idx_oauth_refresh_tokens_user_created", "oauth_refresh_tokens"},
+		{"idx_telegram_accounts_user_last_used", "telegram_accounts"},
+	} {
+		var count int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ? AND tbl_name = ?`,
+			want.index, want.table,
+		).Scan(&count); err != nil {
+			t.Fatalf("check %s: %v", want.index, err)
+		}
+		if count != 1 {
+			t.Errorf("%s on %s: found %d, want 1 -- identityLastSeenExpr "+
+				"correlates on that column and falls back to a scan without it",
+				want.index, want.table, count)
+		}
+	}
+
+	// The leading column alone is not enough: the sub-query takes MAX() of the
+	// second, so an index that stops at user_id still sends the MAX to the
+	// heap. Assert the stored DDL names both columns.
+	for _, want := range []struct {
+		index   string
+		columns string
+	}{
+		{"idx_oauth_refresh_tokens_user_created", "(user_id, created_at)"},
+		{"idx_telegram_accounts_user_last_used", "(user_id, last_used_at)"},
+	} {
+		var ddl sql.NullString
+		if err := conn.QueryRowContext(ctx,
+			`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, want.index,
+		).Scan(&ddl); err != nil {
+			t.Fatalf("read %s ddl: %v", want.index, err)
+		}
+		if !ddl.Valid || !strings.Contains(ddl.String, want.columns) {
+			t.Errorf("%s covers %q, want it to cover %s", want.index, ddl.String, want.columns)
+		}
 	}
 }

@@ -501,6 +501,13 @@ func sqliteSchema() []string {
 			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
+		// identityLastSeenExpr takes MAX(last_used_at) per user over ALL rows,
+		// revoked ones included -- a revoked account's last use is still when
+		// the user was last seen. The partial index above cannot serve it: its
+		// WHERE clause is not in the sub-query, so the planner falls back to a
+		// scan. Covering (user_id, last_used_at) so the MAX comes from the
+		// index rather than the heap.
+		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_last_used ON telegram_accounts(user_id, last_used_at)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER REFERENCES users(id),
@@ -533,6 +540,12 @@ func sqliteSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// The token table had no index on user_id at all -- only token_hash and
+		// family_id -- so identityLastSeenExpr scanned it once per user. That
+		// turned GetIdentity, a point read on the get_my_identity hot path,
+		// into a full scan, and ListIdentities into O(users x tokens).
+		// Covering (user_id, created_at) for the same reason as above.
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_user_created ON oauth_refresh_tokens(user_id, created_at)`,
 		// Worker token revocations (jti denylist). A row with jti set is a
 		// single-token revocation; a row with jti NULL is a blanket
 		// revocation for telegram_id (every worker token for that id issued
@@ -620,6 +633,13 @@ func pgSchema() []string {
 			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
+		// identityLastSeenExpr takes MAX(last_used_at) per user over ALL rows,
+		// revoked ones included -- a revoked account's last use is still when
+		// the user was last seen. The partial index above cannot serve it: its
+		// WHERE clause is not in the sub-query, so the planner falls back to a
+		// scan. Covering (user_id, last_used_at) so the MAX comes from the
+		// index rather than the heap.
+		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_last_used ON telegram_accounts(user_id, last_used_at)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT REFERENCES users(id),
@@ -652,6 +672,12 @@ func pgSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// The token table had no index on user_id at all -- only token_hash and
+		// family_id -- so identityLastSeenExpr scanned it once per user. That
+		// turned GetIdentity, a point read on the get_my_identity hot path,
+		// into a full scan, and ListIdentities into O(users x tokens).
+		// Covering (user_id, created_at) for the same reason as above.
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_user_created ON oauth_refresh_tokens(user_id, created_at)`,
 		// OAuth transient state tables (issue-66). Only created on Postgres; SQLite
 		// deployments keep in-memory maps (single-writer contention makes DB-backed
 		// OAuth worse there). Tables are idempotent (IF NOT EXISTS) and contain
