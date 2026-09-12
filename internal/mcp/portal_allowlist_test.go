@@ -74,8 +74,28 @@ const minReasonLen = 40
 // whether or not the JSON enables it with "self-only": adding a name here is
 // a reviewed Go change, and the reason the tool is safe belongs in the
 // comment next to it.
+// reportsGateTools are handlers that CALL a gate helper and do not act on the
+// answer: they put the verdict in their own output. The AST scan cannot tell
+// that apart from enforcement -- it sees a call -- so the distinction is made
+// here, by a person, and the scan's derived gates are dropped for these tools.
+//
+// Without this, teaching the scan the decomposed BeforeAccount helpers made
+// get_my_send_status derive ["send-gate", "telegram:messages:send"], and the
+// allowlist entry had to claim a check that a client holding only the read
+// scopes sails straight through: the tool reports can_send and returns either
+// way, and its own description says operators cannot disable it. Worse than
+// the wrong entry was the quiet change to the rule -- any handler that
+// mentions a gate function and ignores it would have been enabled with no
+// reviewed Go change at all, which is exactly what selfOnlyTools exists to
+// prevent. A tool named here is treated as gate-less and therefore still needs
+// its vouch below.
+var reportsGateTools = map[string]string{
+	"get_my_send_status": "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
+}
+
 var selfOnlyTools = map[string]string{
 	"get_my_identity":             "returns the caller's own identity row",
+	"get_my_send_status":          "reports the caller's own send gate without acting on it (see reportsGateTools)",
 	"get_my_audit_log":            "reads the caller's own audit rows, peers redacted",
 	"prepare_pin_message":         "mints a confirmation id for the caller's own later pin_message; no Telegram action",
 	"disconnect_telegram_account": "revokes the caller's own session",
@@ -263,6 +283,20 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	fromSource, err := gatesFromSource(fset, parsed...)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A reported gate is not a gate. Dropping the derived set here, before any
+	// consumer reads it, is what keeps the vouch requirement honest for these
+	// handlers rather than letting a mention of a gate helper stand in for one.
+	for name := range reportsGateTools {
+		gates, ok := fromSource[name]
+		if !ok {
+			t.Errorf("reportsGateTools names %q, which no tool registers any more; drop the entry", name)
+			continue
+		}
+		if len(gates) == 0 {
+			t.Errorf("reportsGateTools names %q, but the scan derives no gate for it; the entry explains a subtraction that no longer happens", name)
+		}
+		fromSource[name] = map[string]bool{}
 	}
 	for name := range registered {
 		if _, ok := fromSource[name]; !ok {

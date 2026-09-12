@@ -83,10 +83,9 @@
       "name": "get_my_send_status",
       "enabled": true,
       "upstream_gates": [
-        "send-gate",
-        "telegram:messages:send"
+        "self-only"
       ],
-      "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers. It reports the send gate rather than passing it: the handler runs evaluateSendGateBeforeAccount to compute what it reports, so the gate appears here as a derived check and not as permission to send."
+      "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers. It REPORTS the send gate rather than passing one: the handler computes can_send and returns either way, so this entry claims no gate -- see reportsGateTools in internal/mcp/portal_allowlist_test.go."
     },
     {
       "name": "get_unread_messages",
