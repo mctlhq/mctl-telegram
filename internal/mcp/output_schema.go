@@ -2,8 +2,8 @@ package mcp
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
+	"reflect"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
@@ -44,7 +44,7 @@ func outputSchema[T any]() mcplib.ToolOption {
 		// anonymous string to stderr the way the library option does.
 		fail := func(step string, err error) {
 			slog.Error("mcp: output schema reflection failed; tool will publish no outputSchema",
-				"type", fmt.Sprintf("%T", *new(T)), "step", step, "err", err)
+				"type", reflect.TypeFor[T]().String(), "step", step, "err", err)
 		}
 
 		// SchemaForRaw is the same reflection WithOutputSchema performs
