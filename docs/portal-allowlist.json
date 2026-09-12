@@ -19,7 +19,7 @@
       "upstream_gates": [
         "self-only"
       ],
-      "reason": "Self-service hard delete of the caller's own account row on this server (not the Telegram account). Irreversible for the caller only; no other account can be named."
+      "reason": "Self-service hard delete of the caller's own account row on this server (not the Telegram account). Irreversible for the caller only; no other account can be named. DELIBERATE DECISION 2026-09-12 (owner, mctlhq/.github#35): exposed on the shared surface with no scope gate, so a client holding only the read scopes can drop its own session blob, and recovery needs an operator to re-run the login CLI. Accepted because the blast radius is the caller's own row and the portal cannot widen it; revisit by requiring account:manage if a client ever does this by accident."
     },
     {
       "name": "disconnect_telegram_account",
@@ -27,7 +27,7 @@
       "upstream_gates": [
         "self-only"
       ],
-      "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach."
+      "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach. DELIBERATE DECISION 2026-09-12 (owner, mctlhq/.github#35): same as delete_telegram_account \u2014 no scope gate, irreversible without an operator-run login CLI, accepted because it reaches the caller's own session and nothing else."
     },
     {
       "name": "edit_message",
@@ -83,9 +83,10 @@
       "name": "get_my_send_status",
       "enabled": true,
       "upstream_gates": [
-        "self-only"
+        "send-gate",
+        "telegram:messages:send"
       ],
-      "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers."
+      "reason": "Returns booleans about the caller's own account (can_send, connected, consent); no message content, no peers. It reports the send gate rather than passing it: the handler runs evaluateSendGateBeforeAccount to compute what it reports, so the gate appears here as a derived check and not as permission to send."
     },
     {
       "name": "get_unread_messages",

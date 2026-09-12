@@ -76,7 +76,6 @@ const minReasonLen = 40
 // comment next to it.
 var selfOnlyTools = map[string]string{
 	"get_my_identity":             "returns the caller's own identity row",
-	"get_my_send_status":          "reports the caller's own send gate without acting",
 	"get_my_audit_log":            "reads the caller's own audit rows, peers redacted",
 	"prepare_pin_message":         "mints a confirmation id for the caller's own later pin_message; no Telegram action",
 	"disconnect_telegram_account": "revokes the caller's own session",
@@ -89,8 +88,21 @@ var selfOnlyTools = map[string]string{
 const (
 	gateSelfOnly = "self-only"
 	gateSend     = "send-gate"
+	// sendScopeFromSource is the scope evaluateSendGate binds in tools.go.
+	// TestSendScopeMatchesSource pins it against the source, so a rename
+	// there fails here instead of silently deriving a gate set that names a
+	// scope no handler requires any more.
+	sendScopeFromSource = "telegram:messages:send"
 )
 
+// The scan records that a gate call is PRESENT in the handler, not that its
+// result is enforced: `_ = requireScope(...)` and a check inside a branch both
+// derive a full gate set. That is deliberate — deciding enforcement from the
+// AST would mean re-implementing the type checker — and it is the reason the
+// JSON entry is reviewed by a person rather than merely generated. Read a
+// derived gate as "the handler asks this question", and read the handler when
+// the answer matters.
+//
 // gatesFromSource derives, per registered tool, the set of checks its
 // handler performs, from the Go AST of the given files. Each tool is
 // registered by one top-level function that builds the mcplib.NewTool
@@ -129,10 +141,17 @@ func gatesFromSource(fset *token.FileSet, files ...*ast.File) (map[string]map[st
 							gates[lit] = true
 						}
 					}
-				case "evaluateSendGate":
+				case "evaluateSendGate", "evaluateSendGateBeforeAccount":
+					// evaluateSendGate is evaluateWriteGate with the send
+					// scope bound (tools.go); the BeforeAccount variant is the
+					// same decision taken before the account row is read, and
+					// handlers do gate that way (tools.go:905). Missing it
+					// would report a gated handler as "no checks at all" and
+					// nudge whoever reads that toward a selfOnlyTools vouch
+					// the code does not deserve.
 					gates[gateSend] = true
-					gates["telegram:messages:send"] = true
-				case "evaluateWriteGate":
+					gates[sendScopeFromSource] = true
+				case "evaluateWriteGate", "evaluateWriteGateBeforeAccount":
 					gates[gateSend] = true
 					if lit := stringLit(call.Args, len(call.Args)-1); lit != "" {
 						gates[lit] = true
@@ -253,6 +272,21 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	for name := range fromSource {
 		if _, ok := registered[name]; !ok {
 			t.Errorf("%s: found by the source scan but not registered by the server", name)
+		}
+	}
+
+	// A vouch is a claim about a handler, so it must still describe one: a
+	// name that no longer registers, or one the scan now shows is gated,
+	// means the map outlived the code it was vouching for. Without this a
+	// renamed tool keeps a live gate-less exemption under its old name.
+	for name := range selfOnlyTools {
+		gates, ok := fromSource[name]
+		if !ok {
+			t.Errorf("selfOnlyTools vouches for %q, which no tool registers any more; drop the entry", name)
+			continue
+		}
+		if len(gates) > 0 {
+			t.Errorf("selfOnlyTools vouches for %q as gate-less, but its handler performs %v; drop the vouch and list the gates instead", name, sortedKeys(gates))
 		}
 	}
 
@@ -456,5 +490,20 @@ func (s *Server) toolG() { _ = mcplib.NewTool("g"); _ = requireScope(id, "accoun
 				}
 			}
 		})
+	}
+}
+
+// sendScopeFromSource is retyped in this file, so it has to be checked against
+// the scope evaluateSendGate actually binds. A rename in tools.go would
+// otherwise leave the scan deriving a scope no handler requires, and every
+// enabled entry would keep passing while naming the wrong thing.
+func TestSendScopeMatchesSource(t *testing.T) {
+	src, err := os.ReadFile("tools.go")
+	if err != nil {
+		t.Fatalf("read tools.go: %v", err)
+	}
+	want := `return evaluateWriteGate(ctx, store, id, allowSend, demoReviewerTGID, "` + sendScopeFromSource + `")`
+	if !strings.Contains(string(src), want) {
+		t.Errorf("evaluateSendGate no longer binds %q; update sendScopeFromSource to the scope it binds now", sendScopeFromSource)
 	}
 }
