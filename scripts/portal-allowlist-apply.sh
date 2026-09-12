@@ -6,10 +6,10 @@
 # internal/mcp/portal_allowlist_test.go refuses to let the set change without
 # a decision here). Operator-run: CI holds no Cloudflare credential (#1111).
 #
-#   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh [--dry-run]
+#   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… scripts/portal-allowlist-apply.sh [--dry-run|--check|-h|--help]
 #
-# Run it from a checkout with Go installed: the file is only applied when it
-# matches HEAD and the guard test passes for it.
+# Run it from a checkout with Go installed: the file is only applied (or
+# checked) when it matches HEAD and the guard test passes for it.
 #
 # What is sent: the portal body exactly as read, minus the four top-level
 # timestamps (created_at, created_by, modified_at, modified_by), with only
@@ -22,14 +22,47 @@
 # The token never appears on a command line: curl reads it from a config
 # handed over a file descriptor, so it is in neither the process table nor
 # the shell history. Same discipline as mcpprobe's --token-env.
+#
+# --check compares the committed file against the live portal mapping
+# instead of writing to it: default_disabled, plus the enabled/disabled
+# state of every tool the server has synced. It is held to exactly the same
+# pre-flight guards as an apply or a --dry-run (credentials, jq, git
+# checkout, tracked-and-matches-HEAD, portal=mcp/server=tg, go, the guard
+# test) and never issues a PUT, on any path, including when it finds
+# disagreement. Exit codes: 0 the portal and the file agree, 1 the
+# comparison could not be made (a guard refused, or the API call failed),
+# 2 a usage error, 3 the portal and the file disagree.
 set -euo pipefail
 
+usage() {
+  cat <<EOF
+usage: $0 [--dry-run|--check|-h|--help]
+
+  (no argument)  apply docs/portal-allowlist.json to the Cloudflare portal
+                 mapping. Exit 0 on success, 1 on any pre-flight or API
+                 failure.
+  --dry-run      print the body that would be PUT; never writes. Same exit
+                 codes as the default apply.
+  --check        compare the committed file against the live portal
+                 mapping; never writes. Exit 0 when they agree, 1 when the
+                 comparison could not be made (pre-flight or API failure),
+                 3 when they disagree.
+  -h, --help     print this usage and exit 0.
+
+Exit codes: 0 in sync / applied, 1 could not check or apply, 2 usage error,
+3 drift found (--check only).
+EOF
+}
+
+mode=apply
 case "${1:-}" in
-  "")          dry_run=0 ;;
-  --dry-run)   dry_run=1 ;;
-  *) echo "usage: $0 [--dry-run]  (unknown argument: $1)" >&2; exit 2 ;;
+  "")          mode=apply ;;
+  --dry-run)   mode=dry-run ;;
+  --check)     mode=check ;;
+  -h|--help)   usage; exit 0 ;;
+  *) usage >&2; echo "unknown argument: $1" >&2; exit 2 ;;
 esac
-[ $# -le 1 ] || { echo "usage: $0 [--dry-run]" >&2; exit 2; }
+[ $# -le 1 ] || { usage >&2; echo "usage error: $0 takes at most one argument" >&2; exit 2; }
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 file="$here/docs/portal-allowlist.json"
@@ -117,11 +150,22 @@ synced=$(jq -r '.result.tools // [] | .[].name' <<<"$server_body" | LC_ALL=C sor
 [ -n "$synced" ] || { echo "server '$server': the API returned no synced tools (result.tools is missing or empty); has it connected?" >&2; exit 1; }
 listed=$(jq -r '.tools[].name' <<<"$vetted" | LC_ALL=C sort)
 uncovered=$(LC_ALL=C comm -23 <(echo "$synced") <(echo "$listed"))
+uncovered_drift=""
 if [ -n "$uncovered" ]; then
-  echo "synced tools with no decision in $file:" >&2
-  echo "$uncovered" >&2
-  echo "if a recent release removed these tools, the portal has not re-synced yet: wait and re-run. Do not add them back to the file -- the guard test rejects entries for tools the server no longer registers." >&2
-  exit 1
+  if [ "$mode" = check ]; then
+    # A check reports every category of disagreement in one run instead of
+    # stopping at the first, so this is folded into the drift accumulator
+    # rather than refusing immediately the way apply/dry-run must -- a
+    # refusal here would protect a write that --check never makes.
+    uncovered_drift=$(while IFS= read -r t; do
+      printf 'drift: %s synced by the server with no decision in docs/portal-allowlist.json\n' "$t"
+    done <<<"$uncovered")
+  else
+    echo "synced tools with no decision in $file:" >&2
+    echo "$uncovered" >&2
+    echo "if a recent release removed these tools, the portal has not re-synced yet: wait and re-run. Do not add them back to the file -- the guard test rejects entries for tools the server no longer registers." >&2
+    exit 1
+  fi
 fi
 
 # The write is the mirror of the read check: only tools the portal has
@@ -141,7 +185,66 @@ body=$(jq --arg s "$server" --argjson a "$vetted" --rawfile synced_raw <(echo "$
                              | {name, enabled: (.enabled // false)} ]
       else . end)' <<<"$current")
 
-if [ "$dry_run" = 1 ]; then jq . <<<"$body"; exit 0; fi
+if [ "$mode" = check ]; then
+  # The expected side is read out of the apply's own body, not recomputed,
+  # so the comparison covers exactly what a PUT would write and cannot fall
+  # out of step with the apply. The actual side is the same mapping read
+  # straight from the live portal, before any rewrite.
+  expected=$(jq -c --arg s "$server" '[.servers[] | select(.server_id==$s)][0]' <<<"$body")
+  actual=$(jq -c --arg s "$server" '[.result.servers // [] | .[] | select(.server_id==$s)][0]' <<<"$current")
+
+  # jq's `//` substitutes on `false` as well as on `null`; used anywhere in
+  # this comparison it would turn a genuine `false` into "absent" and report
+  # a matching baseline as drifted -- the bug on record against
+  # mctl-gitops/scripts/portal-controls-apply.sh. Every default below is
+  # therefore built with has() and an explicit conditional, never with `//`.
+  tool_drift=$(jq -r -n --argjson expected "$expected" --argjson actual "$actual" '
+    def dtools(side): if (side|has("updated_tools")) and side.updated_tools != null then side.updated_tools else [] end;
+    def sentinel(side; name):
+      (dtools(side) | map(select(.name == name)) | first) as $e
+      | if ($e != null and ($e|has("enabled"))) then $e.enabled else "absent" end;
+    (if $expected.default_disabled == $actual.default_disabled then empty
+     else "drift: default_disabled portal=\($actual.default_disabled) file=\($expected.default_disabled)" end),
+    (((dtools($expected) | map(.name)) + (dtools($actual) | map(.name)) | unique) as $names
+      | $names[] as $n
+      | sentinel($actual; $n) as $p
+      | sentinel($expected; $n) as $f
+      | select($p != $f)
+      | "drift: \($n) portal=\($p) file=\($f)")
+  ')
+
+  # printf always exits 0, even on an empty string, so this pipeline never
+  # fails a component under pipefail; sed then drops the blank lines that
+  # would otherwise leave from an empty side.
+  total_drift=$(
+    { printf '%s\n' "$uncovered_drift"
+      printf '%s\n' "$tool_drift"; } | sed '/^$/d'
+  )
+  if [ -n "$total_drift" ]; then
+    printf '%s\n' "$total_drift"
+    n=$(wc -l <<<"$total_drift" | tr -d ' ')
+    echo "$n difference(s) between the portal and docs/portal-allowlist.json" >&2
+    exit 3
+  fi
+
+  # A tool the file decides and the server has not synced never reaches
+  # updated_tools in $body in the first place -- the apply holds it back by
+  # design -- so it is not drift; it is named here so it stays visible.
+  held_back=$(LC_ALL=C comm -23 <(echo "$listed") <(echo "$synced"))
+
+  # Same discipline as the applied: summary below: select(. != null) so an
+  # unexpected missing mapping cannot print an empty "in sync" line.
+  jq -er -n --argjson want "$expected" '
+    $want | select(. != null)
+    | "in sync: default_disabled=\(.default_disabled) tools=\(.updated_tools|length) enabled=\([.updated_tools[]|select(.enabled)|.name]|join(","))"' \
+    || { echo "check produced no result for '$server'; verify the portal by hand" >&2; exit 1; }
+  if [ -n "$held_back" ]; then
+    echo "held back (not synced by the server): $(echo "$held_back" | paste -sd, -)"
+  fi
+  exit 0
+fi
+
+if [ "$mode" = dry-run ]; then jq . <<<"$body"; exit 0; fi
 # The decisions going out, as a sorted {name, enabled} projection; the
 # summary must see exactly the same set coming back, or a portal that
 # silently drops, flips or pads decisions would read as a clean apply.
