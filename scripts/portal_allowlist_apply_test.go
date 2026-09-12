@@ -386,7 +386,23 @@ func TestApplyCheck(t *testing.T) {
 
 			// T5: whatever a --check run finds, it must never write -- proven
 			// here by the recorded call log, not by reading the script.
+			//
+			// The log has to be there for that proof to mean anything. Both
+			// assertions below are gated on a successful read, so a stub that
+			// stopped recording -- STUB_CURL_LOG no longer exported, the
+			// append broken -- would skip them and leave every case passing
+			// with write-prevention silently switched off. A case that
+			// reaches the network must therefore show its reads in the log
+			// before the absence of a PUT is allowed to mean anything.
 			logBytes, readErr := os.ReadFile(logPath)
+			if !tc.wantEmptyLog {
+				if readErr != nil {
+					t.Fatalf("no curl call log at %s; the no-PUT assertion below would be vacuous: %v", logPath, readErr)
+				}
+				if !strings.Contains(string(logBytes), "GET\t") {
+					t.Fatalf("expected the portal and server reads in the call log, got:\n%s", logBytes)
+				}
+			}
 			if readErr == nil && strings.Contains(string(logBytes), "PUT\t") {
 				t.Fatalf("--check recorded a PUT in the call log:\n%s", logBytes)
 			}
