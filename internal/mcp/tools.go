@@ -1514,7 +1514,11 @@ Inputs:
   limit       — int, optional, default 50, max 500. Newest entries first.
   before      — RFC3339 timestamp, optional. Only entries strictly older than this; use the "ts" of the last entry of a page as the next "before" for keyset pagination.
 
-Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error, call_path}], count}. call_path is "local" when the call was routed to the user's Local Bridge daemon and is omitted for ordinary hosted calls, so it is the way to confirm which route a call actually took. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.`),
+Output: JSON {entries: [{ts, tool_name, peer_redacted, status, error, call_path, edge_request_id, edge_route, mcp_method, mcp_name, protocol_version}], count}. call_path is "local" when the call was routed to the user's Local Bridge daemon and is omitted for ordinary hosted calls, so it is the way to confirm which route a call actually took. Peer values are redacted at write time; message bodies, phone numbers and session bytes are never recorded.
+
+The last five fields record how the call arrived and are omitted when it carried no such header. edge_request_id is the Cloudflare ray, present on BOTH the portal and the direct route because the zone is proxied — it identifies a request, not a route. edge_route is "portal" when the enterprise MCP Server Portal forwarded the call and "direct" otherwise. mcp_method and mcp_name are the MCP routing headers the Portal sends.
+
+READ THESE AS EVIDENCE, NOT AS IDENTITY. They are headers as received, and on this tool they are headers the SUBJECT of the query sent, not you: a user who calls this server directly chooses every one of them and can make a row look like it came through the portal, or name any tool in mcp_name. Values are sanitized so they cannot inject control characters into your output, which is a different guarantee from being true. Use them to line rows up with edge logs; never conclude from them who did what.`),
 		mcplib.WithNumber("telegram_id",
 			mcplib.Required(),
 			mcplib.Description("Telegram user id whose audit log to read (required).")),
@@ -2222,7 +2226,9 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	// is where these belong today; span attributes wait for whoever introduces
 	// tracing.
 	if ec := edgectx.From(ctx); !ec.Empty() {
-		attrs = append(attrs, "edge_route", ec.Route)
+		if ec.Route != "" {
+			attrs = append(attrs, "edge_route", ec.Route)
+		}
 		if ec.RequestID != "" {
 			attrs = append(attrs, "edge_request_id", ec.RequestID)
 		}

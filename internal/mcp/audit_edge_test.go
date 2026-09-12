@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 )
 
@@ -87,5 +89,48 @@ func TestHTTPContext_CapturesTheArrivingRequestFacts(t *testing.T) {
 	}
 	if got.MCPMethod != "tools/call" || got.MCPName != "get_my_identity" {
 		t.Errorf("MCP routing headers not captured: %+v", got)
+	}
+}
+
+// Both audit tools return db.AuditEntry, so a field added there appears in
+// their output whether or not anyone updated the description. The gap this
+// closes was real: Slice 2 added five fields and documented them on
+// get_my_audit_log only, leaving the admin tool -- the cross-principal read,
+// where the values were chosen by the user being queried -- describing an
+// output it no longer had.
+func TestAuditToolDescriptions_DocumentEveryReturnedField(t *testing.T) {
+	var fields []string
+	for i := 0; i < reflect.TypeOf(db.AuditEntry{}).NumField(); i++ {
+		tag := reflect.TypeOf(db.AuditEntry{}).Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name != "" && name != "-" {
+			fields = append(fields, name)
+		}
+	}
+	if len(fields) == 0 {
+		t.Fatal("no json tags found on db.AuditEntry; this guard would pass vacuously")
+	}
+
+	s := &Server{Store: newToolsTestStore(t)}
+	mine, _ := s.toolGetMyAuditLog()
+	theirs, _ := s.toolGetUserAuditLog()
+	for _, tool := range []struct {
+		name string
+		desc string
+	}{
+		{"get_my_audit_log", mine.Description},
+		{"get_user_audit_log", theirs.Description},
+	} {
+		for _, f := range fields {
+			if !strings.Contains(tool.desc, f) {
+				t.Errorf("%s: description does not mention the returned field %q", tool.name, f)
+			}
+		}
+	}
+
+	// The warning is load-bearing on the admin path specifically: there the
+	// header values were chosen by the subject of the query.
+	if !strings.Contains(theirs.Description, "EVIDENCE, NOT AS IDENTITY") {
+		t.Error("get_user_audit_log must warn that the correlation fields are headers as received, not identity")
 	}
 }

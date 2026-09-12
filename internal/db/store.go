@@ -1493,11 +1493,19 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // concurrent writes would race on prev_hash and break the chain.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath string) {
 	createdAt := time.Now().UTC()
-	// How the call arrived, captured by edgectx.Middleware at the HTTP layer
-	// (mctl-telegram#617 Slice 2). Read from ctx rather than taken as a
-	// parameter so every existing call site -- the MCP tools and the OAuth
-	// connect flow alike -- records it without being rewritten. Zero for an
-	// internal caller with no HTTP request behind it.
+	// How the call arrived (mctl-telegram#617 Slice 2). Captured in
+	// internal/mcp.httpContext, which builds the context of every MCP tool
+	// call, and read from ctx here rather than taken as a parameter so the
+	// ~25 existing call sites did not have to be rewritten.
+	//
+	// Capture is MCP_PATH only. The OAuth connect flow
+	// (internal/oauth/enable_access.go) and internal/agentapi pass an
+	// r.Context() from handlers that never go through httpContext, so their
+	// rows -- every connect:* event and the agent-API ones -- carry NULL
+	// correlation columns. That is a true statement about those calls rather
+	// than a gap: the correlation contract is about MCP calls, and a NULL
+	// here means "not an MCP call through the portal path", not "unknown".
+	// Wiring the web handlers is a separate change with its own decision.
 	ec := edgectx.From(ctx)
 	edge := auditEdge{
 		RequestID:       ec.RequestID,

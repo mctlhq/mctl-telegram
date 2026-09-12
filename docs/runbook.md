@@ -336,7 +336,7 @@ action rows, and close the test window if it dead-letters again.
 | `agent_jobs`, `agent_job_attempts` | Queue state, attempt timing, bounded error text, result IDs | Account lifetime; message body is not copied here | Hard account deletion |
 | `agent_profiles` | Policy settings and per-tenant encrypted owner profile | Account lifetime | Hard account deletion; a content-free legacy-import tombstone may remain while the login identity remains |
 | update/cursor/sent-marker tables | Telegram watermarks, Saved Messages cursor, dedup IDs | Account lifetime | Hard account deletion |
-| `audit_logs` | Tool/action metadata and redacted errors; no message body/token/session | `AUDIT_RETENTION_DAYS` (90d default) | Audit sweeper; approved early-purge SQL if required |
+| `audit_logs` | Tool/action metadata, redacted errors, and how the call arrived (`edge_request_id`, `edge_route`, `mcp_method`, `mcp_name`, `protocol_version`); no message body/token/session | `AUDIT_RETENTION_DAYS` (90d default) | Audit sweeper; approved early-purge SQL if required |
 | worker Claude session | No persisted conversation (`--no-session-persistence`) | Process lifetime | Process/pod exit |
 | container logs | Redacted structured operational logs | Platform Loki policy, normally 14–30d | Platform log retention |
 | database backups / PVC snapshots | Encrypted database pages and worker credential state | Platform backup policy | Natural backup expiry; selective row deletion cannot rewrite immutable historical snapshots |
@@ -1813,6 +1813,36 @@ SELECT call_path, COUNT(*) FROM audit_logs
 WHERE created_at >= NOW() - INTERVAL '1 hour'
 GROUP BY call_path;
 ```
+
+### Following one call across the layers
+
+`audit_logs` records how each MCP call arrived (`mctl-telegram#617`). Join on
+the ray to line an mctl row up with edge evidence, and read `edge_route` to see
+which path it took:
+
+```sql
+-- Everything that carried one Cloudflare ray.
+SELECT created_at, user_id, tool_name, edge_route, mcp_method, mcp_name
+FROM audit_logs WHERE edge_request_id = :cf_ray;
+
+-- Portal versus direct traffic in the last hour.
+SELECT edge_route, COUNT(*) FROM audit_logs
+WHERE created_at >= NOW() - INTERVAL '1 hour'
+GROUP BY edge_route;
+```
+
+Two cautions before drawing a conclusion from these columns:
+
+- **They are headers as received, not identity.** A direct caller chooses every
+  one of them, so `edge_route = 'portal'` is evidence, never proof. Nothing in
+  the service authorizes on them, and neither should a human.
+- **A ray is per request, and one portal tool call is two upstream requests**
+  (`server/discover`, then `tools/call`), each with its own ray. `Cf-Ray` also
+  arrives on the direct route, because the zone is proxied — its presence says
+  nothing about which path was used.
+
+NULL columns mean the row did not come from an MCP call through the HTTP path:
+the OAuth `connect:*` events and the agent API do not capture them.
 
 ### Mitigation
 
