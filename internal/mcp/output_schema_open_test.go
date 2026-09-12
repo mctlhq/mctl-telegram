@@ -133,6 +133,14 @@ func TestNoToolUsesTheLibraryOutputSchemaOption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve module root: %v", err)
 	}
+	// "../.." is the module root only while this package sits exactly two
+	// levels down. Move it (internal/mcp -> internal/mcp/server, plausible
+	// once tools.go grows again) and root silently becomes internal/ — the
+	// walk still finds plenty of files, so the scanned>0 guard below would
+	// not notice, and coverage would shrink without a word.
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("%s is not the module root (no go.mod); this test's relative path is stale: %v", root, err)
+	}
 	var scanned int
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -217,8 +225,12 @@ func assertPublishedMatchesReflected[T any](t *testing.T) {
 	if err != nil {
 		t.Fatalf("reflect schema: %v", err)
 	}
-	var reflected any
-	if err := json.Unmarshal(raw, &reflected); err != nil {
+	// Decoded with the same helper publishedOutputSchema uses. json.Unmarshal
+	// reads numbers as float64 and jsonschema.UnmarshalJSON as json.Number,
+	// and the two marshal back differently — so mixing them would make this
+	// comparison turn on the decoder rather than on the schema.
+	reflected, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
 		t.Fatalf("decode reflected schema: %v", err)
 	}
 	// The one transformation the option is allowed to make.
@@ -239,6 +251,46 @@ func assertPublishedMatchesReflected[T any](t *testing.T) {
 	}
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("published schema is not the reflected schema minus the stamps:\n reflected: %s\n published: %s", wantJSON, gotJSON)
+	}
+}
+
+// TestNoPublishedSchemaUsesRefs covers, across every registered tool, the one
+// typed-round-trip failure that produces a BROKEN schema rather than a merely
+// lossy one.
+//
+// mcplib.ToolOutputSchema has no field for $defs, so if the reflector ever
+// emits a schema that hoists a definition and points at it with $ref, the
+// decode drops $defs and keeps the $ref — leaving every consumer with a
+// dangling pointer. The equivalence test above catches this, but only for the
+// two types it names; it cannot be made generic, because a registered tool
+// gives back an mcplib.Tool rather than the type parameter it was built from.
+//
+// This is the generic half: no published schema may contain $ref at all.
+// Today none does — the result structs are flat and non-recursive, so the
+// reflector inlines everything — which is exactly why a $ref appearing is the
+// signal worth failing on.
+func TestNoPublishedSchemaUsesRefs(t *testing.T) {
+	registered := (&Server{ToolFilter: ""}).newMCPServer().ListTools()
+	if len(registered) == 0 {
+		t.Fatal("no tools registered: the enumeration is broken, not the invariant")
+	}
+	names := make([]string, 0, len(registered))
+	for name := range registered {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		doc := publishedOutputSchema(t, registered[name].Tool)
+		if doc == nil {
+			continue // covered by TestOutputSchemasStayOpenToAdditiveFields
+		}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		if bytes.Contains(raw, []byte(`"$ref"`)) {
+			t.Errorf("%s: published schema contains $ref; the typed round-trip drops $defs, so the pointer dangles for every consumer", name)
+		}
 	}
 }
 
