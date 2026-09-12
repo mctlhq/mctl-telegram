@@ -352,26 +352,3 @@ func TestLoadAgentProfileOwnerRequired(t *testing.T) {
 		})
 	}
 }
-
-// The header probe is a temporary measurement tool (mctl-telegram#617 Slice 1)
-// that logs sanitized inbound headers. Unset must mean off: it has to be
-// switched on for a measurement window and left off everywhere else.
-func TestLoadMCPHeaderProbeDefaultsOff(t *testing.T) {
-	t.Setenv("MCP_HEADER_PROBE", "")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.MCPHeaderProbe {
-		t.Fatal("MCP_HEADER_PROBE must default to false")
-	}
-
-	t.Setenv("MCP_HEADER_PROBE", "true")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if !cfg.MCPHeaderProbe {
-		t.Fatal("MCP_HEADER_PROBE=true must enable the probe")
-	}
-}

@@ -11,6 +11,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -177,10 +178,17 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 func (s *Server) HTTPHandler() http.Handler {
 	return mcpserver.NewStreamableHTTPServer(
 		s.newMCPServer(),
-		mcpserver.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
-			return r.Context()
-		}),
+		mcpserver.WithHTTPContextFunc(httpContext),
 	)
+}
+
+// httpContext is what every tool call's ctx is built from. It carries the
+// request-identity facts (Cf-Ray, the portal/direct route decided by Cf-Worker,
+// the MCP routing headers) down to the audit write, which is the correlation
+// contract of mctl-telegram#617 Slice 2. Split out of HTTPHandler so the
+// capture is exercised by a test rather than only by a deployed request.
+func httpContext(_ context.Context, r *http.Request) context.Context {
+	return edgectx.With(r.Context(), edgectx.FromRequest(r))
 }
 
 // newMCPServer builds the MCP server with every tool registered. It is the

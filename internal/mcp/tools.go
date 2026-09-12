@@ -19,6 +19,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
@@ -1007,7 +1008,9 @@ Inputs (all optional):
   limit  — int, default 50, max 500. Newest entries first.
   before — RFC3339 timestamp. When set, only entries strictly older than this are returned. Use the "ts" of the last entry from a previous page as the next "before" for keyset pagination.
 
-Output: JSON array of {ts, tool_name, peer_redacted, status, error, call_path}. call_path is "local" for calls routed to a Local Bridge daemon and omitted for hosted calls. Peer values are redacted by RedactPeer at write time, so dialog identifiers never appear here in clear text. Message bodies, phone numbers, and session bytes are never written to the table.
+Output: JSON array of {ts, tool_name, peer_redacted, status, error, call_path, edge_request_id, edge_route, mcp_method, mcp_name, protocol_version}. call_path is "local" for calls routed to a Local Bridge daemon and omitted for hosted calls. Peer values are redacted by RedactPeer at write time, so dialog identifiers never appear here in clear text. Message bodies, phone numbers, and session bytes are never written to the table.
+
+The last five fields record how the call arrived and are omitted when the call carried no such header. edge_request_id is the Cloudflare ray, which is present on BOTH routes because the zone is proxied — it identifies a request, not a route. edge_route is "portal" when the enterprise MCP Server Portal forwarded the call and "direct" otherwise. mcp_method and mcp_name are the MCP routing headers the Portal sends. All five are headers as received: read them as evidence when tracing a call, never as proof of who the caller is.
 
 This tool is part of the self-service transparency surface — operators cannot disable it for an authenticated user.`),
 		mcplib.WithNumber("limit",
@@ -2212,6 +2215,26 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	}
 	if cp != "" {
 		attrs = append(attrs, "call_path", cp)
+	}
+	// Correlation facts, mirrored so a Loki line can be joined to the audit
+	// row and to the edge (mctl-telegram#617 Slice 2). This repository has no
+	// tracer wired -- opentelemetry is an indirect dependency only -- so slog
+	// is where these belong today; span attributes wait for whoever introduces
+	// tracing.
+	if ec := edgectx.From(ctx); !ec.Empty() {
+		attrs = append(attrs, "edge_route", ec.Route)
+		if ec.RequestID != "" {
+			attrs = append(attrs, "edge_request_id", ec.RequestID)
+		}
+		if ec.MCPMethod != "" {
+			attrs = append(attrs, "mcp_method", ec.MCPMethod)
+		}
+		if ec.MCPName != "" {
+			attrs = append(attrs, "mcp_name", ec.MCPName)
+		}
+		if ec.ProtocolVersion != "" {
+			attrs = append(attrs, "protocol_version", ec.ProtocolVersion)
+		}
 	}
 	if err != nil {
 		// Resolution failures format the user-supplied peer verbatim

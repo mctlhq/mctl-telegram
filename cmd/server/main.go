@@ -568,14 +568,7 @@ func main() {
 	// pass through. BrowserRedirect stays outermost so human GETs still land on
 	// the instructions page.
 	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
-	// HeaderProbe is outermost and temporary (#617 Slice 1): it must observe
-	// every request that reaches MCP_PATH, including ones auth or the origin
-	// guard will reject, because "the Portal call arrived but was refused" is
-	// itself a measurement result. No-op unless MCP_HEADER_PROBE is set.
-	if cfg.MCPHeaderProbe {
-		slog.Warn("temporary MCP header probe ENABLED: sanitized inbound headers on MCP_PATH are logged (mctl-telegram#617 Slice 1); turn MCP_HEADER_PROBE off when the measurement is done")
-	}
-	mux.Mount(cfg.MCPPath, web.HeaderProbe(web.BrowserRedirect(guarded, "/"), cfg.MCPHeaderProbe))
+	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

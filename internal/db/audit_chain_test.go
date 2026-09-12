@@ -128,7 +128,7 @@ func TestVerifyAuditChain_PreM4NullCallPathVerifies(t *testing.T) {
 	prev := make([]byte, sha256.Size)
 	// Hash without call_path (callPath.Valid == false) — exactly how the
 	// pre-M4 code hashed the row.
-	entry := hashAuditEntry(prev, uid, "legacy_tool", "", "ok", "", sql.NullString{}, createdAt)
+	entry := hashAuditEntry(prev, uid, "legacy_tool", "", "ok", "", sql.NullString{}, createdAt, auditEdge{})
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL)`,
