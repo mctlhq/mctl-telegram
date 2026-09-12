@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.65.0](https://github.com/mctlhq/mctl-telegram/compare/0.64.2...0.65.0) (2026-09-12)
+
+
+### Features
+
+* **observability:** temporary inbound-header probe on MCP_PATH for [#617](https://github.com/mctlhq/mctl-telegram/issues/617) Slice 1 ([ef09452](https://github.com/mctlhq/mctl-telegram/commit/ef0945202991bd5a74109a814fa65ec39912693e))
+* **observability:** temporary inbound-header probe on MCP_PATH for [#617](https://github.com/mctlhq/mctl-telegram/issues/617) Slice 1 ([0b272f6](https://github.com/mctlhq/mctl-telegram/commit/0b272f681828bca27f359c86e2ff05069b497c2a))
+
+
+### Bug Fixes
+
+* **observability:** bound the address branch and stop inventing content-length ([172da7f](https://github.com/mctlhq/mctl-telegram/commit/172da7f8e54f1ff1e193db54b3eff2b46d3116a5))
+* **observability:** bound the keep list per prefix so it cannot be flooded ([a3ab0c2](https://github.com/mctlhq/mctl-telegram/commit/a3ab0c25bba104e0e6664f800a855a6cf0f327b5))
+* **observability:** complete the probe's header set, cap and key it ([568f1b2](https://github.com/mctlhq/mctl-telegram/commit/568f1b27456202ec24d6ab88b34c538a3a754152))
+
 ## [0.64.2](https://github.com/mctlhq/mctl-telegram/compare/0.64.1...0.64.2) (2026-09-11)
 
 
