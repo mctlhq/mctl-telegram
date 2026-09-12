@@ -53,7 +53,7 @@ func (s *Server) toolPrepareGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(true),
-		mcplib.WithOutputSchema[prepareGetMediaResult](),
+		outputSchema[prepareGetMediaResult](),
 		mcplib.WithDescription(`Fetch a message's media metadata and return a confirmation_id for get_media.
 
 The confirmation_id is valid for 10 minutes (single-shot). It binds the download to
@@ -143,7 +143,7 @@ func (s *Server) toolGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(true),
-		mcplib.WithOutputSchema[getMediaResult](),
+		outputSchema[getMediaResult](),
 		mcplib.WithDescription(`Download media bytes for a Telegram message identified by (peer, message_id).
 
 Requires a confirmation_id from prepare_get_media for the same (peer, message_id) pair.
@@ -285,7 +285,7 @@ func (s *Server) toolSendMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
-		mcplib.WithOutputSchema[telegram.SendMediaResult](),
+		outputSchema[telegram.SendMediaResult](),
 		mcplib.WithDescription(`Send a photo, video, document, animation (gif), or voice note to a Telegram peer, with an optional caption.
 
 Draft-by-default: like send_message, media is sent for real only when the server send gate
