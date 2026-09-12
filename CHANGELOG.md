@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.66.0](https://github.com/mctlhq/mctl-telegram/compare/0.65.0...0.66.0) (2026-09-12)
+
+
+### Features
+
+* **audit:** record how an MCP call arrived, and retire the probe ([2d98120](https://github.com/mctlhq/mctl-telegram/commit/2d9812008c8f08eaa8b49961e9f145dbd0cab942))
+* **audit:** record how an MCP call arrived, and retire the probe ([461400a](https://github.com/mctlhq/mctl-telegram/commit/461400a36d19352e763be20daa5963116b30772e))
+* **portal:** enable every tg tool on the aggregate portal, upstream gate decides ([ca14933](https://github.com/mctlhq/mctl-telegram/commit/ca149331dca5f986fd7574a86f59a3d3f84d45ef))
+* **portal:** enable every tg tool on the aggregate portal, upstream gate decides ([c6ec0b8](https://github.com/mctlhq/mctl-telegram/commit/c6ec0b88f552398d8576a9c65fd9b8fa3b7b44b5))
+
+
+### Bug Fixes
+
+* **audit:** correct the capture claim, document the admin tool, index the join ([9fc474f](https://github.com/mctlhq/mctl-telegram/commit/9fc474ff95cfaa9f056c3cf0f7ca72cf740700a0))
+* **portal:** a reported gate is not a gate ([64b1517](https://github.com/mctlhq/mctl-telegram/commit/64b151782342bed1364d2312a92c632d118bdaf0))
+* **portal:** record the destructive-tool decision and close the scan's blind spots ([ba44176](https://github.com/mctlhq/mctl-telegram/commit/ba441766a72db12228b4a522f2f330db3bdd95c2))
+
 ## [0.65.0](https://github.com/mctlhq/mctl-telegram/compare/0.64.2...0.65.0) (2026-09-12)
 
 
