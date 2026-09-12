@@ -14,6 +14,7 @@ require (
 	github.com/mark3labs/mcp-go v1.0.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/yuin/goldmark v1.8.6
 	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.36.0
@@ -56,7 +57,6 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
