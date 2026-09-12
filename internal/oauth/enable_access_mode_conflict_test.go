@@ -124,7 +124,7 @@ func TestEnableAccess_LocalModeConflict_RefusedBeforeLogin(t *testing.T) {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		cfgs ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		loginCalled.Store(true)
 		return inner(ctx, apiID, apiHash, store, uid, phone, askCode, askPassword, cfgs...)
 	})
@@ -191,7 +191,7 @@ func TestEnableAccess_LocalModeConflict_RaceRefusalIsTerminal(t *testing.T) {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		cfgs ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		loginCalled.Store(true)
 		return inner(ctx, apiID, apiHash, store, uid, phone, askCode, askPassword, cfgs...)
 	})
@@ -581,14 +581,14 @@ func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) 
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(lctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		// gotd's SessionStore write. With no loaded row id it targets every
 		// active row; here that is the hosted row created below.
 		if err := store.UpdateSessionBlob(lctx, uid, []byte("fake-mtproto-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		// Self-service activation lands in the window between the login
 		// returning and the reload. Direct SQL because ProvisionLocalAccount
@@ -599,9 +599,9 @@ func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) 
 			                               session_encrypted, mode, send_enabled, connected_at)
 			 VALUES ($1, $2, $3, $4, NULL, $5, $6, CURRENT_TIMESTAMP)`,
 			uid, 500100101, "Dana", "dana_tg", db.ModeLocal, false); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
-		return 500100101, "Dana", "dana_tg", nil
+		return telegram.LoginResult{TelegramID: 500100101, DisplayName: "Dana", Username: "dana_tg"}, nil
 	})
 	esTok := driveToPhone(t, mux)
 
@@ -767,12 +767,12 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		// Wait out the flow's CodeTTL so the identity-mismatch branch runs
 		// after bgCtx is dead. A fixed sleep would also expire it; waiting
@@ -781,9 +781,9 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 		select {
 		case <-ctx.Done():
 		case <-time.After(3 * time.Second):
-			return 0, "", "", errors.New("test: flow context still alive; not exercising the expired-deadline path")
+			return telegram.LoginResult{}, errors.New("test: flow context still alive; not exercising the expired-deadline path")
 		}
-		return 999000111, "Someone Else", "someoneelse", nil
+		return telegram.LoginResult{TelegramID: 999000111, DisplayName: "Someone Else", Username: "someoneelse"}, nil
 	}, func(c *Config) {
 		c.CodeTTL = time.Second
 	})

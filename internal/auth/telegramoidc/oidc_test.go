@@ -255,3 +255,32 @@ func TestParseIdentityKeepsProfileFields(t *testing.T) {
 		t.Errorf("profile fields not preserved: %+v", got)
 	}
 }
+
+// TestParseIdentityLanguageCode covers both shapes issue-620 added:
+// language_code present on the id_token, and absent (empty string, no error)
+// — Telegram has never been observed sending this claim, so the absent case
+// is the one that matters in production.
+func TestParseIdentityLanguageCode(t *testing.T) {
+	got, err := parseIdentity(idTokenClaims{
+		ID:           json.RawMessage(`"42"`),
+		Username:     "alice",
+		LanguageCode: "en",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.LanguageCode != "en" {
+		t.Errorf("LanguageCode = %q, want %q", got.LanguageCode, "en")
+	}
+
+	got, err = parseIdentity(idTokenClaims{
+		ID:       json.RawMessage(`"42"`),
+		Username: "alice",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.LanguageCode != "" {
+		t.Errorf("LanguageCode = %q, want empty string when the claim is absent", got.LanguageCode)
+	}
+}

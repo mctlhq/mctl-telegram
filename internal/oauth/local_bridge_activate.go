@@ -1041,6 +1041,18 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem resolving your account. Approve again to retry.")
 		return
 	}
+	// Best-effort capture of the verified OIDC identity attributes, matching
+	// the OIDC callback in server.go. A capture failure must not block
+	// activation -- the session/device provisioning below is what matters.
+	if cErr := s.store.CaptureTelegramIdentity(ctx, uid, db.TelegramIdentityAttrs{
+		Username:     identity.Username,
+		FirstName:    identity.FirstName,
+		LastName:     identity.LastName,
+		DisplayName:  displayName,
+		LanguageCode: identity.LanguageCode,
+	}); cErr != nil {
+		slog.Warn("local bridge activation: capture telegram identity failed", "telegram_id", identity.TelegramID, "err", cErr)
+	}
 
 	provErr := s.store.ProvisionLocalAccount(ctx, uid, identity.TelegramID, displayName, identity.Username)
 	if provErr != nil {

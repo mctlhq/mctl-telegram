@@ -126,9 +126,11 @@ A `server_error` here is not a de-provisioning signal — it means the check
 itself could not run. Retry; do not read it as either outcome.
 
 To confirm at the tool layer as well, a positive check is
-`list_telegram_identities` returning data for the identity; a negative check is
-a write tool such as `set_telegram_access` or `mint_worker_token` being refused
-with a missing-scope error.
+`list_telegram_identities` returning data for the identity (including its
+`provenance` object, which explains any blank name/language/timestamp field
+rather than leaving it merely absent); a negative check is a write tool such
+as `set_telegram_access` or `mint_worker_token` being refused with a
+missing-scope error.
 
 `TG_LOGIN_LOOKUP_ADMINS` is parsed in `internal/config/config.go` into
 `TGLoginLookupAdmins`, then converted into `oauth.Config.LookupAdminTelegramIDs`.

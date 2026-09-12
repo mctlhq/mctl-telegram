@@ -113,22 +113,28 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		if needPw {
 			if _, err := askPassword(ctx); err != nil {
-				return 0, "", "", err
+				return telegram.LoginResult{}, err
 			}
 		}
 		if failErr != nil {
-			return 0, "", "", failErr
+			return telegram.LoginResult{}, failErr
 		}
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
-		return 500100101, "Dana", "dana_tg", nil
+		return telegram.LoginResult{
+			TelegramID:   500100101,
+			DisplayName:  "Dana",
+			Username:     "dana_tg",
+			FirstName:    "Dana",
+			LanguageCode: "en",
+		}, nil
 	}
 }
 
@@ -142,14 +148,18 @@ func stubLoginWrongAccount() LoginFunc {
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
 		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
+	) (telegram.LoginResult, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
 		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
-			return 0, "", "", err
+			return telegram.LoginResult{}, err
 		}
-		return 999000111, "Someone Else", "someoneelse", nil
+		return telegram.LoginResult{
+			TelegramID:  999000111,
+			DisplayName: "Someone Else",
+			Username:    "someoneelse",
+		}, nil
 	}
 }
 
@@ -1250,5 +1260,119 @@ func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
 	}
 	if tier != db.TierNone {
 		t.Fatalf("tier after raced finishEnable = %q, want %q (admin none must survive)", tier, db.TierNone)
+	}
+}
+
+// TestEnableAccess_CapturesIdentityAttributes covers the phone-login
+// CaptureTelegramIdentity call site (enable_access.go).
+//
+// Review of PR #627 noted that all three capture sites are best-effort with
+// only a slog.Warn on failure, so deleting any of them keeps the suite green
+// while every attribute silently stays at "not_captured" -- the exact defect
+// the feature exists to prevent. stubLogin was extended to return FirstName
+// and LanguageCode, but nothing asserted they reached the users row.
+//
+// Asserted through GetIdentity rather than a raw column read, because
+// provenance is the observable the MCP surface returns: a value present with
+// the wrong provenance is as wrong as a missing one.
+func TestEnableAccess_CapturesIdentityAttributes(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	es := driveToPhone(t, mux)
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("enable did not complete: %s", loc)
+	}
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	row, err := srv.store.GetIdentity(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetIdentity: %v", err)
+	}
+
+	// stubLogin's LoginResult is what the MTProto self-user would carry.
+	for _, want := range []struct {
+		field, got, expect string
+	}{
+		{"FirstName", row.FirstName, "Dana"},
+		{"LanguageCode", row.LanguageCode, "en"},
+		{"Username", row.Username, "dana_tg"},
+	} {
+		if want.got != want.expect {
+			t.Errorf("%s = %q, want %q -- the enable-path capture did not reach the users row",
+				want.field, want.got, want.expect)
+		}
+	}
+	for field, prov := range map[string]string{
+		"FirstName":    row.Provenance.FirstName,
+		"LanguageCode": row.Provenance.LanguageCode,
+	} {
+		if prov == db.ProvenanceNotCaptured {
+			t.Errorf("%s provenance = %q, want a captured provenance", field, prov)
+		}
+	}
+}
+
+// TestTelegramCallback_CapturesIdentityAttributes covers the OIDC-callback
+// CaptureTelegramIdentity call site (server.go).
+//
+// Same reasoning as TestEnableAccess_CapturesIdentityAttributes: the call is
+// best-effort with only a slog.Warn, so its removal is invisible to every
+// other test. This one matters most of the three, because the callback is the
+// path every sign-in takes -- LanguageCode and LastName are carried by the
+// verified OIDC identity and by nothing else, so if this site stops writing
+// them no later flow fills them in.
+func TestTelegramCallback_CapturesIdentityAttributes(t *testing.T) {
+	ctx := context.Background()
+	const tgID = int64(444000555)
+
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	authFake(srv).identity = &telegramoidc.Identity{
+		TelegramID:   tgID,
+		Username:     "erin_tg",
+		FirstName:    "Erin",
+		LastName:     "Okafor",
+		LanguageCode: "pt",
+	}
+	_, challenge := pkceVerifierAndChallenge()
+	state := authorizeViaChi(t, mux, challenge)
+	rec := callbackViaChi(t, mux, state)
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("callback did not issue a code: %s", loc)
+	}
+
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "erin_tg", "Erin")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	row, err := srv.store.GetIdentity(ctx, uid)
+	if err != nil {
+		t.Fatalf("GetIdentity: %v", err)
+	}
+
+	// LastName and LanguageCode are the two the callback alone can supply.
+	for _, want := range []struct{ field, got, expect string }{
+		{"FirstName", row.FirstName, "Erin"},
+		{"LastName", row.LastName, "Okafor"},
+		{"LanguageCode", row.LanguageCode, "pt"},
+	} {
+		if want.got != want.expect {
+			t.Errorf("%s = %q, want %q -- the OIDC callback capture did not reach the users row",
+				want.field, want.got, want.expect)
+		}
+	}
+	if row.Provenance.LanguageCode == db.ProvenanceNotCaptured {
+		t.Errorf("LanguageCode provenance = %q, want a captured provenance",
+			row.Provenance.LanguageCode)
 	}
 }

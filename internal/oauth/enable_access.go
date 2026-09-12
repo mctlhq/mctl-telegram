@@ -201,11 +201,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			lf.err = db.ErrAccountModeConflict
 			return
 		}
-		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
+		res, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
 		if err != nil {
 			lf.err = err
 			return
 		}
+		tgID, displayName, username := res.TelegramID, res.DisplayName, res.Username
 		// From here on the login has already persisted its session bytes
 		// through the gotd SessionStore, and with no loaded row id that write
 		// lands on EVERY active row of this uid -- including a bridge-only one
@@ -340,6 +341,21 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// Past the point of no return for the repair: the session is now
 		// legitimately the user's, and clearing it would undo a good login.
 		saved = true
+		// Capture the MTProto self-user's verified identity attributes now
+		// that the id match and SaveSession have both succeeded -- placed
+		// here rather than inside telegram.Login so a login that resolves to
+		// the wrong account (the tgID != wantTgID branch above) never stamps
+		// that account's names onto this uid. Best-effort: a capture failure
+		// must not turn a valid login into a failed one.
+		if cErr := s.store.CaptureTelegramIdentity(bgCtx, uid, db.TelegramIdentityAttrs{
+			Username:     res.Username,
+			FirstName:    res.FirstName,
+			LastName:     res.LastName,
+			DisplayName:  res.DisplayName,
+			LanguageCode: res.LanguageCode,
+		}); cErr != nil {
+			slog.Warn("enable: capture telegram identity failed", "uid", uid, "err", cErr)
+		}
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)

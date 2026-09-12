@@ -47,11 +47,12 @@ var scopes = []string{oidc.ScopeOpenID, "profile"}
 // TelegramID, retained for the sub-only contingency but unused on the primary
 // path.
 type Identity struct {
-	TelegramID int64
-	Sub        string
-	Username   string
-	FirstName  string
-	LastName   string
+	TelegramID   int64
+	Sub          string
+	Username     string
+	FirstName    string
+	LastName     string
+	LanguageCode string
 }
 
 // Authenticator is the behaviour internal/oauth depends on. A real *Client
@@ -201,6 +202,11 @@ type idTokenClaims struct {
 	Username  string          `json:"username"`
 	FirstName string          `json:"first_name"`
 	LastName  string          `json:"last_name"`
+	// LanguageCode is speculative: neither spike #48 nor today's idTokenClaims
+	// has observed Telegram send a language_code claim over the profile
+	// scope. The field is captured if Telegram ever sends it and otherwise
+	// stays empty with no error — see design.md's "Open questions".
+	LanguageCode string `json:"language_code"`
 }
 
 // parseIdentity converts verified claims into an Identity. It is pure and
@@ -211,11 +217,12 @@ func parseIdentity(c idTokenClaims) (*Identity, error) {
 		return nil, err
 	}
 	id := &Identity{
-		TelegramID: tgID,
-		Sub:        c.Sub,
-		Username:   c.Username,
-		FirstName:  c.FirstName,
-		LastName:   c.LastName,
+		TelegramID:   tgID,
+		Sub:          c.Sub,
+		Username:     c.Username,
+		FirstName:    c.FirstName,
+		LastName:     c.LastName,
+		LanguageCode: c.LanguageCode,
 	}
 	if id.TelegramID == 0 && id.Sub == "" {
 		return nil, errors.New("telegramoidc: id_token carries neither an id claim nor a sub")

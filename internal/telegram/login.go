@@ -88,6 +88,22 @@ func loginMiddlewares(cfg LoginConfig) []telegram.Middleware {
 	return mws
 }
 
+// LoginResult is the resolved Telegram self-user metadata a successful login
+// returns. FirstName/LastName/LanguageCode are populated from *tg.User (the
+// gotd self-user), including the flag-gated LangCode field, which is empty
+// for most accounts — that is a normal outcome, not a partial failure.
+// DisplayName keeps the same TrimSpace(FirstName+" "+LastName) composition
+// used before this type existed, falling back to Username when both names
+// are empty.
+type LoginResult struct {
+	TelegramID   int64
+	DisplayName  string
+	Username     string
+	FirstName    string
+	LastName     string
+	LanguageCode string
+}
+
 // Login runs the interactive phone -> code -> 2FA-password flow for a single
 // user. Session bytes are persisted into the DB via the SessionStore. Returns
 // the resolved Telegram user metadata for storage in telegram_accounts.
@@ -101,12 +117,12 @@ func Login(
 	askCode func(ctx context.Context) (string, error),
 	askPassword func(ctx context.Context) (string, error),
 	cfgs ...LoginConfig,
-) (telegramUserID int64, displayName, username string, err error) {
+) (LoginResult, error) {
 	if apiID == 0 || apiHash == "" {
-		return 0, "", "", errors.New("TG_API_ID / TG_API_HASH must be set before login")
+		return LoginResult{}, errors.New("TG_API_ID / TG_API_HASH must be set before login")
 	}
 	if phone == "" {
-		return 0, "", "", errors.New("phone required")
+		return LoginResult{}, errors.New("phone required")
 	}
 	var cfg LoginConfig
 	if len(cfgs) > 0 {
@@ -136,6 +152,7 @@ func Login(
 	// handler only records a coarse "send code timeout" in the audit, so these
 	// distinguish a dial/handshake hang (never reach "connection established")
 	// from a SendCode hang (established, but the auth flow never returns).
+	var res LoginResult
 	slog.InfoContext(ctx, "telegram login: connecting to telegram", "user_id", userID)
 	runErr := client.Run(ctx, func(ctx context.Context) error {
 		slog.InfoContext(ctx, "telegram login: connection established, running auth flow", "user_id", userID)
@@ -151,12 +168,15 @@ func Login(
 		if err != nil {
 			return fmt.Errorf("self: %w", err)
 		}
-		telegramUserID = me.ID
-		displayName = strings.TrimSpace(me.FirstName + " " + me.LastName)
-		if displayName == "" {
-			displayName = me.Username
+		res.TelegramID = me.ID
+		res.FirstName = me.FirstName
+		res.LastName = me.LastName
+		res.Username = me.Username
+		res.LanguageCode = me.LangCode
+		res.DisplayName = strings.TrimSpace(me.FirstName + " " + me.LastName)
+		if res.DisplayName == "" {
+			res.DisplayName = me.Username
 		}
-		username = me.Username
 		// Force a session flush so the SessionStorage sees the post-auth bytes.
 		// gotd already calls StoreSession on every change, but we trigger one
 		// trivial call to be safe.
@@ -164,17 +184,17 @@ func Login(
 		return nil
 	})
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return 0, "", "", runErr
+		return LoginResult{}, runErr
 	}
 
 	// Sanity check session persisted.
 	if _, err := sessStore.LoadSession(ctx); err != nil {
 		if errors.Is(err, session.ErrNotFound) {
-			return 0, "", "", errors.New("login completed but no session bytes were persisted")
+			return LoginResult{}, errors.New("login completed but no session bytes were persisted")
 		}
-		return 0, "", "", err
+		return LoginResult{}, err
 	}
-	return telegramUserID, displayName, username, nil
+	return res, nil
 }
 
 type interactiveAuthenticator struct {

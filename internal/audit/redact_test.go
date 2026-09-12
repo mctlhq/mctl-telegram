@@ -107,3 +107,40 @@ func TestRedactAttr_DevicePubkeyExempt(t *testing.T) {
 		t.Fatalf("device_pubkey should be exempt from redaction, got: %v", got)
 	}
 }
+
+// TestRedactAttr_ClientIdentityKeys pins issue-620's additions: first/last
+// name and the composed display name must never reach centralized logs
+// unredacted, matched case-insensitively like every other sensitiveKeys
+// entry.
+func TestRedactAttr_ClientIdentityKeys(t *testing.T) {
+	keys := []string{
+		"first_name",
+		"last_name",
+		"telegram_first_name",
+		"telegram_last_name",
+		"display_name",
+		// Case-insensitivity check, matching the package's stated matching rule.
+		"First_Name",
+	}
+	for _, k := range keys {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "Alice Liddell"))
+			if got.Value.Kind() != slog.KindString || !strings.HasPrefix(got.Value.String(), "[redacted len=") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+			if strings.Contains(got.Value.String(), "Alice Liddell") {
+				t.Fatalf("key %q leaked its value: %v", k, got)
+			}
+		})
+	}
+}
+
+// TestRedactAttr_LanguageCodeExempt asserts the deliberate exemption recorded
+// alongside device_pubkey/cost_usd: a two-letter locale is not identifying,
+// so it must pass through unredacted.
+func TestRedactAttr_LanguageCodeExempt(t *testing.T) {
+	got := redactAttr(slog.String("language_code", "en"))
+	if got.Value.Kind() != slog.KindString || got.Value.String() != "en" {
+		t.Fatalf("language_code should be exempt from redaction, got: %v", got)
+	}
+}

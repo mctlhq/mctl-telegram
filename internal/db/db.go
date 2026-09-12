@@ -183,6 +183,33 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// Client identity attributes and provenance (issue-620, #438 slice 1).
+	// All five are nullable with no DEFAULT so existing rows stay untouched
+	// and NULL keeps its "unknown" meaning. identity_captured_at is the whole
+	// provenance mechanism: IS NULL means capture never ran for this row (so
+	// every optional attribute below reads "not_captured"); once set, an
+	// empty attribute means the source supplied nothing ("not_supplied") and
+	// a non-empty one means "verified". See attrProvenance in store.go.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_first_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_last_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_language_code",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "identity_captured_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "onboarding_completed_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "client_name",
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
@@ -281,6 +308,26 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("backfill: %w\nstmt: %s", err, s)
 		}
+	}
+	// Backfill users.onboarding_completed_at from the earliest finalised
+	// telegram_accounts row (telegram_user_id IS NOT NULL) for rows where it
+	// is still NULL. A finalised session is a verified server-side record
+	// that the user completed onboarding, so this is derivation from a real
+	// record, not inference — unlike first/last name, which are NOT
+	// backfilled from telegram_display_name (see db_test.go / design.md).
+	// One statement, portable across both dialects (MIN, a correlated
+	// sub-query and IS NULL need no dialect split); WHERE ... IS NULL makes
+	// it a no-op on every run after the first.
+	if _, err := dbConn.ExecContext(ctx,
+		`UPDATE users
+		    SET onboarding_completed_at = (
+		          SELECT MIN(ta.connected_at) FROM telegram_accounts ta
+		           WHERE ta.user_id = users.id AND ta.telegram_user_id IS NOT NULL)
+		  WHERE onboarding_completed_at IS NULL
+		    AND EXISTS (SELECT 1 FROM telegram_accounts ta
+		                 WHERE ta.user_id = users.id AND ta.telegram_user_id IS NOT NULL)`,
+	); err != nil {
+		return fmt.Errorf("backfill onboarding_completed_at: %w", err)
 	}
 	// Communication-agent domain tables (M6). Kept in a separate file so the
 	// agent schema evolves without touching the core auth/session tables.
@@ -478,6 +525,13 @@ func sqliteSchema() []string {
 			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
+		// identityLastSeenExpr takes MAX(last_used_at) per user over ALL rows,
+		// revoked ones included -- a revoked account's last use is still when
+		// the user was last seen. The partial index above cannot serve it: its
+		// WHERE clause is not in the sub-query, so the planner falls back to a
+		// scan. Covering (user_id, last_used_at) so the MAX comes from the
+		// index rather than the heap.
+		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_last_used ON telegram_accounts(user_id, last_used_at)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER REFERENCES users(id),
@@ -510,6 +564,12 @@ func sqliteSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// The token table had no index on user_id at all -- only token_hash and
+		// family_id -- so identityLastSeenExpr scanned it once per user. That
+		// turned GetIdentity, a point read on the get_my_identity hot path,
+		// into a full scan, and ListIdentities into O(users x tokens).
+		// Covering (user_id, created_at) for the same reason as above.
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_user_created ON oauth_refresh_tokens(user_id, created_at)`,
 		// Worker token revocations (jti denylist). A row with jti set is a
 		// single-token revocation; a row with jti NULL is a blanket
 		// revocation for telegram_id (every worker token for that id issued
@@ -597,6 +657,13 @@ func pgSchema() []string {
 			mode TEXT NOT NULL DEFAULT 'hosted'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
+		// identityLastSeenExpr takes MAX(last_used_at) per user over ALL rows,
+		// revoked ones included -- a revoked account's last use is still when
+		// the user was last seen. The partial index above cannot serve it: its
+		// WHERE clause is not in the sub-query, so the planner falls back to a
+		// scan. Covering (user_id, last_used_at) so the MAX comes from the
+		// index rather than the heap.
+		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_last_used ON telegram_accounts(user_id, last_used_at)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT REFERENCES users(id),
@@ -629,6 +696,12 @@ func pgSchema() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
+		// The token table had no index on user_id at all -- only token_hash and
+		// family_id -- so identityLastSeenExpr scanned it once per user. That
+		// turned GetIdentity, a point read on the get_my_identity hot path,
+		// into a full scan, and ListIdentities into O(users x tokens).
+		// Covering (user_id, created_at) for the same reason as above.
+		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_user_created ON oauth_refresh_tokens(user_id, created_at)`,
 		// OAuth transient state tables (issue-66). Only created on Postgres; SQLite
 		// deployments keep in-memory maps (single-writer contention makes DB-backed
 		// OAuth worse there). Tables are idempotent (IF NOT EXISTS) and contain

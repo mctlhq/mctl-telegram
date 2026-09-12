@@ -71,6 +71,19 @@ var sensitiveKeys = map[string]struct{}{
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},
 	"file_path":   {},
+	// Client identity attributes (issue-620, #438 slice 1). first_name/
+	// last_name/display_name are direct PII; telegram_first_name/
+	// telegram_last_name are the same values under their column names, in
+	// case a future call site logs the row directly rather than the parsed
+	// identity. language_code is DELIBERATELY absent: a two-letter locale is
+	// not identifying, and redacting it would only make capture-path
+	// debugging harder for no security benefit — the same reasoning this
+	// file already records for device_pubkey and cost_usd.
+	"first_name":          {},
+	"last_name":           {},
+	"telegram_first_name": {},
+	"telegram_last_name":  {},
+	"display_name":        {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

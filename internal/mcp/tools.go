@@ -960,7 +960,7 @@ func (s *Server) toolGetMyIdentity() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithOutputSchema[myIdentityResult](),
 		mcplib.WithDescription(`Return the Telegram identity of the currently authenticated session.
 
-Output: {telegram_id, username, display_name}. username and display_name are omitted when they were never captured — Telegram did not supply them, or the row predates capture. They are never inferred from message content.
+Output: {telegram_id, username, display_name, first_name, last_name, language_code, last_seen_at, onboarding_completed_at, provenance}. Any of these may be omitted when the value is empty; provenance always explains why. Each provenance entry is one of: "verified" (Telegram supplied it and it was captured), "derived" (computed from another verified server-side record, e.g. last_seen_at/onboarding_completed_at), "not_supplied" (capture ran but the source had nothing for this attribute), or "not_captured" (no capture has ever run for this row). No attribute is ever inferred from message content.
 
 This is the self-service counterpart of list_telegram_identities: it reports only the caller. No admin scope is required. Operators cannot disable it for an authenticated user. It takes no inputs.`),
 	)
@@ -973,19 +973,39 @@ This is the self-service counterpart of list_telegram_identities: it reports onl
 			TelegramID:  id.TelegramID,
 			Username:    id.TelegramUsername,
 			DisplayName: "",
+			// Default provenance for the auth.Identity-only fallback below,
+			// which carries no capture timestamp of its own: every optional
+			// attribute reads not_captured until a store row says otherwise.
+			Provenance: db.IdentityProvenance{
+				Username:              db.ProvenanceNotCaptured,
+				FirstName:             db.ProvenanceNotCaptured,
+				LastName:              db.ProvenanceNotCaptured,
+				DisplayName:           db.ProvenanceNotCaptured,
+				LanguageCode:          db.ProvenanceNotCaptured,
+				LastSeenAt:            db.ProvenanceNotCaptured,
+				OnboardingCompletedAt: db.ProvenanceNotCaptured,
+			},
 		}
 		if s.Store != nil && id.UserID != 0 {
-			tgID, username, display, err := s.Store.GetLoginIdentity(ctx, id.UserID)
+			row, err := s.Store.GetIdentity(ctx, id.UserID)
 			if err != nil {
 				return toolErr("get_my_identity: %v", err), nil
 			}
-			if tgID != 0 {
-				out.TelegramID = tgID
+			if row != nil {
+				if row.TelegramID != 0 {
+					out.TelegramID = row.TelegramID
+				}
+				if row.Username != "" {
+					out.Username = row.Username
+				}
+				out.DisplayName = row.DisplayName
+				out.FirstName = row.FirstName
+				out.LastName = row.LastName
+				out.LanguageCode = row.LanguageCode
+				out.LastSeenAt = row.LastSeenAt
+				out.OnboardingCompletedAt = row.OnboardingCompletedAt
+				out.Provenance = row.Provenance
 			}
-			if username != "" {
-				out.Username = username
-			}
-			out.DisplayName = display
 		}
 		if out.TelegramID == 0 && out.Username == "" && out.DisplayName == "" {
 			return mcplib.NewToolResultError("get_my_identity: no Telegram identity on this session"), nil
@@ -1063,7 +1083,7 @@ func (s *Server) toolListIdentities() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithOutputSchema[identitiesResult](),
 		mcplib.WithDescription(`Admin only (requires the admin:users or admin:users:read scope). List every Telegram user that has signed in via the Login Widget, with their access tier and whether they hold an active MTProto session.
 
-Output: JSON array of {telegram_id, username, display_name, access_tier, has_session, connected_via}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account). connected_via is a list of distinct OAuth client names (e.g. ["Claude"], ["ChatGPT"], ["Claude","ChatGPT"]) from active refresh tokens; omitted when unknown (tokens predate dynamic client registration).
+Output: JSON array of {telegram_id, username, display_name, first_name, last_name, language_code, access_tier, has_session, last_seen_at, onboarding_completed_at, connected_via, provenance}. access_tier is "none" (authenticated but no scopes — every tool 403s) or "client" (telegram:* scopes for their own account). connected_via is a list of distinct OAuth client names (e.g. ["Claude"], ["ChatGPT"], ["Claude","ChatGPT"]) from active refresh tokens; omitted when unknown (tokens predate dynamic client registration). provenance explains every optional attribute above: "verified" (Telegram supplied it), "derived" (computed from another verified record, e.g. last_seen_at/onboarding_completed_at), "not_supplied" (capture ran but the source had nothing), or "not_captured" (no capture has run for this row yet — it heals on the user's next sign-in).
 
 Use this to find a newly signed-in user, then grant them access with set_telegram_access.`),
 	)
@@ -1982,9 +2002,16 @@ type identitiesResult struct {
 
 // myIdentityResult is the success payload of get_my_identity.
 type myIdentityResult struct {
-	TelegramID  int64  `json:"telegram_id"`
-	Username    string `json:"username,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
+	TelegramID   int64  `json:"telegram_id"`
+	Username     string `json:"username,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	FirstName    string `json:"first_name,omitempty"`
+	LastName     string `json:"last_name,omitempty"`
+	LanguageCode string `json:"language_code,omitempty"`
+	// LastSeenAt and OnboardingCompletedAt are nil when never derived/captured.
+	LastSeenAt            *time.Time            `json:"last_seen_at,omitempty"`
+	OnboardingCompletedAt *time.Time            `json:"onboarding_completed_at,omitempty"`
+	Provenance            db.IdentityProvenance `json:"provenance"`
 }
 
 // setAccessResult is the success payload of set_telegram_access.

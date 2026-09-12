@@ -208,7 +208,7 @@ type LoginFunc func(
 	askCode func(context.Context) (string, error),
 	askPassword func(context.Context) (string, error),
 	cfgs ...telegram.LoginConfig,
-) (telegramUserID int64, displayName, username string, err error)
+) (telegram.LoginResult, error)
 
 // Config captures everything the OAuth server needs at construction time.
 type Config struct {
@@ -1594,11 +1594,25 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// flow provisions below lands on the SAME users.id this token resolves to
 	// on later /mcp calls — closing the duplicate-identity gap the old CLI
 	// (github_login-keyed) login left open.
-	uid, err := s.store.EnsureUserByTelegramID(r.Context(), identity.TelegramID, identity.Username, strings.TrimSpace(identity.FirstName+" "+identity.LastName))
+	oidcDisplayName := strings.TrimSpace(identity.FirstName + " " + identity.LastName)
+	uid, err := s.store.EnsureUserByTelegramID(r.Context(), identity.TelegramID, identity.Username, oidcDisplayName)
 	if err != nil {
 		slog.Error("ensure user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	// Capture the verified OIDC identity attributes (first/last name,
+	// language code) that EnsureUserByTelegramID's own refresh does not
+	// carry. Best-effort: a capture failure must not turn a valid sign-in
+	// into a 500 -- the same reasoning as the auto-approve block below.
+	if cErr := s.store.CaptureTelegramIdentity(r.Context(), uid, db.TelegramIdentityAttrs{
+		Username:     identity.Username,
+		FirstName:    identity.FirstName,
+		LastName:     identity.LastName,
+		DisplayName:  oidcDisplayName,
+		LanguageCode: identity.LanguageCode,
+	}); cErr != nil {
+		slog.Warn("capture telegram identity failed", "telegram_id", identity.TelegramID, "err", cErr)
 	}
 
 	// When open registration is on (AutoApproveClients), materialize the

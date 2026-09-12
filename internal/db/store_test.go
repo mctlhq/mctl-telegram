@@ -12,26 +12,35 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
-func TestGetLoginIdentity(t *testing.T) {
+func TestGetIdentity(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	uid, err := st.EnsureUserByTelegramID(ctx, 111, "alice", "Alice Example")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	tgID, username, display, err := st.GetLoginIdentity(ctx, uid)
+	row, err := st.GetIdentity(ctx, uid)
 	if err != nil {
-		t.Fatalf("GetLoginIdentity: %v", err)
+		t.Fatalf("GetIdentity: %v", err)
 	}
-	if tgID != 111 || username != "alice" || display != "Alice Example" {
-		t.Fatalf("got (%d, %q, %q), want (111, alice, Alice Example)", tgID, username, display)
+	if row == nil {
+		t.Fatal("GetIdentity: row is nil, want a row")
 	}
-	tgID, username, display, err = st.GetLoginIdentity(ctx, uid+99)
+	if row.TelegramID != 111 || row.Username != "alice" || row.DisplayName != "Alice Example" {
+		t.Fatalf("got (%d, %q, %q), want (111, alice, Alice Example)", row.TelegramID, row.Username, row.DisplayName)
+	}
+	// A row that has never gone through CaptureTelegramIdentity reads
+	// not_captured — EnsureUserByTelegramID alone does not stamp
+	// identity_captured_at.
+	if row.Provenance.FirstName != ProvenanceNotCaptured {
+		t.Errorf("FirstName provenance = %q, want %q", row.Provenance.FirstName, ProvenanceNotCaptured)
+	}
+	row, err = st.GetIdentity(ctx, uid+99)
 	if err != nil {
 		t.Fatalf("missing row: %v", err)
 	}
-	if tgID != 0 || username != "" || display != "" {
-		t.Fatalf("missing row = (%d, %q, %q), want zeros", tgID, username, display)
+	if row != nil {
+		t.Fatalf("missing row = %+v, want nil", row)
 	}
 }
 
