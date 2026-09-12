@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
+	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -1225,6 +1226,14 @@ type AuditEntry struct {
 	Status        string    `json:"status"`
 	ErrorRedacted string    `json:"error,omitempty"`
 	CallPath      string    `json:"call_path,omitempty"`
+	// Correlation fields (mctl-telegram#617 Slice 2), omitted when the call
+	// carried no such header. They are headers as RECEIVED: evidence for
+	// reading a trail, never an authorization input.
+	EdgeRequestID   string `json:"edge_request_id,omitempty"`
+	EdgeRoute       string `json:"edge_route,omitempty"`
+	MCPMethod       string `json:"mcp_method,omitempty"`
+	MCPName         string `json:"mcp_name,omitempty"`
+	ProtocolVersion string `json:"protocol_version,omitempty"`
 }
 
 // ListAuditFor returns the user's most recent audit-log rows, newest first.
@@ -1247,14 +1256,16 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	var err error
 	if before.IsZero() {
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT created_at, tool_name, peer_redacted, status, error, call_path FROM audit_logs
+			`SELECT created_at, tool_name, peer_redacted, status, error, call_path,
+			 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version FROM audit_logs
 			 WHERE user_id = $1
 			 ORDER BY id DESC LIMIT $2`,
 			userID, limit,
 		)
 	} else {
 		rows, err = s.DB.QueryContext(ctx,
-			`SELECT created_at, tool_name, peer_redacted, status, error, call_path FROM audit_logs
+			`SELECT created_at, tool_name, peer_redacted, status, error, call_path,
+			 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version FROM audit_logs
 			 WHERE user_id = $1 AND created_at < $2
 			 ORDER BY id DESC LIMIT $3`,
 			userID, before, limit,
@@ -1267,23 +1278,34 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 	out := make([]AuditEntry, 0, limit)
 	for rows.Next() {
 		var (
-			ts       time.Time
-			tool     string
-			peer     sql.NullString
-			status   string
-			errCol   sql.NullString
-			callPath sql.NullString
+			ts        time.Time
+			tool      string
+			peer      sql.NullString
+			status    string
+			errCol    sql.NullString
+			callPath  sql.NullString
+			edgeID    sql.NullString
+			edgeRoute sql.NullString
+			mcpMethod sql.NullString
+			mcpName   sql.NullString
+			protoVer  sql.NullString
 		)
-		if err := rows.Scan(&ts, &tool, &peer, &status, &errCol, &callPath); err != nil {
+		if err := rows.Scan(&ts, &tool, &peer, &status, &errCol, &callPath,
+			&edgeID, &edgeRoute, &mcpMethod, &mcpName, &protoVer); err != nil {
 			return nil, fmt.Errorf("scan audit: %w", err)
 		}
 		out = append(out, AuditEntry{
-			Ts:            ts,
-			ToolName:      tool,
-			PeerRedacted:  peer.String,
-			Status:        status,
-			ErrorRedacted: errCol.String,
-			CallPath:      callPath.String,
+			Ts:              ts,
+			ToolName:        tool,
+			PeerRedacted:    peer.String,
+			Status:          status,
+			ErrorRedacted:   errCol.String,
+			CallPath:        callPath.String,
+			EdgeRequestID:   edgeID.String,
+			EdgeRoute:       edgeRoute.String,
+			MCPMethod:       mcpMethod.String,
+			MCPName:         mcpName.String,
+			ProtocolVersion: protoVer.String,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1471,6 +1493,27 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // concurrent writes would race on prev_hash and break the chain.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath string) {
 	createdAt := time.Now().UTC()
+	// How the call arrived (mctl-telegram#617 Slice 2). Captured in
+	// internal/mcp.httpContext, which builds the context of every MCP tool
+	// call, and read from ctx here rather than taken as a parameter so the
+	// ~25 existing call sites did not have to be rewritten.
+	//
+	// Capture is MCP_PATH only. The OAuth connect flow
+	// (internal/oauth/enable_access.go) and internal/agentapi pass an
+	// r.Context() from handlers that never go through httpContext, so their
+	// rows -- every connect:* event and the agent-API ones -- carry NULL
+	// correlation columns. That is a true statement about those calls rather
+	// than a gap: the correlation contract is about MCP calls, and a NULL
+	// here means "not an MCP call through the portal path", not "unknown".
+	// Wiring the web handlers is a separate change with its own decision.
+	ec := edgectx.From(ctx)
+	edge := auditEdge{
+		RequestID:       ec.RequestID,
+		Route:           ec.Route,
+		MCPMethod:       ec.MCPMethod,
+		MCPName:         ec.MCPName,
+		ProtocolVersion: ec.ProtocolVersion,
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return
@@ -1493,12 +1536,14 @@ func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacte
 	if len(prev) == 0 {
 		prev = make([]byte, sha256.Size)
 	}
-	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt)
+	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt, edge)
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
+		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
+		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion),
 	); err != nil {
 		return
 	}
@@ -1529,7 +1574,8 @@ type AuditChainVerification struct {
 // pre-M3.1 gap visible to the user.
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path
+		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
+		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version
 		 FROM audit_logs
 		 WHERE user_id = $1
 		 ORDER BY id ASC`,
@@ -1553,9 +1599,22 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 			prevHash  []byte
 			entryHash []byte
 			callPath  sql.NullString
+			edgeID    sql.NullString
+			edgeRoute sql.NullString
+			mcpMethod sql.NullString
+			mcpName   sql.NullString
+			protoVer  sql.NullString
 		)
-		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash, &callPath); err != nil {
+		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash, &callPath,
+			&edgeID, &edgeRoute, &mcpMethod, &mcpName, &protoVer); err != nil {
 			return AuditChainVerification{}, fmt.Errorf("scan audit: %w", err)
+		}
+		edge := auditEdge{
+			RequestID:       edgeID.String,
+			Route:           edgeRoute.String,
+			MCPMethod:       mcpMethod.String,
+			MCPName:         mcpName.String,
+			ProtocolVersion: protoVer.String,
 		}
 		if entryHash == nil || prevHash == nil {
 			// Legacy pre-M3.1 row — cannot verify, but reset the chain
@@ -1576,7 +1635,7 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt)
+		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt, edge)
 		if !bytesEqual(recomputed, entryHash) {
 			return AuditChainVerification{
 				OK:         false,

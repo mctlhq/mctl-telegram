@@ -135,6 +135,30 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// Correlation columns on audit_logs (mctl-telegram#617 Slice 2). They
+	// record how the call arrived: edge_request_id is Cf-Ray, edge_route is
+	// portal/direct decided by Cf-Worker, and mcp_method / mcp_name /
+	// protocol_version are the MCP routing headers the Portal forwards.
+	// Nullable with no DEFAULT for the same reason call_path is: a non-NULL
+	// default would retroactively change the canonical hash input of every
+	// older row and make VerifyAuditChain report the whole chain as tampered.
+	for _, col := range []string{"edge_request_id", "edge_route", "mcp_method", "mcp_name", "protocol_version"} {
+		if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", col, "TEXT", "TEXT"); err != nil {
+			return err
+		}
+	}
+	// The correlation columns exist to be joined on: a trail is followed by
+	// asking "what else carried this ray", which is a scan of audit_logs
+	// without this index. Partial where the dialect allows it -- most rows
+	// have no edge id (an internal call, a pre-Slice-2 row) and indexing
+	// their NULLs buys nothing.
+	// Both dialects take the partial form; it runs here rather than with the
+	// table DDL because the column it indexes is added above.
+	if _, err := dbConn.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_edge_request_id
+		 ON audit_logs(edge_request_id) WHERE edge_request_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("create idx_audit_logs_edge_request_id: %w", err)
+	}
 	// Telegram-native identity columns (users): replaces github_login as the
 	// primary key. github_login becomes nullable so widget-issued user rows
 	// (which never have a GitHub login) can coexist with legacy ones during
