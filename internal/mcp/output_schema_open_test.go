@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -63,8 +64,14 @@ func publishedOutputSchema(t *testing.T, tool any) any {
 	if len(envelope.OutputSchema) == 0 {
 		return nil
 	}
-	var doc any
-	if err := json.Unmarshal(envelope.OutputSchema, &doc); err != nil {
+	// jsonschema.UnmarshalJSON, not json.Unmarshal: the validator reads
+	// numeric keywords as json.Number, and its own helper is what produces
+	// them. No reflected schema here carries a numeric keyword today, so the
+	// two agree -- but the first result struct to grow a `minimum` would make
+	// that stop being true, and the symptom would be a puzzle rather than a
+	// clear failure.
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(envelope.OutputSchema))
+	if err != nil {
 		t.Fatalf("decode outputSchema: %v", err)
 	}
 	return doc
@@ -117,24 +124,86 @@ func TestOutputSchemasStayOpenToAdditiveFields(t *testing.T) {
 // removed. A new tool added by copying an old call site must not reintroduce
 // the library form.
 func TestNoToolUsesTheLibraryOutputSchemaOption(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(name)
+	// Every package that builds MCP tools, not just this one. internal/
+	// agentworker declares no output schema today; if it starts, the closed
+	// stamp would come back with nothing objecting.
+	for _, dir := range []string{".", "../agentworker"} {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			t.Fatalf("read %s: %v", dir, err)
 		}
-		for i, line := range strings.Split(string(src), "\n") {
-			if strings.Contains(line, "mcplib.WithOutputSchema[") {
-				t.Errorf("%s:%d: uses mcplib.WithOutputSchema; use outputSchema[T]() so the schema stays open to additive fields", name, i+1)
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			src, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			for i, line := range strings.Split(string(src), "\n") {
+				// Match the selector, not the alias: a file importing the
+				// package under a different name would otherwise slip past.
+				if !strings.Contains(line, ".WithOutputSchema[") {
+					continue
+				}
+				// A doc comment discussing the option by name is prose, not a
+				// call. tools.go has two such comments.
+				if strings.HasPrefix(strings.TrimSpace(line), "//") {
+					continue
+				}
+				t.Errorf("%s:%d: uses the library WithOutputSchema; use outputSchema[T]() so the schema stays open to additive fields", path, i+1)
 			}
 		}
+	}
+}
+
+// TestOpenedSchemaDiffersFromTheLibraryOnlyInAdditionalProperties pins the
+// load-bearing claim: outputSchema[T] is mcplib.WithOutputSchema[T] minus the
+// additionalProperties stamps, and nothing else.
+//
+// It is not self-evident. Both options finish by decoding into the typed
+// mcplib.ToolOutputSchema, which keeps only the keys that struct has fields
+// for and silently drops the rest -- $defs, a top-level title, any keyword a
+// future reflector emits. That lossiness is the library's too, so we are no
+// worse; what this test adds is that a mcp-go bump which starts emitting such
+// a key cannot quietly change 30 published schemas while the other tests here
+// stay green, because they only ever look for additionalProperties.
+func TestOpenedSchemaDiffersFromTheLibraryOnlyInAdditionalProperties(t *testing.T) {
+	// One flat type and one nested type, so the comparison covers a schema
+	// with a nested item schema rather than only a top-level object.
+	t.Run("auditLogResult", func(t *testing.T) {
+		assertOpenedMatchesLibrary[auditLogResult](t)
+	})
+	t.Run("messagesResult", func(t *testing.T) {
+		assertOpenedMatchesLibrary[messagesResult](t)
+	})
+}
+
+func assertOpenedMatchesLibrary[T any](t *testing.T) {
+	t.Helper()
+	// The library form is allowed here: this file is a _test.go and the scan
+	// above skips it.
+	lib := mcplib.NewTool("probe", mcplib.WithOutputSchema[T]())
+	ours := mcplib.NewTool("probe", outputSchema[T]())
+
+	libDoc := publishedOutputSchema(t, lib)
+	if libDoc == nil {
+		t.Fatal("library option published no outputSchema")
+	}
+	openAdditiveFields(libDoc)
+
+	libJSON, err := json.Marshal(libDoc)
+	if err != nil {
+		t.Fatalf("marshal library schema: %v", err)
+	}
+	ourJSON, err := json.Marshal(publishedOutputSchema(t, ours))
+	if err != nil {
+		t.Fatalf("marshal our schema: %v", err)
+	}
+	if string(libJSON) != string(ourJSON) {
+		t.Errorf("opened schema differs from the library form beyond additionalProperties:\n library: %s\n ours:    %s", libJSON, ourJSON)
 	}
 }
 

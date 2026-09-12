@@ -3,7 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"log/slog"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
@@ -32,27 +32,42 @@ import (
 // added field costs nobody anything.
 func outputSchema[T any]() mcplib.ToolOption {
 	return func(t *mcplib.Tool) {
+		// A ToolOption cannot return an error, and this repository does not
+		// panic (see CLAUDE.md), so a failure here leaves the tool with no
+		// outputSchema. Two things keep that from shipping. Every step below
+		// is deterministic in T, so it cannot start failing at runtime for a
+		// type that reflected cleanly in CI; and a tool that publishes no
+		// output schema fails TestOutputSchemasStayOpenToAdditiveFields and
+		// TestToolOutputSchemas. What was missing was a signal if it ever did
+		// happen, which is why these log through slog -- with the type and
+		// the step, so the line names the offender -- rather than writing an
+		// anonymous string to stderr the way the library option does.
+		fail := func(step string, err error) {
+			slog.Error("mcp: output schema reflection failed; tool will publish no outputSchema",
+				"type", fmt.Sprintf("%T", *new(T)), "step", step, "err", err)
+		}
+
 		// SchemaForRaw is the same reflection WithOutputSchema performs
 		// internally (mcp/schema_cache.go), returning the bytes so we can
 		// edit them before they become the declaration.
 		raw, err := mcplib.SchemaForRaw[T]()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fail("reflect", err)
 			return
 		}
 		var doc any
 		if err := json.Unmarshal(raw, &doc); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fail("decode", err)
 			return
 		}
 		openAdditiveFields(doc)
 		opened, err := json.Marshal(doc)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fail("encode", err)
 			return
 		}
 		if err := json.Unmarshal(opened, &t.OutputSchema); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fail("apply", err)
 			return
 		}
 		// Mirrors WithOutputSchema: the MCP spec requires the top-level
