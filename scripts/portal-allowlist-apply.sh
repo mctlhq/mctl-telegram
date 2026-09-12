@@ -50,7 +50,9 @@ usage: $0 [--dry-run|--check|-h|--help]
   -h, --help     print this usage and exit 0.
 
 Exit codes: 0 in sync / applied, 1 could not check or apply, 2 usage error,
-3 drift found (--check only).
+3 drift found (--check only). Every non-zero status is a failure a caller
+must surface; the split exists to say which one happened, not to make any
+of them ignorable.
 EOF
 }
 
