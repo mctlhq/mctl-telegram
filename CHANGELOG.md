@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.67.0](https://github.com/mctlhq/mctl-telegram/compare/0.66.0...0.67.0) (2026-09-12)
+
+
+### Features
+
+* **agents:** issue-632-portal-allowlist-apply-sh-has-no-check-s ([09d834c](https://github.com/mctlhq/mctl-telegram/commit/09d834c34b99068acc07174ab90359fd53d8ea4b))
+* **scripts:** add --check drift detection to portal-allowlist-apply.sh ([401ba25](https://github.com/mctlhq/mctl-telegram/commit/401ba257aaf9c722379e286348905366306f4254))
+
+
+### Bug Fixes
+
+* **mcp:** close the review's findings on the open-schema option ([b112f86](https://github.com/mctlhq/mctl-telegram/commit/b112f8694c8958040aec7ec63d01db9ceb7a9163)), closes [#637](https://github.com/mctlhq/mctl-telegram/issues/637)
+* **mcp:** make the guards deliver what their comments claim ([c8349bc](https://github.com/mctlhq/mctl-telegram/commit/c8349bc4591ec39026e26f9eea296d17cda65908)), closes [#637](https://github.com/mctlhq/mctl-telegram/issues/637)
+* **mcp:** stop publishing closed output schemas ([fff82bd](https://github.com/mctlhq/mctl-telegram/commit/fff82bdd5db74522019c55978b77196edff20489))
+* **mcp:** stop publishing closed output schemas ([398b09d](https://github.com/mctlhq/mctl-telegram/commit/398b09da429b5dbfb860ed358ce5c9293ba474c6)), closes [#637](https://github.com/mctlhq/mctl-telegram/issues/637)
+
 ## [0.66.0](https://github.com/mctlhq/mctl-telegram/compare/0.65.0...0.66.0) (2026-09-12)
 
 
