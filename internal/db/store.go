@@ -34,6 +34,11 @@ type Store struct {
 	pgMu       sync.Mutex
 	pgResolved bool
 	pgFlag     bool
+
+	// outbox, when set, derives an event_outbox row for each ingested event
+	// (see WithEventOutbox). nil disables the outbox entirely.
+	outbox       OutboxBuilder
+	outboxNotify func()
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,

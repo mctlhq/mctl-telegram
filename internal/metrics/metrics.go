@@ -56,6 +56,12 @@ type Registry struct {
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
 
+	// Inbound events outbox (internal/events). Published envelopes, failed
+	// publish attempts (the row stays pending), and the unpublished backlog.
+	EventsPublishedTotal       prometheus.Counter
+	EventsPublishFailuresTotal prometheus.Counter
+	EventsOutboxBacklog        prometheus.Gauge
+
 	// Enable_access login flow (in-browser phone -> SMS -> 2FA).
 	// LoginPhoneStepTotal counts phone-step outcomes, labeled by result:
 	// "ok" (SendCode returned and the code screen was shown), "timeout"
@@ -484,9 +490,25 @@ func New() *Registry {
 		Help: "Info gauge (always 1) identifying the credential domain an agent-worker replica is running against. Label domain_id is sourced from AGENT_CREDENTIAL_DOMAIN_ID, a non-secret operator-chosen identifier (e.g. a Vault path or account label) bounded to 128 characters of [A-Za-z0-9._:/-].",
 	}, []string{"domain_id"})
 
+	r.EventsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_events_published_total",
+		Help: "Event envelopes published to Valkey Streams.",
+	})
+	r.EventsPublishFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_events_publish_failures_total",
+		Help: "Failed attempts to publish an event envelope; the row stays in the outbox.",
+	})
+	r.EventsOutboxBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_events_outbox_backlog",
+		Help: "Event envelopes committed but not yet published.",
+	})
+
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
 	reg.MustRegister(
+		r.EventsPublishedTotal,
+		r.EventsPublishFailuresTotal,
+		r.EventsOutboxBacklog,
 		r.HTTPRequestsTotal,
 		r.AuthFailuresTotal,
 		r.RateLimitEventsTotal,

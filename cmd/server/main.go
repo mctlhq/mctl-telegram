@@ -35,6 +35,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
+	"github.com/mctlhq/mctl-telegram/internal/events"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/netctx"
@@ -126,6 +127,21 @@ func main() {
 	} else if cleared > 0 {
 		slog.Info("session ttl exemptions applied",
 			"rows_cleared", cleared, "identities", len(cfg.SessionTTLExemptTGIDs))
+	}
+	// Inbound events for Claude Remote (mctlhq/.github#87): an outbox row is
+	// committed with every published incoming event and relayed to Valkey
+	// Streams after commit. Wired before the listener starts so no ingest can
+	// run without it. Disabled when EVENTS_VALKEY_URL is empty.
+	if cfg.EventsValkeyURL != "" {
+		valkey, err := events.NewClient(cfg.EventsValkeyURL, cfg.EventsValkeyPassword, 5*time.Second)
+		if err != nil {
+			slog.Error("events valkey config", "err", err)
+			os.Exit(1)
+		}
+		relay := events.NewRelay(store, valkey, m)
+		store.WithEventOutbox(events.OutboxBuilder(cfg.EventsStream)).WithEventOutboxNotify(relay.Notify)
+		go relay.Run(ctx)
+		slog.Info("event outbox enabled", "stream", cfg.EventsStream)
 	}
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)

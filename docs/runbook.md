@@ -2028,3 +2028,28 @@ steps above).
 Canary incidents (alert `MctlTelegramCanaryFailing`) use separate canary-specific
 metrics that are not part of the main server metrics registry. See
 [docs/runbooks/canary.md](runbooks/canary.md) for the full canary runbook.
+
+## Inbound events for Claude Remote (event outbox)
+
+Epic mctlhq/.github#87. When `EVENTS_VALKEY_URL` is set, every incoming private
+message and edit that the agent listener ingests also gets an `event_outbox` row
+**in the same transaction**, and a relay publishes it to platform Valkey
+(`XADD mctl:events:telegram`) right after commit.
+
+- **References only.** The envelope (`mctl.events/v1`) carries `account_id`,
+  `chat_id`, `message_id` and `peer`; never the body or sender names. The consumer
+  hydrates the text with `get_messages(peer, before_id = message_id + 1, limit = 1)`.
+- **Envelope id** = `telegram:` + the listener's deterministic `event_id`, so a
+  gotd redelivery or a relay retry yields the same id and the consumer deduplicates.
+- **Valkey down:** rows stay pending; the relay retries with backoff (max 1 min)
+  and a 30 s safety pass. Nothing is lost; `mctl_events_outbox_backlog` grows and
+  `mctl_events_publish_failures_total` counts attempts. `event_outbox.last_error`
+  holds the last reason.
+- **Retention:** published rows are purged after 7 days.
+- **Audit:** each publish appends `stage=published` to `mctl:events:audit`.
+
+| Env | Meaning |
+|---|---|
+| `EVENTS_VALKEY_URL` | `redis://telegram-producer@valkey.platform-events.svc.cluster.local:6379/0`; empty disables |
+| `EVENTS_VALKEY_PASSWORD` | the `telegram-producer` ACL password (from `secret/platform/valkey`) |
+| `EVENTS_STREAM` | default `mctl:events:telegram` |

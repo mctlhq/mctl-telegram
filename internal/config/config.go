@@ -209,6 +209,15 @@ type Config struct {
 	// redeploying config even if the database is unreachable or compromised.
 	// Set via AGENT_KILL_SWITCH.
 	AgentKillSwitch bool
+
+	// EventsValkeyURL enables publishing reference-only mctl.events/v1
+	// envelopes for incoming messages to platform Valkey Streams
+	// (redis://<acl-user>@host:port/db, no password in the URL). Empty
+	// disables the event outbox entirely. EventsValkeyPassword is the ACL
+	// user's password; EventsStream is the stream that user may XADD to.
+	EventsValkeyURL      string
+	EventsValkeyPassword string
+	EventsStream         string
 	// AgentProfilePath is the deprecated mounted-YAML migration source. At
 	// startup it is imported into the target tenant's encrypted DB profile
 	// only when that document is still missing; it is never consulted on
@@ -258,6 +267,9 @@ func Load() (*Config, error) {
 		AgentApprovalTTL:              envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
 		AgentEnabled:                  envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:               envBool("AGENT_KILL_SWITCH", false),
+		EventsValkeyURL:               os.Getenv("EVENTS_VALKEY_URL"),
+		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
+		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),
 		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
 		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
