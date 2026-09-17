@@ -312,6 +312,29 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		// event_outbox: reference-only mctl.events/v1 envelopes written in the
+		// same transaction as incoming_events and published to Valkey after
+		// commit (internal/events). No message text is ever stored here.
+		`CREATE TABLE IF NOT EXISTS event_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			stream TEXT NOT NULL,
+			envelope TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			published_at DATETIME
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_event_id ON event_outbox(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_unpublished ON event_outbox(published_at, id)`,
+		// event_outbox_lease: one row per relay; whichever replica holds an
+		// unexpired lease is the only one publishing the outbox.
+		`CREATE TABLE IF NOT EXISTS event_outbox_lease (
+			name TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			tg_message_id INTEGER NOT NULL,
@@ -538,6 +561,25 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		`CREATE TABLE IF NOT EXISTS event_outbox (
+			id BIGSERIAL PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			stream TEXT NOT NULL,
+			envelope TEXT NOT NULL,
+			attempts INT NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			published_at TIMESTAMPTZ
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_event_id ON event_outbox(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_unpublished ON event_outbox(id) WHERE published_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_published_at ON event_outbox(published_at) WHERE published_at IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS event_outbox_lease (
+			name TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			tg_message_id BIGINT NOT NULL,

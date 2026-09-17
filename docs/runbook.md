@@ -2028,3 +2028,37 @@ steps above).
 Canary incidents (alert `MctlTelegramCanaryFailing`) use separate canary-specific
 metrics that are not part of the main server metrics registry. See
 [docs/runbooks/canary.md](runbooks/canary.md) for the full canary runbook.
+
+## Inbound events for Claude Remote (event outbox)
+
+Epic mctlhq/.github#87. When `EVENTS_VALKEY_URL` is set, every incoming private
+message and edit that the agent listener ingests also gets an `event_outbox` row
+**in the same transaction**, and a relay publishes it to platform Valkey
+(`XADD mctl:events:telegram`) right after commit.
+
+- **References only.** The envelope (`mctl.events/v1`) carries `account_id`,
+  `chat_id`, `message_id` and `peer`; never the body or sender names. The consumer
+  hydrates the text with `get_messages(peer, before_id = message_id + 1, limit = 1)`.
+- **Envelope id** = `telegram:` + the listener's deterministic `event_id`, so a
+  gotd redelivery or a relay retry yields the same id and the consumer deduplicates.
+- **Valkey down:** rows stay pending; the relay retries with backoff (max 1 min)
+  and a 30 s safety pass. Nothing is lost; `mctl_events_outbox_backlog` grows and
+  `mctl_events_publish_failures_total` counts attempts. `event_outbox.last_error`
+  holds the last reason. A new ingest does not cut a failure backoff short.
+- **Several replicas:** only the replica holding the `event_outbox_lease` row
+  publishes; the lease is renewed per batch, released at the end of each pass and
+  expires after 1 min if its holder dies. Others retry after 1 s, so a normal
+  pass publishes rows in order without two replicas racing. Delivery is still
+  at-least-once: a failed `MarkOutboxPublished`, a crash after XADD, or a holder
+  stalled past its lease can republish a row, and consumers deduplicate by
+  envelope `id`.
+- **Retention:** published rows are purged after 7 days.
+- **Audit (best effort):** each publish attempts a `stage=published` entry in
+  `mctl:events:audit`, bounded to 1 s. An audit failure never blocks delivery;
+  after one failure the rest of that pass skips the trail and logs a warning.
+
+| Env | Meaning |
+|---|---|
+| `EVENTS_VALKEY_URL` | `redis://telegram-producer@valkey.platform-events.svc.cluster.local:6379/0`; empty disables |
+| `EVENTS_VALKEY_PASSWORD` | the `telegram-producer` ACL password (from `secret/platform/valkey`) |
+| `EVENTS_STREAM` | default `mctl:events:telegram` |
