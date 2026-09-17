@@ -77,8 +77,16 @@ func TestBuildEnvelope_KindsAndValidation(t *testing.T) {
 	if _, err := BuildEnvelope(missing, time.Now()); err == nil {
 		t.Fatal("event without a message id must not build")
 	}
+	// An edit's id carries the listener's :e<unix>:<hash> suffix and still builds.
+	editEv := sampleEvent()
+	editEv.Kind, editEv.EventID = db.EventKindMessageEdit, "evt:v1:7000001:555:42:e1726000000:0123456789ab"
+	if got, err := BuildEnvelope(editEv, time.Now()); err != nil || got.ID != "telegram:"+editEv.EventID {
+		t.Fatalf("edit envelope = %+v, err %v", got, err)
+	}
 	// users.id is this database's key; the subject must not fall back to it.
-	for _, id := range []string{"legacy-id", "evt:v1:0:555:42", "evt:v2:7000001:555:42", "evt:v1:acct:555:42"} {
+	for _, id := range []string{"legacy-id", "evt:v1:0:555:42", "evt:v2:7000001:555:42", "evt:v1:acct:555:42",
+		"evt:v1:1:555:42:?", "evt:v1:1:555:42:e1726000000", "evt:v1:1:555:42:e1:ABCDEF012345",
+		"evt:v1:1:555:" + strings.Repeat("9", 250)} {
 		bad := sampleEvent()
 		bad.EventID = id
 		if _, err := BuildEnvelope(bad, time.Now()); err == nil {
@@ -96,14 +104,19 @@ type fakeStore struct {
 	failures  map[int64]string
 	markErr   error
 
-	leaseHolder string
-	leaseUntil  time.Time
-	acquires    int
+	leaseHolder  string
+	leaseUntil   time.Time
+	acquires     int
+	blockPending bool // PendingOutbox waits for its context, like a stalled pool
 
 	releaseBounded, releaseLive bool
 }
 
-func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]db.OutboxRow, error) {
+func (f *fakeStore) PendingOutbox(ctx context.Context, limit int) ([]db.OutboxRow, error) {
+	if f.blockPending {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []db.OutboxRow
@@ -650,5 +663,39 @@ func TestRelay_RunPublishesOnNotifyAndStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestRelay_StalledDatabaseFailsThePassInsteadOfHanging(t *testing.T) {
+	st, pub := newFakes(1)
+	st.blockPending = true
+	r := NewRelay(st, pub, nil)
+	r.storeTimeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- r.Drain(context.Background()) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("drain = %v, want a deadline error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled database query held the drain")
+	}
+}
+
+func TestClient_OversizedBulkReplyIsRejected(t *testing.T) {
+	url := fakeValkey(t, func(args []string) string {
+		if args[0] == "XADD" {
+			return "$9223372036854775807\r\n"
+		}
+		return "+OK\r\n"
+	})
+	c, err := NewClient(url, "pw", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.XAdd(context.Background(), "s", 10, "k", "v"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("xadd = %v, want an oversized-reply error", err)
 	}
 }

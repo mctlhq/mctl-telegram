@@ -10,8 +10,8 @@ package events
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -92,16 +92,27 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 // (evt:v1:<account>:<chat>:<message>[...]). The subject is a cross-service
 // reference, so it carries the Telegram identity other services know, not this
 // database's users.id.
+//
+// The whole id is checked, edit suffix included, so every envelope id meets the
+// mctl.events/v1 identifier pattern and length that consumers enforce.
 func telegramAccountID(eventID string) (string, bool) {
-	parts := strings.Split(eventID, ":")
-	if len(parts) < 5 || parts[0] != "evt" || parts[1] != "v1" {
+	m := listenerEventID.FindStringSubmatch(eventID)
+	if m == nil || len("telegram:"+eventID) > maxIdentifierLen {
 		return "", false
 	}
-	if n, err := strconv.ParseInt(parts[2], 10, 64); err != nil || n <= 0 {
+	if n, err := strconv.ParseInt(m[1], 10, 64); err != nil || n <= 0 {
 		return "", false
 	}
-	return parts[2], true
+	return m[1], true
 }
+
+// listenerEventID is the listener's event id format (see
+// listener.eventIDForMessage): evt:v1:<account>:<chat>:<message>, plus
+// :e<edit unix time>:<12 hex digits> for an edit.
+var listenerEventID = regexp.MustCompile(`^evt:v1:([0-9]+):-?[0-9]+:[0-9]+(?::e[0-9]+:[0-9a-f]{12})?$`)
+
+// maxIdentifierLen is the mctl.events/v1 limit on id and correlation_id.
+const maxIdentifierLen = 256
 
 // Marshal renders the envelope as compact JSON with a stable key order.
 func (e Envelope) Marshal() (string, error) {

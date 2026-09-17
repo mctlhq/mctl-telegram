@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// maxBulkBytes caps one bulk reply read from the server.
+const maxBulkBytes = 1 << 20
+
 // Client is a minimal RESP2 client for the two commands a producer needs:
 // AUTH and XADD. A full client library would bring a large dependency for a
 // write-only path whose ACL user can do nothing else anyway. Not safe for
@@ -184,6 +187,11 @@ func (c *Client) roundTrip(ctx context.Context, deadline time.Time, args []strin
 		}
 		if n < 0 {
 			return "", nil
+		}
+		// This client only reads short AUTH/SELECT/XADD replies; refuse a
+		// length that would overflow or allocate without bound.
+		if n > maxBulkBytes {
+			return "", fmt.Errorf("valkey: bulk reply of %d bytes exceeds %d", n, maxBulkBytes)
 		}
 		buf := make([]byte, n+2)
 		if _, err := io.ReadFull(c.r, buf); err != nil {

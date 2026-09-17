@@ -33,6 +33,7 @@ const (
 	leaseRetry          = time.Second
 	leaseRenewEvery     = leaseTTL / 3
 	auditTimeout        = time.Second
+	storeTimeout        = 10 * time.Second
 )
 
 // ErrLeaseHeld means another replica is draining the shared outbox; this one
@@ -70,6 +71,9 @@ type Relay struct {
 	// at a time own the outbox, so replicas never publish the same rows and
 	// rows keep their order.
 	holder string
+	// storeTimeout bounds each database call, so a stalled connection makes
+	// the pass fail and back off instead of hanging with the lease held.
+	storeTimeout time.Duration
 
 	published prometheus.Counter
 	failures  prometheus.Counter
@@ -83,14 +87,15 @@ func NewRelay(store Store, pub Publisher, m *metrics.Registry) *Relay {
 		m = metrics.New()
 	}
 	return &Relay{
-		store:     store,
-		pub:       pub,
-		now:       time.Now,
-		wake:      make(chan struct{}, 1),
-		holder:    relayHolder(),
-		published: m.EventsPublishedTotal,
-		failures:  m.EventsPublishFailuresTotal,
-		backlog:   m.EventsOutboxBacklog,
+		store:        store,
+		pub:          pub,
+		now:          time.Now,
+		wake:         make(chan struct{}, 1),
+		holder:       relayHolder(),
+		storeTimeout: storeTimeout,
+		published:    m.EventsPublishedTotal,
+		failures:     m.EventsPublishFailuresTotal,
+		backlog:      m.EventsOutboxBacklog,
 	}
 }
 
@@ -99,6 +104,11 @@ func relayHolder() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b)
+}
+
+// storeCtx bounds one database call.
+func (r *Relay) storeCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, r.storeTimeout)
 }
 
 // Notify asks the relay to drain now. Never blocks.
@@ -131,9 +141,11 @@ func (r *Relay) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 		err := r.Drain(ctx)
-		if n, berr := r.store.OutboxBacklog(ctx); berr == nil {
+		bctx, bcancel := r.storeCtx(ctx)
+		if n, berr := r.store.OutboxBacklog(bctx); berr == nil {
 			r.backlog.Set(float64(n))
 		}
+		bcancel()
 		wait := safetyInterval
 		retryAt = time.Time{}
 		switch {
@@ -154,7 +166,10 @@ func (r *Relay) Run(ctx context.Context) {
 			backoff = time.Second
 		}
 		if now := r.now(); now.Sub(lastPurge) > time.Hour {
-			if n, perr := r.store.PurgePublishedOutbox(ctx, now.Add(-publishedRetention)); perr == nil {
+			pctx, pcancel := r.storeCtx(ctx)
+			n, perr := r.store.PurgePublishedOutbox(pctx, now.Add(-publishedRetention))
+			pcancel()
+			if perr == nil {
 				lastPurge = now
 				if n > 0 {
 					slog.Info("event outbox purged", "rows", n)
@@ -196,7 +211,9 @@ func (r *Relay) Drain(ctx context.Context) error {
 		if !force && now.Sub(renewedAt) < leaseRenewEvery {
 			return nil
 		}
-		owned, err := r.store.AcquireOutboxLease(ctx, r.holder, now, leaseTTL)
+		lctx, lcancel := r.storeCtx(ctx)
+		owned, err := r.store.AcquireOutboxLease(lctx, r.holder, now, leaseTTL)
+		lcancel()
 		if err != nil {
 			return err
 		}
@@ -214,7 +231,9 @@ func (r *Relay) Drain(ctx context.Context) error {
 		if err := renew(true); err != nil {
 			return err
 		}
-		rows, err := r.store.PendingOutbox(ctx, batchSize)
+		qctx, qcancel := r.storeCtx(ctx)
+		rows, err := r.store.PendingOutbox(qctx, batchSize)
+		qcancel()
 		if err != nil {
 			return err
 		}
@@ -227,7 +246,7 @@ func (r *Relay) Drain(ctx context.Context) error {
 			}
 			if _, err := r.pub.XAdd(ctx, row.Stream, streamMaxLen, "envelope", row.Envelope); err != nil {
 				r.failures.Inc()
-				if merr := r.store.MarkOutboxFailed(ctx, row.ID, err.Error()); merr != nil {
+				if merr := r.markFailed(ctx, row.ID, err.Error()); merr != nil {
 					slog.Warn("event outbox failure not recorded", "err", merr)
 				}
 				return err
@@ -241,11 +260,14 @@ func (r *Relay) Drain(ctx context.Context) error {
 			} else {
 				slog.Warn("event audit skipped after an earlier failure in this pass", "event_id", row.EventID)
 			}
-			if err := r.store.MarkOutboxPublished(ctx, row.ID, published); err != nil {
+			mctx, mcancel := r.storeCtx(ctx)
+			err := r.store.MarkOutboxPublished(mctx, row.ID, published)
+			mcancel()
+			if err != nil {
 				// Published but not marked: the next pass publishes it again,
 				// and the consumer deduplicates by envelope id. Count this XADD
 				// as an attempt so the republish is audited with its real number.
-				if merr := r.store.MarkOutboxFailed(ctx, row.ID, "published but not marked: "+err.Error()); merr != nil {
+				if merr := r.markFailed(ctx, row.ID, "published but not marked: "+err.Error()); merr != nil {
 					slog.Warn("event outbox attempt not recorded", "err", merr)
 				}
 				return err
@@ -255,6 +277,12 @@ func (r *Relay) Drain(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (r *Relay) markFailed(ctx context.Context, id int64, reason string) error {
+	fctx, cancel := r.storeCtx(ctx)
+	defer cancel()
+	return r.store.MarkOutboxFailed(fctx, id, reason)
 }
 
 func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) bool {
