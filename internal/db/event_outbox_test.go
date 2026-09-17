@@ -115,7 +115,9 @@ func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store) {
 	if err != nil || len(rows) != 2 || rows[0].ID > rows[1].ID {
 		t.Fatalf("pending = %+v err=%v, want two rows oldest first", rows, err)
 	}
-	if err := s.MarkOutboxFailed(ctx, rows[0].ID, strings.Repeat("ж", 401)+"x") // 803 bytes: the cut at 500 falls inside a rune; err != nil {
+	// 803 bytes: the cut at 500 falls inside a two-byte rune, which Postgres
+	// would reject as invalid UTF-8 if the truncation split it.
+	if err := s.MarkOutboxFailed(ctx, rows[0].ID, strings.Repeat("ж", 401)+"x"); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
 	now := time.Now().UTC()
