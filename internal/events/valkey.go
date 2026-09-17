@@ -83,8 +83,8 @@ func (c *Client) Close() {
 	}
 }
 
-func (c *Client) connect(ctx context.Context) error {
-	dialer := net.Dialer{Timeout: c.timeout}
+func (c *Client) connect(ctx context.Context, deadline time.Time) error {
+	dialer := net.Dialer{Deadline: deadline}
 	conn, err := dialer.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
 		return err
@@ -95,13 +95,13 @@ func (c *Client) connect(ctx context.Context) error {
 		if c.username != "" {
 			args = []string{"AUTH", c.username, c.password}
 		}
-		if _, err := c.roundTrip(ctx, args); err != nil {
+		if _, err := c.roundTrip(ctx, deadline, args); err != nil {
 			c.Close()
 			return err
 		}
 	}
 	if c.db != 0 {
-		if _, err := c.roundTrip(ctx, []string{"SELECT", strconv.Itoa(c.db)}); err != nil {
+		if _, err := c.roundTrip(ctx, deadline, []string{"SELECT", strconv.Itoa(c.db)}); err != nil {
 			c.Close()
 			return err
 		}
@@ -112,16 +112,22 @@ func (c *Client) connect(ctx context.Context) error {
 // Do runs one command and returns a simple, integer or bulk reply as a string.
 // A transport failure closes the connection so the next call starts clean. The
 // call ends at the client timeout or when ctx is done, whichever comes first.
+// One deadline covers the whole call, including a reconnect's dial, AUTH and
+// SELECT, so the timeout is a real upper bound.
 func (c *Client) Do(ctx context.Context, args ...string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	deadline := time.Now().Add(c.timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
 	if c.conn == nil {
-		if err := c.connect(ctx); err != nil {
+		if err := c.connect(ctx, deadline); err != nil {
 			return "", err
 		}
 	}
-	reply, err := c.roundTrip(ctx, args)
+	reply, err := c.roundTrip(ctx, deadline, args)
 	if err != nil {
 		var se *ServerError
 		if !errors.As(err, &se) {
@@ -132,11 +138,7 @@ func (c *Client) Do(ctx context.Context, args ...string) (string, error) {
 	return reply, nil
 }
 
-func (c *Client) roundTrip(ctx context.Context, args []string) (string, error) {
-	deadline := time.Now().Add(c.timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
+func (c *Client) roundTrip(ctx context.Context, deadline time.Time, args []string) (string, error) {
 	// Bind to this call's connection: the cancel callback runs on another
 	// goroutine and may fire after Close has already cleared c.conn.
 	conn := c.conn

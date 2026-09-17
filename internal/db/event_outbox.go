@@ -69,6 +69,39 @@ func (s *Store) insertOutboxTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent
 	return nil
 }
 
+const outboxLeaseName = "relay"
+
+// AcquireOutboxLease takes or renews the relay lease for holder. It succeeds
+// when the lease is free, expired or already held by holder, and reports false
+// while another replica holds it.
+func (s *Store) AcquireOutboxLease(ctx context.Context, holder string, now time.Time, ttl time.Duration) (bool, error) {
+	if holder == "" || ttl <= 0 {
+		return false, errors.New("lease needs a holder and a positive ttl")
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO event_outbox_lease(name, holder, expires_at) VALUES($1,$2,$3)
+		 ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at
+		 WHERE event_outbox_lease.holder = excluded.holder OR event_outbox_lease.expires_at < $4`,
+		outboxLeaseName, holder, now.UTC().Add(ttl), now.UTC())
+	if err != nil {
+		return false, fmt.Errorf("acquire event outbox lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("acquire event outbox lease: %w", err)
+	}
+	return n == 1, nil
+}
+
+// ReleaseOutboxLease gives the lease up if holder still owns it.
+func (s *Store) ReleaseOutboxLease(ctx context.Context, holder string) error {
+	if _, err := s.DB.ExecContext(ctx,
+		`DELETE FROM event_outbox_lease WHERE name = $1 AND holder = $2`, outboxLeaseName, holder); err != nil {
+		return fmt.Errorf("release event outbox lease: %w", err)
+	}
+	return nil
+}
+
 // PendingOutbox returns unpublished rows, oldest first.
 func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]OutboxRow, error) {
 	if limit <= 0 {

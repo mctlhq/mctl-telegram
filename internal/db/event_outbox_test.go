@@ -102,6 +102,48 @@ func TestEventOutbox_PublishLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t).WithEventOutbox(testOutboxBuilder)
 	exerciseOutboxLifecycle(ctx, t, s, "evt:v1:9:555:")
+	exerciseOutboxLease(ctx, t, s)
+}
+
+func exerciseOutboxLease(ctx context.Context, t *testing.T, s *Store) {
+	t.Helper()
+	t.Cleanup(func() { _, _ = s.DB.ExecContext(ctx, `DELETE FROM event_outbox_lease`) })
+	now := time.Now()
+	acquire := func(holder string, at time.Time) bool {
+		t.Helper()
+		ok, err := s.AcquireOutboxLease(ctx, holder, at, time.Minute)
+		if err != nil {
+			t.Fatalf("acquire %s: %v", holder, err)
+		}
+		return ok
+	}
+	if !acquire("a", now) {
+		t.Fatal("a could not take a free lease")
+	}
+	if acquire("b", now.Add(30*time.Second)) {
+		t.Fatal("b took a lease a still holds")
+	}
+	if !acquire("a", now.Add(30*time.Second)) {
+		t.Fatal("a could not renew its own lease")
+	}
+	if acquire("b", now.Add(80*time.Second)) {
+		t.Fatal("b took the lease before a's renewal expired")
+	}
+	if !acquire("b", now.Add(2*time.Minute)) {
+		t.Fatal("b could not take an expired lease")
+	}
+	if err := s.ReleaseOutboxLease(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if acquire("a", now.Add(2*time.Minute)) {
+		t.Fatal("a released a lease it no longer held")
+	}
+	if err := s.ReleaseOutboxLease(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if !acquire("a", now.Add(2*time.Minute)) {
+		t.Fatal("a could not take a released lease")
+	}
 }
 
 func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store, prefix string) {
@@ -191,4 +233,5 @@ func TestEventOutbox_PostgresLifecycle(t *testing.T) {
 	// Crypt is required: the ingest seals the message body before the insert.
 	s := (&Store{DB: conn, Crypt: c}).WithEventOutbox(testOutboxBuilder)
 	exerciseOutboxLifecycle(ctx, t, s, prefix)
+	exerciseOutboxLease(ctx, t, s)
 }

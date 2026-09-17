@@ -328,6 +328,13 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_event_id ON event_outbox(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_outbox_unpublished ON event_outbox(published_at, id)`,
+		// event_outbox_lease: one row per relay; whichever replica holds an
+		// unexpired lease is the only one publishing the outbox.
+		`CREATE TABLE IF NOT EXISTS event_outbox_lease (
+			name TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			tg_message_id INTEGER NOT NULL,
@@ -567,6 +574,11 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_event_id ON event_outbox(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_outbox_unpublished ON event_outbox(id) WHERE published_at IS NULL`,
+		`CREATE TABLE IF NOT EXISTS event_outbox_lease (
+			name TEXT PRIMARY KEY,
+			holder TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS agent_sent_messages (
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			tg_message_id BIGINT NOT NULL,

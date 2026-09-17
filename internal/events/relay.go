@@ -2,7 +2,11 @@ package events
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -24,7 +28,13 @@ const (
 	safetyInterval     = 30 * time.Second
 	maxBackoff         = time.Minute
 	publishedRetention = 7 * 24 * time.Hour
+	leaseTTL           = time.Minute
+	leaseRetry         = time.Second
 )
+
+// ErrLeaseHeld means another replica is draining the shared outbox; this one
+// retries shortly instead of publishing the same rows concurrently.
+var ErrLeaseHeld = errors.New("event outbox relay lease held by another replica")
 
 // Store is the slice of *db.Store the relay needs.
 type Store interface {
@@ -33,6 +43,8 @@ type Store interface {
 	MarkOutboxFailed(ctx context.Context, id int64, reason string) error
 	PurgePublishedOutbox(ctx context.Context, before time.Time) (int64, error)
 	OutboxBacklog(ctx context.Context) (int64, error)
+	AcquireOutboxLease(ctx context.Context, holder string, now time.Time, ttl time.Duration) (bool, error)
+	ReleaseOutboxLease(ctx context.Context, holder string) error
 }
 
 // Publisher is the transport the relay writes to.
@@ -50,7 +62,11 @@ type Relay struct {
 	pub   Publisher
 	now   func() time.Time
 	wake  chan struct{}
-	mu    sync.Mutex // one drain at a time
+	mu    sync.Mutex // one drain at a time in this process
+	// holder names this process in the database lease that makes one replica
+	// at a time own the outbox, so replicas never publish the same rows and
+	// rows keep their order.
+	holder string
 
 	published prometheus.Counter
 	failures  prometheus.Counter
@@ -68,10 +84,18 @@ func NewRelay(store Store, pub Publisher, m *metrics.Registry) *Relay {
 		pub:       pub,
 		now:       time.Now,
 		wake:      make(chan struct{}, 1),
+		holder:    relayHolder(),
 		published: m.EventsPublishedTotal,
 		failures:  m.EventsPublishFailuresTotal,
 		backlog:   m.EventsOutboxBacklog,
 	}
+}
+
+func relayHolder() string {
+	host, _ := os.Hostname()
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b)
 }
 
 // Notify asks the relay to drain now. Never blocks.
@@ -89,11 +113,18 @@ func (r *Relay) Run(ctx context.Context) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	lastPurge := time.Time{}
+	var retryAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-r.wake:
+			// A new row does not cut a failure backoff short: under a
+			// sustained outage every ingest would otherwise trigger a retry.
+			// The armed timer still fires at retryAt.
+			if r.now().Before(retryAt) {
+				continue
+			}
 		case <-timer.C:
 		}
 		err := r.Drain(ctx)
@@ -101,9 +132,13 @@ func (r *Relay) Run(ctx context.Context) {
 			r.backlog.Set(float64(n))
 		}
 		wait := safetyInterval
-		if err != nil {
+		retryAt = time.Time{}
+		if errors.Is(err, ErrLeaseHeld) {
+			wait = leaseRetry
+		} else if err != nil {
 			slog.Warn("event relay drain failed", "err", err, "retry_in", backoff)
 			wait = backoff
+			retryAt = r.now().Add(backoff)
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
@@ -134,7 +169,23 @@ func (r *Relay) Run(ctx context.Context) {
 func (r *Relay) Drain(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() {
+		// Hand the outbox over as soon as this pass ends, so another replica's
+		// fresh rows do not wait for the lease to expire.
+		if err := r.store.ReleaseOutboxLease(context.WithoutCancel(ctx), r.holder); err != nil {
+			slog.Warn("event outbox lease not released", "err", err)
+		}
+	}()
 	for {
+		// Renewed per batch: a long drain keeps ownership, a crashed one
+		// loses it after leaseTTL.
+		owned, err := r.store.AcquireOutboxLease(ctx, r.holder, r.now(), leaseTTL)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return ErrLeaseHeld
+		}
 		rows, err := r.store.PendingOutbox(ctx, batchSize)
 		if err != nil {
 			return err
@@ -153,7 +204,11 @@ func (r *Relay) Drain(ctx context.Context) error {
 			published := r.now()
 			if err := r.store.MarkOutboxPublished(ctx, row.ID, published); err != nil {
 				// Published but not marked: the next pass publishes it again,
-				// and the consumer deduplicates by envelope id.
+				// and the consumer deduplicates by envelope id. Count this XADD
+				// as an attempt so the republish is audited with its real number.
+				if merr := r.store.MarkOutboxFailed(ctx, row.ID, "published but not marked: "+err.Error()); merr != nil {
+					slog.Warn("event outbox attempt not recorded", "err", merr)
+				}
 				return err
 			}
 			r.published.Inc()

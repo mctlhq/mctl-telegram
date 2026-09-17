@@ -2044,7 +2044,11 @@ message and edit that the agent listener ingests also gets an `event_outbox` row
 - **Valkey down:** rows stay pending; the relay retries with backoff (max 1 min)
   and a 30 s safety pass. Nothing is lost; `mctl_events_outbox_backlog` grows and
   `mctl_events_publish_failures_total` counts attempts. `event_outbox.last_error`
-  holds the last reason.
+  holds the last reason. A new ingest does not cut a failure backoff short.
+- **Several replicas:** only the replica holding the `event_outbox_lease` row
+  publishes; the lease is renewed per batch, released at the end of each pass and
+  expires after 1 min if its holder dies. Others retry after 1 s, so rows are
+  published once and in order.
 - **Retention:** published rows are purged after 7 days.
 - **Audit:** each publish appends `stage=published` to `mctl:events:audit`.
 
