@@ -32,6 +32,7 @@ const (
 	leaseReleaseTimeout = 5 * time.Second
 	leaseRetry          = time.Second
 	leaseRenewEvery     = leaseTTL / 3
+	auditTimeout        = time.Second
 )
 
 // ErrLeaseHeld means another replica is draining the shared outbox; this one
@@ -138,6 +139,9 @@ func (r *Relay) Run(ctx context.Context) {
 		switch {
 		case errors.Is(err, ErrLeaseHeld):
 			wait = leaseRetry
+			// Coalesce new-row notifications until the retry, too: otherwise
+			// every ingest contends for the lease again right away.
+			retryAt = r.now().Add(leaseRetry)
 		case err != nil:
 			slog.Warn("event relay drain failed", "err", err, "retry_in", backoff)
 			wait = backoff
@@ -202,6 +206,10 @@ func (r *Relay) Drain(ctx context.Context) error {
 		renewedAt = now
 		return nil
 	}
+	// Audit is best effort and must not hold delivery back: each write is
+	// bounded, and after one failure the rest of this pass skips the trail
+	// instead of paying the timeout again for every row.
+	auditOK := true
 	for {
 		if err := renew(true); err != nil {
 			return err
@@ -228,7 +236,11 @@ func (r *Relay) Drain(ctx context.Context) error {
 			// Audit the append itself, before the database mark: a publish
 			// whose mark fails still happened and must be on the trail.
 			r.published.Inc()
-			r.audit(ctx, row, published)
+			if auditOK {
+				auditOK = r.audit(ctx, row, published)
+			} else {
+				slog.Warn("event audit skipped after an earlier failure in this pass", "event_id", row.EventID)
+			}
 			if err := r.store.MarkOutboxPublished(ctx, row.ID, published); err != nil {
 				// Published but not marked: the next pass publishes it again,
 				// and the consumer deduplicates by envelope id. Count this XADD
@@ -245,9 +257,11 @@ func (r *Relay) Drain(ctx context.Context) error {
 	}
 }
 
-func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) {
+func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) bool {
 	id := "telegram:" + row.EventID
-	_, err := r.pub.XAdd(ctx, AuditStream, auditMaxLen,
+	auditCtx, cancel := context.WithTimeout(ctx, auditTimeout)
+	defer cancel()
+	_, err := r.pub.XAdd(auditCtx, AuditStream, auditMaxLen,
 		"stage", "published",
 		"component", Source,
 		"event_id", id,
@@ -259,7 +273,9 @@ func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) {
 	if err != nil {
 		// Best effort: the audit trail must never hold delivery back.
 		slog.Warn("event audit write failed", "err", err)
+		return false
 	}
+	return true
 }
 
 // OutboxBuilder adapts BuildEnvelope to db.OutboxBuilder for stream.

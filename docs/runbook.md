@@ -2047,10 +2047,15 @@ message and edit that the agent listener ingests also gets an `event_outbox` row
   holds the last reason. A new ingest does not cut a failure backoff short.
 - **Several replicas:** only the replica holding the `event_outbox_lease` row
   publishes; the lease is renewed per batch, released at the end of each pass and
-  expires after 1 min if its holder dies. Others retry after 1 s, so rows are
-  published once and in order.
+  expires after 1 min if its holder dies. Others retry after 1 s, so a normal
+  pass publishes rows in order without two replicas racing. Delivery is still
+  at-least-once: a failed `MarkOutboxPublished`, a crash after XADD, or a holder
+  stalled past its lease can republish a row, and consumers deduplicate by
+  envelope `id`.
 - **Retention:** published rows are purged after 7 days.
-- **Audit:** each publish appends `stage=published` to `mctl:events:audit`.
+- **Audit (best effort):** each publish attempts a `stage=published` entry in
+  `mctl:events:audit`, bounded to 1 s. An audit failure never blocks delivery;
+  after one failure the rest of that pass skips the trail and logs a warning.
 
 | Env | Meaning |
 |---|---|
