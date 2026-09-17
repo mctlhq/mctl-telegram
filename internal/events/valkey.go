@@ -137,12 +137,16 @@ func (c *Client) roundTrip(ctx context.Context, args []string) (string, error) {
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	if err := c.conn.SetDeadline(deadline); err != nil {
+	// Bind to this call's connection: the cancel callback runs on another
+	// goroutine and may fire after Close has already cleared c.conn.
+	conn := c.conn
+	if err := conn.SetDeadline(deadline); err != nil {
 		return "", err
 	}
 	// Unblock an in-flight read or write as soon as ctx is cancelled, so a
-	// shutdown does not wait out the full timeout.
-	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetDeadline(time.Now()) })
+	// shutdown does not wait out the full timeout. Setting a deadline on a
+	// connection that is already closed only returns an error.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
 
 	var b strings.Builder
@@ -150,7 +154,7 @@ func (c *Client) roundTrip(ctx context.Context, args []string) (string, error) {
 	for _, a := range args {
 		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
 	}
-	if _, err := c.conn.Write([]byte(b.String())); err != nil {
+	if _, err := conn.Write([]byte(b.String())); err != nil {
 		return "", err
 	}
 	line, err := c.r.ReadString('\n')
