@@ -75,7 +75,8 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 	}
 
 	now := time.Now().UTC()
-	if err := s.insertOutboxTx(ctx, tx, ev, now); err != nil {
+	queued, err := s.insertOutboxTx(ctx, tx, ev, now)
+	if err != nil {
 		return 0, false, err
 	}
 	res, err := tx.ExecContext(ctx,
@@ -96,7 +97,7 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 	if err := tx.Commit(); err != nil {
 		return 0, false, fmt.Errorf("commit ingest tx: %w", err)
 	}
-	if s.outbox != nil && s.outboxNotify != nil {
+	if queued && s.outboxNotify != nil {
 		s.outboxNotify()
 	}
 	return jobID, true, nil

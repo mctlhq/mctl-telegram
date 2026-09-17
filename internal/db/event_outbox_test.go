@@ -68,6 +68,33 @@ func TestEventOutbox_WrittenWithIngestAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestEventOutbox_NotifiesOnlyWhenARowWasWritten(t *testing.T) {
+	ctx := context.Background()
+	notified := 0
+	s := newTestStoreCrypted(t).WithEventOutbox(testOutboxBuilder).WithEventOutboxNotify(func() { notified++ })
+	uid := seedAgentUser(t, s, "owner")
+	conv, err := s.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+	// owner_outgoing is not published: the relay has nothing to wake for.
+	if _, _, err := s.InsertEventEnqueueJobAndTouch(ctx, IncomingEvent{
+		EventID: "evt:v1:1:555:50", UserID: uid, Kind: EventKindOwnerOutgoing,
+		ChatTGID: 555, SenderTGID: 1, MessageID: 50, Body: "mine",
+	}, conv.ID); err != nil {
+		t.Fatalf("ingest owner message: %v", err)
+	}
+	if notified != 0 {
+		t.Fatalf("notified %d times for an unpublished kind, want 0", notified)
+	}
+	if ok, err := ingestForOutbox(t, s, uid, "evt:v1:1:555:51", "hi"); err != nil || !ok {
+		t.Fatalf("ingest: ok=%v err=%v", ok, err)
+	}
+	if notified != 1 {
+		t.Fatalf("notified %d times, want 1", notified)
+	}
+}
+
 func TestEventOutbox_DisabledWritesNothing(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
@@ -184,6 +211,16 @@ func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store, prefix
 	now := time.Now().UTC()
 	if err := s.MarkOutboxPublished(ctx, rows[1].ID, now); err != nil {
 		t.Fatalf("mark published: %v", err)
+	}
+	// A relay that lost its lease mid-publish must not write a failure onto a
+	// row another replica already published.
+	if err := s.MarkOutboxFailed(ctx, rows[1].ID, "stale relay"); err != nil {
+		t.Fatalf("mark failed after publish: %v", err)
+	}
+	var attempts int
+	var lastError string
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts, last_error FROM event_outbox WHERE id = $1`, rows[1].ID).Scan(&attempts, &lastError); err != nil || attempts != 1 || lastError != "" {
+		t.Fatalf("published row attempts=%d last_error=%q err=%v, want 1 and empty", attempts, lastError, err)
 	}
 	if n, err := s.OutboxBacklog(ctx); err != nil || n != baseline+1 {
 		t.Fatalf("backlog = %d err=%v, want baseline+1 = %d", n, err, baseline+1)

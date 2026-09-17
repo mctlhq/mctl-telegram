@@ -47,26 +47,32 @@ func (s *Store) WithEventOutboxNotify(fn func()) *Store {
 // makes the event and its publication intent durable together: a crash before
 // XADD leaves the row unpublished and the relay publishes it on the next pass,
 // and a rolled-back ingest leaves nothing to publish.
-func (s *Store) insertOutboxTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent, at time.Time) error {
+// It reports whether a row was written, so callers wake the relay only then.
+func (s *Store) insertOutboxTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent, at time.Time) (bool, error) {
 	if s.outbox == nil {
-		return nil
+		return false, nil
 	}
 	row, ok, err := s.outbox(ev, at)
 	if err != nil {
-		return fmt.Errorf("build event envelope: %w", err)
+		return false, fmt.Errorf("build event envelope: %w", err)
 	}
 	if !ok {
-		return nil
+		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO event_outbox(event_id, user_id, stream, envelope, created_at)
 		 VALUES($1,$2,$3,$4,$5)
 		 ON CONFLICT (event_id) DO NOTHING`,
 		row.EventID, ev.UserID, row.Stream, row.Envelope, at,
-	); err != nil {
-		return fmt.Errorf("insert event outbox: %w", err)
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert event outbox: %w", err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("insert event outbox rows: %w", err)
+	}
+	return n == 1, nil
 }
 
 const outboxLeaseName = "relay"
@@ -147,7 +153,8 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, reason string) e
 		reason = strings.ToValidUTF8(reason[:500], "")
 	}
 	_, err := s.DB.ExecContext(ctx,
-		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1 WHERE id = $2`,
+		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1
+		  WHERE id = $2 AND published_at IS NULL`,
 		reason, id)
 	if err != nil {
 		return fmt.Errorf("mark event publish failed: %w", err)

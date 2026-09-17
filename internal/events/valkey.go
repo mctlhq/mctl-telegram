@@ -70,6 +70,9 @@ func NewClient(rawURL, password string, timeout time.Duration) (*Client, error) 
 		if db, err = strconv.Atoi(p); err != nil {
 			return nil, fmt.Errorf("valkey url database: %w", err)
 		}
+		if db < 0 {
+			return nil, errors.New("valkey url database must not be negative")
+		}
 	}
 	if timeout <= 0 {
 		timeout = 5 * time.Second

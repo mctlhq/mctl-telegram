@@ -258,7 +258,7 @@ func (r *Relay) Drain(ctx context.Context) error {
 			if auditOK {
 				auditOK = r.audit(ctx, row, published)
 			} else {
-				slog.Warn("event audit skipped after an earlier failure in this pass", "event_id", row.EventID)
+				slog.Warn("event audit skipped after an earlier failure in this pass")
 			}
 			mctx, mcancel := r.storeCtx(ctx)
 			err := r.store.MarkOutboxPublished(mctx, row.ID, published)

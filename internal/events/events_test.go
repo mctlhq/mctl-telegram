@@ -598,6 +598,12 @@ func TestClient_UserWithoutPasswordIsRejected(t *testing.T) {
 	}
 }
 
+func TestClient_NegativeDatabaseIsRejected(t *testing.T) {
+	if _, err := NewClient("redis://valkey.platform-events.svc:6379/-1", "", time.Second); err == nil {
+		t.Fatal("a negative database index was accepted")
+	}
+}
+
 func TestClient_URLWithoutUserinfo(t *testing.T) {
 	c, err := NewClient("redis://valkey.platform-events.svc:6379/0", "", time.Second)
 	if err != nil || c.username != "" {
