@@ -574,6 +574,7 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_outbox_event_id ON event_outbox(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_outbox_unpublished ON event_outbox(id) WHERE published_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_event_outbox_published_at ON event_outbox(published_at) WHERE published_at IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS event_outbox_lease (
 			name TEXT PRIMARY KEY,
 			holder TEXT NOT NULL,

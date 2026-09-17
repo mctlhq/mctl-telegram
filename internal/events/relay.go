@@ -22,14 +22,16 @@ import (
 const AuditStream = "mctl:events:audit"
 
 const (
-	streamMaxLen       = 10000
-	auditMaxLen        = 10000
-	batchSize          = 100
-	safetyInterval     = 30 * time.Second
-	maxBackoff         = time.Minute
-	publishedRetention = 7 * 24 * time.Hour
-	leaseTTL           = time.Minute
-	leaseRetry         = time.Second
+	streamMaxLen        = 10000
+	auditMaxLen         = 10000
+	batchSize           = 100
+	safetyInterval      = 30 * time.Second
+	maxBackoff          = time.Minute
+	publishedRetention  = 7 * 24 * time.Hour
+	leaseTTL            = time.Minute
+	leaseReleaseTimeout = 5 * time.Second
+	leaseRetry          = time.Second
+	leaseRenewEvery     = leaseTTL / 3
 )
 
 // ErrLeaseHeld means another replica is draining the shared outbox; this one
@@ -173,19 +175,36 @@ func (r *Relay) Drain(ctx context.Context) error {
 	defer func() {
 		// Hand the outbox over as soon as this pass ends, so another replica's
 		// fresh rows do not wait for the lease to expire.
-		if err := r.store.ReleaseOutboxLease(context.WithoutCancel(ctx), r.holder); err != nil {
+		// Detached from shutdown so the hand-over still happens, but bounded:
+		// an unreachable database must not keep Run from closing the publisher.
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseReleaseTimeout)
+		defer cancel()
+		if err := r.store.ReleaseOutboxLease(releaseCtx, r.holder); err != nil {
 			slog.Warn("event outbox lease not released", "err", err)
 		}
 	}()
-	for {
-		// Renewed per batch: a long drain keeps ownership, a crashed one
-		// loses it after leaseTTL.
-		owned, err := r.store.AcquireOutboxLease(ctx, r.holder, r.now(), leaseTTL)
+	// The lease is renewed while rows are published, not only per batch: slow
+	// Valkey calls can make one batch outlast leaseTTL, and a replica that lost
+	// ownership must stop before another one publishes the same rows.
+	var renewedAt time.Time
+	renew := func(force bool) error {
+		now := r.now()
+		if !force && now.Sub(renewedAt) < leaseRenewEvery {
+			return nil
+		}
+		owned, err := r.store.AcquireOutboxLease(ctx, r.holder, now, leaseTTL)
 		if err != nil {
 			return err
 		}
 		if !owned {
 			return ErrLeaseHeld
+		}
+		renewedAt = now
+		return nil
+	}
+	for {
+		if err := renew(true); err != nil {
+			return err
 		}
 		rows, err := r.store.PendingOutbox(ctx, batchSize)
 		if err != nil {
@@ -195,6 +214,9 @@ func (r *Relay) Drain(ctx context.Context) error {
 			return nil
 		}
 		for _, row := range rows {
+			if err := renew(false); err != nil {
+				return err
+			}
 			if _, err := r.pub.XAdd(ctx, row.Stream, streamMaxLen, "envelope", row.Envelope); err != nil {
 				r.failures.Inc()
 				if merr := r.store.MarkOutboxFailed(ctx, row.ID, err.Error()); merr != nil {
@@ -203,6 +225,10 @@ func (r *Relay) Drain(ctx context.Context) error {
 				return err
 			}
 			published := r.now()
+			// Audit the append itself, before the database mark: a publish
+			// whose mark fails still happened and must be on the trail.
+			r.published.Inc()
+			r.audit(ctx, row, published)
 			if err := r.store.MarkOutboxPublished(ctx, row.ID, published); err != nil {
 				// Published but not marked: the next pass publishes it again,
 				// and the consumer deduplicates by envelope id. Count this XADD
@@ -212,8 +238,6 @@ func (r *Relay) Drain(ctx context.Context) error {
 				}
 				return err
 			}
-			r.published.Inc()
-			r.audit(ctx, row, published)
 		}
 		if len(rows) < batchSize {
 			return nil

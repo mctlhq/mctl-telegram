@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -61,8 +62,12 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 	if !ok {
 		return Envelope{}, fmt.Errorf("event kind %q is not published", ev.Kind)
 	}
-	if ev.EventID == "" || ev.UserID <= 0 || ev.ChatTGID == 0 || ev.MessageID <= 0 {
+	if ev.EventID == "" || ev.ChatTGID == 0 || ev.MessageID <= 0 {
 		return Envelope{}, fmt.Errorf("event %q lacks identifiers", ev.EventID)
+	}
+	account, ok := telegramAccountID(ev.EventID)
+	if !ok {
+		return Envelope{}, fmt.Errorf("event %q does not name a Telegram account", ev.EventID)
 	}
 	id := "telegram:" + ev.EventID
 	return Envelope{
@@ -74,13 +79,28 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 		CorrelationID: id,
 		Subject: map[string]string{
 			"kind":       "telegram.message",
-			"account_id": strconv.FormatInt(ev.UserID, 10),
+			"account_id": account,
 			"chat_id":    strconv.FormatInt(ev.ChatTGID, 10),
 			"message_id": strconv.FormatInt(ev.MessageID, 10),
 			// The peer string the MCP get_messages tool accepts for this chat.
 			"peer": "user:" + strconv.FormatInt(ev.ChatTGID, 10),
 		},
 	}, nil
+}
+
+// telegramAccountID returns the Telegram account id from a listener event id
+// (evt:v1:<account>:<chat>:<message>[...]). The subject is a cross-service
+// reference, so it carries the Telegram identity other services know, not this
+// database's users.id.
+func telegramAccountID(eventID string) (string, bool) {
+	parts := strings.Split(eventID, ":")
+	if len(parts) < 5 || parts[0] != "evt" || parts[1] != "v1" {
+		return "", false
+	}
+	if n, err := strconv.ParseInt(parts[2], 10, 64); err != nil || n <= 0 {
+		return "", false
+	}
+	return parts[2], true
 }
 
 // Marshal renders the envelope as compact JSON with a stable key order.

@@ -13,6 +13,9 @@ import (
 // expectedMetricNames lists every metric family that New() must register.
 var expectedMetricNames = []string{
 	"mctl_http_requests_total",
+	"mctl_events_published_total",
+	"mctl_events_publish_failures_total",
+	"mctl_events_outbox_backlog",
 	"mctl_auth_failures_total",
 	"mctl_rate_limit_events_total",
 	"mctl_tool_invocations_total",

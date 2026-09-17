@@ -50,7 +50,7 @@ func TestBuildEnvelope_ReferencesOnly(t *testing.T) {
 		"specversion": "mctl.events/v1", "id": "telegram:evt:v1:210408407:555:42",
 		"type": "telegram.message.created", "source": "mctl-telegram",
 		"occurred_at": "2026-09-17T07:00:00Z", "correlation_id": "telegram:evt:v1:210408407:555:42",
-		"subject": map[string]any{"kind": "telegram.message", "account_id": "1", "chat_id": "555",
+		"subject": map[string]any{"kind": "telegram.message", "account_id": "210408407", "chat_id": "555",
 			"message_id": "42", "peer": "user:555"},
 	}
 	if fmt.Sprint(doc) != fmt.Sprint(want) {
@@ -77,6 +77,14 @@ func TestBuildEnvelope_KindsAndValidation(t *testing.T) {
 	if _, err := BuildEnvelope(missing, time.Now()); err == nil {
 		t.Fatal("event without a message id must not build")
 	}
+	// users.id is this database's key; the subject must not fall back to it.
+	for _, id := range []string{"legacy-id", "evt:v1:0:555:42", "evt:v2:210408407:555:42", "evt:v1:acct:555:42"} {
+		bad := sampleEvent()
+		bad.EventID = id
+		if _, err := BuildEnvelope(bad, time.Now()); err == nil {
+			t.Fatalf("event id %q without a Telegram account must not build", id)
+		}
+	}
 }
 
 // --- relay -------------------------------------------------------------------
@@ -90,6 +98,8 @@ type fakeStore struct {
 
 	leaseHolder string
 	leaseUntil  time.Time
+
+	releaseBounded, releaseLive bool
 }
 
 func (f *fakeStore) PendingOutbox(_ context.Context, limit int) ([]db.OutboxRow, error) {
@@ -127,9 +137,11 @@ func (f *fakeStore) AcquireOutboxLease(_ context.Context, holder string, now tim
 	f.leaseHolder, f.leaseUntil = holder, now.Add(ttl)
 	return true, nil
 }
-func (f *fakeStore) ReleaseOutboxLease(_ context.Context, holder string) error {
+func (f *fakeStore) ReleaseOutboxLease(ctx context.Context, holder string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	_, f.releaseBounded = ctx.Deadline()
+	f.releaseLive = ctx.Err() == nil
 	if f.leaseHolder == holder {
 		f.leaseHolder = ""
 	}
@@ -145,6 +157,7 @@ type fakePub struct {
 	failErr  error
 	attempts int
 	delay    time.Duration
+	onXAdd   func(stream string) // runs before the append is recorded
 }
 
 func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...string) (string, error) {
@@ -153,6 +166,9 @@ func (p *fakePub) XAdd(_ context.Context, stream string, maxLen int, fields ...s
 	delay := p.delay
 	p.mu.Unlock()
 	time.Sleep(delay)
+	if p.onXAdd != nil {
+		p.onXAdd(stream)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failOn != "" && stream == p.failOn {
@@ -254,6 +270,63 @@ func TestRelay_UnmarkedPublishIsRetriedNotLost(t *testing.T) {
 	// The first, unmarked XADD still counts as an attempt.
 	if _, ok := st.failures[1]; !ok {
 		t.Fatal("the published-but-unmarked attempt was not recorded")
+	}
+}
+
+func TestRelay_LeaseReleaseOutlivesShutdownButIsBounded(t *testing.T) {
+	st, pub := newFakes(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // shutdown already under way
+	_ = NewRelay(st, pub, nil).Drain(ctx)
+	if !st.releaseLive {
+		t.Fatal("lease release ran with the cancelled shutdown context and could not hand over")
+	}
+	if !st.releaseBounded {
+		t.Fatal("lease release has no deadline; an unreachable database would block shutdown")
+	}
+}
+
+func TestRelay_LostLeaseStopsPublishingMidBatch(t *testing.T) {
+	st, pub := newFakes(5)
+	r := NewRelay(st, pub, nil)
+	clock := time.Now()
+	r.now = func() time.Time { return clock }
+	appended := 0
+	pub.onXAdd = func(stream string) {
+		if stream == AuditStream {
+			return
+		}
+		appended++
+		// Each publish is slow; after the second, this replica's lease has
+		// expired and another replica takes it.
+		clock = clock.Add(leaseTTL / 2)
+		if appended == 2 {
+			st.mu.Lock()
+			st.leaseHolder, st.leaseUntil = "other-replica", clock.Add(time.Hour)
+			st.mu.Unlock()
+		}
+	}
+	if err := r.Drain(context.Background()); !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("drain = %v, want ErrLeaseHeld once ownership is lost", err)
+	}
+	if appended != 2 {
+		t.Fatalf("published %d rows, want 2: nothing after the lease was lost", appended)
+	}
+}
+
+func TestRelay_PublishIsAuditedEvenWhenTheMarkFails(t *testing.T) {
+	st, pub := newFakes(1)
+	st.markErr = errors.New("db down")
+	r := NewRelay(st, pub, nil)
+	_ = r.Drain(context.Background())
+	audited := 0
+	for _, c := range pub.calls {
+		if c[0] == AuditStream {
+			audited++
+		}
+	}
+	if audited != 1 {
+		t.Fatalf("audit entries = %d, want 1 for the append that happened", audited)
 	}
 }
 
