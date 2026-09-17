@@ -465,6 +465,12 @@ func TestClient_RealValkey(t *testing.T) {
 	}
 }
 
+func TestClient_UserWithoutPasswordIsRejected(t *testing.T) {
+	if _, err := NewClient("redis://telegram-producer@127.0.0.1:6379/0", "", time.Second); err == nil {
+		t.Fatal("a named ACL user without a password was accepted")
+	}
+}
+
 func TestClient_URLWithoutUserinfo(t *testing.T) {
 	c, err := NewClient("redis://valkey.platform-events.svc:6379/0", "", time.Second)
 	if err != nil || c.username != "" {

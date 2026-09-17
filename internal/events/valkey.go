@@ -53,6 +53,11 @@ func NewClient(rawURL, password string, timeout time.Duration) (*Client, error) 
 		}
 		username = u.User.Username()
 	}
+	if username != "" && password == "" {
+		// An ACL user without its password would connect anonymously and get
+		// NOAUTH on every publish; refuse the configuration up front instead.
+		return nil, errors.New("valkey url names a user but no password is configured")
+	}
 	port := u.Port()
 	if port == "" {
 		port = "6379"

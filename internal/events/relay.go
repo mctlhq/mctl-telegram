@@ -133,9 +133,10 @@ func (r *Relay) Run(ctx context.Context) {
 		}
 		wait := safetyInterval
 		retryAt = time.Time{}
-		if errors.Is(err, ErrLeaseHeld) {
+		switch {
+		case errors.Is(err, ErrLeaseHeld):
 			wait = leaseRetry
-		} else if err != nil {
+		case err != nil:
 			slog.Warn("event relay drain failed", "err", err, "retry_in", backoff)
 			wait = backoff
 			retryAt = r.now().Add(backoff)
@@ -143,7 +144,7 @@ func (r *Relay) Run(ctx context.Context) {
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
-		} else {
+		default:
 			backoff = time.Second
 		}
 		if now := r.now(); now.Sub(lastPurge) > time.Hour {
