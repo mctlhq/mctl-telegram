@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/crypto"
 )
 
 // testOutboxBuilder stands in for internal/events: identifiers only.
@@ -154,6 +156,11 @@ func TestEventOutbox_PostgresLifecycle(t *testing.T) {
 		_, _ = conn.ExecContext(ctx, `DELETE FROM agent_jobs WHERE event_id LIKE 'evt:v1:9:555:%'`)
 		_, _ = conn.ExecContext(ctx, `DELETE FROM incoming_events WHERE event_id LIKE 'evt:v1:9:555:%'`)
 	})
-	s := (&Store{DB: conn}).WithEventOutbox(testOutboxBuilder)
+	c, err := crypto.New(makeKey())
+	if err != nil {
+		t.Fatalf("crypto: %v", err)
+	}
+	// Crypt is required: the ingest seals the message body before the insert.
+	s := (&Store{DB: conn, Crypt: c}).WithEventOutbox(testOutboxBuilder)
 	exerciseOutboxLifecycle(ctx, t, s)
 }
