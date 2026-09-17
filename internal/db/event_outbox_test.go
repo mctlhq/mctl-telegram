@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -100,20 +101,38 @@ func TestEventOutbox_BuildFailureRollsBackTheIngest(t *testing.T) {
 func TestEventOutbox_PublishLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t).WithEventOutbox(testOutboxBuilder)
-	exerciseOutboxLifecycle(ctx, t, s)
+	exerciseOutboxLifecycle(ctx, t, s, "evt:v1:9:555:")
 }
 
-func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store) {
+func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store, prefix string) {
 	t.Helper()
 	uid := seedAgentUser(t, s, "outbox-owner")
-	for _, id := range []string{"evt:v1:9:555:1", "evt:v1:9:555:2"} {
+	baseline, err := s.OutboxBacklog(ctx)
+	if err != nil {
+		t.Fatalf("baseline backlog: %v", err)
+	}
+	for _, id := range []string{prefix + "1", prefix + "2"} {
 		if ok, err := ingestForOutbox(t, s, uid, id, "hi"); err != nil || !ok {
 			t.Fatalf("ingest %s: ok=%v err=%v", id, ok, err)
 		}
 	}
-	rows, err := s.PendingOutbox(ctx, 10)
-	if err != nil || len(rows) != 2 || rows[0].ID > rows[1].ID {
-		t.Fatalf("pending = %+v err=%v, want two rows oldest first", rows, err)
+	// A shared database may hold other rows; only this run's rows are asserted.
+	mine := func() []OutboxRow {
+		all, err := s.PendingOutbox(ctx, 10000)
+		if err != nil {
+			t.Fatalf("pending: %v", err)
+		}
+		var out []OutboxRow
+		for _, r := range all {
+			if strings.HasPrefix(r.EventID, prefix) {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	rows := mine()
+	if len(rows) != 2 || rows[0].ID > rows[1].ID {
+		t.Fatalf("pending = %+v, want two rows oldest first", rows)
 	}
 	// 803 bytes: the cut at 500 falls inside a two-byte rune, which Postgres
 	// would reject as invalid UTF-8 if the truncation split it.
@@ -124,18 +143,18 @@ func exerciseOutboxLifecycle(ctx context.Context, t *testing.T, s *Store) {
 	if err := s.MarkOutboxPublished(ctx, rows[1].ID, now); err != nil {
 		t.Fatalf("mark published: %v", err)
 	}
-	if n, err := s.OutboxBacklog(ctx); err != nil || n != 1 {
-		t.Fatalf("backlog = %d err=%v, want 1", n, err)
+	if n, err := s.OutboxBacklog(ctx); err != nil || n != baseline+1 {
+		t.Fatalf("backlog = %d err=%v, want baseline+1 = %d", n, err, baseline+1)
 	}
-	left, _ := s.PendingOutbox(ctx, 10)
+	left := mine()
 	if len(left) != 1 || left[0].ID != rows[0].ID || left[0].Attempts != 1 {
 		t.Fatalf("pending after publish = %+v, want the failed row with one attempt", left)
 	}
 	if n, err := s.PurgePublishedOutbox(ctx, now.Add(-time.Hour)); err != nil || n != 0 {
 		t.Fatalf("purge before publish time removed %d err=%v, want 0", n, err)
 	}
-	if n, err := s.PurgePublishedOutbox(ctx, now.Add(time.Hour)); err != nil || n != 1 {
-		t.Fatalf("purge removed %d err=%v, want 1 (published rows only)", n, err)
+	if n, err := s.PurgePublishedOutbox(ctx, now.Add(time.Hour)); err != nil || n < 1 {
+		t.Fatalf("purge removed %d err=%v, want at least this run's published row", n, err)
 	}
 }
 
@@ -149,14 +168,21 @@ func TestEventOutbox_PostgresLifecycle(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres not available: %v", err)
 	}
-	defer conn.Close()
+	// Cleanups run last-in first-out: close is registered first so the row
+	// cleanup below still has an open connection. A deferred Close would run
+	// before any t.Cleanup and silently skip it, leaving rows that make the
+	// next run's ingest a duplicate.
+	t.Cleanup(func() { _ = conn.Close() })
 	if err := Migrate(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	// Unique per run, so leftovers from an earlier run cannot collide either.
+	prefix := fmt.Sprintf("evt:v1:9:%d:", time.Now().UnixNano())
 	t.Cleanup(func() {
-		_, _ = conn.ExecContext(ctx, `DELETE FROM event_outbox WHERE event_id LIKE 'evt:v1:9:555:%'`)
-		_, _ = conn.ExecContext(ctx, `DELETE FROM agent_jobs WHERE event_id LIKE 'evt:v1:9:555:%'`)
-		_, _ = conn.ExecContext(ctx, `DELETE FROM incoming_events WHERE event_id LIKE 'evt:v1:9:555:%'`)
+		like := prefix + "%"
+		_, _ = conn.ExecContext(ctx, `DELETE FROM event_outbox WHERE event_id LIKE $1`, like)
+		_, _ = conn.ExecContext(ctx, `DELETE FROM agent_jobs WHERE event_id LIKE $1`, like)
+		_, _ = conn.ExecContext(ctx, `DELETE FROM incoming_events WHERE event_id LIKE $1`, like)
 	})
 	c, err := crypto.New(makeKey())
 	if err != nil {
@@ -164,5 +190,5 @@ func TestEventOutbox_PostgresLifecycle(t *testing.T) {
 	}
 	// Crypt is required: the ingest seals the message body before the insert.
 	s := (&Store{DB: conn, Crypt: c}).WithEventOutbox(testOutboxBuilder)
-	exerciseOutboxLifecycle(ctx, t, s)
+	exerciseOutboxLifecycle(ctx, t, s, prefix)
 }
