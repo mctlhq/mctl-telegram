@@ -37,7 +37,7 @@ type Store interface {
 
 // Publisher is the transport the relay writes to.
 type Publisher interface {
-	XAdd(stream string, maxLen int, fields ...string) (string, error)
+	XAdd(ctx context.Context, stream string, maxLen int, fields ...string) (string, error)
 	Close()
 }
 
@@ -143,7 +143,7 @@ func (r *Relay) Drain(ctx context.Context) error {
 			return nil
 		}
 		for _, row := range rows {
-			if _, err := r.pub.XAdd(row.Stream, streamMaxLen, "envelope", row.Envelope); err != nil {
+			if _, err := r.pub.XAdd(ctx, row.Stream, streamMaxLen, "envelope", row.Envelope); err != nil {
 				r.failures.Inc()
 				if merr := r.store.MarkOutboxFailed(ctx, row.ID, err.Error()); merr != nil {
 					slog.Warn("event outbox failure not recorded", "err", merr)
@@ -157,7 +157,7 @@ func (r *Relay) Drain(ctx context.Context) error {
 				return err
 			}
 			r.published.Inc()
-			r.audit(row, published)
+			r.audit(ctx, row, published)
 		}
 		if len(rows) < batchSize {
 			return nil
@@ -165,9 +165,9 @@ func (r *Relay) Drain(ctx context.Context) error {
 	}
 }
 
-func (r *Relay) audit(row db.OutboxRow, at time.Time) {
+func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) {
 	id := "telegram:" + row.EventID
-	_, err := r.pub.XAdd(AuditStream, auditMaxLen,
+	_, err := r.pub.XAdd(ctx, AuditStream, auditMaxLen,
 		"stage", "published",
 		"component", Source,
 		"event_id", id,

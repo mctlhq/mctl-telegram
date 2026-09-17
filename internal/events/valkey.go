@@ -2,8 +2,10 @@ package events
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strconv"
@@ -13,7 +15,8 @@ import (
 
 // Client is a minimal RESP2 client for the two commands a producer needs:
 // AUTH and XADD. A full client library would bring a large dependency for a
-// write-only path whose ACL user can do nothing else anyway.
+// write-only path whose ACL user can do nothing else anyway. Not safe for
+// concurrent use; the relay serializes its calls.
 type Client struct {
 	addr     string
 	username string
@@ -43,8 +46,12 @@ func NewClient(rawURL, password string, timeout time.Duration) (*Client, error) 
 	if u.Hostname() == "" {
 		return nil, errors.New("valkey url has no host")
 	}
-	if _, hasPassword := u.User.Password(); hasPassword {
-		return nil, errors.New("valkey url must not embed a password")
+	username := ""
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return nil, errors.New("valkey url must not embed a password")
+		}
+		username = u.User.Username()
 	}
 	port := u.Port()
 	if port == "" {
@@ -61,7 +68,7 @@ func NewClient(rawURL, password string, timeout time.Duration) (*Client, error) 
 	}
 	return &Client{
 		addr:     net.JoinHostPort(u.Hostname(), port),
-		username: u.User.Username(),
+		username: username,
 		password: password,
 		db:       db,
 		timeout:  timeout,
@@ -76,8 +83,9 @@ func (c *Client) Close() {
 	}
 }
 
-func (c *Client) connect() error {
-	conn, err := net.DialTimeout("tcp", c.addr, c.timeout)
+func (c *Client) connect(ctx context.Context) error {
+	dialer := net.Dialer{Timeout: c.timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
 		return err
 	}
@@ -87,13 +95,13 @@ func (c *Client) connect() error {
 		if c.username != "" {
 			args = []string{"AUTH", c.username, c.password}
 		}
-		if _, err := c.roundTrip(args); err != nil {
+		if _, err := c.roundTrip(ctx, args); err != nil {
 			c.Close()
 			return err
 		}
 	}
 	if c.db != 0 {
-		if _, err := c.roundTrip([]string{"SELECT", strconv.Itoa(c.db)}); err != nil {
+		if _, err := c.roundTrip(ctx, []string{"SELECT", strconv.Itoa(c.db)}); err != nil {
 			c.Close()
 			return err
 		}
@@ -102,14 +110,18 @@ func (c *Client) connect() error {
 }
 
 // Do runs one command and returns a simple, integer or bulk reply as a string.
-// A transport failure closes the connection so the next call starts clean.
-func (c *Client) Do(args ...string) (string, error) {
+// A transport failure closes the connection so the next call starts clean. The
+// call ends at the client timeout or when ctx is done, whichever comes first.
+func (c *Client) Do(ctx context.Context, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.conn == nil {
-		if err := c.connect(); err != nil {
+		if err := c.connect(ctx); err != nil {
 			return "", err
 		}
 	}
-	reply, err := c.roundTrip(args)
+	reply, err := c.roundTrip(ctx, args)
 	if err != nil {
 		var se *ServerError
 		if !errors.As(err, &se) {
@@ -120,10 +132,19 @@ func (c *Client) Do(args ...string) (string, error) {
 	return reply, nil
 }
 
-func (c *Client) roundTrip(args []string) (string, error) {
-	if err := c.conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+func (c *Client) roundTrip(ctx context.Context, args []string) (string, error) {
+	deadline := time.Now().Add(c.timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := c.conn.SetDeadline(deadline); err != nil {
 		return "", err
 	}
+	// Unblock an in-flight read or write as soon as ctx is cancelled, so a
+	// shutdown does not wait out the full timeout.
+	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetDeadline(time.Now()) })
+	defer stop()
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "*%d\r\n", len(args))
 	for _, a := range args {
@@ -154,7 +175,7 @@ func (c *Client) roundTrip(args []string) (string, error) {
 			return "", nil
 		}
 		buf := make([]byte, n+2)
-		if _, err := readFull(c.r, buf); err != nil {
+		if _, err := io.ReadFull(c.r, buf); err != nil {
 			return "", err
 		}
 		return string(buf[:n]), nil
@@ -163,20 +184,17 @@ func (c *Client) roundTrip(args []string) (string, error) {
 	}
 }
 
-func readFull(r *bufio.Reader, buf []byte) (int, error) {
-	n := 0
-	for n < len(buf) {
-		m, err := r.Read(buf[n:])
-		n += m
-		if err != nil {
-			return n, err
-		}
-	}
-	return n, nil
+// XAdd appends fields to a stream, trimming it approximately to maxLen.
+func (c *Client) XAdd(ctx context.Context, stream string, maxLen int, fields ...string) (string, error) {
+	args := append([]string{"XADD", stream, "MAXLEN", "~", strconv.Itoa(maxLen), "*"}, fields...)
+	return c.Do(ctx, args...)
 }
 
-// XAdd appends an envelope to a stream, trimming it approximately to maxLen.
-func (c *Client) XAdd(stream string, maxLen int, fields ...string) (string, error) {
-	args := append([]string{"XADD", stream, "MAXLEN", "~", strconv.Itoa(maxLen), "*"}, fields...)
-	return c.Do(args...)
+// truncateUTF8 cuts s to at most max bytes without splitting a rune, so the
+// result is always valid UTF-8 (Postgres TEXT rejects anything else).
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return strings.ToValidUTF8(s[:max], "")
 }

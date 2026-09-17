@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -108,7 +109,9 @@ func (s *Store) MarkOutboxPublished(ctx context.Context, id int64, at time.Time)
 // MarkOutboxFailed records a failed publish attempt; the row stays pending.
 func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, reason string) error {
 	if len(reason) > 500 {
-		reason = reason[:500]
+		// Cut on a rune boundary: Postgres TEXT rejects invalid UTF-8, and the
+		// failure would then not be recorded at all.
+		reason = strings.ToValidUTF8(reason[:500], "")
 	}
 	_, err := s.DB.ExecContext(ctx,
 		`UPDATE event_outbox SET attempts = attempts + 1, last_error = $1 WHERE id = $2`,
