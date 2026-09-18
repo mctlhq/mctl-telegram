@@ -1844,6 +1844,19 @@ Two cautions before drawing a conclusion from these columns:
 NULL columns mean the row did not come from an MCP call through the HTTP path:
 the OAuth `connect:*` events and the agent API do not capture them.
 
+`mctl-telegram#617` shipped in two slices, both complete: Slice 1 measured the
+inbound header set on the Portal and direct routes and established the
+`Cf-Worker` route discriminator; Slice 2 persists and mirrors the five
+correlation columns above to slog. The same values are also copied onto the
+request's OpenTelemetry span when one is recording, so a future trace can be
+joined the same way a Loki line already can be — but mctl-telegram has no
+tracer wired today. Producing and exporting that span (the provider, exporter,
+propagator and sampling policy) is owned by `mctlhq/.github#55`, the
+vendor-neutral observability epic; #617 only provides the attribute adapter
+that the span will carry once #55 lands here. Until then the adapter is inert.
+As with the audit columns, every span attribute is a header as received, never
+identity or authorization evidence.
+
 ### Mitigation
 
 1. **If the account row shows `revoked_at IS NOT NULL`**, the sweeper has

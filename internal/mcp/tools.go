@@ -2221,11 +2221,12 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		attrs = append(attrs, "call_path", cp)
 	}
 	// Correlation facts, mirrored so a Loki line can be joined to the audit
-	// row and to the edge (mctl-telegram#617 Slice 2). This repository has no
-	// tracer wired -- opentelemetry is an indirect dependency only -- so slog
-	// is where these belong today; span attributes wait for whoever introduces
-	// tracing.
-	if ec := edgectx.From(ctx); !ec.Empty() {
+	// row and to the edge (mctl-telegram#617 Slice 2). The same facts are
+	// also copied onto ctx's recording span, if any, so this repository is
+	// ready for the tracer that mctlhq/.github#55 introduces without a
+	// second capture path.
+	ec := edgectx.From(ctx)
+	if !ec.Empty() {
 		if ec.Route != "" {
 			attrs = append(attrs, "edge_route", ec.Route)
 		}
@@ -2242,6 +2243,7 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 			attrs = append(attrs, "protocol_version", ec.ProtocolVersion)
 		}
 	}
+	setAuditSpanAttributes(ctx, ec, tool, status, uid)
 	if err != nil {
 		// Resolution failures format the user-supplied peer verbatim
 		// (`peer %q not found`); scrub @handles / phone numbers so a raw
