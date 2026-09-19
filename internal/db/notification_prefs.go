@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -184,7 +185,19 @@ func (s *Store) SetNotificationPrefs(ctx context.Context, userID int64, changes 
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().UTC()
-	for category, state := range changes {
+	// Iterate in sorted key order, not map order: this INSERT ... ON
+	// CONFLICT DO UPDATE takes a row lock per category, and Go's
+	// non-deterministic map iteration would let two concurrent callers for
+	// the same userID acquire those locks in opposite order across
+	// categories, risking a DB deadlock. Sorting fixes one global lock
+	// order for every caller.
+	categories := make([]string, 0, len(changes))
+	for category := range changes {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	for _, category := range categories {
+		state := changes[category]
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO client_notification_prefs(user_id, category, state, source, decided_at, created_at, updated_at)
 			 VALUES($1,$2,$3,$4,$5,$5,$5)

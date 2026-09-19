@@ -333,12 +333,23 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	// column may already hold a username-fallback value written by
 	// EnsureUserByTelegramID's effectiveUsername behaviour, and splitting it
 	// would fabricate a first/last name that was never actually captured.
+	// The runtime writer (Store.SaveSession) stamps onboarding_completed_at
+	// on every new session going forward, so this backfill only needs to
+	// reach pre-existing rows. The added EXISTS guard bounds it to a
+	// one-time backfill: without it, every not-yet-onboarded user (no
+	// qualifying telegram_accounts row yet) matches
+	// "onboarding_completed_at IS NULL" and gets rewritten to the same NULL
+	// value on every boot, forever.
 	identityBackfill := []string{
 		`UPDATE users SET onboarding_completed_at = (
 		     SELECT MIN(ta.connected_at) FROM telegram_accounts ta
 		      WHERE ta.user_id = users.id AND ta.revoked_at IS NULL
 		        AND ta.telegram_user_id IS NOT NULL)
-		  WHERE onboarding_completed_at IS NULL`,
+		  WHERE onboarding_completed_at IS NULL
+		    AND EXISTS (
+		      SELECT 1 FROM telegram_accounts ta
+		       WHERE ta.user_id = users.id AND ta.revoked_at IS NULL
+		         AND ta.telegram_user_id IS NOT NULL)`,
 		`UPDATE users SET identity_source = 'backfill_legacy'
 		  WHERE identity_source IS NULL AND telegram_login_id IS NOT NULL`,
 	}

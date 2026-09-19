@@ -227,6 +227,14 @@ func (h *AccountHandlers) getNotifications(w http.ResponseWriter, r *http.Reques
 	writeAccountJSON(w, http.StatusOK, map[string]any{"categories": prefs})
 }
 
+// maxNotificationsBodyBytes caps the PUT /api/account/notifications body
+// before it reaches json.Decode, matching the MaxBytesReader pattern used
+// for every other body decode in this codebase (oauth/server.go's
+// handleClientRegistration, internal/agentapi/json.go, internal/workertoken/
+// json.go). The category/state map is tiny in practice; 1 MiB is generous
+// headroom while still bounding decoder memory against an oversized body.
+const maxNotificationsBodyBytes = 1 << 20 // 1 MiB
+
 // putNotifications handles PUT /api/account/notifications. The request body
 // is {"<category>":"<state>", ...} — only the categories present are
 // applied; every other category is left untouched. An unknown category or
@@ -240,6 +248,7 @@ func (h *AccountHandlers) putNotifications(w http.ResponseWriter, r *http.Reques
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxNotificationsBodyBytes)
 	var changes map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&changes); err != nil {
 		writeAccountErr(w, http.StatusBadRequest, "invalid JSON body")

@@ -490,10 +490,15 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 			r.LastSeenAt = &t
 		}
 		r.Provenance = map[string]string{
-			"username":      string(ResolveIdentityProvenance(capturedAt.Valid, r.Username)),
-			"first_name":    string(ResolveIdentityProvenance(capturedAt.Valid, r.FirstName)),
-			"last_name":     string(ResolveIdentityProvenance(capturedAt.Valid, r.LastName)),
-			"language_code": string(ResolveIdentityProvenance(capturedAt.Valid, r.LanguageCode)),
+			"username":   string(ResolveIdentityProvenance(capturedAt.Valid, r.Username)),
+			"first_name": string(ResolveIdentityProvenance(capturedAt.Valid, r.FirstName)),
+			"last_name":  string(ResolveIdentityProvenance(capturedAt.Valid, r.LastName)),
+			// language_code has no writer on any code path yet (see db.go's
+			// addColumnIfMissing comment for telegram_language_code), so
+			// ResolveIdentityProvenance's not_supplied ("Telegram genuinely
+			// did not supply it") would assert an observation nothing backs.
+			// Report unknown until a real writer exists.
+			"language_code": string(ProvenanceUnknown),
 		}
 		out = append(out, r)
 	}
@@ -709,6 +714,17 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires, false,
 	); err != nil {
 		return fmt.Errorf("insert session: %w", err)
+	}
+	// Stamp onboarding_completed_at on the first session this user ever
+	// connects, mirroring the Migrate backfill's "earliest non-revoked,
+	// finalised telegram_accounts row" definition — COALESCE leaves a
+	// value already set (from a prior SaveSession call, or the legacy
+	// backfill) untouched.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, $1) WHERE id = $2`,
+		now, userID,
+	); err != nil {
+		return fmt.Errorf("stamp onboarding_completed_at: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -951,6 +967,18 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// deletion.
 	if err := purgeNotificationState(ctx, tx, userID); err != nil {
 		return 0, err
+	}
+
+	// Clear the client identity fields (issue-438) tied to the deleted
+	// account, for the same reason as the consent/reachability purge above:
+	// the users identity row survives, so telegram_first_name,
+	// telegram_last_name and last_seen_at must not silently outlive the
+	// deletion.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, last_seen_at = NULL WHERE id = $1`,
+		userID,
+	); err != nil {
+		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

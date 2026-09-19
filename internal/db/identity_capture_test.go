@@ -125,6 +125,52 @@ func TestEnsureUserByTelegramCapture_NoDisplayNameFallback(t *testing.T) {
 	}
 }
 
+// TestEnsureUserByTelegramCapture_ClaimlessCaptureOnPreexistingRow is the
+// direct regression for the provenance-staleness defect: a row created
+// earlier by EnsureUserByTelegramID with no username already holds a
+// display-name fallback in telegram_username (effectiveUsername). A later
+// claim-less EnsureUserByTelegramCapture call (e.g. an OIDC exchange that
+// returns only the Telegram id) supplies nothing new and must NOT stamp
+// identity_source/identity_captured_at — otherwise provenance would report
+// that pre-existing display name as "supplied" by this capture's source.
+func TestEnsureUserByTelegramCapture_ClaimlessCaptureOnPreexistingRow(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	uid, err := s.EnsureUserByTelegramID(ctx, 777, "", "Display Only")
+	if err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+
+	if _, err := s.EnsureUserByTelegramCapture(ctx, TelegramIdentityCapture{
+		TelegramID: 777,
+		Source:     "telegram_oidc",
+		CapturedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureUserByTelegramCapture: %v", err)
+	}
+
+	var (
+		username   string
+		source     sql.NullString
+		capturedAt sql.NullTime
+	)
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT telegram_username, identity_source, identity_captured_at FROM users WHERE id = $1`, uid,
+	).Scan(&username, &source, &capturedAt); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if username != "Display Only" {
+		t.Errorf("telegram_username = %q, want untouched pre-existing 'Display Only'", username)
+	}
+	if source.Valid {
+		t.Errorf("identity_source = %q, want NULL — a claim-less capture must not attribute the pre-existing display name to it", source.String)
+	}
+	if capturedAt.Valid {
+		t.Error("identity_captured_at is set, want NULL — a claim-less capture supplied nothing new")
+	}
+}
+
 // TestEnsureUserByTelegramCapture_Reauth covers the refresh path: a second
 // call with new claims advances last_seen_at and updates identity_source /
 // identity_captured_at.

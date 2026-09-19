@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/notify"
@@ -68,6 +69,61 @@ func TestHardDeleteAccount_PurgesNotificationState(t *testing.T) {
 	}
 	if !stillExists {
 		t.Error("the users identity row was deleted; it must survive account deletion")
+	}
+}
+
+// TestHardDeleteAccount_ClearsIdentityFields is the regression for the
+// finding that HardDeleteAccount purged consent/reachability but left
+// telegram_first_name, telegram_last_name and last_seen_at on the surviving
+// users row -- contradicting its own "must not outlive the deletion"
+// reasoning for the other issue-438 state.
+func TestHardDeleteAccount_ClearsIdentityFields(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	uid, err := s.EnsureUserByTelegramCapture(ctx, TelegramIdentityCapture{
+		TelegramID: 111,
+		Username:   "alice",
+		FirstName:  "Alice",
+		LastName:   "Example",
+		Source:     "telegram_oidc",
+	})
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+
+	var lastSeenBefore sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT last_seen_at FROM users WHERE id = $1`, uid,
+	).Scan(&lastSeenBefore); err != nil {
+		t.Fatalf("read last_seen_at before delete: %v", err)
+	}
+	if !lastSeenBefore.Valid {
+		t.Fatal("test setup: want last_seen_at stamped by the capture before deletion")
+	}
+
+	if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+		t.Fatalf("HardDeleteAccount: %v", err)
+	}
+
+	var (
+		firstName  sql.NullString
+		lastName   sql.NullString
+		lastSeenAt sql.NullTime
+	)
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT telegram_first_name, telegram_last_name, last_seen_at FROM users WHERE id = $1`, uid,
+	).Scan(&firstName, &lastName, &lastSeenAt); err != nil {
+		t.Fatalf("read row after delete: %v", err)
+	}
+	if firstName.Valid {
+		t.Errorf("telegram_first_name = %q after delete, want NULL", firstName.String)
+	}
+	if lastName.Valid {
+		t.Errorf("telegram_last_name = %q after delete, want NULL", lastName.String)
+	}
+	if lastSeenAt.Valid {
+		t.Errorf("last_seen_at = %v after delete, want NULL", lastSeenAt.Time)
 	}
 }
 

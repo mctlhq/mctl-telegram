@@ -91,24 +91,31 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 		}
 	}
 	// Refresh on every call — a client re-authenticating always advances
-	// last_seen_at and re-stamps identity_source/identity_captured_at, and
-	// COALESCE(NULLIF($n,''), col) means an attribute Telegram no longer
-	// supplies is NOT clobbered back to empty by a later call that omits it
-	// (mirrors EnsureUserByTelegramID's refresh). telegram_username and
-	// telegram_first_name/telegram_last_name deliberately have NO
-	// display-name fallback: an empty capture writes/leaves them empty
-	// rather than substituting displayName.
+	// last_seen_at, and COALESCE(NULLIF($n,''), col) means an attribute
+	// Telegram no longer supplies is NOT clobbered back to empty by a later
+	// call that omits it (mirrors EnsureUserByTelegramID's refresh).
+	// telegram_username and telegram_first_name/telegram_last_name
+	// deliberately have NO display-name fallback: an empty capture
+	// writes/leaves them empty rather than substituting displayName.
+	//
+	// identity_source/identity_captured_at are only advanced when this call
+	// actually supplies a claim (hasClaim). A claim-less capture (e.g. an
+	// OIDC exchange that returns only the Telegram id) supplies nothing new,
+	// so stamping it would falsely attribute whatever value already sits in
+	// the column — possibly a pre-existing row's display-name fallback from
+	// EnsureUserByTelegramID — to this capture's source.
+	hasClaim := c.Username != "" || c.FirstName != "" || c.LastName != ""
 	if _, err := s.DB.ExecContext(ctx,
 		`UPDATE users SET
 		     telegram_username = COALESCE(NULLIF($1,''), telegram_username),
 		     telegram_display_name = COALESCE(NULLIF($2,''), telegram_display_name),
 		     telegram_first_name = COALESCE(NULLIF($3,''), telegram_first_name),
 		     telegram_last_name = COALESCE(NULLIF($4,''), telegram_last_name),
-		     identity_source = $5,
-		     identity_captured_at = $6,
+		     identity_source = CASE WHEN $7 THEN $5 ELSE identity_source END,
+		     identity_captured_at = CASE WHEN $7 THEN $6 ELSE identity_captured_at END,
 		     last_seen_at = $6
-		 WHERE id = $7`,
-		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, id,
+		 WHERE id = $8`,
+		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, hasClaim, id,
 	); err != nil {
 		return 0, fmt.Errorf("refresh identity capture: %w", err)
 	}
