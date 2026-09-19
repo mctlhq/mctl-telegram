@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.68.0](https://github.com/mctlhq/mctl-telegram/compare/0.67.0...0.68.0) (2026-09-19)
+
+
+### Features
+
+* **agents:** issue-569-spike-mcp-apps-prototype-a-telegram-rese ([2fdf9af](https://github.com/mctlhq/mctl-telegram/commit/2fdf9af711ff02eba3d5b81ac21420aa01ffe12b))
+* **agents:** issue-569-spike-mcp-apps-prototype-a-telegram-rese ([7c3e1f9](https://github.com/mctlhq/mctl-telegram/commit/7c3e1f9c82f4a8cd5844260b3f4046679a2e3b25))
+* **agents:** issue-605-mcpprobe-four-p3s-left-open-when-604-mer ([2c065a6](https://github.com/mctlhq/mctl-telegram/commit/2c065a6d6518568e6bf1d138b35ea8ed8a904dcd))
+* **agents:** issue-617-feat-audit-measure-what-reaches-tg-mctl ([0896685](https://github.com/mctlhq/mctl-telegram/commit/0896685d60c399be9b6670ba996dfd5a8d601685))
+* **agents:** issue-617-feat-audit-measure-what-reaches-tg-mctl ([d0bfb8d](https://github.com/mctlhq/mctl-telegram/commit/d0bfb8d7e8ce26468330e7afcac9affa0b1f98a9))
+* **events:** publish telegram.message.created to Valkey Streams ([d9a3f7f](https://github.com/mctlhq/mctl-telegram/commit/d9a3f7ff9b824cd7b320489dc33fa8f94dc62af8))
+* **events:** publish telegram.message.created to Valkey Streams ([ab16626](https://github.com/mctlhq/mctl-telegram/commit/ab166266b4e1ac079c02f7cbadcc8e7100b7f3b4)), closes [#646](https://github.com/mctlhq/mctl-telegram/issues/646)
+
+
+### Bug Fixes
+
+* address review findings ([deab197](https://github.com/mctlhq/mctl-telegram/commit/deab1975066d96158de1e1683e565205ed499710))
+* **events:** bind the cancel callback to its own connection ([979b4a3](https://github.com/mctlhq/mctl-telegram/commit/979b4a3eddfd54570d21a22736b2ad679f596ca8))
+* **events:** bound best-effort audit, coalesce lease retries, synthetic fixture id ([8108783](https://github.com/mctlhq/mctl-telegram/commit/81087838e6f00b778e5816b81e0b1edd0b8314a6))
+* **events:** context-aware client, rune-safe truncation, nil userinfo guard ([9ba8db9](https://github.com/mctlhq/mctl-telegram/commit/9ba8db9e1cfc4a2718bb4dc60a80959ebf74fdfd))
+* **events:** one relay owns the outbox across replicas, backoff holds, one deadline per call ([afaf5bf](https://github.com/mctlhq/mctl-telegram/commit/afaf5bf85a0c19158ada51109713deeff019e9e1))
+* **events:** reject a Valkey user without a password ([975c60e](https://github.com/mctlhq/mctl-telegram/commit/975c60e849347428c3a08f2fd86d0b1ca486b854))
+* **events:** Telegram account id in the subject; keep relay ownership during a batch ([4c6d51a](https://github.com/mctlhq/mctl-telegram/commit/4c6d51acd626bf70141acdbdb5de47a99b43f19e))
+* **events:** validate the whole listener event id; bound relay database calls and bulk replies ([591cfb1](https://github.com/mctlhq/mctl-telegram/commit/591cfb16e019089b75ec801aeaa54d53dd4bb886))
+* **events:** wake the relay only for written rows; guard stale failure marks ([efa224f](https://github.com/mctlhq/mctl-telegram/commit/efa224f32efed41e7fb239733d26e5ed51882ae9))
+* **mcpprobe:** classify Apps.* string fields in the report origin table ([b94d59a](https://github.com/mctlhq/mctl-telegram/commit/b94d59a1d80787a9c774856a979057a3b5bb2fe2))
+* **oauth:** carry a pre-registered client's display name onto refresh tokens ([58be55e](https://github.com/mctlhq/mctl-telegram/commit/58be55e985433b382c693217487393b3a47e2e14))
+
 ## [0.67.0](https://github.com/mctlhq/mctl-telegram/compare/0.66.0...0.67.0) (2026-09-12)
 
 
