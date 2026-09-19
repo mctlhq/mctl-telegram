@@ -246,6 +246,22 @@
       "reason": "Lets the caller grant or revoke real sending for their OWN account only; there is no telegram_id argument. Gated on the account:manage scope."
     },
     {
+      "name": "get_my_notification_preferences",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Returns the caller's OWN resolved notification preferences (product_updates/maintenance/security); no other account's data and no scope of any kind is conferred. Gated on the account:manage scope."
+    },
+    {
+      "name": "set_my_notification_preferences",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Lets the caller change one or more of their OWN notification preferences only; there is no telegram_id argument and no scope is conferred. Gated on the account:manage scope."
+    },
+    {
       "name": "set_telegram_access",
       "enabled": true,
       "upstream_gates": [

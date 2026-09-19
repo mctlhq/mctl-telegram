@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -43,12 +44,15 @@ func NewAccountHandlers(store *db.Store, pool AccountCloser) *AccountHandlers {
 	return &AccountHandlers{Store: store, Pool: pool}
 }
 
-// Register binds the three account endpoints onto a router. Paths are
+// Register binds the account endpoints onto a router. Paths are
 // relative — when mounted at "/api/account" the resulting routes are
-// "/api/account", "/api/account/disconnect", and DELETE "/api/account".
+// "/api/account", "/api/account/disconnect", DELETE "/api/account", and
+// GET/PUT "/api/account/notifications". chi's *chi.Mux already satisfies
+// the widened interface (it has a Put method), so no caller needs to change.
 func (h *AccountHandlers) Register(mux interface {
 	Get(pattern string, fn http.HandlerFunc)
 	Post(pattern string, fn http.HandlerFunc)
+	Put(pattern string, fn http.HandlerFunc)
 	Delete(pattern string, fn http.HandlerFunc)
 }) {
 	mux.Get("/", h.get)
@@ -56,6 +60,8 @@ func (h *AccountHandlers) Register(mux interface {
 	mux.Delete("/", h.delete)
 	mux.Get("/audit", h.auditLog)
 	mux.Get("/audit/verify", h.auditVerify)
+	mux.Get("/notifications", h.getNotifications)
+	mux.Put("/notifications", h.putNotifications)
 }
 
 func (h *AccountHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +206,63 @@ func (h *AccountHandlers) auditVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAccountJSON(w, http.StatusOK, res)
+}
+
+// getNotifications handles GET /api/account/notifications. Returns every
+// category with its resolved state, whether it was explicitly decided, its
+// classification (marketing/operational) and source/decided_at when
+// explicit.
+func (h *AccountHandlers) getNotifications(w http.ResponseWriter, r *http.Request) {
+	id := auth.From(r.Context())
+	if id == nil {
+		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	prefs, err := h.Store.ResolveNotificationPrefs(r.Context(), id.UserID)
+	if err != nil {
+		slog.Warn("account.get_notifications", "err", err)
+		writeAccountErr(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	writeAccountJSON(w, http.StatusOK, map[string]any{"categories": prefs})
+}
+
+// putNotifications handles PUT /api/account/notifications. The request body
+// is {"<category>":"<state>", ...} — only the categories present are
+// applied; every other category is left untouched. An unknown category or
+// state rejects the WHOLE request with HTTP 400 and writes nothing. Audited
+// with source "account_api"; the audit row records only the tool name and
+// status, never the request body, matching the existing audit(...) helper's
+// contract.
+func (h *AccountHandlers) putNotifications(w http.ResponseWriter, r *http.Request) {
+	id := auth.From(r.Context())
+	if id == nil {
+		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var changes map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&changes); err != nil {
+		writeAccountErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	err := h.Store.SetNotificationPrefs(r.Context(), id.UserID, changes, "account_api")
+	h.audit(r, id, "PUT /api/account/notifications", err)
+	if err != nil {
+		if errors.Is(err, db.ErrUnknownNotificationCategory) || errors.Is(err, db.ErrUnknownNotificationState) {
+			writeAccountErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		slog.Warn("account.put_notifications", "err", err)
+		writeAccountErr(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	prefs, err := h.Store.ResolveNotificationPrefs(r.Context(), id.UserID)
+	if err != nil {
+		slog.Warn("account.put_notifications: resolve after write", "err", err)
+		writeAccountErr(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	writeAccountJSON(w, http.StatusOK, map[string]any{"categories": prefs})
 }
 
 func (h *AccountHandlers) audit(r *http.Request, id *auth.Identity, tool string, err error) {

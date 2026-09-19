@@ -1589,12 +1589,22 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Bind the Telegram identity to an internal users row. EnsureUserByTelegramID
-	// is keyed by telegram_login_id, so the MTProto session the enable_access
-	// flow provisions below lands on the SAME users.id this token resolves to
-	// on later /mcp calls — closing the duplicate-identity gap the old CLI
-	// (github_login-keyed) login left open.
-	uid, err := s.store.EnsureUserByTelegramID(r.Context(), identity.TelegramID, identity.Username, strings.TrimSpace(identity.FirstName+" "+identity.LastName))
+	// Bind the Telegram identity to an internal users row. EnsureUserByTelegramCapture
+	// is keyed by telegram_login_id (same as EnsureUserByTelegramID), so the
+	// MTProto session the enable_access flow provisions below lands on the
+	// SAME users.id this token resolves to on later /mcp calls — closing the
+	// duplicate-identity gap the old CLI (github_login-keyed) login left
+	// open. Unlike EnsureUserByTelegramID this also captures first/last name
+	// into their own columns with explicit provenance (identity_source =
+	// telegram_oidc) — see internal/db.TelegramIdentityCapture.
+	uid, err := s.store.EnsureUserByTelegramCapture(r.Context(), db.TelegramIdentityCapture{
+		TelegramID: identity.TelegramID,
+		Username:   identity.Username,
+		FirstName:  identity.FirstName,
+		LastName:   identity.LastName,
+		Source:     "telegram_oidc",
+		CapturedAt: time.Now().UTC(),
+	})
 	if err != nil {
 		slog.Error("ensure user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
