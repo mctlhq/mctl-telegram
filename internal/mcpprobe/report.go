@@ -64,11 +64,19 @@ const (
 // token or a session identifier has nowhere to go. A change that adds such a
 // field is caught by the reflection guard in report_test.go.
 //
-// The guarantee is about shape, not length: a handful of fields do carry
-// server-chosen text — the server name and version from discovery, tool
-// names, the advertised token endpoint auth methods. Those are the endpoint's
-// own public identifiers, which a compatibility report exists to quote, and
-// they are the only strings here that did not originate in this package.
+// The guarantee is about shape, not length: eight fields carry server-chosen
+// text, and this list is exhaustive — Server.Name, Server.Version and
+// Server.SupportedVersions from discovery; Tools[].Name from tools/list;
+// OAuth.AuthorizationServer.Issuer and
+// OAuth.AuthorizationServer.TokenEndpointAuthMethods from the
+// authorization-server metadata document; and OAuth.Unauthenticated.Realm and
+// OAuth.Unauthenticated.ErrorCode from the WWW-Authenticate challenge. Those
+// are the endpoint's own public identifiers, which a compatibility report
+// exists to quote, and they are the only strings here that did not originate
+// in this package or from the caller's own Options.
+// TestReportStringFieldsHaveADeclaredOrigin in report_test.go enforces the
+// enumeration by reflection: a new string field anywhere in this tree fails
+// that test until it is classified there and, if server-origin, added here.
 type Report struct {
 	Schema          string       `json:"schema"`
 	Timestamp       time.Time    `json:"timestamp"`
