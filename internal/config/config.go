@@ -209,6 +209,15 @@ type Config struct {
 	// redeploying config even if the database is unreachable or compromised.
 	// Set via AGENT_KILL_SWITCH.
 	AgentKillSwitch bool
+	// AppsEnabled gates the MCP Apps (SEP-1865) prototype surface: the
+	// "io.modelcontextprotocol/ui" extension capability, resource capability,
+	// the internal/mcpui triage App resource, and the _meta.ui link on its
+	// backing tools. Off by default, mirroring AgentEnabled — the flag exists
+	// so the App can be built and deployed without exposing it, and a
+	// deployment can drop back to the current tools-only surface by unsetting
+	// it, with no redeploy of this repository required beyond the env change.
+	// Set via MCP_APPS_ENABLED.
+	AppsEnabled bool
 
 	// EventsValkeyURL enables publishing reference-only mctl.events/v1
 	// envelopes for incoming messages to platform Valkey Streams
@@ -267,6 +276,7 @@ func Load() (*Config, error) {
 		AgentApprovalTTL:              envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
 		AgentEnabled:                  envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:               envBool("AGENT_KILL_SWITCH", false),
+		AppsEnabled:                   envBool("MCP_APPS_ENABLED", false),
 		EventsValkeyURL:               os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),

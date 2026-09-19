@@ -90,7 +90,8 @@ const minReasonLen = 40
 // prevent. A tool named here is treated as gate-less and therefore still needs
 // its vouch below.
 var reportsGateTools = map[string]string{
-	"get_my_send_status": "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
+	"get_my_send_status":   "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
+	"prepare_send_message": "runs evaluateSendGate to compute will_really_send/dry_reason for its own output, the same way get_my_send_status does; the verdict is returned, never enforced. Currently listed disabled in docs/portal-allowlist.json, so no upstream_gates vouch is required, but the entry stays accurate if that ever changes.",
 }
 
 var selfOnlyTools = map[string]string{
@@ -270,8 +271,13 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// Enumerate through the unfiltered server. ToolFilter "" means "all"
 	// today (toolPassesFilter); the comparison against the read-only-only
 	// variant proves this is the full set rather than trusting the default.
-	registered := (&Server{ToolFilter: ""}).newMCPServer().ListTools()
-	readOnlyOnly := (&Server{ToolFilter: "read-only"}).newMCPServer().ListTools()
+	//
+	// AppsEnabled is true here so prepare_send_message -- registered only
+	// when the MCP Apps flag is on -- is part of the enumerated set and the
+	// guard keeps covering it, rather than the flag's default-off state
+	// silently exempting a new tool from the allowlist requirement.
+	registered := (&Server{ToolFilter: "", AppsEnabled: true}).newMCPServer().ListTools()
+	readOnlyOnly := (&Server{ToolFilter: "read-only", AppsEnabled: true}).newMCPServer().ListTools()
 	if len(registered) == 0 || len(registered) <= len(readOnlyOnly) {
 		t.Fatalf("enumeration is not the unfiltered tool set: all=%d read-only=%d", len(registered), len(readOnlyOnly))
 	}
@@ -279,7 +285,9 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// The source scan must see exactly the tools the server registers; a
 	// registration the regex missed would otherwise read as "no gates" and
 	// could only be enabled via selfOnlyTools, but the honest failure is here.
-	fset, parsed := parseSources(t, "tools.go", "media_tools.go")
+	// apps.go registers prepare_send_message (only reachable with
+	// AppsEnabled=true above), so it must be scanned too.
+	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go")
 	fromSource, err := gatesFromSource(fset, parsed...)
 	if err != nil {
 		t.Fatal(err)

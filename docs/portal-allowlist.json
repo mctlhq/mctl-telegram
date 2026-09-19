@@ -155,6 +155,11 @@
       "reason": "Issues a confirmation id for a later pin_message on the caller's own dialog; performs no Telegram action by itself."
     },
     {
+      "name": "prepare_send_message",
+      "enabled": false,
+      "reason": "Flag-gated MCP Apps (mctlhq/mctl-telegram#569) prototype affordance, registered only when MCP_APPS_ENABLED=true. It is a triage-App draft/confirm step, not a general client tool, and should not appear on the shared Cloudflare portal surface. An operator can flip this on later if a portal-facing use case appears; upstream_gates is intentionally omitted while disabled."
+    },
+    {
       "name": "provision_local_account",
       "enabled": true,
       "upstream_gates": [

@@ -84,6 +84,12 @@ type Report struct {
 	Steps           []Step       `json:"steps"`
 	Negatives       []Step       `json:"negatives,omitempty"`
 	OAuth           *OAuthReport `json:"oauth,omitempty"`
+	// Apps is the MCP Apps (SEP-1865) conformance check (see apps.go). It is
+	// deliberately excluded from finalize()'s summary computation below: an
+	// endpoint that never advertised the extension -- which is what this
+	// repository's own default, flag-off deployment looks like -- must never
+	// turn an otherwise-passing run into a FAIL.
+	Apps *AppsProbe `json:"apps,omitempty"`
 }
 
 // ServerInfo is the identity a server volunteered about itself.

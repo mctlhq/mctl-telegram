@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Telegram triage</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #14161a;
+    --fg: #e7e9ec;
+    --muted: #9aa1ab;
+    --card: #1d2025;
+    --border: #2a2e35;
+    --accent: #e25a3c;
+    --danger: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #root { padding: 12px; }
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .toolbar input, .toolbar select, .toolbar button {
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+  }
+  .toolbar button {
+    cursor: pointer;
+  }
+  .toolbar button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .status { color: var(--muted); margin: 4px 0 12px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .card-from { font-weight: 600; color: var(--fg); }
+  .card-snippet { white-space: pre-wrap; word-break: break-word; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-left: 6px;
+  }
+  .badge.untrusted { border-color: var(--danger); color: var(--danger); }
+  .card-actions { margin-top: 8px; display: flex; gap: 8px; }
+  .card-actions button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .context-list { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .draft {
+    margin-top: 8px;
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+  }
+  .draft textarea {
+    width: 100%;
+    min-height: 60px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px;
+    font: inherit;
+  }
+  .draft .verdict { font-size: 12px; margin: 6px 0; }
+  .draft .verdict.real { color: #2ecc71; }
+  .draft .verdict.dry { color: var(--muted); }
+  .draft .hash { font-size: 11px; color: var(--muted); word-break: break-all; }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="toolbar">
+    <select id="source-select">
+      <option value="unread">Unread</option>
+      <option value="dialogs">Dialogs</option>
+      <option value="search">Search</option>
+    </select>
+    <input id="query-input" type="text" placeholder="peer, channel or search text">
+    <button id="run-button" class="primary" type="button">Refresh</button>
+  </div>
+  <div id="status" class="status">Connecting to host&hellip;</div>
+  <div id="results"></div>
+</div>
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------
+// Transport: a minimal JSON-RPC 2.0 client over postMessage, talking to
+// the MCP host that embeds this document in a sandboxed iframe. This App
+// never opens a network connection of its own -- every fact it shows came
+// from a host "tools/call" response, which the host obtained by calling
+// the server's own MCP tools with the operator's own identity. The App
+// itself carries no credential and names no identity: see ui/initialize
+// below, which sends none.
+// ---------------------------------------------------------------------
+
+var pending = Object.create(null);
+var nextId = 1;
+var availableTools = null; // filled after tools/list; null = not yet known
+
+function sendToHost(message) {
+  window.parent.postMessage(message, "*");
+}
+
+function callHost(method, params) {
+  var id = "app-" + (nextId++);
+  return new Promise(function (resolve, reject) {
+    pending[id] = { resolve: resolve, reject: reject };
+    sendToHost({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+  });
+}
+
+function notifyHost(method, params) {
+  sendToHost({ jsonrpc: "2.0", method: method, params: params || {} });
+}
+
+function callTool(name, args) {
+  return callHost("tools/call", { name: name, arguments: args || {} }).then(function (result) {
+    if (result && result.isError) {
+      var msg = "tool call failed";
+      if (result.content && result.content.length && result.content[0].text) {
+        msg = result.content[0].text;
+      }
+      throw new Error(msg);
+    }
+    return (result && result.structuredContent) || {};
+  });
+}
+
+window.addEventListener("message", function (event) {
+  var data = event.data;
+  if (!data || typeof data !== "object") return;
+  if (data.id !== undefined && data.id !== null && pending[data.id]) {
+    var p = pending[data.id];
+    delete pending[data.id];
+    if (data.error) {
+      p.reject(new Error(data.error.message || "host error"));
+    } else {
+      p.resolve(data.result);
+    }
+    return;
+  }
+  // Host-pushed notifications. Neither carries an id and neither is ever
+  // treated as authority over anything -- they only affect what this
+  // document renders, never a decision the server makes.
+  if (data.method === "ui/notifications/tool-result") {
+    onToolResultNotification(data.params);
+  } else if (data.method === "ui/notifications/size-changed") {
+    onSizeChanged(data.params);
+  }
+});
+
+function onToolResultNotification(params) {
+  if (!params) return;
+  setStatus("Received an update from the host.");
+  if (params.name === "get_unread_messages" || params.name === "search_messages" || params.name === "get_messages") {
+    renderMessages((params.structuredContent && params.structuredContent.messages) || []);
+  } else if (params.name === "list_dialogs") {
+    renderDialogs((params.structuredContent && params.structuredContent.dialogs) || []);
+  }
+}
+
+function onSizeChanged(params) {
+  // The host is telling this document how much viewport it has. This
+  // prototype's layout is intrinsic (block flow, no fixed canvas), so there
+  // is nothing to resize -- the notification is acknowledged by existing,
+  // not by acting on it.
+  if (params && typeof params.height === "number") {
+    document.body.style.minHeight = params.height + "px";
+  }
+}
+
+// ---------------------------------------------------------------------
+// Untrusted-content envelope. The server already wrapped every Telegram
+// message body in a literal
+//   <telegram-content origin="telegram" peer="...">...</telegram-content>
+// tag (internal/mcp/format.go WrapUntrustedContent) before this App ever
+// sees it. Stripping it for display is a strict prefix/suffix string
+// match against that exact literal shape -- never a regex over arbitrary
+// markup, and never an HTML parse. Anything that does not match the shape
+// is shown verbatim as text, and the card keeps its "untrusted" badge
+// either way: the badge communicates provenance, not whether the strip
+// succeeded.
+// ---------------------------------------------------------------------
+
+var ENVELOPE_HEAD = '<telegram-content origin="telegram" peer="';
+var ENVELOPE_MID = '" untrusted="true">';
+var ENVELOPE_TAIL = "</telegram-content>";
+
+function unwrapEnvelope(raw) {
+  if (typeof raw !== "string" || raw === "") {
+    return { body: "", matched: false };
+  }
+  if (raw.slice(0, ENVELOPE_HEAD.length) !== ENVELOPE_HEAD) {
+    return { body: raw, matched: false };
+  }
+  var midIndex = raw.indexOf(ENVELOPE_MID, ENVELOPE_HEAD.length);
+  if (midIndex === -1) {
+    return { body: raw, matched: false };
+  }
+  var tailStart = raw.length - ENVELOPE_TAIL.length;
+  if (tailStart < 0 || raw.slice(tailStart) !== ENVELOPE_TAIL) {
+    return { body: raw, matched: false };
+  }
+  var bodyStart = midIndex + ENVELOPE_MID.length;
+  if (bodyStart > tailStart) {
+    return { body: raw, matched: false };
+  }
+  return { body: raw.slice(bodyStart, tailStart), matched: true };
+}
+
+// ---------------------------------------------------------------------
+// DOM helpers. Every Telegram-derived string reaches the DOM through
+// textContent on an element created with document.createElement -- never
+// through a markup-assignment API.
+// ---------------------------------------------------------------------
+
+function el(tag, className) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+}
+
+function textEl(tag, className, str) {
+  var node = el(tag, className);
+  node.textContent = str == null ? "" : String(str);
+  return node;
+}
+
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+
+function formatDate(unixSeconds) {
+  if (!unixSeconds) return "";
+  try {
+    return new Date(unixSeconds * 1000).toISOString();
+  } catch (e) {
+    return String(unixSeconds);
+  }
+}
+
+function renderMessages(messages) {
+  var results = document.getElementById("results");
+  clear(results);
+  if (!messages || messages.length === 0) {
+    results.appendChild(textEl("div", "empty", "No messages match."));
+    return;
+  }
+  messages.forEach(function (m) {
+    results.appendChild(renderMessageCard(m));
+  });
+}
+
+function renderDialogs(dialogs) {
+  var results = document.getElementById("results");
+  clear(results);
+  if (!dialogs || dialogs.length === 0) {
+    results.appendChild(textEl("div", "empty", "No dialogs match."));
+    return;
+  }
+  dialogs.forEach(function (d) {
+    var card = el("div", "card");
+    var head = el("div", "card-head");
+    head.appendChild(textEl("span", "card-from", d.title || d.username || d.id || "(untitled)"));
+    head.appendChild(textEl("span", null, d.type || ""));
+    card.appendChild(head);
+    var snippet = el("div", "card-snippet");
+    snippet.appendChild(document.createTextNode(
+      (d.username ? "@" + d.username : d.id || "") + " · unread " + (d.unread_count || 0)
+    ));
+    card.appendChild(snippet);
+    var actions = el("div", "card-actions");
+    var openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.textContent = "Open";
+    openBtn.addEventListener("click", function () {
+      document.getElementById("query-input").value = d.id || "";
+      document.getElementById("source-select").value = "unread";
+      runQuery();
+    });
+    actions.appendChild(openBtn);
+    card.appendChild(actions);
+    results.appendChild(card);
+  });
+}
+
+function renderMessageCard(m) {
+  var unwrapped = unwrapEnvelope(m.text);
+  var card = el("div", "card");
+
+  var head = el("div", "card-head");
+  var left = el("span", null);
+  left.appendChild(textEl("span", "card-from", m.from || "(unknown sender)"));
+  left.appendChild(document.createTextNode(" · " + (m.peer_title || m.peer || "")));
+  head.appendChild(left);
+  head.appendChild(textEl("span", null, formatDate(m.date)));
+  card.appendChild(head);
+
+  var snippet = el("div", "card-snippet");
+  snippet.appendChild(document.createTextNode(unwrapped.body));
+  var untrustedBadge = textEl("span", "badge untrusted", "untrusted · Telegram");
+  snippet.appendChild(untrustedBadge);
+  card.appendChild(snippet);
+
+  if (m.media_info) {
+    var mediaLine = el("div", "card-snippet");
+    mediaLine.appendChild(textEl("span", "badge", (m.media_info.media_type || "media") + (m.media_info.size ? " · " + m.media_info.size + "B" : "")));
+    card.appendChild(mediaLine);
+  }
+
+  card.appendChild(textEl("div", null, "ref: " + (m.peer || "") + "#" + (m.id != null ? m.id : "")));
+
+  var actions = el("div", "card-actions");
+
+  var contextBtn = document.createElement("button");
+  contextBtn.type = "button";
+  contextBtn.textContent = "Context";
+  var contextHolder = el("div", "context-list");
+  contextHolder.style.display = "none";
+  contextBtn.addEventListener("click", function () {
+    if (contextHolder.style.display === "none") {
+      loadContext(m.peer, contextHolder);
+      contextHolder.style.display = "block";
+    } else {
+      contextHolder.style.display = "none";
+    }
+  });
+  actions.appendChild(contextBtn);
+
+  if (m.media_info) {
+    var mediaBtn = document.createElement("button");
+    mediaBtn.type = "button";
+    mediaBtn.textContent = "Prepare media";
+    var mediaStatus = textEl("span", null, "");
+    mediaBtn.addEventListener("click", function () {
+      mediaStatus.textContent = "preparing…";
+      callTool("prepare_get_media", { peer: m.peer, message_id: m.id })
+        .then(function (res) {
+          mediaStatus.textContent = "ready: " + (res.media_type || "") + " (" + (res.size || 0) + "B), expires " + (res.expires_at || "");
+        })
+        .catch(function (err) {
+          mediaStatus.textContent = "failed: " + err.message;
+        });
+    });
+    actions.appendChild(mediaBtn);
+    actions.appendChild(mediaStatus);
+  }
+
+  // The draft affordance is feature-detected, not assumed: with
+  // MCP_TOOL_FILTER=read-only (or any host that simply never lists it)
+  // prepare_send_message is absent from tools/list and wireSendAffordance
+  // never marks it present, so the Reply control is not created at all --
+  // there is no dead button that would produce a failing call.
+  if (availableTools && availableTools.prepare_send_message) {
+    var replyBtn = document.createElement("button");
+    replyBtn.type = "button";
+    replyBtn.textContent = "Reply";
+    var draftHolder = el("div", "draft");
+    draftHolder.style.display = "none";
+    replyBtn.addEventListener("click", function () {
+      if (draftHolder.style.display === "none") {
+        buildDraft(m.peer, draftHolder);
+        draftHolder.style.display = "block";
+      } else {
+        draftHolder.style.display = "none";
+      }
+    });
+    actions.appendChild(replyBtn);
+    card.appendChild(actions);
+    card.appendChild(contextHolder);
+    card.appendChild(draftHolder);
+  } else {
+    card.appendChild(actions);
+    card.appendChild(contextHolder);
+  }
+
+  return card;
+}
+
+function loadContext(peer, holder) {
+  clear(holder);
+  holder.appendChild(textEl("div", "status", "Loading context…"));
+  callTool("get_messages", { peer: peer, limit: 20 })
+    .then(function (res) {
+      clear(holder);
+      var msgs = res.messages || [];
+      if (msgs.length === 0) {
+        holder.appendChild(textEl("div", "empty", "No context available."));
+        return;
+      }
+      msgs.forEach(function (cm) {
+        var unwrapped = unwrapEnvelope(cm.text);
+        var row = el("div", "card-snippet");
+        row.appendChild(textEl("span", "card-from", (cm.from || "?") + ": "));
+        row.appendChild(document.createTextNode(unwrapped.body));
+        holder.appendChild(row);
+      });
+    })
+    .catch(function (err) {
+      clear(holder);
+      holder.appendChild(textEl("div", "status", "Context failed: " + err.message));
+    });
+}
+
+// ---------------------------------------------------------------------
+// Draft / confirm / send. This affordance is only ever shown after
+// tools/list has been checked for prepare_send_message: if the server
+// (e.g. under MCP_TOOL_FILTER=read-only) does not register it, buildDraft
+// is simply never wired to a visible control -- see wireSendAffordance.
+// Every verdict field shown here (will_really_send, dry_reason,
+// text_sha256) is exactly what prepare_send_message returned; nothing
+// here computes or overrides it. The App never calls ui/update-model-context
+// or ui/message with Telegram text -- the only thing it ever hands the
+// host is a tools/call with text the user typed.
+// ---------------------------------------------------------------------
+
+function buildDraft(peer, holder) {
+  clear(holder);
+  var label = textEl("div", null, "Draft reply to " + peer);
+  holder.appendChild(label);
+
+  var textarea = document.createElement("textarea");
+  textarea.placeholder = "Message text";
+  holder.appendChild(textarea);
+
+  var prepareBtn = document.createElement("button");
+  prepareBtn.type = "button";
+  prepareBtn.textContent = "Prepare";
+  holder.appendChild(prepareBtn);
+
+  var verdict = el("div", "verdict");
+  holder.appendChild(verdict);
+  var hashLine = el("div", "hash");
+  holder.appendChild(hashLine);
+
+  var sendBtn = document.createElement("button");
+  sendBtn.type = "button";
+  sendBtn.textContent = "Send";
+  sendBtn.disabled = true;
+  holder.appendChild(sendBtn);
+
+  var resultLine = el("div", "status");
+  holder.appendChild(resultLine);
+
+  var lastConfirmationId = null;
+  var lastText = null;
+
+  prepareBtn.addEventListener("click", function () {
+    var text = textarea.value;
+    verdict.textContent = "preparing…";
+    verdict.className = "verdict";
+    sendBtn.disabled = true;
+    callTool("prepare_send_message", { peer: peer, text: text })
+      .then(function (res) {
+        lastConfirmationId = res.confirmation_id;
+        lastText = text;
+        if (res.will_really_send) {
+          verdict.textContent = "This will really send.";
+          verdict.className = "verdict real";
+        } else {
+          verdict.textContent = "Preview only: " + (res.dry_reason || "send is gated off");
+          verdict.className = "verdict dry";
+        }
+        hashLine.textContent = "text_sha256=" + (res.text_sha256 || "");
+        sendBtn.disabled = false;
+      })
+      .catch(function (err) {
+        verdict.textContent = "prepare failed: " + err.message;
+        verdict.className = "verdict dry";
+      });
+  });
+
+  sendBtn.addEventListener("click", function () {
+    if (!lastConfirmationId || textarea.value !== lastText) {
+      resultLine.textContent = "Text changed since prepare — prepare again before sending.";
+      return;
+    }
+    resultLine.textContent = "sending…";
+    callTool("send_message", { peer: peer, text: textarea.value, confirmation_id: lastConfirmationId })
+      .then(function (res) {
+        resultLine.textContent = res.sent
+          ? "Sent (message_id " + res.message_id + ")."
+          : "Preview only, nothing delivered: " + (res.dry_reason || "");
+        lastConfirmationId = null;
+        sendBtn.disabled = true;
+      })
+      .catch(function (err) {
+        resultLine.textContent = "send failed: " + err.message;
+      });
+  });
+}
+
+// ---------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------
+
+function runQuery() {
+  var source = document.getElementById("source-select").value;
+  var query = document.getElementById("query-input").value.trim();
+  setStatus("Loading…");
+  var work;
+  if (source === "dialogs") {
+    work = callTool("list_dialogs", query ? { query: query } : {}).then(function (res) {
+      renderDialogs(res.dialogs || []);
+    });
+  } else if (source === "search") {
+    work = callTool("search_messages", { query: query }).then(function (res) {
+      renderMessages(res.messages || []);
+    });
+  } else {
+    work = callTool("get_unread_messages", query ? { peer: query } : {}).then(function (res) {
+      renderMessages(res.messages || []);
+    });
+  }
+  work
+    .then(function () {
+      setStatus("Up to date.");
+    })
+    .catch(function (err) {
+      setStatus("Failed: " + err.message);
+    });
+}
+
+function wireSendAffordance(tools) {
+  var names = {};
+  (tools || []).forEach(function (t) {
+    names[t.name] = true;
+  });
+  availableTools = names;
+}
+
+function init() {
+  document.getElementById("run-button").addEventListener("click", runQuery);
+  document.getElementById("query-input").addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") runQuery();
+  });
+
+  callHost("ui/initialize", {})
+    .then(function () {
+      notifyHost("ui/notifications/initialized", {});
+      return callHost("tools/list", {});
+    })
+    .then(function (res) {
+      wireSendAffordance((res && res.tools) || []);
+      setStatus("Connected. Loading unread messages…");
+      return callTool("get_unread_messages", {});
+    })
+    .then(function (res) {
+      renderMessages(res.messages || []);
+      setStatus("Up to date.");
+    })
+    .catch(function (err) {
+      setStatus("Could not connect to host: " + err.message);
+    });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}
+</script>
+</body>
+</html>
