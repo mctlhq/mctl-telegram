@@ -234,6 +234,34 @@ func TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap(t *testing.T) {
 	}
 }
 
+// TestLoadAppsEnabled is T13: MCP_APPS_ENABLED defaults to false and parses
+// "true", mirroring AGENT_ENABLED's envBool wiring.
+func TestLoadAppsEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "default is false", env: map[string]string{}, want: false},
+		{name: "true enables it", env: map[string]string{"MCP_APPS_ENABLED": "true"}, want: true},
+		{name: "false stays off", env: map[string]string{"MCP_APPS_ENABLED": "false"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.AppsEnabled != tc.want {
+				t.Errorf("AppsEnabled = %v, want %v", cfg.AppsEnabled, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadToolFilter(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -64,9 +64,12 @@ const (
 // token or a session identifier has nowhere to go. A change that adds such a
 // field is caught by the reflection guard in report_test.go.
 //
-// The guarantee is about shape, not length: eight fields carry server-chosen
+// The guarantee is about shape, not length: twelve fields carry server-chosen
 // text, and this list is exhaustive — Server.Name, Server.Version and
 // Server.SupportedVersions from discovery; Tools[].Name from tools/list;
+// Apps.ExtensionMimeTypes from initialize's capabilities.extensions;
+// Apps.ResourceURI and Apps.ResourceMimeType from resources/list;
+// Apps.UIToolNames from tools/list's nested _meta.ui.resourceUri annotation;
 // OAuth.AuthorizationServer.Issuer and
 // OAuth.AuthorizationServer.TokenEndpointAuthMethods from the
 // authorization-server metadata document; and OAuth.Unauthenticated.Realm and
@@ -92,6 +95,12 @@ type Report struct {
 	Steps           []Step       `json:"steps"`
 	Negatives       []Step       `json:"negatives,omitempty"`
 	OAuth           *OAuthReport `json:"oauth,omitempty"`
+	// Apps is the MCP Apps (SEP-1865) conformance check (see apps.go). It is
+	// deliberately excluded from finalize()'s summary computation below: an
+	// endpoint that never advertised the extension -- which is what this
+	// repository's own default, flag-off deployment looks like -- must never
+	// turn an otherwise-passing run into a FAIL.
+	Apps *AppsProbe `json:"apps,omitempty"`
 }
 
 // ServerInfo is the identity a server volunteered about itself.

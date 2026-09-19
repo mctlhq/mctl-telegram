@@ -460,9 +460,13 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled)
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
+	// Off by default; see internal/config.Config.AppsEnabled and
+	// docs/reports/mcp-apps-spike.md. Logged at startup like AGENT_ENABLED so
+	// the resolved value is visible in the deployment logs, not just in env.
+	slog.Info("mcp apps prototype surface", "enabled", cfg.AppsEnabled)
 	// Force the reviewer/demo account's sends to dry-run previews. Only armed
 	// when reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
 	// silently gag a real account once the review feature is turned off.

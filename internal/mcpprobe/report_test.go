@@ -121,6 +121,13 @@ func TestReportStringFieldsHaveADeclaredOrigin(t *testing.T) {
 		"OAuth.Unauthenticated.ErrorCode": originServer,
 		"OAuth.Unauthenticated.Outcome":   originPackage,
 		"OAuth.Unauthenticated.Reason":    originPackage,
+
+		"Apps.ExtensionMimeTypes": originServer,
+		"Apps.ResourceURI":        originServer,
+		"Apps.ResourceMimeType":   originServer,
+		"Apps.UIToolNames":        originServer,
+		"Apps.Outcome":            originPackage,
+		"Apps.Reason":             originPackage,
 	}
 
 	timeType := reflect.TypeOf(time.Time{})
@@ -210,8 +217,8 @@ func TestReportStringFieldsHaveADeclaredOrigin(t *testing.T) {
 			serverFields = append(serverFields, path)
 		}
 	}
-	if len(serverFields) != 8 {
-		t.Errorf("origin table classifies %d fields as server-origin, want exactly the 8 the Report "+
+	if len(serverFields) != 12 {
+		t.Errorf("origin table classifies %d fields as server-origin, want exactly the 12 the Report "+
 			"doc comment enumerates: %v", len(serverFields), serverFields)
 	}
 }

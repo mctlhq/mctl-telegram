@@ -43,6 +43,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 | `get_user_audit_log`          | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
 | `revoke_telegram_session`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: revokes a user's active MTProto session on this server. |
 
+## MCP Apps (prototype, flag-gated)
+
+Set `MCP_APPS_ENABLED=true` to expose a flag-gated MCP Apps (SEP-1865) research/triage App, served inline from `internal/mcpui` as a `ui://` resource; off by default, so the surface above is unchanged unless you opt in. See [docs/reports/mcp-apps-spike.md](docs/reports/mcp-apps-spike.md) for the full design, threat model and host-compatibility evidence.
+
 ## Quick start (local dev)
 
 ```bash
