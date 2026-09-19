@@ -2,6 +2,8 @@ package mcpprobe
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -76,6 +78,68 @@ func TestModernRun_InitializeIsANegativeProbeOnly(t *testing.T) {
 		if s.Method == string(mcp.MethodInitialize) {
 			t.Errorf("initialize appears as a positive step: %+v", s)
 		}
+	}
+}
+
+// TestModernRun_ObservesASessionMintedOnToolsList pins the widened
+// observation from #605: the "modern path mints no session identifier" claim
+// has to cover every response on the path, not just discover. Here the
+// fixture only mints a session on tools/list, which the fixture in
+// TestModernRun_UsesDiscoverAndNeverInitializes never does.
+func TestModernRun_ObservesASessionMintedOnToolsList(t *testing.T) {
+	_, url := newFake(t, func(f *fakeServer) {
+		f.modern = true
+		f.mintSessionOn = map[string]bool{string(mcp.MethodToolsList): true}
+	})
+
+	report, err := Run(context.Background(), Options{
+		URL: url, Mode: ModeModern, Source: SourceInProcess, SkipOAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Session.HeaderPresent {
+		t.Error("tools/list minted a session id the report did not observe")
+	}
+	if report.Session.IDLength != len(fakeSessionID) {
+		t.Errorf("id length = %d, want %d", report.Session.IDLength, len(fakeSessionID))
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if strings.Contains(string(encoded), fakeSessionID) {
+		t.Error("report serialized the session identifier itself")
+	}
+}
+
+// TestModernRun_ObservesASessionMintedOnToolsCall is
+// TestModernRun_ObservesASessionMintedOnToolsList's counterpart for the last
+// step of the modern path: the read-only tools/call.
+func TestModernRun_ObservesASessionMintedOnToolsCall(t *testing.T) {
+	_, url := newFake(t, func(f *fakeServer) {
+		f.modern = true
+		f.mintSessionOn = map[string]bool{string(mcp.MethodToolsCall): true}
+	})
+
+	report, err := Run(context.Background(), Options{
+		URL: url, Mode: ModeModern, Source: SourceInProcess, SkipOAuth: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Session.HeaderPresent {
+		t.Error("tools/call minted a session id the report did not observe")
+	}
+	if report.Session.IDLength != len(fakeSessionID) {
+		t.Errorf("id length = %d, want %d", report.Session.IDLength, len(fakeSessionID))
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if strings.Contains(string(encoded), fakeSessionID) {
+		t.Error("report serialized the session identifier itself")
 	}
 }
 
