@@ -1035,7 +1035,19 @@ func (s *Server) handleActivateConsent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *localBridgeActivation, identity *telegramoidc.Identity, deviceLabel, deviceRegKey string, devicePubkey []byte) {
 	ctx := r.Context()
 	displayName := strings.TrimSpace(identity.FirstName + " " + identity.LastName)
-	uid, err := s.store.EnsureUserByTelegramID(ctx, identity.TelegramID, identity.Username, displayName)
+	// EnsureUserByTelegramCapture, not EnsureUserByTelegramID: this call site
+	// already holds split first/last name claims from the OIDC-verified
+	// identity, so it captures them into their own columns with explicit
+	// provenance (identity_source = local_bridge_activation) instead of only
+	// the flattened display name.
+	uid, err := s.store.EnsureUserByTelegramCapture(ctx, db.TelegramIdentityCapture{
+		TelegramID: identity.TelegramID,
+		Username:   identity.Username,
+		FirstName:  identity.FirstName,
+		LastName:   identity.LastName,
+		Source:     "local_bridge_activation",
+		CapturedAt: time.Now().UTC(),
+	})
 	if err != nil {
 		slog.Error("local bridge activation: ensure user failed", "err", err)
 		s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem resolving your account. Approve again to retry.")

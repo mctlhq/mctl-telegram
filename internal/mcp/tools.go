@@ -1345,6 +1345,102 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 	return tool, handler
 }
 
+// notificationPrefsResult is the success payload of
+// get_my_notification_preferences and set_my_notification_preferences.
+type notificationPrefsResult struct {
+	Categories []db.ResolvedPref `json:"categories"`
+}
+
+// toolGetMyNotificationPreferences lets the AUTHENTICATED CALLER read their
+// own resolved notification preferences (issue-438). Gated on account:manage
+// like set_send_consent -- a preference is the user's own data, never
+// admin-scoped.
+func (s *Server) toolGetMyNotificationPreferences() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_my_notification_preferences",
+		mcplib.WithTitleAnnotation("Read your notification preferences"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		outputSchema[notificationPrefsResult](),
+		mcplib.WithDescription(`Return YOUR OWN resolved notification preferences: product_updates, maintenance, security. Requires the account:manage scope.
+
+Output: {categories: [{category, state, explicit, classification, source, decided_at}]}. state is "subscribed" or "unsubscribed". explicit=false means you never explicitly decided this category and are seeing the platform default (product_updates defaults to unsubscribed; maintenance and security default to subscribed). classification is "marketing" or "operational" -- it travels with the category so an operational notice is never counted as marketing consent.
+
+This preference confers no scope or permission; it only records what you want to receive.`),
+	)
+	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		prefs, err := s.Store.ResolveNotificationPrefs(ctx, id.UserID)
+		s.audit(ctx, id, "get_my_notification_preferences", "", err, startedAt)
+		if err != nil {
+			return toolErr("get_my_notification_preferences: %v", err), nil
+		}
+		return jsonResult(notificationPrefsResult{Categories: prefs})
+	}
+	return tool, handler
+}
+
+// toolSetMyNotificationPreferences lets the AUTHENTICATED CALLER change one
+// or more of their own notification preferences. Partial: only the
+// categories present in the "preferences" object are changed; every other
+// category is left exactly as it was. An unknown category or state rejects
+// the whole call with nothing written. Gated on account:manage, source
+// "mcp_tool".
+func (s *Server) toolSetMyNotificationPreferences() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("set_my_notification_preferences",
+		mcplib.WithTitleAnnotation("Change your notification preferences"),
+		mcplib.WithReadOnlyHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		outputSchema[notificationPrefsResult](),
+		mcplib.WithDescription(`Change one or more of YOUR OWN notification preferences. Requires the account:manage scope. Always acts on the caller's own account -- there is no telegram_id argument.
+
+Inputs:
+  preferences — object, required. Maps category -> state. Only the categories present are changed; every other category is left untouched. Valid categories: "product_updates", "maintenance", "security". Valid states: "subscribed", "unsubscribed". An unknown category or state rejects the WHOLE call with nothing written.
+
+Example: {"preferences": {"product_updates": "unsubscribed"}}
+
+Output: the full resolved set of preferences after the change, same shape as get_my_notification_preferences.`),
+		mcplib.WithObject("preferences",
+			mcplib.Required(),
+			mcplib.Description(`Map of category -> state to change (required), e.g. {"product_updates":"unsubscribed"}.`)),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		raw, _ := req.GetArguments()["preferences"].(map[string]any)
+		if len(raw) == 0 {
+			return mcplib.NewToolResultError("preferences is required and must be a non-empty object"), nil
+		}
+		changes := make(map[string]string, len(raw))
+		for k, v := range raw {
+			sv, ok := v.(string)
+			if !ok {
+				return mcplib.NewToolResultError(fmt.Sprintf("preferences.%s must be a string state", k)), nil
+			}
+			changes[k] = sv
+		}
+		err := s.Store.SetNotificationPrefs(ctx, id.UserID, changes, "mcp_tool")
+		s.audit(ctx, id, "set_my_notification_preferences", "", err, startedAt)
+		if err != nil {
+			return toolErr("set_my_notification_preferences: %v", err), nil
+		}
+		prefs, err := s.Store.ResolveNotificationPrefs(ctx, id.UserID)
+		if err != nil {
+			return toolErr("set_my_notification_preferences: %v", err), nil
+		}
+		return jsonResult(notificationPrefsResult{Categories: prefs})
+	}
+	return tool, handler
+}
+
 // toolSetAccountMode switches a user's active Telegram session between
 // "hosted" (server-side MTProto) and "local" (Local Bridge). This replaces
 // the one-shot gitops Job that used to run a manual UPDATE against
