@@ -973,9 +973,13 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// account, for the same reason as the consent/reachability purge above:
 	// the users identity row survives, so telegram_first_name,
 	// telegram_last_name and last_seen_at must not silently outlive the
-	// deletion.
+	// deletion. telegram_display_name duplicates first+last (see
+	// EnsureUserByTelegramCapture) so it must be cleared too, and
+	// identity_captured_at is reset to NULL so provenance reports "unknown"
+	// rather than "not_supplied" (which would falsely claim Telegram never
+	// sent these names).
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, last_seen_at = NULL WHERE id = $1`,
+		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL WHERE id = $1`,
 		userID,
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
@@ -1147,6 +1151,14 @@ func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, d
 	}
 	if n == 0 {
 		return ErrAccountAlreadyActive
+	}
+	// Mirror SaveSession's stamp: this insert satisfies the Migrate backfill's
+	// EXISTS guard too, so without this the row reads NULL until the next restart.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, $1) WHERE id = $2`,
+		time.Now().UTC(), userID,
+	); err != nil {
+		return fmt.Errorf("stamp onboarding_completed_at: %w", err)
 	}
 	return nil
 }
