@@ -72,6 +72,79 @@ func TestProvisionLocalAccount_RefusesExistingActiveAccount(t *testing.T) {
 	}
 }
 
+// TestProvisionLocalAccount_StampsOnboardingCompleted pins that
+// ProvisionLocalAccount stamps onboarding_completed_at for a freshly
+// provisioned row, and -- the regression this fixes -- also stamps it on the
+// already-active retry path (where the insert is skipped and
+// ErrAccountAlreadyActive is returned), so an account provisioned before
+// this fix shipped still gets stamped the next time provisioning is
+// attempted for it.
+func TestProvisionLocalAccount_StampsOnboardingCompleted(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	uid, err := s.EnsureUserByTelegramID(ctx, 700000010, "freshlocal", "Fresh Local")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if err := s.ProvisionLocalAccount(ctx, uid, 700000010, "Fresh Local", "freshlocal"); err != nil {
+		t.Fatalf("provision local account: %v", err)
+	}
+
+	var firstStamp sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT onboarding_completed_at FROM users WHERE id = $1`, uid,
+	).Scan(&firstStamp); err != nil {
+		t.Fatalf("read onboarding_completed_at: %v", err)
+	}
+	if !firstStamp.Valid {
+		t.Fatal("onboarding_completed_at not stamped by ProvisionLocalAccount")
+	}
+
+	// Simulate a row provisioned before this fix shipped: already active,
+	// but never stamped.
+	uid2, err := s.EnsureUser(ctx, "already-active-unstamped", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode) VALUES($1,$2,$3,$4)`,
+		uid2, 700000011, nil, ModeLocal,
+	); err != nil {
+		t.Fatalf("seed already-active local row: %v", err)
+	}
+
+	err = s.ProvisionLocalAccount(ctx, uid2, 700000011, "", "")
+	if !errors.Is(err, ErrAccountAlreadyActive) {
+		t.Fatalf("expected ErrAccountAlreadyActive, got %v", err)
+	}
+
+	var retryStamp sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT onboarding_completed_at FROM users WHERE id = $1`, uid2,
+	).Scan(&retryStamp); err != nil {
+		t.Fatalf("read onboarding_completed_at: %v", err)
+	}
+	if !retryStamp.Valid {
+		t.Fatal("onboarding_completed_at not stamped on the already-active retry path")
+	}
+
+	// Idempotency: a second retry must not move the timestamp.
+	err = s.ProvisionLocalAccount(ctx, uid2, 700000011, "", "")
+	if !errors.Is(err, ErrAccountAlreadyActive) {
+		t.Fatalf("expected ErrAccountAlreadyActive on second retry, got %v", err)
+	}
+	var secondStamp sql.NullTime
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT onboarding_completed_at FROM users WHERE id = $1`, uid2,
+	).Scan(&secondStamp); err != nil {
+		t.Fatalf("read onboarding_completed_at: %v", err)
+	}
+	if secondStamp.Time != retryStamp.Time {
+		t.Errorf("onboarding_completed_at changed on retry: first=%v second=%v, want unchanged (COALESCE stamp-once)", retryStamp.Time, secondStamp.Time)
+	}
+}
+
 // TestGetAccountMode_HostedBehaviorUnchanged pins that narrowing
 // GetAccountMode's query (dropping the revoked_at IS NULL predicate) does
 // not change any existing hosted-path result.

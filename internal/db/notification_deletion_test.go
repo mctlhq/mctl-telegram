@@ -107,13 +107,15 @@ func TestHardDeleteAccount_ClearsIdentityFields(t *testing.T) {
 	}
 
 	var (
-		firstName  sql.NullString
-		lastName   sql.NullString
-		lastSeenAt sql.NullTime
+		firstName        sql.NullString
+		lastName         sql.NullString
+		displayName      sql.NullString
+		identityCaptured sql.NullTime
+		lastSeenAt       sql.NullTime
 	)
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT telegram_first_name, telegram_last_name, last_seen_at FROM users WHERE id = $1`, uid,
-	).Scan(&firstName, &lastName, &lastSeenAt); err != nil {
+		`SELECT telegram_first_name, telegram_last_name, telegram_display_name, identity_captured_at, last_seen_at FROM users WHERE id = $1`, uid,
+	).Scan(&firstName, &lastName, &displayName, &identityCaptured, &lastSeenAt); err != nil {
 		t.Fatalf("read row after delete: %v", err)
 	}
 	if firstName.Valid {
@@ -122,8 +124,18 @@ func TestHardDeleteAccount_ClearsIdentityFields(t *testing.T) {
 	if lastName.Valid {
 		t.Errorf("telegram_last_name = %q after delete, want NULL", lastName.String)
 	}
+	if displayName.Valid {
+		t.Errorf("telegram_display_name = %q after delete, want NULL", displayName.String)
+	}
+	if identityCaptured.Valid {
+		t.Errorf("identity_captured_at = %v after delete, want NULL", identityCaptured.Time)
+	}
 	if lastSeenAt.Valid {
 		t.Errorf("last_seen_at = %v after delete, want NULL", lastSeenAt.Time)
+	}
+
+	if got := ResolveIdentityProvenance(identityCaptured.Valid, firstName.String); got != ProvenanceUnknown {
+		t.Errorf("ResolveIdentityProvenance after delete = %q, want %q -- a cleared identity_captured_at must read as unknown, not not_supplied", got, ProvenanceUnknown)
 	}
 }
 

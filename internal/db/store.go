@@ -720,11 +720,8 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	// finalised telegram_accounts row" definition — COALESCE leaves a
 	// value already set (from a prior SaveSession call, or the legacy
 	// backfill) untouched.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, $1) WHERE id = $2`,
-		now, userID,
-	); err != nil {
-		return fmt.Errorf("stamp onboarding_completed_at: %w", err)
+	if err := stampOnboardingCompleted(ctx, tx, userID, now); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -1136,7 +1133,13 @@ var ErrAccountAlreadyActive = errors.New("account already active")
 // is an operator action taken once per account, so the residual race is
 // accepted and named here rather than papered over.
 func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, displayName, username string) error {
-	res, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, mode, send_enabled)
 		 SELECT $1,$2,$3,$4,NULL,$5,$6
 		 WHERE NOT EXISTS (SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
@@ -1149,14 +1152,38 @@ func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, d
 	if err != nil {
 		return fmt.Errorf("insert local account: %w", err)
 	}
+	// Mirror SaveSession's stamp, run unconditionally (including the n==0
+	// already-active case) and in the same transaction as the insert: a
+	// caller that retries after a prior stamp failure sees n==0 here (the
+	// row from the earlier attempt already exists) and, before this fix,
+	// never reached a stamp attempt again -- onboarding_completed_at stayed
+	// NULL until the next restart's backfill. COALESCE makes re-stamping an
+	// already-stamped row a no-op, and the shared transaction means insert
+	// and stamp either both land or neither does, closing the split-state
+	// window where the account was provisioned but reported an error.
+	if err := stampOnboardingCompleted(ctx, tx, userID, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	if n == 0 {
 		return ErrAccountAlreadyActive
 	}
-	// Mirror SaveSession's stamp: this insert satisfies the Migrate backfill's
-	// EXISTS guard too, so without this the row reads NULL until the next restart.
-	if _, err := s.DB.ExecContext(ctx,
+	return nil
+}
+
+// stampOnboardingCompleted sets onboarding_completed_at on first connect,
+// mirroring the Migrate backfill's "earliest non-revoked, finalised
+// telegram_accounts row" definition. COALESCE leaves a value already set
+// untouched, so it is safe for every writer to call unconditionally. Shared
+// by SaveSession and ProvisionLocalAccount so the two stamps cannot drift.
+func stampOnboardingCompleted(ctx context.Context, ex interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}, userID int64, ts time.Time) error {
+	if _, err := ex.ExecContext(ctx,
 		`UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, $1) WHERE id = $2`,
-		time.Now().UTC(), userID,
+		ts, userID,
 	); err != nil {
 		return fmt.Errorf("stamp onboarding_completed_at: %w", err)
 	}
