@@ -190,6 +190,57 @@ func TestPreregisteredClient_NeverEvictedByRegistrationCap(t *testing.T) {
 	}
 }
 
+// TestPreregisteredClient_RefreshTokenCarriesClientName is #605 finding 4: a
+// pre-registered client is known only through the in-memory s.clients map
+// (there is no store row, on purpose -- see TestPreregisteredClient_NeverSwept
+// and TestPreregisteredClient_NeverEvictedByRegistrationCap), and the
+// authorization_code exchange must still carry its configured display name
+// onto the issued refresh token instead of leaving client_name blank.
+func TestPreregisteredClient_RefreshTokenCarriesClientName(t *testing.T) {
+	srv := newTestServer(t, withPortalClient)
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	resp := authCodeTokensFor(t, srv, mux, portalClientID, portalCallback)
+	refreshToken, _ := resp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("authorization_code response missing refresh_token")
+	}
+
+	rec, err := srv.store.LookupRefreshToken(context.Background(), refreshToken)
+	if err != nil {
+		t.Fatalf("LookupRefreshToken: %v", err)
+	}
+	if rec.ClientName != "Example Portal" {
+		t.Errorf("refresh token client_name = %q, want %q", rec.ClientName, "Example Portal")
+	}
+}
+
+// TestPreregisteredClient_ImplicitClientStillGetsBlankClientName is the
+// regression half of finding 4: a client known to neither the store nor the
+// in-memory map (an implicit client accepted via AllowImplicitClient) must
+// still record an empty client_name, and the exchange must still succeed --
+// clientDisplayName's miss path is cosmetic, never fatal.
+func TestPreregisteredClient_ImplicitClientStillGetsBlankClientName(t *testing.T) {
+	srv := newTestServer(t) // AllowImplicitClient: true, no pre-registered clients
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	resp := authCodeTokens(t, srv, mux) // claude.ai, implicit
+	refreshToken, _ := resp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("authorization_code response missing refresh_token")
+	}
+
+	rec, err := srv.store.LookupRefreshToken(context.Background(), refreshToken)
+	if err != nil {
+		t.Fatalf("LookupRefreshToken: %v", err)
+	}
+	if rec.ClientName != "" {
+		t.Errorf("refresh token client_name = %q, want empty for an implicit client with no registration", rec.ClientName)
+	}
+}
+
 // TestNew_RejectsBadPreregisteredClients keeps the configuration fail-closed:
 // a record the server cannot honour stops startup instead of booting a server
 // that quietly lacks the client the deployment was changed for.

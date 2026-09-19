@@ -26,16 +26,26 @@ func doTokenRequest(t *testing.T, mux *mockRouter, form url.Values) *httptest.Re
 }
 
 // authCodeTokens drives authorize + widget callback + token and returns the
-// decoded response from a successful authorization_code exchange.
+// decoded response from a successful authorization_code exchange. It is a
+// one-line wrapper over authCodeTokensFor for the claude.ai client every
+// existing caller uses.
 func authCodeTokens(t *testing.T, srv *Server, mux *mockRouter) map[string]any {
 	t.Helper()
+	return authCodeTokensFor(t, srv, mux, "claude.ai", "https://claude.ai/cb")
+}
+
+// authCodeTokensFor is authCodeTokens parameterized by client_id and
+// redirect_uri, so a test can drive the exchange as a client other than
+// claude.ai (e.g. a pre-registered client).
+func authCodeTokensFor(t *testing.T, srv *Server, mux *mockRouter, clientID, redirectURI string) map[string]any {
+	t.Helper()
 	verifier, challenge := pkceVerifierAndChallenge()
-	cs := obtainAuthorizationCode(t, srv, mux, challenge)
+	cs := obtainAuthorizationCodeFor(t, srv, mux, challenge, clientID, redirectURI)
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", cs.code)
-	form.Set("client_id", "claude.ai")
-	form.Set("redirect_uri", "https://claude.ai/cb")
+	form.Set("client_id", clientID)
+	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
 	rec := doTokenRequest(t, mux, form)
 	if rec.Code != http.StatusOK {
