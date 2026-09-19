@@ -117,13 +117,23 @@ func pkceVerifierAndChallenge() (string, string) {
 
 // stateFromAuthorize runs GET /oauth/authorize with the given MCP-client PKCE
 // challenge, asserts the 302 to Telegram, and returns the server-side state
-// token embedded in the redirect URL.
+// token embedded in the redirect URL. It is a one-line wrapper over
+// stateFromAuthorizeFor for the claude.ai client every existing caller uses.
 func stateFromAuthorize(t *testing.T, mux *mockRouter, challenge string) string {
+	t.Helper()
+	return stateFromAuthorizeFor(t, mux, challenge, "claude.ai", "https://claude.ai/cb")
+}
+
+// stateFromAuthorizeFor is stateFromAuthorize parameterized by client_id and
+// redirect_uri, so a test can drive the flow as a client other than
+// claude.ai (e.g. a pre-registered client) without duplicating the request
+// wiring.
+func stateFromAuthorizeFor(t *testing.T, mux *mockRouter, challenge, clientID, redirectURI string) string {
 	t.Helper()
 	q := url.Values{
 		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirectURI},
 		"state":                 {"client-state-abc"},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
@@ -1312,10 +1322,19 @@ type codeState struct {
 // returns the issued authorization_code. The fake authenticator resolves the
 // returning admin (500100101); seedSession gives that admin a session so the
 // callback issues a code directly instead of diverting into enable_access.
+// It is a one-line wrapper over obtainAuthorizationCodeFor for the claude.ai
+// client every existing caller uses.
 func obtainAuthorizationCode(t *testing.T, srv *Server, mux *mockRouter, challenge string) codeState {
 	t.Helper()
+	return obtainAuthorizationCodeFor(t, srv, mux, challenge, "claude.ai", "https://claude.ai/cb")
+}
+
+// obtainAuthorizationCodeFor is obtainAuthorizationCode parameterized by
+// client_id and redirect_uri.
+func obtainAuthorizationCodeFor(t *testing.T, srv *Server, mux *mockRouter, challenge, clientID, redirectURI string) codeState {
+	t.Helper()
 	seedSession(t, srv, 500100101)
-	state := stateFromAuthorize(t, mux, challenge)
+	state := stateFromAuthorizeFor(t, mux, challenge, clientID, redirectURI)
 	loc := authCodeRedirect(t, callbackWithState(t, mux, state))
 	return codeState{code: loc.Query().Get("code")}
 }

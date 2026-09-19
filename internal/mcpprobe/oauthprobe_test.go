@@ -240,6 +240,17 @@ func TestParseChallengeParams_HonoursQuotedStringEscapes(t *testing.T) {
 			want:   map[string]string{"realm": "mctl, labs", "resource_metadata": metadata},
 		},
 		{
+			// The table above only escapes inside the first quoted value
+			// (realm). A splitter that mis-tracks in-quotes state could still
+			// corrupt resource_metadata specifically if the escape lived in
+			// the parameter *after* the first one -- that pointer is what a
+			// client needs to find discovery at all, so a wrong or missing
+			// resource_metadata matters more than a wrong realm.
+			name:   "escaped quote in resource_metadata, not realm",
+			header: `Bearer realm="mctl-telegram", resource_metadata="https://host/a\"b"`,
+			want:   map[string]string{"realm": "mctl-telegram", "resource_metadata": `https://host/a"b`},
+		},
+		{
 			name:   "bare token value",
 			header: `Bearer error=invalid_token, realm="mctl-telegram"`,
 			want:   map[string]string{"error": "invalid_token", "realm": "mctl-telegram"},
