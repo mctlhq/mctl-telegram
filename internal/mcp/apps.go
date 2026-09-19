@@ -8,7 +8,6 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/mcpui"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -109,10 +108,14 @@ Output: {confirmation_id, peer_redacted, text, text_sha256, will_really_send, dr
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_send_message:rate_limited", peerRedacted, nil, startedAt)
-			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
-		}
+		// Deliberately no per-peer limiter debit here. send_message holds the
+		// authoritative check (evaluateDirectSendLimiterN), and debiting on
+		// both halves of a prepare -> send pair would charge 2 of the 20
+		// tokens per (identity, peer) hour for a single delivered message --
+		// halving the cap the error text on both paths advertises. The App
+		// re-prepares on every Prepare click while a draft is being edited, so
+		// a debit here would also let pure drafting exhaust a peer's send
+		// budget with nothing sent. This call makes no Telegram API call.
 		willReallySend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		c, err := s.Confirms.Issue(id.UserID, "send", HashSendPayload(peer, text))
 		if err != nil {

@@ -328,6 +328,51 @@ func TestToolSendMessage_AppPathDebitsSamePeerLimiter(t *testing.T) {
 	}
 }
 
+// TestPrepareThenSend_CostsExactlyOnePeerToken drives a full prepare -> send
+// pair through both tool handlers and asserts the pair debits the per-(identity,
+// peer) budget exactly once. prepare_send_message makes no Telegram call, so a
+// debit on that half would charge 2 of the 20 tokens per hour for one delivered
+// message -- and, because the App re-prepares on every Prepare click, would let
+// drafting alone exhaust a peer's budget with nothing sent.
+// TestToolSendMessage_AppPathDebitsSamePeerLimiter covers the send half, but it
+// primes the bucket with a direct Confirms.Issue, so the prepare-side cost is
+// invisible to it.
+func TestPrepareThenSend_CostsExactlyOnePeerToken(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 913)
+	hub := bridge.NewHub()
+	send := hub.Register(uid, "")
+	go func() {
+		env := <-send
+		hub.Deliver(uid, bridge.EncodeResponse(env.ID, json.RawMessage(`{"sent":true,"mode":"send"}`)))
+	}()
+
+	limiter := audit.NewRateLimiter(1000)
+	srv := &Server{Store: store, Hub: hub, Confirms: NewConfirmStore(), AllowSend: true, Limiter: limiter}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+	peerRedacted := telegram.RedactPeer("@x")
+
+	// Leave exactly two tokens. If the pair costs one, one token survives it;
+	// if either half double-charges, the budget is empty afterwards.
+	if !limiter.AllowPeerN(id, peerRedacted, audit.PeerSendCap-2, audit.PeerSendCap, audit.PeerWindow) {
+		t.Fatal("failed to prime the limiter")
+	}
+
+	prep := parsePrepareSendResult(t, callPrepareSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi"}))
+	confID, _ := prep["confirmation_id"].(string)
+	if confID == "" {
+		t.Fatal("prepare_send_message returned no confirmation_id")
+	}
+	res := callSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi", "confirmation_id": confID})
+	if res.IsError {
+		t.Fatalf("expected the send to go through: %s", contentText(res))
+	}
+
+	if !limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+		t.Fatal("a prepare -> send pair debited more than one per-peer token: the prepare half is charging too")
+	}
+}
+
 // ---- MCP_TOOL_FILTER interaction (T10) ----
 
 // TestAppsFlag_ReadOnlyFilterDropsSendToolsKeepsUIResource is T10: with

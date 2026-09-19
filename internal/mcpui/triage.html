@@ -167,6 +167,15 @@ function callTool(name, args) {
 }
 
 window.addEventListener("message", function (event) {
+  // Only the embedding host may speak on this channel. A sandboxed iframe is
+  // not reachable solely by its parent: any sibling frame in the host page can
+  // take a WindowProxy for this document out of parent.frames and postMessage
+  // into it, and the request ids here are sequential ("app-1", "app-2", ...)
+  // and so guessable. Without this check a sibling could resolve an in-flight
+  // pending[id] or push a forged tool-result, and every card rendered from one
+  // closes over its own m.peer -- which is the peer a later Send would really
+  // address. Drop anything that did not come from the parent window.
+  if (event.source !== window.parent) return;
   var data = event.data;
   if (!data || typeof data !== "object") return;
   if (data.id !== undefined && data.id !== null && pending[data.id]) {

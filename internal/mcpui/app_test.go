@@ -41,13 +41,38 @@ func TestTriageHTMLHasNoExternalDeps(t *testing.T) {
 // rather than silent drift a client (or the report's content-hash claim)
 // would not notice.
 func TestTriageHTMLContentHash(t *testing.T) {
-	const wantHash = "b185396474b38ea9b0a0f6cd5d15a87fa7c690026109a882235fbcda0171c294"
+	const wantHash = "390a03383cafc2a0272f5fac87e462306a365a07953f267f0760b999c7a50e88"
 	sum := sha256.Sum256([]byte(triageHTML))
 	got := hex.EncodeToString(sum[:])
 	if got != wantHash {
 		t.Fatalf("triage.html sha256 = %s, want %s (recorded golden hash)\n"+
 			"If this edit to triage.html was deliberate, update wantHash to the "+
 			"new value printed above.", got, wantHash)
+	}
+}
+
+// TestTriageHTMLRejectsForeignMessageSources pins the transport's sender
+// check: the postMessage handler must drop any event whose source is not the
+// parent window. A sandboxed iframe is reachable from sibling frames in the
+// host page (via parent.frames), and the sequential "app-N" request ids are
+// guessable, so without this guard a sibling could resolve an in-flight
+// request or push a forged tool-result whose rendered card carries an
+// attacker-chosen peer into the draft/send path.
+func TestTriageHTMLRejectsForeignMessageSources(t *testing.T) {
+	const guard = "if (event.source !== window.parent) return;"
+	if !strings.Contains(triageHTML, guard) {
+		t.Fatalf("triage.html must contain the host-sender guard %q", guard)
+	}
+	listener := strings.Index(triageHTML, `window.addEventListener("message"`)
+	if listener < 0 {
+		t.Fatal("triage.html has no message listener")
+	}
+	if got := strings.Index(triageHTML, guard); got < listener {
+		t.Fatal("the sender guard must sit inside the message listener, not before it")
+	}
+	body := triageHTML[listener:]
+	if strings.Index(body, guard) > strings.Index(body, "var data = event.data;") {
+		t.Fatal("the sender guard must run before the handler inspects event.data")
 	}
 }
 
