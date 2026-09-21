@@ -2,7 +2,7 @@
 
 Go remote MCP server exposing user-authorized Telegram account access (via `gotd/td` MTProto) as MCP tools — dialogs, messages, preview-gated sends, pin controls, audit logs, and account/admin controls — for ChatGPT Apps, Claude.ai, and any MCP-compatible client.
 
-Status: **Apps SDK readiness track** (v0.x). Fourteen MCP tools, OAuth-protected, preview-only sending by default, reviewer/demo login mode, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-user and persisted encrypted. APIs and tool schemas may change before v1.0.
+Status: **Apps SDK readiness track** (v0.x). 30 MCP tools (31 with `MCP_APPS_ENABLED=true`, off by default), OAuth-protected, write safety enforced per-identity (send-capable tools may be registered server-wide, but a Telegram account can only mutate state after explicit `send_enabled` consent and scope), reviewer/demo login mode, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-user and persisted encrypted. APIs and tool schemas may change before v1.0.
 
 mctl-telegram is an independent project, not an official Telegram app or Telegram API partner. It operates only on the Telegram account that the user explicitly connects and controls; users remain responsible for complying with Telegram's terms.
 
@@ -24,13 +24,20 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 
 ## MCP tools
 
+The table below covers the 16 tools most relevant to everyday use and admin control; it is not
+exhaustive. The full production surface is 30 tools (31 with `MCP_APPS_ENABLED=true`) — the
+remaining 14 (media/search/forward/edit/delete helpers, local-bridge and worker-token
+provisioning, reaction and account-mode controls) follow the same read-tools-are-`readOnly=true`,
+write-tools-require-confirmation pattern. See [`docs/portal-allowlist.json`](docs/portal-allowlist.json)
+for the authoritative full list.
+
 | Tool                          | MCP annotations | Notes |
 |-------------------------------|----------------------|-------|
 | `list_dialogs`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads Telegram dialogs (audit row is internal observability). Inputs: `limit` (≤200, default 50), optional `query`. |
 | `get_unread_messages`         | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads unread Telegram messages (audit row is internal observability). Inputs: optional `peer`, `limit` (≤200). When `peer` is omitted, DMs and chats/groups (including megagroup/supergroups) fill `limit` before broadcast channels. |
 | `get_messages`                | `readOnly=true`, `destructive=false`, `openWorld=true` | Reads recent message history for a specific peer (audit row is internal observability). |
-| `send_message`                | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `text`. Preview-only by default: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, identity has `telegram:messages:send` scope, per-account `send_enabled=true`). Otherwise returns `sent=false` with `dry_reason`; no message is delivered. |
-| `send_media`                  | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `media_type` (`photo`/`video`/`document`/`animation`), exactly one of `file_url`/`file_base64`, optional `caption`/`file_name` (required for `document`+`file_base64`). Same preview-only gate as `send_message`; a denied call never fetches `file_url` or decodes `file_base64`. `animation` is always sent as a distinct type from `video`, never relabeled. `file_url` goes through an SSRF-guarded fetcher (HTTPS-only; loopback/link-local/private-range addresses refused, including on redirect hops). Both sources are capped by `MEDIA_UPLOAD_MAX_BYTES` (default 20 MiB). |
+| `send_message`                | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `text`. Write-gated per identity: sends for real only when the gate is fully open (server `ALLOW_SEND=true`, enabled in production; identity has `telegram:messages:send` scope; per-account `send_enabled=true`). Otherwise returns `sent=false` with `dry_reason`; no message is delivered. |
+| `send_media`                  | `readOnly=false`, `destructive=true`, `openWorld=true` | Inputs: `peer`, `media_type` (`photo`/`video`/`document`/`animation`), exactly one of `file_url`/`file_base64`, optional `caption`/`file_name` (required for `document`+`file_base64`). Same per-identity send gate as `send_message`; a denied call never fetches `file_url` or decodes `file_base64`. `animation` is always sent as a distinct type from `video`, never relabeled. `file_url` goes through an SSRF-guarded fetcher (HTTPS-only; loopback/link-local/private-range addresses refused, including on redirect hops). Both sources are capped by `MEDIA_UPLOAD_MAX_BYTES` (default 20 MiB). |
 | `prepare_pin_message`         | `readOnly=false`, `destructive=false`, `openWorld=false` | Creates a local one-shot confirmation record for a later `pin_message` call. |
 | `pin_message`                 | `readOnly=false`, `destructive=true`, `openWorld=true` | Pins or unpins a Telegram message after a matching confirmation id. |
 | `get_my_audit_log`            | `readOnly=true`, `destructive=false`, `openWorld=false` | Returns the authenticated user's own audit rows. |
@@ -195,8 +202,8 @@ If you are using the shared hosted deployment, configure:
 - MCP connector URL: `https://tg.mctl.ai/mcp`
 
 Submission notes:
-- Keep real sends gated (`ALLOW_SEND=false` on tg.mctl.ai blocks all real sends until opt-in gates are enabled).
-- If you enable real sends later, keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
+- `tg.mctl.ai` runs with `ALLOW_SEND=true`: send-capable tools are registered, but real sends stay gated per Telegram identity (`send_enabled` flag, opt-in via `set_send_consent`) plus the `telegram:messages:send` OAuth scope. Reviewer/demo accounts are non-send-capable unless explicitly enabled.
+- Keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
 - Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 
 ## Local Bridge daemon (`cmd/local`, beta)
