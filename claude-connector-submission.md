@@ -228,8 +228,9 @@ submission.
 - [ ] Errors are actionable, not generic 500s
 
 **Send gates**
-- [ ] Per-identity send model documented (ALLOW_SEND enables tool registration server-wide;
-      real sends require per-account opt-in, not a global default)
+- [ ] Per-identity send model documented (all send-capable tools are always registered;
+      a real send requires ALLOW_SEND=true, per-account opt-in, and scope together —
+      not a single global default)
 - [ ] Per-user `send_enabled` gate documented
 - [ ] `telegram:messages:send` scope requirement documented
 - [ ] No tool argument bypasses send gate

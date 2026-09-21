@@ -409,7 +409,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. The server flag <code>ALLOW_SEND</code> merely controls whether send-capable tools are available at all — the actual safety boundary is per-identity: your account's <code>send_enabled</code> flag defaults to off and you turn it on yourself with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}, and your identity also needs the <code>telegram:messages:send</code> scope. Until you opt in, <code>send_message</code> returns a preview (<code>sent=false</code>) instead of sending — there is no mode argument to bypass the gate.</dd>
+        <dd>Only if you explicitly opt in. A real send needs all three: the server flag <code>ALLOW_SEND=true</code>, your account's <code>send_enabled</code> flag (defaults to off, you turn it on yourself with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}), and your identity's <code>telegram:messages:send</code> scope. Until all three are true, <code>send_message</code> returns a preview (<code>sent=false</code>) instead of sending — there is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does ChatGPT see?</dt>

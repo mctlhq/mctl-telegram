@@ -2,7 +2,7 @@
 
 Go remote MCP server exposing user-authorized Telegram account access (via `gotd/td` MTProto) as MCP tools — dialogs, messages, preview-gated sends, pin controls, audit logs, and account/admin controls — for ChatGPT Apps, Claude.ai, and any MCP-compatible client.
 
-Status: **Apps SDK readiness track** (v0.x). 30 MCP tools (31 with `MCP_APPS_ENABLED=true`, off by default), OAuth-protected, write safety enforced per-identity (send-capable tools may be registered server-wide, but a Telegram account can only mutate state after explicit `send_enabled` consent and scope), reviewer/demo login mode, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-user and persisted encrypted. APIs and tool schemas may change before v1.0.
+Status: **Apps SDK readiness track** (v0.x). 30 MCP tools (31 with `MCP_APPS_ENABLED=true`, off by default), OAuth-protected, write safety enforced per-identity (all send-capable tools are always registered; a real send additionally requires the server-wide `ALLOW_SEND` flag, the account's `send_enabled` consent, and the `telegram:messages:send` scope — all three), reviewer/demo login mode, and production-facing docs/metadata intended for ChatGPT Apps review. Telegram session is per-user and persisted encrypted. APIs and tool schemas may change before v1.0.
 
 mctl-telegram is an independent project, not an official Telegram app or Telegram API partner. It operates only on the Telegram account that the user explicitly connects and controls; users remain responsible for complying with Telegram's terms.
 
@@ -202,7 +202,7 @@ If you are using the shared hosted deployment, configure:
 - MCP connector URL: `https://tg.mctl.ai/mcp`
 
 Submission notes:
-- `tg.mctl.ai` runs with `ALLOW_SEND=true`: send-capable tools are registered, but real sends stay gated per Telegram identity (`send_enabled` flag, opt-in via `set_send_consent`) plus the `telegram:messages:send` OAuth scope. Reviewer/demo accounts are non-send-capable unless explicitly enabled.
+- `tg.mctl.ai` runs with `ALLOW_SEND=true`, one of three conjunctive conditions a real send must pass: real sends still require the account's `send_enabled` flag (opt-in via `set_send_consent`) and the `telegram:messages:send` OAuth scope. Reviewer/demo accounts are non-send-capable unless explicitly enabled.
 - Keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
 - Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 
