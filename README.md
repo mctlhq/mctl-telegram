@@ -202,7 +202,7 @@ If you are using the shared hosted deployment, configure:
 - MCP connector URL: `https://tg.mctl.ai/mcp`
 
 Submission notes:
-- `tg.mctl.ai` runs with `ALLOW_SEND=true`, one of three conjunctive conditions a real send must pass: real sends still require the account's `send_enabled` flag (opt-in via `set_send_consent`) and the `telegram:messages:send` OAuth scope. Reviewer/demo accounts are non-send-capable unless explicitly enabled.
+- `tg.mctl.ai` runs with `ALLOW_SEND=true`. Real sends still require the other two conjunctive conditions: the account's `send_enabled` flag (opt-in via `set_send_consent`) and the `telegram:messages:send` OAuth scope. Reviewer/demo accounts are pinned non-send-capable server-side, independent of `send_enabled`.
 - Keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
 - Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
 

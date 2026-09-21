@@ -155,7 +155,7 @@
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code>.</li>
     <li>Identity has <code>telegram:messages:send</code> scope.</li>
-    <li><code>telegram_accounts.send_enabled = true</code> for that account — off by default, and the owner opts in explicitly via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}. Reviewer and demo identities are kept non-send-capable at this layer unless explicitly enabled.</li>
+    <li><code>telegram_accounts.send_enabled = true</code> for that account — off by default, and the owner opts in explicitly via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}. Reviewer and demo identities are kept non-send-capable regardless of <code>send_enabled</code>, via a separate server-side identity pin (not a normal consent-flow opt-in).</li>
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
   <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; no send RPC reaches Telegram. A denied media call does not fetch its URL or decode its base64 payload.</p>
