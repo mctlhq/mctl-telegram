@@ -16,12 +16,25 @@ import (
 // present" shape (mirrors T2 at the oauth layer, exercised directly against
 // the store): username, first and last name each land in their own column,
 // identity_source and a non-NULL identity_captured_at are stamped.
+//
+// Runs against both dialects per issue #620's acceptance; the Postgres leg
+// is TEST_DATABASE_URL-gated like TestOpenPool.
 func TestEnsureUserByTelegramCapture_ClaimsPresent(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) { assertCaptureClaimsPresent(t, newTestStore(t), 111) })
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		t.Run("postgres", func(t *testing.T) {
+			assertCaptureClaimsPresent(t, newPostgresTestStore(t, dsn), 1111)
+		})
+	}
+}
+
+func assertCaptureClaimsPresent(t *testing.T, s *Store, tgID int64) {
+	t.Helper()
 	ctx := context.Background()
-	s := newTestStore(t)
+	clearIdentityRow(t, s, tgID)
 
 	uid, err := s.EnsureUserByTelegramCapture(ctx, TelegramIdentityCapture{
-		TelegramID: 111,
+		TelegramID: tgID,
 		Username:   "alice",
 		FirstName:  "Alice",
 		LastName:   "Example",
@@ -64,12 +77,25 @@ func TestEnsureUserByTelegramCapture_ClaimsPresent(t *testing.T) {
 // returns only a Telegram id (no username/first/last name). The username
 // must stay empty -- NO display-name fallback, unlike EnsureUserByTelegramID
 // -- and provenance must resolve to not_supplied (capture ran), not unknown.
+//
+// Runs against both dialects per issue #620's acceptance; the Postgres leg
+// is TEST_DATABASE_URL-gated like TestOpenPool.
 func TestEnsureUserByTelegramCapture_ClaimsAbsent(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) { assertCaptureClaimsAbsent(t, newTestStore(t), 222) })
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		t.Run("postgres", func(t *testing.T) {
+			assertCaptureClaimsAbsent(t, newPostgresTestStore(t, dsn), 2222)
+		})
+	}
+}
+
+func assertCaptureClaimsAbsent(t *testing.T, s *Store, tgID int64) {
+	t.Helper()
 	ctx := context.Background()
-	s := newTestStore(t)
+	clearIdentityRow(t, s, tgID)
 
 	uid, err := s.EnsureUserByTelegramCapture(ctx, TelegramIdentityCapture{
-		TelegramID: 222,
+		TelegramID: tgID,
 		Source:     "telegram_oidc",
 		CapturedAt: time.Now().UTC(),
 	})
@@ -448,5 +474,19 @@ func assertLegacyTelegramLoginIDBackfill(t *testing.T, s *Store, tgID int64) {
 	}
 	if !seen {
 		t.Errorf("ListIdentities does not include telegram id %d after backfill", tgID)
+	}
+}
+
+// clearIdentityRow removes any row for tgID before a dual-dialect assertion.
+// SQLite gets a fresh in-memory database per test; the Postgres database
+// named by TEST_DATABASE_URL is reused across runs, so a leftover row from a
+// previous run would otherwise turn a capture into a re-auth.
+func clearIdentityRow(t *testing.T, s *Store, tgID int64) {
+	t.Helper()
+	if _, err := s.DB.ExecContext(context.Background(),
+		`DELETE FROM users WHERE telegram_login_id = $1 OR github_login = $2`,
+		tgID, fmt.Sprintf("tg:%d", tgID),
+	); err != nil {
+		t.Fatalf("clear prior row for %d: %v", tgID, err)
 	}
 }
