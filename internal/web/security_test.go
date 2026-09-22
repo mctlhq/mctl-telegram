@@ -80,6 +80,48 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 }
 
+// TestPrivacy_DisclosesNotificationState pins the privacy matrix against the
+// state issue #438 introduced. Two tables started holding data about a
+// person -- which categories they consented to and whether the bot can reach
+// them -- and the inventory has to name them, or the page understates what is
+// stored. It also pins the two claims that make the consent model meaningful:
+// reachability is never learned from a probe, and both tables are removed by
+// account deletion.
+//
+// Separate from TestPrivacy_ServesHTML so a failure says which contract broke.
+func TestPrivacy_DisclosesNotificationState(t *testing.T) {
+	w := httptest.NewRecorder()
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, must := range []string{
+		// inventory rows
+		"client_notification_prefs",
+		"client_bot_reachability",
+		// the four reachability states, named rather than summarised
+		"cannot_initiate",
+		// the no-probe rule, which is the reason reachability is allowed to
+		// exist at all
+		"no message is ever sent merely to test reachability",
+		// deletion, stated per row
+		"Removed by account deletion",
+		// the consent model
+		"never counted as marketing consent",
+		// the self-service surfaces, including the no-JavaScript one
+		"/api/account/notifications",
+		"/telegram/connect/manage",
+		"needs no JavaScript",
+		"get_my_notification_preferences",
+		"set_my_notification_preferences",
+	} {
+		if !strings.Contains(body, must) {
+			t.Fatalf("/privacy does not disclose notification state: missing %q", must)
+		}
+	}
+}
+
 func TestTerms_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
 	Terms("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/terms", nil))

@@ -235,3 +235,13 @@ func purgeNotificationState(ctx context.Context, ex execer, userID int64) error 
 	}
 	return nil
 }
+
+// NotificationCategories returns the known categories in a stable order.
+// Exported so a rendering surface (the manage page) can enumerate them
+// without redeclaring the list: a category added here must appear there, and
+// a surface that forgets one silently drops a user's control over it.
+func NotificationCategories() []NotificationCategory {
+	out := make([]NotificationCategory, len(notificationCategories))
+	copy(out, notificationCategories)
+	return out
+}

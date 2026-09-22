@@ -66,6 +66,18 @@
         <td>Until account deletion; related user-scoped rows are removed by database cascade where configured</td>
       </tr>
       <tr>
+        <td><code>client_notification_prefs</code> table</td>
+        <td>One row per category you explicitly decided (<code>product_updates</code>, <code>maintenance</code>, <code>security</code>), with the state, the time you decided, and which surface you used. No row is written for a default you never changed.</td>
+        <td>Records consent per category, so operational notices are never counted as marketing consent</td>
+        <td>Removed by account deletion. A preference grants no Telegram or MCP access.</td>
+      </tr>
+      <tr>
+        <td><code>client_bot_reachability</code> table</td>
+        <td>Whether the login bot may currently start a chat with you (<code>unknown</code>, <code>reachable</code>, <code>blocked</code>, <code>cannot_initiate</code>), when that was observed and from which delivery. No message content and no Telegram API response body.</td>
+        <td>Learned only from the outcome of a message actually sent to you; no message is ever sent merely to test reachability</td>
+        <td>Removed by account deletion</td>
+      </tr>
+      <tr>
         <td><code>telegram_accounts</code> table</td>
         <td>AES-256-GCM ciphertext of your MTProto session blob using a per-user derived key, plus account metadata and feature/send flags</td>
         <td>Required to make Telegram API calls on your behalf</td>
@@ -132,7 +144,11 @@ DELETE /api/account              # delete the account/session row and related us
 GET    /api/account              # connection status + feature/send flags
 GET    /api/account/audit        # newest-first audit rows (limit, before)
 GET    /api/account/audit/verify # recompute the audit hash chain</pre>
-  <p>Equivalent MCP tools include <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, and <code>get_my_audit_log</code>. Disconnect/delete also tear down the in-memory MTProto client so a concurrent request cannot continue using a revoked session.</p>
+  <p>Notification preferences are part of the same self-service surface:</p>
+  <pre>GET    /api/account/notifications   # resolved preference per category
+PUT    /api/account/notifications   # change one or more categories</pre>
+  <p>They can also be changed in the browser at <code>/telegram/connect/manage</code>, which submits a plain HTML form and needs no JavaScript. Product updates stay off until you turn them on; maintenance and security are classified as operational notices and are never treated as marketing consent.</p>
+  <p>Equivalent MCP tools include <code>disconnect_telegram_account</code>, <code>delete_telegram_account</code>, <code>get_my_audit_log</code>, <code>get_my_notification_preferences</code>, and <code>set_my_notification_preferences</code>. Disconnect/delete also tear down the in-memory MTProto client so a concurrent request cannot continue using a revoked session.</p>
 
   <h2>Who can access your data</h2>
   <ul>

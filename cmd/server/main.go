@@ -451,6 +451,7 @@ func main() {
 		mux.With(manageAuth).Get("/telegram/connect/manage", manageSrv.HandleManage)
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
+		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
 	}
 
 	// Account endpoints — self-service disconnect/delete + status.
