@@ -2175,6 +2175,18 @@ A permanently poisonous update can be retired with
 `Store.MarkUpdateFailed`, which marks it `handler_error` so it stops blocking
 the sweep.
 
+### Retention of `bot_updates`
+
+The table grows with inbound message volume and is not purged. That is a
+deliberate choice at this size — a row is `update_id`, `kind`, `chat_id`, three
+timestamps and an outcome, and the login bot's inbound volume is bounded by how
+often clients message it — but if it ever needs trimming, **a purge must never
+delete the row holding `MAX(update_id)`**. The poll offset is derived from that
+value, so removing it would rewind the offset and make Telegram redeliver
+everything it still holds (up to 24h), every one of which would then be accepted
+as new. Delete processed rows *older than* a cutoff, and keep the newest row
+unconditionally.
+
 ### Why there is no queue
 
 Telegram already provides the durable boundary. An update is acknowledged only

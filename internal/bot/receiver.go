@@ -24,7 +24,6 @@ type Store interface {
 	NextOffset(ctx context.Context) (int64, error)
 	ListPendingUpdates(ctx context.Context, limit int) ([]db.PendingUpdate, error)
 	DispatchOnce(ctx context.Context, updateID int64, fn func(context.Context, *sql.Tx) (string, error)) error
-	MarkUpdateFailed(ctx context.Context, updateID int64) error
 }
 
 // Counter records why an update was dropped or how it was handled. Outcomes are
@@ -151,31 +150,42 @@ func (r *Receiver) pollOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		r.accept(ctx, u)
+		if err := r.accept(ctx, u); err != nil {
+			// Stop the batch here rather than continuing. Telegram sends
+			// updates in ascending update_id order, so accepting a LATER
+			// update would push the DB-derived offset past this one and
+			// Telegram would never redeliver it -- the failure would become
+			// silent data loss. Returning leaves the offset below this
+			// update, so the next poll starts again from it.
+			return err
+		}
 	}
 	return nil
 }
 
 // accept makes one update durable and dispatches it if this call is the one
-// that accepted it.
-func (r *Receiver) accept(ctx context.Context, u Update) {
+// that accepted it. A non-nil error means the batch must stop: see pollOnce.
+//
+// Note that a dispatch failure is NOT an error here. The update is already
+// durable at that point, so the offset may safely advance past it and the
+// pending sweep will retry it. Only a failure to make it durable is fatal to
+// the batch.
+func (r *Receiver) accept(ctx context.Context, u Update) error {
 	kind := u.Kind()
 	chatID := u.ChatID()
 
 	accepted, err := r.store.AcceptUpdate(ctx, u.UpdateID, kind, chatID)
 	if err != nil {
-		// Not fatal and not skipped: the row was not written, so the offset
-		// does not move and Telegram redelivers this update on the next poll.
-		slog.Warn("bot update not accepted", "update_id", u.UpdateID, "kind", kind, "err", err)
-		return
+		return fmt.Errorf("accept update %d: %w", u.UpdateID, err)
 	}
 	if !accepted {
 		// A duplicate update_id: already accepted by an earlier delivery.
 		// Not dispatched again -- this is the idempotency guarantee.
 		r.count(kind, OutcomeDuplicate)
-		return
+		return nil
 	}
 	r.dispatch(ctx, db.PendingUpdate{UpdateID: u.UpdateID, Kind: kind, ChatID: chatID})
+	return nil
 }
 
 // dispatch routes one accepted update, recording the outcome on its row.

@@ -600,3 +600,56 @@ func captureSlog(t *testing.T, w io.Writer) func() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return func() { slog.SetDefault(prev) }
 }
+
+// failingAcceptStore fails AcceptUpdate for one specific update_id and
+// delegates everything else to a real store.
+type failingAcceptStore struct {
+	*db.Store
+	failOn int64
+}
+
+func (f *failingAcceptStore) AcceptUpdate(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64) (bool, error) {
+	if updateID == f.failOn {
+		return false, fmt.Errorf("simulated durable-write failure")
+	}
+	return f.Store.AcceptUpdate(ctx, updateID, kind, chatID)
+}
+
+// TestReceiver_AcceptFailureStopsTheBatch is a regression test for silent data
+// loss. Telegram sends a batch in ascending update_id order, so if update N
+// fails to become durable and the loop carries on to N+1, the DB-derived offset
+// jumps past N and Telegram will never send it again -- the update is gone, and
+// nothing reports that it was.
+func TestReceiver_AcceptFailureStopsTheBatch(t *testing.T) {
+	real := newBotTestStore(t)
+	store := &failingAcceptStore{Store: real, failOn: 50}
+	fake := &fakeTelegram{batches: [][]byte{batch(
+		msgUpdate(50, 42, "the one that fails"),
+		msgUpdate(51, 42, "the one after it"),
+	)}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		return "", nil
+	}))
+	r := NewReceiver(store, reg, newCounter(), "test-token", Options{BaseURL: srv.URL, PollTimeout: 1})
+
+	err := r.pollOnce(context.Background())
+	if err == nil {
+		t.Fatal("a failed durable write was swallowed")
+	}
+
+	// The critical assertion: the offset must NOT have moved past 50.
+	next, oerr := real.NextOffset(context.Background())
+	if oerr != nil {
+		t.Fatalf("NextOffset: %v", oerr)
+	}
+	if next > 50 {
+		t.Fatalf("NextOffset = %d: update 50 was acknowledged despite never being stored, and Telegram will not resend it", next)
+	}
+	if next != 0 {
+		t.Errorf("NextOffset = %d, want 0 -- nothing in this batch should have been acknowledged", next)
+	}
+}
