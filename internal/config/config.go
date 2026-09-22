@@ -112,6 +112,13 @@ type Config struct {
 	OAUTHPreregisteredClients []PreregisteredClient
 	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
 	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
+	// BotReceiverEnabled turns on the inbound login-bot update receiver
+	// (issue-619). Default OFF, and deliberately so: getUpdates allows exactly
+	// one consumer per bot token, so enabling it in two environments that
+	// share a token would make them fight (409 Conflict) and starve each
+	// other. An explicit opt-in makes claiming the token a decision rather
+	// than a side effect of deploying.
+	BotReceiverEnabled bool
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -297,6 +304,7 @@ func Load() (*Config, error) {
 		OAUTHRegisterRatePerMin:       envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
+		BotReceiverEnabled:            envBool("BOT_RECEIVER_ENABLED", false),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)

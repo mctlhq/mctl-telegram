@@ -43,6 +43,12 @@ type Registry struct {
 	// SessionsRevokedTotal is labeled by reason: "disconnect", "delete",
 	// "idle_expiry", "absolute_expiry".
 	SessionsRevokedTotal *prometheus.CounterVec
+	// BotUpdatesTotal counts inbound login-bot updates by kind and outcome
+	// (issue-619). This is how "dropped safely and counted, not logged with
+	// contents" is satisfied: an unknown chat or an unroutable callback
+	// increments a counter here instead of producing a log line that would
+	// have to carry the update to be useful.
+	BotUpdatesTotal *prometheus.CounterVec
 	// SessionsActiveGauge is refreshed by a background sampler in main().
 	SessionsActiveGauge prometheus.Gauge
 	// SessionsBorrowTotal counts every Pool.Borrow() call exit, labeled by
@@ -410,6 +416,11 @@ func New() *Registry {
 		Help: "Total Telegram sessions revoked, labeled by reason.",
 	}, []string{"reason"})
 
+	r.BotUpdatesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_bot_updates_total",
+		Help: "Total inbound login-bot updates, labeled by update kind and dispatch outcome (handled, no_handler, unknown_chat, unsupported, handler_error, duplicate).",
+	}, []string{"kind", "outcome"})
+
 	r.SessionsActiveGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_sessions_active",
 		Help: "Count of non-revoked sessions that were last used within the last hour, including freshly created sessions not yet used. Refreshed every minute.",
@@ -520,6 +531,7 @@ func New() *Registry {
 		r.TelegramFloodWaitEventsTotal,
 		r.SessionsConnectedTotal,
 		r.SessionsRevokedTotal,
+		r.BotUpdatesTotal,
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
 		r.LoginPhoneStepTotal,
