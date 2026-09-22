@@ -18,6 +18,25 @@ func newManageNotifTestServer(t *testing.T) (*ManageServer, *db.Store) {
 	return NewManageServer(store, nil, "https://tg.mctl.ai"), store
 }
 
+// newIsolatedManageServer builds a server over a private in-memory database.
+// newAccountTestStore uses "file::memory:?cache=shared" with no name, so every
+// store in this package shares ONE database; a test that drops a table there
+// would remove it for every later test that does not happen to re-run Migrate.
+func newIsolatedManageServer(t *testing.T) (*ManageServer, *db.Store) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := db.Open(ctx, "file:"+t.Name()+"?mode=memory&cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	store := db.NewStore(conn, nil)
+	return NewManageServer(store, nil, "https://tg.mctl.ai"), store
+}
+
 // seedManageUser creates a user the manage handlers can act for.
 func seedManageUser(t *testing.T, store *db.Store, tgID int64) int64 {
 	t.Helper()
@@ -337,7 +356,7 @@ func TestNotificationLabels_CoverEveryCategory(t *testing.T) {
 // degradation the design turns on: disconnect is the page's safety-critical
 // control, so a preferences problem must never take it down with it.
 func TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect(t *testing.T) {
-	srv, store := newManageNotifTestServer(t)
+	srv, store := newIsolatedManageServer(t)
 	uid := seedManageUser(t, store, 5007)
 
 	// The disconnect control only renders for a connected account, so the
@@ -354,6 +373,7 @@ func TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect(t *testing.T) {
 	// Drop only the preferences table, not the connection: closing the handle
 	// would also fail the account read that runs first, which errors the page
 	// for a legitimate reason and would never reach the branch under test.
+	// Safe to drop because this server has its own database.
 	if _, err := store.DB.Exec(`DROP TABLE client_notification_prefs`); err != nil {
 		t.Fatalf("drop prefs table: %v", err)
 	}
