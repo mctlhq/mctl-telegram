@@ -424,3 +424,39 @@ func TestPolicySurfacesCoverEveryConstant(t *testing.T) {
 		}
 	}
 }
+
+// TestNew_RegistersBotUpdatesMetric locks in the name and label set of the
+// receiver's counter (issue-619). It is the mechanism behind "unknown chat and
+// unknown callback are counted, not logged with contents", so renaming a label
+// silently turns that guarantee into nothing.
+func TestNew_RegistersBotUpdatesMetric(t *testing.T) {
+	reg := New()
+	reg.BotUpdatesTotal.WithLabelValues("message", "unknown_chat").Inc()
+	reg.BotUpdatesTotal.WithLabelValues("callback_query", "no_handler").Inc()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	var mf *dto.MetricFamily
+	for _, f := range mfs {
+		if f.GetName() == "mctl_bot_updates_total" {
+			mf = f
+		}
+	}
+	if mf == nil {
+		t.Fatal("mctl_bot_updates_total is not registered")
+	}
+	if mf.GetType() != dto.MetricType_COUNTER {
+		t.Errorf("type = %v, want COUNTER", mf.GetType())
+	}
+	for _, m := range mf.GetMetric() {
+		var names []string
+		for _, l := range m.GetLabel() {
+			names = append(names, l.GetName())
+		}
+		if len(names) != 2 || names[0] != "kind" || names[1] != "outcome" {
+			t.Errorf("labels = %v, want [kind outcome]", names)
+		}
+	}
+}

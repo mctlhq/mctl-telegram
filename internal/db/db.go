@@ -673,6 +673,34 @@ func sqliteSchema() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (user_id, category)
 		)`,
+		// Inbound Bot API updates (issue-619). The row IS the acknowledgement
+		// boundary: the long-poll loop derives its next getUpdates offset from
+		// MAX(update_id) in this table, never from the batch it holds in
+		// memory, so an update is only confirmed to Telegram once it is
+		// durably here. update_id is Telegram's own identifier and is the
+		// primary key, which is what makes acceptance idempotent -- a
+		// redelivered update hits ON CONFLICT DO NOTHING and is never
+		// dispatched twice.
+		//
+		// No message text, callback payload, phone number or raw update JSON
+		// is stored. kind and chat_id are the routing facts the registry
+		// needs; everything else is deliberately dropped at the boundary, so
+		// there is no retention question and nothing sensitive to leak from
+		// this table. See internal/bot for the parse.
+		//
+		// processed_at NULL means accepted-but-not-yet-dispatched, which is
+		// precisely the state a crash between acceptance and dispatch leaves
+		// behind, and is what the startup sweep looks for.
+		`CREATE TABLE IF NOT EXISTS bot_updates (
+			update_id INTEGER PRIMARY KEY,
+			kind TEXT NOT NULL,
+			chat_id INTEGER,
+			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			claimed_at DATETIME,
+			processed_at DATETIME,
+			outcome TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
 	}
 }
 
@@ -848,5 +876,18 @@ func pgSchema() []string {
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (user_id, category)
 		)`,
+		// Inbound Bot API updates (issue-619) -- see the sqliteSchema comment
+		// on this table for why the row is the acknowledgement boundary and
+		// why no update content is stored.
+		`CREATE TABLE IF NOT EXISTS bot_updates (
+			update_id BIGINT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			chat_id BIGINT,
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			claimed_at TIMESTAMPTZ,
+			processed_at TIMESTAMPTZ,
+			outcome TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
 	}
 }

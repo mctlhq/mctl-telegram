@@ -33,6 +33,7 @@ Canary incidents are out of scope here; see
 - [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
+- [Login-bot update receiver](#login-bot-update-receiver)
 
 ---
 
@@ -2078,3 +2079,139 @@ message and edit that the agent listener ingests also gets an `event_outbox` row
 | `EVENTS_VALKEY_URL` | `redis://telegram-producer@valkey.platform-events.svc.cluster.local:6379/0`; empty disables |
 | `EVENTS_VALKEY_PASSWORD` | the `telegram-producer` ACL password (from `secret/platform/valkey`) |
 | `EVENTS_STREAM` | default `mctl:events:telegram` |
+
+
+---
+
+<a id="login-bot-update-receiver"></a>
+## Login-bot update receiver
+
+Inbound Bot API updates for the login bot (issue-619). **Transport only** — it
+makes updates durable and hands them to a handler registry. It implements no
+commands: `/subscribe` and `/settings` belong to the #438 split, delivery
+results to #439, and clarification callbacks to #571. It does not send
+anything, and the daily digest and the MCP tools are unaffected by it.
+
+### Transport: long-poll, not a webhook
+
+`getUpdates`, chosen from the deployment rather than preference:
+
+- The service runs `strategy: Recreate` at `replicaCount: 1` with no HPA, so
+  every rollout has a window with **no pod at all**. A webhook would receive a
+  502 in that window and the Bot API abandons a failing webhook after an
+  undocumented number of attempts. `getUpdates` leaves the updates queued on
+  Telegram's side for **24 hours**, so the window costs latency, not data.
+- `getUpdates` permits exactly one consumer per token (a second one gets
+  `409 Conflict`). `Recreate` plus one replica already guarantees that, and is
+  the same exclusivity the MTProto session depends on.
+- No new internet-facing endpoint, and no webhook secret to store or rotate.
+
+### Rotating the secret
+
+**There is no webhook secret, because there is no webhook.** The only credential
+this receiver uses is the bot token it shares with the digest sender:
+
+- Production: `secret/platform/mctl-telegram/login`, key `TELEGRAM_LOGIN_BOT_TOKEN`
+- Preview: `secret/platform/mctl-telegram-preview/login`, same key
+
+To rotate it, issue a new token in BotFather, write it to the Vault path, and let
+the ExternalSecret refresh (`refreshInterval: 1h`) or restart the deployment to
+pick it up immediately. Rotation is safe at any time: the receiver's position is
+the `bot_updates` table, not anything held in the process, so a restart resumes
+from the same offset.
+
+If the bot is ever moved to a webhook, that is the point at which a secret-token
+rotation procedure has to be written — it does not exist today and a runbook
+describing one would be fiction.
+
+### Enabling it
+
+Off unless `BOT_RECEIVER_ENABLED=true`. This is deliberate: two environments
+sharing one bot token must not both poll, or they will take turns evicting each
+other with `409 Conflict`. Enable it in exactly one environment per token.
+
+| Env | Meaning |
+|---|---|
+| `BOT_RECEIVER_ENABLED` | `true` starts the receiver; default off |
+| `TELEGRAM_LOGIN_BOT_TOKEN` | shared with the digest; unset disables the receiver rather than failing startup |
+
+### What to look at
+
+`mctl_bot_updates_total{kind,outcome}`. Outcomes:
+
+| Outcome | Meaning | Normal? |
+|---|---|---|
+| `handled` | dispatched to a registered handler | yes |
+| `no_handler` | no handler registered for that kind yet | yes, until #439/#571 land |
+| `unknown_chat` | the chat is not a client we recognise | yes — anyone can message a public bot |
+| `unsupported` | an update kind the receiver does not route | yes |
+| `duplicate` | Telegram redelivered an update already accepted | yes, occasionally |
+| `handler_error` | a registered handler failed; the update stays pending and is retried | **no** |
+| `dispatch_error` | routing or the database failed, not a handler | **no** — look at the database, not at handler code |
+
+Deliberately **not** logged: message text, callback payloads, phone numbers and
+the bot token. None of it is decoded by the receiver at all, so an unknown chat
+is a counter increment and not a log line. If you need to know *what* someone
+sent, that information does not exist in our systems by design.
+
+### Symptom: `409 Conflict: terminated by other getUpdates request`
+
+Two consumers are polling one token. Check whether the receiver is enabled in
+more than one environment, or whether a developer is running a local instance
+against the production token. The poll fails, backs off and retries; **no update
+is lost** while this is happening, because a failed poll acknowledges nothing.
+
+### Symptom: updates stop being handled, `handler_error` climbing
+
+A handler is failing. The update is not lost — `DispatchOnce` rolls the claim
+back with the handler, so the row stays `processed_at IS NULL` and is retried by
+the sweep on the next loop and at every startup. Pending work is visible with:
+
+```sql
+SELECT update_id, kind, received_at FROM bot_updates
+ WHERE processed_at IS NULL ORDER BY update_id LIMIT 50;
+```
+
+The sweep runs on **every** poll iteration, not only at startup, so a transient
+failure recovers on its own within one poll interval without a restart.
+
+A permanently poisonous update can be retired by hand so it stops being retried
+every cycle:
+
+```sql
+UPDATE bot_updates
+   SET processed_at = NOW(), outcome = 'handler_error'
+ WHERE update_id = :id AND processed_at IS NULL;
+```
+
+(`Store.MarkUpdateFailed` does the same thing in Go; nothing calls it
+automatically, on purpose — only an operator can judge that retrying has stopped
+being useful.)
+
+### Retention of `bot_updates`
+
+The table grows with inbound message volume and is not purged. That is a
+deliberate choice at this size — a row is `update_id`, `kind`, `chat_id`, three
+timestamps and an outcome, and the login bot's inbound volume is bounded by how
+often clients message it — but if it ever needs trimming, **a purge must never
+delete the row holding `MAX(update_id)`**. The poll offset is derived from that
+value, so removing it would rewind the offset and make Telegram redeliver
+everything it still holds (up to 24h), every one of which would then be accepted
+as new. Delete processed rows *older than* a cutoff, and keep the newest row
+unconditionally.
+
+### Why there is no queue
+
+Telegram already provides the durable boundary. An update is acknowledged only
+when `getUpdates` is called with a higher offset, and the receiver derives that
+offset from `MAX(update_id)` in `bot_updates` — read from the database, never
+from the batch in memory. So:
+
+- crash before the row is written → the offset never moved → Telegram redelivers;
+- crash after the row is written, before dispatch → the row is durably pending
+  and the startup sweep picks it up;
+- crash during dispatch → the claim and the handler share one transaction and
+  roll back together.
+
+Adding a queue would introduce a second place to lose an update in exchange for a
+guarantee Telegram already gives for 24 hours.
