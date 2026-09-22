@@ -98,13 +98,27 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 	// deliberately have NO display-name fallback: an empty capture
 	// writes/leaves them empty rather than substituting displayName.
 	//
-	// identity_source/identity_captured_at are only advanced when this call
-	// actually supplies a claim (hasClaim). A claim-less capture (e.g. an
-	// OIDC exchange that returns only the Telegram id) supplies nothing new,
-	// so stamping it would falsely attribute whatever value already sits in
-	// the column — possibly a pre-existing row's display-name fallback from
-	// EnsureUserByTelegramID — to this capture's source.
+	// identity_source/identity_captured_at are advanced when this call
+	// supplies a claim (hasClaim) OR when the row has no pre-existing
+	// identity attribute for a claim-less capture to misattribute. A
+	// claim-less capture on a row that already holds a legacy value —
+	// e.g. a display-name fallback written by EnsureUserByTelegramID —
+	// must NOT stamp, or provenance would falsely attribute that
+	// pre-existing value to this capture's source. But a claim-less
+	// capture on a row with nothing in those columns (a brand-new row, or
+	// one seeded with no username/display name at all) has nothing to
+	// misattribute: capture genuinely ran and genuinely found nothing, so
+	// it must still stamp — that "not_supplied" provenance is the whole
+	// point of identity_captured_at, per design.md.
 	hasClaim := c.Username != "" || c.FirstName != "" || c.LastName != ""
+	var existingUsername, existingFirstName, existingLastName sql.NullString
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT telegram_username, telegram_first_name, telegram_last_name FROM users WHERE id = $1`, id,
+	).Scan(&existingUsername, &existingFirstName, &existingLastName); err != nil {
+		return 0, fmt.Errorf("read existing identity attrs: %w", err)
+	}
+	hasExistingAttr := existingUsername.String != "" || existingFirstName.String != "" || existingLastName.String != ""
+	shouldStamp := hasClaim || !hasExistingAttr
 	if _, err := s.DB.ExecContext(ctx,
 		`UPDATE users SET
 		     telegram_username = COALESCE(NULLIF($1,''), telegram_username),
@@ -115,7 +129,7 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 		     identity_captured_at = CASE WHEN $7 THEN $6 ELSE identity_captured_at END,
 		     last_seen_at = $6
 		 WHERE id = $8`,
-		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, hasClaim, id,
+		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, shouldStamp, id,
 	); err != nil {
 		return 0, fmt.Errorf("refresh identity capture: %w", err)
 	}
