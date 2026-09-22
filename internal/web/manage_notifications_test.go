@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -92,7 +93,10 @@ func TestManageNotifications_UserChangesPreferenceAndSeesIt(t *testing.T) {
 
 	// Submit the form with product updates ticked. maintenance/security are
 	// omitted, which is how an unchecked HTML checkbox arrives.
-	form := url.Values{string(db.CategoryProductUpdates): {"on"}}
+	form := url.Values{
+		"submitted":                       {"notifications"},
+		string(db.CategoryProductUpdates): {"on"},
+	}
 	post := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications",
 		strings.NewReader(form.Encode()))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -162,7 +166,7 @@ func TestManageNotifications_UncheckedBoxUnsubscribes(t *testing.T) {
 
 	// maintenance defaults to subscribed; submit an empty form to clear it.
 	post := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications",
-		strings.NewReader(""))
+		strings.NewReader(url.Values{"submitted": {"notifications"}}.Encode()))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	pw := httptest.NewRecorder()
 	srv.HandleSetNotifications(pw, withIdentity(post, uid))
@@ -191,7 +195,7 @@ func TestManageNotifications_AnonymousIsRejected(t *testing.T) {
 	uid := seedManageUser(t, store, 5004)
 
 	post := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications",
-		strings.NewReader(url.Values{string(db.CategoryProductUpdates): {"on"}}.Encode()))
+		strings.NewReader(url.Values{"submitted": {"notifications"}, string(db.CategoryProductUpdates): {"on"}}.Encode()))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	srv.HandleSetNotifications(w, post) // no identity in context
@@ -224,4 +228,147 @@ func productUpdatesChecked(body string) bool {
 		return false
 	}
 	return strings.Contains(rest[:end], "checked")
+}
+
+// TestManageNotifications_NonFormBodyIsRejected pins the distinction the
+// sentinel exists for. ParseForm returns a nil error with an empty PostForm
+// when the Content-Type is absent, text/plain or application/json, which is
+// byte-for-byte the same state as "the user unticked every box". Without the
+// sentinel such a request would record a deliberate unsubscribe from security
+// and maintenance notices that the user never made.
+func TestManageNotifications_NonFormBodyIsRejected(t *testing.T) {
+	for _, ct := range []string{"", "text/plain", "application/json"} {
+		name := ct
+		if name == "" {
+			name = "no-content-type"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, store := newManageNotifTestServer(t)
+			uid := seedManageUser(t, store, 5100+int64(len(name)))
+			ctx := context.Background()
+
+			// Start from a real decision, so a wipe would be visible.
+			if err := store.SetNotificationPrefs(ctx, uid,
+				map[string]string{string(db.CategorySecurity): db.PrefSubscribed},
+				"test_seed"); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost,
+				"/telegram/connect/manage/notifications", strings.NewReader(""))
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			w := httptest.NewRecorder()
+			srv.HandleSetNotifications(w, withIdentity(req, uid))
+
+			if w.Code == http.StatusFound {
+				t.Error("a body that never parsed as a form was accepted as a cleared form")
+			}
+
+			prefs, err := store.ResolveNotificationPrefs(ctx, uid)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			for _, p := range prefs {
+				if p.Category != string(db.CategorySecurity) {
+					continue
+				}
+				if p.State != db.PrefSubscribed || p.Source != "test_seed" {
+					t.Errorf("security pref = %q from %q; the seeded decision was overwritten",
+						p.State, p.Source)
+				}
+			}
+		})
+	}
+}
+
+// TestManageNotifications_IsAudited: the manage page is the only consent
+// surface a non-technical user can reach, and privacy.html presents
+// GET /api/account/audit as the record of actions on their account. Since
+// SetNotificationPrefs overwrites the row in place, an unaudited change would
+// leave no trace of the earlier decision anywhere.
+func TestManageNotifications_IsAudited(t *testing.T) {
+	srv, store := newManageNotifTestServer(t)
+	uid := seedManageUser(t, store, 5006)
+	ctx := context.Background()
+
+	form := url.Values{"submitted": {"notifications"}, string(db.CategoryProductUpdates): {"on"}}
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.HandleSetNotifications(w, withIdentity(req, uid))
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+
+	entries, err := store.ListAuditFor(ctx, uid, 20, time.Time{})
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.ToolName == "POST /telegram/connect/manage/notifications" {
+			found = true
+			if e.Status != "ok" {
+				t.Errorf("audit status = %q, want ok", e.Status)
+			}
+		}
+	}
+	if !found {
+		t.Error("manage-page consent change wrote no audit row")
+	}
+}
+
+// TestNotificationLabels_CoverEveryCategory is what actually stops a new
+// category shipping unnamed: buildNotificationRows degrades to the bare
+// identifier rather than failing, so nothing at runtime would catch it.
+func TestNotificationLabels_CoverEveryCategory(t *testing.T) {
+	for _, c := range db.NotificationCategories() {
+		meta, ok := notificationLabels[string(c)]
+		if !ok || meta.Label == "" || meta.Description == "" {
+			t.Errorf("category %q has no label/description; the page would render a bare identifier", c)
+		}
+	}
+}
+
+// TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect covers the
+// degradation the design turns on: disconnect is the page's safety-critical
+// control, so a preferences problem must never take it down with it.
+func TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect(t *testing.T) {
+	srv, store := newManageNotifTestServer(t)
+	uid := seedManageUser(t, store, 5007)
+
+	// The disconnect control only renders for a connected account, so the
+	// property under test is only observable with a session seeded.
+	now := time.Now().UTC()
+	if _, err := store.DB.ExecContext(context.Background(),
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, last_used_at, expires_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7)`,
+		uid, int64(5007), "Notif User", "notifuser", []byte("blob"), now, now.Add(24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	// Drop only the preferences table, not the connection: closing the handle
+	// would also fail the account read that runs first, which errors the page
+	// for a legitimate reason and would never reach the branch under test.
+	if _, err := store.DB.Exec(`DROP TABLE client_notification_prefs`); err != nil {
+		t.Fatalf("drop prefs table: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	srv.HandleManage(w, withIdentity(httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil), uid))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 -- a preferences failure must not error the page", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "/telegram/connect/manage/notifications") {
+		t.Error("notification form rendered despite the preference read failing")
+	}
+	if !strings.Contains(body, "/telegram/connect/manage/disconnect") {
+		t.Error("disconnect control is missing; a preferences failure took it down")
+	}
 }

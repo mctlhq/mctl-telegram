@@ -216,6 +216,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <h2 class="notif-heading">Notifications</h2>
     <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
     <form method="POST" action="/telegram/connect/manage/notifications">
+      <input type="hidden" name="submitted" value="notifications">
       {{range .Notifications}}
       <div class="notif-row">
         <label class="notif-label">
