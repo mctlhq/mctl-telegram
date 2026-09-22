@@ -71,13 +71,25 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		renderManageError(w, "Could not load your session. Please try again.")
 		return
 	}
+	// Notification preferences render even when no Telegram session is
+	// connected: consent is a property of the account, and a client who
+	// disconnected should still be able to stop product updates without
+	// reconnecting first. A read failure degrades to no section rather than
+	// to an error page, because it must not block disconnect.
+	var rows []notificationRow
+	if prefs, err := s.store.ResolveNotificationPrefs(r.Context(), id.UserID); err != nil {
+		slog.Warn("manage: resolve notification prefs", "err", err)
+	} else {
+		rows = buildNotificationRows(prefs)
+	}
 	renderManagePage(w, managePageData{
-		Connected:   info.Connected,
-		DisplayName: info.DisplayName,
-		Username:    info.Username,
-		ConnectedAt: info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
-		SendEnabled: info.SendEnabled,
-		Issuer:      s.issuer,
+		Connected:     info.Connected,
+		DisplayName:   info.DisplayName,
+		Username:      info.Username,
+		ConnectedAt:   info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
+		SendEnabled:   info.SendEnabled,
+		Issuer:        s.issuer,
+		Notifications: rows,
 	})
 }
 
@@ -134,12 +146,13 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 // ----- HTML templates -----
 
 type managePageData struct {
-	Connected   bool
-	DisplayName string
-	Username    string
-	ConnectedAt string
-	SendEnabled bool
-	Issuer      string
+	Connected     bool
+	DisplayName   string
+	Username      string
+	ConnectedAt   string
+	SendEnabled   bool
+	Issuer        string
+	Notifications []notificationRow
 }
 
 const manageExtraCSS = `
@@ -154,6 +167,12 @@ const manageExtraCSS = `
   }
   .btn-danger:hover { filter: brightness(.92); }
   .card .btn-secondary { margin-top: 16px; margin-left: 8px; }
+  .notif-heading { font-size: 16px; margin-top: 24px; margin-bottom: 4px; }
+  .notif-row { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .notif-row:last-of-type { border-bottom: none; }
+  .notif-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .notif-name { font-weight: 500; color: var(--text); }
+  .notif-desc { color: var(--text-dim); font-size: 13px; margin-top: 2px; margin-left: 24px; }
 `
 
 var manageHead = `<!doctype html>
@@ -192,6 +211,25 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     </form>
     {{else}}
     <p>No active Telegram session found.</p>
+    {{end}}
+    {{if .Notifications}}
+    <h2 class="notif-heading">Notifications</h2>
+    <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
+    <form method="POST" action="/telegram/connect/manage/notifications">
+      {{range .Notifications}}
+      <div class="notif-row">
+        <label class="notif-label">
+          <input type="checkbox" name="{{.Category}}"{{if .Subscribed}} checked{{end}}>
+          <span class="notif-name">{{.Label}}</span>
+        </label>
+        <div class="notif-desc">{{.Description}}
+          {{- if .Operational}} Operational notice, never treated as marketing consent.{{end}}
+          {{- if .Explicit}} Set {{if .DecidedAt}}{{.DecidedAt}}{{end}}{{if .Source}} via {{.Source}}{{end}}.{{else}} Never changed; showing the default.{{end}}
+        </div>
+      </div>
+      {{end}}
+      <button type="submit" class="btn-secondary">Save notification preferences</button>
+    </form>
     {{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
 ` + manageFoot))
