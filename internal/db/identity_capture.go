@@ -119,8 +119,28 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 	}
 	hasExistingAttr := existingUsername.String != "" || existingFirstName.String != "" || existingLastName.String != ""
 	shouldStamp := hasClaim || !hasExistingAttr
+
+	// telegram_login_id is backfilled here, not only on INSERT. The lookup
+	// above falls back to the synthetic github_login precisely because a
+	// legacy row can carry "tg:<id>" with telegram_login_id still NULL, and
+	// without this COALESCE that row kept the NULL forever: the fallback
+	// refreshed its attributes and returned its id, but nothing ever wrote
+	// the column. Every projection and lookup keyed on telegram_login_id --
+	// ListIdentities, UserIDByTelegramID, SetAccessTier,
+	// AccessTierByTelegramID, and the reachability and notification-preference
+	// projections added by issue-438 -- filters on it, so the user stayed
+	// invisible to all of them, and re-authenticating never repaired it
+	// because each capture took the same fallback again.
+	//
+	// COALESCE and not a plain assignment: a row that already has the column
+	// set must not be rewritten, so a non-legacy row sees no change at all.
+	// The partial unique index on telegram_login_id can still reject this
+	// UPDATE if another row claimed the same id between the SELECT above and
+	// here; that surfaces as an error rather than a silent second identity,
+	// which is the safer failure for an authentication path.
 	if _, err := s.DB.ExecContext(ctx,
 		`UPDATE users SET
+		     telegram_login_id = COALESCE(telegram_login_id, $9),
 		     telegram_username = COALESCE(NULLIF($1,''), telegram_username),
 		     telegram_display_name = COALESCE(NULLIF($2,''), telegram_display_name),
 		     telegram_first_name = COALESCE(NULLIF($3,''), telegram_first_name),
@@ -129,7 +149,7 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 		     identity_captured_at = CASE WHEN $7 THEN $6 ELSE identity_captured_at END,
 		     last_seen_at = $6
 		 WHERE id = $8`,
-		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, shouldStamp, id,
+		c.Username, displayName, c.FirstName, c.LastName, c.Source, capturedAt, shouldStamp, id, c.TelegramID,
 	); err != nil {
 		return 0, fmt.Errorf("refresh identity capture: %w", err)
 	}
