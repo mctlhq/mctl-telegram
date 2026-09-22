@@ -299,6 +299,24 @@ type IdentityRow struct {
 	// when the user has never completed an OAuth flow or all tokens predate
 	// dynamic client registration.
 	ConnectedVia []string `json:"connected_via,omitempty"`
+
+	// The remaining fields are the issue-438 client identity/notification
+	// model. All omitempty so a consumer of today's list_telegram_identities
+	// output keeps parsing unmodified.
+	FirstName          string     `json:"first_name,omitempty"`
+	LastName           string     `json:"last_name,omitempty"`
+	LanguageCode       string     `json:"language_code,omitempty"`
+	IdentitySource     string     `json:"identity_source,omitempty"`
+	IdentityCapturedAt *time.Time `json:"identity_captured_at,omitempty"`
+	// Provenance maps attribute name ("username", "first_name", "last_name",
+	// "language_code") to its AttributeProvenance, resolved via
+	// ResolveIdentityProvenance so every consumer agrees on what an empty
+	// attribute means.
+	Provenance        map[string]string `json:"attribute_provenance,omitempty"`
+	OnboardedAt       *time.Time        `json:"onboarding_completed_at,omitempty"`
+	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
+	BotReachability   *BotReachability  `json:"bot_reachability,omitempty"`
+	NotificationPrefs []ResolvedPref    `json:"notification_prefs,omitempty"`
 }
 
 // SetAccessTier sets users.access_tier for the user with the given Telegram
@@ -411,6 +429,8 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	idleCutoff := now.Add(-idleSessionTTL)
 	query := `SELECT u.telegram_login_id, u.telegram_username, u.telegram_display_name,
 	        u.access_tier, u.created_at,
+	        u.telegram_first_name, u.telegram_last_name, u.telegram_language_code,
+	        u.identity_source, u.identity_captured_at, u.onboarding_completed_at, u.last_seen_at,
 	        EXISTS(SELECT 1 FROM telegram_accounts ta
 	               WHERE ta.user_id = u.id AND ta.revoked_at IS NULL
 	                 AND ta.telegram_user_id IS NOT NULL
@@ -433,21 +453,63 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 	var out []IdentityRow
 	for rows.Next() {
 		var (
-			r        IdentityRow
-			username sql.NullString
-			display  sql.NullString
-			tier     sql.NullString
+			r            IdentityRow
+			username     sql.NullString
+			display      sql.NullString
+			tier         sql.NullString
+			firstName    sql.NullString
+			lastName     sql.NullString
+			languageCode sql.NullString
+			identSource  sql.NullString
+			capturedAt   sql.NullTime
+			onboardedAt  sql.NullTime
+			lastSeenAt   sql.NullTime
 		)
-		if err := rows.Scan(&r.TelegramID, &username, &display, &tier, &r.CreatedAt, &r.HasSession); err != nil {
+		if err := rows.Scan(&r.TelegramID, &username, &display, &tier, &r.CreatedAt,
+			&firstName, &lastName, &languageCode, &identSource, &capturedAt, &onboardedAt, &lastSeenAt,
+			&r.HasSession); err != nil {
 			return nil, fmt.Errorf("scan identity: %w", err)
 		}
 		r.Username = username.String
 		r.DisplayName = display.String
 		r.AccessTier = tier.String // "" when the column is NULL (unset)
+		r.FirstName = firstName.String
+		r.LastName = lastName.String
+		r.LanguageCode = languageCode.String
+		r.IdentitySource = identSource.String
+		if capturedAt.Valid {
+			t := capturedAt.Time
+			r.IdentityCapturedAt = &t
+		}
+		if onboardedAt.Valid {
+			t := onboardedAt.Time
+			r.OnboardedAt = &t
+		}
+		if lastSeenAt.Valid {
+			t := lastSeenAt.Time
+			r.LastSeenAt = &t
+		}
+		r.Provenance = map[string]string{
+			"username":   string(ResolveIdentityProvenance(capturedAt.Valid, r.Username)),
+			"first_name": string(ResolveIdentityProvenance(capturedAt.Valid, r.FirstName)),
+			"last_name":  string(ResolveIdentityProvenance(capturedAt.Valid, r.LastName)),
+			// language_code has no writer on any code path yet (see db.go's
+			// addColumnIfMissing comment for telegram_language_code), so
+			// ResolveIdentityProvenance's not_supplied ("Telegram genuinely
+			// did not supply it") would assert an observation nothing backs.
+			// Report unknown until a real writer exists.
+			"language_code": string(ProvenanceUnknown),
+		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Build index by TelegramID for the O(n) merges below.
+	idx := make(map[int64]int, len(out))
+	for i, r := range out {
+		idx[r.TelegramID] = i
 	}
 
 	// Fetch connected_via: distinct non-empty client names denormalized onto
@@ -468,12 +530,6 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 		return nil, fmt.Errorf("list identities client names: %w", err)
 	}
 	defer func() { _ = clientRows.Close() }()
-
-	// Build index by TelegramID for O(n) merge.
-	idx := make(map[int64]int, len(out))
-	for i, r := range out {
-		idx[r.TelegramID] = i
-	}
 	for clientRows.Next() {
 		var tgID int64
 		var clientName string
@@ -484,7 +540,96 @@ func (s *Store) ListIdentities(ctx context.Context) ([]IdentityRow, error) {
 			out[i].ConnectedVia = append(out[i].ConnectedVia, clientName)
 		}
 	}
-	return out, clientRows.Err()
+	if err := clientRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Fetch bot reachability: one full-table scan of client_bot_reachability,
+	// merged in memory through the same idx built above. No per-user query.
+	reachRows, err := s.DB.QueryContext(ctx,
+		`SELECT u.telegram_login_id, r.state, r.reason_code, r.observed_at, r.source
+		   FROM users u
+		   JOIN client_bot_reachability r ON r.user_id = u.id
+		  WHERE u.telegram_login_id IS NOT NULL`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list identities reachability: %w", err)
+	}
+	defer func() { _ = reachRows.Close() }()
+	for reachRows.Next() {
+		var (
+			tgID       int64
+			state      string
+			reasonCode string
+			observedAt sql.NullTime
+			source     string
+		)
+		if err := reachRows.Scan(&tgID, &state, &reasonCode, &observedAt, &source); err != nil {
+			return nil, fmt.Errorf("scan reachability: %w", err)
+		}
+		i, ok := idx[tgID]
+		if !ok {
+			continue
+		}
+		br := &BotReachability{State: state, ReasonCode: reasonCode, Source: source}
+		if observedAt.Valid {
+			t := observedAt.Time
+			br.ObservedAt = &t
+		}
+		out[i].BotReachability = br
+	}
+	if err := reachRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Fetch notification preferences: one full-table scan of
+	// client_notification_prefs, same merge. Rows with no explicit
+	// preference are left with NotificationPrefs unset here — a caller that
+	// wants the resolved defaults for a single user should call
+	// ResolveNotificationPrefs directly; batching the Go-computed defaults
+	// for every user in this projection would mean synthesizing rows that
+	// were never written, which is exactly what the "never decided" /
+	// "decided" distinction exists to avoid conflating.
+	prefRows, err := s.DB.QueryContext(ctx,
+		`SELECT u.telegram_login_id, p.category, p.state, p.source, p.decided_at
+		   FROM users u
+		   JOIN client_notification_prefs p ON p.user_id = u.id
+		  WHERE u.telegram_login_id IS NOT NULL`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list identities notification prefs: %w", err)
+	}
+	defer func() { _ = prefRows.Close() }()
+	for prefRows.Next() {
+		var (
+			tgID      int64
+			category  string
+			state     string
+			source    string
+			decidedAt time.Time
+		)
+		if err := prefRows.Scan(&tgID, &category, &state, &source, &decidedAt); err != nil {
+			return nil, fmt.Errorf("scan notification pref: %w", err)
+		}
+		i, ok := idx[tgID]
+		if !ok {
+			continue
+		}
+		classification := ClassificationMarketing
+		if NotificationCategory(category) == CategoryMaintenance || NotificationCategory(category) == CategorySecurity {
+			classification = ClassificationOperational
+		}
+		dAt := decidedAt
+		out[i].NotificationPrefs = append(out[i].NotificationPrefs, ResolvedPref{
+			Category:       category,
+			State:          state,
+			Explicit:       true,
+			Classification: classification,
+			Source:         source,
+			DecidedAt:      &dAt,
+		})
+	}
+	return out, prefRows.Err()
 }
 
 // ErrAccountModeConflict is returned by SaveSession when the user's
@@ -569,6 +714,14 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires, false,
 	); err != nil {
 		return fmt.Errorf("insert session: %w", err)
+	}
+	// Stamp onboarding_completed_at on the first session this user ever
+	// connects, mirroring the Migrate backfill's "earliest non-revoked,
+	// finalised telegram_accounts row" definition — COALESCE leaves a
+	// value already set (from a prior SaveSession call, or the legacy
+	// backfill) untouched.
+	if err := stampOnboardingCompleted(ctx, tx, userID, now); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -804,6 +957,31 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, err
 	}
 
+	// Purge the client identity/notification consent state (issue-438) in
+	// the same transaction, for the same reason: users survives deletion,
+	// so its notification preferences and bot reachability row must be
+	// removed explicitly or a deleted account's consent record outlives the
+	// deletion.
+	if err := purgeNotificationState(ctx, tx, userID); err != nil {
+		return 0, err
+	}
+
+	// Clear the client identity fields (issue-438) tied to the deleted
+	// account, for the same reason as the consent/reachability purge above:
+	// the users identity row survives, so telegram_first_name,
+	// telegram_last_name and last_seen_at must not silently outlive the
+	// deletion. telegram_display_name duplicates first+last (see
+	// EnsureUserByTelegramCapture) so it must be cleared too, and
+	// identity_captured_at is reset to NULL so provenance reports "unknown"
+	// rather than "not_supplied" (which would falsely claim Telegram never
+	// sent these names).
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL WHERE id = $1`,
+		userID,
+	); err != nil {
+		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delete account: commit: %w", err)
 	}
@@ -955,7 +1133,13 @@ var ErrAccountAlreadyActive = errors.New("account already active")
 // is an operator action taken once per account, so the residual race is
 // accepted and named here rather than papered over.
 func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, displayName, username string) error {
-	res, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username, session_encrypted, mode, send_enabled)
 		 SELECT $1,$2,$3,$4,NULL,$5,$6
 		 WHERE NOT EXISTS (SELECT 1 FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL)`,
@@ -968,8 +1152,40 @@ func (s *Store) ProvisionLocalAccount(ctx context.Context, userID, tgID int64, d
 	if err != nil {
 		return fmt.Errorf("insert local account: %w", err)
 	}
+	// Mirror SaveSession's stamp, run unconditionally (including the n==0
+	// already-active case) and in the same transaction as the insert: a
+	// caller that retries after a prior stamp failure sees n==0 here (the
+	// row from the earlier attempt already exists) and, before this fix,
+	// never reached a stamp attempt again -- onboarding_completed_at stayed
+	// NULL until the next restart's backfill. COALESCE makes re-stamping an
+	// already-stamped row a no-op, and the shared transaction means insert
+	// and stamp either both land or neither does, closing the split-state
+	// window where the account was provisioned but reported an error.
+	if err := stampOnboardingCompleted(ctx, tx, userID, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	if n == 0 {
 		return ErrAccountAlreadyActive
+	}
+	return nil
+}
+
+// stampOnboardingCompleted sets onboarding_completed_at on first connect,
+// mirroring the Migrate backfill's "earliest non-revoked, finalised
+// telegram_accounts row" definition. COALESCE leaves a value already set
+// untouched, so it is safe for every writer to call unconditionally. Shared
+// by SaveSession and ProvisionLocalAccount so the two stamps cannot drift.
+func stampOnboardingCompleted(ctx context.Context, ex interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}, userID int64, ts time.Time) error {
+	if _, err := ex.ExecContext(ctx,
+		`UPDATE users SET onboarding_completed_at = COALESCE(onboarding_completed_at, $1) WHERE id = $2`,
+		ts, userID,
+	); err != nil {
+		return fmt.Errorf("stamp onboarding_completed_at: %w", err)
 	}
 	return nil
 }

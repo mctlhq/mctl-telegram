@@ -107,3 +107,22 @@ func TestRedactAttr_DevicePubkeyExempt(t *testing.T) {
 		t.Fatalf("device_pubkey should be exempt from redaction, got: %v", got)
 	}
 }
+
+// TestRedactAttr_ClientIdentityNames is T17: first_name and last_name
+// (issue-438's captured Telegram identity attributes) must never appear
+// unredacted in slog output, matched case-insensitively like every other
+// entry in sensitiveKeys.
+func TestRedactAttr_ClientIdentityNames(t *testing.T) {
+	keys := []string{"first_name", "last_name", "First_Name", "LAST_NAME"}
+	for _, k := range keys {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "Alice Example"))
+			if got.Value.Kind() != slog.KindString || !strings.HasPrefix(got.Value.String(), "[redacted len=") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+			if strings.Contains(got.Value.String(), "Alice Example") {
+				t.Fatalf("key %q leaked its value: %v", k, got)
+			}
+		})
+	}
+}

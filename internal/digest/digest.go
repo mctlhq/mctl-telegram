@@ -6,6 +6,7 @@ package digest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/notify"
 )
 
 const (
@@ -89,13 +91,52 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 	}
 	sent := 0
 	for _, chatID := range recipients {
-		if err := sendTelegramMessage(botToken, chatID, msg); err != nil {
-			slog.Warn("digest: send failed", "chat_id", chatID, "err", err)
+		sendErr := sendTelegramMessage(botToken, chatID, msg)
+		recordReachability(qctx, store, chatID, sendErr)
+		if sendErr != nil {
+			slog.Warn("digest: send failed", "chat_id", chatID, "err", sendErr)
 			continue
 		}
 		sent++
 	}
 	slog.Info("digest sent", "new_clients", len(newRows), "delivered", sent, "recipients", len(recipients))
+}
+
+// recordReachability classifies the outcome of one sendTelegramMessage call
+// and, when conclusive, records it against the recipient's users.id. This is
+// the one wired sender in the repository -- see internal/notify's package
+// doc for why reachability is never learned by a dedicated probe. Best
+// effort: a failure to resolve the user id or to write the row is logged and
+// never turns a digest send failure/success into a harder error.
+func recordReachability(ctx context.Context, store *db.Store, chatID int64, sendErr error) {
+	if store == nil {
+		return
+	}
+	httpStatus := http.StatusOK
+	description := ""
+	var apiErr *notify.APIError
+	if sendErr != nil {
+		if !errors.As(sendErr, &apiErr) {
+			// Transport-level failure (already unwrapped of the bot token by
+			// sendTelegramMessage) — not a classifiable HTTP response at
+			// all, so it is never conclusive. Nothing to record.
+			return
+		}
+		httpStatus = apiErr.StatusCode
+		description = apiErr.Description
+	}
+	outcome := notify.ClassifyDelivery(httpStatus, description)
+	if !outcome.Conclusive {
+		return
+	}
+	userID, err := store.UserIDByTelegramID(ctx, chatID)
+	if err != nil {
+		slog.Warn("digest: resolve recipient user id for reachability", "chat_id", chatID, "err", err)
+		return
+	}
+	if err := store.RecordBotReachability(ctx, userID, outcome, "digest_delivery"); err != nil {
+		slog.Warn("digest: record bot reachability", "chat_id", chatID, "err", err)
+	}
 }
 
 // effectiveTier maps the raw users.access_tier value ("" = unset) to the tier
@@ -135,10 +176,24 @@ func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool) stri
 		if r.HasSession {
 			session = "session active"
 		}
-		fmt.Fprintf(&b, "• %s — id %d — tier=%s — %s\n",
-			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), session)
+		fmt.Fprintf(&b, "• %s — id %d — tier=%s — %s%s\n",
+			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), session, reachabilitySuffix(r))
 	}
 	return b.String()
+}
+
+// reachabilitySuffix returns " — bot: <state>" for a row whose reachability
+// is recorded and not "unknown", so the operator sees e.g. "bot: blocked"
+// for exactly the signal this digest send itself produced. Rows with no
+// recorded reachability (the common case — see design.md's Risks section)
+// get no suffix at all, since "unknown" means "no delivery attempt
+// observed", never "reachable", and printing it on every line would bury the
+// signal that does exist.
+func reachabilitySuffix(r db.IdentityRow) string {
+	if r.BotReachability == nil || r.BotReachability.State == "" || r.BotReachability.State == "unknown" {
+		return ""
+	}
+	return " — bot: " + r.BotReachability.State
 }
 
 // sendTelegramMessage posts one message via the Telegram Bot API. A non-2xx
@@ -171,7 +226,27 @@ func sendTelegramMessage(botToken string, chatID int64, text string) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("telegram sendMessage HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// A typed *notify.APIError, not a formatted string: ClassifyDelivery
+		// needs the status code and description separately, and the raw
+		// response body must never be persisted (see RecordBotReachability) —
+		// only Description travels past this point, and only into
+		// ClassifyDelivery, never into a stored column or a log line.
+		return &notify.APIError{StatusCode: resp.StatusCode, Description: parseTelegramDescription(body)}
 	}
 	return nil
+}
+
+// telegramErrorBody is the minimal shape of a Telegram Bot API error
+// response: {"ok":false,"error_code":403,"description":"Forbidden: bot was
+// blocked by the user"}. parseTelegramDescription falls back to the raw
+// (truncated, trimmed) body when it does not parse as JSON, so
+// ClassifyDelivery still has text to match against.
+func parseTelegramDescription(body []byte) string {
+	var payload struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(body, &payload); err == nil && payload.Description != "" {
+		return payload.Description
+	}
+	return strings.TrimSpace(string(body))
 }

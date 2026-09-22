@@ -71,6 +71,12 @@ var sensitiveKeys = map[string]struct{}{
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},
 	"file_path":   {},
+	// Client identity attributes (issue-438). Captured Telegram first/last
+	// name are PII the same way display_name/username already were meant to
+	// be treated -- new identity-capture and admin-projection code paths must
+	// log only ids, categories, states and reason codes, never these.
+	"first_name": {},
+	"last_name":  {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

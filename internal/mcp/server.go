@@ -341,6 +341,14 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolGetMyNotificationPreferences()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSetMyNotificationPreferences()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolSetAccountMode()
 		s.addTool(srv, t, h)
 	}
