@@ -819,3 +819,79 @@ func TestReceiver_InfrastructureFailureIsNotCountedAsAHandlerError(t *testing.T)
 		t.Errorf("handler_error counter = %d, want 0 -- no handler was involved", got)
 	}
 }
+
+// TestReceiver_HandlerErrorTextIsScrubbedBeforeLogging closes the one path by
+// which message content could still reach a log. This package never decodes
+// content, but a HANDLER does, and slog attribute redaction keys off the
+// attribute NAME -- so an "err" value carrying a @handle or a phone number
+// would pass through untouched. Handlers come from #439 and #571; the
+// transport has to hold the line regardless of what they do.
+func TestReceiver_HandlerErrorTextIsScrubbedBeforeLogging(t *testing.T) {
+	store := newBotTestStore(t)
+	fake := &fakeTelegram{batches: [][]byte{batch(msgUpdate(90, 42, "x"))}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		// A handler that leaks content into its error, which is exactly what a
+		// wrapped parse error over message text looks like.
+		return "", fmt.Errorf(`cannot parse command from @victimhandle (+447700900123)`)
+	}))
+
+	var logs strings.Builder
+	restore := captureSlog(t, &logs)
+	r := NewReceiver(store, reg, newCounter(), "test-token", Options{BaseURL: srv.URL, PollTimeout: 1})
+	if err := r.pollOnce(context.Background()); err != nil {
+		t.Fatalf("pollOnce: %v", err)
+	}
+	restore()
+
+	for _, bad := range []string{"@victimhandle", "+447700900123"} {
+		if strings.Contains(logs.String(), bad) {
+			t.Errorf("handler error leaked %q into the log:\n%s", bad, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "[redacted]") {
+		t.Errorf("expected the scrubbed marker in the log:\n%s", logs.String())
+	}
+}
+
+// TestReceiver_StartSweepsBeforeItsFirstPoll: the pre-loop sweep was removed as
+// redundant, so this pins that startup recovery still happens -- the first loop
+// iteration must sweep before it polls.
+func TestReceiver_StartSweepsBeforeItsFirstPoll(t *testing.T) {
+	store := newBotTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Work accepted by a previous process and never dispatched.
+	if _, err := store.AcceptUpdate(ctx, 950, db.KindMessage, sql.NullInt64{Int64: 42, Valid: true}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	handled := make(chan int64, 1)
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(_ context.Context, _ *sql.Tx, d Delivery) (string, error) {
+		select {
+		case handled <- d.UpdateID:
+		default:
+		}
+		return "", nil
+	}))
+
+	// No reachable Telegram: if recovery depended on a successful poll, this
+	// would hang and the test would fail.
+	r := NewReceiver(store, reg, newCounter(), "test-token",
+		Options{BaseURL: "http://127.0.0.1:1", PollTimeout: 1, IdleBackoff: 10 * time.Millisecond})
+	r.Start(ctx)
+
+	select {
+	case id := <-handled:
+		if id != 950 {
+			t.Errorf("recovered update %d, want 950", id)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("startup recovery did not happen; accepted work is stranded until a successful poll")
+	}
+}

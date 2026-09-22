@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -109,21 +110,18 @@ func (r *Receiver) Start(ctx context.Context) {
 		return
 	}
 	go func() {
-		// Recover work that was acknowledged to Telegram but whose dispatch
-		// did not complete before the process died. This runs before the
-		// first poll because those updates will never be redelivered: their
-		// update_id is already below the offset.
-		r.sweepPending(ctx)
 		for {
 			if ctx.Err() != nil {
 				return
 			}
-			// Sweep on every iteration, not only at startup. A dispatch that
-			// fails leaves the row pending while its update_id is already past
-			// the Telegram offset, so nothing will ever redeliver it -- without
-			// an in-loop sweep such a row would sit stranded until the process
-			// restarted, which is exactly what the runbook promises does not
-			// happen. Normally this is one indexed query returning no rows.
+			// Sweep first, on every iteration. This recovers work that was
+			// acknowledged to Telegram but whose dispatch did not complete --
+			// whether the process died mid-dispatch or a handler failed a
+			// moment ago. Either way the update_id is already past the offset,
+			// so nothing will ever redeliver it and this is the only path back.
+			// Running it at the top of the loop covers the startup case too,
+			// since the first iteration happens before the first poll.
+			// Normally it is one indexed query returning no rows.
 			r.sweepPending(ctx)
 			if err := r.pollOnce(ctx); err != nil {
 				if ctx.Err() != nil {
@@ -205,12 +203,21 @@ func (r *Receiver) dispatch(ctx context.Context, p db.PendingUpdate) {
 		// never the update content, which this package never decoded.
 		var he handlerError
 		if errors.As(err, &he) {
-			slog.Warn("bot update handler failed", "update_id", p.UpdateID, "kind", p.Kind, "err", err)
+			// Scrubbed, not logged raw. This package never decodes content, but
+			// a HANDLER does, and its error string is the one path by which
+			// message text or a callback payload could still reach a log --
+			// slog attribute redaction keys off the attribute NAME, so an
+			// "err" value carrying content passes through untouched. Handlers
+			// are written by other work items (#439, #571); this is the
+			// transport making the no-content posture hold regardless of them.
+			slog.Warn("bot update handler failed", "update_id", p.UpdateID, "kind", p.Kind,
+				"err", audit.ScrubText(r.redact(err.Error())))
 			r.count(p.Kind, db.OutcomeHandlerError)
 		} else {
 			// Routing or the database failed, not a handler. Counted apart so
 			// an infrastructure problem is not read as a broken handler.
-			slog.Warn("bot update dispatch failed", "update_id", p.UpdateID, "kind", p.Kind, "err", err)
+			slog.Warn("bot update dispatch failed", "update_id", p.UpdateID, "kind", p.Kind,
+				"err", audit.ScrubText(r.redact(err.Error())))
 			r.count(p.Kind, OutcomeDispatchError)
 		}
 		return
@@ -306,8 +313,12 @@ func (r *Receiver) sweepPending(ctx context.Context) {
 	// pending, but the sweep still moves past it and tries again on the next
 	// loop iteration rather than spinning on it here.
 	var (
-		after     int64
-		recovered int
+		after int64
+		// seen counts rows the sweep ATTEMPTED, which is not the same as rows
+		// it recovered: a row whose dispatch fails is counted here and stays
+		// pending. The log says "attempted" for that reason -- calling it
+		// "recovered" would report a poison row as recovered on every cycle.
+		seen int
 	)
 	for {
 		if ctx.Err() != nil {
@@ -329,14 +340,14 @@ func (r *Receiver) sweepPending(ctx context.Context) {
 			if p.UpdateID > after {
 				after = p.UpdateID
 			}
-			recovered++
+			seen++
 		}
 		if len(pending) < r.batchLimit {
 			break
 		}
 	}
-	if recovered > 0 {
-		slog.Info("recovered accepted bot updates", "count", recovered)
+	if seen > 0 {
+		slog.Info("swept accepted bot updates", "attempted", seen)
 	}
 }
 

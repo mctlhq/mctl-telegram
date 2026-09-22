@@ -418,7 +418,7 @@ func New() *Registry {
 
 	r.BotUpdatesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_bot_updates_total",
-		Help: "Total inbound login-bot updates, labeled by update kind and dispatch outcome (handled, no_handler, unknown_chat, unsupported, handler_error, duplicate).",
+		Help: "Total inbound login-bot updates, labeled by update kind and dispatch outcome (handled, no_handler, unknown_chat, unsupported, duplicate, handler_error, dispatch_error).",
 	}, []string{"kind", "outcome"})
 
 	r.SessionsActiveGauge = prometheus.NewGauge(prometheus.GaugeOpts{
