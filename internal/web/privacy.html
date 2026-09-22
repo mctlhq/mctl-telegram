@@ -66,7 +66,7 @@
         <td>Until account deletion; related user-scoped rows are removed by database cascade where configured</td>
       </tr>
       <tr>
-        <td><code>notification_prefs</code> table</td>
+        <td><code>client_notification_prefs</code> table</td>
         <td>One row per category you explicitly decided (<code>product_updates</code>, <code>maintenance</code>, <code>security</code>), with the state, the time you decided, and which surface you used. No row is written for a default you never changed.</td>
         <td>Records consent per category, so operational notices are never counted as marketing consent</td>
         <td>Removed by account deletion. A preference grants no Telegram or MCP access.</td>

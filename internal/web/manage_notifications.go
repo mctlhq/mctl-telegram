@@ -14,10 +14,16 @@ package web
 // Authorization and CSRF follow the existing manage handlers unchanged: the
 // route is wrapped in the same auth middleware, the identity comes from
 // auth.From(r.Context()), and cross-site submission is refused by the
-// SameSite=Lax connect-session cookie plus the page's own
-// `form-action 'self'` CSP. No new token scheme is introduced, because a
-// second, different one on the same page would be the more likely source of
-// a mistake.
+// SameSite=Lax connect-session cookie. No new token scheme is introduced,
+// because a second, different one on the same page would be the more likely
+// source of a mistake.
+//
+// The page's `form-action 'self'` is deliberately NOT counted here. It
+// constrains where THIS page may submit; an attacker's page serves its own
+// CSP or none, so it contributes nothing against cross-site submission.
+// SameSite=Lax carries that alone -- which is why HandleSetNotifications does
+// not rely on it to keep a destructive default out of reach (see the sentinel
+// check there).
 
 import (
 	"log/slog"

@@ -98,7 +98,7 @@ func TestPrivacy_DisclosesNotificationState(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		// inventory rows
-		"notification_prefs",
+		"client_notification_prefs",
 		"client_bot_reachability",
 		// the four reachability states, named rather than summarised
 		"cannot_initiate",
