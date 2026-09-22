@@ -2146,7 +2146,8 @@ other with `409 Conflict`. Enable it in exactly one environment per token.
 | `unknown_chat` | the chat is not a client we recognise | yes — anyone can message a public bot |
 | `unsupported` | an update kind the receiver does not route | yes |
 | `duplicate` | Telegram redelivered an update already accepted | yes, occasionally |
-| `handler_error` | a handler failed; the update stays pending and is retried | **no** |
+| `handler_error` | a registered handler failed; the update stays pending and is retried | **no** |
+| `dispatch_error` | routing or the database failed, not a handler | **no** — look at the database, not at handler code |
 
 Deliberately **not** logged: message text, callback payloads, phone numbers and
 the bot token. None of it is decoded by the receiver at all, so an unknown chat
@@ -2171,9 +2172,21 @@ SELECT update_id, kind, received_at FROM bot_updates
  WHERE processed_at IS NULL ORDER BY update_id LIMIT 50;
 ```
 
-A permanently poisonous update can be retired with
-`Store.MarkUpdateFailed`, which marks it `handler_error` so it stops blocking
-the sweep.
+The sweep runs on **every** poll iteration, not only at startup, so a transient
+failure recovers on its own within one poll interval without a restart.
+
+A permanently poisonous update can be retired by hand so it stops being retried
+every cycle:
+
+```sql
+UPDATE bot_updates
+   SET processed_at = NOW(), outcome = 'handler_error'
+ WHERE update_id = :id AND processed_at IS NULL;
+```
+
+(`Store.MarkUpdateFailed` does the same thing in Go; nothing calls it
+automatically, on purpose — only an operator can judge that retrying has stopped
+being useful.)
 
 ### Retention of `bot_updates`
 

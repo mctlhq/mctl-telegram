@@ -416,7 +416,7 @@ func TestReceiver_HandlerErrorLeavesUpdatePendingForRetry(t *testing.T) {
 		t.Errorf("handler_error counter = %d, want 1", got)
 	}
 
-	pending, err := store.ListPendingUpdates(ctx, 10)
+	pending, err := store.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("ListPendingUpdates: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestReceiver_HandlerErrorLeavesUpdatePendingForRetry(t *testing.T) {
 
 	// The retry succeeds and clears it.
 	r.sweepPending(ctx)
-	pending, err = store.ListPendingUpdates(ctx, 10)
+	pending, err = store.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("ListPendingUpdates after retry: %v", err)
 	}
@@ -651,5 +651,171 @@ func TestReceiver_AcceptFailureStopsTheBatch(t *testing.T) {
 	}
 	if next != 0 {
 		t.Errorf("NextOffset = %d, want 0 -- nothing in this batch should have been acknowledged", next)
+	}
+}
+
+// TestReceiver_SweepDrainsABacklogLargerThanOneBatch pins the second P2: the
+// sweep used to recover at most batchLimit rows in one pass. Those rows are
+// past the Telegram offset and will never be redelivered, so a truncated sweep
+// is silent loss for everything beyond the first page.
+func TestReceiver_SweepDrainsABacklogLargerThanOneBatch(t *testing.T) {
+	store := newBotTestStore(t)
+	ctx := context.Background()
+
+	const backlog = 25
+	for i := int64(1); i <= backlog; i++ {
+		if _, err := store.AcceptUpdate(ctx, i, db.KindMessage, sql.NullInt64{Int64: 42, Valid: true}); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	var calls int32
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		atomic.AddInt32(&calls, 1)
+		return "", nil
+	}))
+
+	// batchLimit deliberately smaller than the backlog.
+	r := NewReceiver(store, reg, newCounter(), "test-token",
+		Options{BaseURL: "http://127.0.0.1:1", PollTimeout: 1, BatchLimit: 5})
+	r.sweepPending(ctx)
+
+	if got := atomic.LoadInt32(&calls); got != backlog {
+		t.Errorf("recovered %d of %d updates; the rest are past the offset and lost", got, backlog)
+	}
+	pending, err := store.ListPendingUpdates(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("%d updates still pending after the sweep", len(pending))
+	}
+}
+
+// TestReceiver_SweepTerminatesOnAPersistentlyFailingHandler: draining must not
+// become an infinite loop when nothing can be processed. The cursor advances
+// even for rows that fail, so the pass ends and the retry happens on the next
+// loop iteration instead.
+func TestReceiver_SweepTerminatesOnAPersistentlyFailingHandler(t *testing.T) {
+	store := newBotTestStore(t)
+	ctx := context.Background()
+	for i := int64(1); i <= 9; i++ {
+		if _, err := store.AcceptUpdate(ctx, i, db.KindMessage, sql.NullInt64{Int64: 42, Valid: true}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	var calls int32
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		atomic.AddInt32(&calls, 1)
+		return "", fmt.Errorf("always fails")
+	}))
+	r := NewReceiver(store, reg, newCounter(), "test-token",
+		Options{BaseURL: "http://127.0.0.1:1", PollTimeout: 1, BatchLimit: 3})
+
+	done := make(chan struct{})
+	go func() { r.sweepPending(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sweepPending did not terminate with a persistently failing handler")
+	}
+	// Each row tried exactly once in the pass -- not retried within it.
+	if got := atomic.LoadInt32(&calls); got != 9 {
+		t.Errorf("handler called %d times in one sweep, want 9 (once per pending row)", got)
+	}
+}
+
+// TestReceiver_InLoopSweepRetriesAFailedDispatch pins the first P2, which both
+// reviewers found and which contradicted the runbook: a transient dispatch
+// failure left the row pending for the rest of the process lifetime, because
+// the sweep only ran before the loop. Its update_id is past the offset, so
+// Telegram never redelivers it.
+func TestReceiver_InLoopSweepRetriesAFailedDispatch(t *testing.T) {
+	store := newBotTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fake := &fakeTelegram{batches: [][]byte{batch(msgUpdate(70, 42, "x"))}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	var calls int32
+	handled := make(chan struct{})
+	reg := NewRegistry(knownChats(42))
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return "", fmt.Errorf("transient failure")
+		}
+		select {
+		case <-handled:
+		default:
+			close(handled)
+		}
+		return "", nil
+	}))
+
+	r := NewReceiver(store, reg, newCounter(), "test-token",
+		Options{BaseURL: srv.URL, PollTimeout: 1, IdleBackoff: 10 * time.Millisecond})
+	r.Start(ctx)
+
+	select {
+	case <-handled:
+		// The retry happened while the process kept running, which is the point.
+	case <-time.After(15 * time.Second):
+		t.Fatal("a failed dispatch was never retried while running; it would sit stranded until restart")
+	}
+}
+
+// TestReceiver_TokenNeverLeaksThroughARequestBuildError is the third P2. A bot
+// token with a stray control character makes url.Parse fail, and *url.Error
+// carries the raw URL -- which contains the token. Start logs whatever
+// pollOnce returns. The existing token test only covered the client.Do path.
+func TestReceiver_TokenNeverLeaksThroughARequestBuildError(t *testing.T) {
+	const token = "123456:AAHsecretToken\n" // trailing newline, e.g. from a file
+	store := newBotTestStore(t)
+	r := NewReceiver(store, NewRegistry(nil), newCounter(), token,
+		Options{BaseURL: "https://api.telegram.org", PollTimeout: 1})
+
+	err := r.pollOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the malformed URL to fail")
+	}
+	if strings.Contains(err.Error(), "AAHsecretToken") {
+		t.Errorf("bot token leaked through the request-build error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("error = %v, want the token replaced with [redacted]", err)
+	}
+}
+
+// TestReceiver_InfrastructureFailureIsNotCountedAsAHandlerError: an unknown-chat
+// lookup that fails is a database problem, not a broken handler, and reading
+// one as the other sends an operator to the wrong place.
+func TestReceiver_InfrastructureFailureIsNotCountedAsAHandlerError(t *testing.T) {
+	store := newBotTestStore(t)
+	fake := &fakeTelegram{batches: [][]byte{batch(msgUpdate(80, 42, "x"))}}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	reg := NewRegistry(func(context.Context, int64) (bool, error) {
+		return false, fmt.Errorf("database is down")
+	})
+	reg.Register(db.KindMessage, HandlerFunc(func(context.Context, *sql.Tx, Delivery) (string, error) {
+		t.Error("handler ran despite the chat lookup failing")
+		return "", nil
+	}))
+
+	c := newCounter()
+	r := NewReceiver(store, reg, c, "test-token", Options{BaseURL: srv.URL, PollTimeout: 1})
+	if err := r.pollOnce(context.Background()); err != nil {
+		t.Fatalf("pollOnce: %v", err)
+	}
+	if got := c.get("message/" + OutcomeDispatchError); got != 1 {
+		t.Errorf("dispatch_error counter = %d, want 1", got)
+	}
+	if got := c.get("message/" + db.OutcomeHandlerError); got != 0 {
+		t.Errorf("handler_error counter = %d, want 0 -- no handler was involved", got)
 	}
 }

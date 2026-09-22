@@ -106,18 +106,22 @@ func (s *Store) NextOffset(ctx context.Context) (int64, error) {
 	return maxID.Int64 + 1, nil
 }
 
-// ListPendingUpdates returns accepted-but-undispatched updates in arrival
-// order, oldest first. The startup sweep uses it to recover work that was
-// acknowledged to Telegram but whose dispatch did not complete.
-func (s *Store) ListPendingUpdates(ctx context.Context, limit int) ([]PendingUpdate, error) {
+// ListPendingUpdates returns accepted-but-undispatched updates with
+// update_id > afterID, in arrival order, oldest first.
+//
+// The cursor is what lets the sweep drain a backlog larger than one page
+// without looping forever: a page of rows that all fail to dispatch still
+// advances afterID, so the next page is strictly newer. Pass 0 to start from
+// the beginning.
+func (s *Store) ListPendingUpdates(ctx context.Context, afterID int64, limit int) ([]PendingUpdate, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT update_id, kind, chat_id FROM bot_updates
-		 WHERE processed_at IS NULL
+		 WHERE processed_at IS NULL AND update_id > $1
 		 ORDER BY update_id ASC
-		 LIMIT $1`, limit,
+		 LIMIT $2`, afterID, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pending updates: %w", err)

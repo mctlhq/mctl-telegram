@@ -85,7 +85,7 @@ func TestBotUpdates_AcceptanceNeverOverwritesAnExistingRow(t *testing.T) {
 		t.Error("redelivery was accepted again")
 	}
 
-	pending, err := s.ListPendingUpdates(ctx, 10)
+	pending, err := s.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestBotUpdates_DispatchOnceIsAtomicWithTheHandler(t *testing.T) {
 	}
 
 	// Still retriable.
-	pending, err := s.ListPendingUpdates(ctx, 10)
+	pending, err := s.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestBotUpdates_ListPendingIsOldestFirst(t *testing.T) {
 			t.Fatalf("accept %d: %v", id, err)
 		}
 	}
-	pending, err := s.ListPendingUpdates(ctx, 10)
+	pending, err := s.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestBotUpdates_MarkUpdateFailedIsTerminalAndDoesNotResurrect(t *testing.T) 
 	if err := s.MarkUpdateFailed(ctx, 40); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
-	pending, err := s.ListPendingUpdates(ctx, 10)
+	pending, err := s.ListPendingUpdates(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

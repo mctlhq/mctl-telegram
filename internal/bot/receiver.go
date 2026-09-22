@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ import (
 type Store interface {
 	AcceptUpdate(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64) (bool, error)
 	NextOffset(ctx context.Context) (int64, error)
-	ListPendingUpdates(ctx context.Context, limit int) ([]db.PendingUpdate, error)
+	ListPendingUpdates(ctx context.Context, afterID int64, limit int) ([]db.PendingUpdate, error)
 	DispatchOnce(ctx context.Context, updateID int64, fn func(context.Context, *sql.Tx) (string, error)) error
 }
 
@@ -117,6 +118,13 @@ func (r *Receiver) Start(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			// Sweep on every iteration, not only at startup. A dispatch that
+			// fails leaves the row pending while its update_id is already past
+			// the Telegram offset, so nothing will ever redeliver it -- without
+			// an in-loop sweep such a row would sit stranded until the process
+			// restarted, which is exactly what the runbook promises does not
+			// happen. Normally this is one indexed query returning no rows.
+			r.sweepPending(ctx)
 			if err := r.pollOnce(ctx); err != nil {
 				if ctx.Err() != nil {
 					return
@@ -195,12 +203,28 @@ func (r *Receiver) dispatch(ctx context.Context, p db.PendingUpdate) {
 		// The claim rolled back with the handler, so the update stays pending
 		// and is retried by the next sweep. Only the error TYPE is logged --
 		// never the update content, which this package never decoded.
-		slog.Warn("bot update handler failed", "update_id", p.UpdateID, "kind", p.Kind, "err", err)
-		r.count(p.Kind, db.OutcomeHandlerError)
+		var he handlerError
+		if errors.As(err, &he) {
+			slog.Warn("bot update handler failed", "update_id", p.UpdateID, "kind", p.Kind, "err", err)
+			r.count(p.Kind, db.OutcomeHandlerError)
+		} else {
+			// Routing or the database failed, not a handler. Counted apart so
+			// an infrastructure problem is not read as a broken handler.
+			slog.Warn("bot update dispatch failed", "update_id", p.UpdateID, "kind", p.Kind, "err", err)
+			r.count(p.Kind, OutcomeDispatchError)
+		}
 		return
 	}
 	r.count(p.Kind, outcome)
 }
+
+// handlerError marks an error as coming from a registered handler rather than
+// from routing or the database, so the two are counted separately. Conflating
+// them hides "the database is failing" behind "some handler is broken".
+type handlerError struct{ err error }
+
+func (e handlerError) Error() string { return e.err.Error() }
+func (e handlerError) Unwrap() error { return e.err }
 
 // route resolves the handler and runs it inside DispatchOnce.
 func (r *Receiver) route(ctx context.Context, p db.PendingUpdate) (string, error) {
@@ -234,7 +258,10 @@ func (r *Receiver) route(ctx context.Context, p db.PendingUpdate) (string, error
 			ChatID:   p.ChatID,
 		})
 		outcome = o
-		return o, herr
+		if herr != nil {
+			return o, handlerError{err: herr}
+		}
+		return o, nil
 	})
 	if errors.Is(err, db.ErrUpdateNotClaimable) {
 		// Someone else completed it first. Not an error, and not dispatched
@@ -270,20 +297,46 @@ func (r *Receiver) complete(ctx context.Context, updateID int64, outcome string)
 // Without this they would be stranded: their update_id is below the offset, so
 // Telegram considers them delivered and will not send them again.
 func (r *Receiver) sweepPending(ctx context.Context) {
-	pending, err := r.store.ListPendingUpdates(ctx, r.batchLimit)
-	if err != nil {
-		slog.Warn("bot update sweep failed", "err", err)
-		return
-	}
-	if len(pending) == 0 {
-		return
-	}
-	slog.Info("recovering accepted bot updates", "count", len(pending))
-	for _, p := range pending {
+	// Page through the whole backlog rather than one batch. These rows are
+	// past the Telegram offset and will never be redelivered, so a truncated
+	// sweep is silent loss for everything beyond the first page.
+	//
+	// The cursor advances even when a row fails to dispatch, which is what
+	// makes this terminate: a persistently failing handler leaves its row
+	// pending, but the sweep still moves past it and tries again on the next
+	// loop iteration rather than spinning on it here.
+	var (
+		after     int64
+		recovered int
+	)
+	for {
 		if ctx.Err() != nil {
 			return
 		}
-		r.dispatch(ctx, p)
+		pending, err := r.store.ListPendingUpdates(ctx, after, r.batchLimit)
+		if err != nil {
+			slog.Warn("bot update sweep failed", "err", err)
+			return
+		}
+		if len(pending) == 0 {
+			break
+		}
+		for _, p := range pending {
+			if ctx.Err() != nil {
+				return
+			}
+			r.dispatch(ctx, p)
+			if p.UpdateID > after {
+				after = p.UpdateID
+			}
+			recovered++
+		}
+		if len(pending) < r.batchLimit {
+			break
+		}
+	}
+	if recovered > 0 {
+		slog.Info("recovered accepted bot updates", "count", recovered)
 	}
 }
 
@@ -299,6 +352,11 @@ func (r *Receiver) count(kind, outcome string) {
 // is a receiver-level counter label only and is never written to a row -- the
 // row already carries the outcome of the delivery that won.
 const OutcomeDuplicate = "duplicate"
+
+// OutcomeDispatchError labels a routing or database failure, as distinct from
+// db.OutcomeHandlerError which is a registered handler failing. Both leave the
+// update pending for the sweep; only the second one means a handler is broken.
+const OutcomeDispatchError = "dispatch_error"
 
 // getUpdates performs one long poll.
 //
@@ -322,7 +380,11 @@ func (r *Receiver) getUpdates(ctx context.Context, offset int64) ([]Update, erro
 	endpoint := fmt.Sprintf("%s/bot%s/getUpdates?%s", r.baseURL, r.token, q.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build getUpdates request: %w", err)
+		// NOT %w. url.Parse returns a *url.Error carrying the raw URL, which
+		// contains the bot token -- a token with a stray control character is
+		// enough to reach this. Start logs whatever pollOnce returns, so the
+		// text is scrubbed before it can become an error value at all.
+		return nil, fmt.Errorf("build getUpdates request: %s", r.redact(err.Error()))
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -353,11 +415,23 @@ func (r *Receiver) getUpdates(ctx context.Context, offset int64) ([]Update, erro
 	return updates, nil
 }
 
+// botPathToken matches the token segment of a Bot API URL. Errors from
+// net/url quote the raw URL with Go escaping, so a token containing a control
+// character appears as "...Token\n" rather than with a real newline and a
+// literal string replacement of the token misses it entirely. Masking by
+// position catches every encoding of it.
+var botPathToken = regexp.MustCompile(`/bot[^/]*`)
+
 // redact removes the bot token from a string. Transport errors from net/http
-// embed the full request URL, which contains the token, so any error text that
-// might have come from the HTTP layer goes through here before it reaches a log
-// line or a wrapped error.
+// and parse errors from net/url both embed the full request URL, which contains
+// the token, so any error text that might have come from either goes through
+// here before it reaches a log line or a wrapped error.
+//
+// Both passes are needed: the positional one catches the token however it is
+// escaped inside a URL, and the literal one catches it in text that is not a
+// URL at all.
 func (r *Receiver) redact(s string) string {
+	s = botPathToken.ReplaceAllString(s, "/bot[redacted]")
 	if r.token == "" {
 		return s
 	}
