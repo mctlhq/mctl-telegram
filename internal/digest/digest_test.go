@@ -49,6 +49,27 @@ func TestBuildDigestMessage(t *testing.T) {
 	}
 }
 
+// TestBuildDigestMessage_ReachabilitySuffix is part of task 15: a row whose
+// reachability is recorded and not "unknown" gets a "bot: <state>" suffix;
+// a row with no recorded reachability (the common case today) gets none.
+func TestBuildDigestMessage_ReachabilitySuffix(t *testing.T) {
+	rows := []db.IdentityRow{
+		{TelegramID: 111, Username: "alice", BotReachability: &db.BotReachability{State: "blocked"}},
+		{TelegramID: 222, Username: "bob"}, // no reachability recorded at all
+		{TelegramID: 333, Username: "carol", BotReachability: &db.BotReachability{State: "unknown"}},
+	}
+	msg := buildDigestMessage(rows, 3, false)
+	if !strings.Contains(msg, "alice — id 111 — tier=none — no session — bot: blocked") {
+		t.Errorf("blocked row missing its reachability suffix; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "bob — id 222 — tier=none — no session — bot:") {
+		t.Errorf("a row with no recorded reachability must not get a bot: suffix; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "carol — id 333 — tier=none — no session — bot:") {
+		t.Errorf("state=unknown must not get a bot: suffix; got:\n%s", msg)
+	}
+}
+
 func TestEffectiveTier(t *testing.T) {
 	cases := []struct {
 		raw         string

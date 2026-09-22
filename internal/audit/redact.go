@@ -67,10 +67,26 @@ var sensitiveKeys = map[string]struct{}{
 	"device_registration_key": {},
 	"worker_token":            {},
 	"bridge_token":            {},
+	// Login-bot update receiver (issue-619). The receiver never decodes
+	// message text or callback data, so these keys should never be reachable
+	// from it -- they are here so that a LATER handler that does decode
+	// content cannot log it by naming the field in the obvious way.
+	// bot_token is the Bot API token; callback_data and callback_payload are
+	// attacker-influenced content; update_json would be a whole raw update.
+	"bot_token":        {},
+	"callback_data":    {},
+	"callback_payload": {},
+	"update_json":      {},
 	// send_media byte sources. file_base64 is file contents; file_path is a
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},
 	"file_path":   {},
+	// Client identity attributes (issue-438). Captured Telegram first/last
+	// name are PII the same way display_name/username already were meant to
+	// be treated -- new identity-capture and admin-projection code paths must
+	// log only ids, categories, states and reason codes, never these.
+	"first_name": {},
+	"last_name":  {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

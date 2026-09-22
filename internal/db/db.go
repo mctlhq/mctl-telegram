@@ -183,6 +183,43 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// Client identity/notification model (issue-438). All nullable, no
+	// defaults, mirroring the audit_logs.call_path reasoning above: a
+	// non-NULL default would make a pre-existing row indistinguishable from
+	// one that has actually been through identity capture. See
+	// db.ResolveIdentityProvenance for how these are read.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_first_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_last_name",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	// telegram_language_code: reserved, left unpopulated by any code path
+	// today. No verified source for it exists — see design.md's Open
+	// questions. Adding the column now means the backfill/provenance story
+	// is already in place if a source is later approved.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "telegram_language_code",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "identity_source",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "identity_captured_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "onboarding_completed_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "last_seen_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "client_name",
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
@@ -280,6 +317,45 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	for _, s := range backfill {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("backfill: %w\nstmt: %s", err, s)
+		}
+	}
+	// Client identity backfill (issue-438), same idempotent in-Migrate
+	// pattern as the last_used_at/expires_at backfill above.
+	//
+	// onboarding_completed_at: the earliest non-revoked, finalised
+	// telegram_accounts row for the user — see design.md's Open questions
+	// for why "first finalised session" was chosen over "OAuth grant time".
+	//
+	// identity_source = 'backfill_legacy': labels a pre-existing row so its
+	// empty first/last name reads as provenance "unknown" (capture never
+	// ran), not "not_supplied" (Telegram supplied nothing). Deliberately
+	// does NOT split telegram_display_name into first/last name — that
+	// column may already hold a username-fallback value written by
+	// EnsureUserByTelegramID's effectiveUsername behaviour, and splitting it
+	// would fabricate a first/last name that was never actually captured.
+	// The runtime writer (Store.SaveSession) stamps onboarding_completed_at
+	// on every new session going forward, so this backfill only needs to
+	// reach pre-existing rows. The added EXISTS guard bounds it to a
+	// one-time backfill: without it, every not-yet-onboarded user (no
+	// qualifying telegram_accounts row yet) matches
+	// "onboarding_completed_at IS NULL" and gets rewritten to the same NULL
+	// value on every boot, forever.
+	identityBackfill := []string{
+		`UPDATE users SET onboarding_completed_at = (
+		     SELECT MIN(ta.connected_at) FROM telegram_accounts ta
+		      WHERE ta.user_id = users.id AND ta.revoked_at IS NULL
+		        AND ta.telegram_user_id IS NOT NULL)
+		  WHERE onboarding_completed_at IS NULL
+		    AND EXISTS (
+		      SELECT 1 FROM telegram_accounts ta
+		       WHERE ta.user_id = users.id AND ta.revoked_at IS NULL
+		         AND ta.telegram_user_id IS NOT NULL)`,
+		`UPDATE users SET identity_source = 'backfill_legacy'
+		  WHERE identity_source IS NULL AND telegram_login_id IS NOT NULL`,
+	}
+	for _, s := range identityBackfill {
+		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("identity backfill: %w\nstmt: %s", err, s)
 		}
 	}
 	// Communication-agent domain tables (M6). Kept in a separate file so the
@@ -570,6 +646,61 @@ func sqliteSchema() []string {
 		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
+		// Bot reachability (issue-438): whether the login bot may currently
+		// initiate a chat with the client, observed only from real delivery
+		// results (see internal/notify) -- never probed. One row per user;
+		// see Store.RecordBotReachability.
+		`CREATE TABLE IF NOT EXISTS client_bot_reachability (
+			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			state TEXT NOT NULL DEFAULT 'unknown',
+			reason_code TEXT NOT NULL DEFAULT '',
+			observed_at DATETIME,
+			source TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// Notification preferences (issue-438): one row per (user, category)
+		// only once a client has explicitly decided; absent rows resolve to
+		// the Go-computed defaults in Store.ResolveNotificationPrefs so
+		// "never decided" stays distinguishable from "decided, then
+		// unsubscribed".
+		`CREATE TABLE IF NOT EXISTS client_notification_prefs (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			category TEXT NOT NULL,
+			state TEXT NOT NULL,
+			source TEXT NOT NULL,
+			decided_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, category)
+		)`,
+		// Inbound Bot API updates (issue-619). The row IS the acknowledgement
+		// boundary: the long-poll loop derives its next getUpdates offset from
+		// MAX(update_id) in this table, never from the batch it holds in
+		// memory, so an update is only confirmed to Telegram once it is
+		// durably here. update_id is Telegram's own identifier and is the
+		// primary key, which is what makes acceptance idempotent -- a
+		// redelivered update hits ON CONFLICT DO NOTHING and is never
+		// dispatched twice.
+		//
+		// No message text, callback payload, phone number or raw update JSON
+		// is stored. kind and chat_id are the routing facts the registry
+		// needs; everything else is deliberately dropped at the boundary, so
+		// there is no retention question and nothing sensitive to leak from
+		// this table. See internal/bot for the parse.
+		//
+		// processed_at NULL means accepted-but-not-yet-dispatched, which is
+		// precisely the state a crash between acceptance and dispatch leaves
+		// behind, and is what the startup sweep looks for.
+		`CREATE TABLE IF NOT EXISTS bot_updates (
+			update_id INTEGER PRIMARY KEY,
+			kind TEXT NOT NULL,
+			chat_id INTEGER,
+			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			claimed_at DATETIME,
+			processed_at DATETIME,
+			outcome TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
 	}
 }
 
@@ -723,5 +854,40 @@ func pgSchema() []string {
 		`DROP INDEX IF EXISTS idx_local_bridge_devices_idempotency_key`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_local_bridge_devices_idem_live ON local_bridge_devices(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND revoked_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_local_bridge_devices_user ON local_bridge_devices(user_id) WHERE revoked_at IS NULL`,
+		// Bot reachability (issue-438) -- see the sqliteSchema comment on
+		// this table for the column-shape rationale.
+		`CREATE TABLE IF NOT EXISTS client_bot_reachability (
+			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			state TEXT NOT NULL DEFAULT 'unknown',
+			reason_code TEXT NOT NULL DEFAULT '',
+			observed_at TIMESTAMPTZ,
+			source TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		// Notification preferences (issue-438) -- see the sqliteSchema
+		// comment on this table for the column-shape rationale.
+		`CREATE TABLE IF NOT EXISTS client_notification_prefs (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			category TEXT NOT NULL,
+			state TEXT NOT NULL,
+			source TEXT NOT NULL,
+			decided_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (user_id, category)
+		)`,
+		// Inbound Bot API updates (issue-619) -- see the sqliteSchema comment
+		// on this table for why the row is the acknowledgement boundary and
+		// why no update content is stored.
+		`CREATE TABLE IF NOT EXISTS bot_updates (
+			update_id BIGINT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			chat_id BIGINT,
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			claimed_at TIMESTAMPTZ,
+			processed_at TIMESTAMPTZ,
+			outcome TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
 	}
 }
