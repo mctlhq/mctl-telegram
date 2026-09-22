@@ -364,7 +364,17 @@ pointing at how to turn real sends on.
 
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>".
-  text — message body (plain text).`),
+  text — message body (plain text).
+
+Inputs (optional):
+  confirmation_id — a one-shot id from prepare_send_message, bound to this
+  exact (peer, text) pair. When supplied, it is consumed (and the call
+  refused if it is unknown, expired, already used, issued to a different
+  identity, or bound to a different peer/text) before the send gate is
+  evaluated. The send gate remains authoritative either way: a confirmation
+  is an additional binding, not a substitute for ALLOW_SEND, the scope, or
+  per-account send_enabled. Omitting it leaves this tool's behavior exactly
+  as it is without the argument.`),
 		mcplib.WithString("peer",
 			mcplib.Required(),
 			mcplib.Description("Peer to send to."),
@@ -372,6 +382,9 @@ Inputs (required):
 		mcplib.WithString("text",
 			mcplib.Required(),
 			mcplib.Description("Message text to send."),
+		),
+		mcplib.WithString("confirmation_id",
+			mcplib.Description("Optional one-shot id from prepare_send_message, bound to this exact (peer, text)."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -383,10 +396,29 @@ Inputs (required):
 		if peer == "" || text == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
+		if confID := stringArg(args, "confirmation_id", ""); confID != "" {
+			uid := int64(0)
+			if id != nil {
+				uid = id.UserID
+			}
+			if _, cerr := s.Confirms.Consume(confID, uid, HashSendPayload(peer, text)); cerr != nil {
+				s.audit(ctx, id, "send_message:confirmation_rejected", telegram.RedactPeer(peer), cerr, startedAt)
+				switch {
+				case errors.Is(cerr, ErrConfirmationMismatch):
+					return mcplib.NewToolResultError("confirmation_id was issued for a different (peer, text) — re-run prepare_send_message"), nil
+				case errors.Is(cerr, ErrConfirmationWrongUser):
+					return mcplib.NewToolResultError("confirmation_id belongs to another identity"), nil
+				default:
+					return mcplib.NewToolResultError("confirmation_id not found, expired, or already used"), nil
+				}
+			}
+		}
 		// The send gate is authoritative. The tool exposes no mode parameter,
 		// so any client-supplied mode is irrelevant: a real send happens only
 		// when ALLOW_SEND, the send scope, per-account send_enabled, and the
-		// per-peer rate limit all pass.
+		// per-peer rate limit all pass. A confirmation_id above only binds the
+		// call to an exact (peer, text) snapshot; it never widens or replaces
+		// this gate.
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if canSend {
 			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {

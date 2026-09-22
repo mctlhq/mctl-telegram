@@ -2030,10 +2030,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
 		return
 	}
-	var clientName string
-	if reg, regErr := s.store.GetClientReg(r.Context(), clientID); regErr == nil {
-		clientName = reg.ClientName
-	}
+	clientName := s.clientDisplayName(r.Context(), clientID)
 	refreshTok, err := s.issueRefreshToken(r.Context(), db.RefreshToken{
 		FamilyID:         randomToken(16),
 		UserID:           uid,
@@ -2810,6 +2807,24 @@ func isLoopbackHost(h string) bool {
 // exchange a hijacked code), shipping a URL fragment to an attacker-controlled
 // host would still leak the authorization_code briefly. Constraining the host
 // closes that window.
+// clientDisplayName resolves the operator- or client-supplied display name for
+// client_id, preferring a persisted registration and falling back to the
+// in-memory map that holds the built-in connect client and every
+// cfg.PreregisteredClients entry. A miss yields "": the name is cosmetic and
+// must never fail a token exchange.
+func (s *Server) clientDisplayName(ctx context.Context, clientID string) string {
+	if reg, err := s.store.GetClientReg(ctx, clientID); err == nil {
+		return reg.ClientName
+	}
+	s.mu.Lock()
+	reg, ok := s.clients[clientID]
+	s.mu.Unlock()
+	if ok {
+		return reg.ClientName
+	}
+	return ""
+}
+
 func (s *Server) validateClient(ctx context.Context, clientID, redirectURI string) error {
 	if s.useDB {
 		// Look up registration in the Postgres table.

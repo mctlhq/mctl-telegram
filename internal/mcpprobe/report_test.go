@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -52,6 +53,185 @@ func TestReportCarriesNoOpenEndedFields(t *testing.T) {
 		}
 	}
 	walk(t, reflect.TypeOf(Report{}), "Report")
+}
+
+// fieldOrigin classifies where a Report string field's value comes from.
+type fieldOrigin int
+
+const (
+	// originPackage is a closed enum or constant this package chose, e.g. an
+	// Outcome, a Reason or the step Label a probe function assigned.
+	originPackage fieldOrigin = iota
+	// originCaller is a value supplied by the caller via Options (or, for
+	// GitRef, by the build), never by the probed server.
+	originCaller
+	// originServer is text the probed server chose and published about
+	// itself. This is exactly the set the Report doc comment promises is
+	// exhaustive.
+	originServer
+)
+
+// TestReportStringFieldsHaveADeclaredOrigin is the enumeration half of the
+// redaction guarantee TestReportCarriesNoOpenEndedFields checks structurally.
+// It walks every string-kind field reachable from Report and requires each
+// one to be classified below. An unclassified field fails with a message
+// telling the author to classify it and, if server-origin, to extend the
+// Report doc comment -- so the comment's "only strings that did not
+// originate in this package" claim stays true by construction rather than by
+// a reviewer noticing drift (#605).
+func TestReportStringFieldsHaveADeclaredOrigin(t *testing.T) {
+	origin := map[string]fieldOrigin{
+		"Schema":          originPackage,
+		"GitRef":          originCaller,
+		"Source":          originCaller,
+		"Mode":            originCaller,
+		"ProtocolVersion": originCaller,
+		"TargetHost":      originCaller,
+		"Summary":         originPackage,
+
+		"Server.Name":              originServer,
+		"Server.Version":           originServer,
+		"Server.SupportedVersions": originServer,
+
+		"Tools[].Name": originServer,
+
+		"Steps[].Label":   originPackage,
+		"Steps[].Method":  originPackage,
+		"Steps[].Tool":    originCaller,
+		"Steps[].Outcome": originPackage,
+		"Steps[].Reason":  originPackage,
+
+		"Negatives[].Label":   originPackage,
+		"Negatives[].Method":  originPackage,
+		"Negatives[].Tool":    originCaller,
+		"Negatives[].Outcome": originPackage,
+		"Negatives[].Reason":  originPackage,
+
+		"OAuth.ProtectedResource.Outcome":     originPackage,
+		"OAuth.ProtectedResource.Reason":      originPackage,
+		"OAuth.ProtectedResourcePath.Outcome": originPackage,
+		"OAuth.ProtectedResourcePath.Reason":  originPackage,
+
+		"OAuth.AuthorizationServer.Issuer":                   originServer,
+		"OAuth.AuthorizationServer.TokenEndpointAuthMethods": originServer,
+		"OAuth.AuthorizationServer.Outcome":                  originPackage,
+		"OAuth.AuthorizationServer.Reason":                   originPackage,
+
+		"OAuth.Unauthenticated.Realm":     originServer,
+		"OAuth.Unauthenticated.ErrorCode": originServer,
+		"OAuth.Unauthenticated.Outcome":   originPackage,
+		"OAuth.Unauthenticated.Reason":    originPackage,
+
+		"Apps.ExtensionMimeTypes": originServer,
+		"Apps.ResourceURI":        originServer,
+		"Apps.ResourceMimeType":   originServer,
+		"Apps.UIToolNames":        originServer,
+		"Apps.Outcome":            originPackage,
+		"Apps.Reason":             originPackage,
+	}
+
+	timeType := reflect.TypeOf(time.Time{})
+
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		if typ == timeType {
+			return
+		}
+		switch typ.Kind() {
+		case reflect.Ptr:
+			walk(typ.Elem(), path)
+		case reflect.Slice, reflect.Array:
+			elem := typ.Elem()
+			if elem.Kind() == reflect.String {
+				// A []string (or named-string slice) field is itself the
+				// unit worth classifying; its element type carries nothing
+				// further to walk.
+				checkClassified(t, origin, path, typ)
+				return
+			}
+			walk(elem, path+"[]")
+		case reflect.String:
+			checkClassified(t, origin, path, typ)
+		case reflect.Struct:
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				if !f.IsExported() {
+					continue
+				}
+				child := f.Name
+				if path != "" {
+					child = path + "." + f.Name
+				}
+				walk(f.Type, child)
+			}
+		}
+	}
+	walk(reflect.TypeOf(Report{}), "")
+
+	// Every classified path must also exist in the type -- otherwise a
+	// removed field would leave a stale entry silently over-claiming the
+	// comment's enumeration.
+	found := map[string]bool{}
+	var collect func(typ reflect.Type, path string)
+	collect = func(typ reflect.Type, path string) {
+		if typ == timeType {
+			return
+		}
+		switch typ.Kind() {
+		case reflect.Ptr:
+			collect(typ.Elem(), path)
+		case reflect.Slice, reflect.Array:
+			elem := typ.Elem()
+			if elem.Kind() == reflect.String {
+				found[path] = true
+				return
+			}
+			collect(elem, path+"[]")
+		case reflect.String:
+			found[path] = true
+		case reflect.Struct:
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				if !f.IsExported() {
+					continue
+				}
+				child := f.Name
+				if path != "" {
+					child = path + "." + f.Name
+				}
+				collect(f.Type, child)
+			}
+		}
+	}
+	collect(reflect.TypeOf(Report{}), "")
+	for path := range origin {
+		if !found[path] {
+			t.Errorf("origin table names %q but Report no longer has that field; remove it from the table "+
+				"(and from the doc comment, if it was server-origin)", path)
+		}
+	}
+
+	var serverFields []string
+	for path, o := range origin {
+		if o == originServer {
+			serverFields = append(serverFields, path)
+		}
+	}
+	if len(serverFields) != 12 {
+		t.Errorf("origin table classifies %d fields as server-origin, want exactly the 12 the Report "+
+			"doc comment enumerates: %v", len(serverFields), serverFields)
+	}
+}
+
+// checkClassified fails the test when path has no entry in origin -- the
+// only way a new string field can pass silently.
+func checkClassified(t *testing.T, origin map[string]fieldOrigin, path string, typ reflect.Type) {
+	t.Helper()
+	if _, ok := origin[path]; !ok {
+		t.Errorf("Report.%s (%s) has no declared origin in TestReportStringFieldsHaveADeclaredOrigin's "+
+			"table; classify it as originPackage, originCaller or originServer, and if server-origin, "+
+			"add it to the Report doc comment's enumeration", path, typ)
+	}
 }
 
 // TestReport_OmitsSensitiveValuesEndToEnd is T6. It drives a full run against

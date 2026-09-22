@@ -204,7 +204,10 @@ lifting the account-wide pause is an operator action through the agent
 API. If Saved Messages goes completely silent, the cause is the kill
 switch, `mode=off`, or a disabled listener — not a pause by itself. See
 [`docs/reports/communication-agent-c1.md`](reports/communication-agent-c1.md)
-for the validation history that first surfaced this distinction.
+for the validation history that first surfaced this distinction. (Unrelated
+to the Communication Agent: see
+[`docs/reports/mcp-apps-spike.md`](reports/mcp-apps-spike.md) for the
+flag-gated MCP Apps prototype's own technical report.)
 
 ### Safe bootstrap and test-window procedure
 

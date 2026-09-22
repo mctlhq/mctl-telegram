@@ -83,6 +83,58 @@ func newInProcessTarget(t *testing.T) (string, string) {
 	return ts.URL + "/mcp", token
 }
 
+// newInProcessAppsTarget is newInProcessTarget's twin for the MCP Apps
+// conformance step (apps_test.go): same real handler and auth middleware,
+// parameterized on appsEnabled so a test can compare the flag-on and
+// flag-off shapes of the same wiring.
+func newInProcessAppsTarget(t *testing.T, appsEnabled bool) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	conn, err := db.Open(ctx, "file:"+filepath.Join(t.TempDir(), "probe-apps.db"), 0, 0)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := db.Migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	store := db.NewStore(conn, nil)
+
+	provider, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+		Secret:           inProcessSecret,
+		ExpectedIssuer:   inProcessIssuer,
+		ExpectedAudience: "mcp",
+		AudienceRequired: true,
+	})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	issuer, err := localjwt.NewIssuer(inProcessSecret, inProcessIssuer)
+	if err != nil {
+		t.Fatalf("issuer: %v", err)
+	}
+	token, err := issuer.Mint(localjwt.Claims{
+		Subject:    "tg:500100102",
+		TelegramID: inProcessTGID + 1,
+		Scopes:     []string{"telegram:messages:read", "telegram:dialogs:read"},
+		Audience:   []string{"mcp"},
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	mcpSrv := mcpapp.New(store, nil, false).WithAppsEnabled(appsEnabled)
+	r := chi.NewRouter()
+	r.Mount("/mcp", auth.Middleware(provider, true, nil, auth.ResourceMetadata{
+		BaseURL: inProcessIssuer, MCPPath: "/mcp",
+	})(mcpSrv.HTTPHandler()))
+
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+	return ts.URL + "/mcp", token
+}
+
 // TestInProcess_ModernPathAgainstRealHandler is T7. It produces the one
 // evidence row continuous integration is entitled to produce, and it is
 // labelled as such: this is what the code on this branch supports, not what

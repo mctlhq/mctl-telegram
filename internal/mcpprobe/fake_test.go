@@ -23,6 +23,14 @@ type fakeServer struct {
 	dispatched []string
 	// mintSession makes the legacy initialize hand out a session id.
 	mintSession bool
+	// mintSessionOn mints Mcp-Session-Id on the response for a named JSON-RPC
+	// method, independently of mintSession's legacy-only initialize path. It
+	// models a non-conforming server that starts minting a session identifier
+	// somewhere on the modern path other than its first response -- the case
+	// the "modern path mints no session" claim has to cover to mean anything.
+	// Keyed by method string (e.g. "tools/list"); nil/absent means off, so no
+	// existing test's behaviour changes.
+	mintSessionOn map[string]bool
 	// requireSession rejects non-initialize requests that arrive without one.
 	requireSession bool
 	// acceptAnySession models a server that validates the shape of a session
@@ -147,6 +155,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.noteSession(r.Header.Get(mcp.HeaderSessionID))
 	f.record(body.Method)
+
+	if f.mintSessionOn[body.Method] {
+		w.Header().Set(mcp.HeaderSessionID, fakeSessionID)
+	}
 
 	switch method {
 	case mcp.MethodInitialize:

@@ -4,14 +4,17 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
+	"github.com/mctlhq/mctl-telegram/internal/mcpui"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -68,6 +71,13 @@ type Server struct {
 	// Version is reported to MCP clients in the initialize response. Empty
 	// falls back to "dev" in HTTPHandler.
 	Version string
+	// AppsEnabled gates the MCP Apps (SEP-1865) prototype surface: the
+	// "io.modelcontextprotocol/ui" extension capability, the resource
+	// capability, the internal/mcpui triage App resource, the _meta.ui link
+	// on its backing tools, and the prepare_send_message tool. false (the
+	// default) reproduces today's tools-only surface byte-for-byte -- see
+	// WithAppsEnabled and newMCPServer.
+	AppsEnabled bool
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -158,6 +168,16 @@ func (s *Server) WithToolFilter(f string) *Server {
 	return s
 }
 
+// WithAppsEnabled sets whether the MCP Apps prototype surface (extension
+// capability, resource capability, the triage App resource, and _meta.ui on
+// its backing tools) is registered. false (the default, and what this PR
+// ships with) reproduces the current tools-only surface exactly. Returns the
+// receiver for chaining, following the WithToolFilter shape.
+func (s *Server) WithAppsEnabled(b bool) *Server {
+	s.AppsEnabled = b
+	return s
+}
+
 // toolPassesFilter reports whether a tool should be registered given the
 // active filter mode. An unrecognised filter is treated as "all" (safe default).
 func toolPassesFilter(tool mcplib.Tool, filter string) bool {
@@ -173,6 +193,29 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 	if toolPassesFilter(tool, s.ToolFilter) {
 		srv.AddTool(tool, handler)
 	}
+}
+
+// addToolUI registers a (tool, handler) pair like addTool, additionally
+// attaching the MCP Apps _meta.ui link (withUIResource) when s.AppsEnabled is
+// true. With the flag off this is exactly addTool: no tool carries Meta.
+// Used only for the tools the triage App composes (see apps.go).
+func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc) {
+	if s.AppsEnabled {
+		withUIResource()(&tool)
+	}
+	s.addTool(srv, tool, handler)
+}
+
+// handleReadAppResource serves the triage App document for resources/read.
+// It requires an authenticated identity so an AUTH_REQUIRED=false deployment
+// does not serve the App body anonymously even though the flag is on --
+// matching the auth check every tool handler in this package performs via
+// auth.From(ctx).
+func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
+	if auth.From(ctx) == nil {
+		return nil, errors.New("authentication required")
+	}
+	return mcpui.Contents(req.Params.URI), nil
 }
 
 func (s *Server) HTTPHandler() http.Handler {
@@ -200,26 +243,38 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	if v == "" {
 		v = "dev"
 	}
+	opts := []mcpserver.ServerOption{
+		mcpserver.WithToolCapabilities(true),
+	}
+	if s.AppsEnabled {
+		opts = append(opts,
+			mcpserver.WithResourceCapabilities(false, false),
+			mcpserver.WithExtensions(mcpui.ExtensionCapability()),
+		)
+	}
 	srv := mcpserver.NewMCPServer(
 		"mctl-telegram",
 		v,
-		mcpserver.WithToolCapabilities(true),
+		opts...,
 	)
+	if s.AppsEnabled {
+		srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
+	}
 	{
 		t, h := s.toolListDialogs()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolGetUnreadMessages()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolGetMessages()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolSendMessage()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolPreparePinMessage()
@@ -231,11 +286,15 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolPrepareGetMedia()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolGetMedia()
 		s.addTool(srv, t, h)
+	}
+	if s.AppsEnabled {
+		t, h := s.toolPrepareSendMessage()
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolSendMedia()
@@ -327,7 +386,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSearchMessages()
-		s.addTool(srv, t, h)
+		s.addToolUI(srv, t, h)
 	}
 	{
 		t, h := s.toolSetReaction()

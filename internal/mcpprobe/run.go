@@ -30,6 +30,15 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	}
 	client := &rpcClient{httpClient: o.HTTPClient, url: o.URL, token: o.Token}
 
+	// Apps conformance runs first and on its own session-less "initialize"
+	// call, deliberately before the mode-specific run below: it is the only
+	// step in this package that issues a classic initialize regardless of
+	// Mode, and running it after the legacy row would leave the legacy row's
+	// own minted-session bookkeeping (Session.HeaderPresent/Required/
+	// ForeignAccepted) describing this probe's extra round trip instead of
+	// the legacy row's own last call.
+	probeApps(ctx, client, report)
+
 	switch o.Mode {
 	case ModeModern:
 		if err := runModern(ctx, client, &o, report); err != nil {
