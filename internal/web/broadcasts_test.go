@@ -132,6 +132,10 @@ func TestBroadcastPage_ConnectOperatorApproves(t *testing.T) {
 	if strings.Contains(w.Body.String(), "<script") {
 		t.Fatal("the approval page must not carry script")
 	}
+	// The operator sees through which MCP client the campaign was prepared.
+	if !strings.Contains(w.Body.String(), "mcp:tgmcp_claude") {
+		t.Fatal("the page does not show the preparing surface")
+	}
 
 	if w := e.approve(e.connectIdentity(), p, bcIssuer); w.Code != http.StatusSeeOther {
 		t.Fatalf("approve = %d %s", w.Code, w.Body.String())
@@ -190,6 +194,21 @@ func TestBroadcastPage_MCPCredentialCannotApprove(t *testing.T) {
 			}
 		})
 	}
+	// A refused page VIEW is logged, not audited: any signed-in user can
+	// load the URL, and each reload would otherwise add a row.
+	t.Run("page view refusal is not audited", func(t *testing.T) {
+		e := newBroadcastEnv(t)
+		id := e.connectIdentity()
+		id.ClientID = "tgmcp_0123456789abcdef"
+		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/broadcasts", nil)
+		req = req.WithContext(auth.With(req.Context(), id))
+		w := httptest.NewRecorder()
+		e.srv.HandleList(w, req)
+		var n int
+		if err := e.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&n); w.Code != http.StatusForbidden || err != nil || n != 0 {
+			t.Fatalf("refused GET = %d, audit rows %d %v", w.Code, n, err)
+		}
+	})
 	t.Run("anonymous", func(t *testing.T) {
 		e := newBroadcastEnv(t)
 		p := e.prepared("Hello.")
@@ -253,5 +272,28 @@ func TestBroadcast_EndToEnd(t *testing.T) {
 	}
 	if got := e.state(p.CampaignID); got != db.CampaignCompleted {
 		t.Fatalf("state = %s", got)
+	}
+}
+
+func TestBroadcastPage_OperatorCancels(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.prepared("Hello.")
+	form := url.Values{"campaign_id": {p.CampaignID}}
+	post := func(id *auth.Identity) int {
+		req := httptest.NewRequest(http.MethodPost, "/telegram/connect/broadcasts/cancel", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", bcIssuer)
+		req = req.WithContext(auth.With(req.Context(), id))
+		w := httptest.NewRecorder()
+		e.srv.HandleCancel(w, req)
+		return w.Code
+	}
+	mcp := e.connectIdentity()
+	mcp.ClientID = "tgmcp_0123456789abcdef"
+	if code := post(mcp); code != http.StatusForbidden || e.state(p.CampaignID) != db.CampaignPrepared {
+		t.Fatalf("mcp-token cancel = %d, state %s", code, e.state(p.CampaignID))
+	}
+	if code := post(e.connectIdentity()); code != http.StatusSeeOther || e.state(p.CampaignID) != db.CampaignCancelled {
+		t.Fatalf("cancel = %d, state %s", code, e.state(p.CampaignID))
 	}
 }

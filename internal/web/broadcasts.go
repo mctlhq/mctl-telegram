@@ -22,6 +22,7 @@ package web
 // served under the manage CSP: no script, form-action 'self'.
 
 import (
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -77,7 +78,12 @@ func (b *BroadcastServer) authorize(w http.ResponseWriter, r *http.Request, acti
 		reason = "cross-origin or origin-less submission"
 	}
 	if reason != "" {
-		b.store.LogToolCall(r.Context(), id.UserID, action, "", "error", reason, "")
+		// Refused POSTs are the boundary and are audited. A refused page
+		// view is only logged: any signed-in user can load the URL, and an
+		// audit row per reload would be free rows in the primary DB.
+		if r.Method == http.MethodPost {
+			b.store.LogToolCall(r.Context(), id.UserID, action, "", "error", reason, "")
+		}
 		slog.Warn("broadcast web: refused", "action", action, "user_id", id.UserID, "reason", reason)
 		http.Error(w, "forbidden: this page requires a broadcast operator signed in with Telegram in a browser", http.StatusForbidden)
 		return broadcast.Actor{}, false
@@ -111,6 +117,7 @@ type broadcastRow struct {
 	ContentHash  string
 	SelectorHash string
 	CreatedBy    int64
+	Surface      string
 	CreatedAt    string
 	ExpiresAt    string
 	Report       *broadcast.Report
@@ -169,7 +176,7 @@ func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
 	return broadcastRow{
 		ID: c.ID, State: c.State, EndReason: c.EndReason, Category: c.Category,
 		Selector: c.SelectorJSON, Text: c.Content, Preview: c.PreviewCounts,
-		ContentHash: c.ContentHash, SelectorHash: c.SelectorHash, CreatedBy: c.CreatedBy,
+		ContentHash: c.ContentHash, SelectorHash: c.SelectorHash, CreatedBy: c.CreatedBy, Surface: c.Surface,
 		CreatedAt: c.CreatedAt.UTC().Format("2006-01-02 15:04 UTC"),
 		ExpiresAt: c.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC"),
 		Report:    rep,
@@ -209,12 +216,33 @@ func (b *BroadcastServer) handleAction(w http.ResponseWriter, r *http.Request, a
 	}
 	b.store.LogToolCall(r.Context(), actor.UserID, action, "", status, msg, "")
 	if err != nil {
+		if !isBroadcastConflict(err) {
+			// Not the operator's doing: keep internals out of the page.
+			slog.Error("broadcast web: action failed", "action", action, "campaign_id", r.PostForm.Get("campaign_id"), "err", err)
+			renderManageError(w, "Could not complete the action. Please try again.")
+			return
+		}
 		slog.Info("broadcast web: action refused", "action", action, "campaign_id", r.PostForm.Get("campaign_id"), "err", err)
 		renderManage(w, http.StatusConflict, broadcastErrorTemplate, manageErrorData{Message: err.Error()})
 		return
 	}
 	slog.Info("broadcast web: action done", "action", action, "campaign_id", r.PostForm.Get("campaign_id"), "user_id", actor.UserID)
 	http.Redirect(w, r, b.issuer+"/telegram/connect/broadcasts?done="+url.QueryEscape(action), http.StatusSeeOther)
+}
+
+// isBroadcastConflict reports whether err is a refusal the operator can act
+// on (stale page, closed window, finished campaign). Anything else is an
+// internal failure.
+func isBroadcastConflict(err error) bool {
+	for _, target := range []error{
+		db.ErrCampaignNotFound, db.ErrCampaignExpired, db.ErrCampaignNotPrepared,
+		db.ErrCampaignMismatch, db.ErrCampaignTerminal, broadcast.ErrNotBroadcastAdmin,
+	} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 const broadcastExtraCSS = `
@@ -231,7 +259,7 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
     <h2>Awaiting approval</h2>
     {{range .Pending}}
     <div class="bc">
-      <div><strong>{{.Category}}</strong> · <code>{{.ID}}</code> · prepared by user {{.CreatedBy}} at {{.CreatedAt}} · expires {{.ExpiresAt}}</div>
+      <div><strong>{{.Category}}</strong> · <code>{{.ID}}</code> · prepared by user {{.CreatedBy}} via <code>{{.Surface}}</code> at {{.CreatedAt}} · expires {{.ExpiresAt}}</div>
       <pre>{{.Text}}</pre>
       <div class="meta">Selector <code>{{.Selector}}</code></div>
       <div class="meta">Preview <code>{{.Preview}}</code></div>

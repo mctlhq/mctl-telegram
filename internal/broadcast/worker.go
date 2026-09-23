@@ -146,6 +146,13 @@ func NewWorker(store WorkerStore, sender Sender, cfg WorkerConfig, now func() ti
 	}
 }
 
+// EffectiveBatchSize is the batch size a worker configured with rate and
+// batch will actually use (see withDefaults). The preview's estimate uses it
+// so what a human approves matches what the worker does.
+func EffectiveBatchSize(rate float64, batch int) int {
+	return WorkerConfig{RatePerSecond: rate, BatchSize: batch}.withDefaults().BatchSize
+}
+
 // BatchSize is the effective batch size, after withDefaults fitted it to the
 // claim lease; it can be lower than BROADCAST_BATCH_SIZE.
 func (w *Worker) BatchSize() int { return w.cfg.BatchSize }

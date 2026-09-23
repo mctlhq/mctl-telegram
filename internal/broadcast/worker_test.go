@@ -733,3 +733,10 @@ func TestWorker_LeaseStartsAtTheClaim(t *testing.T) {
 		t.Fatalf("row = %s: the pre-claim work was charged against the lease", st)
 	}
 }
+
+func TestEffectiveBatchSizeMatchesTheWorker(t *testing.T) {
+	w := NewWorker(nil, nil, WorkerConfig{RatePerSecond: 1, BatchSize: 500}, nil)
+	if got := EffectiveBatchSize(1, 500); got != w.BatchSize() || got >= 500 {
+		t.Fatalf("EffectiveBatchSize = %d, worker uses %d", got, w.BatchSize())
+	}
+}

@@ -68,7 +68,7 @@ func newBroadcastService(store *db.Store, cfg *config.Config) *broadcast.Service
 		Operators:      telegramIDSet(cfg.BroadcastOperators),
 		ApprovalTTL:    cfg.BroadcastApprovalTTL,
 		RecipientLimit: cfg.BroadcastRecipientLimit,
-		BatchSize:      cfg.BroadcastBatchSize,
+		BatchSize:      broadcast.EffectiveBatchSize(cfg.BroadcastRatePerSec, cfg.BroadcastBatchSize),
 		Policy:         broadcastPolicy(cfg),
 	}, nil)
 }

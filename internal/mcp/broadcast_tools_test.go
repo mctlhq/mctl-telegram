@@ -140,3 +140,60 @@ func TestBroadcastTools_PrepareIsPreviewOnly(t *testing.T) {
 		t.Fatalf("state after cancel = %s", c.State)
 	}
 }
+
+// list_broadcasts and get_broadcast return the campaign and its aggregate
+// report: who prepared it, who approved it, and counts -- no recipients.
+func TestBroadcastTools_ListAndGetReport(t *testing.T) {
+	srv, _, opUID := newBroadcastToolServer(t, true)
+	id := &auth.Identity{UserID: opUID, TelegramID: bcOperatorTG, Scopes: []string{BroadcastScope}}
+	res := callBroadcastTool(t, srv.toolPrepareBroadcast, id, map[string]any{"category": "maintenance", "text": "Maintenance tonight."})
+	var prep struct {
+		CampaignID   string `json:"campaign_id"`
+		ContentHash  string `json:"content_hash"`
+		SelectorHash string `json:"selector_hash"`
+	}
+	if err := json.Unmarshal([]byte(resultText(res)), &prep); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Broadcast.Approve(context.Background(), broadcast.Actor{UserID: opUID, TelegramID: bcOperatorTG, Surface: "web"}, prep.CampaignID, prep.ContentHash, prep.SelectorHash); err != nil {
+		t.Fatal(err)
+	}
+
+	res = callBroadcastTool(t, srv.toolListBroadcasts, id, map[string]any{"state": "approved"})
+	var list struct {
+		Count     int `json:"count"`
+		Campaigns []struct {
+			CampaignID string `json:"campaign_id"`
+			Text       string `json:"text"`
+		} `json:"campaigns"`
+	}
+	if err := json.Unmarshal([]byte(resultText(res)), &list); err != nil || res.IsError {
+		t.Fatalf("list: %s %v", resultText(res), err)
+	}
+	if list.Count != 1 || list.Campaigns[0].CampaignID != prep.CampaignID || list.Campaigns[0].Text != "Maintenance tonight." {
+		t.Fatalf("list = %+v", list)
+	}
+
+	res = callBroadcastTool(t, srv.toolGetBroadcast, id, map[string]any{"campaign_id": prep.CampaignID})
+	if res.IsError {
+		t.Fatalf("get: %s", resultText(res))
+	}
+	var got struct {
+		Campaign struct {
+			State string `json:"state"`
+		} `json:"campaign"`
+		Report struct {
+			CreatedBy  int64  `json:"created_by"`
+			ApprovedBy *int64 `json:"approved_by"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(resultText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Campaign.State != db.CampaignApproved || got.Report.CreatedBy != opUID || got.Report.ApprovedBy == nil || *got.Report.ApprovedBy != opUID {
+		t.Fatalf("get = %+v", got)
+	}
+	if strings.Contains(resultText(res), "888000222") {
+		t.Fatal("the report names a recipient")
+	}
+}

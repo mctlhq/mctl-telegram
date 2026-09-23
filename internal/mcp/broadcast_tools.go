@@ -158,10 +158,12 @@ Approval is NOT possible through this or any other tool. A human operator must a
 		args := req.GetArguments()
 		tiers, err := stringListArg(args, "tiers")
 		if err != nil {
+			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		via, err := stringListArg(args, "connected_via")
 		if err != nil {
+			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		preview, err := s.Broadcast.Prepare(ctx, actor, broadcast.PrepareRequest{
@@ -206,6 +208,7 @@ Inputs:
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		if _, err := s.broadcastActor(id); err != nil {
+			s.audit(ctx, id, "list_broadcasts", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		var states []string
@@ -249,6 +252,7 @@ Inputs:
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		if _, err := s.broadcastActor(id); err != nil {
+			s.audit(ctx, id, "get_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		cid := stringArg(req.GetArguments(), "campaign_id", "")
@@ -288,6 +292,7 @@ Inputs:
 		}
 		actor, err := s.broadcastActor(id)
 		if err != nil {
+			s.audit(ctx, id, "cancel_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		cid := stringArg(req.GetArguments(), "campaign_id", "")
