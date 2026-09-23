@@ -126,8 +126,10 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	}
 	// revoked_reason (issue-668): names why a session was revoked
 	// (disconnect, delete, idle_expiry, absolute_expiry — the same values
-	// already used as the SessionsRevokedTotal metric label), surfaced by
-	// the daily digest's onboarding-stage suffix. Nullable, no default, no
+	// already used as the SessionsRevokedTotal metric label — plus
+	// 'superseded', which SaveSession stamps on the rows a fresh login
+	// replaces and which has no metric label), surfaced by the daily
+	// digest's onboarding-stage suffix. Nullable, no default, no
 	// backfill: a NULL means "revoked before this column existed, or by a
 	// path that names no reason", which is a true statement — the same
 	// convention call_path above already uses.

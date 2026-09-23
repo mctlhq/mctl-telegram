@@ -78,6 +78,32 @@ func TestBuildDigestMessage_ReachabilitySuffix(t *testing.T) {
 	}
 }
 
+// TestBuildDigestMessage_RevokedWithoutConnectStep pins the review finding
+// on #674: LastConnectStepFor materialises an entry from the revoked-reason
+// lookup alone (empty Step, zero At) when the user has no connect:* audit
+// row. That entry must render only the revoke clause — never an empty step
+// with a fabricated "00:00".
+func TestBuildDigestMessage_RevokedWithoutConnectStep(t *testing.T) {
+	rows := []db.IdentityRow{
+		{TelegramID: 444, Username: "dana"},
+		{TelegramID: 555, Username: "alice"},
+	}
+	steps := map[int64]db.ConnectStep{
+		444: {RevokedReason: "disconnect"}, // revoke lookup only: no Step, zero At
+		555: {},                            // zero entry with nothing to say
+	}
+	msg := buildDigestMessage(rows, 2, false, steps)
+	if !strings.Contains(msg, "dana — id 444 — tier=none — no session — session revoked (disconnect)\n") {
+		t.Errorf("revoke-only entry must render just the revoke clause; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "last:  ") || strings.Contains(msg, "00:00") {
+		t.Errorf("an entry without a step must not render an empty step or a fabricated time; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "alice — id 555 — tier=none — no session — last: never started\n") {
+		t.Errorf("a zero-valued entry must read like the no-entry case; got:\n%s", msg)
+	}
+}
+
 func TestEffectiveTier(t *testing.T) {
 	cases := []struct {
 		raw         string

@@ -106,10 +106,15 @@ type loginFlow struct {
 	tgUserID int64
 	err      error
 
-	// step is the last onboarding stage this flow reached. Written ONLY by
-	// the login goroutine itself (in askCode/askPassword and around the
-	// loginFn call below), and read only by that same goroutine's deferred
-	// logger -- so no mutex is needed and none should be added.
+	// step is the last onboarding stage this flow reached. Written around
+	// the loginFn call below on the login goroutine, and inside askCode/
+	// askPassword -- which in production run on a goroutine gotd's
+	// client.Run spawns for its callback (telegram.Login ->
+	// client.Run(ctx, fn)), NOT on the login goroutine. It is still read
+	// unsynchronised by the deferred logger, and that is safe because
+	// client.Run joins its callback goroutine before it returns: loginFn
+	// returning is the happens-before edge between the last write and the
+	// read. Do not add a mutex; do not read step anywhere else.
 	step string
 	// superseded is set by a /start re-submission before it calls cancel(),
 	// so the deferred logger can tell "user started over" from "user walked
@@ -193,21 +198,33 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 				slog.Info("enable: telegram login succeeded",
 					"uid", uid, "tg_id", lf.tgUserID,
 					"elapsed", elapsed)
-			case lf.superseded.Load():
+			case lf.superseded.Load() && isAbandonment(lf.err):
 				// A later /start re-submission cancelled this flow — the user
 				// started over, not walked away. INFO, not an error: this is
 				// an ordinary UI interaction, and logging it at WARN/ERROR
 				// would make the abandonment reclassification below noisy for
-				// no reason.
+				// no reason. The error must actually be the cancellation:
+				// superseded is stored by handler goroutines and can land
+				// while this goroutine already holds a real failure
+				// (FLOOD_WAIT, identity mismatch, errModeCheckFailed), which
+				// must keep falling through to the ERROR arm with its err.
 				slog.Info("enable: login flow superseded",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
-			case isAbandonment(lf.err):
+			case isAbandonment(lf.err) && (lf.step == "code_requested" || lf.step == "password_requested"):
 				// The CodeTTL deadline expired while parked in askCode/
 				// askPassword: a user who walked away from the browser. WARN,
 				// not ERROR -- see design.md's rationale. No err attribute:
 				// "context canceled"/"context deadline exceeded" is the
 				// deadline restated, and dropping it is what keeps a
 				// log-scraper from alerting on the word "canceled" itself.
+				//
+				// Gated on the step: bgCtx's deadline covers the whole loginFn
+				// call, so the same context error also surfaces when SendCode
+				// or the sign-in RPC hangs (step phone_submitted /
+				// code_submitted / password_submitted) or when the
+				// hasActiveLocalAccount query above times out. Those are
+				// Telegram- or DB-side stalls, not a user walking away, and
+				// they keep the ERROR arm with the underlying err.
 				slog.Warn("enable: onboarding abandoned",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
 			default:

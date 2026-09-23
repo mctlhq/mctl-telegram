@@ -6,6 +6,19 @@ import (
 	"net/url"
 )
 
+// regOutcome is the closed set of /oauth/register outcomes — the `outcome`
+// label of mctl_oauth_client_registrations_total. Typed for the same reason
+// as regReason: a label value can only ever be one of these constants, and a
+// typo at a call site is a compile error rather than a silently new series.
+type regOutcome string
+
+const (
+	regOutcomeAccepted    regOutcome = "accepted"
+	regOutcomeRejected    regOutcome = "rejected"
+	regOutcomeRateLimited regOutcome = "rate_limited"
+	regOutcomeError       regOutcome = "error"
+)
+
 // regReason is a closed set of registration-outcome tokens. Values are
 // compile-time constants so a client-supplied error string can never become
 // a Prometheus label and blow up cardinality.
@@ -99,8 +112,8 @@ func redirectOrigin(raw string) (scheme, host string) {
 // redirect_scheme/redirect_host are included only when the refusal concerns
 // a redirect URI. extra carries call-site-specific attributes appended
 // as-is (e.g. redirect_uri_count on the accepted path).
-func (s *Server) auditRegistration(outcome string, reason regReason, clientName, userAgent, scheme, host string, extra ...any) {
-	attrs := []any{"outcome", outcome, "reason", string(reason)}
+func (s *Server) auditRegistration(outcome regOutcome, reason regReason, clientName, userAgent, scheme, host string, extra ...any) {
+	attrs := []any{"outcome", string(outcome), "reason", string(reason)}
 	if clientName != "" {
 		attrs = append(attrs, "client_name", clientName)
 	}
@@ -113,6 +126,6 @@ func (s *Server) auditRegistration(outcome string, reason regReason, clientName,
 	attrs = append(attrs, extra...)
 	slog.Info("oauth: client_registration audit", attrs...)
 	if s.metrics != nil {
-		s.metrics.CountOAuthClientRegistration(outcome, string(reason))
+		s.metrics.CountOAuthClientRegistration(string(outcome), string(reason))
 	}
 }

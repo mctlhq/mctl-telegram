@@ -214,9 +214,23 @@ func sessionSuffix(r db.IdentityRow, steps map[int64]db.ConnectStep) string {
 	if !ok {
 		return "no session — last: never started"
 	}
-	out := "no session — last: " + st.Step + " " + st.At.UTC().Format("15:04")
+	// An entry can come from the revoked-reason lookup alone: the latest
+	// telegram_accounts row carries a reason but the user has no connect:*
+	// audit row (rows aged out, or a session created by a path that writes
+	// no connect:* step). LastConnectStepFor materialises such an entry with
+	// an empty Step and a zero At, so render only the revoke clause rather
+	// than an empty step and a fabricated "00:00".
+	out := "no session"
+	if st.Step != "" {
+		out += " — last: " + st.Step + " " + st.At.UTC().Format("15:04")
+	}
 	if st.RevokedReason != "" {
 		out += " — session revoked (" + st.RevokedReason + ")"
+	}
+	if st.Step == "" && st.RevokedReason == "" {
+		// Defensive: a zero-valued entry with nothing to say reads like
+		// the no-entry case, never like a half-rendered line.
+		return "no session — last: never started"
 	}
 	return out
 }

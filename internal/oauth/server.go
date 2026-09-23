@@ -2569,7 +2569,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// records outcome only — no request body, no IP (the limiter already
 	// keys on it), no client secret (DCR here is public-client).
 	if !s.allowRegister(s.clientIP(r)) {
-		s.auditRegistration("rate_limited", regRateLimited, "", "", "", "")
+		s.auditRegistration(regOutcomeRateLimited, regRateLimited, "", "", "", "")
 		w.Header().Set("Retry-After", "60")
 		writeTokenError(w, "temporarily_unavailable", "too many registration attempts", http.StatusTooManyRequests)
 		return
@@ -2587,7 +2587,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// into the typed struct for actual processing.
 	var raw map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		s.auditRegistration("rejected", regMalformedBody, "", userAgent, "", "")
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, "", userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2612,7 +2612,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// Re-encode + decode to extract the typed shape we actually use.
 	buf, err := json.Marshal(raw)
 	if err != nil {
-		s.auditRegistration("rejected", regMalformedBody, rawClientName, userAgent, "", "")
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2621,24 +2621,24 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		RedirectURIs []string `json:"redirect_uris"`
 	}
 	if err := json.Unmarshal(buf, &req); err != nil {
-		s.auditRegistration("rejected", regMalformedBody, rawClientName, userAgent, "", "")
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
 	if len(req.RedirectURIs) == 0 {
-		s.auditRegistration("rejected", regNoRedirectURIs, req.ClientName, userAgent, "", "")
+		s.auditRegistration(regOutcomeRejected, regNoRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "redirect_uris is required", http.StatusBadRequest)
 		return
 	}
 	if s.cfg.MaxRedirectURIs > 0 && len(req.RedirectURIs) > s.cfg.MaxRedirectURIs {
-		s.auditRegistration("rejected", regTooManyRedirectURIs, req.ClientName, userAgent, "", "")
+		s.auditRegistration(regOutcomeRejected, regTooManyRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", fmt.Sprintf("too many redirect_uris (max %d)", s.cfg.MaxRedirectURIs), http.StatusBadRequest)
 		return
 	}
 	for _, raw := range req.RedirectURIs {
 		if s.cfg.MaxRedirectURILength > 0 && len(raw) > s.cfg.MaxRedirectURILength {
 			scheme, host := redirectOrigin(raw)
-			s.auditRegistration("rejected", regRedirectTooLong, req.ClientName, userAgent, scheme, host)
+			s.auditRegistration(regOutcomeRejected, regRedirectTooLong, req.ClientName, userAgent, scheme, host)
 			writeTokenError(w, "invalid_redirect_uri", fmt.Sprintf("redirect_uri exceeds %d bytes", s.cfg.MaxRedirectURILength), http.StatusBadRequest)
 			return
 		}
@@ -2653,7 +2653,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	for _, raw := range req.RedirectURIs {
 		if err := s.validateImplicitRedirectURI(raw); err != nil {
 			scheme, host := redirectOrigin(raw)
-			s.auditRegistration("rejected", classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
+			s.auditRegistration(regOutcomeRejected, classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
 			writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2672,7 +2672,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			CreatedAt:    now,
 		}); err != nil {
 			slog.Error("oauth: persist client_reg failed", "err", err)
-			s.auditRegistration("error", regPersistFailed, req.ClientName, userAgent, "", "")
+			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
 			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
 			return
 		}
@@ -2715,7 +2715,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
-	s.auditRegistration("accepted", regOK, req.ClientName, userAgent, "", "",
+	s.auditRegistration(regOutcomeAccepted, regOK, req.ClientName, userAgent, "", "",
 		"redirect_uri_count", len(req.RedirectURIs),
 	)
 	w.Header().Set("Content-Type", "application/json")

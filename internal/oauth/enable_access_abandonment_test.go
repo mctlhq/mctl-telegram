@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -114,6 +115,84 @@ func TestStartLoginFlow_CodeTTLDeadlineLogsAbandonment(t *testing.T) {
 	}
 	if strings.Contains(line, "enable: telegram login failed") {
 		t.Errorf("an abandoned flow must not also log the ERROR line; log:\n%s", line)
+	}
+}
+
+// stubLoginHangsInSendCode fakes telegram.Login stalling inside SendCode (a
+// DC that never answers): it never reaches askCode and only returns when
+// the flow's own context expires, wrapping that context error the way the
+// real login path does.
+func stubLoginHangsInSendCode() LoginFunc {
+	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
+		uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
+	) (int64, string, string, error) {
+		<-ctx.Done()
+		return 0, "", "", fmt.Errorf("send code: %w", ctx.Err())
+	}
+}
+
+// TestStartLoginFlow_DeadlineDuringLoginFnStaysError pins the #674 review
+// finding: bgCtx's CodeTTL deadline covers the whole loginFn call, so a
+// SendCode/RPC stall surfaces as the same context.DeadlineExceeded as a
+// walked-away user. With the step still at phone_submitted that is a
+// Telegram-side incident, and it must keep the ERROR line with its err —
+// never be reclassified as "onboarding abandoned".
+func TestStartLoginFlow_DeadlineDuringLoginFnStaysError(t *testing.T) {
+	buf := captureEnableLog(t)
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 60 * time.Millisecond })
+	srv.loginFn = stubLoginHangsInSendCode()
+
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	waitForFlowDone(t, lf, 2*time.Second)
+
+	line := buf.String()
+	if !strings.Contains(line, "enable: telegram login failed") {
+		t.Errorf("a deadline that fires inside loginFn is a stall, not abandonment; expected the ERROR line; log:\n%s", line)
+	}
+	if !strings.Contains(line, "err=") || !strings.Contains(line, "deadline exceeded") {
+		t.Errorf("the ERROR line must carry the underlying err; log:\n%s", line)
+	}
+	if strings.Contains(line, "enable: onboarding abandoned") {
+		t.Errorf("a SendCode stall must not be logged as user abandonment; log:\n%s", line)
+	}
+}
+
+// TestStartLoginFlow_SupersededWithRealErrorStaysError pins the P3 from the
+// same review: superseded is stored by handler goroutines and can land
+// while the flow already holds a genuine failure. Only a cancellation-shaped
+// error may take the INFO supersession arm; a real error keeps the ERROR
+// line and its err even when superseded is set.
+func TestStartLoginFlow_SupersededWithRealErrorStaysError(t *testing.T) {
+	buf := captureEnableLog(t)
+	srv, _ := newEnableTestServer(t, nil)
+	floodErr := errors.New("FLOOD_WAIT_300")
+	srv.loginFn = stubLogin(false, floodErr)
+
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	// Mark the flow superseded before the code is consumed, so the store
+	// is guaranteed to land before the deferred logger runs.
+	lf.superseded.Store(true)
+	select {
+	case <-lf.needCode:
+	case <-time.After(2 * time.Second):
+		t.Fatal("askCode never parked")
+	}
+	select {
+	case lf.codeCh <- "12345":
+	case <-time.After(2 * time.Second):
+		t.Fatal("goroutine never consumed the code")
+	}
+	waitForFlowDone(t, lf, 2*time.Second)
+
+	line := buf.String()
+	if !strings.Contains(line, "enable: telegram login failed") || !strings.Contains(line, "FLOOD_WAIT_300") {
+		t.Errorf("a real failure must keep the ERROR line with its err even when superseded; log:\n%s", line)
+	}
+	if strings.Contains(line, "enable: login flow superseded") {
+		t.Errorf("the supersession arm must not swallow a genuine failure; log:\n%s", line)
 	}
 }
 
