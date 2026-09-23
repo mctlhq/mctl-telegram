@@ -8,13 +8,16 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/config"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // broadcastShutdownGrace bounds how long main waits for the delivery worker
 // after the shutdown signal: one in-flight Bot API call (15 s) plus the few
-// writes that record it and hand the rest of the batch back. It runs
-// alongside the HTTP server's own 10 s drain and stays inside Kubernetes'
-// default 30 s termination grace period.
+// writes that record it and hand the rest of the batch back. The deadline is
+// anchored to the signal, not to the start of the wait: the worker has been
+// winding down since ctx was cancelled and keeps running while the HTTP
+// server drains (10 s), so it gets the full 20 s either way and the whole
+// shutdown stays inside Kubernetes' default 30 s termination grace period.
 const broadcastShutdownGrace = 20 * time.Second
 
 // broadcastWorker tracks the one delivery worker goroutine, so main can let
@@ -55,4 +58,17 @@ func broadcastPolicy(cfg *config.Config) broadcast.Policy {
 		ClientTelegramIDs:      telegramIDSet(cfg.TGLoginClients),
 		AutoApproveClients:     cfg.AutoApproveClients,
 	}
+}
+
+// newBroadcastService builds the prepare/approve/cancel service. With no
+// BROADCAST_OPERATORS it is disabled (Enabled()==false) and every surface
+// refuses.
+func newBroadcastService(store *db.Store, cfg *config.Config) *broadcast.Service {
+	return broadcast.NewService(store, broadcast.Config{
+		Operators:      telegramIDSet(cfg.BroadcastOperators),
+		ApprovalTTL:    cfg.BroadcastApprovalTTL,
+		RecipientLimit: cfg.BroadcastRecipientLimit,
+		BatchSize:      cfg.BroadcastBatchSize,
+		Policy:         broadcastPolicy(cfg),
+	}, nil)
 }

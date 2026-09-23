@@ -2230,13 +2230,31 @@ With the default empty allow-list the whole workflow is off.
 | `BROADCAST_RATE_PER_SEC` | `10` | messages per second across all campaigns, **per replica** (Telegram's bot-wide ceiling is about 30). The limiter is in-process: with N replicas running the worker the bot sends up to N× this rate |
 | `BROADCAST_BATCH_SIZE` | `20` | deliveries claimed per worker pass (every 5 s) |
 | `BROADCAST_MAX_ATTEMPTS` | `5` | sends per recipient on transient failures (429 / 5xx / connection refused) |
-| `BROADCAST_RECIPIENT_LIMIT` | `1000` | per-campaign audience cap, enforced at preview and again at start¹ |
-| `BROADCAST_APPROVAL_TTL` | `30m` | how long a preview stays approvable¹ |
+| `BROADCAST_RECIPIENT_LIMIT` | `1000` | per-campaign audience cap, enforced at preview and again at start (stored on the campaign when it is prepared) |
+| `BROADCAST_APPROVAL_TTL` | `30m` | how long a preview stays approvable |
 
-¹ Read when a preview is created. Previews are created by the operator
-surface (`prepare_broadcast`), which ships separately; until it does, these
-two settings are parsed but have no effect. The worker itself enforces the
-limit stored on each campaign row.
+### Who can do what
+
+| Step | Where | Requires |
+|---|---|---|
+| prepare (preview), list, get, cancel | MCP tools `prepare_broadcast`, `list_broadcasts`, `get_broadcast`, `cancel_broadcast` | the `admin:broadcast` scope: a platform admin (`TG_LOGIN_ADMINS`) who is also in `BROADCAST_OPERATORS` |
+| **approve** (and cancel) | web page `/telegram/connect/broadcasts` | the same operator, signed in with Telegram **in a browser** |
+
+There is no approve tool. The approval page accepts only an access token whose
+`client_id` is the built-in self-connect client (`oauth.ConnectClientID`). Such a
+token is minted only by the browser Telegram login (`/telegram/connect`); the
+token endpoint refuses that client's codes and refresh tokens. An assistant's
+MCP token -- even an operator's, even presented as the connect cookie --
+carries its own client id and is refused (403, audited as
+`broadcast_approve_web` with status `error`). Every POST must also carry a
+same-origin `Origin` header. Access tokens issued before this release carry no
+`client_id`; an operator signed in before it simply signs in again.
+
+To approve: open the `approval_url` the assistant returns, sign in with
+Telegram if asked (`/telegram/connect`), check the exact text, selector and
+preview counts, and press **Approve and send**. The approval is bound to the
+text and selector hashes the page rendered; if the campaign changed, it is
+refused.
 
 ### Lifecycle
 

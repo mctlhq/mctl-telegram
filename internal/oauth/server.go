@@ -268,6 +268,14 @@ type Config struct {
 	// Checked after AdminTelegramIDs and before the client tier, so
 	// full-admin membership always takes precedence over a dual listing.
 	LookupAdminTelegramIDs map[int64]bool
+	// BroadcastOperatorTelegramIDs (issue-439, BROADCAST_OPERATORS) adds
+	// admin:broadcast -- prepare/list/get/cancel of client broadcasts -- to
+	// an identity that is ALSO a full platform admin. Membership here alone
+	// grants nothing: a broadcast reaches every opted-in client, so it stays
+	// inside the admin tier. Like admin:users it is granted by membership,
+	// never negotiable via DCR and never in a worker/device mint allowlist.
+	// Approval is not a scope at all; see internal/web/broadcasts.go.
+	BroadcastOperatorTelegramIDs map[int64]bool
 	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
 	// an operator action. An explicit DB tier of "none" still bans them.
@@ -798,10 +806,11 @@ const ConnectClientID = "mctl_self_connect"
 // and scope resolution in handleTokenAuthCode but is callable in-process from
 // the /telegram/connect/done handler, avoiding a loopback HTTP round-trip.
 //
-// The returned access token is discarded by the caller; ExchangeConnect is
-// called only to confirm that the code is valid and that the MTProto session
-// was provisioned successfully. An error signals that the code was invalid,
-// expired, or the PKCE verifier did not match.
+// The returned access token becomes the browser's mctl_connect_token cookie
+// (internal/web/connect.go) and carries client_id=ConnectClientID. This is
+// the only place such a token is minted: the token endpoint refuses this
+// client's codes and refresh tokens. An error signals that the code was
+// invalid, expired, or the PKCE verifier did not match.
 func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, redirectURI string) (string, error) {
 	if code == "" || verifier == "" || clientID == "" || redirectURI == "" {
 		return "", errors.New("invalid_request: code, verifier, client_id, redirect_uri are required")
@@ -866,7 +875,7 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// Same bound as handleTokenAuthCode, so the two exchange paths mint the
 	// same token for the same code even though this one is discarded.
 	scopes = narrowGrant(scopes, entry.Scope)
-	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		return "", fmt.Errorf("server_error: could not mint token: %w", err)
 	}
@@ -1058,7 +1067,7 @@ func cancelEnableFlow(e *enableSession) bool {
 // fails the token issuance rather than silently under-granting.
 func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes []string, err error) {
 	if s.cfg.AdminTelegramIDs[tgID] {
-		return []string{"platform-admins", "admins"}, []string{
+		granted := []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
@@ -1072,7 +1081,11 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			// stays admin:users-only; see design.md's open question on
 			// admin-initiated device revocation).
 			"account:manage",
-		}, nil
+		}
+		if s.cfg.BroadcastOperatorTelegramIDs[tgID] {
+			granted = append(granted, "admin:broadcast")
+		}
+		return []string{"platform-admins", "admins"}, granted, nil
 	}
 	// The lookup tier's scope is admin:users:read, NOT admin:users. That
 	// distinction is the whole tier: admin:users is a single flat scope
@@ -1939,6 +1952,17 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "code, client_id, code_verifier are required", http.StatusBadRequest)
 		return
 	}
+	// The self-connect client's codes are redeemed only in-process, by
+	// ExchangeConnect with the verifier the /telegram/connect handler holds
+	// server-side. Refusing them here keeps a token whose client_id is
+	// ConnectClientID mintable ONLY by the browser Telegram login -- the
+	// property the broadcast approval page relies on (issue-439). Without
+	// this, whoever started an authorize request for that client with their
+	// own PKCE pair and got hold of the resulting code could mint one here.
+	if clientID == ConnectClientID {
+		writeTokenError(w, "unauthorized_client", "this client's codes are not redeemable at the token endpoint", http.StatusBadRequest)
+		return
+	}
 	if err := validPKCEString(codeVerifier); err != nil {
 		writeTokenError(w, "invalid_request", "code_verifier "+err.Error(), http.StatusBadRequest)
 		return
@@ -2015,7 +2039,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
 	)
-	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2143,7 +2167,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
-	tok, mErr := s.mintAccessToken(child.TelegramID, child.TelegramUsername, groups, scopes)
+	tok, mErr := s.mintAccessToken(child.ClientID, child.TelegramID, child.TelegramUsername, groups, scopes)
 	if mErr != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return graceServerError
@@ -2166,6 +2190,14 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	clientID := r.FormValue("client_id")
 	if refreshTok == "" || clientID == "" {
 		writeTokenError(w, "invalid_request", "refresh_token and client_id are required", http.StatusBadRequest)
+		return
+	}
+	// ExchangeConnect never issues a refresh token, and the token endpoint
+	// refuses the self-connect client's codes (see handleTokenAuthCode), so
+	// no legitimate refresh for it exists; refuse one outright rather than
+	// mint a self-connect access token from it.
+	if clientID == ConnectClientID {
+		writeTokenError(w, "unauthorized_client", "this client cannot refresh", http.StatusBadRequest)
 		return
 	}
 	rt, err := s.store.LookupRefreshToken(r.Context(), refreshTok)
@@ -2239,7 +2271,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
-	tok, err := s.mintAccessToken(rt.TelegramID, rt.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(rt.ClientID, rt.TelegramID, rt.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2465,7 +2497,7 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // per RFC 7519). Binding aud to client_id like an earlier default would have
 // failed /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE — a
 // misconfiguration trap codex flagged.
-func (s *Server) mintAccessToken(tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
 	var audience []string
 	if s.cfg.JWTAudience != "" {
 		audience = []string{s.cfg.JWTAudience}
@@ -2477,6 +2509,7 @@ func (s *Server) mintAccessToken(tgID int64, tgUsername string, groups, scopes [
 		Groups:           groups,
 		Scopes:           scopes,
 		Audience:         audience,
+		ClientID:         clientID,
 	}, s.cfg.AccessTokenTTL)
 }
 

@@ -42,6 +42,10 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invarian
 | `set_account_send`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: enables or disables the per-account real-send gate. |
 | `get_user_audit_log`          | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
 | `revoke_telegram_session`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: revokes a user's active MTProto session on this server. |
+| `prepare_broadcast`           | `readOnly=false`, `destructive=false`, `openWorld=false` | Broadcast operators only (`admin:broadcast` = platform admin AND `BROADCAST_OPERATORS`). Previews a broadcast to opted-in clients and records it as a prepared campaign; sends nothing. Returns the eligible/skipped counts and an `approval_url`. **No tool can approve**: a human operator approves on `/telegram/connect/broadcasts`, signed in with Telegram in a browser. See [docs/runbook.md](docs/runbook.md#broadcast-delivery-issue-439). |
+| `list_broadcasts`             | `readOnly=true`, `destructive=false`, `openWorld=false` | Broadcast operators only: lists campaigns, optionally by state. |
+| `get_broadcast`               | `readOnly=true`, `destructive=false`, `openWorld=false` | Broadcast operators only: one campaign plus its aggregate delivery report (no recipients named). |
+| `cancel_broadcast`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Broadcast operators only: cancels a campaign that has not finished; unsent messages are skipped. |
 
 ## MCP Apps (prototype, flag-gated)
 

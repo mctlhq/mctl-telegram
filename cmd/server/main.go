@@ -443,6 +443,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Broadcast service (issue-439), shared by the MCP operator tools and the
+	// web approval page below. Disabled when BROADCAST_OPERATORS is empty.
+	broadcastSvc := newBroadcastService(store, cfg)
+
 	// Session management dashboard — only mounted in local-jwt mode alongside
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
@@ -455,6 +459,14 @@ func main() {
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
+		// Broadcast approval (issue-439). Under /telegram/connect so the
+		// connect-session cookie reaches it; the handler itself requires a
+		// token issued to the self-connect client, so an MCP token can
+		// never approve. See internal/web/broadcasts.go.
+		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID)
+		mux.With(manageAuth).Get("/telegram/connect/broadcasts", broadcastWeb.HandleList)
+		mux.With(manageAuth).Post("/telegram/connect/broadcasts/approve", broadcastWeb.HandleApprove)
+		mux.With(manageAuth).Post("/telegram/connect/broadcasts/cancel", broadcastWeb.HandleCancel)
 	}
 
 	// Account endpoints — self-service disconnect/delete + status.
@@ -465,6 +477,9 @@ func main() {
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled)
+	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
+	// Approval lives only on the web page registered with the manage routes.
+	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
 	// Off by default; see internal/config.Config.AppsEnabled and
@@ -836,21 +851,24 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AdminTelegramIDs:         admins,
 		ClientTelegramIDs:        clients,
 		LookupAdminTelegramIDs:   lookupAdmins,
-		AutoApproveClients:       cfg.AutoApproveClients,
-		AccessTokenTTL:           cfg.OAUTHAccessTokenTTL,
-		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,
-		CodeTTL:                  cfg.OAUTHCodeTTL,
-		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
-		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
-		PreregisteredClients:     preregisteredClients(cfg.OAUTHPreregisteredClients),
-		RegisterRatePerMin:       cfg.OAUTHRegisterRatePerMin,
-		TGAPIID:                  cfg.TGAPIID,
-		TGAPIHash:                cfg.TGAPIHash,
-		UseDBForOAuth:            useDBForOAuth,
-		DemoReviewerEnabled:      cfg.DemoReviewerEnabled,
-		DemoReviewerUsername:     cfg.DemoReviewerUsername,
-		DemoReviewerPassword:     cfg.DemoReviewerPassword,
-		DemoReviewerTGID:         cfg.DemoReviewerTGID,
+		// admin:broadcast (issue-439) goes only to ids that are ALSO in
+		// admins; ResolveScopes ignores a non-admin operator.
+		BroadcastOperatorTelegramIDs: telegramIDSet(cfg.BroadcastOperators),
+		AutoApproveClients:           cfg.AutoApproveClients,
+		AccessTokenTTL:               cfg.OAUTHAccessTokenTTL,
+		RefreshTokenTTL:              cfg.OAUTHRefreshTokenTTL,
+		CodeTTL:                      cfg.OAUTHCodeTTL,
+		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
+		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
+		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		RegisterRatePerMin:           cfg.OAUTHRegisterRatePerMin,
+		TGAPIID:                      cfg.TGAPIID,
+		TGAPIHash:                    cfg.TGAPIHash,
+		UseDBForOAuth:                useDBForOAuth,
+		DemoReviewerEnabled:          cfg.DemoReviewerEnabled,
+		DemoReviewerUsername:         cfg.DemoReviewerUsername,
+		DemoReviewerPassword:         cfg.DemoReviewerPassword,
+		DemoReviewerTGID:             cfg.DemoReviewerTGID,
 	}, store)
 	if err != nil {
 		return nil, err
@@ -888,7 +906,10 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 				MaxAttempts:   cfg.BroadcastMaxAttempts,
 			}, nil)
 			startBroadcastWorker(ctx, worker)
-			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec)
+			if cfg.BroadcastBatchSize > 0 && worker.BatchSize() != cfg.BroadcastBatchSize {
+				slog.Warn("broadcast: batch size lowered to fit the claim lease", "requested", cfg.BroadcastBatchSize, "effective", worker.BatchSize(), "rate_per_sec", cfg.BroadcastRatePerSec)
+			}
+			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec, "batch_size", worker.BatchSize())
 		}
 	}
 	// Inbound login-bot updates (issue-619). Transport only: updates are made

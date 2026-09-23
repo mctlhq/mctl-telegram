@@ -273,6 +273,38 @@
         "admin:users"
       ],
       "reason": "Admin-only grant/revoke of the client access tier; refused upstream without admin:users."
+    },
+    {
+      "name": "prepare_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: records a campaign preview (normalized text, server-resolved audience counts, redacted sample). Sends nothing; approval is web-only and cannot be done by any tool."
+    },
+    {
+      "name": "list_broadcasts",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: lists campaigns with their operator-authored text, selector and preview counts. No recipient identities."
+    },
+    {
+      "name": "get_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: one campaign plus its aggregate delivery report (counts by status and reason). No recipient identities, no message reads."
+    },
+    {
+      "name": "cancel_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: cancels a campaign that has not finished; unsent work is skipped, delivered messages stay delivered. Can only stop delivery, never start it."
     }
   ]
 }

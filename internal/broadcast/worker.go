@@ -146,6 +146,10 @@ func NewWorker(store WorkerStore, sender Sender, cfg WorkerConfig, now func() ti
 	}
 }
 
+// BatchSize is the effective batch size, after withDefaults fitted it to the
+// claim lease; it can be lower than BROADCAST_BATCH_SIZE.
+func (w *Worker) BatchSize() int { return w.cfg.BatchSize }
+
 // Run ticks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
@@ -184,18 +188,25 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if _, err := w.store.SkipCancelledBroadcastDeliveries(ctx, now); err != nil {
 		return err
 	}
-	claimed, err := w.store.ClaimBroadcastDeliveries(ctx, w.cfg.BatchSize, now)
+	// The lease starts at the claim, not at the top of the tick: the work
+	// above (startApproved's audience scans above all) must not be charged
+	// against the time the batch has to send.
+	claimAt := w.now().UTC()
+	claimed, err := w.store.ClaimBroadcastDeliveries(ctx, w.cfg.BatchSize, claimAt)
 	if err != nil {
 		return err
 	}
 	for i, d := range claimed {
-		if err := w.deliver(ctx, d, now); err != nil {
+		if err := w.deliver(ctx, d, claimAt); err != nil {
 			// The rest of the batch was claimed but never attempted: hand it
 			// back now instead of leaving it for the stale sweep, which
 			// would close every row as outcome_unknown.
 			w.release(ctx, claimed[i+1:])
 			if errors.Is(err, errLeaseExhausted) {
-				break // not a failure: the next tick claims them afresh
+				// Not a failure -- the next tick claims them afresh -- but
+				// never silent: a batch cut short every tick is a stall.
+				slog.Warn("broadcast: batch cut short by the claim lease", "campaign_id", d.CampaignID, "remaining", len(claimed)-i)
+				break
 			}
 			return err
 		}
