@@ -297,15 +297,18 @@ func TestIDTokenClaimsNameFallback(t *testing.T) {
 	if got.FirstName != "Alice Liddell" || got.LastName != "" {
 		t.Errorf("name fallback: got %q/%q, want \"Alice Liddell\"/\"\"", got.FirstName, got.LastName)
 	}
-	if err := json.Unmarshal([]byte(`{"id":"42","name":"Alice Liddell","given_name":"Alice"}`), &claims); err != nil {
+	// Fresh value: decoding into the first one would keep its leftover
+	// fields and could mask a tag regression in a later assertion.
+	var split idTokenClaims
+	if err := json.Unmarshal([]byte(`{"id":"42","name":"Alice Liddell","given_name":"Alice"}`), &split); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	got, err = parseIdentity(claims)
+	got, err = parseIdentity(split)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.FirstName != "Alice" {
-		t.Errorf("given_name must win over name: got %q", got.FirstName)
+	if got.FirstName != "Alice" || got.Username != "" {
+		t.Errorf("given_name must win over name and no state may leak: got first=%q username=%q", got.FirstName, got.Username)
 	}
 }
 

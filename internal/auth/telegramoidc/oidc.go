@@ -229,6 +229,12 @@ func parseIdentity(c idTokenClaims) (*Identity, error) {
 		FirstName:  c.FirstName,
 		LastName:   c.LastName,
 	}
+	// Contingency only: Telegram sends the split claims (#48), so this arm
+	// runs for a provider that emits `name` alone. The composite lands in
+	// FirstName unsplit — and is persisted as users.telegram_first_name
+	// verbatim — because guessing a first/last boundary from whitespace is
+	// wrong for single-word and multi-part names, and the downstream display
+	// name (first + " " + last) is correct either way.
 	if id.FirstName == "" && id.LastName == "" {
 		id.FirstName = strings.TrimSpace(c.Name)
 	}
