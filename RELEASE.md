@@ -18,6 +18,24 @@ Releases are managed by [release-please](https://github.com/googleapis/release-p
 
 4. On merge of the release PR, release-please creates the tag and GitHub Release, then dispatches the centralized build + deploy pipeline in `mctl-gitops`.
 
+## Tool surface evidence
+
+`docs/tool-descriptors.json` is the canonical descriptor of every MCP tool the server registers (full surface: all tools, MCP Apps on). `TestToolDescriptorsSnapshotMatchesRegistry` holds it to the registry byte for byte, so any change to a tool's name, schema, annotations or text must regenerate it in the same pull request:
+
+```bash
+go test ./internal/mcp -run TestToolDescriptorsSnapshotMatchesRegistry -update-descriptors
+```
+
+While reviewing the release PR, diff the surface against the previous release. This is the deterministic source a product update may cite (issue-440): added, removed, schema-changed, annotation-changed (with each changed hint named) and text-changed tools, each kept separate. A rename shows up as one removal plus one addition.
+
+```bash
+go run ./cmd/tooldiff \
+  -old <(git show <previous-tag>:docs/tool-descriptors.json) -from <previous-tag> \
+  -new docs/tool-descriptors.json -to "$(git rev-parse HEAD)"
+```
+
+The command only prints JSON. It drafts, approves and publishes nothing. Releases before the snapshot existed have no file to diff against.
+
 ## Versioning
 
 - `MAJOR` — breaking changes to tool schemas or auth behavior
