@@ -124,12 +124,15 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT NOT NULL DEFAULT 'hosted'", "TEXT NOT NULL DEFAULT 'hosted'"); err != nil {
 		return err
 	}
-	// revoked_reason (issue-668): names why a session was revoked
-	// (disconnect, delete, idle_expiry, absolute_expiry — the same values
-	// already used as the SessionsRevokedTotal metric label — plus
-	// 'superseded', which SaveSession stamps on the rows a fresh login
-	// replaces and which has no metric label), surfaced by the daily
-	// digest's onboarding-stage suffix. Nullable, no default, no
+	// revoked_reason (issue-668): names why a session was revoked, surfaced
+	// by the daily digest's onboarding-stage suffix. Values written today:
+	// 'disconnect' and 'unauthorized' (RevokeActiveSession / RevokeSessionByID
+	// callers), 'superseded' (SaveSession, on the rows a fresh login
+	// replaces), 'idle_expiry' and 'absolute_expiry' (the two TTL sweeps).
+	// This set overlaps the SessionsRevokedTotal metric label but neither
+	// contains the other: 'delete' is a metric label with no row to carry it
+	// (HardDeleteAccount removes the row), and 'superseded' is a row value
+	// with no metric label. Nullable, no default, no
 	// backfill: a NULL means "revoked before this column existed, or by a
 	// path that names no reason", which is a true statement — the same
 	// convention call_path above already uses.

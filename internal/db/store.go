@@ -1366,8 +1366,12 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
+	// revoked_reason is stamped here too: the sweeps are the path that
+	// actually fires for an idle session (no request arrives to trigger the
+	// lazy CheckSessionValid revoke), so without it the digest's
+	// "session revoked (...)" clause could never say idle_expiry.
 	query := `UPDATE telegram_accounts
-		 SET revoked_at = $1
+		 SET revoked_at = $1, revoked_reason = 'idle_expiry'
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND last_used_at IS NOT NULL
@@ -1396,7 +1400,7 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
-		 SET revoked_at = $1
+		 SET revoked_at = $1, revoked_reason = 'absolute_expiry'
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND expires_at IS NOT NULL

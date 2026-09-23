@@ -1608,16 +1608,22 @@ problem. Both present, followed by the deferred failure line, means
 `enable: onboarding abandoned` (WARN, added by issue-668) is the same
 deferred goroutine's line for a flow that ran out its `CodeTTL` deadline
 while parked waiting for a code or password no one ever submitted — i.e. a
-user who walked away, not a Telegram-side stall. It carries `step` (the last
-onboarding stage reached: `phone_submitted`, `code_requested`,
-`code_submitted`, `password_requested`, or `password_submitted`) and
-`elapsed`, but no `err`. `enable: telegram login failed` (ERROR) now fires
-only for a login failure that is neither an abandoned flow nor a `/start`
-re-submission superseding a live one — the latter logs `enable: login flow
-superseded` (INFO) with the same `uid`/`step` and is not a failure at all. A
-drop in `enable: telegram login failed` volume after this change is
-expected, not a regression: it means abandoned/superseded flows stopped
-being counted as failures, which is the point.
+user who walked away, not a Telegram-side stall. It carries `step` and
+`elapsed`, but no `err`, and `step` is always one of the two prompt states,
+`code_requested` or `password_requested`: the arm is gated on them because
+the same deadline also covers the `SendCode` and sign-in RPCs. A deadline
+that fires at any other step (`phone_submitted`, `code_submitted`,
+`password_submitted`) is a Telegram- or DB-side stall and keeps the ERROR
+line with its `err` — so an `enable: telegram login failed` at
+`step=phone_submitted` with `context deadline exceeded` is a reliable
+"Telegram never answered SendCode" signal, not something to disambiguate.
+A `/start` re-submission superseding a live flow logs `enable: login flow
+superseded` (INFO) with the same `uid`/`step` and is not a failure at all,
+but only when the flow's own error is the cancellation; a flow that already
+held a real failure (FLOOD_WAIT, identity mismatch) when it was superseded
+still logs the ERROR line. A drop in `enable: telegram login failed` volume
+after this change is expected, not a regression: it means abandoned and
+superseded flows stopped being counted as failures, which is the point.
 
 ### Mitigation
 
