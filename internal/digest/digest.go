@@ -6,17 +6,14 @@ package digest
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/botapi"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 )
@@ -198,55 +195,11 @@ func reachabilitySuffix(r db.IdentityRow) string {
 
 // sendTelegramMessage posts one message via the Telegram Bot API. A non-2xx
 // response (e.g. an operator who never opened a chat with the bot) is returned
-// as an error for the caller to log.
+// as a typed *notify.APIError for the caller to log and classify. The HTTP
+// work, token redaction and error typing live in internal/botapi, shared with
+// the broadcast delivery worker.
 func sendTelegramMessage(botToken string, chatID int64, text string) error {
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-	form := url.Values{
-		"chat_id": {strconv.FormatInt(chatID, 10)},
-		"text":    {text},
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		// *url.Error.Error() embeds the request URL, which contains the bot
-		// token — unwrap to the underlying cause so the token cannot leak
-		// into logs.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return fmt.Errorf("telegram request failed: %w", urlErr.Err)
-		}
-		return fmt.Errorf("telegram request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		// A typed *notify.APIError, not a formatted string: ClassifyDelivery
-		// needs the status code and description separately, and the raw
-		// response body must never be persisted (see RecordBotReachability) —
-		// only Description travels past this point, and only into
-		// ClassifyDelivery, never into a stored column or a log line.
-		return &notify.APIError{StatusCode: resp.StatusCode, Description: parseTelegramDescription(body)}
-	}
-	return nil
-}
-
-// telegramErrorBody is the minimal shape of a Telegram Bot API error
-// response: {"ok":false,"error_code":403,"description":"Forbidden: bot was
-// blocked by the user"}. parseTelegramDescription falls back to the raw
-// (truncated, trimmed) body when it does not parse as JSON, so
-// ClassifyDelivery still has text to match against.
-func parseTelegramDescription(body []byte) string {
-	var payload struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(body, &payload); err == nil && payload.Description != "" {
-		return payload.Description
-	}
-	return strings.TrimSpace(string(body))
+	return (&botapi.Client{Token: botToken}).SendMessage(ctx, chatID, text)
 }

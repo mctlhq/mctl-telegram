@@ -71,7 +71,11 @@ func ResolvePrefState(category NotificationCategory, explicit map[string]string)
 // ListBroadcastRecipientFacts returns facts for every users row with a
 // Telegram login id, ordered by users.id so the preview sample and batch
 // order are deterministic. It performs three fixed queries regardless of
-// population size.
+// population size, and all three are full scans BY DESIGN: the recipient
+// limit must be checked against the true eligible count, which a LIMITed page
+// cannot give. Preview cost therefore grows with the user table; when that
+// matters, the growth path is a server-side filter for connected_via and the
+// activity window plus a paged fetch, as a deliberate later change.
 func (s *Store) ListBroadcastRecipientFacts(ctx context.Context, now time.Time) ([]BroadcastRecipientFacts, error) {
 	return s.broadcastFacts(ctx, now, 0)
 }
@@ -227,8 +231,11 @@ type BroadcastCampaign struct {
 	CancelledBy    *int64
 	CancelledAt    *time.Time
 	CompletedAt    *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// EndReason says why a campaign ended short of its audience (set by
+	// the delivery worker); empty otherwise.
+	EndReason string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // CreateBroadcastCampaign inserts a new campaign in the prepared state. The
@@ -256,7 +263,7 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 
 const campaignColumns = `id, state, category, selector_json, selector_hash, content, content_hash,
 	created_by, surface, recipient_limit, preview_counts, expires_at, approved_by, approved_at,
-	cancelled_by, cancelled_at, completed_at, created_at, updated_at`
+	cancelled_by, cancelled_at, completed_at, end_reason, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -271,7 +278,7 @@ func scanCampaign(r rowScanner) (*BroadcastCampaign, error) {
 	)
 	if err := r.Scan(&c.ID, &c.State, &c.Category, &c.SelectorJSON, &c.SelectorHash, &c.Content,
 		&c.ContentHash, &c.CreatedBy, &c.Surface, &c.RecipientLimit, &c.PreviewCounts, &c.ExpiresAt,
-		&approvedBy, &approvedAt, &cancelledBy, &cancelledAt, &completedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&approvedBy, &approvedAt, &cancelledBy, &cancelledAt, &completedAt, &c.EndReason, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if approvedBy.Valid {

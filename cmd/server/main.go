@@ -31,7 +31,9 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
 	"github.com/mctlhq/mctl-telegram/internal/bot"
+	"github.com/mctlhq/mctl-telegram/internal/botapi"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -864,6 +866,25 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		slog.Warn("TELEGRAM_LOGIN_BOT_TOKEN unset — the daily new-client digest will not be delivered")
 	}
 	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
+	// Broadcast delivery worker (issue-439). It only ever sends campaigns a
+	// human approved, so with no operators configured there is nothing it
+	// could send and it is not started at all. Single replica like the
+	// digest; its claim is nonetheless safe under concurrency (SKIP LOCKED
+	// on Postgres, state-guarded updates everywhere).
+	if len(cfg.BroadcastOperators) > 0 {
+		if cfg.TelegramLoginBotToken == "" {
+			slog.Warn("BROADCAST_OPERATORS set but TELEGRAM_LOGIN_BOT_TOKEN unset — broadcast delivery is disabled")
+		} else {
+			worker := broadcast.NewWorker(store, &botapi.Client{Token: cfg.TelegramLoginBotToken}, broadcast.WorkerConfig{
+				Policy:        broadcastPolicy(cfg),
+				RatePerSecond: cfg.BroadcastRatePerSec,
+				BatchSize:     cfg.BroadcastBatchSize,
+				MaxAttempts:   cfg.BroadcastMaxAttempts,
+			}, nil)
+			go worker.Run(ctx, broadcast.DefaultTickInterval)
+			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec)
+		}
+	}
 	// Inbound login-bot updates (issue-619). Transport only: updates are made
 	// durable exactly once and handed to a registry that currently has no
 	// handlers registered -- commands belong to the #438 split, delivery

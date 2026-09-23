@@ -119,6 +119,19 @@ type Config struct {
 	// other. An explicit opt-in makes claiming the token a decision rather
 	// than a side effect of deploying.
 	BotReceiverEnabled bool
+	// Safe client broadcasts (issue-439). BroadcastOperators is the
+	// allow-list of Telegram ids who may prepare, approve and cancel a
+	// broadcast; empty (the default) turns the whole workflow off,
+	// delivery worker included. The remaining knobs tune delivery through
+	// the login bot: messages per second across all campaigns, rows per
+	// worker pass, attempts per recipient on transient failures, the
+	// per-campaign audience cap and how long a preview stays approvable.
+	BroadcastOperators      []int64
+	BroadcastRatePerSec     float64
+	BroadcastBatchSize      int
+	BroadcastMaxAttempts    int
+	BroadcastRecipientLimit int
+	BroadcastApprovalTTL    time.Duration
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -305,6 +318,11 @@ func Load() (*Config, error) {
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 		BotReceiverEnabled:            envBool("BOT_RECEIVER_ENABLED", false),
+		BroadcastRatePerSec:           envFloat("BROADCAST_RATE_PER_SEC", 10),
+		BroadcastBatchSize:            envInt("BROADCAST_BATCH_SIZE", 20),
+		BroadcastMaxAttempts:          envInt("BROADCAST_MAX_ATTEMPTS", 5),
+		BroadcastRecipientLimit:       envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
+		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
@@ -384,6 +402,7 @@ func Load() (*Config, error) {
 	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TGLoginLookupAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_LOOKUP_ADMINS"))
+	c.BroadcastOperators = parseInt64CSV(os.Getenv("BROADCAST_OPERATORS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
 	if v := os.Getenv("TG_API_ID"); v != "" {
