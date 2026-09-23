@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/config"
 )
@@ -27,5 +29,40 @@ func TestBroadcastPolicyMirrorsLoginAllowlists(t *testing.T) {
 	}
 	if !p.AutoApproveClients {
 		t.Fatal("AutoApproveClients not carried over")
+	}
+}
+
+// The two shutdown-wait tests share the package-level broadcastWorker
+// WaitGroup, so neither may run in parallel.
+
+func TestWaitBroadcastWorkerReturnsWhenTheWorkerStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	broadcastWorker.Add(1)
+	go func() {
+		defer broadcastWorker.Done()
+		<-ctx.Done()
+		close(stopped)
+	}()
+	cancel()
+	start := time.Now()
+	waitBroadcastWorker(start.Add(5 * time.Second))
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("wait returned before the worker stopped")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("wait ran into the deadline although the worker had stopped")
+	}
+}
+
+func TestWaitBroadcastWorkerGivesUpAtTheDeadline(t *testing.T) {
+	broadcastWorker.Add(1)
+	defer broadcastWorker.Done()
+	start := time.Now()
+	waitBroadcastWorker(start.Add(50 * time.Millisecond))
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("waited %s past the deadline", d)
 	}
 }

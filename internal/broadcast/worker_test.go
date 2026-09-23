@@ -705,3 +705,38 @@ func TestWorker_ShutdownDoesNotAbortAnInFlightSend(t *testing.T) {
 		t.Fatalf("in-flight send at shutdown = %s/%s, want delivered", st, reason)
 	}
 }
+
+// slowAudience makes the start-time audience resolution take a while, as
+// its full scans do on a large user base.
+type slowAudience struct {
+	WorkerStore
+	spend func()
+}
+
+func (s *slowAudience) ListBroadcastRecipientFacts(ctx context.Context, now time.Time) ([]db.BroadcastRecipientFacts, error) {
+	s.spend()
+	return s.WorkerStore.ListBroadcastRecipientFacts(ctx, now)
+}
+
+// The lease a batch gets starts at the claim: time spent before it (here a
+// slow audience resolution) must not starve the batch it then claims.
+func TestWorker_LeaseStartsAtTheClaim(t *testing.T) {
+	w := newWorkerEnv(t)
+	u := w.user(123450001, db.TierClient)
+	p := w.approved("Hello.")
+	slow := &slowAudience{WorkerStore: w.store, spend: func() { w.now = w.now.Add(w.worker.cfg.Lease) }}
+	worker := NewWorker(slow, w.sender, w.worker.cfg, func() time.Time { return w.now })
+	if err := worker.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := w.delivery(p.CampaignID, u); st != db.DeliveryDelivered {
+		t.Fatalf("row = %s: the pre-claim work was charged against the lease", st)
+	}
+}
+
+func TestEffectiveBatchSizeMatchesTheWorker(t *testing.T) {
+	w := NewWorker(nil, nil, WorkerConfig{RatePerSecond: 1, BatchSize: 500}, nil)
+	if got := EffectiveBatchSize(1, 500); got != w.BatchSize() || got >= 500 {
+		t.Fatalf("EffectiveBatchSize = %d, worker uses %d", got, w.BatchSize())
+	}
+}

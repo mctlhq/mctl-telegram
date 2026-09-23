@@ -11,6 +11,8 @@ import "strings"
 //   - "admin:users:read": same, for TG_LOGIN_LOOKUP_ADMINS membership. It is
 //     the read-only subset of admin:users, accepted only by
 //     list_telegram_identities and get_user_audit_log.
+//   - "admin:broadcast": same, for full admins who are also in
+//     BROADCAST_OPERATORS (issue-439); gates the broadcast operator tools.
 //   - "mctl": never actually granted by ResolveScopes anywhere in this
 //     codebase; it leaked into the hand-built protected-resource JSON only,
 //     causing DCR clients (observed live: codex) to request a scope the

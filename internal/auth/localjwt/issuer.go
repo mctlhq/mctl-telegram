@@ -67,6 +67,16 @@ type Claims struct {
 	// field existed, since encoding/json silently skips an absent key on
 	// decode. Same recipe as OriginalIssuedAt/Jti above.
 	DeviceID string `json:"device_id,omitempty"`
+	// ClientID is the OAuth client the access token was issued to (RFC 9068
+	// client_id), stamped by oauth.Server.mintAccessToken on every access
+	// token it mints. Worker, bridge and agent credentials are minted
+	// elsewhere and never carry it. It exists so a handler can require a
+	// specific issuing client -- the broadcast approval page (issue-439)
+	// accepts only the self-connect client, whose tokens can only be
+	// obtained through the browser Telegram login, never by an MCP client
+	// or an assistant holding one. Absent on tokens minted before it
+	// existed, which therefore fail such a requirement closed.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -305,6 +315,7 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		Jti:              c.Jti,
 		OriginalIssuedAt: c.OriginalIssuedAt,
 		DeviceID:         c.DeviceID,
+		ClientID:         c.ClientID,
 	}, nil
 }
 
