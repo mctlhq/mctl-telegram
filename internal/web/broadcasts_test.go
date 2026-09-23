@@ -297,3 +297,27 @@ func TestBroadcastPage_OperatorCancels(t *testing.T) {
 		t.Fatalf("cancel = %d, state %s", code, e.state(p.CampaignID))
 	}
 }
+
+// A live campaign's Stop button must stay on the page however many newer
+// campaigns have finished since.
+func TestBroadcastPage_LiveCampaignNeverPushedOffByFinishedOnes(t *testing.T) {
+	e := newBroadcastEnv(t)
+	live := e.prepared("Live one.")
+	if w := e.approve(e.connectIdentity(), live, bcIssuer); w.Code != http.StatusSeeOther {
+		t.Fatalf("approve = %d", w.Code)
+	}
+	op := broadcast.Actor{UserID: e.opUID, TelegramID: bcOperator, Surface: "web"}
+	for i := 0; i < 25; i++ {
+		p := e.prepared("Finished one.")
+		if err := e.svc.Cancel(context.Background(), op, p.CampaignID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/broadcasts", nil)
+	req = req.WithContext(auth.With(req.Context(), e.connectIdentity()))
+	w := httptest.NewRecorder()
+	e.srv.HandleList(w, req)
+	if !strings.Contains(w.Body.String(), live.CampaignID) {
+		t.Fatal("the approved campaign (and its Cancel button) fell off the page")
+	}
+}

@@ -121,6 +121,7 @@ type broadcastRow struct {
 	CreatedAt    string
 	ExpiresAt    string
 	Report       *broadcast.Report
+	ReportErr    bool
 }
 
 type broadcastPageData struct {
@@ -141,13 +142,21 @@ func (b *BroadcastServer) HandleList(w http.ResponseWriter, r *http.Request) {
 		renderManageError(w, "Could not load broadcasts.")
 		return
 	}
-	recent, err := b.store.ListBroadcastCampaigns(ctx, 20,
-		db.CampaignApproved, db.CampaignSending, db.CampaignCompleted, db.CampaignCancelled, db.CampaignExpired)
+	// Live campaigns are listed on their own, so newer finished ones can
+	// never push a Cancel / Stop sending button off the page.
+	live, err := b.store.ListBroadcastCampaigns(ctx, db.MaxCampaignListLimit, db.CampaignApproved, db.CampaignSending)
+	if err != nil {
+		slog.Warn("broadcast web: list live", "err", err)
+		renderManageError(w, "Could not load broadcasts.")
+		return
+	}
+	finished, err := b.store.ListBroadcastCampaigns(ctx, 20, db.CampaignCompleted, db.CampaignCancelled, db.CampaignExpired)
 	if err != nil {
 		slog.Warn("broadcast web: list recent", "err", err)
 		renderManageError(w, "Could not load broadcasts.")
 		return
 	}
+	recent := append(live, finished...)
 	// Only the two known actions produce a notice; the query string is not
 	// echoed, so a crafted link cannot put arbitrary text on this page.
 	data := broadcastPageData{Notice: map[string]string{
@@ -163,11 +172,12 @@ func (b *BroadcastServer) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range recent {
 		rep, err := broadcast.BuildReport(ctx, b.store, c.ID)
+		row := toRow(c, rep)
 		if err != nil {
 			slog.Warn("broadcast web: report", "campaign_id", c.ID, "err", err)
-			rep = nil
+			row.Report, row.ReportErr = nil, true
 		}
-		data.Recent = append(data.Recent, toRow(c, rep))
+		data.Recent = append(data.Recent, row)
 	}
 	renderManage(w, http.StatusOK, broadcastTemplate, data)
 }
@@ -281,6 +291,7 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
     {{range .Recent}}
     <div class="bc">
       <div><strong>{{.State}}</strong>{{if .EndReason}} ({{.EndReason}}){{end}} · {{.Category}} · <code>{{.ID}}</code></div>
+      {{if .ReportErr}}<div class="meta">Delivery report unavailable right now.</div>{{end}}
       {{with .Report}}<div class="meta">queued {{.Queued}} · delivered {{.Delivered}} · pending {{.Pending}} · transient failures {{.TransientFailure}} · outcome unknown {{.OutcomeUnknown}} · skipped {{range $k, $v := .Skipped}}{{$k}}={{$v}} {{end}} · permanent {{range $k, $v := .PermanentFailure}}{{$k}}={{$v}} {{end}}</div>{{end}}
       {{if eq .State "approved"}}<form method="POST" action="/telegram/connect/broadcasts/cancel"><input type="hidden" name="campaign_id" value="{{.ID}}"><button type="submit" class="btn-secondary">Cancel</button></form>{{end}}
       {{if eq .State "sending"}}<form method="POST" action="/telegram/connect/broadcasts/cancel"><input type="hidden" name="campaign_id" value="{{.ID}}"><button type="submit" class="btn-secondary">Stop sending</button></form>{{end}}

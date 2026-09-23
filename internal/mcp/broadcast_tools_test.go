@@ -197,3 +197,30 @@ func TestBroadcastTools_ListAndGetReport(t *testing.T) {
 		t.Fatal("the report names a recipient")
 	}
 }
+
+// The scope proves operator membership at mint time only. An id removed
+// from BROADCAST_OPERATORS keeps a live token until it expires, and that
+// token must be refused by every tool, the read-only ones included.
+func TestBroadcastTools_RevokedOperatorIsRefusedEverywhere(t *testing.T) {
+	srv, _, opUID := newBroadcastToolServer(t, true)
+	revoked := &auth.Identity{UserID: opUID, TelegramID: 888000999, Scopes: []string{BroadcastScope}}
+	builds := map[string]func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
+		"prepare_broadcast": srv.toolPrepareBroadcast, "list_broadcasts": srv.toolListBroadcasts,
+		"get_broadcast": srv.toolGetBroadcast, "cancel_broadcast": srv.toolCancelBroadcast,
+	}
+	for name, build := range builds {
+		res := callBroadcastTool(t, build, revoked, map[string]any{"category": "maintenance", "text": "x", "campaign_id": "bc_x"})
+		if !res.IsError || !strings.Contains(resultText(res), "not a broadcast operator") {
+			t.Errorf("%s for a revoked operator: %s", name, resultText(res))
+		}
+	}
+}
+
+func TestBroadcastTools_ListRejectsUnknownState(t *testing.T) {
+	srv, _, opUID := newBroadcastToolServer(t, true)
+	id := &auth.Identity{UserID: opUID, TelegramID: bcOperatorTG, Scopes: []string{BroadcastScope}}
+	res := callBroadcastTool(t, srv.toolListBroadcasts, id, map[string]any{"state": "pending"})
+	if !res.IsError || !strings.Contains(resultText(res), "unknown state") {
+		t.Fatalf("unknown state = %s", resultText(res))
+	}
+}

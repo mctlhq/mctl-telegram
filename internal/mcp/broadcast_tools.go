@@ -40,7 +40,10 @@ func (s *Server) WithBroadcast(svc *broadcast.Service, approvalURL string) *Serv
 var errBroadcastDisabled = errors.New("broadcasts are not enabled on this server (no BROADCAST_OPERATORS configured)")
 
 // broadcastActor turns an identity that already passed the admin:broadcast
-// scope gate into a service actor, refusing when the workflow is disabled.
+// scope gate into a service actor, refusing when the workflow is disabled or
+// the caller is no longer an operator. The scope proves membership at mint
+// time only; removing an id from BROADCAST_OPERATORS must cut off a
+// still-live token for every tool, reads included.
 // The scope check itself stays in each handler as a literal requireScope
 // call: portal_allowlist_test derives every tool's upstream gate from exactly
 // that call, so hiding it in a helper would make the gate invisible to it.
@@ -48,11 +51,22 @@ func (s *Server) broadcastActor(id *auth.Identity) (broadcast.Actor, error) {
 	if s.Broadcast == nil || !s.Broadcast.Enabled() {
 		return broadcast.Actor{}, errBroadcastDisabled
 	}
+	if !s.Broadcast.IsOperator(id.TelegramID) {
+		return broadcast.Actor{}, broadcast.ErrNotBroadcastAdmin
+	}
 	surface := "mcp"
 	if id.ClientID != "" {
 		surface = "mcp:" + id.ClientID
 	}
 	return broadcast.Actor{UserID: id.UserID, TelegramID: id.TelegramID, Surface: surface}, nil
+}
+
+func validCampaignState(st string) bool {
+	switch st {
+	case db.CampaignPrepared, db.CampaignApproved, db.CampaignSending, db.CampaignCompleted, db.CampaignCancelled, db.CampaignExpired:
+		return true
+	}
+	return false
 }
 
 type prepareBroadcastResult struct {
@@ -213,6 +227,11 @@ Inputs:
 		}
 		var states []string
 		if st := stringArg(req.GetArguments(), "state", ""); st != "" {
+			if !validCampaignState(st) {
+				err := fmt.Errorf("unknown state %q: use one of prepared, approved, sending, completed, cancelled, expired", st)
+				s.audit(ctx, id, "list_broadcasts", "", err, startedAt)
+				return mcplib.NewToolResultError(err.Error()), nil
+			}
 			states = []string{st}
 		}
 		list, err := s.Store.ListBroadcastCampaigns(ctx, 50, states...)
