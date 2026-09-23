@@ -293,3 +293,53 @@ func TestRecipientFacts_ConnectedViaOnlyLiveGrants(t *testing.T) {
 		t.Fatalf("missing user: %+v %v", missing, err)
 	}
 }
+
+// TestPrepare_ConnectedViaUsesLiveGrantsEndToEnd drives the whole-population
+// facts query (not the single-user branch) through Prepare: only the user
+// with a live Claude grant is in the audience; an expired or revoked grant
+// for the same client name does not count.
+func TestPrepare_ConnectedViaUsesLiveGrantsEndToEnd(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	live := e.user(123456711, db.TierClient)
+	expired := e.user(123456722, db.TierClient)
+	revoked := e.user(123456733, db.TierClient)
+	e.user(123456744, db.TierClient) // no grant at all
+	ins := `INSERT INTO oauth_refresh_tokens(family_id, token_hash, user_id, client_id, telegram_id, client_name, expires_at, revoked_at)
+	        VALUES($1,$2,$3,'c',$4,'Claude',$5,$6)`
+	for i, r := range []struct {
+		uid     int64
+		tg      int64
+		expires time.Time
+		revoked any
+	}{
+		{live, 123456711, e.now.Add(time.Hour), nil},
+		{expired, 123456722, e.now.Add(-time.Hour), nil},
+		{revoked, 123456733, e.now.Add(time.Hour), e.now},
+	} {
+		if _, err := e.store.DB.ExecContext(ctx, ins, "fam"+string(rune('a'+i)), []byte{byte(i)}, r.uid, r.tg, r.expires, r.revoked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := e.prepare(Selector{Category: "maintenance", ConnectedVia: []string{"claude"}}, "Claude connector users only.")
+	if p.Counts.Eligible != 1 || len(p.Sample) != 1 || p.Sample[0].TelegramID != "12…11" {
+		t.Fatalf("counts %+v sample %+v, want exactly the live-grant user", p.Counts, p.Sample)
+	}
+	for r, n := range p.Counts.Skipped {
+		if n != 0 {
+			t.Errorf("skipped[%s] = %d: users outside connected_via must not be counted at all", r, n)
+		}
+	}
+}
+
+func TestCancel_RequiresKnownActor(t *testing.T) {
+	e := newEnv(t)
+	e.user(1001, db.TierClient)
+	p := e.prepare(Selector{Category: "maintenance"}, "x")
+	if err := e.store.CancelBroadcastCampaign(context.Background(), p.CampaignID, 0, e.now); err == nil {
+		t.Fatal("cancel with no actor must be refused")
+	}
+	if got := e.state(p.CampaignID); got != db.CampaignPrepared {
+		t.Fatalf("state = %s", got)
+	}
+}

@@ -394,6 +394,9 @@ func (s *Store) ApproveBroadcastCampaign(ctx context.Context, id string, approve
 // delivery worker has not yet sent is skipped once the state is cancelled;
 // what was already delivered stays delivered and is reported as such.
 func (s *Store) CancelBroadcastCampaign(ctx context.Context, id string, actor int64, now time.Time) error {
+	if actor <= 0 {
+		return errors.New("cancelling actor must be a known user")
+	}
 	now = now.UTC()
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE broadcast_campaigns
