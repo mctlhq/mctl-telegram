@@ -62,6 +62,13 @@ const (
 	// SkipUnreachable: a real delivery has conclusively shown the bot
 	// cannot reach this client (blocked / cannot_initiate).
 	SkipUnreachable SkipReason = "unreachable"
+	// SkipOutOfAudience: the selector's targeting filters (connected_via,
+	// active window) exclude the recipient. Never counted in a preview --
+	// such recipients are simply not the audience -- but the delivery worker
+	// re-runs Evaluate before each send, where a grant expiring after
+	// approval can move a queued recipient out of the audience, and that
+	// skip needs a name too.
+	SkipOutOfAudience SkipReason = "out_of_audience"
 )
 
 // SkipReasons lists every SkipReason in evaluation order, for reports that
@@ -238,8 +245,8 @@ func (p Policy) TierOf(telegramID int64, rawAccessTier string) string {
 // Decision is Evaluate's verdict for one recipient.
 type Decision struct {
 	// InAudience is false when the selector's targeting filters
-	// (connected_via, active window) exclude the recipient outright; such
-	// recipients are not counted anywhere.
+	// (connected_via, active window) exclude the recipient outright; Reason
+	// is then SkipOutOfAudience and Resolve does not count them.
 	InAudience bool
 	// Eligible is true when the recipient is in the audience and no skip
 	// reason applies.
@@ -252,12 +259,12 @@ type Decision struct {
 // unsubscribed and unreachable is always reported the same way.
 func Evaluate(sel Selector, f db.BroadcastRecipientFacts, p Policy, now time.Time) Decision {
 	if len(sel.ConnectedVia) > 0 && !anyConnected(sel.ConnectedVia, f.ConnectedVia) {
-		return Decision{}
+		return Decision{Reason: SkipOutOfAudience}
 	}
 	if sel.ActiveWithinDays > 0 {
 		cutoff := now.Add(-time.Duration(sel.ActiveWithinDays) * 24 * time.Hour)
 		if f.LastSeenAt == nil || f.LastSeenAt.Before(cutoff) {
-			return Decision{}
+			return Decision{Reason: SkipOutOfAudience}
 		}
 	}
 	if f.IdentityCapturedAt == nil {

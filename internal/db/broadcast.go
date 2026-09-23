@@ -232,12 +232,13 @@ type BroadcastCampaign struct {
 }
 
 // CreateBroadcastCampaign inserts a new campaign in the prepared state. The
-// caller computes the id, hashes, preview counts and expiry.
-func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign) error {
+// caller computes the id, hashes, preview counts and expiry; now stamps
+// created_at/updated_at from the same clock that computed the expiry.
+func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign, now time.Time) error {
 	if c.ID == "" || c.ContentHash == "" || c.SelectorHash == "" || c.CreatedBy <= 0 {
 		return errors.New("create broadcast campaign: id, hashes and creator are required")
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
 	_, err := s.DB.ExecContext(ctx,
 		`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
 		     content, content_hash, created_by, surface, recipient_limit, preview_counts,
@@ -309,11 +310,18 @@ func (s *Store) GetBroadcastCampaign(ctx context.Context, id string) (*Broadcast
 	return c, nil
 }
 
+// MaxCampaignListLimit caps one ListBroadcastCampaigns page.
+const MaxCampaignListLimit = 200
+
 // ListBroadcastCampaigns returns campaigns in the given states (all states
-// when none are given), newest first, at most limit rows.
+// when none are given), newest first, at most limit rows (50 when limit is
+// not positive, clamped to MaxCampaignListLimit).
 func (s *Store) ListBroadcastCampaigns(ctx context.Context, limit int, states ...string) ([]BroadcastCampaign, error) {
-	if limit <= 0 || limit > 200 {
+	switch {
+	case limit <= 0:
 		limit = 50
+	case limit > MaxCampaignListLimit:
+		limit = MaxCampaignListLimit
 	}
 	q := `SELECT ` + campaignColumns + ` FROM broadcast_campaigns`
 	args := []any{}
@@ -365,7 +373,13 @@ func (s *Store) ApproveBroadcastCampaign(ctx context.Context, id string, approve
 	if err != nil {
 		return fmt.Errorf("approve broadcast campaign: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		// The UPDATE may have committed; do not report a refusal for an
+		// approval that might have taken effect.
+		return fmt.Errorf("approve broadcast campaign: rows affected: %w", err)
+	}
+	if n == 1 {
 		return nil
 	}
 	c, err := s.GetBroadcastCampaign(ctx, id)
@@ -407,7 +421,11 @@ func (s *Store) CancelBroadcastCampaign(ctx context.Context, id string, actor in
 	if err != nil {
 		return fmt.Errorf("cancel broadcast campaign: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cancel broadcast campaign: rows affected: %w", err)
+	}
+	if n == 1 {
 		return nil
 	}
 	if _, err := s.GetBroadcastCampaign(ctx, id); err != nil {
@@ -426,6 +444,9 @@ func (s *Store) ExpireBroadcastCampaigns(ctx context.Context, now time.Time) (in
 	if err != nil {
 		return 0, fmt.Errorf("expire broadcast campaigns: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("expire broadcast campaigns: rows affected: %w", err)
+	}
 	return n, nil
 }

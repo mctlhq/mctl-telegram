@@ -87,6 +87,12 @@ var sensitiveKeys = map[string]struct{}{
 	// log only ids, categories, states and reason codes, never these.
 	"first_name": {},
 	"last_name":  {},
+	// Broadcast campaigns (issue-439). content is the operator-authored
+	// broadcast text; it is stored for delivery and must never reach a log
+	// line, whichever handler (worker, web approval, MCP tool) holds it.
+	"content":          {},
+	"campaign_content": {},
+	"broadcast_text":   {},
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

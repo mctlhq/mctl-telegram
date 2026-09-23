@@ -65,7 +65,7 @@ func (c Config) withDefaults() Config {
 // Store is the subset of *db.Store the service needs.
 type Store interface {
 	ListBroadcastRecipientFacts(ctx context.Context, now time.Time) ([]db.BroadcastRecipientFacts, error)
-	CreateBroadcastCampaign(ctx context.Context, c db.BroadcastCampaign) error
+	CreateBroadcastCampaign(ctx context.Context, c db.BroadcastCampaign, now time.Time) error
 	GetBroadcastCampaign(ctx context.Context, id string) (*db.BroadcastCampaign, error)
 	ApproveBroadcastCampaign(ctx context.Context, id string, approver int64, contentHash, selectorHash string, now time.Time) error
 	CancelBroadcastCampaign(ctx context.Context, id string, actor int64, now time.Time) error
@@ -223,7 +223,7 @@ func (s *Service) Prepare(ctx context.Context, actor Actor, req PrepareRequest) 
 		RecipientLimit: s.cfg.RecipientLimit,
 		PreviewCounts:  string(countsJSON),
 		ExpiresAt:      p.ExpiresAt,
-	}); err != nil {
+	}, now); err != nil {
 		return nil, err
 	}
 	return p, nil

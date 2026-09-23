@@ -37,6 +37,13 @@ func assertBroadcastCampaignStore(t *testing.T, s *Store, tgID int64) {
 	t.Cleanup(func() {
 		_, _ = s.DB.Exec(`DELETE FROM broadcast_campaigns WHERE id LIKE $1`, prefix+"%")
 	})
+	// Campaigns first: created_by references users(id) with no cascade, so
+	// rows left by a killed earlier run would otherwise block the user reset
+	// on every later run.
+	if _, err := s.DB.ExecContext(ctx,
+		`DELETE FROM broadcast_campaigns WHERE created_by IN (SELECT id FROM users WHERE telegram_login_id = $1)`, tgID); err != nil {
+		t.Fatalf("reset campaigns: %v", err)
+	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE telegram_login_id = $1`, tgID); err != nil {
 		t.Fatalf("reset user: %v", err)
 	}
@@ -82,7 +89,7 @@ func assertBroadcastCampaignStore(t *testing.T, s *Store, tgID int64) {
 			ID: id, Category: string(CategoryMaintenance), SelectorJSON: `{"category":"maintenance"}`,
 			SelectorHash: "sh", Content: "text", ContentHash: "ch", CreatedBy: uid, Surface: "test",
 			RecipientLimit: 10, PreviewCounts: `{"eligible":1}`, ExpiresAt: expires,
-		}); err != nil {
+		}, now); err != nil {
 			t.Fatalf("create %s: %v", suffix, err)
 		}
 		return id
@@ -129,18 +136,23 @@ func assertBroadcastCampaignStore(t *testing.T, s *Store, tgID int64) {
 	if err := s.CancelBroadcastCampaign(ctx, prefix+"missing", uid, now); !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("cancel missing: %v", err)
 	}
-	pending, err := s.ListBroadcastCampaigns(ctx, 200, CampaignApproved)
+	// The shared Postgres database may hold approved campaigns from other
+	// runs, so assert on the filter, not on finding a to be present in the
+	// first page: a is only guaranteed present when it is the newest.
+	pending, err := s.ListBroadcastCampaigns(ctx, 1000, CampaignApproved)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := false
+	if len(pending) > MaxCampaignListLimit {
+		t.Fatalf("limit not clamped: %d rows", len(pending))
+	}
 	for _, p := range pending {
 		if p.State != CampaignApproved {
 			t.Fatalf("state filter leaked %s", p.State)
 		}
-		seen = seen || p.ID == a
 	}
-	if !seen {
-		t.Fatal("approved campaign missing from filtered list")
+	newest, err := s.ListBroadcastCampaigns(ctx, 1, CampaignApproved)
+	if err != nil || len(newest) != 1 || newest[0].ID != a {
+		t.Fatalf("newest approved = %+v, %v; want %s", newest, err, a)
 	}
 }

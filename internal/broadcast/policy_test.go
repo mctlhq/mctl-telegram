@@ -204,9 +204,9 @@ func TestEvaluate(t *testing.T) {
 				f := facts(1)
 				f.ConnectedVia = []string{"Claude"}
 				return f
-			}, Decision{}},
+			}, Decision{Reason: SkipOutOfAudience}},
 		{"activity window excludes stale user", mustSel(t, Selector{Category: "maintenance", ActiveWithinDays: 7}),
-			func() db.BroadcastRecipientFacts { return facts(1) }, Decision{}},
+			func() db.BroadcastRecipientFacts { return facts(1) }, Decision{Reason: SkipOutOfAudience}},
 		{"activity window keeps recent user", mustSel(t, Selector{Category: "maintenance", ActiveWithinDays: 30}),
 			func() db.BroadcastRecipientFacts { return facts(1) }, eligible},
 	}
