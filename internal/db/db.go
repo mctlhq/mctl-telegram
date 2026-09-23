@@ -124,6 +124,17 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT NOT NULL DEFAULT 'hosted'", "TEXT NOT NULL DEFAULT 'hosted'"); err != nil {
 		return err
 	}
+	// revoked_reason (issue-668): names why a session was revoked
+	// (disconnect, delete, idle_expiry, absolute_expiry — the same values
+	// already used as the SessionsRevokedTotal metric label), surfaced by
+	// the daily digest's onboarding-stage suffix. Nullable, no default, no
+	// backfill: a NULL means "revoked before this column existed, or by a
+	// path that names no reason", which is a true statement — the same
+	// convention call_path above already uses.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "revoked_reason",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// call_path column on audit_logs (M4). Distinguishes relay-forwarded
 	// calls ('local') from server-side hosted calls (''). No DEFAULT: the
 	// column is left NULL for rows that pre-date M4 so they stay
@@ -560,7 +571,8 @@ func sqliteSchema() []string {
 			revoked_at DATETIME,
 			last_used_at DATETIME,
 			expires_at DATETIME,
-			mode TEXT NOT NULL DEFAULT 'hosted'
+			mode TEXT NOT NULL DEFAULT 'hosted',
+			revoked_reason TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
@@ -791,7 +803,8 @@ func pgSchema() []string {
 			revoked_at TIMESTAMPTZ,
 			last_used_at TIMESTAMPTZ,
 			expires_at TIMESTAMPTZ,
-			mode TEXT NOT NULL DEFAULT 'hosted'
+			mode TEXT NOT NULL DEFAULT 'hosted',
+			revoked_reason TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (

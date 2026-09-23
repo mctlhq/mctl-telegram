@@ -177,6 +177,10 @@ type metricsIface interface {
 	// ObserveLoginPhoneStep records the duration and outcome of the enable_access
 	// phone -> SendCode wait. result is "ok", "timeout", or "error".
 	ObserveLoginPhoneStep(result string, seconds float64)
+	// CountOAuthClientRegistration increments mctl_oauth_client_registrations_total
+	// for one /oauth/register outcome. Both outcome and reason are closed
+	// compile-time constants — see regReason in registration_audit.go.
+	CountOAuthClientRegistration(outcome, reason string)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the
@@ -2559,12 +2563,13 @@ func writeTokenError(w http.ResponseWriter, code, desc string, status int) {
 // ----- /oauth/register (RFC 7591) -----
 
 func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request) {
+	userAgent := r.Header.Get("User-Agent")
 	// /oauth/register is unauthenticated. Rate-limit first so a flood never
 	// reaches the JSON decoder or the registration map. The audit line
 	// records outcome only — no request body, no IP (the limiter already
 	// keys on it), no client secret (DCR here is public-client).
 	if !s.allowRegister(s.clientIP(r)) {
-		slog.Info("oauth: client_registration audit", "outcome", "rate_limited")
+		s.auditRegistration("rate_limited", regRateLimited, "", "", "", "")
 		w.Header().Set("Retry-After", "60")
 		writeTokenError(w, "temporarily_unavailable", "too many registration attempts", http.StatusTooManyRequests)
 		return
@@ -2582,6 +2587,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// into the typed struct for actual processing.
 	var raw map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		s.auditRegistration("rejected", regMalformedBody, "", userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2597,7 +2603,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		redirectURICount = len(uris)
 	}
 	slog.Info("oauth: client_registration request",
-		"user_agent", r.Header.Get("User-Agent"),
+		"user_agent", userAgent,
 		"keys", strings.Join(keys, ","),
 		"client_name", rawClientName,
 		"redirect_uri_count", redirectURICount,
@@ -2606,6 +2612,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// Re-encode + decode to extract the typed shape we actually use.
 	buf, err := json.Marshal(raw)
 	if err != nil {
+		s.auditRegistration("rejected", regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2614,19 +2621,24 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		RedirectURIs []string `json:"redirect_uris"`
 	}
 	if err := json.Unmarshal(buf, &req); err != nil {
+		s.auditRegistration("rejected", regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
 	if len(req.RedirectURIs) == 0 {
+		s.auditRegistration("rejected", regNoRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "redirect_uris is required", http.StatusBadRequest)
 		return
 	}
 	if s.cfg.MaxRedirectURIs > 0 && len(req.RedirectURIs) > s.cfg.MaxRedirectURIs {
+		s.auditRegistration("rejected", regTooManyRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", fmt.Sprintf("too many redirect_uris (max %d)", s.cfg.MaxRedirectURIs), http.StatusBadRequest)
 		return
 	}
 	for _, raw := range req.RedirectURIs {
 		if s.cfg.MaxRedirectURILength > 0 && len(raw) > s.cfg.MaxRedirectURILength {
+			scheme, host := redirectOrigin(raw)
+			s.auditRegistration("rejected", regRedirectTooLong, req.ClientName, userAgent, scheme, host)
 			writeTokenError(w, "invalid_redirect_uri", fmt.Sprintf("redirect_uri exceeds %d bytes", s.cfg.MaxRedirectURILength), http.StatusBadRequest)
 			return
 		}
@@ -2640,6 +2652,8 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// attacker URL.
 	for _, raw := range req.RedirectURIs {
 		if err := s.validateImplicitRedirectURI(raw); err != nil {
+			scheme, host := redirectOrigin(raw)
+			s.auditRegistration("rejected", classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
 			writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2658,6 +2672,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			CreatedAt:    now,
 		}); err != nil {
 			slog.Error("oauth: persist client_reg failed", "err", err)
+			s.auditRegistration("error", regPersistFailed, req.ClientName, userAgent, "", "")
 			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
 			return
 		}
@@ -2700,9 +2715,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
-	slog.Info("oauth: client_registration audit",
-		"outcome", "accepted",
-		"client_name", req.ClientName,
+	s.auditRegistration("accepted", regOK, req.ClientName, userAgent, "", "",
 		"redirect_uri_count", len(req.RedirectURIs),
 	)
 	w.Header().Set("Content-Type", "application/json")
@@ -2777,7 +2790,10 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 	if isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("redirect_uri host %q is not in the allowlist", host)
+	return withReason(
+		fmt.Errorf("redirect_uri host %q is not in the allowlist", host),
+		errRedirectHost,
+	)
 }
 
 // validateRedirectURIShape applies the host-independent redirect_uri rules
@@ -2791,7 +2807,7 @@ func validateRedirectURIShape(raw string) (*url.URL, error) {
 	// the host approved here need not be the host a browser dials. Reject
 	// before parsing so the two can never diverge.
 	if strings.ContainsRune(raw, '\\') {
-		return nil, errors.New("redirect_uri must not contain a backslash")
+		return nil, errRedirectBackslash
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -2803,11 +2819,14 @@ func validateRedirectURIShape(raw string) (*url.URL, error) {
 	// reading as evil.com to anything that splits on the first '@' or renders
 	// the URL to a user.
 	if u.User != nil {
-		return nil, errors.New("redirect_uri must not contain userinfo")
+		return nil, errRedirectUserinfo
 	}
 	if u.Scheme != "https" {
 		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
-			return nil, fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
+			return nil, withReason(
+				fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme),
+				errRedirectScheme,
+			)
 		}
 	}
 	return u, nil

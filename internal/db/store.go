@@ -673,7 +673,7 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	// the newest row (LIMIT 1) would let a newer hosted row wave the guard
 	// through while an older local row is revoked anyway.
 	revoked, err := tx.QueryContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'superseded'
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 RETURNING mode`,
 		userID,
@@ -878,9 +878,9 @@ func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int
 // TTL gate), "absolute_expiry" (CheckSessionValid absolute TTL gate).
 func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID,
+		userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
@@ -901,9 +901,9 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 		return false, nil
 	}
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3
 		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
-		sessionID, userID,
+		sessionID, userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session by id: %w", err)

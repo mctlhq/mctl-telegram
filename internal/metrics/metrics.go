@@ -61,6 +61,11 @@ type Registry struct {
 	// OAuthPendingAuthSize reflects the current count of pending OAuth
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
+	// OAuthClientRegistrationsTotal counts /oauth/register outcomes, labeled
+	// by outcome (accepted, rejected, rate_limited, error) and reason. Both
+	// label sets are closed compile-time constants from internal/oauth — a
+	// client-supplied string never reaches either label.
+	OAuthClientRegistrationsTotal *prometheus.CounterVec
 
 	// Inbound events outbox (internal/events). Published envelopes, failed
 	// publish attempts (the row stays pending), and the unpublished backlog.
@@ -320,6 +325,14 @@ func (r *Registry) SetOAuthPendingAuthSize(n float64) {
 	r.OAuthPendingAuthSize.Set(n)
 }
 
+// CountOAuthClientRegistration increments mctl_oauth_client_registrations_total
+// for one /oauth/register outcome. Satisfies oauth.metricsIface. Both outcome
+// and reason come from a closed compile-time set in internal/oauth — never
+// from a client-supplied string.
+func (r *Registry) CountOAuthClientRegistration(outcome, reason string) {
+	r.OAuthClientRegistrationsTotal.WithLabelValues(outcome, reason).Inc()
+}
+
 // ObserveLoginPhoneStep records the outcome and latency of one enable_access
 // phone step. Satisfies oauth.metricsIface. The duration histogram is observed
 // only for "ok" so timeouts/errors do not skew the latency distribution; the
@@ -388,6 +401,11 @@ func New() *Registry {
 		Name: "mctl_oauth_pending_auth_size",
 		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
 	})
+
+	r.OAuthClientRegistrationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_oauth_client_registrations_total",
+		Help: "Total /oauth/register outcomes, labeled by outcome (accepted, rejected, rate_limited, error) and reason. Both labels are closed compile-time constants from internal/oauth.",
+	}, []string{"outcome", "reason"})
 
 	r.LoginPhoneStepTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_phone_step_total",
@@ -534,6 +552,7 @@ func New() *Registry {
 		r.BotUpdatesTotal,
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
+		r.OAuthClientRegistrationsTotal,
 		r.LoginPhoneStepTotal,
 		r.LoginPhoneToCodeDuration,
 		r.SessionsBorrowTotal,

@@ -139,8 +139,26 @@ func (i *Issuer) Mint(c Claims, ttl time.Duration) (string, error) {
 }
 
 // Verify decodes and validates the signature, issuer, and expiry of a token.
-// Does not check audience — call CheckAudience separately when needed.
+// Does not check audience — call CheckAudience separately when needed. A
+// thin wrapper over VerifyWithClaims that nils the claims on any error, so
+// its signature and behavior are exactly what they were before that
+// function existed.
 func Verify(token string, secret []byte, expectedIssuer string) (*Claims, error) {
+	c, err := VerifyWithClaims(token, secret, expectedIssuer)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// VerifyWithClaims is the primitive behind Verify. It returns non-nil claims
+// ONLY for a failure strictly AFTER the json.Unmarshal below succeeds — i.e.
+// never for a malformed JWT, a bad signature, or an undecodable payload,
+// whose bytes are unauthenticated attacker-controlled input. A caller must
+// not attribute a log line or a metric to claims from a token that failed
+// at or before that unmarshal: see internal/auth.AttributedError's doc
+// comment for why.
+func VerifyWithClaims(token string, secret []byte, expectedIssuer string) (*Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, errors.New("malformed JWT")
@@ -160,15 +178,18 @@ func Verify(token string, secret []byte, expectedIssuer string) (*Claims, error)
 	if err := json.Unmarshal(payloadJSON, &c); err != nil {
 		return nil, errors.New("malformed JWT payload")
 	}
+	// Everything below this line is validating a payload whose signature
+	// already checked out, so the claims themselves are safe to hand back
+	// alongside the error.
 	if c.Issuer != expectedIssuer {
-		return nil, fmt.Errorf("unexpected JWT issuer: %q", c.Issuer)
+		return &c, fmt.Errorf("unexpected JWT issuer: %q", c.Issuer)
 	}
 	if time.Now().Unix() > c.ExpiresAt {
-		return nil, errors.New("JWT expired")
+		return &c, errors.New("JWT expired")
 	}
 	aud, err := audienceList(c.AudienceRaw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid audience claim: %w", err)
+		return &c, fmt.Errorf("invalid audience claim: %w", err)
 	}
 	c.Audience = aud
 	return &c, nil
@@ -266,12 +287,18 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if tok == "" {
 		return nil, nil
 	}
-	c, err := Verify(tok, p.Secret, p.ExpectedIssuer)
+	c, err := VerifyWithClaims(tok, p.Secret, p.ExpectedIssuer)
 	if err != nil {
+		if c != nil {
+			// A post-signature failure (issuer/expiry/audience-shape): the
+			// claims were vouched for by our own HMAC key and are safe to
+			// attribute to the "auth failed" log line.
+			return nil, &auth.AttributedError{Attr: attrFrom(c), Err: err}
+		}
 		return nil, err
 	}
 	if err := CheckAudience(c.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
-		return nil, err
+		return nil, &auth.AttributedError{Attr: attrFrom(c), Err: err}
 	}
 	// Revocation check: for every non-interactive credential (see
 	// needsRevocationCheck) — a jti-bearing token, a jti-less pre-jti one
@@ -290,10 +317,10 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if needsRevocationCheck(c) && p.RevocationCache != nil {
 		revoked, err := p.RevocationCache.IsRevoked(r.Context(), c.Jti, c.TelegramID, originAnchor(c))
 		if err != nil {
-			return nil, fmt.Errorf("check worker token revocation: %w", err)
+			return nil, &auth.AttributedError{Attr: attrFrom(c), Err: fmt.Errorf("check worker token revocation: %w", err)}
 		}
 		if revoked {
-			return nil, errors.New("worker token revoked")
+			return nil, &auth.AttributedError{Attr: attrFrom(c), Err: errors.New("worker token revoked")}
 		}
 	}
 	// Persist/find the user row by telegram id. EnsureUserByTelegramID is the
@@ -317,6 +344,19 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		DeviceID:         c.DeviceID,
 		ClientID:         c.ClientID,
 	}, nil
+}
+
+// attrFrom copies the four loggable identifying claims out of c into an
+// auth.TokenAttribution. Only ever called with claims returned by
+// VerifyWithClaims alongside a post-signature error — TelegramUsername and
+// Groups are deliberately not carried into a log-safe struct.
+func attrFrom(c *Claims) auth.TokenAttribution {
+	return auth.TokenAttribution{
+		Subject:   c.Subject,
+		ClientID:  c.ClientID,
+		Jti:       c.Jti,
+		ExpiresAt: c.ExpiresAt,
+	}
 }
 
 // workerAudience is the aud value internal/workertoken stamps on every token

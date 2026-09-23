@@ -28,14 +28,14 @@ func TestUntilNextHour(t *testing.T) {
 }
 
 func TestBuildDigestMessage(t *testing.T) {
-	if msg := buildDigestMessage(nil, 0, false); msg != "" {
+	if msg := buildDigestMessage(nil, 0, false, nil); msg != "" {
 		t.Errorf("no new clients must produce an empty message, got %q", msg)
 	}
 	rows := []db.IdentityRow{
 		{TelegramID: 111, Username: "alice", AccessTier: "client", HasSession: true},
 		{TelegramID: 222, DisplayName: "Bob B", AccessTier: "", HasSession: false}, // unset tier
 	}
-	msg := buildDigestMessage(rows, 5, false)
+	msg := buildDigestMessage(rows, 5, false, nil)
 	for _, want := range []string{"2 new client", "(5 total)", "alice", "id 111", "Bob B", "id 222"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("digest message missing %q; got:\n%s", want, msg)
@@ -43,7 +43,7 @@ func TestBuildDigestMessage(t *testing.T) {
 	}
 	// Under auto-approve an unset-tier user must show as an effective client,
 	// never "none" — that would imply the operator still has to act.
-	autoMsg := buildDigestMessage(rows, 5, true)
+	autoMsg := buildDigestMessage(rows, 5, true, nil)
 	if !strings.Contains(autoMsg, "client (auto)") {
 		t.Errorf("auto-approve digest should label unset users client (auto); got:\n%s", autoMsg)
 	}
@@ -52,20 +52,28 @@ func TestBuildDigestMessage(t *testing.T) {
 // TestBuildDigestMessage_ReachabilitySuffix is part of task 15: a row whose
 // reachability is recorded and not "unknown" gets a "bot: <state>" suffix;
 // a row with no recorded reachability (the common case today) gets none.
+// alice additionally carries a connect step, pinning that the onboarding-
+// stage suffix (issue-668) and the reachability suffix compose correctly.
 func TestBuildDigestMessage_ReachabilitySuffix(t *testing.T) {
 	rows := []db.IdentityRow{
 		{TelegramID: 111, Username: "alice", BotReachability: &db.BotReachability{State: "blocked"}},
 		{TelegramID: 222, Username: "bob"}, // no reachability recorded at all
 		{TelegramID: 333, Username: "carol", BotReachability: &db.BotReachability{State: "unknown"}},
 	}
-	msg := buildDigestMessage(rows, 3, false)
-	if !strings.Contains(msg, "alice — id 111 — tier=none — no session — bot: blocked") {
-		t.Errorf("blocked row missing its reachability suffix; got:\n%s", msg)
+	steps := map[int64]db.ConnectStep{
+		111: {Step: "phone_submitted", Status: "ok", At: time.Date(2026, 5, 16, 14, 28, 0, 0, time.UTC)},
 	}
-	if strings.Contains(msg, "bob — id 222 — tier=none — no session — bot:") {
+	msg := buildDigestMessage(rows, 3, false, steps)
+	if !strings.Contains(msg, "alice — id 111 — tier=none — no session — last: phone_submitted 14:28 — bot: blocked") {
+		t.Errorf("blocked row missing its onboarding-stage and reachability suffixes; got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "bob — id 222 — tier=none — no session — last: never started") {
+		t.Errorf("bob has no connect:* audit row and must render 'never started'; got:\n%s", msg)
+	}
+	if strings.Contains(msg, "bob — id 222 — tier=none — no session — last: never started — bot:") {
 		t.Errorf("a row with no recorded reachability must not get a bot: suffix; got:\n%s", msg)
 	}
-	if strings.Contains(msg, "carol — id 333 — tier=none — no session — bot:") {
+	if strings.Contains(msg, "carol — id 333 — tier=none — no session — last: never started — bot:") {
 		t.Errorf("state=unknown must not get a bot: suffix; got:\n%s", msg)
 	}
 }

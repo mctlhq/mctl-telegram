@@ -81,7 +81,25 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 			newRows = append(newRows, r)
 		}
 	}
-	msg := buildDigestMessage(newRows, len(all), autoApprove)
+	// One additional query, keyed by the Telegram ids of the rows actually
+	// being rendered (bounded by the 24h window newRows already is) — never
+	// the unbounded ListIdentities scan. A query error degrades to the
+	// pre-existing plain "no session" text (steps stays nil) rather than
+	// skipping the send.
+	var steps map[int64]db.ConnectStep
+	if len(newRows) > 0 {
+		tgIDs := make([]int64, len(newRows))
+		for i, r := range newRows {
+			tgIDs[i] = r.TelegramID
+		}
+		s, stepsErr := store.LastConnectStepFor(qctx, tgIDs)
+		if stepsErr != nil {
+			slog.Warn("digest: last connect step", "err", stepsErr)
+		} else {
+			steps = s
+		}
+	}
+	msg := buildDigestMessage(newRows, len(all), autoApprove, steps)
 	if msg == "" {
 		slog.Info("digest: no new clients in the last 24h, skipping send")
 		return
@@ -154,8 +172,11 @@ func effectiveTier(raw string, autoApprove bool) string {
 }
 
 // buildDigestMessage formats the digest text. It returns "" when there are no
-// new clients so the caller can skip an empty send.
-func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool) string {
+// new clients so the caller can skip an empty send. steps is the result of
+// LastConnectStepFor keyed by Telegram id; nil when that lookup failed or
+// was skipped, in which case every row falls back to the plain pre-existing
+// "no session" text.
+func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -169,14 +190,35 @@ func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool) stri
 		if name == "" {
 			name = "(no username)"
 		}
-		session := "no session"
-		if r.HasSession {
-			session = "session active"
-		}
 		fmt.Fprintf(&b, "• %s — id %d — tier=%s — %s%s\n",
-			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), session, reachabilitySuffix(r))
+			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), sessionSuffix(r, steps), reachabilitySuffix(r))
 	}
 	return b.String()
+}
+
+// sessionSuffix renders the session column. Rows WITH a session are
+// unchanged ("session active"). Rows without one gain the last connect
+// step, which is what separates "never started" from "stuck at the code
+// prompt" from "FLOOD_WAIT" — three stories that were identical in the
+// pre-issue-668 output. steps == nil (LastConnectStepFor failed or was
+// skipped) degrades to the plain pre-existing "no session" text so a
+// failing lookup never turns into a missing digest.
+func sessionSuffix(r db.IdentityRow, steps map[int64]db.ConnectStep) string {
+	if r.HasSession {
+		return "session active"
+	}
+	if steps == nil {
+		return "no session"
+	}
+	st, ok := steps[r.TelegramID]
+	if !ok {
+		return "no session — last: never started"
+	}
+	out := "no session — last: " + st.Step + " " + st.At.UTC().Format("15:04")
+	if st.RevokedReason != "" {
+		out += " — session revoked (" + st.RevokedReason + ")"
+	}
+	return out
 }
 
 // reachabilitySuffix returns " — bot: <state>" for a row whose reachability
