@@ -2259,7 +2259,7 @@ was banned or became unreachable after the preview is not queued. Right before
 | `skipped/cancelled` | the campaign was cancelled (or halted by the integrity check below) before this recipient's turn |
 | `failed/bot_blocked`, `…/user_deactivated`, `…/cannot_initiate_conversation`, `…/chat_not_found` | a permanent refusal; bot reachability is updated so the next campaign skips the client up front |
 | `failed/rejected_<status>` | another 4xx that says nothing about the client; not retried, reachability untouched |
-| `failed/retries_exhausted` | transient failures until `BROADCAST_MAX_ATTEMPTS` |
+| `failed/retries_exhausted` | transient failures (or database errors while checking this recipient) until `BROADCAST_MAX_ATTEMPTS` |
 | `failed/outcome_unknown` | the request may have reached Telegram (a timeout, or a crash mid-send). Deliberately **never re-sent**, so a recipient can get the message at most once |
 
 A campaign-level `end_reason` is set when the worker ended a campaign:
@@ -2270,7 +2270,15 @@ delivered, and its remaining queue is closed as `skipped/cancelled`).
 
 A claimed row that was never attempted -- a database error earlier in the
 batch, a shutdown while waiting for the rate limiter, or too little lease left
-to finish a send -- goes back to `pending` without counting an attempt.
+to finish a send -- goes back to `pending` without counting an attempt. A
+database error while checking a row itself counts as an attempt and backs the
+row off, so a row that keeps failing ends as `retries_exhausted` instead of
+holding its campaign open. `BROADCAST_BATCH_SIZE` is lowered automatically to
+what the rate can send inside the 2-minute claim lease.
+
+On shutdown the server waits up to 20 s for the worker: a send already under
+way is completed and recorded (never aborted), and the rest of the batch goes
+back to `pending`.
 
 ### Inspecting a campaign
 

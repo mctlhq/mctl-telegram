@@ -106,6 +106,11 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	if c.Lease < minLease {
 		c.Lease = minLease
 	}
+	// A batch must fit inside its lease at the configured rate, or its tail
+	// is claimed only to be handed back unsent every tick.
+	if fit := int(c.RatePerSecond * (c.Lease - sendTimeout).Seconds()); c.BatchSize > fit {
+		c.BatchSize = max(fit, 1)
+	}
 	return c
 }
 
@@ -116,8 +121,14 @@ type Worker struct {
 	store   WorkerStore
 	sender  Sender
 	cfg     WorkerConfig
-	limiter *rate.Limiter
+	limiter waiter
 	now     func() time.Time
+}
+
+// waiter is the rate limiter's one method the worker uses (*rate.Limiter);
+// an interface so a test can make the wait itself spend lease time.
+type waiter interface {
+	Wait(ctx context.Context) error
 }
 
 // NewWorker builds a Worker. now may be nil (time.Now).
@@ -183,6 +194,9 @@ func (w *Worker) Tick(ctx context.Context) error {
 			// back now instead of leaving it for the stale sweep, which
 			// would close every row as outcome_unknown.
 			w.release(ctx, claimed[i+1:])
+			if errors.Is(err, errLeaseExhausted) {
+				break // not a failure: the next tick claims them afresh
+			}
 			return err
 		}
 	}
@@ -268,6 +282,18 @@ func campaignSelector(c *db.BroadcastCampaign) (Selector, error) {
 	return sel.Normalize()
 }
 
+// errLeaseExhausted stops a batch whose claim lease has too little time left
+// for another send. Every row of a batch shares one claim time, so once one
+// row is past the threshold all the rest are too.
+var errLeaseExhausted = errors.New("broadcast: claim lease nearly exhausted")
+
+// leaseExhausted reports whether a send started now could still be in flight
+// when the lease runs out and the stale sweep closes the row as
+// outcome_unknown.
+func (w *Worker) leaseExhausted(claimedAt time.Time) bool {
+	return w.now().Sub(claimedAt) > w.cfg.Lease-sendTimeout
+}
+
 // release hands claimed-but-unattempted rows back to pending without
 // counting the attempt. Best effort: a row it cannot release stays in
 // sending and is closed by the stale sweep, which never re-sends.
@@ -288,16 +314,33 @@ func (w *Worker) release(ctx context.Context, rows []db.BroadcastDelivery) {
 // after it leaves the row in sending for the stale sweep, because whether
 // the message was delivered is then unknown.
 func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt time.Time) error {
+	// A skip is a decision already taken; record it even while shutting
+	// down, or the row would drift to outcome_unknown.
 	finish := func(status, reason string) error {
-		return w.store.FinishBroadcastDelivery(ctx, d.CampaignID, d.UserID, status, reason, w.now())
+		return w.store.FinishBroadcastDelivery(context.WithoutCancel(ctx), d.CampaignID, d.UserID, status, reason, w.now())
 	}
+	// preSend hands the row back unsent and uncounted: for a shutdown or an
+	// exhausted lease, which say nothing about this row.
 	preSend := func(err error) error {
 		w.release(ctx, []db.BroadcastDelivery{d})
 		return err
 	}
+	// storeFault is for a store error while checking THIS row. The claim's
+	// attempt stays counted and the row backs off, so a row that fails
+	// persistently ends as retries_exhausted instead of heading the queue
+	// and stalling its campaign forever.
+	storeFault := func(err error) error {
+		if rerr := w.retry(context.WithoutCancel(ctx), d, 0, w.now()); rerr != nil {
+			slog.Warn("broadcast: back off delivery after store error", "campaign_id", d.CampaignID, "err", rerr)
+		}
+		return err
+	}
 	c, err := w.store.GetBroadcastCampaign(ctx, d.CampaignID)
 	if err != nil {
-		return preSend(err)
+		if ctx.Err() != nil {
+			return preSend(err)
+		}
+		return storeFault(err)
 	}
 	if c.State != db.CampaignSending {
 		return finish(db.DeliverySkipped, db.ReasonCancelled)
@@ -308,14 +351,17 @@ func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt 
 		// go out: halt it, and SkipCancelledBroadcastDeliveries closes the
 		// rest of its queue on the next tick.
 		slog.Error("broadcast: campaign failed integrity check mid-send; halted", "campaign_id", c.ID)
-		if err := w.store.HaltBroadcastCampaign(ctx, c.ID, EndIntegrity, w.now()); err != nil && !errors.Is(err, db.ErrCampaignNotSending) {
-			return preSend(err)
+		if err := w.store.HaltBroadcastCampaign(context.WithoutCancel(ctx), c.ID, EndIntegrity, w.now()); err != nil && !errors.Is(err, db.ErrCampaignNotSending) {
+			return storeFault(err)
 		}
 		return finish(db.DeliverySkipped, db.ReasonCancelled)
 	}
 	f, err := w.store.GetBroadcastRecipientFacts(ctx, d.UserID, w.now())
 	if err != nil {
-		return preSend(err)
+		if ctx.Err() != nil {
+			return preSend(err)
+		}
+		return storeFault(err)
 	}
 	if f == nil {
 		return finish(db.DeliverySkipped, string(SkipNoAccount))
@@ -323,18 +369,24 @@ func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt 
 	if dec := Evaluate(sel, *f, w.cfg.Policy, w.now()); !dec.Eligible {
 		return finish(db.DeliverySkipped, string(dec.Reason))
 	}
+	// The lease is checked on both sides of the limiter wait: before it, so
+	// an exhausted batch does not queue for slots it cannot use, and after
+	// it, because the wait itself spends lease time. Either way the row goes
+	// back unsent and the batch stops; the next claim starts a fresh lease.
+	if w.leaseExhausted(claimedAt) {
+		return preSend(errLeaseExhausted)
+	}
 	if err := w.limiter.Wait(ctx); err != nil {
 		// Shutting down before the send: nothing went out.
 		return preSend(err)
 	}
-	if w.now().Sub(claimedAt) > w.cfg.Lease-sendTimeout {
-		// A send started now could still be in flight when the lease runs
-		// out and the stale sweep closes the row as outcome_unknown. Hand it
-		// back unsent; the next claim starts a fresh lease.
-		w.release(ctx, []db.BroadcastDelivery{d})
-		return nil
+	if w.leaseExhausted(claimedAt) {
+		return preSend(errLeaseExhausted)
 	}
-	sctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	// Once started, a send is not cancelled by shutdown: an aborted request
+	// may still have been delivered, and would be recorded as
+	// outcome_unknown. sendTimeout bounds it; main waits for it.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 	sendErr := w.sender.SendMessage(sctx, f.TelegramID, c.Content)
 	cancel()
 	return w.record(ctx, d, sendErr)

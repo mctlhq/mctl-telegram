@@ -737,6 +737,7 @@ func sqliteSchema() []string {
 			cancelled_by INTEGER REFERENCES users(id),
 			cancelled_at DATETIME,
 			completed_at DATETIME,
+			end_reason TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -974,6 +975,7 @@ func pgSchema() []string {
 			cancelled_by BIGINT REFERENCES users(id),
 			cancelled_at TIMESTAMPTZ,
 			completed_at TIMESTAMPTZ,
+			end_reason TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

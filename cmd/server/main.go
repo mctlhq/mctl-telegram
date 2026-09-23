@@ -623,7 +623,9 @@ func main() {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	workerDeadline := time.Now().Add(broadcastShutdownGrace)
 	_ = srv.Shutdown(shutCtx)
+	waitBroadcastWorker(workerDeadline)
 }
 
 // metricsHandler wraps the Prometheus exposition handler with an optional CIDR
@@ -868,9 +870,13 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
 	// Broadcast delivery worker (issue-439). It only ever sends campaigns a
 	// human approved, so with no operators configured there is nothing it
-	// could send and it is not started at all. Single replica like the
-	// digest; its claim is nonetheless safe under concurrency (SKIP LOCKED
-	// on Postgres, state-guarded updates everywhere).
+	// could send and it is not started at all. The delivery QUEUE is safe
+	// with several replicas (SKIP LOCKED on Postgres, state-guarded updates
+	// everywhere); the RATE is not -- the limiter is per process, so N
+	// replicas send at N x BROADCAST_RATE_PER_SEC. main waits for the worker
+	// on shutdown (waitBroadcastWorker) so an in-flight send is recorded and
+	// the rest of its batch is handed back rather than left to the stale
+	// sweep.
 	if len(cfg.BroadcastOperators) > 0 {
 		if cfg.TelegramLoginBotToken == "" {
 			slog.Warn("BROADCAST_OPERATORS set but TELEGRAM_LOGIN_BOT_TOKEN unset — broadcast delivery is disabled")
@@ -881,7 +887,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 				BatchSize:     cfg.BroadcastBatchSize,
 				MaxAttempts:   cfg.BroadcastMaxAttempts,
 			}, nil)
-			go worker.Run(ctx, broadcast.DefaultTickInterval)
+			startBroadcastWorker(ctx, worker)
 			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec)
 		}
 	}

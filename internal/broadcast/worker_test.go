@@ -487,6 +487,9 @@ func (f *failingFacts) GetBroadcastRecipientFacts(ctx context.Context, userID in
 }
 
 func TestWorker_StoreErrorMidBatchReleasesUnattemptedRows(t *testing.T) {
+	// A store error while checking one row: that row keeps its counted
+	// attempt and backs off; the rows behind it were never attempted and go
+	// back uncounted.
 	w := newWorkerEnv(t)
 	var users []int64
 	for i := int64(1); i <= 3; i++ {
@@ -501,10 +504,11 @@ func TestWorker_StoreErrorMidBatchReleasesUnattemptedRows(t *testing.T) {
 	if st, _, _ := w.delivery(p.CampaignID, users[0]); st != db.DeliveryDelivered {
 		t.Fatalf("first recipient = %s", st)
 	}
-	for _, u := range users[1:] {
-		if st, _, n := w.delivery(p.CampaignID, u); st != db.DeliveryPending || n != 0 {
-			t.Fatalf("user %d = %s attempts=%d, want pending/0 (released, not burned)", u, st, n)
-		}
+	if st, _, n := w.delivery(p.CampaignID, users[1]); st != db.DeliveryPending || n != 1 {
+		t.Fatalf("failing row = %s attempts=%d, want pending/1 (backed off)", st, n)
+	}
+	if st, _, n := w.delivery(p.CampaignID, users[2]); st != db.DeliveryPending || n != 0 {
+		t.Fatalf("unattempted row = %s attempts=%d, want pending/0 (released, not burned)", st, n)
 	}
 	// A later lease expiry must not turn the released rows into unknowns.
 	w.now = w.now.Add(10 * time.Minute)
@@ -520,7 +524,7 @@ func TestWorker_StoreErrorMidBatchReleasesUnattemptedRows(t *testing.T) {
 }
 
 func TestWorker_ShutdownMidBatchReleasesWithoutBurningAttempts(t *testing.T) {
-	w := newWorkerEnv(t, func(c *WorkerConfig) { c.RatePerSecond = 0.001 })
+	w := newWorkerEnv(t, func(c *WorkerConfig) { c.RatePerSecond = 0.1 })
 	var users []int64
 	for i := int64(1); i <= 3; i++ {
 		users = append(users, w.user(123450000+i, db.TierClient))
@@ -577,23 +581,127 @@ func TestWorker_IntegrityMismatchMidSendHaltsCampaign(t *testing.T) {
 func TestWorker_NoSendStartsTooCloseToLeaseExpiry(t *testing.T) {
 	w := newWorkerEnv(t)
 	var users []int64
-	for i := int64(1); i <= 2; i++ {
+	for i := int64(1); i <= 3; i++ {
 		users = append(users, w.user(123450000+i, db.TierClient))
 	}
 	p := w.approved("Hello.")
 	// The first send is slow: by the time it returns, the rest of the batch
 	// could not finish inside the lease.
 	w.sender.before = func(int64) { w.now = w.now.Add(w.worker.cfg.Lease) }
+	waits := 0
+	w.worker.limiter = slowWait(func() { waits++ })
 	w.tick()
 	if len(w.sender.sent) != 1 {
 		t.Fatalf("sent %d, want 1", len(w.sender.sent))
 	}
-	if st, _, n := w.delivery(p.CampaignID, users[1]); st != db.DeliveryPending || n != 0 {
-		t.Fatalf("second = %s attempts=%d, want released", st, n)
+	// The exhausted batch stops before queueing on the limiter again.
+	if waits != 1 {
+		t.Fatalf("limiter waited %d times, want 1", waits)
+	}
+	for _, u := range users[1:] {
+		if st, _, n := w.delivery(p.CampaignID, u); st != db.DeliveryPending || n != 0 {
+			t.Fatalf("user %d = %s attempts=%d, want released", u, st, n)
+		}
 	}
 	w.sender.before = nil
 	w.tick()
-	if st, _, _ := w.delivery(p.CampaignID, users[1]); st != db.DeliveryDelivered || len(w.sender.sent) != 2 {
-		t.Fatalf("second = %s sent=%d", st, len(w.sender.sent))
+	for _, u := range users {
+		if st, _, _ := w.delivery(p.CampaignID, u); st != db.DeliveryDelivered {
+			t.Fatalf("user %d = %s after the next tick", u, st)
+		}
+	}
+	if len(w.sender.sent) != 3 {
+		t.Fatalf("sent %d, want 3", len(w.sender.sent))
+	}
+}
+
+// slowWait stands in for a limiter wait that takes a while.
+type slowWait func()
+
+func (f slowWait) Wait(context.Context) error { f(); return nil }
+
+// The lease is re-checked AFTER the limiter wait: the wait itself can use up
+// the lease, and a send started then could be swept as outcome_unknown.
+func TestWorker_LeaseSpentInRateLimiterWaitStopsTheSend(t *testing.T) {
+	w := newWorkerEnv(t)
+	u := w.user(123450001, db.TierClient)
+	p := w.approved("Hello.")
+	w.worker.limiter = slowWait(func() { w.now = w.now.Add(w.worker.cfg.Lease) })
+	w.tick()
+	if len(w.sender.sent) != 0 {
+		t.Fatal("sent after the lease ran out during the limiter wait")
+	}
+	if st, _, n := w.delivery(p.CampaignID, u); st != db.DeliveryPending || n != 0 {
+		t.Fatalf("row = %s attempts=%d, want released", st, n)
+	}
+}
+
+// A row whose store lookup fails every time must not hold its campaign open:
+// it backs off (the rest of the queue drains past it) and ends as
+// retries_exhausted once MaxAttempts is spent.
+func TestWorker_PersistentStoreFaultDoesNotStallTheCampaign(t *testing.T) {
+	w := newWorkerEnv(t)
+	var users []int64
+	for i := int64(1); i <= 3; i++ {
+		users = append(users, w.user(123450000+i, db.TierClient))
+	}
+	p := w.approved("Hello.")
+	broken := NewWorker(&failingFacts{WorkerStore: w.store, failUser: users[0]}, w.sender, w.worker.cfg, func() time.Time { return w.now })
+	for i := 0; i < 10 && w.state(p.CampaignID) != db.CampaignCompleted; i++ {
+		_ = broken.Tick(context.Background())
+		w.now = w.now.Add(w.worker.cfg.MaxBackoff)
+	}
+	if got := w.state(p.CampaignID); got != db.CampaignCompleted {
+		t.Fatalf("campaign = %s, stalled behind the failing row", got)
+	}
+	if st, reason, _ := w.delivery(p.CampaignID, users[0]); st != db.DeliveryFailed || reason != ReasonRetriesExhausted {
+		t.Fatalf("failing row = %s/%s", st, reason)
+	}
+	for _, u := range users[1:] {
+		if st, _, _ := w.delivery(p.CampaignID, u); st != db.DeliveryDelivered {
+			t.Fatalf("user %d = %s", u, st)
+		}
+	}
+}
+
+func TestWorkerConfig_BatchFitsTheLease(t *testing.T) {
+	c := WorkerConfig{RatePerSecond: 1, BatchSize: 200, Lease: 2 * time.Minute}.withDefaults()
+	if want := int((2*time.Minute - sendTimeout).Seconds()); c.BatchSize != want {
+		t.Fatalf("BatchSize = %d, want %d", c.BatchSize, want)
+	}
+	if c := (WorkerConfig{RatePerSecond: 0.001, BatchSize: 5}).withDefaults(); c.BatchSize != 1 {
+		t.Fatalf("BatchSize = %d, want at least 1", c.BatchSize)
+	}
+	if c := (WorkerConfig{RatePerSecond: 10, BatchSize: 20}).withDefaults(); c.BatchSize != 20 {
+		t.Fatalf("a batch that fits was changed to %d", c.BatchSize)
+	}
+}
+
+// cancellingSender is a send during which shutdown arrives: it cancels the
+// worker's context and then reports whatever its own context says.
+type cancellingSender struct {
+	cancel context.CancelFunc
+	sent   int
+}
+
+func (c *cancellingSender) SendMessage(ctx context.Context, _ int64, _ string) error {
+	c.cancel()
+	c.sent++
+	return ctx.Err()
+}
+
+// A send already under way is not aborted by shutdown: an aborted request
+// may still have been delivered and could only be recorded as unknown.
+func TestWorker_ShutdownDoesNotAbortAnInFlightSend(t *testing.T) {
+	w := newWorkerEnv(t)
+	u := w.user(123450001, db.TierClient)
+	p := w.approved("Hello.")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &cancellingSender{cancel: cancel}
+	worker := NewWorker(w.store, s, w.worker.cfg, func() time.Time { return w.now })
+	_ = worker.Tick(ctx)
+	if st, reason, _ := w.delivery(p.CampaignID, u); st != db.DeliveryDelivered {
+		t.Fatalf("in-flight send at shutdown = %s/%s, want delivered", st, reason)
 	}
 }
