@@ -701,6 +701,37 @@ func sqliteSchema() []string {
 			outcome TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
+		// Broadcast campaigns (issue-439). One row per prepared broadcast;
+		// the row is also the approval record. content_hash and
+		// selector_hash are what a human approval is bound to -- see
+		// Store.ApproveBroadcastCampaign, whose single conditional UPDATE
+		// makes approval single-use. content is the exact normalized text
+		// that will be delivered (operator copy, never private chat
+		// content). preview_counts is the JSON eligible/skipped summary
+		// shown at prepare time, kept so the approver sees what was
+		// previewed rather than a number recomputed later.
+		`CREATE TABLE IF NOT EXISTS broadcast_campaigns (
+			id TEXT PRIMARY KEY,
+			state TEXT NOT NULL,
+			category TEXT NOT NULL,
+			selector_json TEXT NOT NULL,
+			selector_hash TEXT NOT NULL,
+			content TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			created_by INTEGER NOT NULL REFERENCES users(id),
+			surface TEXT NOT NULL DEFAULT '',
+			recipient_limit INTEGER NOT NULL,
+			preview_counts TEXT NOT NULL DEFAULT '{}',
+			expires_at DATETIME NOT NULL,
+			approved_by INTEGER REFERENCES users(id),
+			approved_at DATETIME,
+			cancelled_by INTEGER REFERENCES users(id),
+			cancelled_at DATETIME,
+			completed_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_state ON broadcast_campaigns(state, created_at)`,
 	}
 }
 
@@ -889,5 +920,29 @@ func pgSchema() []string {
 			outcome TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
+		// Broadcast campaigns (issue-439) -- see the sqliteSchema comment on
+		// this table for why the row is also the approval record.
+		`CREATE TABLE IF NOT EXISTS broadcast_campaigns (
+			id TEXT PRIMARY KEY,
+			state TEXT NOT NULL,
+			category TEXT NOT NULL,
+			selector_json TEXT NOT NULL,
+			selector_hash TEXT NOT NULL,
+			content TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			created_by BIGINT NOT NULL REFERENCES users(id),
+			surface TEXT NOT NULL DEFAULT '',
+			recipient_limit INTEGER NOT NULL,
+			preview_counts TEXT NOT NULL DEFAULT '{}',
+			expires_at TIMESTAMPTZ NOT NULL,
+			approved_by BIGINT REFERENCES users(id),
+			approved_at TIMESTAMPTZ,
+			cancelled_by BIGINT REFERENCES users(id),
+			cancelled_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_state ON broadcast_campaigns(state, created_at)`,
 	}
 }
