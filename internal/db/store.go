@@ -673,7 +673,7 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 	// the newest row (LIMIT 1) would let a newer hosted row wave the guard
 	// through while an older local row is revoked anyway.
 	revoked, err := tx.QueryContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'superseded'
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 RETURNING mode`,
 		userID,
@@ -878,9 +878,9 @@ func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int
 // TTL gate), "absolute_expiry" (CheckSessionValid absolute TTL gate).
 func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID,
+		userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
@@ -901,9 +901,9 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 		return false, nil
 	}
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3
 		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
-		sessionID, userID,
+		sessionID, userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session by id: %w", err)
@@ -1366,8 +1366,12 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	idleCutoff := now.Add(-idleSessionTTL)
+	// revoked_reason is stamped here too: the sweeps are the path that
+	// actually fires for an idle session (no request arrives to trigger the
+	// lazy CheckSessionValid revoke), so without it the digest's
+	// "session revoked (...)" clause could never say idle_expiry.
 	query := `UPDATE telegram_accounts
-		 SET revoked_at = $1
+		 SET revoked_at = $1, revoked_reason = 'idle_expiry'
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND last_used_at IS NOT NULL
@@ -1396,7 +1400,7 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
-		 SET revoked_at = $1
+		 SET revoked_at = $1, revoked_reason = 'absolute_expiry'
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND expires_at IS NOT NULL

@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -93,9 +96,40 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, err := p.Authenticate(r)
 			if err != nil {
-				slog.Warn("auth failed", "err", err)
+				// Computed once and shared with the counter below, so the log
+				// line and the metric can never disagree about which bucket
+				// this failure fell into.
+				reason := classifyAuthError(err.Error())
+				ec := edgectx.FromRequest(r)
+				attrs := []any{
+					"err", err,
+					"provider", providerLabel,
+					"reason", reason,
+					"edge_request_id", ec.RequestID,
+					"edge_route", ec.Route,
+				}
+				if rc := chi.RouteContext(r.Context()); rc != nil {
+					attrs = append(attrs, "route", rc.RoutePattern())
+				}
+				// Claims are attached only for a post-signature failure (see
+				// AttributedError's doc comment) — never for a malformed or
+				// signature-failed token, whose payload is unauthenticated
+				// attacker-controlled input.
+				if a, ok := AttributionOf(err); ok {
+					attrs = append(attrs, "sub", a.Subject)
+					if a.ClientID != "" {
+						attrs = append(attrs, "client_id", a.ClientID)
+					}
+					if a.Jti != "" {
+						attrs = append(attrs, "jti", a.Jti)
+					}
+					if a.ExpiresAt != 0 {
+						attrs = append(attrs, "exp", a.ExpiresAt)
+					}
+				}
+				slog.Warn("auth failed", attrs...)
 				if m != nil {
-					m.AuthFailuresTotal.WithLabelValues(classifyAuthError(err.Error()), providerLabel).Inc()
+					m.AuthFailuresTotal.WithLabelValues(reason, providerLabel).Inc()
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path, bearerErrorCode(err)))
 				writeUnauthorized(w, r, http.StatusUnauthorized, MsgInvalidCredentials, html)

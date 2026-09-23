@@ -23,6 +23,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlTelegramNearCapacity — session pool near capacity](#mctltelegramnearcapacity)
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
+- [Rejected dynamic client registrations (issue-668)](#oauthclientregistrations)
 - [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
 - [Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS](#lookup-admin-tier-and-tg_login_lookup_admins)
 - [JwtFailures — authentication failure spike](#jwtfailures)
@@ -1019,6 +1020,56 @@ Open a postmortem if:
 
 ---
 
+<a id="oauthclientregistrations"></a>
+## Rejected dynamic client registrations (issue-668)
+
+No dedicated alert ships with this yet — see design.md's Out-of-scope note;
+a baseline is needed before choosing thresholds. This section documents what
+is available today.
+
+Every `POST /oauth/register` call now reaches a terminal outcome logged as a
+single `oauth: client_registration audit` line and counted in
+`mctl_oauth_client_registrations_total{outcome,reason}`:
+
+- `outcome` is one of `accepted`, `rejected`, `rate_limited`, `error`.
+- `reason` is a closed, compile-time token set: `ok`, `rate_limited`,
+  `malformed_body`, `no_redirect_uris`, `too_many_redirect_uris`,
+  `redirect_uri_too_long`, `redirect_scheme_not_allowed`,
+  `redirect_host_not_allowed`, `redirect_userinfo`, `redirect_backslash`,
+  `redirect_unparseable`, `persist_failed`. Neither label is ever a
+  client-supplied string, so the series count is bounded.
+
+A rejection's log line also carries `client_name`, `user_agent`, and — only
+when the refusal concerns a redirect URI — `redirect_scheme` and
+`redirect_host` (never the full URI, its path, or its query string). A
+rate-limited attempt carries neither the caller's IP nor `client_name`.
+
+Rejected registrations are deliberately **not** written to `audit_logs`:
+`/oauth/register` is unauthenticated and has no `user_id` to key a
+hash-chained row on. See design.md's Alternatives section.
+
+Useful queries:
+
+```promql
+sum(rate(mctl_oauth_client_registrations_total{outcome="rejected"}[15m])) by (reason)
+```
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=1h \
+  | grep 'oauth: client_registration audit' | grep 'outcome=rejected'
+```
+
+A sustained run of `redirect_scheme_not_allowed` or
+`redirect_host_not_allowed` from one `client_name`/`user_agent` is a client
+whose redirect URI the current policy refuses — see the issue's own open
+question about RFC 8252 §7.1 private-use schemes before changing that
+policy. A regression in `validateRedirectURIShape`/`validateImplicitRedirectURI`
+that starts refusing every client would show up as `accepted` dropping to
+near zero while `rejected` climbs — that is the case this counter exists to
+catch quickly.
+
+---
+
 <a id="jwtfailures"></a>
 ## JwtFailures — authentication failure spike
 
@@ -1053,6 +1104,24 @@ Open a postmortem if:
 - **`other`**: Catch-all for unexpected validation errors; check pod logs.
 - **Provider context:** `provider` label values are `local-jwt`,
   `shared-hmac`, and `local-dev`.
+
+### Attribution (issue-668)
+
+The `auth failed` WARN line itself now carries more than `err`:
+`edge_request_id` and `edge_route` (from `Cf-Ray`/`Cf-Worker`, `direct` when
+neither header is present) and the chi route pattern in `route`, on every
+failure. When the failure happened *after* the token's HMAC signature
+verified — expired, wrong issuer, wrong audience, revoked — it additionally
+carries `sub`, `client_id`, `jti` and `exp`, taken from the token's own
+claims and omitting any the token did not carry. A token that fails at or
+before the signature check (malformed JWT, bad signature, malformed payload,
+non-Bearer scheme) NEVER carries any of the four: that payload is
+unauthenticated attacker-controlled input, and logging claims from it would
+turn the log into a write channel for whoever sends the token. `sub` /
+`client_id` / `jti` / `exp` are not treated as sensitive by the redacting
+slog handler — they are identifiers this service itself minted and signed,
+not secrets — see the comment in `internal/audit/redact.go`. No new counter:
+`mctl_auth_failures_total{reason,provider}` is unchanged.
 
 ### Diagnostic queries
 
@@ -1535,12 +1604,32 @@ diagnosis:
 
 ```sh
 kubectl -n mctl-telegram logs -l app=mctl-telegram --since=30m \
-  | grep -E 'telegram login: (connecting|connection established)|enable: telegram login failed'
+  | grep -E 'telegram login: (connecting|connection established)|enable: telegram login failed|enable: onboarding abandoned'
 ```
 
 "connecting" with no "connection established" is a network or datacenter
 problem. Both present, followed by the deferred failure line, means
 `SendCode` itself is slow — see `MctlTelegramLoginSlow` below.
+
+`enable: onboarding abandoned` (WARN, added by issue-668) is the same
+deferred goroutine's line for a flow that ran out its `CodeTTL` deadline
+while parked waiting for a code or password no one ever submitted — i.e. a
+user who walked away, not a Telegram-side stall. It carries `step` and
+`elapsed`, but no `err`, and `step` is always one of the two prompt states,
+`code_requested` or `password_requested`: the arm is gated on them because
+the same deadline also covers the `SendCode` and sign-in RPCs. A deadline
+that fires at any other step (`phone_submitted`, `code_submitted`,
+`password_submitted`) is a Telegram- or DB-side stall and keeps the ERROR
+line with its `err` — so an `enable: telegram login failed` at
+`step=phone_submitted` with `context deadline exceeded` is a reliable
+"Telegram never answered SendCode" signal, not something to disambiguate.
+A `/start` re-submission superseding a live flow logs `enable: login flow
+superseded` (INFO) with the same `uid`/`step` and is not a failure at all,
+but only when the flow's own error is the cancellation; a flow that already
+held a real failure (FLOOD_WAIT, identity mismatch) when it was superseded
+still logs the ERROR line. A drop in `enable: telegram login failed` volume
+after this change is expected, not a regression: it means abandoned and
+superseded flows stopped being counted as failures, which is the point.
 
 ### Mitigation
 

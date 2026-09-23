@@ -93,6 +93,14 @@ var sensitiveKeys = map[string]struct{}{
 	"content":          {},
 	"campaign_content": {},
 	"broadcast_text":   {},
+	// sub, client_id, jti and exp (attributed auth failures, issue-668) are
+	// DELIBERATELY absent from this list, for the same reason as
+	// credential_domain_id above: none of the four is a secret. They are
+	// identifiers this service itself minted into a token it signed with its
+	// own HMAC key, attached to the "auth failed" log line only for claims
+	// that already passed that signature check (see
+	// internal/auth.AttributedError) -- the token material itself stays
+	// covered by the existing "authorization"/"bearer" entries.
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for
