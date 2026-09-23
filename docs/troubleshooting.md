@@ -19,8 +19,13 @@ section quotes a string produced by `mtprotoErrCatalog` or
 preceded by an HTML comment naming the MTProto code (e.g.
 `<!-- catalog: PEER_ID_INVALID -->`) — those markers, and the quoted text
 after them, are checked verbatim against the source by
-`internal/mcp/troubleshooting_doc_test.go` so this page cannot silently drift
-from the code.
+`internal/mcp/troubleshooting_doc_test.go` (and the equivalent OAuth-error
+quotes by `internal/oauth/troubleshooting_doc_test.go`), so those quoted
+strings cannot silently drift from the code. `docs/troubleshooting_test.go`
+additionally pins the nine section headings. The 30-day window and the
+~70%-share figure above are a point-in-time read of the `audit_logs` pass
+from issue #669 — narrative context, not something any test re-derives or
+keeps in sync as traffic shifts.
 
 ## Table of contents
 
@@ -320,11 +325,16 @@ hour); see the `JwtFailures` alert playbook in
 
 ### Symptom
 
-A Dynamic Client Registration request to `POST /oauth/register` (or an
-`/oauth/authorize` call for an implicit client) with a `redirect_uri` using a
-custom app scheme — for example `cursor://anonymous/callback` — is refused
-with an OAuth `error=invalid_redirect_uri` response, HTTP 400. For that exact
-input, the underlying validation error text is:
+A Dynamic Client Registration request to `POST /oauth/register` with a
+`redirect_uri` using a custom app scheme — for example
+`cursor://anonymous/callback` — is refused with an OAuth
+`error=invalid_redirect_uri` response, HTTP 400. An `/oauth/authorize` call
+for an implicit client with the same custom-scheme `redirect_uri` hits the
+same underlying check (`validateImplicitRedirectURI`), but
+`handleAuthorize` reports every `validateClient` failure as
+`error=invalid_client`, HTTP 400 — the `/oauth/authorize` response never
+carries `error=invalid_redirect_uri`. For that exact input, the underlying
+validation error text is the same on both endpoints:
 
 <!-- source: validateRedirectURIShape (internal/oauth/server.go), asserted by internal/oauth/troubleshooting_doc_test.go -->
 ```
