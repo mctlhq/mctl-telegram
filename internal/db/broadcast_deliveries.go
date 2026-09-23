@@ -33,6 +33,10 @@ const (
 // campaign is not (or no longer) in the approved state.
 var ErrCampaignNotApproved = errors.New("broadcast campaign is not approved")
 
+// ErrCampaignNotSending is returned by HaltBroadcastCampaign when the
+// campaign is not (or no longer) sending.
+var ErrCampaignNotSending = errors.New("broadcast campaign is not sending")
+
 // BroadcastRecipient is one materialized delivery target.
 type BroadcastRecipient struct {
 	UserID     int64
@@ -104,6 +108,27 @@ func (s *Store) EndBroadcastCampaign(ctx context.Context, id, toState, endReason
 	return nil
 }
 
+// HaltBroadcastCampaign cancels a campaign that is already sending, with
+// endReason recorded. Its remaining pending rows are then skipped by
+// SkipCancelledBroadcastDeliveries. Used when a campaign fails its integrity
+// check mid-send: nothing more of it may go out.
+func (s *Store) HaltBroadcastCampaign(ctx context.Context, id, endReason string, now time.Time) error {
+	now = now.UTC()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE broadcast_campaigns SET state = $2, end_reason = $3, completed_at = $4, updated_at = $4
+		  WHERE id = $1 AND state = $5`,
+		id, CampaignCancelled, endReason, now, CampaignSending)
+	if err != nil {
+		return fmt.Errorf("halt broadcast campaign: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("halt broadcast campaign: %w", err)
+	} else if n != 1 {
+		return ErrCampaignNotSending
+	}
+	return nil
+}
+
 // ClaimBroadcastDeliveries claims up to limit due pending deliveries of
 // campaigns that are sending, marking them sending and counting the
 // attempt. Oldest first, so one campaign drains in queue order.
@@ -116,21 +141,27 @@ func (s *Store) ClaimBroadcastDeliveries(ctx context.Context, limit int, now tim
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE OF d SKIP LOCKED"
 	}
+	// The due rows are picked in a CTE, not an IN (subquery ... LIMIT):
+	// Postgres may re-evaluate an IN subquery (it plans it as a join), and a
+	// LIMIT inside it was observed claiming 3 rows for limit 2. A CTE with
+	// FOR UPDATE is never inlined, so it is evaluated exactly once.
+	//
 	// The outer UPDATE re-checks status = pending, which is what makes a
 	// concurrent double-select safe without SKIP LOCKED (SQLite): the
 	// loser re-evaluates the predicate against the winner's committed row
 	// and skips it.
 	rows, err := s.DB.QueryContext(ctx,
-		`UPDATE broadcast_deliveries
-		    SET status = $1, attempts = attempts + 1, claimed_at = $2, updated_at = $2
-		  WHERE status = $3 AND (campaign_id, user_id) IN (
+		`WITH due AS (
 		        SELECT d.campaign_id, d.user_id
 		          FROM broadcast_deliveries d
 		          JOIN broadcast_campaigns c ON c.id = d.campaign_id
 		         WHERE d.status = $3 AND d.next_attempt_at <= $2 AND c.state = $4
 		         ORDER BY d.next_attempt_at, d.created_at, d.user_id
 		         LIMIT $5`+lock+`
-		  )
+		)
+		UPDATE broadcast_deliveries
+		    SET status = $1, attempts = attempts + 1, claimed_at = $2, updated_at = $2
+		  WHERE status = $3 AND (campaign_id, user_id) IN (SELECT campaign_id, user_id FROM due)
 		 RETURNING campaign_id, user_id, telegram_id, attempts`,
 		DeliverySending, now, DeliveryPending, CampaignSending, limit)
 	if err != nil {
@@ -178,6 +209,24 @@ func (s *Store) RetryBroadcastDelivery(ctx context.Context, campaignID string, u
 		campaignID, userID, DeliveryPending, reason, nextAttempt.UTC(), now, DeliverySending)
 	if err != nil {
 		return fmt.Errorf("retry broadcast delivery: %w", err)
+	}
+	return nil
+}
+
+// ReleaseBroadcastDelivery hands a claimed row back to pending WITHOUT
+// counting the attempt: for a row the worker claimed but never sent (a
+// store error earlier in the batch, shutdown while waiting for the rate
+// limiter, or a lease too close to expiry). Like Finish, it only moves a
+// row that is still sending, so a row the stale sweep already closed
+// stays closed.
+func (s *Store) ReleaseBroadcastDelivery(ctx context.Context, campaignID string, userID int64, now time.Time) error {
+	now = now.UTC()
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE broadcast_deliveries SET status = $3, attempts = attempts - 1, claimed_at = NULL, updated_at = $4
+		  WHERE campaign_id = $1 AND user_id = $2 AND status = $5`,
+		campaignID, userID, DeliveryPending, now, DeliverySending)
+	if err != nil {
+		return fmt.Errorf("release broadcast delivery: %w", err)
 	}
 	return nil
 }

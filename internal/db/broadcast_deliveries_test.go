@@ -172,6 +172,37 @@ func assertBroadcastDeliveryStore(t *testing.T, s *Store, tgBase int64) {
 		t.Fatal("a cancelled campaign was marked completed")
 	}
 
+	// Release hands an unattempted claim back without counting it; Halt
+	// cancels a sending campaign (and only a sending one).
+	h := mk("h")
+	if err := s.StartBroadcastCampaign(ctx, h, users[:1], now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ClaimBroadcastDeliveries(ctx, 10, now.Add(2*time.Hour)); err != nil || len(got) != 1 || got[0].CampaignID != h {
+		t.Fatalf("claim h: %+v %v", got, err)
+	}
+	if err := s.ReleaseBroadcastDelivery(ctx, h, users[0].UserID, now); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, n := status(h, users[0].UserID); st != DeliveryPending || n != 0 {
+		t.Fatalf("released = %s attempts=%d", st, n)
+	}
+	if err := s.ReleaseBroadcastDelivery(ctx, h, users[0].UserID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, n := status(h, users[0].UserID); n != 0 {
+		t.Fatalf("releasing a pending row changed attempts to %d", n)
+	}
+	if err := s.HaltBroadcastCampaign(ctx, h, "integrity", now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetBroadcastCampaign(ctx, h); err != nil || got.State != CampaignCancelled || got.EndReason != "integrity" {
+		t.Fatalf("halted = %+v %v", got, err)
+	}
+	if err := s.HaltBroadcastCampaign(ctx, h, "integrity", now); !errors.Is(err, ErrCampaignNotSending) {
+		t.Fatalf("second halt: %v", err)
+	}
+
 	// End an approved campaign without delivery.
 	c := mk("c")
 	if err := s.EndBroadcastCampaign(ctx, c, CampaignCancelled, "recipient_limit_exceeded_at_send", now); err != nil {

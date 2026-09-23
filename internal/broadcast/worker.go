@@ -28,6 +28,7 @@ const (
 	// a row is never swept as outcome_unknown while its request can still
 	// complete.
 	sendTimeout = 15 * time.Second
+	minLease    = 2 * sendTimeout
 )
 
 // Campaign end reasons recorded by the worker (broadcast_campaigns.end_reason).
@@ -58,9 +59,11 @@ type WorkerStore interface {
 	GetBroadcastRecipientFacts(ctx context.Context, userID int64, now time.Time) (*db.BroadcastRecipientFacts, error)
 	StartBroadcastCampaign(ctx context.Context, id string, recipients []db.BroadcastRecipient, now time.Time) error
 	EndBroadcastCampaign(ctx context.Context, id, toState, endReason string, now time.Time) error
+	HaltBroadcastCampaign(ctx context.Context, id, endReason string, now time.Time) error
 	ClaimBroadcastDeliveries(ctx context.Context, limit int, now time.Time) ([]db.BroadcastDelivery, error)
 	FinishBroadcastDelivery(ctx context.Context, campaignID string, userID int64, status, reason string, now time.Time) error
 	RetryBroadcastDelivery(ctx context.Context, campaignID string, userID int64, reason string, nextAttempt, now time.Time) error
+	ReleaseBroadcastDelivery(ctx context.Context, campaignID string, userID int64, now time.Time) error
 	FailStaleBroadcastDeliveries(ctx context.Context, lease time.Duration, now time.Time) (int64, error)
 	SkipCancelledBroadcastDeliveries(ctx context.Context, now time.Time) (int64, error)
 	CompleteBroadcastCampaigns(ctx context.Context, now time.Time) ([]string, error)
@@ -97,6 +100,11 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	}
 	if c.Lease <= 0 {
 		c.Lease = DefaultLease
+	}
+	// deliver refuses to start a send once less than sendTimeout of the
+	// lease is left, so a lease shorter than that would never send anything.
+	if c.Lease < minLease {
+		c.Lease = minLease
 	}
 	return c
 }
@@ -169,8 +177,12 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, d := range claimed {
-		if err := w.deliver(ctx, d); err != nil {
+	for i, d := range claimed {
+		if err := w.deliver(ctx, d, now); err != nil {
+			// The rest of the batch was claimed but never attempted: hand it
+			// back now instead of leaving it for the stale sweep, which
+			// would close every row as outcome_unknown.
+			w.release(ctx, claimed[i+1:])
 			return err
 		}
 	}
@@ -256,28 +268,54 @@ func campaignSelector(c *db.BroadcastCampaign) (Selector, error) {
 	return sel.Normalize()
 }
 
+// release hands claimed-but-unattempted rows back to pending without
+// counting the attempt. Best effort: a row it cannot release stays in
+// sending and is closed by the stale sweep, which never re-sends.
+func (w *Worker) release(ctx context.Context, rows []db.BroadcastDelivery) {
+	ctx = context.WithoutCancel(ctx)
+	for _, d := range rows {
+		if err := w.store.ReleaseBroadcastDelivery(ctx, d.CampaignID, d.UserID, w.now()); err != nil {
+			slog.Warn("broadcast: release claimed delivery", "campaign_id", d.CampaignID, "err", err)
+		}
+	}
+}
+
 // deliver handles one claimed row. Every check that can stop a send happens
 // here, immediately before it: the campaign must still be sending and intact,
 // and the recipient must still be eligible under the campaign's selector.
-func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery) error {
+//
+// An error before the send releases the row (nothing went out); an error
+// after it leaves the row in sending for the stale sweep, because whether
+// the message was delivered is then unknown.
+func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt time.Time) error {
 	finish := func(status, reason string) error {
 		return w.store.FinishBroadcastDelivery(ctx, d.CampaignID, d.UserID, status, reason, w.now())
 	}
+	preSend := func(err error) error {
+		w.release(ctx, []db.BroadcastDelivery{d})
+		return err
+	}
 	c, err := w.store.GetBroadcastCampaign(ctx, d.CampaignID)
 	if err != nil {
-		return err
+		return preSend(err)
 	}
 	if c.State != db.CampaignSending {
 		return finish(db.DeliverySkipped, db.ReasonCancelled)
 	}
 	sel, err := campaignSelector(c)
 	if err != nil {
-		slog.Error("broadcast: campaign failed integrity check before send", "campaign_id", c.ID)
-		return finish(db.DeliveryFailed, "integrity")
+		// The row changed after approval. Nothing more of this campaign may
+		// go out: halt it, and SkipCancelledBroadcastDeliveries closes the
+		// rest of its queue on the next tick.
+		slog.Error("broadcast: campaign failed integrity check mid-send; halted", "campaign_id", c.ID)
+		if err := w.store.HaltBroadcastCampaign(ctx, c.ID, EndIntegrity, w.now()); err != nil && !errors.Is(err, db.ErrCampaignNotSending) {
+			return preSend(err)
+		}
+		return finish(db.DeliverySkipped, db.ReasonCancelled)
 	}
 	f, err := w.store.GetBroadcastRecipientFacts(ctx, d.UserID, w.now())
 	if err != nil {
-		return err
+		return preSend(err)
 	}
 	if f == nil {
 		return finish(db.DeliverySkipped, string(SkipNoAccount))
@@ -286,9 +324,15 @@ func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery) error {
 		return finish(db.DeliverySkipped, string(dec.Reason))
 	}
 	if err := w.limiter.Wait(ctx); err != nil {
-		// Shutting down before the send: nothing went out, so hand the row
-		// back rather than let the stale sweep mark it unknown.
-		return w.store.RetryBroadcastDelivery(context.WithoutCancel(ctx), d.CampaignID, d.UserID, ReasonTransient, w.now(), w.now())
+		// Shutting down before the send: nothing went out.
+		return preSend(err)
+	}
+	if w.now().Sub(claimedAt) > w.cfg.Lease-sendTimeout {
+		// A send started now could still be in flight when the lease runs
+		// out and the stale sweep closes the row as outcome_unknown. Hand it
+		// back unsent; the next claim starts a fresh lease.
+		w.release(ctx, []db.BroadcastDelivery{d})
+		return nil
 	}
 	sctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	sendErr := w.sender.SendMessage(sctx, f.TelegramID, c.Content)
@@ -328,6 +372,7 @@ func (w *Worker) record(ctx context.Context, d db.BroadcastDelivery, sendErr err
 			return w.store.FinishBroadcastDelivery(ctx, d.CampaignID, d.UserID, db.DeliveryFailed, outcome.ReasonCode, now)
 		}
 		if apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= 500 {
+			slog.Warn("broadcast: transient send failure", "campaign_id", d.CampaignID, "status", apiErr.StatusCode, "attempt", d.Attempts)
 			return w.retry(ctx, d, apiErr.RetryAfter, now)
 		}
 		return w.store.FinishBroadcastDelivery(ctx, d.CampaignID, d.UserID, db.DeliveryFailed,
@@ -335,8 +380,10 @@ func (w *Worker) record(ctx context.Context, d db.BroadcastDelivery, sendErr err
 	}
 	var opErr *net.OpError
 	if errors.As(sendErr, &opErr) && opErr.Op == "dial" {
+		slog.Warn("broadcast: transient send failure", "campaign_id", d.CampaignID, "err", sendErr, "attempt", d.Attempts)
 		return w.retry(ctx, d, 0, now)
 	}
+	slog.Warn("broadcast: send outcome unknown; not retried", "campaign_id", d.CampaignID, "err", sendErr)
 	return w.store.FinishBroadcastDelivery(ctx, d.CampaignID, d.UserID, db.DeliveryFailed, db.ReasonOutcomeUnknown, now)
 }
 

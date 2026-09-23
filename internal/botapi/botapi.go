@@ -71,7 +71,12 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 		}
 		return fmt.Errorf("telegram request failed: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		// Drain (bounded) before closing so the keep-alive connection is
+		// reused; a broadcast sends many requests back to back.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		// A typed *notify.APIError, not a formatted string: ClassifyDelivery

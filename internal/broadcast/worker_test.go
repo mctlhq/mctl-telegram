@@ -471,3 +471,129 @@ func TestReport_AggregatesOutcomesWithoutRecipients(t *testing.T) {
 		t.Fatalf("report must identify the approver: %+v", r.ApprovedBy)
 	}
 }
+
+// failingFacts fails the recipient lookup for one user: a store error in the
+// middle of a batch.
+type failingFacts struct {
+	WorkerStore
+	failUser int64
+}
+
+func (f *failingFacts) GetBroadcastRecipientFacts(ctx context.Context, userID int64, now time.Time) (*db.BroadcastRecipientFacts, error) {
+	if userID == f.failUser {
+		return nil, errors.New("db unavailable")
+	}
+	return f.WorkerStore.GetBroadcastRecipientFacts(ctx, userID, now)
+}
+
+func TestWorker_StoreErrorMidBatchReleasesUnattemptedRows(t *testing.T) {
+	w := newWorkerEnv(t)
+	var users []int64
+	for i := int64(1); i <= 3; i++ {
+		users = append(users, w.user(123450000+i, db.TierClient))
+	}
+	p := w.approved("Hello.")
+	cfg := w.worker.cfg
+	broken := NewWorker(&failingFacts{WorkerStore: w.store, failUser: users[1]}, w.sender, cfg, func() time.Time { return w.now })
+	if err := broken.Tick(context.Background()); err == nil {
+		t.Fatal("tick swallowed the store error")
+	}
+	if st, _, _ := w.delivery(p.CampaignID, users[0]); st != db.DeliveryDelivered {
+		t.Fatalf("first recipient = %s", st)
+	}
+	for _, u := range users[1:] {
+		if st, _, n := w.delivery(p.CampaignID, u); st != db.DeliveryPending || n != 0 {
+			t.Fatalf("user %d = %s attempts=%d, want pending/0 (released, not burned)", u, st, n)
+		}
+	}
+	// A later lease expiry must not turn the released rows into unknowns.
+	w.now = w.now.Add(10 * time.Minute)
+	w.tick()
+	for _, u := range users {
+		if st, _, _ := w.delivery(p.CampaignID, u); st != db.DeliveryDelivered {
+			t.Fatalf("user %d = %s after recovery", u, st)
+		}
+	}
+	if len(w.sender.sent) != 3 {
+		t.Fatalf("sent %d, want exactly 3", len(w.sender.sent))
+	}
+}
+
+func TestWorker_ShutdownMidBatchReleasesWithoutBurningAttempts(t *testing.T) {
+	w := newWorkerEnv(t, func(c *WorkerConfig) { c.RatePerSecond = 0.001 })
+	var users []int64
+	for i := int64(1); i <= 3; i++ {
+		users = append(users, w.user(123450000+i, db.TierClient))
+	}
+	p := w.approved("Hello.")
+	// The deadline is far enough for the store calls but far shorter than
+	// the limiter's next slot, so the limiter is what stops the batch --
+	// exactly as a shutdown does while a send waits for its turn.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.worker.Tick(ctx); err == nil {
+		t.Fatal("tick did not report the interrupted batch")
+	}
+	if len(w.sender.sent) != 1 {
+		t.Fatalf("sent %d, want 1 before shutdown", len(w.sender.sent))
+	}
+	for _, u := range users[1:] {
+		if st, _, n := w.delivery(p.CampaignID, u); st != db.DeliveryPending || n != 0 {
+			t.Fatalf("user %d = %s attempts=%d, want pending/0", u, st, n)
+		}
+	}
+}
+
+func TestWorker_IntegrityMismatchMidSendHaltsCampaign(t *testing.T) {
+	w := newWorkerEnv(t)
+	var users []int64
+	for i := int64(1); i <= 3; i++ {
+		users = append(users, w.user(123450000+i, db.TierClient))
+	}
+	p := w.approved("Approved text.")
+	w.sender.before = func(chatID int64) {
+		if chatID == 123450001 {
+			if _, err := w.store.DB.Exec(`UPDATE broadcast_campaigns SET content = 'Swapped.' WHERE id = $1`, p.CampaignID); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	w.tick()
+	w.tick()
+	if len(w.sender.sent) != 1 {
+		t.Fatalf("sent %d, want only the send that preceded the tamper", len(w.sender.sent))
+	}
+	c, _ := w.store.GetBroadcastCampaign(context.Background(), p.CampaignID)
+	if c.State != db.CampaignCancelled || c.EndReason != EndIntegrity {
+		t.Fatalf("campaign = %s/%s, want cancelled/%s", c.State, c.EndReason, EndIntegrity)
+	}
+	for _, u := range users[1:] {
+		if st, reason, _ := w.delivery(p.CampaignID, u); st != db.DeliverySkipped || reason != db.ReasonCancelled {
+			t.Fatalf("user %d = %s/%s", u, st, reason)
+		}
+	}
+}
+
+func TestWorker_NoSendStartsTooCloseToLeaseExpiry(t *testing.T) {
+	w := newWorkerEnv(t)
+	var users []int64
+	for i := int64(1); i <= 2; i++ {
+		users = append(users, w.user(123450000+i, db.TierClient))
+	}
+	p := w.approved("Hello.")
+	// The first send is slow: by the time it returns, the rest of the batch
+	// could not finish inside the lease.
+	w.sender.before = func(int64) { w.now = w.now.Add(w.worker.cfg.Lease) }
+	w.tick()
+	if len(w.sender.sent) != 1 {
+		t.Fatalf("sent %d, want 1", len(w.sender.sent))
+	}
+	if st, _, n := w.delivery(p.CampaignID, users[1]); st != db.DeliveryPending || n != 0 {
+		t.Fatalf("second = %s attempts=%d, want released", st, n)
+	}
+	w.sender.before = nil
+	w.tick()
+	if st, _, _ := w.delivery(p.CampaignID, users[1]); st != db.DeliveryDelivered || len(w.sender.sent) != 2 {
+		t.Fatalf("second = %s sent=%d", st, len(w.sender.sent))
+	}
+}
