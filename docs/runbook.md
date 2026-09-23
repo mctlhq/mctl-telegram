@@ -10,10 +10,16 @@ header says which is which.
 Canary incidents are out of scope here; see
 [docs/runbooks/canary.md](runbooks/canary.md).
 
+This runbook is alert-driven — it is organized by Prometheus alert rule, for
+on-call response. For the client-facing error families a client or LLM agent
+actually hits (the exact string a tool or the OAuth flow returned, and what
+to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
+
 ---
 
 ## Table of contents
 
+- [Troubleshooting: error families clients actually hit](troubleshooting.md)
 - [MctlTelegramNearCapacity — session pool near capacity](#mctltelegramnearcapacity)
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
