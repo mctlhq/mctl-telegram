@@ -241,6 +241,74 @@ func TestJWKSFilterTransport(t *testing.T) {
 	}
 }
 
+// TestIDTokenClaimsDecodeTelegramShape decodes the claim set Telegram's OIDC
+// provider actually emits — the key list measured live in spike #48 — and
+// checks the profile fields survive into Identity. It is the regression guard
+// for #667: the struct tags used to be `username` / `first_name` /
+// `last_name`, which Telegram never sends, so every OIDC sign-in landed with
+// an empty username and display name. Going through json.Unmarshal (not a
+// struct literal) is the point — a literal cannot catch a wrong tag.
+func TestIDTokenClaimsDecodeTelegramShape(t *testing.T) {
+	const raw = `{
+		"iss": "https://oauth.telegram.org",
+		"aud": "8568443430",
+		"sub": "1234567890123456789",
+		"id": "500100101",
+		"iat": 1700000000,
+		"exp": 1700000030,
+		"name": "Alice Liddell",
+		"given_name": "Alice",
+		"family_name": "Liddell",
+		"preferred_username": "alice",
+		"picture": "https://t.me/i/userpic/320/x.jpg",
+		"nonce": "n"
+	}`
+	var claims idTokenClaims
+	if err := json.Unmarshal([]byte(raw), &claims); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got, err := parseIdentity(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TelegramID != 500100101 || got.Sub != "1234567890123456789" {
+		t.Errorf("identity claims not preserved: %+v", got)
+	}
+	if got.Username != "alice" {
+		t.Errorf("Username = %q, want alice (from preferred_username)", got.Username)
+	}
+	if got.FirstName != "Alice" || got.LastName != "Liddell" {
+		t.Errorf("names = %q/%q, want Alice/Liddell (from given_name/family_name)", got.FirstName, got.LastName)
+	}
+}
+
+// TestIDTokenClaimsNameFallback: when the split name claims are absent but
+// the composite `name` is present, it becomes FirstName so the display name
+// downstream (first + " " + last) is not empty. A present given_name wins.
+func TestIDTokenClaimsNameFallback(t *testing.T) {
+	var claims idTokenClaims
+	if err := json.Unmarshal([]byte(`{"id":"42","name":"Alice Liddell","preferred_username":"alice"}`), &claims); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got, err := parseIdentity(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.FirstName != "Alice Liddell" || got.LastName != "" {
+		t.Errorf("name fallback: got %q/%q, want \"Alice Liddell\"/\"\"", got.FirstName, got.LastName)
+	}
+	if err := json.Unmarshal([]byte(`{"id":"42","name":"Alice Liddell","given_name":"Alice"}`), &claims); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got, err = parseIdentity(claims)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.FirstName != "Alice" {
+		t.Errorf("given_name must win over name: got %q", got.FirstName)
+	}
+}
+
 func TestParseIdentityKeepsProfileFields(t *testing.T) {
 	got, err := parseIdentity(idTokenClaims{
 		ID:        json.RawMessage(`"42"`),
