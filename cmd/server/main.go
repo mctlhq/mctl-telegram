@@ -31,7 +31,9 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
 	"github.com/mctlhq/mctl-telegram/internal/bot"
+	"github.com/mctlhq/mctl-telegram/internal/botapi"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -621,7 +623,9 @@ func main() {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	workerDeadline := time.Now().Add(broadcastShutdownGrace)
 	_ = srv.Shutdown(shutCtx)
+	waitBroadcastWorker(workerDeadline)
 }
 
 // metricsHandler wraps the Prometheus exposition handler with an optional CIDR
@@ -864,6 +868,29 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		slog.Warn("TELEGRAM_LOGIN_BOT_TOKEN unset — the daily new-client digest will not be delivered")
 	}
 	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
+	// Broadcast delivery worker (issue-439). It only ever sends campaigns a
+	// human approved, so with no operators configured there is nothing it
+	// could send and it is not started at all. The delivery QUEUE is safe
+	// with several replicas (SKIP LOCKED on Postgres, state-guarded updates
+	// everywhere); the RATE is not -- the limiter is per process, so N
+	// replicas send at N x BROADCAST_RATE_PER_SEC. main waits for the worker
+	// on shutdown (waitBroadcastWorker) so an in-flight send is recorded and
+	// the rest of its batch is handed back rather than left to the stale
+	// sweep.
+	if len(cfg.BroadcastOperators) > 0 {
+		if cfg.TelegramLoginBotToken == "" {
+			slog.Warn("BROADCAST_OPERATORS set but TELEGRAM_LOGIN_BOT_TOKEN unset — broadcast delivery is disabled")
+		} else {
+			worker := broadcast.NewWorker(store, &botapi.Client{Token: cfg.TelegramLoginBotToken}, broadcast.WorkerConfig{
+				Policy:        broadcastPolicy(cfg),
+				RatePerSecond: cfg.BroadcastRatePerSec,
+				BatchSize:     cfg.BroadcastBatchSize,
+				MaxAttempts:   cfg.BroadcastMaxAttempts,
+			}, nil)
+			startBroadcastWorker(ctx, worker)
+			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec)
+		}
+	}
 	// Inbound login-bot updates (issue-619). Transport only: updates are made
 	// durable exactly once and handed to a registry that currently has no
 	// handlers registered -- commands belong to the #438 split, delivery

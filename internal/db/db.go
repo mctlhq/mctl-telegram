@@ -394,6 +394,15 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	// broadcast_campaigns.end_reason (issue-439 delivery): why a campaign
+	// ended without delivering to its whole audience -- e.g. the audience
+	// grew past the recipient limit between approval and execution. Empty
+	// for a campaign that simply ran to completion or was cancelled by an
+	// operator (cancelled_by says who).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "broadcast_campaigns", "end_reason",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
@@ -728,10 +737,36 @@ func sqliteSchema() []string {
 			cancelled_by INTEGER REFERENCES users(id),
 			cancelled_at DATETIME,
 			completed_at DATETIME,
+			end_reason TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_state ON broadcast_campaigns(state, created_at)`,
+		// Broadcast deliveries (issue-439): one row per (campaign,
+		// recipient), materialized when an approved campaign starts. The
+		// primary key IS the idempotency key -- a recipient can be queued
+		// for a campaign exactly once, however often materialization runs.
+		// status: pending -> sending -> delivered | skipped | failed, or
+		// sending -> pending again for a bounded transient retry. A row
+		// found in sending after its lease is never re-sent (the outcome is
+		// unknown), so a crash cannot duplicate a message. reason carries
+		// only a machine code (skip reason, classifier reason code), never
+		// Telegram's response text.
+		`CREATE TABLE IF NOT EXISTS broadcast_deliveries (
+			campaign_id TEXT NOT NULL REFERENCES broadcast_campaigns(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			telegram_id INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at DATETIME NOT NULL,
+			claimed_at DATETIME,
+			finished_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (campaign_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_due ON broadcast_deliveries(status, next_attempt_at)`,
 	}
 }
 
@@ -940,9 +975,28 @@ func pgSchema() []string {
 			cancelled_by BIGINT REFERENCES users(id),
 			cancelled_at TIMESTAMPTZ,
 			completed_at TIMESTAMPTZ,
+			end_reason TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_state ON broadcast_campaigns(state, created_at)`,
+		// Broadcast deliveries (issue-439) -- see the sqliteSchema comment
+		// on this table for the status machine and why the primary key is
+		// the idempotency key.
+		`CREATE TABLE IF NOT EXISTS broadcast_deliveries (
+			campaign_id TEXT NOT NULL REFERENCES broadcast_campaigns(id) ON DELETE CASCADE,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			telegram_id BIGINT NOT NULL,
+			status TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at TIMESTAMPTZ NOT NULL,
+			claimed_at TIMESTAMPTZ,
+			finished_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (campaign_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_due ON broadcast_deliveries(status, next_attempt_at)`,
 	}
 }

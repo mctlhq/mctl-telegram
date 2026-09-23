@@ -2215,3 +2215,80 @@ from the batch in memory. So:
 
 Adding a queue would introduce a second place to lose an update in exchange for a
 guarantee Telegram already gives for 24 hours.
+
+## Broadcast delivery (issue-439)
+
+A broadcast is a campaign that one call prepares (a preview) and a human
+operator approves. Delivery is done by a background worker through the login
+bot, and only ever for an approved campaign. The worker starts only when
+`BROADCAST_OPERATORS` is non-empty **and** `TELEGRAM_LOGIN_BOT_TOKEN` is set.
+With the default empty allow-list the whole workflow is off.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BROADCAST_OPERATORS` | empty (off) | Telegram ids allowed to prepare, approve and cancel broadcasts |
+| `BROADCAST_RATE_PER_SEC` | `10` | messages per second across all campaigns, **per replica** (Telegram's bot-wide ceiling is about 30). The limiter is in-process: with N replicas running the worker the bot sends up to N× this rate |
+| `BROADCAST_BATCH_SIZE` | `20` | deliveries claimed per worker pass (every 5 s) |
+| `BROADCAST_MAX_ATTEMPTS` | `5` | sends per recipient on transient failures (429 / 5xx / connection refused) |
+| `BROADCAST_RECIPIENT_LIMIT` | `1000` | per-campaign audience cap, enforced at preview and again at start¹ |
+| `BROADCAST_APPROVAL_TTL` | `30m` | how long a preview stays approvable¹ |
+
+¹ Read when a preview is created. Previews are created by the operator
+surface (`prepare_broadcast`), which ships separately; until it does, these
+two settings are parsed but have no effect. The worker itself enforces the
+limit stored on each campaign row.
+
+### Lifecycle
+
+`prepared → approved → sending → completed`, with two exits:
+
+- `cancelled`: by an operator at any point before completion, or by the
+  worker at start. Only unsent work stops.
+- `expired`: a preview that was never approved in time.
+
+At start the worker **resolves the audience again**. A client who unsubscribed,
+was banned or became unreachable after the preview is not queued. Right before
+**each** send it re-checks consent, eligibility and the campaign state again.
+
+### Reading a delivery's `reason`
+
+| Status / reason | Meaning |
+|---|---|
+| `delivered` | the Bot API accepted the message. This is **not** a read receipt |
+| `skipped/unsubscribed`, `…/unreachable`, `…/policy`, `…/no_account`, `…/out_of_audience` | dropped by the pre-send re-check |
+| `skipped/cancelled` | the campaign was cancelled (or halted by the integrity check below) before this recipient's turn |
+| `failed/bot_blocked`, `…/user_deactivated`, `…/cannot_initiate_conversation`, `…/chat_not_found` | a permanent refusal; bot reachability is updated so the next campaign skips the client up front |
+| `failed/rejected_<status>` | another 4xx that says nothing about the client; not retried, reachability untouched |
+| `failed/retries_exhausted` | transient failures (or database errors while checking this recipient) until `BROADCAST_MAX_ATTEMPTS` |
+| `failed/outcome_unknown` | the request may have reached Telegram (a timeout, or a crash mid-send). Deliberately **never re-sent**, so a recipient can get the message at most once |
+
+A campaign-level `end_reason` is set when the worker ended a campaign:
+`no_eligible_recipients_at_send` or `recipient_limit_exceeded_at_send` at
+start, or `content_or_selector_integrity_mismatch` at start **or mid-send**
+(the stored row no longer matches what was approved: nothing more of it is
+delivered, and its remaining queue is closed as `skipped/cancelled`).
+
+A claimed row that was never attempted -- a database error earlier in the
+batch, a shutdown while waiting for the rate limiter, or too little lease left
+to finish a send -- goes back to `pending` without counting an attempt. A
+database error while checking a row itself counts as an attempt and backs the
+row off, so a row that keeps failing ends as `retries_exhausted` instead of
+holding its campaign open. `BROADCAST_BATCH_SIZE` is lowered automatically to
+what the rate can send inside the 2-minute claim lease.
+
+On shutdown the server waits up to 20 s for the worker: a send already under
+way is completed and recorded (never aborted), and the rest of the batch goes
+back to `pending`.
+
+### Inspecting a campaign
+
+Aggregates only. The table never stores Telegram's response text, and campaign
+content is redacted from logs.
+
+```sql
+SELECT id, state, end_reason, approved_by, approved_at, completed_at
+  FROM broadcast_campaigns ORDER BY created_at DESC LIMIT 10;
+
+SELECT status, reason, COUNT(*) FROM broadcast_deliveries
+ WHERE campaign_id = '<id>' GROUP BY status, reason;
+```

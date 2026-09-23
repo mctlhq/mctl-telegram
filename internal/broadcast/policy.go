@@ -20,17 +20,20 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 )
 
-// MaxTextRunes is Telegram's sendMessage text limit (4096 UTF-8 characters
-// after entity parsing; no parse mode is used, so the raw text is what
-// counts). A longer text would fail at delivery time for every recipient, so
-// it is refused at prepare time instead.
-const MaxTextRunes = 4096
+// MaxTextUnits is Telegram's sendMessage text limit: 4096 characters counted
+// in UTF-16 code units (the unit Telegram's entity offsets use), so a
+// character outside the Basic Multilingual Plane -- most emoji -- costs two.
+// No parse mode is used, so the raw text is what counts. A longer text would
+// fail at delivery for every recipient after its single-use approval was
+// already spent, so it is refused at prepare time instead.
+const MaxTextUnits = 4096
 
 // Tier values a selector may target. The tier is the recipient's EFFECTIVE
 // tier as the OAuth server would resolve it (see TierOf), never the raw
@@ -71,8 +74,11 @@ const (
 	SkipOutOfAudience SkipReason = "out_of_audience"
 )
 
-// SkipReasons lists every SkipReason in evaluation order, for reports that
-// must show a zero count rather than omit a reason.
+// SkipReasons lists every COUNTABLE SkipReason in evaluation order, so a
+// preview shows a zero count rather than omitting a reason. SkipOutOfAudience
+// is deliberately absent: out-of-audience recipients are not the audience and
+// are never counted, and adding it here would change the shape of every
+// stored preview_counts an approver is shown.
 func SkipReasons() []SkipReason {
 	return []SkipReason{SkipNoAccount, SkipPolicy, SkipUnsubscribed, SkipUnreachable}
 }
@@ -194,8 +200,8 @@ func NormalizeText(text string) (string, error) {
 	if !utf8.ValidString(t) {
 		return "", errors.New("broadcast text is not valid UTF-8")
 	}
-	if n := utf8.RuneCountInString(t); n > MaxTextRunes {
-		return "", fmt.Errorf("broadcast text is %d characters; Telegram allows at most %d", n, MaxTextRunes)
+	if n := len(utf16.Encode([]rune(t))); n > MaxTextUnits {
+		return "", fmt.Errorf("broadcast text is %d UTF-16 units; Telegram allows at most %d", n, MaxTextUnits)
 	}
 	return t, nil
 }

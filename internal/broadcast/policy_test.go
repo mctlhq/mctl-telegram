@@ -70,11 +70,19 @@ func TestNormalizeText(t *testing.T) {
 	if _, err := NormalizeText(" \n\t "); err == nil {
 		t.Fatal("blank text must be refused")
 	}
-	if _, err := NormalizeText(strings.Repeat("я", MaxTextRunes)); err != nil {
-		t.Fatalf("text at the rune limit must pass: %v", err)
+	if _, err := NormalizeText(strings.Repeat("я", MaxTextUnits)); err != nil {
+		t.Fatalf("BMP text at the limit must pass: %v", err)
 	}
-	if _, err := NormalizeText(strings.Repeat("я", MaxTextRunes+1)); err == nil {
-		t.Fatal("text over the rune limit must be refused")
+	if _, err := NormalizeText(strings.Repeat("я", MaxTextUnits+1)); err == nil {
+		t.Fatal("text over the limit must be refused")
+	}
+	// Telegram counts UTF-16 units: 2100 emoji are 2100 runes but 4200
+	// units, and would be rejected at delivery for every recipient.
+	if _, err := NormalizeText(strings.Repeat("😀", 2100)); err == nil {
+		t.Fatal("non-BMP text over the UTF-16 limit must be refused")
+	}
+	if _, err := NormalizeText(strings.Repeat("😀", MaxTextUnits/2)); err != nil {
+		t.Fatalf("non-BMP text exactly at the UTF-16 limit must pass: %v", err)
 	}
 	if _, err := NormalizeText("a\xffb"); err == nil {
 		t.Fatal("invalid UTF-8 must be refused")
