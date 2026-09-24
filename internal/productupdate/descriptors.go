@@ -69,25 +69,40 @@ func Canonical(descriptor []byte) (json.RawMessage, error) {
 // NewSnapshot builds a snapshot from marshalled descriptors keyed by name. The
 // name inside each descriptor must match its key: a snapshot whose keys and
 // contents disagree would let a diff report a tool under the wrong name.
+// A surface with no tools is refused too: diffed against it, a release would
+// appear to add every tool it has.
 func NewSnapshot(surface Surface, descriptors map[string][]byte) (Snapshot, error) {
+	if len(descriptors) == 0 {
+		return Snapshot{}, fmt.Errorf("snapshot has no tools")
+	}
 	tools := make(map[string]json.RawMessage, len(descriptors))
 	for name, raw := range descriptors {
-		canonical, err := Canonical(raw)
+		canonical, err := canonicalNamed(name, raw)
 		if err != nil {
-			return Snapshot{}, fmt.Errorf("tool %s: %w", name, err)
-		}
-		var head struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(canonical, &head); err != nil {
-			return Snapshot{}, fmt.Errorf("tool %s: %w", name, err)
-		}
-		if head.Name != name {
-			return Snapshot{}, fmt.Errorf("tool %s: descriptor names itself %q", name, head.Name)
+			return Snapshot{}, err
 		}
 		tools[name] = canonical
 	}
 	return Snapshot{Schema: SnapshotSchema, Surface: surface, Tools: tools}, nil
+}
+
+// canonicalNamed canonicalises one descriptor and checks it names itself as
+// the key it is filed under.
+func canonicalNamed(name string, raw []byte) (json.RawMessage, error) {
+	canonical, err := Canonical(raw)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: %w", name, err)
+	}
+	var head struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(canonical, &head); err != nil {
+		return nil, fmt.Errorf("tool %s: %w", name, err)
+	}
+	if head.Name != name {
+		return nil, fmt.Errorf("tool %s: descriptor names itself %q", name, head.Name)
+	}
+	return canonical, nil
 }
 
 // Marshal is the one serialization of a snapshot: indented at the top level
@@ -96,6 +111,9 @@ func NewSnapshot(surface Surface, descriptors map[string][]byte) (Snapshot, erro
 // re-canonicalised on the way out, so a snapshot assembled or edited by hand
 // cannot write bytes ParseSnapshot would reject.
 func (s Snapshot) Marshal() ([]byte, error) {
+	if len(s.Tools) == 0 {
+		return nil, fmt.Errorf("snapshot has no tools")
+	}
 	names := s.names()
 	var out bytes.Buffer
 	surface, err := json.Marshal(s.Surface)
@@ -112,9 +130,9 @@ func (s Snapshot) Marshal() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("encode tool name: %w", err)
 		}
-		descriptor, err := Canonical(s.Tools[name])
+		descriptor, err := canonicalNamed(name, s.Tools[name])
 		if err != nil {
-			return nil, fmt.Errorf("tool %s: %w", name, err)
+			return nil, err
 		}
 		if i > 0 {
 			out.WriteString(",")
@@ -136,11 +154,6 @@ func ParseSnapshot(raw []byte) (Snapshot, error) {
 	}
 	if s.Schema != SnapshotSchema {
 		return Snapshot{}, fmt.Errorf("snapshot schema %q is not %q", s.Schema, SnapshotSchema)
-	}
-	// A surface with no tools is not evidence: diffed against it, a release
-	// would appear to add every tool it has.
-	if len(s.Tools) == 0 {
-		return Snapshot{}, fmt.Errorf("snapshot has no tools")
 	}
 	descriptors := make(map[string][]byte, len(s.Tools))
 	for name, descriptor := range s.Tools {

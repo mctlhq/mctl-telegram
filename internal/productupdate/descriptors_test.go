@@ -202,6 +202,16 @@ func TestMarshalCanonicalisesAnEditedDescriptor(t *testing.T) {
 	if _, err := s.Marshal(); err == nil {
 		t.Fatal("an empty descriptor must fail Marshal, not reach the file")
 	}
+	s.Tools["list_dialogs"] = json.RawMessage(sendMessage)
+	if _, err := s.Marshal(); err == nil {
+		t.Fatal("a descriptor filed under another tool's name must fail Marshal")
+	}
+	if _, err := (Snapshot{Schema: SnapshotSchema, Surface: full}).Marshal(); err == nil {
+		t.Fatal("a snapshot with no tools must fail Marshal")
+	}
+	if _, err := NewSnapshot(full, nil); err == nil {
+		t.Fatal("NewSnapshot must refuse a surface with no tools")
+	}
 }
 
 // Numbers survive exactly: 4096 must not become 4096.0, or every release
