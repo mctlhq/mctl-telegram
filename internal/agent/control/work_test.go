@@ -39,6 +39,10 @@ type fakeMctlAPI struct {
 	surfaceCalls int
 	intentCalls  []string
 	redeemCalls  []string
+	// createRequestIdemKeys records every Idempotency-Key header seen by
+	// handleCreateRequest, in call order — used to assert that a retried
+	// resume gets a fresh key rather than reusing a refused attempt's key.
+	createRequestIdemKeys []string
 
 	// refuseExternalKey, when set, makes CreateWorkItem for that key answer
 	// 409 external_key_in_use instead of the dedupe/create path.
@@ -172,6 +176,7 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := r.PathValue("id")
+	f.createRequestIdemKeys = append(f.createRequestIdemKeys, r.Header.Get("Idempotency-Key"))
 	var body struct {
 		Kind                 string `json:"kind"`
 		ExpectedStateVersion int64  `json:"expected_state_version"`
@@ -749,5 +754,71 @@ func TestTwoThreadsOneIssue(t *testing.T) {
 	refreshedB, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10001)
 	if refreshedA.LastState != "waiting" || refreshedB.LastState != "waiting" {
 		t.Fatalf("state after touch: A=%q B=%q, want both waiting", refreshedA.LastState, refreshedB.LastState)
+	}
+}
+
+// TestResumeRetryAfterRefusalGetsFreshIdempotencyKey is a regression test
+// for a P2 finding: a refused resume does not advance the work item's
+// state_version, so keying resume's Idempotency-Key on the binding's root
+// message id plus state_version alone made a second, deliberate /mctl work
+// resume recompute the EXACT SAME key as the refused attempt — which the
+// platform's idempotency cache would answer with that same stale rejection
+// forever, making resume permanently a no-op. The fix scopes the key to the
+// resume command's own message id instead, so each distinct /mctl work
+// resume gets its own key even when state_version has not moved.
+func TestResumeRetryAfterRefusalGetsFreshIdempotencyKey(t *testing.T) {
+	store, uid := newTestWorkStore(t)
+	fake := newFakeMctlAPI()
+	srv := fake.server(t)
+	defer srv.Close()
+	sender := &fakeSelfSender{}
+	client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+	router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+	router.Work = newTestWorkHandler(t, store, sender, client)
+	ctx := context.Background()
+
+	if err := router.HandleSavedText(ctx, meta(uid, 11000), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// The open's own "start" execution-request call already used one
+	// Idempotency-Key; only look at calls made from here on.
+	fake.createRequestIdemKeys = nil
+
+	// First resume is refused by the platform. A refusal never bumps the
+	// work item's state_version.
+	fake.forcedRequestState = workctx.RequestStateRejected
+	fake.forcedRequestReason = "resume_refused:stale"
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, meta(uid, 11001), "/mctl work resume"); err != nil {
+		t.Fatalf("resume 1: %v", err)
+	}
+	if len(fake.createRequestIdemKeys) != 1 {
+		t.Fatalf("execution-request calls after first resume = %d, want 1", len(fake.createRequestIdemKeys))
+	}
+	firstKey := fake.createRequestIdemKeys[0]
+
+	// Un-force the rejection so a genuinely new attempt could succeed if it
+	// actually reaches the handler instead of being answered from a cached
+	// refusal.
+	fake.forcedRequestState = ""
+	fake.forcedRequestReason = ""
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, meta(uid, 11002), "/mctl work resume"); err != nil {
+		t.Fatalf("resume 2: %v", err)
+	}
+	if len(fake.createRequestIdemKeys) != 2 {
+		t.Fatalf("execution-request calls after second resume = %d, want 2 (a fresh attempt was submitted)", len(fake.createRequestIdemKeys))
+	}
+	secondKey := fake.createRequestIdemKeys[1]
+	if secondKey == firstKey {
+		t.Fatalf("resume reused idempotency key %q across attempts after a refusal — this wedges /mctl work resume permanently", firstKey)
+	}
+
+	reply := sender.sent[0]
+	if strings.Contains(reply, "resume_refused") {
+		t.Fatalf("second resume reply = %q, still shows the stale refusal instead of a fresh attempt", reply)
+	}
+	if !strings.Contains(reply, "pending") {
+		t.Fatalf("second resume reply = %q, want a pending request", reply)
 	}
 }

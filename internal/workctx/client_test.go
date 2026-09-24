@@ -279,3 +279,67 @@ func TestSchemaVersionRejection(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIncompatibleSchema", err)
 	}
 }
+
+// TestOpenWorkItemResponseValidation locks in the fix for a P2 finding: a
+// 2xx work-item response that decodes to a zero-value WorkItem.ID (either
+// because the body is empty, or because it names schema_version correctly
+// but omits work_item.id) must be rejected, not returned as a successful
+// ItemView. Before the fix, relay() treated an empty body as success and
+// GetWorkItem/CreateWorkItem happily returned a zero-value ItemView, which
+// callers then persisted as a durable binding with an empty WorkItemID —
+// wedging the owner's Saved Messages command channel on what looked like a
+// permanently open binding.
+func TestOpenWorkItemResponseValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ""},
+		{"missing work_item.id", `{"schema_version":"workitem/v1","state_version":1}`},
+		{"blank work_item.id", `{"schema_version":"workitem/v1","work_item":{"id":""},"state_version":1}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+			client := NewClient(srv.URL, "tok", "tenant", nil)
+
+			if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); err == nil {
+				t.Fatal("GetWorkItem: expected error rejecting the response, got nil")
+			}
+
+			if _, err := client.CreateWorkItem(context.Background(), 555, CreateRequest{ExternalKey: "https://github.com/mctlhq/foo/issues/1"}); err == nil {
+				t.Fatal("CreateWorkItem: expected error rejecting the response, got nil")
+			}
+		})
+	}
+}
+
+// TestOpenWorkItemResponseAccepted is the positive counterpart to
+// TestOpenWorkItemResponseValidation: a 2xx response that does carry a
+// non-empty work_item.id must still decode into a usable ItemView, so the
+// new validate() hook only rejects the poison-pill shape, not every
+// response.
+func TestOpenWorkItemResponseAccepted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","work_item":{"id":"wi_1"},"state_version":3}`))
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "tok", "tenant", nil)
+
+	view, err := client.GetWorkItem(context.Background(), 555, "wi_1")
+	if err != nil {
+		t.Fatalf("GetWorkItem: unexpected error: %v", err)
+	}
+	if view.WorkItem.ID != "wi_1" {
+		t.Errorf("WorkItem.ID = %q, want wi_1", view.WorkItem.ID)
+	}
+	if view.StateVersion != 3 {
+		t.Errorf("StateVersion = %d, want 3", view.StateVersion)
+	}
+}

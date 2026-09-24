@@ -238,7 +238,7 @@ func (w *WorkHandler) handleResume(ctx context.Context, meta SavedMeta) error {
 	if err != nil {
 		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+workctxErrText(err))
 	}
-	req, retried, err := w.requestResumeWithRetry(ctx, actorTGID, binding, item.StateVersion)
+	req, retried, err := w.requestResumeWithRetry(ctx, actorTGID, binding, meta.TGMessageID, item.StateVersion)
 	if err != nil {
 		if errors.Is(err, workctx.ErrStateVersionConflict) {
 			return w.Notifier.Reply(ctx, meta.UserID, "The work item changed while resuming — please try /mctl work resume again.")
@@ -257,8 +257,20 @@ func (w *WorkHandler) handleResume(ctx context.Context, meta SavedMeta) error {
 // stateVersion. On a single 409 state-version conflict it re-reads the item
 // and retries EXACTLY once; a second conflict is returned to the caller
 // rather than looping — matching the bounded re-read-and-retry rule.
-func (w *WorkHandler) requestResumeWithRetry(ctx context.Context, actorTGID int64, binding db.WorkItemBinding, stateVersion int64) (*workctx.ExecutionRequestView, bool, error) {
-	key := workctx.IdempotencyKey(binding.ChatTGID, binding.RootTGMessageID, "resume", stateVersion)
+//
+// The idempotency key is scoped to cmdMsgID — THIS /mctl work resume
+// command's own message id — not the binding's root message id. A rejected
+// (refused) resume does not advance the work item's state_version, so
+// keying on the thread root plus state_version alone would make every
+// subsequent resume attempt recompute the exact same key as the refused one
+// and be answered from the platform's idempotency cache with that same
+// stale rejection forever — a permanent no-op from Telegram (P2). Each
+// distinct /mctl work resume the owner sends is a distinct Telegram
+// message, so scoping to cmdMsgID guarantees a fresh key per attempt while
+// still keying on stateVersion to give the in-function 409-conflict retry
+// below its own, correctly distinct key.
+func (w *WorkHandler) requestResumeWithRetry(ctx context.Context, actorTGID int64, binding db.WorkItemBinding, cmdMsgID, stateVersion int64) (*workctx.ExecutionRequestView, bool, error) {
+	key := workctx.IdempotencyKey(binding.ChatTGID, cmdMsgID, "resume", stateVersion)
 	req, err := w.Client.RequestExecution(ctx, actorTGID, binding.WorkItemID, workctx.ExecutionRequest{
 		Kind: workctx.ExecutionKindResume, ExpectedStateVersion: stateVersion, IdempotencyKey: key,
 	})
@@ -272,7 +284,7 @@ func (w *WorkHandler) requestResumeWithRetry(ctx context.Context, actorTGID int6
 	if gerr != nil {
 		return nil, true, gerr
 	}
-	retryKey := workctx.IdempotencyKey(binding.ChatTGID, binding.RootTGMessageID, "resume", item.StateVersion)
+	retryKey := workctx.IdempotencyKey(binding.ChatTGID, cmdMsgID, "resume", item.StateVersion)
 	req, err = w.Client.RequestExecution(ctx, actorTGID, binding.WorkItemID, workctx.ExecutionRequest{
 		Kind: workctx.ExecutionKindResume, ExpectedStateVersion: item.StateVersion, IdempotencyKey: retryKey,
 	})
