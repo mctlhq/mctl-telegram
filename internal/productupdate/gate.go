@@ -53,13 +53,15 @@ func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
 // removal plus an addition, each of which must be covered -- one entry may
 // claim both.
 //
-// latestTag is the latest release tag of any kind, snapshot or not. It is
-// used only in the bootstrap window (no baseline), where a citation cannot be
-// held to a diff but can still be held to reality: it may not cite a release
-// that does not exist yet, every tool it names must exist at HEAD unless it
-// claims that tool's removal, and no change may be claimed twice. A repository
-// with no release tag at all cannot carry a product update yet.
-func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (GateReport, error) {
+// releases are the repository's tags, snapshot or not; anything that is not
+// MAJOR.MINOR.PATCH is ignored. They are used only in the bootstrap window (no
+// baseline), where a citation cannot be held to a diff but can still be held
+// to reality: it must cite a release that exists as a tag -- not merely one
+// no newer than the latest, since an entry citing a version below the oldest
+// tag would count as shipped at once -- every tool it names must exist at HEAD
+// unless it claims that tool's removal, and no change may be claimed twice. A
+// repository with no release tag at all cannot carry a product update yet.
+func Gate(feed Feed, baseline string, releases []string, previous, current Snapshot) (GateReport, error) {
 	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}, Unverified: []string{}}
 	if baseline == "" {
 		// The bootstrap window: no release carries a snapshot, so there is no
@@ -68,6 +70,13 @@ func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (Ga
 		// citation is recorded as unverified rather than refused.
 		report.Diff = Diff{Added: []string{}, Removed: []string{}, Changed: []ToolChange{}}
 		bootstrapClaims := map[string]string{}
+		released := map[string]bool{}
+		for _, t := range releases {
+			if releasePattern.MatchString(t) {
+				released[t] = true
+			}
+		}
+		latestTag := LatestRelease(releases, func(string) bool { return true })
 		for _, e := range feed.Entries {
 			from := e.Evidence.From
 			if from == "" {
@@ -85,6 +94,11 @@ func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (Ga
 			if newer {
 				report.Problems = append(report.Problems, fmt.Sprintf(
 					"%s cites release %s, which is not a released version (latest: %s); cite the latest release", e.ID, from, latestTag))
+				continue
+			}
+			if !released[from] {
+				report.Problems = append(report.Problems, fmt.Sprintf(
+					"%s cites release %s, which is not a release tag of this repository (latest: %s); cite the latest release", e.ID, from, latestTag))
 				continue
 			}
 			// Such an entry becomes history at the first snapshot release and is

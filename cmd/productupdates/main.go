@@ -88,9 +88,9 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
 		return exitUsage
 	}
-	latestTag := productupdate.LatestRelease(strings.Fields(tags), func(string) bool { return true })
+	releases := strings.Fields(tags)
 	if baseline == "" {
-		baseline = productupdate.LatestRelease(strings.Fields(tags), func(tag string) bool {
+		baseline = productupdate.LatestRelease(releases, func(tag string) bool {
 			_, err := git(repo, "cat-file", "-e", tag+":"+snapshotPath)
 			return err == nil
 		})
@@ -131,7 +131,7 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		_, _ = fmt.Fprintf(stderr, "productupdates: %s: %v\n", snapshotPath, err)
 		return exitFailed
 	}
-	report, err := productupdate.Gate(feed, baseline, latestTag, previous, current)
+	report, err := productupdate.Gate(feed, baseline, releases, previous, current)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
 		return exitFailed
