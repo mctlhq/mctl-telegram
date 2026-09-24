@@ -1,5 +1,7 @@
 package workctx
 
+import "fmt"
+
 // SchemaVersion is the only envelope version this client understands. Any
 // response naming a different value is rejected outright — see
 // docs/contracts/mctl-api-work-context.md's "workitem/v1 envelope" section
@@ -11,6 +13,29 @@ const SchemaVersion = "workitem/v1"
 // without a type switch per route.
 type versionedEnvelope interface {
 	schemaVersion() string
+}
+
+// validatedEnvelope is implemented by response envelopes that carry a
+// required field relay cannot leave unchecked. A 2xx response that omits it
+// (whether the body is empty or just missing the field) must not be treated
+// as success: the caller would persist the zero value as a durable
+// identifier — for ItemView that is an empty WorkItem.ID written into a
+// work-item binding — and every subsequent command on that thread would
+// then operate on an empty id, wedging the owner's whole Saved Messages
+// command channel on what looks like a permanently "open" binding.
+type validatedEnvelope interface {
+	validate() error
+}
+
+// validate reports an error when WorkItem.ID is empty. Every route that
+// returns an ItemView (POST /api/v1/work-items, GET
+// /api/v1/work-items/{id}) promises at least this field per envelope.go's
+// ItemView doc, so a response missing it is malformed, not merely sparse.
+func (v *ItemView) validate() error {
+	if v.WorkItem.ID == "" {
+		return fmt.Errorf("response missing work_item.id")
+	}
+	return nil
 }
 
 // WorkItemDTO is the work_item object nested in ItemView. Deliberately thin

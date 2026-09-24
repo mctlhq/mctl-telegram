@@ -127,15 +127,23 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	if out == nil {
 		return nil
 	}
-	if len(respBody) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("workctx: decode response: %w", err)
+	// An empty 2xx body is NOT treated as success here: out is left at its
+	// zero value, which then fails the schemaVersion/validate checks below
+	// instead of silently reporting success with a blank result (see
+	// validatedEnvelope's doc on the poison-pill hazard this closes).
+	if len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("workctx: decode response: %w", err)
+		}
 	}
 	if env, ok := out.(versionedEnvelope); ok {
 		if env.schemaVersion() != SchemaVersion {
 			return fmt.Errorf("%w: got %q, want %q", ErrIncompatibleSchema, env.schemaVersion(), SchemaVersion)
+		}
+	}
+	if v, ok := out.(validatedEnvelope); ok {
+		if err := v.validate(); err != nil {
+			return fmt.Errorf("workctx: %w", err)
 		}
 	}
 	return nil
