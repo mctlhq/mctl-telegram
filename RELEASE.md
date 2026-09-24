@@ -36,6 +36,14 @@ go run ./cmd/tooldiff \
 
 The command only prints JSON. It drafts, approves and publishes nothing. Releases before the snapshot existed have no file to diff against.
 
+Every user-visible change in that diff needs a curated product update in `docs/product-updates/` (see its README): an added or removed tool, or a schema or annotation change, fails CI on the pull request that makes it until an approved entry claims it. CI runs the same check anyone can run locally:
+
+```bash
+go run ./cmd/productupdates gate
+```
+
+The check is the `product-updates` job in `build.yml`. Branch protection on `main` requires it, next to `test` and `docker` (set in the repository settings, not by this file). The baseline is the latest release tag whose tree carries `docs/tool-descriptors.json`. Until one exists, the gate requires nothing and only validates the feed; an entry's citation is reported as unverified, because there is no diff to hold it to. After a release, entries whose `evidence.from` is the previous baseline are history. New entries cite the new release. The gate reads no `CHANGELOG.md` and publishes nothing.
+
 ## Versioning
 
 - `MAJOR` — breaking changes to tool schemas or auth behavior

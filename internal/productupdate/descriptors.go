@@ -139,10 +139,7 @@ func (s Snapshot) Marshal() ([]byte, error) {
 		}
 		fmt.Fprintf(&out, "\n    %s: %s", key, descriptor)
 	}
-	if len(names) > 0 {
-		out.WriteString("\n  ")
-	}
-	out.WriteString("}\n}\n")
+	out.WriteString("\n  }\n}\n")
 	return out.Bytes(), nil
 }
 
@@ -249,6 +246,17 @@ func Compare(previous, current Snapshot) (Diff, error) {
 }
 
 func compareTool(name string, before, after json.RawMessage) (*ToolChange, error) {
+	// Canonicalise both sides first: a Snapshot assembled by hand may hold a
+	// pretty-printed descriptor, and whether a tool changed must not depend on
+	// its whitespace (mctl-telegram#681).
+	before, err := Canonical(before)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: %w", name, err)
+	}
+	after, err = Canonical(after)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: %w", name, err)
+	}
 	if bytes.Equal(before, after) {
 		return nil, nil
 	}
