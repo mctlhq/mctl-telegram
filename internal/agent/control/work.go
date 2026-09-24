@@ -14,6 +14,22 @@ import (
 // followed by any mctl-api call or binding write.
 const workUsage = "Usage: /mctl work https://github.com/mctlhq/<repo>/issues/<n>\nAlso: /mctl work status | /mctl work note <text> | /mctl work resume\nOne-time setup: /mctl link <code>"
 
+// isMissingWorkArg reports whether text is a /mctl work invocation that
+// ParseCommand rejected for a missing argument (bare "/mctl work", or
+// "/mctl work note" with no text) — the one ParseCommand-error case that
+// gets the work-specific usage line instead of the generic unknown-command
+// reply, per requirements.md's explicit-runnable-target rule.
+func isMissingWorkArg(text string) bool {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "/mctl") || !strings.EqualFold(fields[1], "work") {
+		return false
+	}
+	if len(fields) == 2 {
+		return true // bare "/mctl work"
+	}
+	return len(fields) == 3 && strings.EqualFold(fields[2], "note") // "/mctl work note" with no text
+}
+
 // WorkHandler implements the five issue-443 subcommands (/mctl work
 // open|status|note|resume, /mctl link) behind Router.Work. It is
 // constructed and wired only when WORK_CONTEXT_ENABLED is true

@@ -75,6 +75,14 @@ func (r *Router) HandleSavedText(ctx context.Context, meta SavedMeta, text strin
 	userID := meta.UserID
 	cmd, err := ParseCommand(text)
 	if err != nil {
+		// A missing /mctl work[/link] argument gets the work-specific usage
+		// line (requirements.md's explicit-runnable-target rule), not the
+		// generic unknown-command reply — but only when the adapter is
+		// actually wired; with r.Work nil (WORK_CONTEXT_ENABLED=false) this
+		// must stay byte-identical to the pre-#443 fallback.
+		if r.Work != nil && isMissingWorkArg(text) {
+			return r.Notifier.Reply(ctx, userID, workUsage)
+		}
 		return r.Notifier.Reply(ctx, userID, unknownCommandReply)
 	}
 	switch cmd.Type {
