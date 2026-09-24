@@ -105,6 +105,9 @@ func FreezeDigest(id string, version int, category db.NotificationCategory, late
 	if version < 1 {
 		return Digest{}, fmt.Errorf("digest version must be at least 1")
 	}
+	if latestRelease != "" && !ValidRelease(latestRelease) {
+		return Digest{}, fmt.Errorf("latest release %q is not a MAJOR.MINOR.PATCH release", latestRelease)
+	}
 	if len(entries) == 0 {
 		return Digest{}, fmt.Errorf("digest %s has no entries", id)
 	}

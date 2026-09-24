@@ -32,8 +32,9 @@ a snapshot (the *baseline*) and fails unless:
 
 A product update (`new_tool`, `changed_behavior`, `deprecation`) always cites
 the diff: `evidence.from` and at least one change. Only a `maintenance` or
-`security` notice may rest on links alone, and the tools it names must exist at
-HEAD. Text-only changes may be claimed but need not be. A rename shows up as a
+`security` notice may rest on links alone. It claims no capability, so the
+tools it names are only syntax-checked. Text-only changes may be claimed but
+need not be. A rename shows up as a
 removal plus an addition: both must be covered, and one `changed_behavior`
 entry may claim the pair. A release that changes no tool requires nothing.
 Entries for older baselines are history and are only schema-checked. So when a

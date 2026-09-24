@@ -128,17 +128,27 @@ func TestOlderEntriesAreHistoryAndNewerOnesAreRefused(t *testing.T) {
 	wantProblem(t, runGate(t, []Entry{future}, s, s), "newer than the latest released snapshot")
 }
 
-func TestWithoutABaselineNothingIsRequiredButNothingCanCite(t *testing.T) {
+// Before the first release that carries a snapshot nothing can be required or
+// verified. A product update written then still cites a release (Validate
+// demands it), and passes as unverified rather than being unwritable.
+func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
 	r, err := Gate(Feed{}, "", Snapshot{}, snapshot(t, listDialogs))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantPass(t, r)
-	r, err = Gate(Feed{Entries: []Entry{approved("send-message")}}, "", Snapshot{}, snapshot(t, listDialogs))
+	e := approved("send-message")
+	if err := e.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Gate(Feed{Entries: []Entry{e}}, "", Snapshot{}, snapshot(t, listDialogs))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantProblem(t, r, "no release carries a tool snapshot yet")
+	wantPass(t, r)
+	if len(r.Unverified) != 1 || !strings.Contains(r.Unverified[0], "send-message") {
+		t.Fatalf("unverified %q", r.Unverified)
+	}
 }
 
 func TestLatestReleaseSortsNumericallyAndSkipsTagsWithoutASnapshot(t *testing.T) {
@@ -163,14 +173,19 @@ func TestClaimsSerialiseWithStableKeys(t *testing.T) {
 	}
 }
 
-// A links-only notice has no diff to be held to, but the tools it names must
-// exist.
-func TestALinksOnlyNoticeNamesCurrentTools(t *testing.T) {
-	notice := approved("maintenance-window")
-	notice.Kind, notice.Tools = KindMaintenance, []string{"teleport"}
-	notice.Evidence = Evidence{Links: []string{"https://example.com/maintenance"}}
+// A links-only notice claims no capability. A notice naming a tool that a
+// deprecation removes in the same pull request, or one a later release
+// removes, must not fail the gate: that failure could never be fixed.
+func TestALinksOnlyNoticeIsNotHeldToHEAD(t *testing.T) {
+	notice := approved("delete-advisory")
+	notice.Kind, notice.Tools = KindSecurity, []string{"delete_messages"}
+	notice.Evidence = Evidence{Links: []string{"https://github.com/mctlhq/mctl-telegram/security/advisories/1"}}
+	d := approved("drop-delete-messages")
+	d.Kind, d.Tools = KindDeprecation, []string{"delete_messages"}
+	d.Evidence.Changes = []Claim{{Tool: "delete_messages", Change: ClaimRemoved}}
+	wantPass(t, runGate(t, []Entry{notice, d}, snapshot(t, listDialogs, deleteMessage), snapshot(t, listDialogs)))
 	s := snapshot(t, listDialogs)
-	wantProblem(t, runGate(t, []Entry{notice}, s, s), "names tool teleport, which does not exist at HEAD")
+	wantPass(t, runGate(t, []Entry{notice}, s, s))
 }
 
 // A release cut while a pull request is open leaves its entry citing the old
@@ -179,5 +194,5 @@ func TestAnEntryCitingAnOlderBaselineIsToldToBump(t *testing.T) {
 	before, after := snapshot(t, listDialogs), snapshot(t, listDialogs, sendMessage)
 	old := approved("send-message")
 	old.Evidence.From = "0.68.0"
-	wantProblem(t, runGate(t, []Entry{old}, before, after), "bump its evidence.from to 0.69.0")
+	wantProblem(t, runGate(t, []Entry{old}, before, after), "bump its evidence.from to 0.69.0, otherwise add a new entry")
 }

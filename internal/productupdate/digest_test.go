@@ -138,3 +138,10 @@ func TestEmptyAndAbsentListsHashAlike(t *testing.T) {
 		t.Fatal("links: [] and no links hashed differently")
 	}
 }
+
+func TestFreezeDigestRefusesAMalformedLatestRelease(t *testing.T) {
+	_, err := FreezeDigest("weekly-2026-39", 1, db.CategoryProductUpdates, "v0.70.0", []Entry{approved("send-message")})
+	if err == nil || !strings.Contains(err.Error(), "latest release") {
+		t.Fatalf("malformed latest release: %v", err)
+	}
+}

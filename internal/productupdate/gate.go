@@ -23,6 +23,10 @@ type GateReport struct {
 	Covered map[string]string `json:"covered"`
 	// Problems are why the gate fails; empty means it passes.
 	Problems []string `json:"problems"`
+	// Unverified lists entries whose citation the gate could not check,
+	// because no release carries a snapshot yet. They pass: nothing can be
+	// required or verified before the first baseline exists.
+	Unverified []string `json:"unverified"`
 }
 
 // Passed reports a gate with nothing to fix.
@@ -49,13 +53,16 @@ func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
 // removal plus an addition, each of which must be covered -- one entry may
 // claim both.
 func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, error) {
-	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}}
+	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}, Unverified: []string{}}
 	if baseline == "" {
+		// The bootstrap window: no release carries a snapshot, so there is no
+		// diff to require anything from or to hold a citation to. A product
+		// update written now must still cite a release (Validate), so the
+		// citation is recorded as unverified rather than refused.
 		report.Diff = Diff{Added: []string{}, Removed: []string{}, Changed: []ToolChange{}}
 		for _, e := range feed.Entries {
 			if e.Evidence.From != "" {
-				report.Problems = append(report.Problems, fmt.Sprintf(
-					"%s cites release %s, but no release carries a tool snapshot yet", e.ID, e.Evidence.From))
+				report.Unverified = append(report.Unverified, fmt.Sprintf("%s (evidence.from %s)", e.ID, e.Evidence.From))
 			}
 		}
 		return report, nil
@@ -100,14 +107,11 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 	for _, e := range feed.Entries {
 		from := e.Evidence.From
 		if from == "" {
-			// A links-only maintenance or security notice: no diff to hold it
-			// to, but the tools it names are current ones.
-			for _, tool := range e.Tools {
-				if _, ok := current.Tools[tool]; !ok {
-					report.Problems = append(report.Problems, fmt.Sprintf(
-						"%s names tool %s, which does not exist at HEAD", e.ID, tool))
-				}
-			}
+			// A links-only maintenance or security notice: it claims no
+			// capability and has no diff to be held to. Its tool names are
+			// syntax-checked by Validate only; checking them against HEAD
+			// would never age out and would fail the day a tool it once named
+			// is removed.
 			continue
 		}
 		newer, err := releaseAfter(from, baseline)
@@ -162,8 +166,8 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 		}
 		if stale, ok := staleClaim[key]; ok {
 			report.Problems = append(report.Problems, fmt.Sprintf(
-				"%s %s since %s is claimed only by %s: a release was cut since; bump its evidence.from to %s",
-				c.Tool, c.Change, baseline, stale, baseline))
+				"%s %s since %s has no product update citing %s; %s claims it under an older baseline: if that entry comes from a pull request opened before %s was cut, bump its evidence.from to %s, otherwise add a new entry",
+				c.Tool, c.Change, baseline, baseline, stale, baseline, baseline))
 			continue
 		}
 		report.Problems = append(report.Problems, fmt.Sprintf(
