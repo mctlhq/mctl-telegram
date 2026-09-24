@@ -46,7 +46,9 @@ type Digest struct {
 	ID       string                  `json:"id"`
 	Version  int                     `json:"version"`
 	Category db.NotificationCategory `json:"category"`
-	// SourceRefs name each entry by id and the hash of its content, so the
+	// SourceRefs name each entry by its file and the hash of its CONTENT --
+	// the JSON projection digestEntry, not the file bytes, so review metadata
+	// can change without moving it: "<file>@content-sha256:<hex>". The
 	// digest says exactly which reviewed text it was built from.
 	SourceRefs []string `json:"sourceRefs"`
 	// ContentHash covers the schema, id, version, category and every entry's
@@ -66,8 +68,21 @@ type digestEntry struct {
 	Evidence Evidence `json:"evidence"`
 }
 
+// entryContent is the hashed projection of an entry. Absent and empty lists
+// are the same content, so they are normalised before hashing.
 func entryContent(e Entry) digestEntry {
-	return digestEntry{ID: e.ID, Kind: e.Kind, Title: e.Title, Summary: e.Summary, Locale: e.Locale, Tools: e.Tools, Evidence: e.Evidence}
+	evidence := Evidence{From: e.Evidence.From, Changes: e.Evidence.Changes, Links: e.Evidence.Links}
+	if evidence.Changes == nil {
+		evidence.Changes = []Claim{}
+	}
+	if evidence.Links == nil {
+		evidence.Links = []string{}
+	}
+	tools := e.Tools
+	if tools == nil {
+		tools = []string{}
+	}
+	return digestEntry{ID: e.ID, Kind: e.Kind, Title: e.Title, Summary: e.Summary, Locale: e.Locale, Tools: tools, Evidence: evidence}
 }
 
 func hashJSON(v any) (string, error) {
@@ -76,7 +91,7 @@ func hashJSON(v any) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256(raw)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // FreezeDigest builds the frozen digest for one category from the given
@@ -116,7 +131,7 @@ func FreezeDigest(id string, version int, category db.NotificationCategory, late
 			return Digest{}, fmt.Errorf("hash %s: %w", e.ID, err)
 		}
 		contents = append(contents, content)
-		refs = append(refs, fmt.Sprintf("%s/%s.yaml@%s", FeedDir, e.ID, h))
+		refs = append(refs, fmt.Sprintf("%s/%s.yaml@content-sha256:%s", FeedDir, e.ID, h))
 	}
 	d := Digest{Schema: DigestSchema, ID: id, Version: version, Category: category, SourceRefs: refs}
 	h, err := hashJSON(struct {
@@ -129,6 +144,6 @@ func FreezeDigest(id string, version int, category db.NotificationCategory, late
 	if err != nil {
 		return Digest{}, fmt.Errorf("hash digest %s: %w", id, err)
 	}
-	d.ContentHash = h
+	d.ContentHash = "sha256:" + h
 	return d, nil
 }

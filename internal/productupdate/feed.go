@@ -129,20 +129,17 @@ type Provenance struct {
 
 // Entry is one product update, as committed in docs/product-updates/<id>.yaml.
 type Entry struct {
-	Schema    string   `yaml:"schema"`
-	ID        string   `yaml:"id"`
-	Kind      Kind     `yaml:"kind"`
-	Title     string   `yaml:"title"`
-	Summary   string   `yaml:"summary"`
-	Locale    string   `yaml:"locale"`
-	Delivery  Delivery `yaml:"delivery"`
-	HighValue bool     `yaml:"high_value"`
-	Tools     []string `yaml:"tools"`
-	Surfaces  []string `yaml:"surfaces"`
-	Evidence  Evidence `yaml:"evidence"`
-	// Release is the version the change shipped in, once known. Optional:
-	// release-please picks the version only when the release is cut.
-	Release    string     `yaml:"release"`
+	Schema     string     `yaml:"schema"`
+	ID         string     `yaml:"id"`
+	Kind       Kind       `yaml:"kind"`
+	Title      string     `yaml:"title"`
+	Summary    string     `yaml:"summary"`
+	Locale     string     `yaml:"locale"`
+	Delivery   Delivery   `yaml:"delivery"`
+	HighValue  bool       `yaml:"high_value"`
+	Tools      []string   `yaml:"tools"`
+	Surfaces   []string   `yaml:"surfaces"`
+	Evidence   Evidence   `yaml:"evidence"`
 	Status     Status     `yaml:"status"`
 	Provenance Provenance `yaml:"provenance"`
 	CreatedAt  string     `yaml:"created_at"`
@@ -160,6 +157,7 @@ const (
 var (
 	idPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,79}$`)
 	toolPattern    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	surfacePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 	releasePattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 )
 
@@ -225,8 +223,13 @@ func (e Entry) Validate() error {
 	if dup := duplicate(e.Tools); dup != "" {
 		add("tool %q is listed twice", dup)
 	}
-	if e.Release != "" && !releasePattern.MatchString(e.Release) {
-		add("release %q is not MAJOR.MINOR.PATCH", e.Release)
+	for _, surface := range e.Surfaces {
+		if !surfacePattern.MatchString(surface) {
+			add("surface %q is not a lower-case surface name", surface)
+		}
+	}
+	if dup := duplicate(e.Surfaces); dup != "" {
+		add("surface %q is listed twice", dup)
 	}
 	problems = append(problems, e.validateEvidence()...)
 	problems = append(problems, e.validateReview()...)
@@ -246,9 +249,17 @@ func (e Entry) validateEvidence() []string {
 	if len(ev.Changes) > 0 && ev.From == "" {
 		add("evidence.changes needs evidence.from, the release the diff is taken against")
 	}
-	// Every factual update links back to deterministic source evidence: a
-	// tool change to the diff, anything else to at least one link.
-	if len(ev.Changes) == 0 && len(ev.Links) == 0 {
+	// Every factual update links back to deterministic source evidence. A
+	// product update -- new tool, changed behaviour, deprecation -- describes
+	// the tool surface, so it cites the diff: evidence.from and at least one
+	// change, which the gate then holds to that diff and which decides when it
+	// has shipped. Only a maintenance or security notice may rest on links
+	// alone; it describes no capability.
+	if e.Category() == db.CategoryProductUpdates {
+		if ev.From == "" || len(ev.Changes) == 0 {
+			add("a %s update must cite the tool diff: evidence.from and at least one evidence.changes item", e.Kind)
+		}
+	} else if len(ev.Changes) == 0 && len(ev.Links) == 0 {
 		add("evidence needs changes from the tool diff or at least one link")
 	}
 	for _, link := range ev.Links {
@@ -322,8 +333,8 @@ func (e Entry) validateReview() []string {
 	default:
 		add("status %q is not draft or approved", e.Status)
 	}
-	if isBot(p.Author) && p.AssistedBy == "" {
-		add("author %q is a bot; name the model in provenance.assisted_by and a human author", p.Author)
+	if isBot(p.Author) {
+		add("author %q is a bot; the author is a person, and a model that helped goes in provenance.assisted_by", p.Author)
 	}
 	return problems
 }

@@ -133,6 +133,11 @@ func TestGeneratedCopyCannotApproveItself(t *testing.T) {
 	e.Provenance.Author = "app/mctl-agents"
 	wantInvalid(t, e, "author \"app/mctl-agents\" is a bot")
 
+	// Naming the model does not make a bot an acceptable author.
+	e = approved("send-message")
+	e.Provenance.Author, e.Provenance.AssistedBy = "mctl-agents[bot]", "claude-opus"
+	wantInvalid(t, e, "the author is a person")
+
 	// A model-assisted update reviewed by a person is fine, and the reviewer
 	// may be the author (owner decision on #440).
 	e = approved("send-message")
@@ -241,4 +246,33 @@ func TestTheCommittedFeedIsValid(t *testing.T) {
 	if _, err := LoadFeed(filepath.Join("..", "..", FeedDir)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A product update describes the tool surface, so it must cite the diff; a
+// links-only product update would escape every factual guard of the gate.
+func TestAProductUpdateMustCiteTheDiff(t *testing.T) {
+	for _, kind := range []Kind{KindNewTool, KindChangedBehavior, KindDeprecation} {
+		e := approved("silent-send")
+		e.Kind = kind
+		e.Evidence = Evidence{Links: []string{"https://github.com/mctlhq/mctl-telegram/pull/1"}}
+		wantInvalid(t, e, "must cite the tool diff")
+	}
+	notice := approved("maintenance-window")
+	notice.Kind, notice.Tools = KindMaintenance, nil
+	notice.Evidence = Evidence{Links: []string{"https://example.com/maintenance"}}
+	if err := notice.Validate(); err != nil {
+		t.Fatalf("a links-only maintenance notice: %v", err)
+	}
+}
+
+func TestSurfacesAreNamesAndUnique(t *testing.T) {
+	e := approved("send-message")
+	e.Surfaces = []string{"chatgpt", "claude"}
+	if err := e.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e.Surfaces = []string{"Claude Desktop"}
+	wantInvalid(t, e, "is not a lower-case surface name")
+	e.Surfaces = []string{"claude", "claude"}
+	wantInvalid(t, e, "surface \"claude\" is listed twice")
 }

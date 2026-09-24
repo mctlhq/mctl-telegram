@@ -162,3 +162,22 @@ func TestClaimsSerialiseWithStableKeys(t *testing.T) {
 		t.Fatalf("got %s, want %s", raw, want)
 	}
 }
+
+// A links-only notice has no diff to be held to, but the tools it names must
+// exist.
+func TestALinksOnlyNoticeNamesCurrentTools(t *testing.T) {
+	notice := approved("maintenance-window")
+	notice.Kind, notice.Tools = KindMaintenance, []string{"teleport"}
+	notice.Evidence = Evidence{Links: []string{"https://example.com/maintenance"}}
+	s := snapshot(t, listDialogs)
+	wantProblem(t, runGate(t, []Entry{notice}, s, s), "names tool teleport, which does not exist at HEAD")
+}
+
+// A release cut while a pull request is open leaves its entry citing the old
+// baseline; the failure says to bump it rather than to add a new entry.
+func TestAnEntryCitingAnOlderBaselineIsToldToBump(t *testing.T) {
+	before, after := snapshot(t, listDialogs), snapshot(t, listDialogs, sendMessage)
+	old := approved("send-message")
+	old.Evidence.From = "0.68.0"
+	wantProblem(t, runGate(t, []Entry{old}, before, after), "bump its evidence.from to 0.69.0")
+}

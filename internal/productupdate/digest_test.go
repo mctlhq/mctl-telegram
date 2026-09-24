@@ -64,7 +64,7 @@ func TestTheFrozenDigestIsContentAddressed(t *testing.T) {
 	if first.ContentHash != again.ContentHash || strings.Join(first.SourceRefs, ",") != strings.Join(again.SourceRefs, ",") {
 		t.Fatalf("order changed the digest: %+v vs %+v", first, again)
 	}
-	if !strings.HasPrefix(first.SourceRefs[0], FeedDir+"/list-dialogs.yaml@sha256:") {
+	if !strings.HasPrefix(first.SourceRefs[0], FeedDir+"/list-dialogs.yaml@content-sha256:") {
 		t.Fatalf("source ref %q", first.SourceRefs[0])
 	}
 
@@ -118,5 +118,23 @@ func TestAnUnshippedUpdateIsNotAnnounced(t *testing.T) {
 	notice.Evidence = Evidence{Links: []string{"https://example.com/maintenance"}}
 	if !notice.Shipped("") {
 		t.Fatal("a links-only notice describes no unreleased capability")
+	}
+}
+
+// Absent and empty lists say the same thing and hash the same.
+func TestEmptyAndAbsentListsHashAlike(t *testing.T) {
+	a := approved("send-message")
+	b := a
+	b.Evidence.Links = []string{}
+	x, err := FreezeDigest("weekly-2026-39", 1, db.CategoryProductUpdates, "0.70.0", []Entry{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := FreezeDigest("weekly-2026-39", 1, db.CategoryProductUpdates, "0.70.0", []Entry{b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x.ContentHash != y.ContentHash {
+		t.Fatal("links: [] and no links hashed differently")
 	}
 }

@@ -42,7 +42,7 @@ Every user-visible change in that diff needs a curated product update in `docs/p
 go run ./cmd/productupdates gate
 ```
 
-The baseline is the latest release tag whose tree carries `docs/tool-descriptors.json`. Until one exists, the gate requires nothing and only validates the feed. After a release, entries whose `evidence.from` is the previous baseline are history. New entries cite the new release. The gate reads no `CHANGELOG.md` and publishes nothing.
+The check is the `product-updates` job in `build.yml`, and it is a required status check on `main` next to `test` and `docker`. The baseline is the latest release tag whose tree carries `docs/tool-descriptors.json`. Until one exists, the gate requires nothing and only validates the feed. After a release, entries whose `evidence.from` is the previous baseline are history. New entries cite the new release. The gate reads no `CHANGELOG.md` and publishes nothing.
 
 ## Versioning
 

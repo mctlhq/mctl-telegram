@@ -30,10 +30,16 @@ a snapshot (the *baseline*) and fails unless:
   surface does not show;
 - no entry cites a release newer than the baseline.
 
-Text-only changes may be claimed but need not be. A rename shows up as a
+A product update (`new_tool`, `changed_behavior`, `deprecation`) always cites
+the diff: `evidence.from` and at least one change. Only a `maintenance` or
+`security` notice may rest on links alone, and the tools it names must exist at
+HEAD. Text-only changes may be claimed but need not be. A rename shows up as a
 removal plus an addition: both must be covered, and one `changed_behavior`
 entry may claim the pair. A release that changes no tool requires nothing.
-Entries for older baselines are history and are only schema-checked.
+Entries for older baselines are history and are only schema-checked. So when a
+release is cut while a pull request carrying an entry is open, rebase it and
+bump that entry's `evidence.from` to the new release. The gate names the entry
+when this is the cause.
 `CHANGELOG.md` is not an input.
 
 The gate needs the full history and tags. In a shallow clone it refuses
@@ -66,14 +72,13 @@ locale: en                     # v1 is English only
 delivery: next_digest          # next_digest | immediate | docs_only
 high_value: false              # immediate is only for security, maintenance or high_value
 tools: [send_message]          # affected tool identifiers
-surfaces: [chatgpt, claude]    # optional
+surfaces: [chatgpt, claude]    # optional; lower-case names, no duplicates
 evidence:
   from: 0.69.0                 # the baseline release the diff is taken against
   changes:                     # the diff items this entry covers
     - {tool: send_message, change: schema}   # added | removed | schema | annotations | text
-  links:                       # optional https sources; required when there are no changes
+  links:                       # optional https sources
     - https://github.com/mctlhq/mctl-telegram/pull/123
-release: 0.70.0                # optional, once the version is known
 status: approved               # draft | approved
 provenance:
   author: alice

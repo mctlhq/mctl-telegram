@@ -93,9 +93,21 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 	}
 
 	claimedBy := map[string]string{}
+	// staleClaim: an item an entry claims under an OLDER baseline -- usually a
+	// pull request opened before the latest release, whose evidence.from now
+	// needs bumping. Used only to make the failure say so.
+	staleClaim := map[string]string{}
 	for _, e := range feed.Entries {
 		from := e.Evidence.From
 		if from == "" {
+			// A links-only maintenance or security notice: no diff to hold it
+			// to, but the tools it names are current ones.
+			for _, tool := range e.Tools {
+				if _, ok := current.Tools[tool]; !ok {
+					report.Problems = append(report.Problems, fmt.Sprintf(
+						"%s names tool %s, which does not exist at HEAD", e.ID, tool))
+				}
+			}
 			continue
 		}
 		newer, err := releaseAfter(from, baseline)
@@ -109,6 +121,9 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 			continue
 		}
 		if from != baseline {
+			for _, c := range e.Evidence.Changes {
+				staleClaim[claimKey(c)] = e.ID + " (evidence.from " + from + ")"
+			}
 			continue
 		}
 		for _, tool := range e.Tools {
@@ -143,6 +158,12 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 		if id, drafted := claimedBy[key]; drafted {
 			report.Problems = append(report.Problems, fmt.Sprintf(
 				"%s %s since %s is claimed only by draft %s; it needs review", c.Tool, c.Change, baseline, id))
+			continue
+		}
+		if stale, ok := staleClaim[key]; ok {
+			report.Problems = append(report.Problems, fmt.Sprintf(
+				"%s %s since %s is claimed only by %s: a release was cut since; bump its evidence.from to %s",
+				c.Tool, c.Change, baseline, stale, baseline))
 			continue
 		}
 		report.Problems = append(report.Problems, fmt.Sprintf(
