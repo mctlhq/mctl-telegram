@@ -181,6 +181,14 @@ type Registry struct {
 	// domain id, a small deployment-time constant, never a Telegram id,
 	// username, peer, or the credential itself.
 	AgentCredentialDomain *prometheus.GaugeVec // {domain_id}
+
+	// WorkContextRequestsTotal counts outbound mctl-api calls made by the
+	// issue-443 work-context adapter, labeled by route (a short bounded
+	// name, never a raw path containing an id) and outcome (ok, error).
+	WorkContextRequestsTotal *prometheus.CounterVec // {route, outcome}
+	// WorkContextBindingsTotal counts work_item_bindings writes, labeled by
+	// result (created, reused, refused).
+	WorkContextBindingsTotal *prometheus.CounterVec // {result}
 }
 
 // Policy-denial surfaces — the call site that consumed a policy.Deny
@@ -519,6 +527,16 @@ func New() *Registry {
 		Help: "Info gauge (always 1) identifying the credential domain an agent-worker replica is running against. Label domain_id is sourced from AGENT_CREDENTIAL_DOMAIN_ID, a non-secret operator-chosen identifier (e.g. a Vault path or account label) bounded to 128 characters of [A-Za-z0-9._:/-].",
 	}, []string{"domain_id"})
 
+	r.WorkContextRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_work_context_requests_total",
+		Help: "Total outbound mctl-api calls made by the work-context adapter (issue-443), labeled by route and outcome (ok, error).",
+	}, []string{"route", "outcome"})
+
+	r.WorkContextBindingsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_work_context_bindings_total",
+		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created, reused, refused).",
+	}, []string{"result"})
+
 	r.EventsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_events_published_total",
 		Help: "Event envelopes published to Valkey Streams.",
@@ -570,6 +588,8 @@ func New() *Registry {
 		r.AgentJobCostUSDTotal,
 		r.AgentClaudeResultErrorsTotal,
 		r.AgentCredentialDomain,
+		r.WorkContextRequestsTotal,
+		r.WorkContextBindingsTotal,
 	)
 
 	// Give every agent counter an alert reads through increase() a zero

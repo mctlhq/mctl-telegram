@@ -46,6 +46,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/mctlhq/mctl-telegram/internal/workctx"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
@@ -243,7 +244,22 @@ func main() {
 	if cfg.AgentApprovalTTL > 0 {
 		agentNotifier.MaxPendingAge = cfg.AgentApprovalTTL
 	}
-	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
+	agentRouter := control.NewRouter(store, agentExecutor, agentNotifier)
+	agentListener.Router = agentRouter
+
+	// Work-context surface adapter (issue-443): off by default, like every
+	// other agent-adjacent surface. With the flag off, no workctx.Client is
+	// constructed, no outbound HTTP is ever possible, and agentRouter.Work
+	// stays nil — HandleSavedText's CmdWork/CmdLink branch falls through to
+	// the pre-#443 unknown-command reply, so this is a genuine no-op, not
+	// just an unused client. Config.Load already refused to start if the
+	// flag is on with an empty token or tenant, so both are guaranteed
+	// non-empty here.
+	if cfg.WorkContextEnabled {
+		workClient := workctx.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, cfg.WorkItemTenant, nil)
+		agentRouter.Work = &control.WorkHandler{Store: store, Client: workClient, Notifier: agentNotifier}
+	}
+	slog.Info("work context adapter", "enabled", cfg.WorkContextEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 
 	// Runtime profile reads are always tenant-scoped and DB-backed. Missing
 	// documents are allowed (the worker endpoint returns 404 and the
