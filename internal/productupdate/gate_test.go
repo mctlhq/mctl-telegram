@@ -153,7 +153,7 @@ func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
 }
 
 // What can still be checked in the bootstrap window is: the cited release
-// exists, and a claimed tool (other than a removal) exists at HEAD. Such an
+// exists, and a named tool (other than a removal) exists at HEAD. Such an
 // entry is never held to a diff later, so this is its only check.
 func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	head := snapshot(t, listDialogs)
@@ -163,7 +163,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantProblem(t, r, "claims send_message added, but send_message does not exist at HEAD")
+	wantProblem(t, r, "names tool send_message, which does not exist at HEAD")
 
 	gone := approved("drop-delete-messages")
 	gone.Kind, gone.Tools = KindDeprecation, []string{"delete_messages"}
@@ -182,6 +182,42 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantProblem(t, r, "cites release 0.69.0, which is not a released version (latest: 0.68.0)")
+
+	// A tool listed without a claim is checked too: it is what recipients read.
+	listed := approved("list-dialogs")
+	listed.Tools = []string{"list_dialogs", "teleport"}
+	listed.Evidence = Evidence{From: "0.68.0", Changes: []Claim{{Tool: "list_dialogs", Change: ClaimSchema}}}
+	listed.Kind = KindChangedBehavior
+	r, err = Gate(Feed{Entries: []Entry{listed}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "names tool teleport, which does not exist at HEAD")
+
+	// One change, one update, before the first baseline as after it.
+	a, b := listed, listed
+	a.Tools, b.ID, b.Tools = []string{"list_dialogs"}, "list-dialogs-again", []string{"list_dialogs"}
+	r, err = Gate(Feed{Entries: []Entry{a, b}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "both claim list_dialogs schema")
+
+	// A malformed citation is reported as malformed, not as a future release.
+	bad := a
+	bad.Evidence.From = "v0.68.0"
+	r, err = Gate(Feed{Entries: []Entry{bad}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "list-dialogs: evidence.from:")
+
+	// With no release tag at all, a product update cannot be written yet.
+	r, err = Gate(Feed{Entries: []Entry{a}}, "", "", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "cites release 0.68.0, but no release exists yet")
 }
 
 func TestLatestReleaseSortsNumericallyAndSkipsTagsWithoutASnapshot(t *testing.T) {

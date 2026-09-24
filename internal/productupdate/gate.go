@@ -56,8 +56,9 @@ func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
 // latestTag is the latest release tag of any kind, snapshot or not. It is
 // used only in the bootstrap window (no baseline), where a citation cannot be
 // held to a diff but can still be held to reality: it may not cite a release
-// that does not exist yet, and every tool it claims (except a removal) must
-// exist at HEAD.
+// that does not exist yet, every tool it names must exist at HEAD unless it
+// claims that tool's removal, and no change may be claimed twice. A repository
+// with no release tag at all cannot carry a product update yet.
 func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (GateReport, error) {
 	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}, Unverified: []string{}}
 	if baseline == "" {
@@ -66,6 +67,7 @@ func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (Ga
 		// update written now must still cite a release (Validate), so the
 		// citation is recorded as unverified rather than refused.
 		report.Diff = Diff{Added: []string{}, Removed: []string{}, Changed: []ToolChange{}}
+		bootstrapClaims := map[string]string{}
 		for _, e := range feed.Entries {
 			from := e.Evidence.From
 			if from == "" {
@@ -75,15 +77,36 @@ func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (Ga
 				report.Problems = append(report.Problems, fmt.Sprintf("%s cites release %s, but no release exists yet", e.ID, from))
 				continue
 			}
-			if newer, err := releaseAfter(from, latestTag); err != nil || newer {
+			newer, err := releaseAfter(from, latestTag)
+			if err != nil {
+				report.Problems = append(report.Problems, fmt.Sprintf("%s: evidence.from: %v", e.ID, err))
+				continue
+			}
+			if newer {
 				report.Problems = append(report.Problems, fmt.Sprintf(
 					"%s cites release %s, which is not a released version (latest: %s); cite the latest release", e.ID, from, latestTag))
 				continue
 			}
+			// Such an entry becomes history at the first snapshot release and is
+			// never held to a diff, so what can be checked is checked now: every
+			// tool it names exists at HEAD or is claimed as removed, and no
+			// change is claimed twice.
+			claimedRemoved := map[string]bool{}
 			for _, c := range e.Evidence.Changes {
-				if _, ok := current.Tools[c.Tool]; !ok && c.Change != ClaimRemoved {
+				if c.Change == ClaimRemoved {
+					claimedRemoved[c.Tool] = true
+				}
+				if other, dup := bootstrapClaims[claimKey(c)]; dup {
 					report.Problems = append(report.Problems, fmt.Sprintf(
-						"%s claims %s %s, but %s does not exist at HEAD", e.ID, c.Tool, c.Change, c.Tool))
+						"%s and %s both claim %s %s; one change is one update", other, e.ID, c.Tool, c.Change))
+				} else {
+					bootstrapClaims[claimKey(c)] = e.ID
+				}
+			}
+			for _, tool := range e.Tools {
+				if _, ok := current.Tools[tool]; !ok && !claimedRemoved[tool] {
+					report.Problems = append(report.Problems, fmt.Sprintf(
+						"%s names tool %s, which does not exist at HEAD and is not claimed as removed", e.ID, tool))
 				}
 			}
 			report.Unverified = append(report.Unverified, fmt.Sprintf("%s (evidence.from %s)", e.ID, from))

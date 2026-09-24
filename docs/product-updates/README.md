@@ -45,10 +45,12 @@ when this is the cause.
 
 Before any release carries `docs/tool-descriptors.json` (the bootstrap window),
 there is no diff: `evidence.from` cites the latest existing release, the gate
-reports the entry as *unverified*, and checks only that the cited release
-exists and that every claimed tool other than a removal exists at HEAD. Such an
-entry is never held to a diff later, since it becomes history at the first
-snapshot release.
+reports the entry as *unverified*, and checks only that the cited release is
+not newer than the latest tag, that every tool the entry names exists at HEAD
+unless it claims that tool's removal, and that no change is claimed twice. Such
+an entry is never held to a diff later, since it becomes history at the first
+snapshot release. A repository with no release tag at all cannot carry a
+product update yet.
 
 The gate needs the full history and tags. In a shallow clone it refuses
 (exit 2) rather than judging the feed against a baseline it cannot see.
