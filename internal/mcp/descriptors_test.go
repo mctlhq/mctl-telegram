@@ -57,16 +57,56 @@ func TestToolDescriptorsAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := (&Server{ToolFilter: "", AppsEnabled: true, Version: "9.9.9"}).descriptorsForTest()
+	second, err := (&Server{
+		ToolFilter: DescriptorSurface.ToolFilter, AppsEnabled: DescriptorSurface.AppsEnabled, Version: "9.9.9",
+	}).descriptors()
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, _ := first.Marshal()
-	b, _ := second.Marshal()
+	a, err := first.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := second.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(a, b) {
 		t.Fatal("tool descriptors differ between two enumerations (or depend on the server version)")
 	}
 	if len(first.Tools) == 0 {
 		t.Fatal("no tools enumerated")
+	}
+}
+
+// TestToolDescriptorsAreTheFullSurface: the snapshot's label is what was
+// enumerated. The committed file claims the full surface, so it must hold
+// strictly more tools than a read-only server, and every one of them.
+func TestToolDescriptorsAreTheFullSurface(t *testing.T) {
+	full, err := ToolDescriptors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Surface != DescriptorSurface {
+		t.Fatalf("snapshot labelled %+v, want %+v", full.Surface, DescriptorSurface)
+	}
+	readOnly, err := (&Server{ToolFilter: "read-only", AppsEnabled: DescriptorSurface.AppsEnabled}).descriptors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readOnly.Surface.ToolFilter != "read-only" {
+		t.Fatalf("read-only snapshot labelled %+v", readOnly.Surface)
+	}
+	if len(full.Tools) <= len(readOnly.Tools) {
+		t.Fatalf("full surface has %d tools, read-only %d", len(full.Tools), len(readOnly.Tools))
+	}
+	for name := range readOnly.Tools {
+		if _, ok := full.Tools[name]; !ok {
+			t.Fatalf("read-only tool %s is missing from the full surface", name)
+		}
+	}
+	unfiltered := (&Server{ToolFilter: "", AppsEnabled: true}).newMCPServer().ListTools()
+	if len(unfiltered) != len(full.Tools) {
+		t.Fatalf("snapshot has %d tools, the unfiltered server registers %d", len(full.Tools), len(unfiltered))
 	}
 }

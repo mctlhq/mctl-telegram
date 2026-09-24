@@ -16,12 +16,17 @@ var DescriptorSurface = productupdate.Surface{AppsEnabled: true, ToolFilter: "al
 // registers, as tools/list serves it (issue-440). It needs no database and no
 // network: it is the same enumeration portal_allowlist_test.go relies on.
 func ToolDescriptors() (productupdate.Snapshot, error) {
-	return (&Server{ToolFilter: "", AppsEnabled: DescriptorSurface.AppsEnabled}).descriptorsForTest()
+	return (&Server{
+		ToolFilter:  DescriptorSurface.ToolFilter,
+		AppsEnabled: DescriptorSurface.AppsEnabled,
+	}).descriptors()
 }
 
-// descriptorsForTest enumerates this server's own configuration; tests use it
-// to prove the snapshot does not depend on fields such as Version.
-func (s *Server) descriptorsForTest() (productupdate.Snapshot, error) {
+// descriptors enumerates this server's own configuration and labels the
+// snapshot with that configuration, so the label cannot disagree with what
+// was enumerated. Tests call it directly to prove the snapshot does not
+// depend on fields such as Version.
+func (s *Server) descriptors() (productupdate.Snapshot, error) {
 	registered := s.newMCPServer().ListTools()
 	descriptors := make(map[string][]byte, len(registered))
 	for name, tool := range registered {
@@ -31,5 +36,6 @@ func (s *Server) descriptorsForTest() (productupdate.Snapshot, error) {
 		}
 		descriptors[name] = raw
 	}
-	return productupdate.NewSnapshot(DescriptorSurface, descriptors)
+	return productupdate.NewSnapshot(
+		productupdate.Surface{AppsEnabled: s.AppsEnabled, ToolFilter: s.ToolFilter}, descriptors)
 }

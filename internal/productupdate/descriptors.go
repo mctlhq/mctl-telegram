@@ -279,7 +279,7 @@ func differingKeys(a, b map[string]any) []string {
 	for key := range b {
 		keys[key] = true
 	}
-	var out []string
+	out := []string{}
 	for _, key := range sortedKeys(keys) {
 		left, inLeft := a[key]
 		right, inRight := b[key]

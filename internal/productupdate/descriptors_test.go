@@ -125,9 +125,15 @@ func TestTextAndOtherChangesAreSeparateKinds(t *testing.T) {
 func TestDiffIsDeterministic(t *testing.T) {
 	a := snapshot(t, listDialogs, sendMessage)
 	b := snapshot(t, deleteMessage, strings.Replace(listDialogs, `"maximum":100`, `"maximum":1`, 1))
-	first, _ := json.Marshal(compare(t, a, b))
+	first, err := json.Marshal(compare(t, a, b))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 20; i++ {
-		again, _ := json.Marshal(compare(t, a, b))
+		again, err := json.Marshal(compare(t, a, b))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !bytes.Equal(first, again) {
 			t.Fatalf("diff differs between runs:\n%s\n%s", first, again)
 		}
@@ -158,7 +164,10 @@ func TestSnapshotRoundTripsAndRefusesAMisnamedDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, _ := back.Marshal()
+	again, err := back.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(raw, again) {
 		t.Fatalf("round trip changed bytes:\n%s\n%s", raw, again)
 	}
