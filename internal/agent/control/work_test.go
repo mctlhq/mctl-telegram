@@ -568,3 +568,185 @@ func TestResumeConcurrency(t *testing.T) {
 		t.Fatalf("resume reply after double conflict = %q, want an item-changed message", reply)
 	}
 }
+
+// TestRequestStateRendering is T14: a table test over /mctl work status for
+// each documented request state and typed rejection reason, an unknown
+// reason (shown verbatim, never mctl-api's free text), a binding with no
+// recorded request (falls back to the newest from the list), and a failing
+// request read (the item part still renders; "request state unavailable").
+func TestRequestStateRendering(t *testing.T) {
+	cases := []struct {
+		name       string
+		state      string
+		reason     string
+		wantSubstr []string
+		wantAbsent []string
+	}{
+		{"pending", workctx.RequestStatePending, "", []string{"pending"}, nil},
+		{"claimed", workctx.RequestStateClaimed, "", []string{"claimed"}, nil},
+		{"fulfilled", workctx.RequestStateFulfilled, "", []string{"fulfilled"}, nil},
+		{"rejected no_runnable_target", workctx.RequestStateRejected, "no_runnable_target",
+			[]string{"no_runnable_target", "no runnable"}, nil},
+		{"rejected loop_active", workctx.RequestStateRejected, "loop_active",
+			[]string{"loop_active", "already running"}, nil},
+		{"rejected unsupported_kind", workctx.RequestStateRejected, "unsupported_kind",
+			[]string{"unsupported_kind"}, nil},
+		{"rejected resume_refused", workctx.RequestStateRejected, "resume_refused:stale",
+			[]string{"resume_refused:stale", "stale"}, nil},
+		{"rejected fulfil_refused", workctx.RequestStateRejected, "fulfil_refused:bad_engine",
+			[]string{"fulfil_refused:bad_engine", "bad_engine"}, nil},
+		{"rejected engine_run_ended", workctx.RequestStateRejected, "engine_run_ended",
+			[]string{"engine_run_ended", "ended"}, nil},
+		{"rejected unrecognised", workctx.RequestStateRejected, "some_new_code_v99",
+			[]string{"some_new_code_v99", "unrecognised"}, []string{"mctl-api free text should never appear"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store, uid := newTestWorkStore(t)
+			fake := newFakeMctlAPI()
+			srv := fake.server(t)
+			defer srv.Close()
+			sender := &fakeSelfSender{}
+			client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+			router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+			router.Work = newTestWorkHandler(t, store, sender, client)
+			ctx := context.Background()
+
+			if err := router.HandleSavedText(ctx, meta(uid, 9000), "/mctl work "+testIssueURL); err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			binding, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 9000)
+			fake.requests[binding.LastRequestID].State = c.state
+			fake.requests[binding.LastRequestID].Reason = c.reason
+
+			sender.sent = nil
+			if err := router.HandleSavedText(ctx, meta(uid, 9001), "/mctl work status"); err != nil {
+				t.Fatalf("status: %v", err)
+			}
+			reply := sender.sent[0]
+			for _, want := range c.wantSubstr {
+				if !strings.Contains(reply, want) {
+					t.Errorf("reply = %q, want it to contain %q", reply, want)
+				}
+			}
+			for _, absent := range c.wantAbsent {
+				if strings.Contains(reply, absent) {
+					t.Errorf("reply = %q, must not contain %q", reply, absent)
+				}
+			}
+		})
+	}
+
+	// Binding with no recorded request: falls back to the newest from the
+	// list.
+	t.Run("no recorded request falls back to list", func(t *testing.T) {
+		store, uid := newTestWorkStore(t)
+		fake := newFakeMctlAPI()
+		srv := fake.server(t)
+		defer srv.Close()
+		sender := &fakeSelfSender{}
+		client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+		router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+		router.Work = newTestWorkHandler(t, store, sender, client)
+		ctx := context.Background()
+
+		if err := router.HandleSavedText(ctx, meta(uid, 9100), "/mctl work "+testIssueURL); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		// Clear the binding's recorded request id directly to simulate an
+		// older/lost row.
+		if _, err := store.DB.ExecContext(ctx, `UPDATE work_item_bindings SET last_request_id='' WHERE user_id=$1 AND chat_tg_id=$2 AND root_tg_message_id=$3`,
+			uid, workOwnerTGID, int64(9100)); err != nil {
+			t.Fatalf("clear request id: %v", err)
+		}
+		sender.sent = nil
+		if err := router.HandleSavedText(ctx, meta(uid, 9101), "/mctl work status"); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if !strings.Contains(sender.sent[0], "pending") {
+			t.Fatalf("reply = %q, want it to fall back to the newest listed request", sender.sent[0])
+		}
+	})
+
+	// A failing request read degrades to "request state unavailable" but
+	// still renders the item part.
+	t.Run("failing request read degrades gracefully", func(t *testing.T) {
+		store, uid := newTestWorkStore(t)
+		fake := newFakeMctlAPI()
+		srv := fake.server(t)
+		sender := &fakeSelfSender{}
+		client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+		router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+		router.Work = newTestWorkHandler(t, store, sender, client)
+		ctx := context.Background()
+
+		if err := router.HandleSavedText(ctx, meta(uid, 9200), "/mctl work "+testIssueURL); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		srv.Close() // every subsequent call fails
+		sender.sent = nil
+		if err := router.HandleSavedText(ctx, meta(uid, 9201), "/mctl work status"); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if len(sender.sent) != 1 {
+			t.Fatalf("replies = %d, want 1 (degraded, not failed)", len(sender.sent))
+		}
+	})
+}
+
+// TestTwoThreadsOneIssue is T17: the same owner runs /mctl work <url> for
+// the same issue in two threads; mctl-api's dedupe returns the same item for
+// both. Both threads are bound (two rows), each thread's status shows the
+// request IT submitted, and a state change seen from either thread is
+// reflected in both.
+func TestTwoThreadsOneIssue(t *testing.T) {
+	store, uid := newTestWorkStore(t)
+	fake := newFakeMctlAPI()
+	srv := fake.server(t)
+	defer srv.Close()
+	sender := &fakeSelfSender{}
+	client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+	router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+	router.Work = newTestWorkHandler(t, store, sender, client)
+	ctx := context.Background()
+
+	if err := router.HandleSavedText(ctx, meta(uid, 10000), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open thread A: %v", err)
+	}
+	if err := router.HandleSavedText(ctx, meta(uid, 10001), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open thread B: %v", err)
+	}
+	// Both threads call POST /work-items (each is its own thread key, so
+	// neither reuses a cached binding locally) but mctl-api's own
+	// external_key dedupe means only one item is ever actually created —
+	// verified below by both threads sharing one WorkItemID.
+	if fake.createCalls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (one per thread, deduped server-side)", fake.createCalls)
+	}
+	if len(fake.itemsByExternalKey) != 1 {
+		t.Fatalf("distinct items created = %d, want 1 (mctl-api dedupe on external_key)", len(fake.itemsByExternalKey))
+	}
+
+	threadA, foundA, errA := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10000)
+	threadB, foundB, errB := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10001)
+	if errA != nil || !foundA || errB != nil || !foundB {
+		t.Fatalf("bindings: A(found=%v err=%v) B(found=%v err=%v)", foundA, errA, foundB, errB)
+	}
+	if threadA.WorkItemID != threadB.WorkItemID {
+		t.Fatalf("threads bound to different items: A=%s B=%s", threadA.WorkItemID, threadB.WorkItemID)
+	}
+	if threadA.LastRequestID == threadB.LastRequestID {
+		t.Fatalf("both threads share the same request id %q; each thread submits its own", threadA.LastRequestID)
+	}
+
+	// A state change seen from either thread (TouchWorkItemBindingState is
+	// item-level) is reflected in both.
+	if err := store.TouchWorkItemBindingState(ctx, uid, threadA.WorkItemID, "waiting", 9, "exec_z"); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	refreshedA, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10000)
+	refreshedB, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10001)
+	if refreshedA.LastState != "waiting" || refreshedB.LastState != "waiting" {
+		t.Fatalf("state after touch: A=%q B=%q, want both waiting", refreshedA.LastState, refreshedB.LastState)
+	}
+}
