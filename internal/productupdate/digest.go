@@ -14,13 +14,18 @@ import (
 const DigestSchema = "mctl-telegram.product-update-digest/v1"
 
 // DigestCandidates returns the entries a category's next weekly digest may
-// contain: approved, delivered next_digest, of that category, and not already
-// sent (published holds the ids of entries a digest already carried). One
-// category only: a digest never mixes consent domains.
-func DigestCandidates(feed Feed, category db.NotificationCategory, published map[string]bool) []Entry {
+// contain: approved, delivered next_digest, of that category, already shipped
+// in a release up to latestRelease (Entry.Shipped -- an update merged with its
+// change is not announced before the release carrying it is cut), and not
+// already sent (published holds the ids of entries a digest already carried).
+// One category only: a digest never mixes consent domains.
+func DigestCandidates(feed Feed, category db.NotificationCategory, latestRelease string, published map[string]bool) []Entry {
 	var out []Entry
 	for _, e := range feed.Entries {
 		if e.Status != StatusApproved || e.Delivery != DeliveryNextDigest || e.Category() != category {
+			continue
+		}
+		if !e.Shipped(latestRelease) {
 			continue
 		}
 		if published[e.ID] {
@@ -76,8 +81,9 @@ func hashJSON(v any) (string, error) {
 
 // FreezeDigest builds the frozen digest for one category from the given
 // entries. It refuses a mixed category, an entry that is not an approved
-// next_digest update, a duplicate entry, and an empty digest.
-func FreezeDigest(id string, version int, category db.NotificationCategory, entries []Entry) (Digest, error) {
+// next_digest update, an entry whose change is not in a release up to
+// latestRelease, a duplicate entry, and an empty digest.
+func FreezeDigest(id string, version int, category db.NotificationCategory, latestRelease string, entries []Entry) (Digest, error) {
 	if !idPattern.MatchString(id) {
 		return Digest{}, fmt.Errorf("digest id %q must match %s", id, idPattern)
 	}
@@ -99,6 +105,8 @@ func FreezeDigest(id string, version int, category db.NotificationCategory, entr
 			return Digest{}, fmt.Errorf("digest %s: %s is not approved", id, e.ID)
 		case e.Delivery != DeliveryNextDigest:
 			return Digest{}, fmt.Errorf("digest %s: %s is delivered %s, not next_digest", id, e.ID, e.Delivery)
+		case !e.Shipped(latestRelease):
+			return Digest{}, fmt.Errorf("digest %s: %s describes a change after %s, not released yet", id, e.ID, e.Evidence.From)
 		case i > 0 && sorted[i-1].ID == e.ID:
 			return Digest{}, fmt.Errorf("digest %s carries %s twice", id, e.ID)
 		}

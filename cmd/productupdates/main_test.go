@@ -154,8 +154,34 @@ func TestAnInvalidFeedFailsValidate(t *testing.T) {
 	if code := run([]string{"validate", "-repo", r.dir}, &stdout, &stderr); code != exitFailed {
 		t.Fatalf("exit %d\n%s", code, stderr.String())
 	}
-	if code := run([]string{"bogus"}, &stdout, &stderr); code != exitUsage {
-		t.Fatalf("unknown command: exit %d", code)
+	// Usage errors stay usage errors even where the feed is broken.
+	for _, args := range [][]string{
+		{"bogus", "-repo", r.dir},
+		{"validate", "-repo", r.dir, "-baseline", "0.69.0"},
+		{"gate", "-repo", r.dir, "-baseline", "--output=x"},
+	} {
+		if code := run(args, &stdout, &stderr); code != exitUsage {
+			t.Fatalf("%v: exit %d, want %d", args, code, exitUsage)
+		}
+	}
+}
+
+// A shallow clone has no tags: no baseline there means "not fetched", and the
+// gate refuses rather than judging the feed against nothing.
+func TestTheGateRefusesAShallowClone(t *testing.T) {
+	r := newRepo(t)
+	r.snapshot(listDialogs)
+	r.commit("one")
+	r.git("tag", "0.69.0")
+	r.commit("two")
+	shallow := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", "--depth", "1", "--no-tags", "file://"+r.dir, shallow).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"gate", "-repo", shallow}, &stdout, &stderr)
+	if code != exitUsage || !strings.Contains(stderr.String(), "needs the full history") {
+		t.Fatalf("shallow clone: exit %d\n%s", code, stderr.String())
 	}
 }
 
@@ -165,6 +191,11 @@ func TestTheRepositoryPassesItsOwnGate(t *testing.T) {
 	root := filepath.Join("..", "..")
 	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
 		t.Skip("not a git checkout")
+	}
+	// The test and test-cross-platform jobs check out shallow, without tags;
+	// only the product-updates job has the history this needs.
+	if out, err := exec.Command("git", "-C", root, "rev-parse", "--is-shallow-repository").Output(); err != nil || strings.TrimSpace(string(out)) == "true" {
+		t.Skip("shallow checkout: the product-updates CI job runs this gate with full history")
 	}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"gate", "-repo", root}, &stdout, &stderr); code != exitOK {

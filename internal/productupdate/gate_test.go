@@ -1,6 +1,7 @@
 package productupdate
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -148,5 +149,16 @@ func TestLatestReleaseSortsNumericallyAndSkipsTagsWithoutASnapshot(t *testing.T)
 	}
 	if got := LatestRelease(tags, func(string) bool { return false }); got != "" {
 		t.Fatalf("latest %q, want none", got)
+	}
+}
+
+// The report and the digest hash serialise claims with stable lower-case keys.
+func TestClaimsSerialiseWithStableKeys(t *testing.T) {
+	raw, err := json.Marshal(Evidence{From: "0.69.0", Changes: []Claim{{Tool: "send_message", Change: ClaimAdded}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"from":"0.69.0","changes":[{"tool":"send_message","change":"added"}],"links":null}`; string(raw) != want {
+		t.Fatalf("got %s, want %s", raw, want)
 	}
 }

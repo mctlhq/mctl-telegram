@@ -55,21 +55,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(rest); err != nil || fs.NArg() != 0 {
 		return exitUsage
 	}
+	switch command {
+	case "validate":
+		if *baseline != "" {
+			_, _ = fmt.Fprintln(stderr, "productupdates: -baseline applies to gate only")
+			return exitUsage
+		}
+	case "gate":
+		if *baseline != "" && !productupdate.ValidRelease(*baseline) {
+			_, _ = fmt.Fprintf(stderr, "productupdates: -baseline %q is not a MAJOR.MINOR.PATCH release tag\n", *baseline)
+			return exitUsage
+		}
+	default:
+		_, _ = fmt.Fprintf(stderr, "productupdates: unknown command %q\n", command)
+		return exitUsage
+	}
 	feed, err := productupdate.LoadFeed(filepath.Join(*repo, productupdate.FeedDir))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
 		return exitFailed
 	}
-	switch command {
-	case "validate":
+	if command == "validate" {
 		_, _ = fmt.Fprintf(stdout, "%d product update(s) valid\n", len(feed.Entries))
 		return exitOK
-	case "gate":
-		return gate(*repo, *baseline, feed, stdout, stderr)
-	default:
-		_, _ = fmt.Fprintf(stderr, "productupdates: unknown command %q\n", command)
-		return exitUsage
 	}
+	return gate(*repo, *baseline, feed, stdout, stderr)
 }
 
 func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writer) int {
@@ -83,6 +93,20 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 			_, err := git(repo, "cat-file", "-e", tag+":"+snapshotPath)
 			return err == nil
 		})
+		// A shallow clone carries no tags, so "no baseline" there means "not
+		// fetched", not "none exists". Judging the feed against that would fail
+		// every entry that cites a release; refuse instead.
+		if baseline == "" {
+			shallow, err := git(repo, "rev-parse", "--is-shallow-repository")
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+				return exitUsage
+			}
+			if strings.TrimSpace(shallow) == "true" {
+				_, _ = fmt.Fprintln(stderr, "productupdates: gate needs the full history and tags (a shallow clone has none); fetch with fetch-depth 0")
+				return exitUsage
+			}
+		}
 	}
 	var previous productupdate.Snapshot
 	if baseline != "" {

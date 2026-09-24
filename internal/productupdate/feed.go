@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -101,8 +102,8 @@ var SupportedLocales = []string{"en"}
 
 // Claim is one (tool, change) pair an entry says the tool surface shows.
 type Claim struct {
-	Tool   string      `yaml:"tool"`
-	Change ClaimChange `yaml:"change"`
+	Tool   string      `yaml:"tool" json:"tool"`
+	Change ClaimChange `yaml:"change" json:"change"`
 }
 
 // Evidence ties an entry to the deterministic source it may cite.
@@ -110,11 +111,11 @@ type Evidence struct {
 	// From is the release tag the tool diff is taken against: the previous
 	// release when the entry was written. The release gate holds every claim
 	// of an entry whose From is the current baseline to that diff.
-	From string `yaml:"from"`
+	From string `yaml:"from" json:"from"`
 	// Changes are the diff items this entry covers.
-	Changes []Claim `yaml:"changes"`
+	Changes []Claim `yaml:"changes" json:"changes"`
 	// Links are further sources (a release, an advisory, a pull request).
-	Links []string `yaml:"links"`
+	Links []string `yaml:"links" json:"links"`
 }
 
 // Provenance records who wrote and who reviewed the content.
@@ -172,8 +173,11 @@ func ParseEntry(raw []byte) (Entry, error) {
 		return Entry{}, fmt.Errorf("decode entry: %w", err)
 	}
 	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+	switch err := decoder.Decode(&extra); {
+	case err == nil:
 		return Entry{}, fmt.Errorf("decode entry: more than one YAML document")
+	case !errors.Is(err, io.EOF):
+		return Entry{}, fmt.Errorf("decode entry: after the first document: %w", err)
 	}
 	return e, nil
 }
@@ -195,10 +199,10 @@ func (e Entry) Validate() error {
 	default:
 		add("kind %q is not one of new_tool, changed_behavior, deprecation, maintenance, security", e.Kind)
 	}
-	if strings.TrimSpace(e.Title) == "" || len(e.Title) > maxTitle {
+	if strings.TrimSpace(e.Title) == "" || utf8.RuneCountInString(e.Title) > maxTitle {
 		add("title must be 1-%d characters", maxTitle)
 	}
-	if strings.TrimSpace(e.Summary) == "" || len(e.Summary) > maxSummary {
+	if strings.TrimSpace(e.Summary) == "" || utf8.RuneCountInString(e.Summary) > maxSummary {
 		add("summary must be 1-%d characters", maxSummary)
 	}
 	if !contains(SupportedLocales, e.Locale) {
@@ -329,6 +333,26 @@ func (e Entry) label() string {
 		return "product update " + e.ID
 	}
 	return "product update"
+}
+
+// ValidRelease reports a MAJOR.MINOR.PATCH release tag.
+func ValidRelease(tag string) bool { return releasePattern.MatchString(tag) }
+
+// Shipped reports whether the change an entry describes is in a released
+// version, given the latest release. An entry citing baseline B lands with its
+// change (the gate requires both in the same pull request), so the change
+// ships in the first release after B. An entry that cites no tool diff -- a
+// maintenance or security notice backed by links -- describes no unreleased
+// capability and counts as shipped.
+func (e Entry) Shipped(latestRelease string) bool {
+	if e.Evidence.From == "" {
+		return true
+	}
+	if latestRelease == "" {
+		return false
+	}
+	after, err := releaseAfter(latestRelease, e.Evidence.From)
+	return err == nil && after
 }
 
 // isBot reports a GitHub bot or app login.

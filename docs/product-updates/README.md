@@ -36,6 +36,23 @@ entry may claim the pair. A release that changes no tool requires nothing.
 Entries for older baselines are history and are only schema-checked.
 `CHANGELOG.md` is not an input.
 
+The gate needs the full history and tags. In a shallow clone it refuses
+(exit 2) rather than judging the feed against a baseline it cannot see.
+
+The snapshot's schema and surface (`appsEnabled`, `toolFilter`) are fixed by the
+generator in `internal/mcp`. Changing either is a format migration, not a tool
+change: `Compare` refuses to diff across them, so such a pull request fails the
+gate on purpose and needs a deliberate migration plan.
+
+## When an update is announced
+
+An entry lands in the same pull request as its change, before the release that
+ships it. A digest therefore takes an entry only once a release newer than its
+`evidence.from` exists: an entry citing `0.69.0` is announced after `0.69.1` or
+`0.70.0` is cut, never before. An entry that cites no tool diff (a maintenance
+or security notice backed by links) describes no unreleased capability and is
+eligible immediately.
+
 ## Schema (`mctl-telegram.product-update/v1`)
 
 ```yaml

@@ -162,9 +162,24 @@ func TestParseEntryIsStrict(t *testing.T) {
 	if _, err := ParseEntry([]byte("schema: x\nid: a\nunknown_field: 1\n")); err == nil {
 		t.Fatal("an unknown field was accepted")
 	}
-	if _, err := ParseEntry([]byte("schema: x\n---\nschema: y\n")); err == nil {
-		t.Fatal("two YAML documents were accepted")
+	if _, err := ParseEntry([]byte("schema: x\n---\nschema: y\n")); err == nil || !strings.Contains(err.Error(), "more than one YAML document") {
+		t.Fatalf("two YAML documents: %v", err)
 	}
+	// A broken second document is reported as broken, not as a second one.
+	_, err := ParseEntry([]byte("schema: x\n---\n: [unclosed\n"))
+	if err == nil || strings.Contains(err.Error(), "more than one YAML document") {
+		t.Fatalf("broken second document: %v", err)
+	}
+}
+
+func TestLengthLimitsCountCharactersNotBytes(t *testing.T) {
+	e := approved("send-message")
+	e.Title = strings.Repeat("й", maxTitle) // 2 bytes each
+	if err := e.Validate(); err != nil && strings.Contains(err.Error(), "title") {
+		t.Fatalf("a %d-character title was rejected: %v", maxTitle, err)
+	}
+	e.Title = strings.Repeat("a", maxTitle+1)
+	wantInvalid(t, e, "title must be")
 }
 
 func writeEntry(t *testing.T, dir, name, body string) {
