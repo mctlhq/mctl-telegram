@@ -419,6 +419,19 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// broadcast_campaigns.source_* (issue-683): the frozen product-update
+	// digest a campaign was prepared from -- (digest id, version, content
+	// hash). NULL for manual campaigns and every campaign that predates it;
+	// set at most once, by Store.SetBroadcastCampaignSourceRef.
+	for _, col := range []struct{ name, typ string }{
+		{"source_digest_id", "TEXT"},
+		{"source_digest_version", "INTEGER"},
+		{"source_content_hash", "TEXT"},
+	} {
+		if err := addColumnIfMissing(ctx, dbConn, pg, "broadcast_campaigns", col.name, col.typ, col.typ); err != nil {
+			return err
+		}
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
@@ -755,6 +768,9 @@ func sqliteSchema() []string {
 			cancelled_at DATETIME,
 			completed_at DATETIME,
 			end_reason TEXT NOT NULL DEFAULT '',
+			source_digest_id TEXT,
+			source_digest_version INTEGER,
+			source_content_hash TEXT,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -784,6 +800,35 @@ func sqliteSchema() []string {
 			PRIMARY KEY (campaign_id, user_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_due ON broadcast_deliveries(status, next_attempt_at)`,
+		// Product-update digests (issue-683). The feed itself lives in the
+		// repository (docs/product-updates/*.yaml); the database holds only
+		// what was frozen and sent from it. A row is a frozen, content-
+		// addressed digest (productupdate.FreezeDigest) and is never updated:
+		// (id, version) is written once, and Store.SaveProductUpdateDigest
+		// refuses the same key with different content. source_refs is the
+		// JSON array of "<file>@content-sha256:<hex>" refs, one per entry.
+		`CREATE TABLE IF NOT EXISTS product_update_digests (
+			id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			category TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			source_refs TEXT NOT NULL,
+			created_by INTEGER NOT NULL REFERENCES users(id),
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id, version)
+		)`,
+		// Product-update publications (issue-683): which feed entries each
+		// digest carried. The set of entry ids here is the "published" input
+		// to productupdate.DigestCandidates, which is what keeps an entry out
+		// of a second digest across releases and channels.
+		`CREATE TABLE IF NOT EXISTS product_update_publications (
+			digest_id TEXT NOT NULL,
+			digest_version INTEGER NOT NULL,
+			entry_id TEXT NOT NULL,
+			PRIMARY KEY (digest_id, digest_version, entry_id),
+			FOREIGN KEY (digest_id, digest_version) REFERENCES product_update_digests(id, version)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_product_update_publications_entry ON product_update_publications(entry_id)`,
 	}
 }
 
@@ -994,6 +1039,9 @@ func pgSchema() []string {
 			cancelled_at TIMESTAMPTZ,
 			completed_at TIMESTAMPTZ,
 			end_reason TEXT NOT NULL DEFAULT '',
+			source_digest_id TEXT,
+			source_digest_version INTEGER,
+			source_content_hash TEXT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
@@ -1016,5 +1064,26 @@ func pgSchema() []string {
 			PRIMARY KEY (campaign_id, user_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_due ON broadcast_deliveries(status, next_attempt_at)`,
+		// Product-update digests and publications (issue-683) -- see the
+		// sqliteSchema comments on these tables: a digest row is written once
+		// and never updated, and the publications are the dedupe set.
+		`CREATE TABLE IF NOT EXISTS product_update_digests (
+			id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			category TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			source_refs TEXT NOT NULL,
+			created_by BIGINT NOT NULL REFERENCES users(id),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (id, version)
+		)`,
+		`CREATE TABLE IF NOT EXISTS product_update_publications (
+			digest_id TEXT NOT NULL,
+			digest_version INTEGER NOT NULL,
+			entry_id TEXT NOT NULL,
+			PRIMARY KEY (digest_id, digest_version, entry_id),
+			FOREIGN KEY (digest_id, digest_version) REFERENCES product_update_digests(id, version)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_product_update_publications_entry ON product_update_publications(entry_id)`,
 	}
 }
