@@ -158,6 +158,22 @@ jobs:
       - run: go build ./...
       - run: go test ${{ matrix.packages }}
 
+  # The product-update release gate (issue-440): every added or removed tool
+  # and every schema or annotation change since the latest release that
+  # carries a tool snapshot must be claimed by an approved entry in
+  # docs/product-updates/, and no entry may claim a change the diff does not
+  # show. It needs the tags, hence the full history. It publishes nothing.
+  product-updates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.6"
+      - run: go run ./cmd/productupdates gate
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

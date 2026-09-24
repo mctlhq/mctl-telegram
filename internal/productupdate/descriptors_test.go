@@ -228,3 +228,21 @@ func TestCanonicalKeepsNumbersAsWritten(t *testing.T) {
 		t.Fatal("trailing data must be refused")
 	}
 }
+
+// A Snapshot assembled by hand, not through NewSnapshot or ParseSnapshot, may
+// hold a pretty-printed descriptor. Whether a tool changed must not depend on
+// that whitespace (mctl-telegram#681): an identical descriptor is no change,
+// not a change with no kinds and no fields.
+func TestHandAssembledWhitespaceIsNoChange(t *testing.T) {
+	a := snapshot(t, listDialogs)
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, []byte(listDialogs), "", "  "); err != nil {
+		t.Fatal(err)
+	}
+	b := Snapshot{Schema: SnapshotSchema, Surface: full, Tools: map[string]json.RawMessage{
+		"list_dialogs": indented.Bytes(),
+	}}
+	if d := compare(t, a, b); !d.Empty() {
+		t.Fatalf("whitespace alone reported %+v", d)
+	}
+}
