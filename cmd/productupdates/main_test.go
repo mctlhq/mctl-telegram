@@ -117,10 +117,14 @@ func TestTheGateHoldsATagToTheFeed(t *testing.T) {
 	r.commit("before any snapshot")
 	r.git("tag", "0.68.0")
 
-	// No release carries a snapshot yet: nothing can be required.
+	// No release carries a snapshot yet: nothing can be required, and an
+	// entry citing the latest release is reported as unverified.
 	r.snapshot(listDialogs)
+	r.write(filepath.Join(productupdate.FeedDir, "list-dialogs.yaml"), strings.NewReplacer(
+		"send-message", "list-dialogs", "send_message", "list_dialogs", "0.69.0", "0.68.0").Replace(sendMessageEntry))
 	r.commit("snapshot")
-	if code, out := r.gate(); code != exitOK || !strings.Contains(out, "no release carries") {
+	if code, out := r.gate(); code != exitOK || !strings.Contains(out, "no release carries") ||
+		!strings.Contains(out, "unverified until a release carries a snapshot: list-dialogs (evidence.from 0.68.0)") {
 		t.Fatalf("no baseline: exit %d\n%s", code, out)
 	}
 

@@ -52,7 +52,13 @@ func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
 // A no-op release (identical snapshots) requires nothing, and a rename is a
 // removal plus an addition, each of which must be covered -- one entry may
 // claim both.
-func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, error) {
+//
+// latestTag is the latest release tag of any kind, snapshot or not. It is
+// used only in the bootstrap window (no baseline), where a citation cannot be
+// held to a diff but can still be held to reality: it may not cite a release
+// that does not exist yet, and every tool it claims (except a removal) must
+// exist at HEAD.
+func Gate(feed Feed, baseline, latestTag string, previous, current Snapshot) (GateReport, error) {
 	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}, Unverified: []string{}}
 	if baseline == "" {
 		// The bootstrap window: no release carries a snapshot, so there is no
@@ -61,10 +67,28 @@ func Gate(feed Feed, baseline string, previous, current Snapshot) (GateReport, e
 		// citation is recorded as unverified rather than refused.
 		report.Diff = Diff{Added: []string{}, Removed: []string{}, Changed: []ToolChange{}}
 		for _, e := range feed.Entries {
-			if e.Evidence.From != "" {
-				report.Unverified = append(report.Unverified, fmt.Sprintf("%s (evidence.from %s)", e.ID, e.Evidence.From))
+			from := e.Evidence.From
+			if from == "" {
+				continue
 			}
+			if latestTag == "" {
+				report.Problems = append(report.Problems, fmt.Sprintf("%s cites release %s, but no release exists yet", e.ID, from))
+				continue
+			}
+			if newer, err := releaseAfter(from, latestTag); err != nil || newer {
+				report.Problems = append(report.Problems, fmt.Sprintf(
+					"%s cites release %s, which is not a released version (latest: %s); cite the latest release", e.ID, from, latestTag))
+				continue
+			}
+			for _, c := range e.Evidence.Changes {
+				if _, ok := current.Tools[c.Tool]; !ok && c.Change != ClaimRemoved {
+					report.Problems = append(report.Problems, fmt.Sprintf(
+						"%s claims %s %s, but %s does not exist at HEAD", e.ID, c.Tool, c.Change, c.Tool))
+				}
+			}
+			report.Unverified = append(report.Unverified, fmt.Sprintf("%s (evidence.from %s)", e.ID, from))
 		}
+		sort.Strings(report.Problems)
 		return report, nil
 	}
 	diff, err := Compare(previous, current)

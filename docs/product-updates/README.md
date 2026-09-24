@@ -43,6 +43,13 @@ bump that entry's `evidence.from` to the new release. The gate names the entry
 when this is the cause.
 `CHANGELOG.md` is not an input.
 
+Before any release carries `docs/tool-descriptors.json` (the bootstrap window),
+there is no diff: `evidence.from` cites the latest existing release, the gate
+reports the entry as *unverified*, and checks only that the cited release
+exists and that every claimed tool other than a removal exists at HEAD. Such an
+entry is never held to a diff later, since it becomes history at the first
+snapshot release.
+
 The gate needs the full history and tags. In a shallow clone it refuses
 (exit 2) rather than judging the feed against a baseline it cannot see.
 

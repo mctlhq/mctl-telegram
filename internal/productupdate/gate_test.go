@@ -10,7 +10,7 @@ const sendMessageV2 = `{"name":"send_message","description":"Send a message.","i
 
 func runGate(t *testing.T, entries []Entry, previous, current Snapshot) GateReport {
 	t.Helper()
-	r, err := Gate(Feed{Entries: entries}, "0.69.0", previous, current)
+	r, err := Gate(Feed{Entries: entries}, "0.69.0", "0.69.0", previous, current)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestOlderEntriesAreHistoryAndNewerOnesAreRefused(t *testing.T) {
 // verified. A product update written then still cites a release (Validate
 // demands it), and passes as unverified rather than being unwritable.
 func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
-	r, err := Gate(Feed{}, "", Snapshot{}, snapshot(t, listDialogs))
+	r, err := Gate(Feed{}, "", "0.68.0", Snapshot{}, snapshot(t, listDialogs, sendMessage))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,8 @@ func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
 	if err := e.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	r, err = Gate(Feed{Entries: []Entry{e}}, "", Snapshot{}, snapshot(t, listDialogs))
+	e.Evidence.From = "0.68.0"
+	r, err = Gate(Feed{Entries: []Entry{e}}, "", "0.68.0", Snapshot{}, snapshot(t, listDialogs, sendMessage))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +150,38 @@ func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
 	if len(r.Unverified) != 1 || !strings.Contains(r.Unverified[0], "send-message") {
 		t.Fatalf("unverified %q", r.Unverified)
 	}
+}
+
+// What can still be checked in the bootstrap window is: the cited release
+// exists, and a claimed tool (other than a removal) exists at HEAD. Such an
+// entry is never held to a diff later, so this is its only check.
+func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
+	head := snapshot(t, listDialogs)
+	ghost := approved("send-message")
+	ghost.Evidence.From = "0.68.0"
+	r, err := Gate(Feed{Entries: []Entry{ghost}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "claims send_message added, but send_message does not exist at HEAD")
+
+	gone := approved("drop-delete-messages")
+	gone.Kind, gone.Tools = KindDeprecation, []string{"delete_messages"}
+	gone.Evidence = Evidence{From: "0.68.0", Changes: []Claim{{Tool: "delete_messages", Change: ClaimRemoved}}}
+	r, err = Gate(Feed{Entries: []Entry{gone}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPass(t, r)
+
+	future := approved("list-dialogs")
+	future.Tools = []string{"list_dialogs"}
+	future.Evidence = Evidence{From: "0.69.0", Changes: []Claim{{Tool: "list_dialogs", Change: ClaimAdded}}}
+	r, err = Gate(Feed{Entries: []Entry{future}}, "", "0.68.0", Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "cites release 0.69.0, which is not a released version (latest: 0.68.0)")
 }
 
 func TestLatestReleaseSortsNumericallyAndSkipsTagsWithoutASnapshot(t *testing.T) {
