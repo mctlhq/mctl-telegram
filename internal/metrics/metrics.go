@@ -300,6 +300,16 @@ func JobStatuses() []string {
 var (
 	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
 	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
+	// workContextRoutes and friends are the closed label sets for
+	// WorkContextRequestsTotal/WorkContextBindingsTotal (issue-443), primed
+	// below for the same reason as the two lists above — see #591.
+	workContextRoutes = []string{
+		"redeem_link", "create_work_item", "get_work_item", "append_intent",
+		"request_execution", "get_execution_request", "list_execution_requests",
+		"add_surface_ref",
+	}
+	workContextOutcomes       = []string{"ok", "error"}
+	workContextBindingResults = []string{"created", "reused", "refused"}
 )
 
 // CountPolicyDenial increments AgentPolicyDenialsTotal for the given
@@ -311,6 +321,25 @@ func (r *Registry) CountPolicyDenial(reason, surface string) {
 		return
 	}
 	r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Inc()
+}
+
+// CountWorkContextRequest increments mctl_work_context_requests_total for one
+// outbound mctl-api call made by the work-context adapter (issue-443).
+// Nil-safe, matching CountPolicyDenial above.
+func (r *Registry) CountWorkContextRequest(route, outcome string) {
+	if r == nil {
+		return
+	}
+	r.WorkContextRequestsTotal.WithLabelValues(route, outcome).Inc()
+}
+
+// CountWorkContextBinding increments mctl_work_context_bindings_total for one
+// work_item_bindings write attempted by the work-context adapter. Nil-safe.
+func (r *Registry) CountWorkContextBinding(result string) {
+	if r == nil {
+		return
+	}
+	r.WorkContextBindingsTotal.WithLabelValues(result).Inc()
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -630,6 +659,14 @@ func New() *Registry {
 		for _, surface := range policySurfaces {
 			r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Add(0)
 		}
+	}
+	for _, route := range workContextRoutes {
+		for _, outcome := range workContextOutcomes {
+			r.WorkContextRequestsTotal.WithLabelValues(route, outcome).Add(0)
+		}
+	}
+	for _, result := range workContextBindingResults {
+		r.WorkContextBindingsTotal.WithLabelValues(result).Add(0)
 	}
 
 	return r

@@ -257,7 +257,8 @@ func main() {
 	// non-empty here.
 	if cfg.WorkContextEnabled {
 		workClient := workctx.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, cfg.WorkItemTenant, nil)
-		agentRouter.Work = &control.WorkHandler{Store: store, Client: workClient, Notifier: agentNotifier}
+		workClient.Metrics = m
+		agentRouter.Work = &control.WorkHandler{Store: store, Client: workClient, Notifier: agentNotifier, Metrics: m}
 	}
 	slog.Info("work context adapter", "enabled", cfg.WorkContextEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 

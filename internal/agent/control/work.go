@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
 )
 
@@ -40,6 +41,7 @@ type WorkHandler struct {
 	Store    *db.Store
 	Client   *workctx.Client
 	Notifier *Notifier
+	Metrics  *metrics.Registry
 }
 
 // resolveActor derives the Telegram user id for the X-MCTL-Surface-Actor
@@ -123,6 +125,7 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		return fmt.Errorf("get work item binding: %w", err)
 	}
 	if found && isOpenWorkItemState(existing.LastState) {
+		w.Metrics.CountWorkContextBinding("refused")
 		if existing.ExternalKey != issueURL {
 			return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
 				"This thread is already bound to %s. Start a new thread to work a different issue.", existing.ExternalKey))
@@ -150,6 +153,11 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 	}
 	if err := w.Store.UpsertWorkItemBinding(ctx, binding); err != nil {
 		return fmt.Errorf("upsert work item binding: %w", err)
+	}
+	if found {
+		w.Metrics.CountWorkContextBinding("reused")
+	} else {
+		w.Metrics.CountWorkContextBinding("created")
 	}
 
 	// Correlation metadata only — best-effort in the sense that a failure

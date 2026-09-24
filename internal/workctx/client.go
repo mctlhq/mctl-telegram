@@ -26,7 +26,18 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
+
+// relayTimeout bounds every outbound mctl-api call from this package. The
+// inbound context here carries no deadline of its own (HandleSavedText runs
+// inline under listener.persist's RunFor), so without this a hung
+// api.mctl.ai connection stalls that account's update processing
+// indefinitely — see internal/agentworker/client.go's pollEventsDeadline for
+// the same hazard on the sibling client.
+const relayTimeout = 20 * time.Second
 
 // Client is a thin HTTP client for mctl-api's surface-relay routes,
 // authenticating every request as the surface:telegram principal and
@@ -36,6 +47,10 @@ type Client struct {
 	token   string // MCTL_SURFACE_TELEGRAM_TOKEN
 	tenant  string // MCTL_WORK_ITEM_TENANT
 	http    *http.Client
+
+	// Metrics is optional (nil-safe via metrics.Registry's Count* methods) so
+	// existing callers/tests that construct a Client directly keep compiling.
+	Metrics *metrics.Registry
 }
 
 // NewClient builds a Client. hc may be nil to use http.DefaultClient. A
@@ -54,10 +69,19 @@ func NewClient(baseURL, token, tenant string, hc *http.Client) *Client {
 // non-empty, Idempotency-Key. No other header is ever set by this package —
 // in particular, nothing here can carry an actor subject, since the only
 // actor-identifying value it ever sends is this one numeric header.
-func (c *Client) relay(ctx context.Context, method, path string, actorTGID int64, idemKey string, body, out any) error {
+func (c *Client) relay(ctx context.Context, route, method, path string, actorTGID int64, idemKey string, body, out any) (err error) {
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		c.Metrics.CountWorkContextRequest(route, outcome)
+	}()
 	if actorTGID <= 0 {
 		return fmt.Errorf("workctx: relay actor telegram id must be positive, got %d", actorTGID)
 	}
+	ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+	defer cancel()
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -122,7 +146,7 @@ func (c *Client) relay(ctx context.Context, method, path string, actorTGID int64
 // and never logged or echoed by this package.
 func (c *Client) RedeemLink(ctx context.Context, actorTGID int64, code string) error {
 	body := map[string]string{"code": code}
-	return c.relay(ctx, http.MethodPost, "/api/v1/surface-identities/redeem", actorTGID, "", body, nil)
+	return c.relay(ctx, "redeem_link", http.MethodPost, "/api/v1/surface-identities/redeem", actorTGID, "", body, nil)
 }
 
 // CreateRequest is the body for CreateWorkItem. ExternalKey is the only
@@ -152,7 +176,7 @@ func (c *Client) CreateWorkItem(ctx context.Context, actorTGID int64, r CreateRe
 		wireBody["idempotency_key"] = r.IdempotencyKey
 	}
 	var out ItemView
-	if err := c.relay(ctx, http.MethodPost, "/api/v1/work-items", actorTGID, r.IdempotencyKey, wireBody, &out); err != nil {
+	if err := c.relay(ctx, "create_work_item", http.MethodPost, "/api/v1/work-items", actorTGID, r.IdempotencyKey, wireBody, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -162,7 +186,7 @@ func (c *Client) CreateWorkItem(ctx context.Context, actorTGID int64, r CreateRe
 func (c *Client) GetWorkItem(ctx context.Context, actorTGID int64, id string) (*ItemView, error) {
 	var out ItemView
 	path := "/api/v1/work-items/" + url.PathEscape(id)
-	if err := c.relay(ctx, http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
+	if err := c.relay(ctx, "get_work_item", http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -183,7 +207,7 @@ func (c *Client) AppendIntent(ctx context.Context, actorTGID int64, id string, r
 		wireBody["idempotency_key"] = r.IdempotencyKey
 	}
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/intents"
-	return c.relay(ctx, http.MethodPost, path, actorTGID, r.IdempotencyKey, wireBody, nil)
+	return c.relay(ctx, "append_intent", http.MethodPost, path, actorTGID, r.IdempotencyKey, wireBody, nil)
 }
 
 // ExecutionRequest is the body for RequestExecution. There is deliberately
@@ -217,7 +241,7 @@ func (c *Client) RequestExecution(ctx context.Context, actorTGID int64, id strin
 	}
 	var out ExecutionRequestView
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/execution-requests"
-	if err := c.relay(ctx, http.MethodPost, path, actorTGID, r.IdempotencyKey, wireBody, &out); err != nil {
+	if err := c.relay(ctx, "request_execution", http.MethodPost, path, actorTGID, r.IdempotencyKey, wireBody, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -228,7 +252,7 @@ func (c *Client) RequestExecution(ctx context.Context, actorTGID int64, id strin
 func (c *Client) GetExecutionRequest(ctx context.Context, actorTGID int64, id, requestID string) (*ExecutionRequestView, error) {
 	var out ExecutionRequestView
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/execution-requests/" + url.PathEscape(requestID)
-	if err := c.relay(ctx, http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
+	if err := c.relay(ctx, "get_execution_request", http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -241,7 +265,7 @@ func (c *Client) GetExecutionRequest(ctx context.Context, actorTGID int64, id, r
 func (c *Client) ListExecutionRequests(ctx context.Context, actorTGID int64, id string) ([]ExecutionRequestView, error) {
 	var out executionRequestListEnvelope
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/execution-requests"
-	if err := c.relay(ctx, http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
+	if err := c.relay(ctx, "list_execution_requests", http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
 		return nil, err
 	}
 	return out.ExecutionRequests, nil
@@ -263,5 +287,5 @@ func (c *Client) AddSurfaceRef(ctx context.Context, actorTGID int64, id string, 
 	externalID := fmt.Sprintf("telegram:%d:%d", r.ChatTGID, r.RootTGMessageID)
 	wireBody := map[string]any{"external_id": externalID}
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/surface-refs"
-	return c.relay(ctx, http.MethodPost, path, actorTGID, "", wireBody, nil)
+	return c.relay(ctx, "add_surface_ref", http.MethodPost, path, actorTGID, "", wireBody, nil)
 }

@@ -62,7 +62,7 @@ func (s *Store) LatestWorkItemBinding(ctx context.Context, userID, chatTGID int6
 		        created_at, updated_at
 		   FROM work_item_bindings
 		  WHERE user_id = $1 AND chat_tg_id = $2
-		  ORDER BY updated_at DESC
+		  ORDER BY updated_at DESC, id DESC
 		  LIMIT 1`,
 		userID, chatTGID,
 	).Scan(&b.ID, &b.UserID, &b.ChatTGID, &b.RootTGMessageID, &b.WorkItemID, &b.ExternalKey,

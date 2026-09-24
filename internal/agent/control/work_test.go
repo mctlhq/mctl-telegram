@@ -696,9 +696,10 @@ func TestRequestStateRendering(t *testing.T) {
 
 // TestTwoThreadsOneIssue is T17: the same owner runs /mctl work <url> for
 // the same issue in two threads; mctl-api's dedupe returns the same item for
-// both. Both threads are bound (two rows), each thread's status shows the
-// request IT submitted, and a state change seen from either thread is
-// reflected in both.
+// both. Both threads are bound (two rows) and each row keeps its own
+// LastRequestID (verified via direct GetWorkItemBinding reads, not the
+// chat-scoped /mctl work status handler), and a state change seen from
+// either thread is reflected in both.
 func TestTwoThreadsOneIssue(t *testing.T) {
 	store, uid := newTestWorkStore(t)
 	fake := newFakeMctlAPI()

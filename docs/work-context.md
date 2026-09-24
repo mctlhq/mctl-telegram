@@ -30,8 +30,8 @@ no mctl-api client is even constructed.
   accepts an explicit mctlhq GitHub issue URL — no title-only work, no
   guessing a target from chat text.
 - `/mctl work status` — shows the work item's id, state, latest execution
-  and snapshot pointers, and the state of the last execution request this
-  thread submitted:
+  and snapshot pointers, and the state of the last execution request
+  submitted from the most recently updated binding in this chat:
   - `pending` — waiting for the platform to pick it up;
   - `claimed` — the platform is starting it;
   - `fulfilled` — done, with the execution id it produced;
