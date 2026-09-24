@@ -80,32 +80,91 @@ func TestNoExecutionIdentityField(t *testing.T) {
 
 // TestRouteAllowlist is the other half of T3: every path any client method
 // can build must be one of the eight permitted routes, and none may contain
-// a forbidden segment or be the bare list/PATCH route.
+// a forbidden segment or be the bare list/PATCH route. Unlike a hardcoded
+// literal slice, this actually calls all 8 Client methods against an
+// httptest server and asserts the paths they build.
 func TestRouteAllowlist(t *testing.T) {
 	const id = "wi_123"
 	const reqID = "xr_456"
-	paths := []string{
-		"/api/v1/surface-identities/redeem",
-		"/api/v1/work-items",
-		"/api/v1/work-items/" + id,
-		"/api/v1/work-items/" + id + "/intents",
-		"/api/v1/work-items/" + id + "/execution-requests",
-		"/api/v1/work-items/" + id + "/execution-requests/" + reqID,
-		"/api/v1/work-items/" + id + "/surface-refs",
+	allowedPaths := map[string]bool{
+		"/api/v1/surface-identities/redeem":                         true,
+		"/api/v1/work-items":                                        true,
+		"/api/v1/work-items/" + id:                                  true,
+		"/api/v1/work-items/" + id + "/intents":                     true,
+		"/api/v1/work-items/" + id + "/execution-requests":          true,
+		"/api/v1/work-items/" + id + "/execution-requests/" + reqID: true,
+		"/api/v1/work-items/" + id + "/surface-refs":                true,
 	}
 	forbiddenSubstrings := []string{"executions", "snapshot", "snapshots", "events", "approvals", "/resume"}
-	for _, p := range paths {
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/execution-requests") && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","execution_requests":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","work_item":{"id":"wi_1"},"state_version":1}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "surface-token", "tenant-1", nil)
+	ctx := context.Background()
+	observedMethods := make(map[string]bool)
+	observedPaths := make(map[string]bool)
+
+	check := func(callName string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", callName, err)
+		}
+		if !allowedPaths[gotPath] {
+			t.Errorf("%s built path %q, not in the allowlist", callName, gotPath)
+		}
 		for _, f := range forbiddenSubstrings {
-			if strings.Contains(p, f) {
-				t.Errorf("path %q contains forbidden segment %q", p, f)
+			if strings.Contains(gotPath, f) {
+				t.Errorf("%s built path %q containing forbidden segment %q", callName, gotPath, f)
 			}
 		}
-		if p == "/api/v1/work-items" {
-			// POST-only in this package; verified this is never called as a
-			// bare GET (the list route) by construction — CreateWorkItem is
-			// the only method building this exact path, and it always POSTs.
-			continue
-		}
+		observedMethods[callName] = true
+		observedPaths[gotPath] = true
+	}
+
+	err := c.RedeemLink(ctx, 555, "CODE123")
+	check("RedeemLink", err)
+
+	_, err = c.CreateWorkItem(ctx, 555, CreateRequest{ExternalKey: "https://github.com/mctlhq/foo/issues/1"})
+	check("CreateWorkItem", err)
+
+	_, err = c.GetWorkItem(ctx, 555, id)
+	check("GetWorkItem", err)
+
+	err = c.AppendIntent(ctx, 555, id, IntentRequest{Text: "note"})
+	check("AppendIntent", err)
+
+	_, err = c.RequestExecution(ctx, 555, id, ExecutionRequest{Kind: ExecutionKindStart, ExpectedStateVersion: 1})
+	check("RequestExecution", err)
+
+	_, err = c.GetExecutionRequest(ctx, 555, id, reqID)
+	check("GetExecutionRequest", err)
+
+	_, err = c.ListExecutionRequests(ctx, 555, id)
+	check("ListExecutionRequests", err)
+
+	err = c.AddSurfaceRef(ctx, 555, id, SurfaceRefRequest{ChatTGID: 100, RootTGMessageID: 200})
+	check("AddSurfaceRef", err)
+
+	// 8 distinct methods, exercising all 7 distinct allowed routes (POST
+	// .../execution-requests and GET .../execution-requests share one path,
+	// distinguished only by HTTP method — RequestExecution and
+	// ListExecutionRequests).
+	const wantMethods = 8
+	if len(observedMethods) != wantMethods {
+		t.Errorf("observed %d distinct client methods, want %d (observed: %v)", len(observedMethods), wantMethods, observedMethods)
+	}
+	if len(observedPaths) != len(allowedPaths) {
+		t.Errorf("observed %d distinct allowed paths, want %d (observed: %v)", len(observedPaths), len(allowedPaths), observedPaths)
 	}
 }
 

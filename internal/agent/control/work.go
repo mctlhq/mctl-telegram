@@ -164,11 +164,12 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 	// here must not stop the start request below, but it is still reported
 	// as a real error (not silently dropped) since a Codex-caught defect
 	// here would otherwise be invisible.
+	var surfaceRefWarning string
 	if err := w.Client.AddSurfaceRef(ctx, actorTGID, item.WorkItem.ID, workctx.SurfaceRefRequest{
 		ChatTGID: meta.ChatTGID, RootTGMessageID: meta.TGMessageID,
 	}); err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
-			"Work item %s created, but registering this thread failed: %s", item.WorkItem.ID, workctxErrText(err)))
+		surfaceRefWarning = fmt.Sprintf(
+			"Work item %s created, but registering this thread failed: %s\n", item.WorkItem.ID, workctxErrText(err))
 	}
 
 	startKey := workctx.IdempotencyKey(meta.ChatTGID, meta.TGMessageID, "start", 0)
@@ -176,13 +177,13 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		Kind: workctx.ExecutionKindStart, ExpectedStateVersion: item.StateVersion, IdempotencyKey: startKey,
 	})
 	if err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
+		return w.Notifier.Reply(ctx, meta.UserID, surfaceRefWarning+fmt.Sprintf(
 			"Work item %s bound, but the start request failed: %s", item.WorkItem.ID, workctxErrText(err)))
 	}
 	if err := w.Store.SetWorkItemBindingRequest(ctx, meta.UserID, meta.ChatTGID, meta.TGMessageID, req.ID); err != nil {
 		return fmt.Errorf("set work item binding request: %w", err)
 	}
-	return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
+	return w.Notifier.Reply(ctx, meta.UserID, surfaceRefWarning+fmt.Sprintf(
 		"Bound to work item %s.\nRequest %s (%s): pending.\n/mctl work status to check progress.",
 		item.WorkItem.ID, req.ID, req.Kind))
 }
