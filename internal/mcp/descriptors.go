@@ -36,6 +36,12 @@ func (s *Server) descriptors() (productupdate.Snapshot, error) {
 		}
 		descriptors[name] = raw
 	}
+	// One spelling per surface: toolPassesFilter treats "" as "all", and so
+	// does the config default, so the label does too.
+	filter := s.ToolFilter
+	if filter == "" {
+		filter = "all"
+	}
 	return productupdate.NewSnapshot(
-		productupdate.Surface{AppsEnabled: s.AppsEnabled, ToolFilter: s.ToolFilter}, descriptors)
+		productupdate.Surface{AppsEnabled: s.AppsEnabled, ToolFilter: filter}, descriptors)
 }

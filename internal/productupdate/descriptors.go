@@ -92,7 +92,9 @@ func NewSnapshot(surface Surface, descriptors map[string][]byte) (Snapshot, erro
 
 // Marshal is the one serialization of a snapshot: indented at the top level
 // for a reviewable diff in a release pull request, one canonical line per
-// tool, tools in name order, trailing newline.
+// tool, tools in name order, trailing newline. Each descriptor is
+// re-canonicalised on the way out, so a snapshot assembled or edited by hand
+// cannot write bytes ParseSnapshot would reject.
 func (s Snapshot) Marshal() ([]byte, error) {
 	names := s.names()
 	var out bytes.Buffer
@@ -110,10 +112,14 @@ func (s Snapshot) Marshal() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("encode tool name: %w", err)
 		}
+		descriptor, err := Canonical(s.Tools[name])
+		if err != nil {
+			return nil, fmt.Errorf("tool %s: %w", name, err)
+		}
 		if i > 0 {
 			out.WriteString(",")
 		}
-		fmt.Fprintf(&out, "\n    %s: %s", key, s.Tools[name])
+		fmt.Fprintf(&out, "\n    %s: %s", key, descriptor)
 	}
 	if len(names) > 0 {
 		out.WriteString("\n  ")
@@ -130,6 +136,11 @@ func ParseSnapshot(raw []byte) (Snapshot, error) {
 	}
 	if s.Schema != SnapshotSchema {
 		return Snapshot{}, fmt.Errorf("snapshot schema %q is not %q", s.Schema, SnapshotSchema)
+	}
+	// A surface with no tools is not evidence: diffed against it, a release
+	// would appear to add every tool it has.
+	if len(s.Tools) == 0 {
+		return Snapshot{}, fmt.Errorf("snapshot has no tools")
 	}
 	descriptors := make(map[string][]byte, len(s.Tools))
 	for name, descriptor := range s.Tools {

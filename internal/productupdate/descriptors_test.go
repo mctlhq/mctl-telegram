@@ -177,6 +177,31 @@ func TestSnapshotRoundTripsAndRefusesAMisnamedDescriptor(t *testing.T) {
 	if _, err := ParseSnapshot([]byte(`{"schema":"x","surface":{},"tools":{}}`)); err == nil {
 		t.Fatal("an unknown schema must be refused")
 	}
+	for _, empty := range []string{
+		`{"schema":"` + SnapshotSchema + `","surface":{},"tools":{}}`,
+		`{"schema":"` + SnapshotSchema + `","surface":{},"tools":null}`,
+		`{"schema":"` + SnapshotSchema + `","surface":{}}`,
+	} {
+		if _, err := ParseSnapshot([]byte(empty)); err == nil {
+			t.Fatalf("a snapshot with no tools must be refused: %s", empty)
+		}
+	}
+}
+
+func TestMarshalCanonicalisesAnEditedDescriptor(t *testing.T) {
+	s := snapshot(t, listDialogs)
+	s.Tools["list_dialogs"] = json.RawMessage("{\n  \"name\": \"list_dialogs\",\n  \"annotations\": {}\n}")
+	raw, err := s.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseSnapshot(raw); err != nil {
+		t.Fatalf("Marshal wrote a snapshot ParseSnapshot rejects: %v\n%s", err, raw)
+	}
+	s.Tools["list_dialogs"] = json.RawMessage("")
+	if _, err := s.Marshal(); err == nil {
+		t.Fatal("an empty descriptor must fail Marshal, not reach the file")
+	}
 }
 
 // Numbers survive exactly: 4096 must not become 4096.0, or every release

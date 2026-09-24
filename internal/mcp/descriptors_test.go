@@ -105,6 +105,14 @@ func TestToolDescriptorsAreTheFullSurface(t *testing.T) {
 			t.Fatalf("read-only tool %s is missing from the full surface", name)
 		}
 	}
+	// The zero-valued filter is the same surface under the same label.
+	zero, err := (&Server{AppsEnabled: DescriptorSurface.AppsEnabled}).descriptors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero.Surface != DescriptorSurface {
+		t.Fatalf("zero-valued ToolFilter labelled %+v, want %+v", zero.Surface, DescriptorSurface)
+	}
 	unfiltered := (&Server{ToolFilter: "", AppsEnabled: true}).newMCPServer().ListTools()
 	if len(unfiltered) != len(full.Tools) {
 		t.Fatalf("snapshot has %d tools, the unfiltered server registers %d", len(full.Tools), len(unfiltered))
