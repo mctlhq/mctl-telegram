@@ -10,7 +10,7 @@ const sendMessageV2 = `{"name":"send_message","description":"Send a message.","i
 
 func runGate(t *testing.T, entries []Entry, previous, current Snapshot) GateReport {
 	t.Helper()
-	r, err := Gate(Feed{Entries: entries}, "0.69.0", "0.69.0", previous, current)
+	r, err := Gate(Feed{Entries: entries}, "0.69.0", []string{"0.69.0"}, previous, current)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestOlderEntriesAreHistoryAndNewerOnesAreRefused(t *testing.T) {
 // verified. A product update written then still cites a release (Validate
 // demands it), and passes as unverified rather than being unwritable.
 func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
-	r, err := Gate(Feed{}, "", "0.68.0", Snapshot{}, snapshot(t, listDialogs, sendMessage))
+	r, err := Gate(Feed{}, "", []string{"0.68.0"}, Snapshot{}, snapshot(t, listDialogs, sendMessage))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestWithoutABaselineCitationsPassAsUnverified(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.Evidence.From = "0.68.0"
-	r, err = Gate(Feed{Entries: []Entry{e}}, "", "0.68.0", Snapshot{}, snapshot(t, listDialogs, sendMessage))
+	r, err = Gate(Feed{Entries: []Entry{e}}, "", []string{"0.68.0"}, Snapshot{}, snapshot(t, listDialogs, sendMessage))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	head := snapshot(t, listDialogs)
 	ghost := approved("send-message")
 	ghost.Evidence.From = "0.68.0"
-	r, err := Gate(Feed{Entries: []Entry{ghost}}, "", "0.68.0", Snapshot{}, head)
+	r, err := Gate(Feed{Entries: []Entry{ghost}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	gone := approved("drop-delete-messages")
 	gone.Kind, gone.Tools = KindDeprecation, []string{"delete_messages"}
 	gone.Evidence = Evidence{From: "0.68.0", Changes: []Claim{{Tool: "delete_messages", Change: ClaimRemoved}}}
-	r, err = Gate(Feed{Entries: []Entry{gone}}, "", "0.68.0", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{gone}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	future := approved("list-dialogs")
 	future.Tools = []string{"list_dialogs"}
 	future.Evidence = Evidence{From: "0.69.0", Changes: []Claim{{Tool: "list_dialogs", Change: ClaimAdded}}}
-	r, err = Gate(Feed{Entries: []Entry{future}}, "", "0.68.0", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{future}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	listed.Tools = []string{"list_dialogs", "teleport"}
 	listed.Evidence = Evidence{From: "0.68.0", Changes: []Claim{{Tool: "list_dialogs", Change: ClaimSchema}}}
 	listed.Kind = KindChangedBehavior
-	r, err = Gate(Feed{Entries: []Entry{listed}}, "", "0.68.0", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{listed}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	// One change, one update, before the first baseline as after it.
 	a, b := listed, listed
 	a.Tools, b.ID, b.Tools = []string{"list_dialogs"}, "list-dialogs-again", []string{"list_dialogs"}
-	r, err = Gate(Feed{Entries: []Entry{a, b}}, "", "0.68.0", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{a, b}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,14 +206,32 @@ func TestTheBootstrapWindowStillRefusesGhostsAndFutureReleases(t *testing.T) {
 	// A malformed citation is reported as malformed, not as a future release.
 	bad := a
 	bad.Evidence.From = "v0.68.0"
-	r, err = Gate(Feed{Entries: []Entry{bad}}, "", "0.68.0", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{bad}}, "", []string{"0.68.0"}, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantProblem(t, r, "list-dialogs: evidence.from:")
 
+	// A cited version must be a tag, not merely one no newer than the latest:
+	// 0.1.0 predates the oldest tag, and would count as shipped immediately.
+	below := a
+	below.Evidence.From = "0.1.0"
+	tags := []string{"0.67.0", "0.68.0", "v0.68.0", "notes"}
+	r, err = Gate(Feed{Entries: []Entry{below}}, "", tags, Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "cites release 0.1.0, which is not a release tag of this repository (latest: 0.68.0)")
+	older := a
+	older.Evidence.From = "0.67.0"
+	r, err = Gate(Feed{Entries: []Entry{older}}, "", tags, Snapshot{}, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPass(t, r)
+
 	// With no release tag at all, a product update cannot be written yet.
-	r, err = Gate(Feed{Entries: []Entry{a}}, "", "", Snapshot{}, head)
+	r, err = Gate(Feed{Entries: []Entry{a}}, "", nil, Snapshot{}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
