@@ -9,6 +9,7 @@ import (
 
 	"github.com/gotd/td/tg"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	cryptopkg "github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -311,7 +312,7 @@ type recordingRouter struct {
 	err   error
 }
 
-func (r *recordingRouter) HandleSavedText(_ context.Context, _ int64, text string) error {
+func (r *recordingRouter) HandleSavedText(_ context.Context, _ control.SavedMeta, text string) error {
 	r.calls++
 	r.text = text
 	return r.err

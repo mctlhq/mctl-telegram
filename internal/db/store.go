@@ -270,6 +270,32 @@ func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, erro
 	return id.Int64, nil
 }
 
+// TelegramIDByUserID resolves an internal users.id to its Telegram user id —
+// the reverse of UserIDByTelegramID. found=false (not an error) means the
+// user has no Telegram id on file, e.g. a local-dev or shared-hmac account
+// that never authenticated via Telegram. Used by the work-context adapter
+// (issue-443) to cross-check the relay actor: the header sent to mctl-api is
+// derived from the caller-supplied Telegram id, never trusted on its own.
+func (s *Store) TelegramIDByUserID(ctx context.Context, userID int64) (int64, bool, error) {
+	if userID <= 0 {
+		return 0, false, errors.New("user id must be positive")
+	}
+	var tgID sql.NullInt64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT telegram_login_id FROM users WHERE id = $1`, userID,
+	).Scan(&tgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("select telegram id by user id: %w", err)
+	}
+	if !tgID.Valid || tgID.Int64 == 0 {
+		return 0, false, nil
+	}
+	return tgID.Int64, true, nil
+}
+
 // Access tiers stored in users.access_tier. NULL is treated as TierNone.
 // Admins are governed by the TG_LOGIN_ADMINS env allowlist, not this column.
 const (

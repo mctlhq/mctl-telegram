@@ -39,6 +39,8 @@ var expectedMetricNames = []string{
 	"mctl_agent_job_cost_usd_total",
 	"mctl_agent_claude_result_errors_total",
 	"mctl_agent_credential_domain",
+	"mctl_work_context_requests_total",
+	"mctl_work_context_bindings_total",
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
@@ -459,6 +461,42 @@ func TestNew_RegistersBotUpdatesMetric(t *testing.T) {
 		}
 		if len(names) != 2 || names[0] != "kind" || names[1] != "outcome" {
 			t.Errorf("labels = %v, want [kind outcome]", names)
+		}
+	}
+}
+
+// TestNew_WorkContextCountersZeroBaseline pins the issue-443 pre-init: both
+// work-context families exist at zero for their whole closed label space on
+// a freshly constructed registry, so deleting the priming loops in New()
+// fails here instead of leaving the series absent until first use.
+func TestNew_WorkContextCountersZeroBaseline(t *testing.T) {
+	reg := New()
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	want := map[string]int{
+		"mctl_work_context_requests_total": len(workContextRoutes) * len(workContextOutcomes),
+		"mctl_work_context_bindings_total": len(workContextBindingResults),
+	}
+	for name, n := range want {
+		var mf *dto.MetricFamily
+		for _, f := range mfs {
+			if f.GetName() == name {
+				mf = f
+				break
+			}
+		}
+		if mf == nil {
+			t.Fatalf("%s absent from a freshly constructed registry", name)
+		}
+		if got := len(mf.GetMetric()); got != n {
+			t.Fatalf("%s: %d children, want %d", name, got, n)
+		}
+		for _, m := range mf.GetMetric() {
+			if v := m.GetCounter().GetValue(); v != 0 {
+				t.Fatalf("%s child %v = %v, want 0", name, m.GetLabel(), v)
+			}
 		}
 	}
 }
