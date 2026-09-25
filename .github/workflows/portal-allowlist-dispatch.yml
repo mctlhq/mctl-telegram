@@ -27,6 +27,9 @@ jobs:
   dispatch:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # One token mint and one dispatch call; a hang must not hold the
+    # concurrency group for the default 6 hours.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
