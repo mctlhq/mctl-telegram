@@ -135,13 +135,23 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		return fmt.Errorf("get work item binding: %w", err)
 	}
 	if found && isOpenWorkItemState(existing.LastState) {
-		w.Metrics.CountWorkContextBinding("refused")
 		if existing.ExternalKey != issueURL {
+			w.Metrics.CountWorkContextBinding("refused")
 			return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
 				"This thread is already bound to %s. Start a new thread to work a different issue.", existing.ExternalKey))
 		}
-		return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
-			"Already bound to work item %s (%s).", existing.WorkItemID, existing.LastState))
+		if existing.LastRequestID != "" {
+			w.Metrics.CountWorkContextBinding("reused")
+			return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
+				"Already bound to work item %s (%s).", existing.WorkItemID, existing.LastState))
+		}
+		// Bound, but no start request was ever recorded: a crash (or a
+		// failed start) between UpsertWorkItemBinding and
+		// SetWorkItemBindingRequest below. Answering "already bound" here
+		// would leave the item with no start request forever, so fall
+		// through and redo the create + start: both carry this command's
+		// deterministic Idempotency-Keys, so the platform replays whatever
+		// it already accepted instead of doing it twice.
 	}
 
 	idemKey := workctx.IdempotencyKey(meta.ChatTGID, meta.TGMessageID, "open", 0)
@@ -194,8 +204,8 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		return fmt.Errorf("set work item binding request: %w", err)
 	}
 	return w.Notifier.Reply(ctx, meta.UserID, surfaceRefWarning+fmt.Sprintf(
-		"Bound to work item %s.\nRequest %s (%s): pending.\n/mctl work status to check progress.",
-		item.WorkItem.ID, req.ID, req.Kind))
+		"Bound to work item %s.\nRequest %s\n/mctl work status to check progress.",
+		item.WorkItem.ID, formatRequestState(*req)))
 }
 
 func isOpenWorkItemState(state string) bool {

@@ -41,7 +41,9 @@ const relayTimeout = 20 * time.Second
 
 // maxResponseBytes caps how much of a response body relay reads. Every
 // workitem/v1 envelope is a few KiB at most; the cap keeps a misbehaving
-// upstream from making the listener goroutine allocate without bound.
+// upstream from making the listener goroutine allocate without bound, and
+// also bounds the error-body text that can land in APIError.Message. A body
+// over the cap is rejected as ErrIncompatibleSchema.
 const maxResponseBytes = 1 << 20
 
 // Client is a thin HTTP client for mctl-api's surface-relay routes,
@@ -112,9 +114,12 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		return fmt.Errorf("workctx: do request: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("workctx: read response: %w", err)
+	}
+	if len(respBody) > maxResponseBytes {
+		return fmt.Errorf("%w: response body exceeds %d bytes", ErrIncompatibleSchema, maxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody struct {

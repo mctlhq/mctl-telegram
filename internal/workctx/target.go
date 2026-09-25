@@ -19,11 +19,13 @@ var ErrNotAnIssueURL = errors.New("workctx: not a mctlhq GitHub issue URL")
 const canonicalIssueOwner = "mctlhq"
 
 // CanonicalIssueURL validates and normalises a /mctl work argument. It
-// accepts only https://github.com/mctlhq/<repo>/issues/<n>, every path
-// segment and the scheme and host case-insensitive (the repo is lower-cased); a trailing slash, query string or fragment are
-// stripped. Anything else — a missing argument, a pull request URL, another
-// owner, another host, a non-numeric or missing issue number — is refused
-// with ErrNotAnIssueURL and no I/O of any kind: this is a pure function.
+// accepts only https://github.com/mctlhq/<repo>/issues/<n>. Scheme, host,
+// owner and the "issues" segment are matched case-insensitively and the
+// repo is lower-cased, so one issue always yields one external_key; a
+// trailing slash, query string or fragment are stripped. Anything else —
+// a missing argument, a pull request URL, another owner, another host, a
+// non-numeric or missing issue number — is refused with ErrNotAnIssueURL
+// and no I/O of any kind: this is a pure function.
 func CanonicalIssueURL(arg string) (string, error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {

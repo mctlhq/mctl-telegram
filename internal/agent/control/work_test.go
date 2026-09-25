@@ -57,7 +57,16 @@ type fakeMctlAPI struct {
 	// live version each time — simulating a real race between the
 	// handler's GetWorkItem read and its RequestExecution call. Used by T7.
 	forceConflicts int
+	// failStartRequests, when > 0, makes the next N execution-request
+	// creates answer 503 — simulating a start that never got recorded.
+	failStartRequests int
+	// failSurfaceRef makes AddSurfaceRef answer 500.
+	failSurfaceRef bool
 }
+
+// freeTextMarker is the free-text "message" the fake attaches to a rejected
+// execution request; no owner-facing reply may ever contain it.
+const freeTextMarker = "FAKE_MCTL_API_FREE_TEXT_MARKER"
 
 func newFakeMctlAPI() *fakeMctlAPI {
 	return &fakeMctlAPI{
@@ -178,6 +187,10 @@ func (f *fakeMctlAPI) handleSurfaceRef(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.surfaceCalls++
+	if f.failSurfaceRef {
+		writeAPIErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -191,6 +204,11 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 		ExpectedStateVersion int64  `json:"expected_state_version"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if f.failStartRequests > 0 {
+		f.failStartRequests--
+		writeAPIErr(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
 	if f.forceConflicts > 0 {
 		f.forceConflicts--
 		f.itemVersion[id] = f.itemVersion[id] + 1
@@ -236,6 +254,16 @@ func (f *fakeMctlAPI) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 	req, ok := f.requests[rid]
 	if !ok {
 		writeAPIErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if req.State == workctx.RequestStateRejected {
+		// mctl-api may attach free text to a rejection; it must never reach
+		// the owner (see TestRequestStateRendering's wantAbsent).
+		b, _ := json.Marshal(req)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		m["message"] = freeTextMarker
+		writeJSON(w, http.StatusOK, m)
 		return
 	}
 	writeJSON(w, http.StatusOK, *req)
@@ -412,11 +440,13 @@ func TestOpenIdempotentAndStatusRendering(t *testing.T) {
 	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if fake.createCalls != 1 {
-		t.Fatalf("createCalls = %d, want 1", fake.createCalls)
+	var createCalls, nRequests int
+	fake.locked(func() { createCalls, nRequests = fake.createCalls, len(fake.requests) })
+	if createCalls != 1 {
+		t.Fatalf("createCalls = %d, want 1", createCalls)
 	}
-	if len(fake.requests) != 1 {
-		t.Fatalf("requests = %d, want 1", len(fake.requests))
+	if nRequests != 1 {
+		t.Fatalf("requests = %d, want 1", nRequests)
 	}
 	reply := sender.sent[len(sender.sent)-1]
 	if !strings.Contains(reply, "pending") || strings.Contains(strings.ToLower(reply), "accepted") {
@@ -436,8 +466,9 @@ func TestOpenIdempotentAndStatusRendering(t *testing.T) {
 	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
 		t.Fatalf("repeat open: %v", err)
 	}
-	if fake.createCalls != 1 {
-		t.Fatalf("createCalls after repeat = %d, want still 1", fake.createCalls)
+	fake.locked(func() { createCalls = fake.createCalls })
+	if createCalls != 1 {
+		t.Fatalf("createCalls after repeat = %d, want still 1", createCalls)
 	}
 
 	sender.sent = nil
@@ -517,8 +548,10 @@ func TestNoTranscriptPersisted(t *testing.T) {
 	if err := router.HandleSavedText(ctx, meta(uid, 7003), "/mctl work resume"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if len(fake.intentCalls) != 1 || fake.intentCalls[0] != secret {
-		t.Fatalf("intent was not forwarded to mctl-api: %v", fake.intentCalls)
+	var intentCalls []string
+	fake.locked(func() { intentCalls = append([]string(nil), fake.intentCalls...) })
+	if len(intentCalls) != 1 || intentCalls[0] != secret {
+		t.Fatalf("intent was not forwarded to mctl-api: %v", intentCalls)
 	}
 
 	rows, err := store.DB.QueryContext(ctx, `SELECT user_id, chat_tg_id, root_tg_message_id, work_item_id, external_key, last_state, last_execution_id, last_request_id FROM work_item_bindings`)
@@ -614,7 +647,7 @@ func TestRequestStateRendering(t *testing.T) {
 		{"rejected engine_run_ended", workctx.RequestStateRejected, "engine_run_ended",
 			[]string{"engine_run_ended", "ended"}, nil},
 		{"rejected unrecognised", workctx.RequestStateRejected, "some_new_code_v99",
-			[]string{"some_new_code_v99", "unrecognised"}, []string{"mctl-api free text should never appear"}},
+			[]string{"some_new_code_v99", "unrecognised"}, []string{freeTextMarker}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -739,11 +772,13 @@ func TestTwoThreadsOneIssue(t *testing.T) {
 	// neither reuses a cached binding locally) but mctl-api's own
 	// external_key dedupe means only one item is ever actually created —
 	// verified below by both threads sharing one WorkItemID.
-	if fake.createCalls != 2 {
-		t.Fatalf("createCalls = %d, want 2 (one per thread, deduped server-side)", fake.createCalls)
+	var createCalls, nItems int
+	fake.locked(func() { createCalls, nItems = fake.createCalls, len(fake.itemsByExternalKey) })
+	if createCalls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (one per thread, deduped server-side)", createCalls)
 	}
-	if len(fake.itemsByExternalKey) != 1 {
-		t.Fatalf("distinct items created = %d, want 1 (mctl-api dedupe on external_key)", len(fake.itemsByExternalKey))
+	if nItems != 1 {
+		t.Fatalf("distinct items created = %d, want 1 (mctl-api dedupe on external_key)", nItems)
 	}
 
 	threadA, foundA, errA := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 10000)
@@ -849,5 +884,148 @@ func TestResumeRetryAfterRefusalGetsFreshIdempotencyKey(t *testing.T) {
 	}
 	if !strings.Contains(reply, "pending") {
 		t.Fatalf("second resume reply = %q, want a pending request", reply)
+	}
+}
+
+// newEnabledRouter wires a Router with the work adapter enabled against fake.
+func newEnabledRouter(t *testing.T, fake *fakeMctlAPI) (*Router, *fakeSelfSender, *db.Store, int64) {
+	t.Helper()
+	store, uid := newTestWorkStore(t)
+	srv := fake.server(t)
+	t.Cleanup(srv.Close)
+	sender := &fakeSelfSender{}
+	client := workctx.NewClient(srv.URL, "tok", "tenant", nil)
+	router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+	router.Work = newTestWorkHandler(t, store, sender, client)
+	return router, sender, store, uid
+}
+
+// TestOpenRedeliveryAfterUnrecordedStart: a binding persisted without a
+// start request (the start failed, or the process died before recording
+// it) must not answer "already bound" on redelivery of the same command —
+// that would leave the item with no start request forever. The redelivery
+// submits the start and records it.
+func TestOpenRedeliveryAfterUnrecordedStart(t *testing.T) {
+	fake := newFakeMctlAPI()
+	fake.failStartRequests = 1
+	router, sender, store, uid := newEnabledRouter(t, fake)
+	ctx := context.Background()
+	m := meta(uid, 12000)
+
+	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	binding, found, err := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 12000)
+	if err != nil || !found {
+		t.Fatalf("get binding: found=%v err=%v", found, err)
+	}
+	if binding.LastRequestID != "" {
+		t.Fatalf("LastRequestID = %q after a failed start, want empty", binding.LastRequestID)
+	}
+
+	sender.sent = nil
+	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("redelivered open: %v", err)
+	}
+	binding, _, _ = store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 12000)
+	if binding.LastRequestID == "" {
+		t.Fatalf("redelivery did not submit the start request; reply = %v", sender.sent)
+	}
+	if reply := sender.sent[len(sender.sent)-1]; strings.Contains(reply, "Already bound") || !strings.Contains(reply, "pending") {
+		t.Fatalf("redelivery reply = %q, want a submitted pending request", reply)
+	}
+	var nItems int
+	fake.locked(func() { nItems = len(fake.itemsByExternalKey) })
+	if nItems != 1 {
+		t.Fatalf("distinct items = %d, want 1", nItems)
+	}
+}
+
+// TestOpenSurfaceRefFailureStillStarts: AddSurfaceRef is correlation
+// metadata only — its failure is reported but must not stop the start.
+func TestOpenSurfaceRefFailureStillStarts(t *testing.T) {
+	fake := newFakeMctlAPI()
+	fake.failSurfaceRef = true
+	router, sender, store, uid := newEnabledRouter(t, fake)
+	ctx := context.Background()
+
+	if err := router.HandleSavedText(ctx, meta(uid, 13000), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	binding, found, err := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 13000)
+	if err != nil || !found || binding.LastRequestID == "" {
+		t.Fatalf("start was not submitted after a surface-ref failure: found=%v err=%v binding=%+v", found, err, binding)
+	}
+	reply := sender.sent[len(sender.sent)-1]
+	if !strings.Contains(reply, "registering this thread failed") || !strings.Contains(reply, "pending") {
+		t.Fatalf("reply = %q, want the surface-ref warning and the pending request", reply)
+	}
+}
+
+// TestLinkRedeem covers /mctl link <code> with the adapter enabled: success,
+// a refused code (whose value is never echoed back), and an actor that
+// cannot be resolved (fails closed, no HTTP call).
+func TestLinkRedeem(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		fake := newFakeMctlAPI()
+		router, sender, _, uid := newEnabledRouter(t, fake)
+		if err := router.HandleSavedText(ctx, meta(uid, 14000), "/mctl link GOODCODE42"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		var calls []string
+		fake.locked(func() { calls = append([]string(nil), fake.redeemCalls...) })
+		if len(calls) != 1 || calls[0] != "GOODCODE42" {
+			t.Fatalf("redeem calls = %v, want [GOODCODE42]", calls)
+		}
+		if reply := sender.sent[0]; !strings.HasPrefix(reply, "Linked.") || strings.Contains(reply, "GOODCODE42") {
+			t.Fatalf("reply = %q, want the Linked confirmation without the code", reply)
+		}
+	})
+
+	t.Run("invalid code", func(t *testing.T) {
+		fake := newFakeMctlAPI()
+		router, sender, _, uid := newEnabledRouter(t, fake)
+		if err := router.HandleSavedText(ctx, meta(uid, 14001), "/mctl link BADCODE"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		reply := sender.sent[0]
+		if !strings.Contains(reply, "invalid or already used") || strings.Contains(reply, "BADCODE") {
+			t.Fatalf("reply = %q, want the invalid-code text without echoing the code", reply)
+		}
+	})
+
+	t.Run("unresolved actor", func(t *testing.T) {
+		store, uid := newTestWorkStore(t)
+		sender := &fakeSelfSender{}
+		client := workctx.NewClient("http://unused.invalid", "tok", "tenant", &http.Client{Transport: failingTransport{t}})
+		router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+		router.Work = newTestWorkHandler(t, store, sender, client)
+		m := meta(uid, 14002)
+		m.SelfTGID = workOwnerTGID + 1 // disagrees with the stored Telegram id
+		if err := router.HandleSavedText(ctx, m, "/mctl link GOODCODE42"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		if len(sender.sent) != 1 || sender.sent[0] != notLinkedReply {
+			t.Fatalf("reply = %v, want notLinkedReply", sender.sent)
+		}
+	})
+}
+
+// TestOpenRendersReturnedStartState: the open reply renders the start
+// request's real state, so a start the platform rejects at once (e.g.
+// no_runnable_target) is not reported as "pending".
+func TestOpenRendersReturnedStartState(t *testing.T) {
+	fake := newFakeMctlAPI()
+	fake.forcedRequestState = workctx.RequestStateRejected
+	fake.forcedRequestReason = "no_runnable_target"
+	router, sender, _, uid := newEnabledRouter(t, fake)
+	if err := router.HandleSavedText(context.Background(), meta(uid, 15000), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	reply := sender.sent[len(sender.sent)-1]
+	if strings.Contains(reply, "pending") || !strings.Contains(reply, "no_runnable_target") {
+		t.Fatalf("open reply = %q, want the rejected state with its reason", reply)
 	}
 }

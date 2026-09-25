@@ -401,7 +401,8 @@ func TestListExecutionRequestsEmptyBody(t *testing.T) {
 }
 
 // TestResponseBodyIsBounded: relay reads at most maxResponseBytes, so an
-// oversized body fails to decode instead of being buffered whole.
+// oversized body is rejected as ErrIncompatibleSchema instead of being
+// buffered whole.
 func TestResponseBodyIsBounded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -410,7 +411,7 @@ func TestResponseBodyIsBounded(t *testing.T) {
 	}))
 	defer srv.Close()
 	client := NewClient(srv.URL, "tok", "tenant", nil)
-	if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); err == nil {
-		t.Fatal("GetWorkItem: expected a decode error for a body over maxResponseBytes, got nil")
+	if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("GetWorkItem: err = %v, want ErrIncompatibleSchema for a body over maxResponseBytes", err)
 	}
 }
