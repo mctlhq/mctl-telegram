@@ -67,6 +67,12 @@ var sensitiveKeys = map[string]struct{}{
 	"device_registration_key": {},
 	"worker_token":            {},
 	"bridge_token":            {},
+	// mctl_surface_telegram_token is the surface:telegram bearer the
+	// work-context adapter (issue-443) authenticates outbound mctl-api
+	// calls with — never MCTL_API_TOKEN or an mctl-agent credential, and
+	// like every other credential in this list it must never reach a log
+	// line.
+	"mctl_surface_telegram_token": {},
 	// Login-bot update receiver (issue-619). The receiver never decodes
 	// message text or callback data, so these keys should never be reachable
 	// from it -- they are here so that a LATER handler that does decode

@@ -96,7 +96,7 @@ func newTestRouter(t *testing.T) (*Router, *fakeApprover, *fakeSelfSender, *db.S
 
 func TestRouter_Status_RepliesWithProfileSummary(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl status"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl status"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -106,7 +106,7 @@ func TestRouter_Status_RepliesWithProfileSummary(t *testing.T) {
 
 func TestRouter_UnknownCommand_RepliesWithHelp(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl frobnicate"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl frobnicate"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -116,7 +116,7 @@ func TestRouter_UnknownCommand_RepliesWithHelp(t *testing.T) {
 
 func TestRouter_Approve_DelegatesToExecutorWithCode(t *testing.T) {
 	router, approver, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve AB12CD"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl approve AB12CD"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(approver.approveCalls) != 1 || approver.approveCalls[0] != "AB12CD" {
@@ -133,7 +133,7 @@ func TestRouter_Approve_DelegatesToExecutorWithCode(t *testing.T) {
 // owner must still resolve.
 func TestRouter_Approve_NormalizesCodeCase(t *testing.T) {
 	router, approver, _, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve ab12cd"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl approve ab12cd"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(approver.approveCalls) != 1 || approver.approveCalls[0] != "AB12CD" {
@@ -143,7 +143,7 @@ func TestRouter_Approve_NormalizesCodeCase(t *testing.T) {
 
 func TestRouter_Reject_NormalizesCodeCase(t *testing.T) {
 	router, approver, _, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl reject  ab12cd  "); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl reject  ab12cd  "); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(approver.rejectCalls) != 1 || approver.rejectCalls[0] != "AB12CD" {
@@ -154,7 +154,7 @@ func TestRouter_Reject_NormalizesCodeCase(t *testing.T) {
 func TestRouter_Approve_SurfacesErrorFromExecutor(t *testing.T) {
 	router, approver, sender, _, uid := newTestRouter(t)
 	approver.approveErr = executor.ErrApprovalCodeNotFound
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve ZZZZZZ"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl approve ZZZZZZ"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -174,7 +174,7 @@ func TestRouter_Approve_SurfacesErrorFromExecutor(t *testing.T) {
 func TestRouter_Approve_QueuedRetryIsNotReportedAsFailure(t *testing.T) {
 	router, approver, sender, _, uid := newTestRouter(t)
 	approver.approveErr = executor.ErrSendQueuedForRetry
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl approve AB12CD"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl approve AB12CD"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -191,7 +191,7 @@ func TestRouter_Approve_QueuedRetryIsNotReportedAsFailure(t *testing.T) {
 
 func TestRouter_Reject_DelegatesToExecutorWithCode(t *testing.T) {
 	router, approver, _, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl reject XY9988"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl reject XY9988"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(approver.rejectCalls) != 1 || approver.rejectCalls[0] != "XY9988" {
@@ -201,7 +201,7 @@ func TestRouter_Reject_DelegatesToExecutorWithCode(t *testing.T) {
 
 func TestRouter_Pause_SetsAutopilotPaused(t *testing.T) {
 	router, _, _, store, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl pause"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl pause"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	profile, err := store.GetAgentProfile(context.Background(), uid)
@@ -229,7 +229,7 @@ func TestRouter_Takeover_SetsStateAndDeniesPending(t *testing.T) {
 		t.Fatalf("seed pending action: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl takeover "+strconv.FormatInt(conv.ID, 10)); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl takeover "+strconv.FormatInt(conv.ID, 10)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestRouter_Leads_ShowsConversationIDNotLeadID(t *testing.T) {
 		t.Fatalf("seed lead: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl leads"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -295,7 +295,7 @@ func TestRouter_Leads_IncludesPeerName(t *testing.T) {
 		t.Fatalf("seed lead: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl leads"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -323,7 +323,7 @@ func TestRouter_Leads_FallsBackToDashOnMissingConversation(t *testing.T) {
 		t.Fatalf("seed dangling lead: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl leads"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl leads"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -338,7 +338,7 @@ func TestRouter_Conversations_ListsAndHandlesEmpty(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
 	ctx := context.Background()
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations"); err != nil {
 		t.Fatalf("handle empty: %v", err)
 	}
 	if len(sender.sent) != 1 || sender.sent[0] != "No conversations yet." {
@@ -361,7 +361,7 @@ func TestRouter_Conversations_IncludesTakenOverWithNoLead(t *testing.T) {
 		t.Fatalf("take over: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -389,7 +389,7 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 		}
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations"); err != nil {
 		t.Fatalf("handle default: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -403,7 +403,7 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	}
 
 	sender.sent = nil
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations 5"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations 5"); err != nil {
 		t.Fatalf("handle count: %v", err)
 	}
 	if strings.Count(sender.sent[0], "Conv #") != 5 {
@@ -414,7 +414,7 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	}
 
 	sender.sent = nil
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations @Anna_HR"); err != nil {
 		t.Fatalf("handle filter: %v", err)
 	}
 	if !strings.Contains(sender.sent[0], "Anna HR") {
@@ -428,7 +428,7 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	}
 
 	sender.sent = nil
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations nobody"); err != nil {
 		t.Fatalf("handle miss: %v", err)
 	}
 	if sender.sent[0] != "No conversations matched your search." {
@@ -436,7 +436,7 @@ func TestRouter_Conversations_TruncationNoticeAndFilter(t *testing.T) {
 	}
 
 	sender.sent = nil
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations _unclosed["); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations _unclosed["); err != nil {
 		t.Fatalf("handle markdown-ish miss: %v", err)
 	}
 	if sender.sent[0] != "No conversations matched your search." {
@@ -466,7 +466,7 @@ func TestRouter_Conversations_FilterScanCapFewMatches(t *testing.T) {
 		}
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations @Anna_HR"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations @Anna_HR"); err != nil {
 		t.Fatalf("handle filter: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -485,7 +485,7 @@ func TestRouter_Conversations_FilterScanCapFewMatches(t *testing.T) {
 	}
 
 	sender.sent = nil
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations nobody"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations nobody"); err != nil {
 		t.Fatalf("handle miss: %v", err)
 	}
 	if !strings.HasPrefix(sender.sent[0], "No conversations matched your search.") {
@@ -532,7 +532,7 @@ func TestRouter_Conversations_CountCappedAt100(t *testing.T) {
 		}
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations 150"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations 150"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -559,7 +559,7 @@ func TestRouter_Conversations_FilterTruncationOmitsCountHint(t *testing.T) {
 		}
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl conversations peer"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl conversations peer"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 {
@@ -588,7 +588,7 @@ func TestRouter_Show_ResolvesPeerReference(t *testing.T) {
 		t.Fatalf("seed conversation: %v", err)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl show user:555"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl show user:555"); err != nil {
 		t.Fatalf("handle user: %v", err)
 	}
 	wantMarker := "Conversation #" + strconv.FormatInt(conv.ID, 10)
@@ -596,7 +596,7 @@ func TestRouter_Show_ResolvesPeerReference(t *testing.T) {
 		t.Fatalf("show user:555 reply = %v, want it to contain %q", sender.sent, wantMarker)
 	}
 
-	if err := router.HandleSavedText(ctx, uid, "/mctl show @anna_hr"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl show @anna_hr"); err != nil {
 		t.Fatalf("handle @username: %v", err)
 	}
 	if len(sender.sent) != 2 || !strings.Contains(sender.sent[1], wantMarker) {
@@ -614,7 +614,7 @@ func TestRouter_Show_PlainIntegerStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
-	if err := router.HandleSavedText(ctx, uid, "/mctl show "+strconv.FormatInt(conv.ID, 10)); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl show "+strconv.FormatInt(conv.ID, 10)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	wantMarker := "Conversation #" + strconv.FormatInt(conv.ID, 10)
@@ -628,7 +628,7 @@ func TestRouter_Show_PlainIntegerStillWorks(t *testing.T) {
 // must get the usage text, not a not-found reply.
 func TestRouter_Show_MalformedArgUsesUsageMessage(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl show garbage"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl show garbage"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 || !strings.HasPrefix(sender.sent[0], "Usage:") {
@@ -640,14 +640,14 @@ func TestRouter_Show_MalformedArgUsesUsageMessage(t *testing.T) {
 // "well-formed reference, no match" branch distinct from the usage branch.
 func TestRouter_Show_UnmatchedPeerReferenceUsesNotFoundMessage(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl show @nobody"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl show @nobody"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "not found") {
 		t.Fatalf("show @nobody reply = %v, want a not-found message", sender.sent)
 	}
 	sender.sent = nil
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl show user:404"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl show user:404"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "not found") {
@@ -671,7 +671,7 @@ func TestRouter_PeerReferencePrefixesAreCaseInsensitive(t *testing.T) {
 	}
 	for _, arg := range []string{"user:555", "User:555", "USER:555", "@anna_hr", "@Anna_HR"} {
 		sender.sent = nil
-		if err := router.HandleSavedText(ctx, uid, "/mctl show "+arg); err != nil {
+		if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl show "+arg); err != nil {
 			t.Fatalf("handle %q: %v", arg, err)
 		}
 		if len(sender.sent) != 1 {
@@ -691,7 +691,7 @@ func TestRouter_PeerReferencePrefixesAreCaseInsensitive(t *testing.T) {
 // the usage line, which is what its own doc comment says it is for.
 func TestRouter_Show_MalformedPeerIDUsesUsageMessage(t *testing.T) {
 	router, _, sender, _, uid := newTestRouter(t)
-	if err := router.HandleSavedText(context.Background(), uid, "/mctl show user:abc"); err != nil {
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl show user:abc"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	if len(sender.sent) != 1 || !strings.HasPrefix(sender.sent[0], "Usage:") {
@@ -712,7 +712,7 @@ func TestRouter_Continue_ResolvesPeerReference(t *testing.T) {
 	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
 		t.Fatalf("take over: %v", err)
 	}
-	if err := router.HandleSavedText(ctx, uid, "/mctl continue @anna_hr"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl continue @anna_hr"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	got, err := store.GetConversation(ctx, uid, conv.ID)
@@ -731,7 +731,7 @@ func TestRouter_Takeover_ResolvesPeerReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
-	if err := router.HandleSavedText(ctx, uid, "/mctl takeover user:555"); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl takeover user:555"); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	got, err := store.GetConversation(ctx, uid, conv.ID)
@@ -753,7 +753,7 @@ func TestRouter_Continue_ResetsStateAndTurns(t *testing.T) {
 	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
 		t.Fatalf("take over: %v", err)
 	}
-	if err := router.HandleSavedText(ctx, uid, "/mctl continue "+strconv.FormatInt(conv.ID, 10)); err != nil {
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl continue "+strconv.FormatInt(conv.ID, 10)); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 	got, err := store.GetConversation(ctx, uid, conv.ID)

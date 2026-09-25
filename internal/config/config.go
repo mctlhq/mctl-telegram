@@ -268,6 +268,29 @@ type Config struct {
 	// outside a deliberate drill window — every real send on the pod is hit
 	// by this, not just a chosen one. Set via AGENT_TEST_CRASH_AFTER_RESERVE.
 	AgentTestCrashAfterReserve bool
+
+	// WorkContextEnabled gates the issue-443 work-context surface adapter:
+	// the outbound mctl-api client and the /mctl work|link subcommands. Off
+	// by default like every other agent-adjacent surface — with it false,
+	// no workctx.Client is constructed, no outbound request is ever made,
+	// and /mctl work|link fall through to the pre-#443 unknown-command
+	// reply. Set via WORK_CONTEXT_ENABLED.
+	WorkContextEnabled bool
+	// MCTLAPIBaseURL is the mctl-api root the workctx client talks to. Set
+	// via MCTL_API_BASE_URL, default https://api.mctl.ai.
+	MCTLAPIBaseURL string
+	// MCTLSurfaceTelegramToken is the bearer credential for the
+	// surface:telegram principal — never MCTL_API_TOKEN or an mctl-agent
+	// credential. Bare os.Getenv, matching the TG_API_HASH secret pattern:
+	// no default, and registered in internal/audit/redact.go's
+	// sensitiveKeys so it can never reach a log line. Set via
+	// MCTL_SURFACE_TELEGRAM_TOKEN.
+	MCTLSurfaceTelegramToken string
+	// WorkItemTenant is the single configured mctl-api tenant every
+	// Telegram-originated work item belongs to (see requirements.md's Open
+	// questions — this repository's own "tenant" concept is a different
+	// thing). Set via MCTL_WORK_ITEM_TENANT.
+	WorkItemTenant string
 }
 
 func Load() (*Config, error) {
@@ -323,6 +346,10 @@ func Load() (*Config, error) {
 		BroadcastMaxAttempts:          envInt("BROADCAST_MAX_ATTEMPTS", 5),
 		BroadcastRecipientLimit:       envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
 		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
+		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
+		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
+		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
+		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
@@ -357,6 +384,15 @@ func Load() (*Config, error) {
 	// validation immediately above.
 	if c.AgentProfilePath != "" && c.AgentProfileOwnerTGID <= 0 {
 		return nil, fmt.Errorf("AGENT_PROFILE_OWNER_TG_ID must be set to a positive Telegram id when AGENT_PROFILE_PATH is set")
+	}
+	// Mirrors the DemoReviewer validation immediately above: an adapter
+	// enabled with no way to authenticate to mctl-api, or no tenant to file
+	// work items under, would either fail every call at runtime or (worse)
+	// silently misfile work — refuse to start rather than degrade quietly.
+	if c.WorkContextEnabled {
+		if c.MCTLSurfaceTelegramToken == "" || c.WorkItemTenant == "" {
+			return nil, fmt.Errorf("WORK_CONTEXT_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN and MCTL_WORK_ITEM_TENANT")
+		}
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {

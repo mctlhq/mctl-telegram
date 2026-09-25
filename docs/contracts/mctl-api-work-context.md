@@ -79,6 +79,15 @@ Create refuses:
 
 Requests have no TTL and cannot be cancelled by the requester yet (mctl-api#371). An open request waits for the dispatcher, so the bot should show "requested" rather than "running" until the request is fulfilled.
 
+## Adapter status
+
+The Telegram-side adapter built against this contract now exists:
+`internal/workctx` (client), `internal/db/work_item_bindings.go` (binding
+store), `internal/agent/control/work.go` (the five `/mctl work`/`/mctl link`
+subcommands). See [docs/work-context.md](../work-context.md) for the
+operator-facing walkthrough. Flag-gated (`WORK_CONTEXT_ENABLED`, default
+false) per the rollout gate below.
+
 ## Rollout gate
 
 Code may target this contract now. End-to-end use needs an mctl-api release and deployment with the surface principal token configured. Until then every call answers as the running mctl-api version does, so the adapter must stay behind a flag that is off by default, with no behaviour change when it is off.

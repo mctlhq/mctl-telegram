@@ -23,6 +23,30 @@ type Approver interface {
 	Reject(ctx context.Context, userID int64, code string) error
 }
 
+// SavedMeta is the per-message context the widened Saved Messages dispatch
+// path carries into the router (issue-443): the facts the work-context
+// adapter needs (the acting Telegram user id for the relay header, and the
+// thread key for the binding) that a bare userID/text pair cannot express.
+// The listener already computes every field here for its own purposes
+// (extract.go, IncomingEvent) — this is plumbing, not new extraction.
+type SavedMeta struct {
+	// UserID is users.id, the owning account — same value the pre-#443
+	// HandleSavedText took directly.
+	UserID int64
+	// SelfTGID is the Telegram user id of the owning account (the Saved
+	// Messages self-peer). This, cross-checked against
+	// Store.TelegramIDByUserID, is the only source for the
+	// X-MCTL-Surface-Actor relay header — never a deployment allowlist.
+	SelfTGID int64
+	// ChatTGID is the chat the command was sent in (Saved Messages: the
+	// owner's own self-peer id).
+	ChatTGID int64
+	// TGMessageID is the command message's own Telegram message id — the
+	// root of a work-item binding's thread key when this is a /mctl work
+	// <issue-url> that starts a new binding.
+	TGMessageID int64
+}
+
 // Router implements listener.CommandRouter (HandleSavedText) — the concrete
 // handler wired into listener.New in cmd/server/main.go, replacing the nil
 // placeholder every earlier communication-agent PR shipped with.
@@ -30,6 +54,10 @@ type Router struct {
 	Store    *db.Store
 	Executor Approver
 	Notifier *Notifier
+	// Work is nilable: nil (the default, and always the case when
+	// WORK_CONTEXT_ENABLED is false) means /mctl work and /mctl link fall
+	// through to today's unknown-command reply — see HandleSavedText below.
+	Work *WorkHandler
 }
 
 // NewRouter constructs a Router.
@@ -37,14 +65,25 @@ func NewRouter(store *db.Store, executor Approver, notifier *Notifier) *Router {
 	return &Router{Store: store, Executor: executor, Notifier: notifier}
 }
 
+const unknownCommandReply = "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations [count|filter]\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>"
+
 // HandleSavedText implements listener.CommandRouter. The listener has
 // already confirmed text starts with /mctl (isMCTLCommand) before ever
 // calling this — errors from ParseCommand here are almost always a bad
 // subcommand or a missing argument, not a false trigger.
-func (r *Router) HandleSavedText(ctx context.Context, userID int64, text string) error {
+func (r *Router) HandleSavedText(ctx context.Context, meta SavedMeta, text string) error {
+	userID := meta.UserID
 	cmd, err := ParseCommand(text)
 	if err != nil {
-		return r.Notifier.Reply(ctx, userID, "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations [count|filter]\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>")
+		// A missing /mctl work[/link] argument gets the work-specific usage
+		// line (requirements.md's explicit-runnable-target rule), not the
+		// generic unknown-command reply — but only when the adapter is
+		// actually wired; with r.Work nil (WORK_CONTEXT_ENABLED=false) this
+		// must stay byte-identical to the pre-#443 fallback.
+		if r.Work != nil && isMissingWorkArg(text) {
+			return r.Notifier.Reply(ctx, userID, workUsage)
+		}
+		return r.Notifier.Reply(ctx, userID, unknownCommandReply)
 	}
 	switch cmd.Type {
 	case CmdStatus:
@@ -65,6 +104,14 @@ func (r *Router) HandleSavedText(ctx context.Context, userID int64, text string)
 		return r.handleApprove(ctx, userID, cmd.Arg)
 	case CmdReject:
 		return r.handleReject(ctx, userID, cmd.Arg)
+	case CmdWork, CmdLink:
+		// Off (the default) until WORK_CONTEXT_ENABLED wires this field —
+		// falling through to the SAME unknown-command reply as before
+		// #443, so a flag-off deployment is byte-identical to today.
+		if r.Work == nil {
+			return r.Notifier.Reply(ctx, userID, unknownCommandReply)
+		}
+		return r.Work.Handle(ctx, meta, cmd)
 	}
 	return nil
 }
