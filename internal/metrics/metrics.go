@@ -563,7 +563,7 @@ func New() *Registry {
 
 	r.WorkContextBindingsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_work_context_bindings_total",
-		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created, reused, refused).",
+		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created; reused: redelivery or same-issue rebind; refused: thread already bound to a different issue).",
 	}, []string{"result"})
 
 	r.EventsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{

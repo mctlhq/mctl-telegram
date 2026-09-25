@@ -61,7 +61,8 @@ no mctl-api client is even constructed.
   mctl-api call; `outcome` is `ok` or `error`. A sustained `error` rate on
   one `route` is the signal to alert on.
 - `mctl_work_context_bindings_total{result}` — thread binding writes:
-  `created`, `reused` (crash redelivery) or `refused` (thread already bound).
+  `created`, `reused` (crash redelivery, or a rebind of the same issue) or
+  `refused` (thread already bound to a different issue).
 
 Both families are pre-created at zero for their full label set.
 

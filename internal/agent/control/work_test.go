@@ -43,6 +43,10 @@ type fakeMctlAPI struct {
 	// handleCreateRequest, in call order — used to assert that a retried
 	// resume gets a fresh key rather than reusing a refused attempt's key.
 	createRequestIdemKeys []string
+	// requestByIdemKey models mctl-api's Idempotency-Key replay on the
+	// execution-request create route: a repeated key answers the request
+	// it already created instead of minting a new one.
+	requestByIdemKey map[string]string
 
 	// refuseExternalKey, when set, makes CreateWorkItem for that key answer
 	// 409 external_key_in_use instead of the dedupe/create path.
@@ -74,6 +78,7 @@ func newFakeMctlAPI() *fakeMctlAPI {
 		itemState:          map[string]string{},
 		itemVersion:        map[string]int64{},
 		requests:           map[string]*workctx.ExecutionRequestView{},
+		requestByIdemKey:   map[string]string{},
 	}
 }
 
@@ -198,7 +203,12 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := r.PathValue("id")
-	f.createRequestIdemKeys = append(f.createRequestIdemKeys, r.Header.Get("Idempotency-Key"))
+	idemKey := r.Header.Get("Idempotency-Key")
+	f.createRequestIdemKeys = append(f.createRequestIdemKeys, idemKey)
+	if rid, ok := f.requestByIdemKey[idemKey]; ok && idemKey != "" {
+		writeJSON(w, http.StatusOK, *f.requests[rid])
+		return
+	}
 	var body struct {
 		Kind                 string `json:"kind"`
 		ExpectedStateVersion int64  `json:"expected_state_version"`
@@ -231,6 +241,9 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 		req.Reason = f.forcedRequestReason
 	}
 	f.requests[req.ID] = req
+	if idemKey != "" {
+		f.requestByIdemKey[idemKey] = req.ID
+	}
 	writeJSON(w, http.StatusCreated, req)
 }
 
@@ -1027,5 +1040,44 @@ func TestOpenRendersReturnedStartState(t *testing.T) {
 	reply := sender.sent[len(sender.sent)-1]
 	if strings.Contains(reply, "pending") || !strings.Contains(reply, "no_runnable_target") {
 		t.Fatalf("open reply = %q, want the rejected state with its reason", reply)
+	}
+}
+
+// TestOpenRedeliveryAfterAcceptedButUnrecordedStart: the platform accepted
+// the start, but the process died before SetWorkItemBindingRequest. The
+// redelivered command redoes the start under the same Idempotency-Key, so
+// the platform replays the request it already has — no second request —
+// and the binding ends up recording that original request id.
+func TestOpenRedeliveryAfterAcceptedButUnrecordedStart(t *testing.T) {
+	fake := newFakeMctlAPI()
+	router, _, store, uid := newEnabledRouter(t, fake)
+	ctx := context.Background()
+	m := meta(uid, 16000)
+
+	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	binding, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 16000)
+	firstReq := binding.LastRequestID
+	if firstReq == "" {
+		t.Fatal("first open recorded no request id")
+	}
+	// Simulate the crash: the request exists at the platform, the local
+	// binding never recorded it.
+	if _, err := store.DB.ExecContext(ctx, `UPDATE work_item_bindings SET last_request_id = '' WHERE root_tg_message_id = ?`, 16000); err != nil {
+		t.Fatalf("clear last_request_id: %v", err)
+	}
+
+	if err := router.HandleSavedText(ctx, m, "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("redelivered open: %v", err)
+	}
+	binding, _, _ = store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 16000)
+	if binding.LastRequestID != firstReq {
+		t.Fatalf("LastRequestID = %q after redelivery, want the replayed %q", binding.LastRequestID, firstReq)
+	}
+	var nRequests int
+	fake.locked(func() { nRequests = len(fake.requests) })
+	if nRequests != 1 {
+		t.Fatalf("execution requests = %d, want 1 (the redo must replay, not resubmit)", nRequests)
 	}
 }
