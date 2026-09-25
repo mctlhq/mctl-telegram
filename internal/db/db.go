@@ -829,6 +829,16 @@ func sqliteSchema() []string {
 			FOREIGN KEY (digest_id, digest_version) REFERENCES product_update_digests(id, version)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_product_update_publications_entry ON product_update_publications(entry_id)`,
+		// Product-update entry owners (issue-683): the one digest id that may
+		// carry each entry. The primary key is what holds "an entry is carried
+		// by at most one digest id" in the database itself, so the invariant
+		// does not depend on SaveProductUpdateDigest's Postgres table lock
+		// being taken (it is skipped when the dialect probe fails). Later
+		// versions of the owning digest carry the entry again freely.
+		`CREATE TABLE IF NOT EXISTS product_update_entry_owners (
+			entry_id TEXT NOT NULL PRIMARY KEY,
+			digest_id TEXT NOT NULL
+		)`,
 	}
 }
 
@@ -1085,5 +1095,9 @@ func pgSchema() []string {
 			FOREIGN KEY (digest_id, digest_version) REFERENCES product_update_digests(id, version)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_product_update_publications_entry ON product_update_publications(entry_id)`,
+		`CREATE TABLE IF NOT EXISTS product_update_entry_owners (
+			entry_id TEXT NOT NULL PRIMARY KEY,
+			digest_id TEXT NOT NULL
+		)`,
 	}
 }

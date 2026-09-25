@@ -35,6 +35,7 @@ func assertProductUpdateDigestStore(t *testing.T, s *Store, tgID int64) {
 	t.Cleanup(func() {
 		_, _ = s.DB.Exec(`DELETE FROM broadcast_campaigns WHERE id LIKE $1`, p+"%")
 		_, _ = s.DB.Exec(`DELETE FROM product_update_publications WHERE digest_id LIKE $1`, p+"%")
+		_, _ = s.DB.Exec(`DELETE FROM product_update_entry_owners WHERE entry_id LIKE $1`, p+"%")
 		_, _ = s.DB.Exec(`DELETE FROM product_update_digests WHERE id LIKE $1`, p+"%")
 	})
 	uid := productUpdateTestUser(t, s, tgID, now)
@@ -119,6 +120,47 @@ func assertProductUpdateDigestStore(t *testing.T, s *Store, tgID int64) {
 		t.Fatalf("a later version of the same digest: stored=%v err=%v", stored, err)
 	}
 
+	// Entry ids whose byte order and a libc collation's order disagree: the
+	// postgres image's default en_US.utf8 ignores the hyphen at the primary
+	// level and sorts "exportable-feed" before "export-chat". An identical
+	// re-save of such a digest must still be a no-op, and the stored digest
+	// reads back in byte order whatever the server collation.
+	hyphenated := ProductUpdateDigest{
+		ID: p + "hyphenated", Version: 1, Category: string(CategoryProductUpdates), ContentHash: "sha256:hy",
+		SourceRefs: []string{"x@1", "y@1"}, EntryIDs: []string{p + "exportable-feed", p + "export-chat"}, CreatedBy: uid,
+	}
+	if stored, err := s.SaveProductUpdateDigest(ctx, hyphenated, now); err != nil || !stored {
+		t.Fatalf("save hyphenated: stored=%v err=%v", stored, err)
+	}
+	if stored, err := s.SaveProductUpdateDigest(ctx, hyphenated, now.Add(time.Minute)); err != nil || stored {
+		t.Fatalf("identical re-save of hyphenated ids: stored=%v err=%v; want a no-op", stored, err)
+	}
+	got, err = s.GetProductUpdateDigest(ctx, hyphenated.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{p + "export-chat", p + "exportable-feed"}; !slices.Equal(got.EntryIDs, want) {
+		t.Fatalf("hyphenated entry ids read back as %v; want byte order %v", got.EntryIDs, want)
+	}
+
+	// The owner table refuses on its own: an entry owned by another digest
+	// id is refused even when no publication row names it, which is the
+	// state a concurrent saver that skipped the table lock would find.
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO product_update_entry_owners(entry_id, digest_id) VALUES($1,$2)`, p+"owned", p+"racer"); err != nil {
+		t.Fatal(err)
+	}
+	owned := ProductUpdateDigest{
+		ID: p + "late", Version: 1, Category: string(CategoryProductUpdates), ContentHash: "sha256:late",
+		SourceRefs: []string{"o@1"}, EntryIDs: []string{p + "owned"}, CreatedBy: uid,
+	}
+	if _, err := s.SaveProductUpdateDigest(ctx, owned, now); !errors.Is(err, ErrDigestEntryPublished) {
+		t.Fatalf("entry owned by another digest id: %v; want ErrDigestEntryPublished", err)
+	}
+	if _, err := s.GetProductUpdateDigest(ctx, owned.ID, 1); !errors.Is(err, ErrDigestNotFound) {
+		t.Fatalf("a digest refused by the owner table was written: %v", err)
+	}
+
 	bad := weekly
 	bad.Category = "mixed"
 	if _, err := s.SaveProductUpdateDigest(ctx, bad, now); !errors.Is(err, ErrUnknownNotificationCategory) {
@@ -196,6 +238,8 @@ func productUpdateTestUser(t *testing.T, s *Store, tgID int64, now time.Time) in
 		`DELETE FROM broadcast_campaigns WHERE created_by IN (SELECT id FROM users WHERE telegram_login_id = $1)`,
 		`DELETE FROM product_update_publications WHERE (digest_id, digest_version) IN
 		   (SELECT id, version FROM product_update_digests WHERE created_by IN (SELECT id FROM users WHERE telegram_login_id = $1))`,
+		`DELETE FROM product_update_entry_owners WHERE digest_id IN
+		   (SELECT id FROM product_update_digests WHERE created_by IN (SELECT id FROM users WHERE telegram_login_id = $1))`,
 		`DELETE FROM product_update_digests WHERE created_by IN (SELECT id FROM users WHERE telegram_login_id = $1)`,
 		`DELETE FROM users WHERE telegram_login_id = $1`,
 	} {
@@ -210,4 +254,48 @@ func productUpdateTestUser(t *testing.T, s *Store, tgID int64, now time.Time) in
 		t.Fatalf("capture: %v", err)
 	}
 	return uid
+}
+
+// Every guard in ProductUpdateDigest.validate refuses its shape before
+// anything is written.
+func TestSaveProductUpdateDigestRejectsInvalidShapes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	uid := productUpdateTestUser(t, s, 830000002, now)
+	valid := func() ProductUpdateDigest {
+		return ProductUpdateDigest{
+			ID: "weekly", Version: 1, Category: string(CategoryProductUpdates), ContentHash: "sha256:one",
+			SourceRefs: []string{"a@1", "b@1"}, EntryIDs: []string{"a", "b"}, CreatedBy: uid,
+		}
+	}
+	for name, mutate := range map[string]func(*ProductUpdateDigest){
+		"empty id":           func(d *ProductUpdateDigest) { d.ID = "" },
+		"version 0":          func(d *ProductUpdateDigest) { d.Version = 0 },
+		"negative version":   func(d *ProductUpdateDigest) { d.Version = -1 },
+		"unknown category":   func(d *ProductUpdateDigest) { d.Category = "mixed" },
+		"empty content hash": func(d *ProductUpdateDigest) { d.ContentHash = "" },
+		"no creator":         func(d *ProductUpdateDigest) { d.CreatedBy = 0 },
+		"no entries":         func(d *ProductUpdateDigest) { d.EntryIDs, d.SourceRefs = nil, nil },
+		"fewer refs":         func(d *ProductUpdateDigest) { d.SourceRefs = d.SourceRefs[:1] },
+		"more refs":          func(d *ProductUpdateDigest) { d.SourceRefs = append(d.SourceRefs, "c@1") },
+		"empty entry id":     func(d *ProductUpdateDigest) { d.EntryIDs = []string{"a", ""} },
+		"repeated entry id":  func(d *ProductUpdateDigest) { d.EntryIDs = []string{"a", "a"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := valid()
+			mutate(&d)
+			if stored, err := s.SaveProductUpdateDigest(ctx, d, now); err == nil || stored {
+				t.Fatalf("stored=%v err=%v; want a refusal", stored, err)
+			}
+			if d.ID != "" {
+				if _, err := s.GetProductUpdateDigest(ctx, d.ID, d.Version); !errors.Is(err, ErrDigestNotFound) {
+					t.Fatalf("a refused digest was written: %v", err)
+				}
+			}
+		})
+	}
+	if stored, err := s.SaveProductUpdateDigest(ctx, valid(), now); err != nil || !stored {
+		t.Fatalf("the valid shape itself: stored=%v err=%v", stored, err)
+	}
 }

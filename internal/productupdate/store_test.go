@@ -112,3 +112,55 @@ func TestDigestEntryIDsRejectsAForeignRef(t *testing.T) {
 		t.Fatalf("ids %v, %v", ids, err)
 	}
 }
+
+// PersistDigest refuses a digest of another schema, or one whose refs do not
+// name feed entries, before anything reaches the store.
+func TestPersistDigestRejectsForeignShapes(t *testing.T) {
+	ctx := context.Background()
+	s, uid := newDigestStore(t)
+	d, err := FreezeDigest("weekly-2026-39", 1, db.CategoryProductUpdates, "0.70.0", []Entry{approved("send-message")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Digest){
+		"other schema": func(d *Digest) { d.Schema = "mctl-telegram.product-update-digest/v2" },
+		"no schema":    func(d *Digest) { d.Schema = "" },
+		"foreign ref":  func(d *Digest) { d.SourceRefs = []string{"elsewhere/send-message.yaml@content-sha256:ab"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := d
+			bad.SourceRefs = slices.Clone(d.SourceRefs)
+			mutate(&bad)
+			if stored, err := PersistDigest(ctx, s, bad, uid, time.Now().UTC()); err == nil || stored {
+				t.Fatalf("stored=%v err=%v; want a refusal", stored, err)
+			}
+			if _, err := s.GetProductUpdateDigest(ctx, d.ID, d.Version); !errors.Is(err, db.ErrDigestNotFound) {
+				t.Fatalf("a refused digest was written: %v", err)
+			}
+		})
+	}
+}
+
+// A later version of the same digest id is frozen from the earlier entries
+// plus whatever was approved since, not from the earlier set alone; the new
+// entries are then published under this id. Pinned so the documented
+// behaviour cannot drift into an implied "correction reproduces v1".
+func TestFreezeNextDigestLaterVersionTakesNewEntriesToo(t *testing.T) {
+	ctx := context.Background()
+	s, uid := newDigestStore(t)
+	now := time.Now().UTC()
+	a, b := approved("send-message"), approved("list-dialogs")
+	if _, _, err := FreezeNextDigest(ctx, s, Feed{Entries: []Entry{a}}, "weekly-2026-39", 1, db.CategoryProductUpdates, "0.70.0", uid, now); err != nil {
+		t.Fatal(err)
+	}
+	v2, stored, err := FreezeNextDigest(ctx, s, Feed{Entries: []Entry{a, b}}, "weekly-2026-39", 2, db.CategoryProductUpdates, "0.71.0", uid, now)
+	if err != nil || !stored {
+		t.Fatalf("v2: stored=%v err=%v", stored, err)
+	}
+	if ids, _ := v2.EntryIDs(); !slices.Equal(ids, []string{"list-dialogs", "send-message"}) {
+		t.Fatalf("v2 carries %v; want the v1 entry plus the newly approved one", ids)
+	}
+	if _, _, err := FreezeNextDigest(ctx, s, Feed{Entries: []Entry{a, b}}, "weekly-2026-40", 1, db.CategoryProductUpdates, "0.71.0", uid, now); err == nil {
+		t.Fatal("the next digest id was offered an entry v2 of the previous one already carried")
+	}
+}

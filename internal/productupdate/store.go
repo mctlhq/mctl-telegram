@@ -57,6 +57,15 @@ func PersistDigest(ctx context.Context, st DigestStore, d Digest, createdBy int6
 // are not excluded, so repeating the call after a lost response yields the
 // identical digest and stores nothing new. It runs only while an operator is
 // present (it is the step before broadcast Prepare), never on a timer.
+//
+// A later version of the same id is NOT a reproduction of the earlier one.
+// Because the exclusion is by digest id, version+1 is frozen from every
+// entry the earlier versions carried plus every entry approved since that no
+// other digest id carried, and those new entries are then published under
+// this id (so the next digest id will not carry them). Nothing here checks
+// that a correction keeps the earlier entry set, and reusing an id that was
+// already sent reopens its entries as candidates. A caller that needs a
+// correction limited to the earlier entries must enforce that itself.
 func FreezeNextDigest(ctx context.Context, st DigestStore, feed Feed, id string, version int, category db.NotificationCategory, latestRelease string, createdBy int64, now time.Time) (Digest, bool, error) {
 	published, err := st.PublishedProductUpdateEntries(ctx, id)
 	if err != nil {

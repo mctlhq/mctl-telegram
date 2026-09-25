@@ -16,6 +16,7 @@ import (
 //
 //	product_update_digests       one row per frozen (id, version), written once
 //	product_update_publications  the entry ids each digest carried
+//	product_update_entry_owners  the one digest id allowed to carry each entry
 //	broadcast_campaigns.source_* the digest a campaign was prepared from
 //
 // A digest row is never updated. Saving the same (id, version) again is a
@@ -38,7 +39,8 @@ var (
 )
 
 // ProductUpdateDigest is one frozen digest (productupdate.Digest) as stored.
-// EntryIDs is the set of feed entries it carried, sorted.
+// EntryIDs is the set of feed entries it carried, sorted in byte order
+// (not the database collation's).
 type ProductUpdateDigest struct {
 	ID          string
 	Version     int
@@ -158,6 +160,23 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 			d.ID, d.Version, id); err != nil {
 			return false, fmt.Errorf("save product update publication %s: %w", id, err)
 		}
+		// The database-held form of the published check above. A concurrent
+		// saver of the same entry blocks on the primary key until this
+		// transaction ends, then finds the committed owner and is refused;
+		// that holds even when the table lock was skipped.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO product_update_entry_owners(entry_id, digest_id) VALUES($1,$2) ON CONFLICT (entry_id) DO NOTHING`,
+			id, d.ID); err != nil {
+			return false, fmt.Errorf("save product update entry owner %s: %w", id, err)
+		}
+		var owner string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT digest_id FROM product_update_entry_owners WHERE entry_id = $1`, id).Scan(&owner); err != nil {
+			return false, fmt.Errorf("save product update entry owner %s: %w", id, err)
+		}
+		if owner != d.ID {
+			return false, fmt.Errorf("%w: %s is in %s", ErrDigestEntryPublished, id, owner)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("save product update digest: commit: %w", err)
@@ -208,6 +227,12 @@ func getProductUpdateDigest(ctx context.Context, q queryer, id string, version i
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("get product update digest: entries: %w", err)
 	}
+	// Byte order, as SaveProductUpdateDigest sorts the ids it compares
+	// against. ORDER BY above follows the server collation, and a libc one
+	// such as en_US.utf8 (the postgres image default) ignores hyphens at the
+	// primary level, so "exportable-feed" sorts before "export-chat" there
+	// and an identical retry would otherwise read as ErrDigestConflict.
+	slices.Sort(d.EntryIDs)
 	return &d, nil
 }
 
@@ -215,7 +240,9 @@ func getProductUpdateDigest(ctx context.Context, q queryer, id string, version i
 // digest carried: the published set productupdate.DigestCandidates excludes.
 // Entries carried only by exceptDigestID (any version) are left out, so
 // re-freezing that same digest after a retry offers the same candidates
-// again; pass "" for the whole set.
+// again; pass "" for the whole set. The exclusion is by id, not version: for
+// a later version of exceptDigestID it also lets through entries approved
+// since (see productupdate.FreezeNextDigest).
 func (s *Store) PublishedProductUpdateEntries(ctx context.Context, exceptDigestID string) (map[string]bool, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT DISTINCT entry_id FROM product_update_publications WHERE digest_id <> $1`, exceptDigestID)
@@ -231,7 +258,12 @@ func (s *Store) PublishedProductUpdateEntries(ctx context.Context, exceptDigestI
 		}
 		out[id] = true
 	}
-	return out, rows.Err()
+	// Never a partial set with an error: a caller that dropped the error
+	// would treat the missing entries as unpublished and send them again.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("published product update entries: %w", err)
+	}
+	return out, nil
 }
 
 // SetBroadcastCampaignSourceRef records the frozen digest a prepared campaign
