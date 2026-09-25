@@ -27,13 +27,21 @@ type validatedEnvelope interface {
 	validate() error
 }
 
+// emptyBodyTolerant is implemented by response envelopes for which an empty
+// 2xx body (e.g. 204 No Content) is a legitimate success: a list read that
+// persists nothing, where "no body" honestly means "no entries". Every other
+// envelope keeps the strict empty-body rejection above.
+type emptyBodyTolerant interface {
+	emptyBodyMeansNone()
+}
+
 // validate reports an error when WorkItem.ID is empty. Every route that
 // returns an ItemView (POST /api/v1/work-items, GET
 // /api/v1/work-items/{id}) promises at least this field per envelope.go's
 // ItemView doc, so a response missing it is malformed, not merely sparse.
 func (v *ItemView) validate() error {
 	if v.WorkItem.ID == "" {
-		return fmt.Errorf("response missing work_item.id")
+		return fmt.Errorf("%w: response missing work_item.id", ErrIncompatibleSchema)
 	}
 	return nil
 }
@@ -100,6 +108,15 @@ type ExecutionRequestView struct {
 
 func (v *ExecutionRequestView) schemaVersion() string { return v.SchemaVersionField }
 
+// validate reports an error when ID is empty: handleOpen and handleResume
+// persist it as the binding's last_request_id and echo it to the owner.
+func (v *ExecutionRequestView) validate() error {
+	if v.ID == "" {
+		return fmt.Errorf("%w: response missing execution request id", ErrIncompatibleSchema)
+	}
+	return nil
+}
+
 // executionRequestListEnvelope is the wire shape of
 // GET /api/v1/work-items/{id}/execution-requests (no id): a list, newest
 // first per docs/contracts/mctl-api-work-context.md.
@@ -109,6 +126,8 @@ type executionRequestListEnvelope struct {
 }
 
 func (v *executionRequestListEnvelope) schemaVersion() string { return v.SchemaVersionField }
+
+func (v *executionRequestListEnvelope) emptyBodyMeansNone() {}
 
 // Execution request kinds — the only two values RequestExecution.Kind may
 // hold. There is deliberately no "wake" or "attach" kind: this package only

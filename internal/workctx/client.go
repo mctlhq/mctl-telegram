@@ -39,6 +39,11 @@ import (
 // the same hazard on the sibling client.
 const relayTimeout = 20 * time.Second
 
+// maxResponseBytes caps how much of a response body relay reads. Every
+// workitem/v1 envelope is a few KiB at most; the cap keeps a misbehaving
+// upstream from making the listener goroutine allocate without bound.
+const maxResponseBytes = 1 << 20
+
 // Client is a thin HTTP client for mctl-api's surface-relay routes,
 // authenticating every request as the surface:telegram principal and
 // relaying the acting human via X-MCTL-Surface-Actor.
@@ -107,7 +112,7 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		return fmt.Errorf("workctx: do request: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("workctx: read response: %w", err)
 	}
@@ -131,7 +136,11 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	// zero value, which then fails the schemaVersion/validate checks below
 	// instead of silently reporting success with a blank result (see
 	// validatedEnvelope's doc on the poison-pill hazard this closes).
-	if len(respBody) > 0 {
+	if len(respBody) == 0 {
+		if _, ok := out.(emptyBodyTolerant); ok {
+			return nil
+		}
+	} else {
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("workctx: decode response: %w", err)
 		}
@@ -143,7 +152,7 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	}
 	if v, ok := out.(validatedEnvelope); ok {
 		if err := v.validate(); err != nil {
-			return fmt.Errorf("workctx: %w", err)
+			return err
 		}
 	}
 	return nil

@@ -38,6 +38,16 @@ var (
 	// ErrIncompatibleSchema means a response's schema_version was not
 	// workitem/v1 — the response is rejected outright, no state changes.
 	ErrIncompatibleSchema = errors.New("workctx: incompatible platform schema version")
+	// ErrExecutionRequestOpen means the work item already has an open
+	// execution request (409 execution_request_open).
+	ErrExecutionRequestOpen = errors.New("workctx: an execution request is already open")
+	// ErrExecutionActive means an execution for the work item is already
+	// running (409 execution_active).
+	ErrExecutionActive = errors.New("workctx: an execution is already active")
+	// ErrInvalidTransition means the work item cannot take the requested
+	// transition — a terminal item, or a start on an item that already ran
+	// (409 invalid_transition).
+	ErrInvalidTransition = errors.New("workctx: work item cannot take that transition")
 )
 
 // codeToErr maps mctl-api's typed error codes (the JSON "error" field) onto
@@ -56,6 +66,9 @@ var codeToErr = map[string]error{
 	"actor_not_accepted":     ErrActorNotAccepted,
 	"state_version_conflict": ErrStateVersionConflict,
 	"external_key_in_use":    ErrExternalKeyInUse,
+	"execution_request_open": ErrExecutionRequestOpen,
+	"execution_active":       ErrExecutionActive,
+	"invalid_transition":     ErrInvalidTransition,
 }
 
 // APIError is returned for any non-2xx response from mctl-api that this

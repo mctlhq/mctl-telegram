@@ -55,6 +55,16 @@ no mctl-api client is even constructed.
 | `MCTL_SURFACE_TELEGRAM_TOKEN` | *(none)* | Bearer for the `surface:telegram` principal — required when the flag is on. |
 | `MCTL_WORK_ITEM_TENANT` | *(none)* | The mctl-api tenant every Telegram-originated work item belongs to — required when the flag is on. |
 
+## Metrics
+
+- `mctl_work_context_requests_total{route, outcome}` — every outbound
+  mctl-api call; `outcome` is `ok` or `error`. A sustained `error` rate on
+  one `route` is the signal to alert on.
+- `mctl_work_context_bindings_total{result}` — thread binding writes:
+  `created`, `reused` (crash redelivery) or `refused` (thread already bound).
+
+Both families are pre-created at zero for their full label set.
+
 ## Manual cross-surface verification
 
 1. Enable the flag with a valid token and tenant, and link your account

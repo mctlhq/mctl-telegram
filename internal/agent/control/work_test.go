@@ -68,6 +68,15 @@ func newFakeMctlAPI() *fakeMctlAPI {
 	}
 }
 
+// locked runs fn under f.mu — the lock every handler holds — so a test
+// goroutine's reads and writes of the fake's fields are ordered against the
+// httptest server goroutines for the race detector, not just in wall-clock.
+func (f *fakeMctlAPI) locked(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
+}
+
 func (f *fakeMctlAPI) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -315,6 +324,8 @@ func TestExplicitRunnableTarget(t *testing.T) {
 		text string
 	}{
 		{"no argument", "/mctl work"},
+		{"link without code", "/mctl link"},
+		{"work note without text", "/mctl work note"},
 		{"a title", "/mctl work fix the login bug"},
 		{"pull request url", "/mctl work https://github.com/mctlhq/mctl-telegram/pull/443"},
 		{"another owner", "/mctl work https://github.com/other/mctl-telegram/issues/443"},
@@ -466,7 +477,7 @@ func TestDedupeAndConflict(t *testing.T) {
 		t.Fatalf("binding.WorkItemID = %q, want wi_existing (the deduped item)", binding.WorkItemID)
 	}
 
-	fake.refuseExternalKey = "https://github.com/mctlhq/other-repo/issues/1"
+	fake.locked(func() { fake.refuseExternalKey = "https://github.com/mctlhq/other-repo/issues/1" })
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, meta(uid, 6001), "/mctl work https://github.com/mctlhq/other-repo/issues/1"); err != nil {
 		t.Fatalf("open conflict: %v", err)
@@ -551,7 +562,7 @@ func TestResumeConcurrency(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	// A single conflict: one bounded retry succeeds.
-	fake.forceConflicts = 1
+	fake.locked(func() { fake.forceConflicts = 1 })
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, meta(uid, 8001), "/mctl work resume"); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -563,7 +574,7 @@ func TestResumeConcurrency(t *testing.T) {
 
 	// Two consecutive conflicts: the handler stops after one retry and
 	// tells the owner, instead of looping.
-	fake.forceConflicts = 2
+	fake.locked(func() { fake.forceConflicts = 2 })
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, meta(uid, 8002), "/mctl work resume"); err != nil {
 		t.Fatalf("resume (double conflict): %v", err)
@@ -621,8 +632,10 @@ func TestRequestStateRendering(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			binding, _, _ := store.GetWorkItemBinding(ctx, uid, workOwnerTGID, 9000)
-			fake.requests[binding.LastRequestID].State = c.state
-			fake.requests[binding.LastRequestID].Reason = c.reason
+			fake.locked(func() {
+				fake.requests[binding.LastRequestID].State = c.state
+				fake.requests[binding.LastRequestID].Reason = c.reason
+			})
 
 			sender.sent = nil
 			if err := router.HandleSavedText(ctx, meta(uid, 9001), "/mctl work status"); err != nil {
@@ -782,34 +795,50 @@ func TestResumeRetryAfterRefusalGetsFreshIdempotencyKey(t *testing.T) {
 	}
 	// The open's own "start" execution-request call already used one
 	// Idempotency-Key; only look at calls made from here on.
-	fake.createRequestIdemKeys = nil
+	fake.locked(func() { fake.createRequestIdemKeys = nil })
+	idemKeys := func() []string {
+		var keys []string
+		fake.locked(func() { keys = append([]string(nil), fake.createRequestIdemKeys...) })
+		return keys
+	}
 
 	// First resume is refused by the platform. A refusal never bumps the
 	// work item's state_version.
-	fake.forcedRequestState = workctx.RequestStateRejected
-	fake.forcedRequestReason = "resume_refused:stale"
+	fake.locked(func() {
+		fake.forcedRequestState = workctx.RequestStateRejected
+		fake.forcedRequestReason = "resume_refused:stale"
+	})
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, meta(uid, 11001), "/mctl work resume"); err != nil {
 		t.Fatalf("resume 1: %v", err)
 	}
-	if len(fake.createRequestIdemKeys) != 1 {
-		t.Fatalf("execution-request calls after first resume = %d, want 1", len(fake.createRequestIdemKeys))
+	keys := idemKeys()
+	if len(keys) != 1 {
+		t.Fatalf("execution-request calls after first resume = %d, want 1", len(keys))
 	}
-	firstKey := fake.createRequestIdemKeys[0]
+	firstKey := keys[0]
+	// handleResume renders the returned request's real state, so the
+	// refusal is visible to the owner rather than masked as "pending".
+	if reply := sender.sent[0]; !strings.Contains(reply, "resume_refused:stale") || strings.Contains(reply, "pending") {
+		t.Fatalf("first resume reply = %q, want the rejected state with its reason", reply)
+	}
 
 	// Un-force the rejection so a genuinely new attempt could succeed if it
 	// actually reaches the handler instead of being answered from a cached
 	// refusal.
-	fake.forcedRequestState = ""
-	fake.forcedRequestReason = ""
+	fake.locked(func() {
+		fake.forcedRequestState = ""
+		fake.forcedRequestReason = ""
+	})
 	sender.sent = nil
 	if err := router.HandleSavedText(ctx, meta(uid, 11002), "/mctl work resume"); err != nil {
 		t.Fatalf("resume 2: %v", err)
 	}
-	if len(fake.createRequestIdemKeys) != 2 {
-		t.Fatalf("execution-request calls after second resume = %d, want 2 (a fresh attempt was submitted)", len(fake.createRequestIdemKeys))
+	keys = idemKeys()
+	if len(keys) != 2 {
+		t.Fatalf("execution-request calls after second resume = %d, want 2 (a fresh attempt was submitted)", len(keys))
 	}
-	secondKey := fake.createRequestIdemKeys[1]
+	secondKey := keys[1]
 	if secondKey == firstKey {
 		t.Fatalf("resume reused idempotency key %q across attempts after a refusal — this wedges /mctl work resume permanently", firstKey)
 	}

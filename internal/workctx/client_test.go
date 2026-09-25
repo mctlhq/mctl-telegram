@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -97,15 +98,22 @@ func TestRouteAllowlist(t *testing.T) {
 	}
 	forbiddenSubstrings := []string{"executions", "snapshot", "snapshots", "events", "approvals", "/resume"}
 
-	var gotPath string
+	var (
+		pathMu  sync.Mutex
+		gotPath string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathMu.Lock()
 		gotPath = r.URL.Path
+		pathMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/execution-requests") && r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","execution_requests":[]}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","work_item":{"id":"wi_1"},"state_version":1}`))
+		// Carries both an ItemView's work_item.id and an
+		// ExecutionRequestView's id, so every route's validate() passes.
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","id":"xr_1","work_item":{"id":"wi_1"},"state_version":1}`))
 	}))
 	defer srv.Close()
 
@@ -116,6 +124,9 @@ func TestRouteAllowlist(t *testing.T) {
 
 	check := func(callName string, err error) {
 		t.Helper()
+		pathMu.Lock()
+		gotPath := gotPath
+		pathMu.Unlock()
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", callName, err)
 		}
@@ -241,6 +252,10 @@ func TestErrorMapping(t *testing.T) {
 		{403, "challenge_invalid", ErrChallengeInvalid},
 		{409, "link_conflict", ErrLinkConflict},
 		{409, "state_version_conflict", ErrStateVersionConflict},
+		{409, "external_key_in_use", ErrExternalKeyInUse},
+		{409, "execution_request_open", ErrExecutionRequestOpen},
+		{409, "execution_active", ErrExecutionActive},
+		{409, "invalid_transition", ErrInvalidTransition},
 	}
 	for _, c := range cases {
 		t.Run(c.code, func(t *testing.T) {
@@ -308,12 +323,14 @@ func TestOpenWorkItemResponseValidation(t *testing.T) {
 			defer srv.Close()
 			client := NewClient(srv.URL, "tok", "tenant", nil)
 
-			if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); err == nil {
-				t.Fatal("GetWorkItem: expected error rejecting the response, got nil")
+			// Every malformed shape is one class: ErrIncompatibleSchema, so
+			// the owner sees one message for one defect.
+			if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); !errors.Is(err, ErrIncompatibleSchema) {
+				t.Fatalf("GetWorkItem: err = %v, want ErrIncompatibleSchema", err)
 			}
 
-			if _, err := client.CreateWorkItem(context.Background(), 555, CreateRequest{ExternalKey: "https://github.com/mctlhq/foo/issues/1"}); err == nil {
-				t.Fatal("CreateWorkItem: expected error rejecting the response, got nil")
+			if _, err := client.CreateWorkItem(context.Background(), 555, CreateRequest{ExternalKey: "https://github.com/mctlhq/foo/issues/1"}); !errors.Is(err, ErrIncompatibleSchema) {
+				t.Fatalf("CreateWorkItem: err = %v, want ErrIncompatibleSchema", err)
 			}
 		})
 	}
@@ -341,5 +358,59 @@ func TestOpenWorkItemResponseAccepted(t *testing.T) {
 	}
 	if view.StateVersion != 3 {
 		t.Errorf("StateVersion = %d, want 3", view.StateVersion)
+	}
+}
+
+// TestExecutionRequestResponseValidation: a 2xx execution-request response
+// without an id is rejected as ErrIncompatibleSchema — handleOpen and
+// handleResume would otherwise persist and echo an empty request id.
+func TestExecutionRequestResponseValidation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","kind":"start","state":"pending"}`))
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "tok", "tenant", nil)
+	_, err := client.RequestExecution(context.Background(), 555, "wi_1", ExecutionRequest{Kind: ExecutionKindStart, IdempotencyKey: "k"})
+	if !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("RequestExecution: err = %v, want ErrIncompatibleSchema", err)
+	}
+	if _, err := client.GetExecutionRequest(context.Background(), 555, "wi_1", "xr_1"); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("GetExecutionRequest: err = %v, want ErrIncompatibleSchema", err)
+	}
+}
+
+// TestListExecutionRequestsEmptyBody: an empty 2xx body (204 No Content) on
+// the list route means "no requests", not an incompatible response — the
+// list persists nothing, unlike the ItemView routes above.
+func TestListExecutionRequestsEmptyBody(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusOK} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		client := NewClient(srv.URL, "tok", "tenant", nil)
+		list, err := client.ListExecutionRequests(context.Background(), 555, "wi_1")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("status %d: unexpected error: %v", status, err)
+		}
+		if len(list) != 0 {
+			t.Fatalf("status %d: list = %v, want empty", status, list)
+		}
+	}
+}
+
+// TestResponseBodyIsBounded: relay reads at most maxResponseBytes, so an
+// oversized body fails to decode instead of being buffered whole.
+func TestResponseBodyIsBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		pad := strings.Repeat("x", maxResponseBytes)
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","work_item":{"id":"wi_1","title":"` + pad + `"},"state_version":1}`))
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "tok", "tenant", nil)
+	if _, err := client.GetWorkItem(context.Background(), 555, "wi_1"); err == nil {
+		t.Fatal("GetWorkItem: expected a decode error for a body over maxResponseBytes, got nil")
 	}
 }

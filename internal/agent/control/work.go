@@ -15,20 +15,30 @@ import (
 // followed by any mctl-api call or binding write.
 const workUsage = "Usage: /mctl work https://github.com/mctlhq/<repo>/issues/<n>\nAlso: /mctl work status | /mctl work note <text> | /mctl work resume\nOne-time setup: /mctl link <code>"
 
-// isMissingWorkArg reports whether text is a /mctl work invocation that
-// ParseCommand rejected for a missing argument (bare "/mctl work", or
-// "/mctl work note" with no text) — the one ParseCommand-error case that
-// gets the work-specific usage line instead of the generic unknown-command
-// reply, per requirements.md's explicit-runnable-target rule.
+// isMissingWorkArg reports whether text is a /mctl work or /mctl link
+// invocation that ParseCommand rejected for a missing argument (bare
+// "/mctl work", bare "/mctl link", or "/mctl work note" with no text) — the
+// ParseCommand-error cases that get the work-specific usage line instead of
+// the generic unknown-command reply, per requirements.md's
+// explicit-runnable-target rule. workUsage documents /mctl link <code>, so
+// a bare "/mctl link" must land there rather than on a reply that does not
+// list the command at all.
 func isMissingWorkArg(text string) bool {
 	fields := strings.Fields(strings.TrimSpace(text))
-	if len(fields) < 2 || !strings.EqualFold(fields[0], "/mctl") || !strings.EqualFold(fields[1], "work") {
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "/mctl") {
 		return false
 	}
-	if len(fields) == 2 {
-		return true // bare "/mctl work"
+	switch {
+	case strings.EqualFold(fields[1], "link"):
+		return len(fields) == 2 // bare "/mctl link"
+	case strings.EqualFold(fields[1], "work"):
+		if len(fields) == 2 {
+			return true // bare "/mctl work"
+		}
+		return len(fields) == 3 && strings.EqualFold(fields[2], "note") // "/mctl work note" with no text
+	default:
+		return false
 	}
-	return len(fields) == 3 && strings.EqualFold(fields[2], "note") // "/mctl work note" with no text
 }
 
 // WorkHandler implements the five issue-443 subcommands (/mctl work
@@ -238,19 +248,17 @@ func (w *WorkHandler) handleResume(ctx context.Context, meta SavedMeta) error {
 	if err != nil {
 		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+workctxErrText(err))
 	}
-	req, retried, err := w.requestResumeWithRetry(ctx, actorTGID, binding, meta.TGMessageID, item.StateVersion)
+	req, err := w.requestResumeWithRetry(ctx, actorTGID, binding, meta.TGMessageID, item.StateVersion)
 	if err != nil {
 		if errors.Is(err, workctx.ErrStateVersionConflict) {
 			return w.Notifier.Reply(ctx, meta.UserID, "The work item changed while resuming — please try /mctl work resume again.")
 		}
 		return w.Notifier.Reply(ctx, meta.UserID, "Could not resume: "+workctxErrText(err))
 	}
-	_ = retried
 	if err := w.Store.SetWorkItemBindingRequest(ctx, meta.UserID, binding.ChatTGID, binding.RootTGMessageID, req.ID); err != nil {
 		return fmt.Errorf("set work item binding request: %w", err)
 	}
-	return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf(
-		"Request %s (%s): pending.\n/mctl work status to check progress.", req.ID, req.Kind))
+	return w.Notifier.Reply(ctx, meta.UserID, "Request "+formatRequestState(*req)+"\n/mctl work status to check progress.")
 }
 
 // requestResumeWithRetry submits a resume execution request at
@@ -269,26 +277,26 @@ func (w *WorkHandler) handleResume(ctx context.Context, meta SavedMeta) error {
 // message, so scoping to cmdMsgID guarantees a fresh key per attempt while
 // still keying on stateVersion to give the in-function 409-conflict retry
 // below its own, correctly distinct key.
-func (w *WorkHandler) requestResumeWithRetry(ctx context.Context, actorTGID int64, binding db.WorkItemBinding, cmdMsgID, stateVersion int64) (*workctx.ExecutionRequestView, bool, error) {
+func (w *WorkHandler) requestResumeWithRetry(ctx context.Context, actorTGID int64, binding db.WorkItemBinding, cmdMsgID, stateVersion int64) (*workctx.ExecutionRequestView, error) {
 	key := workctx.IdempotencyKey(binding.ChatTGID, cmdMsgID, "resume", stateVersion)
 	req, err := w.Client.RequestExecution(ctx, actorTGID, binding.WorkItemID, workctx.ExecutionRequest{
 		Kind: workctx.ExecutionKindResume, ExpectedStateVersion: stateVersion, IdempotencyKey: key,
 	})
 	if err == nil {
-		return req, false, nil
+		return req, nil
 	}
 	if !errors.Is(err, workctx.ErrStateVersionConflict) {
-		return nil, false, err
+		return nil, err
 	}
 	item, gerr := w.Client.GetWorkItem(ctx, actorTGID, binding.WorkItemID)
 	if gerr != nil {
-		return nil, true, gerr
+		return nil, gerr
 	}
 	retryKey := workctx.IdempotencyKey(binding.ChatTGID, cmdMsgID, "resume", item.StateVersion)
 	req, err = w.Client.RequestExecution(ctx, actorTGID, binding.WorkItemID, workctx.ExecutionRequest{
 		Kind: workctx.ExecutionKindResume, ExpectedStateVersion: item.StateVersion, IdempotencyKey: retryKey,
 	})
-	return req, true, err
+	return req, err
 }
 
 // requestReasonExplanations is the fixed, closed table of owner-facing
@@ -422,6 +430,12 @@ func workctxErrText(err error) string {
 		return "that issue already has work you don't have access to"
 	case errors.Is(err, workctx.ErrIncompatibleSchema):
 		return "the platform returned an incompatible response — try again later"
+	case errors.Is(err, workctx.ErrExecutionRequestOpen):
+		return "a request for this work item is already open — /mctl work status to check it"
+	case errors.Is(err, workctx.ErrExecutionActive):
+		return "an execution for this work item is already running — /mctl work status to check it"
+	case errors.Is(err, workctx.ErrInvalidTransition):
+		return "the work item cannot take that request in its current state — /mctl work status to check it"
 	default:
 		return "an internal error occurred"
 	}

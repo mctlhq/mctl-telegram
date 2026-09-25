@@ -16,6 +16,8 @@ func TestCanonicalIssueURL_Table(t *testing.T) {
 		{"uppercase host and scheme", "HTTPS://GITHUB.COM/mctlhq/mctl-telegram/issues/443", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
 		{"trailing slash", "https://github.com/mctlhq/mctl-telegram/issues/443/", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
 		{"query", "https://github.com/mctlhq/mctl-telegram/issues/443?tab=comments", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
+		{"mixed-case issues segment", "https://github.com/mctlhq/mctl-telegram/Issues/443", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
+		{"mixed-case owner and repo", "https://github.com/MCTLHQ/MCTL-Telegram/issues/443", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
 		{"fragment", "https://github.com/mctlhq/mctl-telegram/issues/443#issuecomment-1", "https://github.com/mctlhq/mctl-telegram/issues/443", false},
 		{"empty", "", "", true},
 		{"missing arg trimmed", "   ", "", true},
