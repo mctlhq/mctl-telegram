@@ -1,0 +1,66 @@
+name: Portal allowlist dispatch
+
+# Sends docs/portal-allowlist.json to mctlhq/mctl-gitops whenever it changes
+# on main. mctl-gitops vendors it byte-identical into
+# infrastructure/cloudflare/portal/allowlists/tg.json and opens a PR
+# whose cloudflare-plan names every tool that flips; the portal changes only
+# when that PR merges and an approved cloudflare-apply runs
+# (mctlhq/mctl-gitops#1370). Nothing here talks to Cloudflare.
+#
+# workflow_dispatch re-sends the current file by hand. Re-sending content
+# that is already vendored opens nothing.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/portal-allowlist.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portal-allowlist-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # The mctl-agents App, as this org's release workflows use to dispatch
+      # into mctl-gitops (mctlhq/mctl-gitops#761): actions:write there and
+      # nothing else. It cannot push to mctl-gitops; the vendor workflow
+      # there mints its own token to open the PR.
+      - name: Generate a dispatch token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AGENTS_APP_ID }}
+          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+          permission-actions: write
+
+      - name: Dispatch portal-allowlist-vendor
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          # -w0: unwrapped. GNU base64 wraps at 76 columns, and the vendor
+          # workflow rejects wrapped input.
+          b64=$(base64 -w0 docs/portal-allowlist.json)
+          # workflow_dispatch inputs are capped at 65,535 characters in total.
+          if [ "${#b64}" -gt 60000 ]; then
+            echo "::error::docs/portal-allowlist.json is ${#b64} characters in base64; too large for a dispatch input"
+            exit 1
+          fi
+          gh workflow run portal-allowlist-vendor.yml \
+            --repo mctlhq/mctl-gitops \
+            --ref main \
+            -f server=tg \
+            -f allowlist_b64="$b64" \
+            -f source_repo="$GITHUB_REPOSITORY" \
+            -f source_sha="$GITHUB_SHA"
