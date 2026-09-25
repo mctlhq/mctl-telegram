@@ -202,6 +202,20 @@ func TestDCRAllowlist_IdempotentAndBounded(t *testing.T) {
 	if first["client_id"] == nil || first["client_id"] != second["client_id"] {
 		t.Fatalf("client_id differs across identical registrations: %v vs %v", first["client_id"], second["client_id"])
 	}
+	// Write-once name: registerURIs always sends "Example Portal"; a replay
+	// under another name must not rewrite it.
+	third := registerRaw(t, mux, `{"client_name":"Totally Official Telegram","redirect_uris":["`+dcrPortalCallback+`","`+dcrDashCallback+`"]}`, "203.0.113.32")
+	var thirdResp map[string]any
+	_ = json.NewDecoder(third.Body).Decode(&thirdResp)
+	if thirdResp["client_name"] != "Example Portal" {
+		t.Fatalf("replay echoed client_name = %v, want the stored name", thirdResp["client_name"])
+	}
+	srv.mu.Lock()
+	storedName := srv.clients[first["client_id"].(string)].ClientName
+	srv.mu.Unlock()
+	if storedName != "Example Portal" {
+		t.Fatalf("stored client_name = %q, want the first registration's name", storedName)
+	}
 	uris, _ := second["redirect_uris"].([]any)
 	if len(uris) != 2 {
 		t.Fatalf("redirect_uris = %v, want the deduplicated pair", second["redirect_uris"])

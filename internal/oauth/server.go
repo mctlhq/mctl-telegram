@@ -777,6 +777,12 @@ func validatePreregisteredClient(c PreregisteredClient) error {
 	if strings.TrimSpace(c.ClientID) == "" {
 		return errors.New("client_id is required")
 	}
+	// The prefix marks a pinned DCR registration, whose redirect_uri is
+	// re-checked against DCRRedirectURIs at /oauth/authorize; a static client
+	// carrying it would fail every login with a confusing error.
+	if strings.HasPrefix(c.ClientID, db.PinnedClientIDPrefix) {
+		return fmt.Errorf("client %q: client_id must not use the reserved %q prefix", c.ClientID, db.PinnedClientIDPrefix)
+	}
 	if len(c.RedirectURIs) == 0 {
 		return fmt.Errorf("client %q: at least one redirect_uri is required", c.ClientID)
 	}
@@ -2707,7 +2713,26 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		clientID = pinnedClientID(req.RedirectURIs)
 	}
 	now := s.clock()
-	if s.useDB {
+	if s.useDB && pinned {
+		// No cap eviction: a pinned registration is not counted toward the
+		// cap and a replay adds no row, so evicting here would let anyone
+		// destroy real dynamic registrations for free by replaying the
+		// portal's public registration. Write-once: an existing row, and its
+		// client_name, is kept as it is.
+		stored, err := s.store.InsertPinnedClientReg(r.Context(), db.OAuthClientReg{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+			CreatedAt:    now,
+		})
+		if err != nil {
+			slog.Error("oauth: persist pinned client_reg failed", "err", err)
+			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
+			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
+			return
+		}
+		req.ClientName = stored.ClientName
+	} else if s.useDB {
 		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
 			slog.Warn("oauth: client_reg eviction failed", "err", err)
@@ -2748,11 +2773,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 				delete(s.clients, oldestKey)
 			}
 		}
-		s.clients[clientID] = &clientReg{
-			ClientID:     clientID,
-			ClientName:   req.ClientName,
-			RedirectURIs: req.RedirectURIs,
-			CreatedAt:    now,
+		if existing, ok := s.clients[clientID]; ok && pinned {
+			// Write-once, as on the DB path: a replay keeps the stored name.
+			req.ClientName = existing.ClientName
+		} else {
+			s.clients[clientID] = &clientReg{
+				ClientID:     clientID,
+				ClientName:   req.ClientName,
+				RedirectURIs: req.RedirectURIs,
+				CreatedAt:    now,
+			}
 		}
 		s.mu.Unlock()
 	}

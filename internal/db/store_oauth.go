@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,15 +65,11 @@ type OAuthClientReg struct {
 // MaxRegisteredClients eviction: the Cloudflare MCP portal registers once and
 // keeps authorizing its users with that client_id for as long as it runs, and
 // a 24h sweep would silently break every portal login after the first day.
-// Random registrations always start "tgmcp_", so no other row can carry this
-// prefix.
+// Random registrations always start "tgmcp_", and internal/oauth refuses a
+// preregistered client_id with this prefix, so no other row can carry it.
+// The queries test it with starts_with, an exact prefix comparison, never a
+// LIKE pattern in which '_' would be a wildcard.
 const PinnedClientIDPrefix = "tgdcr_"
-
-// pinnedClientIDPattern is the LIKE pattern excluding pinned rows. The '_' in
-// the prefix is a single-character wildcard in LIKE, which only makes the
-// pattern match a superset of "tgdcr_"-prefixed ids that all start "tgdcr" —
-// and no random registration does.
-const pinnedClientIDPattern = PinnedClientIDPrefix + "%"
 
 // InsertOAuthPending persists a pending OAuth authorization-flow entry to
 // oauth_pending_auth. Used by oauth.Server.handleAuthorize when useDB is true.
@@ -156,11 +153,11 @@ func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 		`DELETE FROM oauth_client_registrations
 		  WHERE client_id = (
 		    SELECT client_id FROM oauth_client_registrations
-		     WHERE client_id NOT LIKE $2
+		     WHERE NOT starts_with(client_id, $2)
 		     ORDER BY created_at ASC LIMIT 1
 		  )
-		  AND (SELECT COUNT(*) FROM oauth_client_registrations WHERE client_id NOT LIKE $2) >= $1`,
-		int64(max), pinnedClientIDPattern,
+		  AND (SELECT COUNT(*) FROM oauth_client_registrations WHERE NOT starts_with(client_id, $2)) >= $1`,
+		int64(max), PinnedClientIDPrefix,
 	)
 	if err != nil {
 		return fmt.Errorf("evict oldest oauth_client_registrations: %w", err)
@@ -274,6 +271,32 @@ func (s *Store) InsertClientReg(ctx context.Context, reg OAuthClientReg) error {
 	return nil
 }
 
+// InsertPinnedClientReg persists a pinned registration (PinnedClientIDPrefix)
+// write-once: an existing row is left exactly as it is, client_name included,
+// and the stored registration is returned. A pinned client_id is derivable
+// from public callbacks, so an upsert would let any unauthenticated caller
+// rewrite the name that flows into oauth_refresh_tokens.client_name and from
+// there into broadcast audience selection. The redirect set never needs
+// updating either: it is what the client_id is derived from.
+func (s *Store) InsertPinnedClientReg(ctx context.Context, reg OAuthClientReg) (*OAuthClientReg, error) {
+	if !strings.HasPrefix(reg.ClientID, PinnedClientIDPrefix) {
+		return nil, fmt.Errorf("insert pinned client_reg: client_id %q lacks the pinned prefix", reg.ClientID)
+	}
+	urisJSON, err := json.Marshal(reg.RedirectURIs)
+	if err != nil {
+		return nil, fmt.Errorf("insert pinned client_reg: marshal redirect_uris: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO oauth_client_registrations (client_id, client_name, redirect_uris, created_at)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (client_id) DO NOTHING`,
+		reg.ClientID, reg.ClientName, string(urisJSON), reg.CreatedAt.UTC(),
+	); err != nil {
+		return nil, fmt.Errorf("insert pinned client_reg: %w", err)
+	}
+	return s.GetClientReg(ctx, reg.ClientID)
+}
+
 // GetClientReg returns the dynamic client registration for the given clientID.
 // Returns ErrOAuthNotFound when the row is absent.
 func (s *Store) GetClientReg(ctx context.Context, clientID string) (*OAuthClientReg, error) {
@@ -339,8 +362,8 @@ func (s *Store) DeleteExpiredOAuthRows(ctx context.Context, ttl time.Duration) (
 func (s *Store) DeleteExpiredClientRegs(ctx context.Context, ttl time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
-		`DELETE FROM oauth_client_registrations WHERE created_at < $1 AND client_id NOT LIKE $2`,
-		cutoff, pinnedClientIDPattern,
+		`DELETE FROM oauth_client_registrations WHERE created_at < $1 AND NOT starts_with(client_id, $2)`,
+		cutoff, PinnedClientIDPrefix,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("sweep oauth_client_registrations: %w", err)

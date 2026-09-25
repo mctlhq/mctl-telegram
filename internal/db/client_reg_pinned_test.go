@@ -84,4 +84,28 @@ func TestClientRegPinned_PostgresExemptFromSweepAndEviction(t *testing.T) {
 	if !exists(pinned) {
 		t.Fatal("the TTL sweep removed the pinned registration")
 	}
+
+	// Write-once: InsertPinnedClientReg never rewrites an existing row.
+	got, err := s.InsertPinnedClientReg(ctx, OAuthClientReg{
+		ClientID: pinned, ClientName: "Totally Official Telegram",
+		RedirectURIs: []string{"https://evil.example.test/cb"}, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClientName != "n" || len(got.RedirectURIs) != 1 || got.RedirectURIs[0] != "https://portal.example.test/cb" {
+		t.Fatalf("pinned row was rewritten: %+v", got)
+	}
+	if _, err := s.InsertPinnedClientReg(ctx, OAuthClientReg{ClientID: "tgmcp_x", RedirectURIs: []string{"https://a.example.test/cb"}}); err == nil {
+		t.Fatal("InsertPinnedClientReg accepted a non-pinned client_id")
+	}
+	// starts_with is an exact prefix test: '_' is not a wildcard, so an id
+	// that merely matches the old LIKE pattern is swept like any other.
+	insert("tgdcrXnotpinned", old)
+	if _, err := s.DeleteExpiredClientRegs(ctx, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if exists("tgdcrXnotpinned") {
+		t.Fatal("an id outside the exact pinned prefix was exempted from the sweep")
+	}
 }
