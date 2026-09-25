@@ -81,8 +81,8 @@ func clientRegIDs(t *testing.T, store *db.Store) []string {
 // in-memory tests and the SQL-only test each miss:
 //   - replaying the pinned registration at the registration cap evicts no
 //     real dynamic registration (it adds no row, so it needs no room);
-//   - the pinned row's client_name is write-once, so a replay with another
-//     name neither changes the stored name nor what the response echoes;
+//   - the pinned row's client_name is the server-assigned
+//     db.PinnedClientName whatever the caller sends, stored and answered;
 //   - the pinned client authorizes from the database.
 func TestDCRAllowlist_PostgresPinnedWiring(t *testing.T) {
 	store := newPostgresOAuthStore(t)
@@ -128,15 +128,18 @@ func TestDCRAllowlist_PostgresPinnedWiring(t *testing.T) {
 		}
 		return resp
 	}
-	first := register("203.0.113.80", "Cloudflare MCP Portal")
+	first := register("203.0.113.80", "Totally Official Telegram")
 	clientID, _ := first["client_id"].(string)
+	if first["client_name"] != db.PinnedClientName {
+		t.Fatalf("first registration echoed client_name = %v, want %q", first["client_name"], db.PinnedClientName)
+	}
 	for i := 0; i < 3; i++ {
-		replay := register(fmt.Sprintf("203.0.113.%d", 81+i), "Totally Official Telegram")
+		replay := register(fmt.Sprintf("203.0.113.%d", 81+i), fmt.Sprintf("Spoof %d", i))
 		if replay["client_id"] != clientID {
 			t.Fatalf("replay client_id = %v, want %q", replay["client_id"], clientID)
 		}
-		if replay["client_name"] != "Cloudflare MCP Portal" {
-			t.Fatalf("replay echoed client_name = %v, want the stored name", replay["client_name"])
+		if replay["client_name"] != db.PinnedClientName {
+			t.Fatalf("replay echoed client_name = %v, want %q", replay["client_name"], db.PinnedClientName)
 		}
 	}
 
@@ -154,8 +157,8 @@ func TestDCRAllowlist_PostgresPinnedWiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.ClientName != "Cloudflare MCP Portal" {
-		t.Fatalf("stored client_name = %q, want the first registration's name", reg.ClientName)
+	if reg.ClientName != db.PinnedClientName {
+		t.Fatalf("stored client_name = %q, want %q", reg.ClientName, db.PinnedClientName)
 	}
 	for _, cb := range []string{dcrPortalCallback, dcrDashCallback} {
 		if err := srv.validateClient(context.Background(), clientID, cb); err != nil {

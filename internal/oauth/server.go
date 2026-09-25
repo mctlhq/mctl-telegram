@@ -2711,14 +2711,17 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	if pinned {
 		req.RedirectURIs = canonicalRedirectSet(req.RedirectURIs)
 		clientID = pinnedClientID(req.RedirectURIs)
+		// Server-assigned name; the caller's client_name is ignored. See
+		// db.PinnedClientName.
+		req.ClientName = db.PinnedClientName
 	}
 	now := s.clock()
 	if s.useDB && pinned {
 		// No cap eviction: a pinned registration is not counted toward the
 		// cap and a replay adds no row, so evicting here would let anyone
 		// destroy real dynamic registrations for free by replaying the
-		// portal's public registration. Write-once: an existing row, and its
-		// client_name, is kept as it is.
+		// portal's public registration. The name is db.PinnedClientName, and
+		// the row is written once and kept as it is.
 		stored, err := s.store.InsertPinnedClientReg(r.Context(), db.OAuthClientReg{
 			ClientID:     clientID,
 			ClientName:   req.ClientName,
@@ -2774,7 +2777,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			}
 		}
 		if existing, ok := s.clients[clientID]; ok && pinned {
-			// Write-once, as on the DB path: a replay keeps the stored name.
+			// Write-once, as on the DB path: a replay keeps the stored entry.
 			req.ClientName = existing.ClientName
 		} else {
 			s.clients[clientID] = &clientReg{

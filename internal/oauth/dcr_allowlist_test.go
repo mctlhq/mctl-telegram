@@ -202,19 +202,19 @@ func TestDCRAllowlist_IdempotentAndBounded(t *testing.T) {
 	if first["client_id"] == nil || first["client_id"] != second["client_id"] {
 		t.Fatalf("client_id differs across identical registrations: %v vs %v", first["client_id"], second["client_id"])
 	}
-	// Write-once name: registerURIs always sends "Example Portal"; a replay
-	// under another name must not rewrite it.
+	// Server-assigned name: registerURIs sends "Example Portal" and this
+	// replay another name; neither is stored or answered.
 	third := registerRaw(t, mux, `{"client_name":"Totally Official Telegram","redirect_uris":["`+dcrPortalCallback+`","`+dcrDashCallback+`"]}`, "203.0.113.32")
 	var thirdResp map[string]any
 	_ = json.NewDecoder(third.Body).Decode(&thirdResp)
-	if thirdResp["client_name"] != "Example Portal" {
-		t.Fatalf("replay echoed client_name = %v, want the stored name", thirdResp["client_name"])
+	if first["client_name"] != db.PinnedClientName || thirdResp["client_name"] != db.PinnedClientName {
+		t.Fatalf("echoed client_name = %v / %v, want %q", first["client_name"], thirdResp["client_name"], db.PinnedClientName)
 	}
 	srv.mu.Lock()
 	storedName := srv.clients[first["client_id"].(string)].ClientName
 	srv.mu.Unlock()
-	if storedName != "Example Portal" {
-		t.Fatalf("stored client_name = %q, want the first registration's name", storedName)
+	if storedName != db.PinnedClientName {
+		t.Fatalf("stored client_name = %q, want %q", storedName, db.PinnedClientName)
 	}
 	uris, _ := second["redirect_uris"].([]any)
 	if len(uris) != 2 {

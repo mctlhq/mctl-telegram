@@ -71,6 +71,15 @@ type OAuthClientReg struct {
 // LIKE pattern in which '_' would be a wildcard.
 const PinnedClientIDPrefix = "tgdcr_"
 
+// PinnedClientName is the client_name every pinned registration is stored
+// and answered with, whatever the caller sent. A pinned client_id is
+// derivable from public callbacks, so a caller-supplied name could be set by
+// anyone who registers the exact set first; it would then flow into
+// oauth_refresh_tokens.client_name and broadcast audience selection. The
+// only client the allowlist exists for is the Cloudflare MCP portal, so the
+// server names it.
+const PinnedClientName = "Cloudflare MCP portal"
+
 // InsertOAuthPending persists a pending OAuth authorization-flow entry to
 // oauth_pending_auth. Used by oauth.Server.handleAuthorize when useDB is true.
 func (s *Store) InsertOAuthPending(ctx context.Context, p OAuthPendingAuth) error {
@@ -272,12 +281,11 @@ func (s *Store) InsertClientReg(ctx context.Context, reg OAuthClientReg) error {
 }
 
 // InsertPinnedClientReg persists a pinned registration (PinnedClientIDPrefix)
-// write-once: an existing row is left exactly as it is, client_name included,
-// and the stored registration is returned. A pinned client_id is derivable
-// from public callbacks, so an upsert would let any unauthenticated caller
-// rewrite the name that flows into oauth_refresh_tokens.client_name and from
-// there into broadcast audience selection. The redirect set never needs
-// updating either: it is what the client_id is derived from.
+// write-once: an existing row is left exactly as it is and the stored
+// registration is returned. The caller passes PinnedClientName as the name,
+// so there is nothing to update; the redirect set never needs updating
+// either, since it is what the client_id is derived from. Write-once keeps
+// that true even for a row written by an older build.
 func (s *Store) InsertPinnedClientReg(ctx context.Context, reg OAuthClientReg) (*OAuthClientReg, error) {
 	if !strings.HasPrefix(reg.ClientID, PinnedClientIDPrefix) {
 		return nil, fmt.Errorf("insert pinned client_reg: client_id %q lacks the pinned prefix", reg.ClientID)

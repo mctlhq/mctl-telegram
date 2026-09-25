@@ -134,7 +134,8 @@ exactly. The rules:
   changes nothing at all.
 - Matching is byte for byte, and entries are validated at startup like pre-registered redirect URIs.
 - The registered client's `client_id` is derived from its redirect set, so the portal re-registering gets
-  the same client back and a replayed registration adds no row. It is kept past the 24h registration TTL
+  the same client back and a replayed registration adds no row. Its `client_name` is always the
+  server-assigned `Cloudflare MCP portal`; whatever name the registration sends is ignored. It is kept past the 24h registration TTL
   (the portal keeps using it for every user login) and at `/oauth/authorize` each redirect must still be on
   the current list, so deleting an entry revokes it without a database change.
 - An authorization request that names no `scope` is granted the principal's full entitlement, which for a
