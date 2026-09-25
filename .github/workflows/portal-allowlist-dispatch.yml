@@ -7,8 +7,9 @@ name: Portal allowlist dispatch
 # when that PR merges and an approved cloudflare-apply runs
 # (mctlhq/mctl-gitops#1370). Nothing here talks to Cloudflare.
 #
-# workflow_dispatch re-sends the current file by hand. Re-sending content
-# that is already vendored opens nothing.
+# workflow_dispatch re-sends main's current file by hand. Started from any
+# other ref the job is skipped, so only merged content is ever published.
+# Re-sending content that is already vendored opens nothing.
 on:
   push:
     branches: [main]
@@ -24,6 +25,7 @@ concurrency:
 
 jobs:
   dispatch:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -64,3 +66,6 @@ jobs:
             -f allowlist_b64="$b64" \
             -f source_repo="$GITHUB_REPOSITORY" \
             -f source_sha="$GITHUB_SHA"
+          # gh workflow run returns once the dispatch is accepted; the vendor
+          # run (and any PR it opens) is over there.
+          echo "Dispatched to mctl-gitops: https://github.com/mctlhq/mctl-gitops/actions/workflows/portal-allowlist-vendor.yml" >> "$GITHUB_STEP_SUMMARY"
