@@ -110,8 +110,21 @@ type Config struct {
 	// The records carry no secret: the authorization server is public-client
 	// + PKCE only and this variable does not widen that contract.
 	OAUTHPreregisteredClients []PreregisteredClient
-	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
-	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
+	// OAUTHDCRRedirectURIs is the exact-match redirect URI allowlist for RFC
+	// 7591 dynamic registration, parsed from OAUTH_DCR_REDIRECT_URIS
+	// (comma-separated). A registration whose redirect_uris are ALL on this
+	// list is accepted without consulting OAUTHAllowedImplicitHosts; one that
+	// mixes a listed URI with anything else is refused. It is how the
+	// Cloudflare MCP portal runs this server in automatic (DCR) mode
+	// (mctlhq/.github#137) without its callback hosts joining the implicit
+	// allowlist, which also governs every unregistered client_id. Matching is
+	// byte for byte: no prefix, wildcard or host semantics. Unset ⇒ empty ⇒
+	// /oauth/register behaves exactly as before. Entries are validated at
+	// startup (https or loopback http, a host, no userinfo, no fragment) and a
+	// bad entry aborts the boot. See internal/oauth Config.DCRRedirectURIs.
+	OAUTHDCRRedirectURIs []string
+	AutoApproveClients   bool // open registration: every widget login auto-gets the client tier
+	DigestHourUTC        int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// BotReceiverEnabled turns on the inbound login-bot update receiver
 	// (issue-619). Default OFF, and deliberately so: getUpdates allows exactly
 	// one consumer per bot token, so enabling it in two environments that
@@ -424,6 +437,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 	}
 	c.OAUTHPreregisteredClients = preregistered
+	c.OAUTHDCRRedirectURIs = parseStringCSV(os.Getenv("OAUTH_DCR_REDIRECT_URIS"))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {

@@ -878,6 +878,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
 		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		DCRRedirectURIs:              cfg.OAUTHDCRRedirectURIs,
 		RegisterRatePerMin:           cfg.OAUTHRegisterRatePerMin,
 		TGAPIID:                      cfg.TGAPIID,
 		TGAPIHash:                    cfg.TGAPIHash,
@@ -954,6 +955,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 		"preregistered_clients", len(cfg.OAUTHPreregisteredClients),
+		"dcr_redirect_uris", len(cfg.OAUTHDCRRedirectURIs),
 		"demo_reviewer", cfg.DemoReviewerEnabled,
 	)
 	if cfg.DemoReviewerEnabled {

@@ -112,6 +112,7 @@ Key variables:
 | `OAUTH_ACCESS_TOKEN_TTL`      | optional, default `1h`                                                      |
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
 | `OAUTH_PREREGISTERED_CLIENTS` | optional; JSON array of `{"client_id","redirect_uris"}` seeded as static clients with byte-exact redirect matching. For a counterpart that cannot use dynamic registration; carries no secret. See [SECURITY.md](SECURITY.md) and [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
+| `OAUTH_DCR_REDIRECT_URIS`     | optional; comma-separated, byte-exact redirect URI allowlist for `POST /oauth/register`. A registration whose `redirect_uris` are all on it is accepted without the implicit-host allowlist; mixing in any other URI is refused. For an MCP gateway that registers itself (the Cloudflare MCP portal in automatic mode). Unset changes nothing. See [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
 
 > `OAUTH_JWT_SECRET` is a deprecated alias of `OAUTH_JWT_SIGNING_KEY`. It is
 > still accepted as a fallback but logs a warning at startup. Use
