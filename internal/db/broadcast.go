@@ -234,6 +234,10 @@ type BroadcastCampaign struct {
 	// EndReason says why a campaign ended short of its audience (set by
 	// the delivery worker); empty otherwise.
 	EndReason string
+	// SourceRef names the frozen product-update digest the campaign was
+	// prepared from; nil for a manual campaign. Set at most once, by
+	// SetBroadcastCampaignSourceRef.
+	SourceRef *CampaignSourceRef
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -263,7 +267,8 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 
 const campaignColumns = `id, state, category, selector_json, selector_hash, content, content_hash,
 	created_by, surface, recipient_limit, preview_counts, expires_at, approved_by, approved_at,
-	cancelled_by, cancelled_at, completed_at, end_reason, created_at, updated_at`
+	cancelled_by, cancelled_at, completed_at, end_reason, source_digest_id, source_digest_version,
+	source_content_hash, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -275,11 +280,17 @@ func scanCampaign(r rowScanner) (*BroadcastCampaign, error) {
 		approvedBy, cancelledBy sql.NullInt64
 		approvedAt, cancelledAt sql.NullTime
 		completedAt             sql.NullTime
+		srcID, srcHash          sql.NullString
+		srcVersion              sql.NullInt64
 	)
 	if err := r.Scan(&c.ID, &c.State, &c.Category, &c.SelectorJSON, &c.SelectorHash, &c.Content,
 		&c.ContentHash, &c.CreatedBy, &c.Surface, &c.RecipientLimit, &c.PreviewCounts, &c.ExpiresAt,
-		&approvedBy, &approvedAt, &cancelledBy, &cancelledAt, &completedAt, &c.EndReason, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&approvedBy, &approvedAt, &cancelledBy, &cancelledAt, &completedAt, &c.EndReason,
+		&srcID, &srcVersion, &srcHash, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
+	}
+	if srcID.Valid {
+		c.SourceRef = &CampaignSourceRef{DigestID: srcID.String, DigestVersion: int(srcVersion.Int64), ContentHash: srcHash.String}
 	}
 	if approvedBy.Valid {
 		v := approvedBy.Int64
