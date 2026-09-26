@@ -15,8 +15,9 @@ import (
 // the database keeps is what was frozen from it and handed to a broadcast:
 //
 //	product_update_digests       one row per frozen (id, version), written once
-//	product_update_publications  the entry ids each digest carried
-//	product_update_entry_owners  the one digest id allowed to carry each entry
+//	product_update_publications  the entry ids each digest version carried
+//	product_update_entry_owners  the one digest id allowed to carry each entry:
+//	                             the published set, and the dedupe authority
 //	broadcast_campaigns.source_* the digest a campaign was prepared from
 //
 // A digest row is never updated. Saving the same (id, version) again is a
@@ -121,11 +122,7 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 	existing, err := getProductUpdateDigest(ctx, tx, d.ID, d.Version)
 	switch {
 	case err == nil:
-		if existing.Category != d.Category || existing.ContentHash != d.ContentHash ||
-			!slices.Equal(existing.SourceRefs, d.SourceRefs) || !slices.Equal(existing.EntryIDs, d.EntryIDs) {
-			return false, fmt.Errorf("%w: %s v%d", ErrDigestConflict, d.ID, d.Version)
-		}
-		return false, nil
+		return false, d.sameAs(existing)
 	case !errors.Is(err, ErrDigestNotFound):
 		return false, fmt.Errorf("save product update digest: %w", err)
 	}
@@ -138,7 +135,7 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 	}
 	var otherDigest, entry string
 	err = tx.QueryRowContext(ctx,
-		`SELECT digest_id, entry_id FROM product_update_publications
+		`SELECT digest_id, entry_id FROM product_update_entry_owners
 		  WHERE digest_id <> $1 AND entry_id IN (`+strings.Join(ph, ",")+`)
 		  ORDER BY entry_id LIMIT 1`, args...).Scan(&otherDigest, &entry)
 	switch {
@@ -148,11 +145,28 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 		return false, fmt.Errorf("save product update digest: published check: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO product_update_digests(id, version, category, content_hash, source_refs, created_by, created_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7)`,
-		d.ID, d.Version, d.Category, d.ContentHash, string(refs), d.CreatedBy, now.UTC()); err != nil {
+		 VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id, version) DO NOTHING`,
+		d.ID, d.Version, d.Category, d.ContentHash, string(refs), d.CreatedBy, now.UTC())
+	if err != nil {
 		return false, fmt.Errorf("save product update digest: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("save product update digest: rows affected: %w", err)
+	}
+	if n == 0 {
+		// A concurrent saver of the same (id, version) committed after the
+		// read above, which only the skipped table lock allows: this INSERT
+		// waited for it and wrote nothing. Answer as the read would have,
+		// a no-op for identical content and ErrDigestConflict otherwise,
+		// rather than surface a unique violation.
+		existing, err := getProductUpdateDigest(ctx, tx, d.ID, d.Version)
+		if err != nil {
+			return false, fmt.Errorf("save product update digest: %w", err)
+		}
+		return false, d.sameAs(existing)
 	}
 	for _, id := range d.EntryIDs {
 		if _, err := tx.ExecContext(ctx,
@@ -182,6 +196,17 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 		return false, fmt.Errorf("save product update digest: commit: %w", err)
 	}
 	return true, nil
+}
+
+// sameAs is nil when stored holds the same content as d (a retry) and
+// ErrDigestConflict otherwise. d.EntryIDs must already be sorted; stored's
+// are, by getProductUpdateDigest.
+func (d ProductUpdateDigest) sameAs(stored *ProductUpdateDigest) error {
+	if stored.Category != d.Category || stored.ContentHash != d.ContentHash ||
+		!slices.Equal(stored.SourceRefs, d.SourceRefs) || !slices.Equal(stored.EntryIDs, d.EntryIDs) {
+		return fmt.Errorf("%w: %s v%d", ErrDigestConflict, d.ID, d.Version)
+	}
+	return nil
 }
 
 type queryer interface {
@@ -244,8 +269,11 @@ func getProductUpdateDigest(ctx context.Context, q queryer, id string, version i
 // a later version of exceptDigestID it also lets through entries approved
 // since (see productupdate.FreezeNextDigest).
 func (s *Store) PublishedProductUpdateEntries(ctx context.Context, exceptDigestID string) (map[string]bool, error) {
+	// Read from the owners, the same table SaveProductUpdateDigest refuses
+	// on, so an entry is never offered as a candidate that saving would
+	// then refuse.
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT DISTINCT entry_id FROM product_update_publications WHERE digest_id <> $1`, exceptDigestID)
+		`SELECT entry_id FROM product_update_entry_owners WHERE digest_id <> $1`, exceptDigestID)
 	if err != nil {
 		return nil, fmt.Errorf("published product update entries: %w", err)
 	}
@@ -297,7 +325,7 @@ func (s *Store) SetBroadcastCampaignSourceRef(ctx context.Context, campaignID st
 	}
 	c, err := s.GetBroadcastCampaign(ctx, campaignID)
 	if err != nil {
-		return err
+		return fmt.Errorf("set broadcast campaign source_ref %s: %w", campaignID, err)
 	}
 	if c.SourceRef != nil {
 		if *c.SourceRef == ref {
@@ -310,7 +338,7 @@ func (s *Store) SetBroadcastCampaignSourceRef(ctx context.Context, campaignID st
 	}
 	d, err := s.GetProductUpdateDigest(ctx, ref.DigestID, ref.DigestVersion)
 	if err != nil {
-		return err
+		return fmt.Errorf("set broadcast campaign source_ref %s: %w", campaignID, err)
 	}
 	if d.ContentHash != ref.ContentHash || d.Category != c.Category {
 		return ErrCampaignSourceMismatch

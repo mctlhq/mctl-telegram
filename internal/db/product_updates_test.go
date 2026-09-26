@@ -160,6 +160,11 @@ func assertProductUpdateDigestStore(t *testing.T, s *Store, tgID int64) {
 	if _, err := s.GetProductUpdateDigest(ctx, owned.ID, 1); !errors.Is(err, ErrDigestNotFound) {
 		t.Fatalf("a digest refused by the owner table was written: %v", err)
 	}
+	// ...and the published set agrees with it, so FreezeNextDigest never
+	// offers an entry that saving would refuse.
+	if published, err := s.PublishedProductUpdateEntries(ctx, owned.ID); err != nil || !published[p+"owned"] {
+		t.Fatalf("an owned entry is missing from the published set: %v, %v", published, err)
+	}
 
 	bad := weekly
 	bad.Category = "mixed"

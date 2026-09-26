@@ -3,6 +3,7 @@ package productupdate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,16 +17,20 @@ type DigestStore interface {
 	SaveProductUpdateDigest(ctx context.Context, d db.ProductUpdateDigest, now time.Time) (bool, error)
 }
 
+// contentHashPattern is the hex SHA-256 FreezeDigest writes after
+// "@content-sha256:"; a ref without one names no content.
+var contentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // EntryIDs returns the ids of the entries the digest carries, in SourceRefs
 // order, read back from the "<FeedDir>/<id>.yaml@content-sha256:<hex>" refs
 // FreezeDigest wrote.
 func (d Digest) EntryIDs() ([]string, error) {
 	ids := make([]string, 0, len(d.SourceRefs))
 	for _, ref := range d.SourceRefs {
-		file, _, ok := strings.Cut(ref, "@content-sha256:")
+		file, hash, ok := strings.Cut(ref, "@content-sha256:")
 		id, found := strings.CutPrefix(file, FeedDir+"/")
 		id, yaml := strings.CutSuffix(id, ".yaml")
-		if !ok || !found || !yaml || !idPattern.MatchString(id) {
+		if !ok || !found || !yaml || !idPattern.MatchString(id) || !contentHashPattern.MatchString(hash) {
 			return nil, fmt.Errorf("digest %s: source ref %q is not %s/<id>.yaml@content-sha256:<hex>", d.ID, ref, FeedDir)
 		}
 		ids = append(ids, id)

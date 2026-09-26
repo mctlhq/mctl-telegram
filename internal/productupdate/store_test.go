@@ -108,6 +108,10 @@ func TestDigestEntryIDsRejectsAForeignRef(t *testing.T) {
 		t.Fatal("a ref outside the feed directory was accepted")
 	}
 	d.SourceRefs = []string{FeedDir + "/send-message.yaml@content-sha256:ab"}
+	if _, err := d.EntryIDs(); err == nil {
+		t.Fatal("a ref whose hash is not a hex SHA-256 was accepted")
+	}
+	d.SourceRefs = []string{FeedDir + "/send-message.yaml@content-sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 	if ids, err := d.EntryIDs(); err != nil || !slices.Equal(ids, []string{"send-message"}) {
 		t.Fatalf("ids %v, %v", ids, err)
 	}
@@ -126,6 +130,8 @@ func TestPersistDigestRejectsForeignShapes(t *testing.T) {
 		"other schema": func(d *Digest) { d.Schema = "mctl-telegram.product-update-digest/v2" },
 		"no schema":    func(d *Digest) { d.Schema = "" },
 		"foreign ref":  func(d *Digest) { d.SourceRefs = []string{"elsewhere/send-message.yaml@content-sha256:ab"} },
+		"empty hash":   func(d *Digest) { d.SourceRefs = []string{FeedDir + "/send-message.yaml@content-sha256:"} },
+		"non-hex hash": func(d *Digest) { d.SourceRefs = []string{FeedDir + "/send-message.yaml@content-sha256:not-hex"} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := d
