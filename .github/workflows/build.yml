@@ -65,7 +65,11 @@ jobs:
       - name: postgres-backed tests must not skip
         run: |
           set -euo pipefail
-          go test ./internal/db/ -count=1 -v -run 'Postgres|TestOpenPool' > /tmp/pg-tests.log 2>&1 || {
+          # internal/oauth too: TestDCRAllowlist_PostgresPinnedWiring (#691) is
+          # the only test of the pinned-client + database seam, and it skips
+          # the same way. Each package must match the filter, or the
+          # "no tests to run" check below fires.
+          go test ./internal/db/ ./internal/oauth/ -count=1 -v -run 'Postgres|TestOpenPool' > /tmp/pg-tests.log 2>&1 || {
             cat /tmp/pg-tests.log
             exit 1
           }
@@ -94,12 +98,20 @@ jobs:
           # Belt and braces for the case the warning text ever changes: assert
           # the count of top-level results. A floor, not an equality, so adding
           # a Postgres-backed test needs no CI edit; removing one is caught.
-          # Raise it when the set below grows:
-          #   TestOpenPool, TestRegisterDevice_PostgresUpsert,
+          # Raise it when the set below grows (it had fallen behind at 5 while
+          # the set grew to 12, so seven removals would have passed unseen):
+          #   internal/db: TestOpenPool, TestRegisterDevice_PostgresUpsert,
           #   TestGrantClientTierIfUnset_PostgresHeldNoneIsNotOverwritten,
           #   TestGrantClientTierIfUnset_PostgresSetsClientWhenUnset,
-          #   TestRevokeWorkerToken_PostgresUpsert
-          expected=5
+          #   TestRevokeWorkerToken_PostgresUpsert,
+          #   TestBroadcastDeliveryStore_Postgres,
+          #   TestBroadcastCampaignStore_Postgres,
+          #   TestClientRegPinned_PostgresExemptFromSweepAndEviction,
+          #   TestDropColumnIfPresent_Postgres, TestEventOutbox_PostgresLifecycle,
+          #   TestProductUpdateDigestStore_Postgres,
+          #   TestFamilyEverHeldScope_Postgres
+          #   internal/oauth: TestDCRAllowlist_PostgresPinnedWiring
+          expected=13
           passed=$(grep -c "^--- PASS" /tmp/pg-tests.log || true)
           if [ "$passed" -lt "$expected" ]; then
             echo "::error::expected at least $expected Postgres-backed tests to pass, saw $passed"
