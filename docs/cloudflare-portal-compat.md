@@ -124,7 +124,19 @@ OAUTH_DCR_REDIRECT_URIS='<portal servers-callback>,<dashboard oauth-callback for
 
 The portal's registration carries both its shared servers-callback and the dashboard's per-server admin
 callback, which embeds the Cloudflare account id and the portal's id for this server; list both, copied
-exactly. The rules:
+exactly.
+
+**List the portal's exact callbacks and nothing else.** `POST /oauth/register` is unauthenticated, and
+the pinned `client_id` is derived from public values, so anyone can register a listed set, not only the
+portal. What keeps that harmless is that a code can only ever be delivered to a URI on the list. Each
+entry is therefore a standing trust decision: a pinned client that outlives the registration TTL and the
+cap. Do not add a callback "for testing", a second gateway's callback on a hunch, or a prefix or pattern.
+Matching is exact, so a prefix entry only works as the literal string, and it still reads as intent to
+widen. The production list is the two URIs in mctl-gitops
+`platform-gitops/services/labs/mctl-telegram/values.yaml`. Anything added there needs the same review as
+widening `OAUTH_ALLOWED_IMPLICIT_HOSTS`.
+
+The rules:
 
 - A `POST /oauth/register` whose `redirect_uris` are **all** on the list is accepted. The hosts never join
   `OAUTH_ALLOWED_IMPLICIT_HOSTS`, so nothing changes for unregistered `client_id`s, which is the boundary
@@ -143,7 +155,10 @@ exactly. The rules:
   what the portal needs in automatic mode, where its scope cannot be pinned.
 
 Pre-registration and this list can coexist during a migration: the pre-registered `client_id` keeps working
-for a server still in manual mode.
+for a server still in manual mode. Once the portal server is in automatic mode, remove its
+`OAUTH_PREREGISTERED_CLIENTS` record. It is then an unused second door with the same callback, and refresh
+tokens minted under it before the switch stop refreshing, so a user who connected through the portal
+before the switch signs in once more.
 
 **Do not put the callback in `OAUTH_ALLOWED_IMPLICIT_HOSTS`.** That list governs redirect acceptance for
 clients that never registered, and widening it to onboard one gateway would loosen the boundary for every
