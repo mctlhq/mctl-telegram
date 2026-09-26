@@ -64,6 +64,9 @@ type Server struct {
 	// used unchanged.
 	useDB   bool
 	metrics metricsIface
+	// dcrRedirectURIs is cfg.DCRRedirectURIs as a set, built once in New and
+	// read-only afterwards, so it needs no lock.
+	dcrRedirectURIs map[string]struct{}
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
@@ -332,6 +335,33 @@ type Config struct {
 	// example) and whose callback host should not be trusted for anything
 	// but this one client.
 	PreregisteredClients []PreregisteredClient
+	// DCRRedirectURIs is an exact-match allowlist of redirect URIs that an
+	// RFC 7591 registration may claim WITHOUT passing AllowedImplicitHosts.
+	// It exists for the Cloudflare MCP portal in automatic (DCR) mode
+	// (mctlhq/.github#137): the portal registers its own callbacks, whose
+	// hosts must not join the implicit-host list because that list also
+	// governs every unregistered client_id (see #585).
+	//
+	// A registration is accepted through this path only when EVERY one of
+	// its redirect_uris is on the list, compared byte for byte (no prefix,
+	// no host or path normalisation). A registration that names at least one
+	// listed URI and anything else is refused with invalid_redirect_uri, even
+	// if the other URI would pass the implicit-host check: a portal-class
+	// registration never picks up a second destination. A registration naming
+	// no listed URI takes the unchanged AllowedImplicitHosts path.
+	//
+	// Such a registration is "pinned": its client_id is derived from its
+	// redirect set (so repeating it is idempotent and the rows it can create
+	// are bounded by subsets of this list), it is exempt from the
+	// ClientRegistrationTTL sweep and the MaxRegisteredClients cap, and at
+	// /oauth/authorize each redirect_uri must still be on the CURRENT list,
+	// so removing a URI here revokes it without touching the database.
+	//
+	// Empty (the default) ⇒ no registration is pinned and /oauth/register
+	// behaves exactly as before. In the server binary this comes from
+	// OAUTH_DCR_REDIRECT_URIS (comma-separated). Entries are validated at
+	// construction with the same rules as PreregisteredClients' redirect_uris.
+	DCRRedirectURIs []string
 	// ClientRegistrationTTL bounds how long a dynamically-registered client
 	// is kept in memory before the sweeper evicts it. Defaults to 24h.
 	// Set to a negative duration to disable eviction (not recommended in
@@ -717,6 +747,15 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			CreatedAt:    time.Time{}, // zero — never swept
 		}
 	}
+	// Fail closed on a malformed DCR allowlist entry, for the same reason as
+	// a malformed preregistered client: the operator is relying on it.
+	s.dcrRedirectURIs = make(map[string]struct{}, len(cfg.DCRRedirectURIs))
+	for i, raw := range cfg.DCRRedirectURIs {
+		if err := validateExactRedirectURI(raw); err != nil {
+			return nil, fmt.Errorf("oauth: DCR redirect URI %d: %w", i, err)
+		}
+		s.dcrRedirectURIs[raw] = struct{}{}
+	}
 	return s, nil
 }
 
@@ -738,24 +777,18 @@ func validatePreregisteredClient(c PreregisteredClient) error {
 	if strings.TrimSpace(c.ClientID) == "" {
 		return errors.New("client_id is required")
 	}
+	// The prefix marks a pinned DCR registration, whose redirect_uri is
+	// re-checked against DCRRedirectURIs at /oauth/authorize; a static client
+	// carrying it would fail every login with a confusing error.
+	if strings.HasPrefix(c.ClientID, db.PinnedClientIDPrefix) {
+		return fmt.Errorf("client %q: client_id must not use the reserved %q prefix", c.ClientID, db.PinnedClientIDPrefix)
+	}
 	if len(c.RedirectURIs) == 0 {
 		return fmt.Errorf("client %q: at least one redirect_uri is required", c.ClientID)
 	}
 	for _, raw := range c.RedirectURIs {
-		u, err := validateRedirectURIShape(raw)
-		if err != nil {
+		if err := validateExactRedirectURI(raw); err != nil {
 			return fmt.Errorf("client %q: %w", c.ClientID, err)
-		}
-		if u.Fragment != "" || strings.Contains(raw, "#") {
-			return fmt.Errorf("client %q: redirect_uri must not contain a fragment", c.ClientID)
-		}
-		// The shape check does not require an authority, and for the implicit
-		// path it need not: an empty host cannot match the allowlist, so the
-		// allowlist is the backstop. Pre-registration deliberately skips that
-		// allowlist, which leaves nothing checking the authority — "https:///cb"
-		// would otherwise be seeded as a valid exact-match target.
-		if u.Host == "" {
-			return fmt.Errorf("client %q: redirect_uri must have a host", c.ClientID)
 		}
 	}
 	return nil
@@ -973,8 +1006,8 @@ func (s *Server) sweep(now time.Time) {
 	// must never be evicted.
 	if s.cfg.ClientRegistrationTTL > 0 {
 		for k, c := range s.clients {
-			if c.CreatedAt.IsZero() {
-				continue // built-in client — never sweep
+			if c.CreatedAt.IsZero() || isPinnedClientID(k) {
+				continue // built-in or pinned DCR client — never sweep
 			}
 			if now.Sub(c.CreatedAt) > s.cfg.ClientRegistrationTTL {
 				delete(s.clients, k)
@@ -2643,24 +2676,66 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	// Apply the SAME scheme + host policy as implicit clients. Without
-	// this, a malicious /oauth/register call could supply an http://
-	// attacker-controlled redirect_uri, and a later /oauth/authorize
-	// call against that client_id would skip the implicit-host check
-	// because validateClient trusts registered redirect_uris on
-	// exact-match. Result: authorization codes redirected to an
-	// attacker URL.
-	for _, raw := range req.RedirectURIs {
-		if err := s.validateImplicitRedirectURI(raw); err != nil {
-			scheme, host := redirectOrigin(raw)
-			s.auditRegistration(regOutcomeRejected, classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
-			writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
-			return
+	// A registration naming any URI on the exact DCR allowlist is a
+	// portal-class registration and must consist of listed URIs only; see
+	// Config.DCRRedirectURIs. With the list empty this is always false and
+	// the implicit-host path below runs exactly as before.
+	pinned := s.namesDCRRedirect(req.RedirectURIs)
+	if pinned {
+		for _, raw := range req.RedirectURIs {
+			if _, ok := s.dcrRedirectURIs[raw]; !ok {
+				scheme, host := redirectOrigin(raw)
+				s.auditRegistration(regOutcomeRejected, regNotOnDCRList, req.ClientName, userAgent, scheme, host)
+				writeTokenError(w, "invalid_redirect_uri", "redirect_uris must all be on the DCR redirect allowlist when any of them is", http.StatusBadRequest)
+				return
+			}
+		}
+	} else {
+		// Apply the SAME scheme + host policy as implicit clients. Without
+		// this, a malicious /oauth/register call could supply an http://
+		// attacker-controlled redirect_uri, and a later /oauth/authorize
+		// call against that client_id would skip the implicit-host check
+		// because validateClient trusts registered redirect_uris on
+		// exact-match. Result: authorization codes redirected to an
+		// attacker URL.
+		for _, raw := range req.RedirectURIs {
+			if err := s.validateImplicitRedirectURI(raw); err != nil {
+				scheme, host := redirectOrigin(raw)
+				s.auditRegistration(regOutcomeRejected, classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
+				writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	clientID := "tgmcp_" + randomToken(16)
+	if pinned {
+		req.RedirectURIs = canonicalRedirectSet(req.RedirectURIs)
+		clientID = pinnedClientID(req.RedirectURIs)
+		// Server-assigned name; the caller's client_name is ignored. See
+		// db.PinnedClientName.
+		req.ClientName = db.PinnedClientName
+	}
 	now := s.clock()
-	if s.useDB {
+	if s.useDB && pinned {
+		// No cap eviction: a pinned registration is not counted toward the
+		// cap and a replay adds no row, so evicting here would let anyone
+		// destroy real dynamic registrations for free by replaying the
+		// portal's public registration. The name is db.PinnedClientName, and
+		// the row is written once and kept as it is.
+		stored, err := s.store.InsertPinnedClientReg(r.Context(), db.OAuthClientReg{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+			CreatedAt:    now,
+		})
+		if err != nil {
+			slog.Error("oauth: persist pinned client_reg failed", "err", err)
+			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
+			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
+			return
+		}
+		req.ClientName = stored.ClientName
+	} else if s.useDB {
 		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
 			slog.Warn("oauth: client_reg eviction failed", "err", err)
@@ -2680,14 +2755,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		s.mu.Lock()
 		// Enforce the global cap. If we are at the limit, evict the oldest
 		// dynamic entry (linear scan — fine at N≈1000). Built-in clients
-		// (zero CreatedAt) are not counted toward the cap and are never evicted.
-		if s.cfg.MaxRegisteredClients > 0 {
+		// (zero CreatedAt) and pinned DCR clients are not counted toward the
+		// cap and are never evicted; a pinned re-registration overwrites its
+		// own entry, so it never needs room either.
+		if s.cfg.MaxRegisteredClients > 0 && !pinned {
 			var dynamicCount int
 			var oldestKey string
 			var oldestAt time.Time
 			for k, c := range s.clients {
-				if c.CreatedAt.IsZero() {
-					continue // built-in client — skip
+				if c.CreatedAt.IsZero() || isPinnedClientID(k) {
+					continue // built-in or pinned client — skip
 				}
 				dynamicCount++
 				if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
@@ -2699,11 +2776,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 				delete(s.clients, oldestKey)
 			}
 		}
-		s.clients[clientID] = &clientReg{
-			ClientID:     clientID,
-			ClientName:   req.ClientName,
-			RedirectURIs: req.RedirectURIs,
-			CreatedAt:    now,
+		if existing, ok := s.clients[clientID]; ok && pinned {
+			// Write-once, as on the DB path: a replay keeps the stored entry.
+			req.ClientName = existing.ClientName
+		} else {
+			s.clients[clientID] = &clientReg{
+				ClientID:     clientID,
+				ClientName:   req.ClientName,
+				RedirectURIs: req.RedirectURIs,
+				CreatedAt:    now,
+			}
 		}
 		s.mu.Unlock()
 	}
@@ -2717,10 +2799,73 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	}
 	s.auditRegistration(regOutcomeAccepted, regOK, req.ClientName, userAgent, "", "",
 		"redirect_uri_count", len(req.RedirectURIs),
+		"dcr_allowlisted", pinned,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// namesDCRRedirect reports whether any of uris is on the exact DCR allowlist.
+// Always false when the allowlist is empty.
+func (s *Server) namesDCRRedirect(uris []string) bool {
+	if len(s.dcrRedirectURIs) == 0 {
+		return false
+	}
+	for _, u := range uris {
+		if _, ok := s.dcrRedirectURIs[u]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalRedirectSet returns uris deduplicated and sorted. The strings are
+// not otherwise touched: matching is byte-exact, so trimming or case-folding
+// here would store a URI the allowlist check never saw.
+func canonicalRedirectSet(uris []string) []string {
+	seen := make(map[string]struct{}, len(uris))
+	out := make([]string, 0, len(uris))
+	for _, u := range uris {
+		if _, dup := seen[u]; dup {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pinnedClientID derives the client_id of a pinned DCR registration from its
+// canonical redirect set. Repeating the same registration therefore returns
+// the same client_id instead of minting a new row, and the number of pinned
+// rows is bounded by the distinct subsets of the allowlist that are actually
+// registered. client_id is public for a public PKCE client, so a
+// deterministic value discloses nothing.
+func pinnedClientID(canonical []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(canonical, "\n")))
+	return db.PinnedClientIDPrefix + base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
+// isPinnedClientID reports whether clientID was minted by pinnedClientID.
+func isPinnedClientID(clientID string) bool {
+	return strings.HasPrefix(clientID, db.PinnedClientIDPrefix)
+}
+
+// checkPinnedRedirect re-applies the CURRENT DCR allowlist to a pinned
+// client's redirect_uri at /oauth/authorize. A pinned registration outlives
+// the TTL sweep, so without this an operator who removes a URI from
+// OAUTH_DCR_REDIRECT_URIS would still see it accepted for as long as the row
+// exists. Non-pinned clients are unaffected.
+func (s *Server) checkPinnedRedirect(clientID, redirectURI string) error {
+	if !isPinnedClientID(clientID) {
+		return nil
+	}
+	if _, ok := s.dcrRedirectURIs[redirectURI]; !ok {
+		return fmt.Errorf("redirect_uri %q is no longer on the DCR redirect allowlist", redirectURI)
+	}
+	return nil
 }
 
 // allowRegister records one /oauth/register attempt for ip and reports
@@ -2794,6 +2939,31 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 		fmt.Errorf("redirect_uri host %q is not in the allowlist", host),
 		errRedirectHost,
 	)
+}
+
+// validateExactRedirectURI validates an operator-configured redirect URI that
+// will be matched byte for byte and so bypasses the implicit-host allowlist:
+// a PreregisteredClients entry or a DCRRedirectURIs entry. It applies the
+// shared shape rules (scheme, userinfo, backslash) and additionally refuses a
+// fragment, which RFC 6749 §3.1.2 forbids and an exact-match comparison would
+// otherwise carry into the redirect.
+func validateExactRedirectURI(raw string) error {
+	u, err := validateRedirectURIShape(raw)
+	if err != nil {
+		return err
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return errors.New("redirect_uri must not contain a fragment")
+	}
+	// The shape check does not require an authority, and for the implicit
+	// path it need not: an empty host cannot match the allowlist, so the
+	// allowlist is the backstop. Exact registration deliberately skips that
+	// allowlist, which leaves nothing checking the authority — "https:///cb"
+	// would otherwise be accepted as a valid exact-match target.
+	if u.Host == "" {
+		return errors.New("redirect_uri must have a host")
+	}
+	return nil
 }
 
 // validateRedirectURIShape applies the host-independent redirect_uri rules
@@ -2884,7 +3054,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 		if err == nil {
 			for _, u := range dbReg.RedirectURIs {
 				if u == redirectURI {
-					return nil
+					return s.checkPinnedRedirect(clientID, redirectURI)
 				}
 			}
 			return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
@@ -2905,7 +3075,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 	if ok {
 		for _, u := range reg.RedirectURIs {
 			if u == redirectURI {
-				return nil
+				return s.checkPinnedRedirect(clientID, redirectURI)
 			}
 		}
 		return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)

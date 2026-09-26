@@ -91,8 +91,9 @@ around here: record Phase B as **BLOCKED** and open a separate, security-reviewe
 this server should ever support it. Do not reach for a credential-bearing token endpoint auth method as a
 fallback.
 
-Dynamic client registration remains compatibility-only. Client ID Metadata Documents are the direction of
-travel once both ends support them end to end.
+Client ID Metadata Documents are the direction of travel once both ends support them end to end. Until
+then, dynamic client registration is kept as a fallback restricted to the gateway's exact callbacks: see
+[Automatic (DCR) mode](#automatic-dcr-mode) below.
 
 ### Registering the gateway's callback
 
@@ -108,6 +109,41 @@ The record is matched byte for byte. A path suffix, an added query, a different 
 rejected, and so is anything but `https` outside a loopback address. Unknown fields are refused at startup
 rather than ignored, so a record carrying something this contract does not support fails the boot instead
 of silently doing less than the operator intended.
+
+### Automatic (DCR) mode
+
+Pre-registration puts the Cloudflare portal in **manual** mode, which freezes the tool catalogue at the first
+login (the portal only re-syncs servers it registered itself) and needs a hand-pasted `client_id`. The
+org rule [.github#137](https://github.com/mctlhq/.github/issues/137) therefore runs every upstream that can
+do dynamic registration in **automatic** mode, with registration restricted to the portal's own callbacks.
+This server does that through `OAUTH_DCR_REDIRECT_URIS`, a comma-separated list of exact redirect URIs:
+
+```bash
+OAUTH_DCR_REDIRECT_URIS='<portal servers-callback>,<dashboard oauth-callback for this server id>'
+```
+
+The portal's registration carries both its shared servers-callback and the dashboard's per-server admin
+callback, which embeds the Cloudflare account id and the portal's id for this server; list both, copied
+exactly. The rules:
+
+- A `POST /oauth/register` whose `redirect_uris` are **all** on the list is accepted. The hosts never join
+  `OAUTH_ALLOWED_IMPLICIT_HOSTS`, so nothing changes for unregistered `client_id`s, which is the boundary
+  #585 set.
+- A registration naming a listed URI together with any other URI is refused with `invalid_redirect_uri`.
+- A registration naming no listed URI takes the implicit-host path exactly as before. Unset, the variable
+  changes nothing at all.
+- Matching is byte for byte, and entries are validated at startup like pre-registered redirect URIs.
+- The registered client's `client_id` is derived from its redirect set, so the portal re-registering gets
+  the same client back and a replayed registration adds no row. Its `client_name` is always the
+  server-assigned `Cloudflare MCP portal`; whatever name the registration sends is ignored. It is kept past the 24h registration TTL
+  (the portal keeps using it for every user login) and at `/oauth/authorize` each redirect must still be on
+  the current list, so deleting an entry revokes it without a database change.
+- An authorization request that names no `scope` is granted the principal's full entitlement, which for a
+  client-tier user is every scope in `scopes_supported`; one that names scopes gets exactly those. That is
+  what the portal needs in automatic mode, where its scope cannot be pinned.
+
+Pre-registration and this list can coexist during a migration: the pre-registered `client_id` keeps working
+for a server still in manual mode.
 
 **Do not put the callback in `OAUTH_ALLOWED_IMPLICIT_HOSTS`.** That list governs redirect acceptance for
 clients that never registered, and widening it to onboard one gateway would loosen the boundary for every

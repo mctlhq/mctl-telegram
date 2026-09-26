@@ -1036,8 +1036,18 @@ single `oauth: client_registration audit` line and counted in
   `malformed_body`, `no_redirect_uris`, `too_many_redirect_uris`,
   `redirect_uri_too_long`, `redirect_scheme_not_allowed`,
   `redirect_host_not_allowed`, `redirect_userinfo`, `redirect_backslash`,
-  `redirect_unparseable`, `persist_failed`. Neither label is ever a
-  client-supplied string, so the series count is bounded.
+  `redirect_unparseable`, `persist_failed`, `redirect_not_on_dcr_list`.
+  Neither label is ever a client-supplied string, so the series count is
+  bounded.
+
+`redirect_not_on_dcr_list` means a registration named at least one URI on
+`OAUTH_DCR_REDIRECT_URIS` together with one that is not; such a set is refused
+whole. An `accepted` line carries `dcr_allowlisted=true` when the registration
+went through that exact list (the Cloudflare MCP portal in automatic mode)
+rather than the implicit-host path. If the portal's registration is refused,
+compare the `redirect_host` on the rejection with the list: the portal's
+dashboard callback embeds the account id and the portal server id, and each
+must be listed byte for byte.
 
 A rejection's log line also carries `client_name`, `user_agent`, and — only
 when the refusal concerns a redirect URI — `redirect_scheme` and

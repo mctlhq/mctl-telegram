@@ -445,7 +445,11 @@ by trial and error at `/oauth/register`:
 - **Dynamic Client Registration** (`POST /oauth/register`, RFC 7591) applies
   the same scheme/host rules as implicit clients to every `redirect_uri` it
   is given, so a registration call cannot smuggle in a redirect target that
-  the implicit path would have refused.
+  the implicit path would have refused. The one exception is
+  `OAUTH_DCR_REDIRECT_URIS`: a registration whose `redirect_uris` are all on
+  that exact list is accepted without the host check, and one mixing a listed
+  URI with any other is refused. See
+  [cloudflare-portal-compat.md](cloudflare-portal-compat.md).
 
 For the day-to-day OAuth refresh/re-authorization behavior after a scope
 change, see

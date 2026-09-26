@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,29 @@ type OAuthClientReg struct {
 	RedirectURIs []string
 	CreatedAt    time.Time
 }
+
+// PinnedClientIDPrefix marks a client registration whose redirect_uris are all
+// on the operator's exact DCR allowlist (OAUTH_DCR_REDIRECT_URIS). Such a
+// client_id is derived from its redirect set rather than drawn at random, so
+// the rows it can produce are bounded by the allowlist itself, and it is
+// exempt from both the ClientRegistrationTTL sweep and the
+// MaxRegisteredClients eviction: the Cloudflare MCP portal registers once and
+// keeps authorizing its users with that client_id for as long as it runs, and
+// a 24h sweep would silently break every portal login after the first day.
+// Random registrations always start "tgmcp_", and internal/oauth refuses a
+// preregistered client_id with this prefix, so no other row can carry it.
+// The queries test it with starts_with, an exact prefix comparison, never a
+// LIKE pattern in which '_' would be a wildcard.
+const PinnedClientIDPrefix = "tgdcr_"
+
+// PinnedClientName is the client_name every pinned registration is stored
+// and answered with, whatever the caller sent. A pinned client_id is
+// derivable from public callbacks, so a caller-supplied name could be set by
+// anyone who registers the exact set first; it would then flow into
+// oauth_refresh_tokens.client_name and broadcast audience selection. The
+// only client the allowlist exists for is the Cloudflare MCP portal, so the
+// server names it.
+const PinnedClientName = "Cloudflare MCP portal"
 
 // InsertOAuthPending persists a pending OAuth authorization-flow entry to
 // oauth_pending_auth. Used by oauth.Server.handleAuthorize when useDB is true.
@@ -129,6 +153,7 @@ func (s *Store) EvictOldestOAuthCodeIfOver(ctx context.Context, max int, ttl tim
 // EvictOldestClientRegIfOver deletes the oldest client registration when the
 // total count is at or above max. No-op when max is zero. Used by
 // handleClientRegistration to enforce MaxRegisteredClients on the DB path.
+// Pinned registrations (PinnedClientIDPrefix) are neither counted nor evicted.
 func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 	if max <= 0 {
 		return nil
@@ -136,10 +161,12 @@ func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 	_, err := s.DB.ExecContext(ctx,
 		`DELETE FROM oauth_client_registrations
 		  WHERE client_id = (
-		    SELECT client_id FROM oauth_client_registrations ORDER BY created_at ASC LIMIT 1
+		    SELECT client_id FROM oauth_client_registrations
+		     WHERE NOT starts_with(client_id, $2)
+		     ORDER BY created_at ASC LIMIT 1
 		  )
-		  AND (SELECT COUNT(*) FROM oauth_client_registrations) >= $1`,
-		int64(max),
+		  AND (SELECT COUNT(*) FROM oauth_client_registrations WHERE NOT starts_with(client_id, $2)) >= $1`,
+		int64(max), PinnedClientIDPrefix,
 	)
 	if err != nil {
 		return fmt.Errorf("evict oldest oauth_client_registrations: %w", err)
@@ -253,6 +280,31 @@ func (s *Store) InsertClientReg(ctx context.Context, reg OAuthClientReg) error {
 	return nil
 }
 
+// InsertPinnedClientReg persists a pinned registration (PinnedClientIDPrefix)
+// write-once: an existing row is left exactly as it is and the stored
+// registration is returned. The caller passes PinnedClientName as the name,
+// so there is nothing to update; the redirect set never needs updating
+// either, since it is what the client_id is derived from. Write-once keeps
+// that true even for a row written by an older build.
+func (s *Store) InsertPinnedClientReg(ctx context.Context, reg OAuthClientReg) (*OAuthClientReg, error) {
+	if !strings.HasPrefix(reg.ClientID, PinnedClientIDPrefix) {
+		return nil, fmt.Errorf("insert pinned client_reg: client_id %q lacks the pinned prefix", reg.ClientID)
+	}
+	urisJSON, err := json.Marshal(reg.RedirectURIs)
+	if err != nil {
+		return nil, fmt.Errorf("insert pinned client_reg: marshal redirect_uris: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO oauth_client_registrations (client_id, client_name, redirect_uris, created_at)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (client_id) DO NOTHING`,
+		reg.ClientID, reg.ClientName, string(urisJSON), reg.CreatedAt.UTC(),
+	); err != nil {
+		return nil, fmt.Errorf("insert pinned client_reg: %w", err)
+	}
+	return s.GetClientReg(ctx, reg.ClientID)
+}
+
 // GetClientReg returns the dynamic client registration for the given clientID.
 // Returns ErrOAuthNotFound when the row is absent.
 func (s *Store) GetClientReg(ctx context.Context, clientID string) (*OAuthClientReg, error) {
@@ -314,10 +366,12 @@ func (s *Store) DeleteExpiredOAuthRows(ctx context.Context, ttl time.Duration) (
 }
 
 // DeleteExpiredClientRegs removes client registration rows older than ttl.
+// Pinned registrations (PinnedClientIDPrefix) are never swept.
 func (s *Store) DeleteExpiredClientRegs(ctx context.Context, ttl time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-ttl)
 	res, err := s.DB.ExecContext(ctx,
-		`DELETE FROM oauth_client_registrations WHERE created_at < $1`, cutoff,
+		`DELETE FROM oauth_client_registrations WHERE created_at < $1 AND NOT starts_with(client_id, $2)`,
+		cutoff, PinnedClientIDPrefix,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("sweep oauth_client_registrations: %w", err)

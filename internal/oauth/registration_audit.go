@@ -37,6 +37,9 @@ const (
 	regBackslash           regReason = "redirect_backslash"
 	regUnparseable         regReason = "redirect_unparseable"
 	regPersistFailed       regReason = "persist_failed"
+	// regNotOnDCRList: a registration named at least one URI on the exact
+	// DCR allowlist (OAUTH_DCR_REDIRECT_URIS) together with one that is not.
+	regNotOnDCRList regReason = "redirect_not_on_dcr_list"
 )
 
 // Typed sentinels for the redirect_uri validators in server.go
