@@ -49,11 +49,18 @@ func TestNarrowGrant(t *testing.T) {
 // callback → token for the identity the fake authenticator currently returns.
 func scopedAuthCodeTokens(t *testing.T, srv *Server, mux *mockRouter, requested string) map[string]any {
 	t.Helper()
+	return scopedAuthCodeTokensFor(t, mux, "claude.ai", "https://claude.ai/cb", requested)
+}
+
+// scopedAuthCodeTokensFor is scopedAuthCodeTokens for an arbitrary client_id
+// and redirect_uri, e.g. a client registered through POST /oauth/register.
+func scopedAuthCodeTokensFor(t *testing.T, mux *mockRouter, clientID, redirectURI, requested string) map[string]any {
+	t.Helper()
 	verifier, challenge := pkceVerifierAndChallenge()
 	q := url.Values{
 		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
+		"client_id":             {clientID},
+		"redirect_uri":          {redirectURI},
 		"state":                 {"s"},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
@@ -78,8 +85,8 @@ func scopedAuthCodeTokens(t *testing.T, srv *Server, mux *mockRouter, requested 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("client_id", "claude.ai")
-	form.Set("redirect_uri", "https://claude.ai/cb")
+	form.Set("client_id", clientID)
+	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
 	tokRec := doTokenRequest(t, mux, form)
 	if tokRec.Code != http.StatusOK {

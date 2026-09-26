@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,33 @@ func TestLoadOAuthAllowedImplicitHosts(t *testing.T) {
 				if cfg.OAUTHAllowedImplicitHosts[i] != want {
 					t.Errorf("host[%d] = %q, want %q", i, cfg.OAUTHAllowedImplicitHosts[i], want)
 				}
+			}
+		})
+	}
+}
+
+func TestLoadOAuthDCRRedirectURIs(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{name: "unset leaves DCR registration unchanged", env: "", want: nil},
+		{
+			name: "comma-separated URIs are split and trimmed, never otherwise altered",
+			env:  " https://portal.example.test/servers-callback , https://dash.example.test/a/oauth-callback/tg ",
+			want: []string{"https://portal.example.test/servers-callback", "https://dash.example.test/a/oauth-callback/tg"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OAUTH_DCR_REDIRECT_URIS", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.OAUTHDCRRedirectURIs, tc.want) {
+				t.Fatalf("OAUTHDCRRedirectURIs = %#v, want %#v", cfg.OAUTHDCRRedirectURIs, tc.want)
 			}
 		})
 	}
