@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
@@ -32,6 +33,50 @@ import (
 // Defined here so the web package avoids a direct import cycle with internal/oauth.
 type OAuthExchanger interface {
 	ExchangeConnect(ctx context.Context, code, verifier, clientID, redirectURI string) (string, error)
+}
+
+// ConnectIdentifier reports whether the request carries a credential this
+// server should treat as an already-connected browser session. Satisfied by
+// auth.Provider (in particular localjwt.Provider, which also accepts the
+// mctl_connect_token cookie — see internal/auth/localjwt/issuer.go). Defined
+// locally, mirroring OAuthExchanger, so this package need not import the
+// concrete provider package.
+type ConnectIdentifier interface {
+	Authenticate(r *http.Request) (*auth.Identity, error)
+}
+
+// Reason vocabulary for logConnectReject / the prefetch-refusal log line.
+// Duplicated (not shared) in internal/oauth/server.go for the same reason
+// OAuthExchanger exists: internal/web must not import internal/oauth.
+const (
+	reasonMissingState    = "missing_state"
+	reasonUnknownState    = "unknown_state"
+	reasonExpiredState    = "expired_state"
+	reasonExchangeFailed  = "exchange_failed"
+	reasonOIDCError       = "oidc_error"
+	reasonPrefetchRefused = "prefetch_refused"
+)
+
+// isPrefetch reports whether r looks like a browser or crawler prefetch
+// rather than a real navigation, per the Sec-Purpose / legacy Purpose
+// request headers. Sec-Purpose is a structured list so it is matched by
+// substring; Purpose is the legacy bare-token header so it is matched
+// exactly (case-insensitively, trimmed).
+func isPrefetch(r *http.Request) bool {
+	if strings.Contains(strings.ToLower(r.Header.Get("Sec-Purpose")), "prefetch") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Purpose")), "prefetch")
+}
+
+// logConnectReject emits one WARN line for a rejected /telegram/connect/done
+// request. Attributes are deliberately limited to route, reason and the
+// prefetch boolean — never code, state, or a cookie value.
+func logConnectReject(r *http.Request, reason string) {
+	slog.Warn("connect: request rejected",
+		"route", "/telegram/connect/done",
+		"reason", reason,
+		"prefetch", isPrefetch(r))
 }
 
 // ConnectConfig holds the construction parameters for ConnectServer.
@@ -57,6 +102,13 @@ type ConnectConfig struct {
 	// When > 0 and the cap is reached, the oldest session is evicted to make
 	// room. 0 means no cap.
 	MaxSessions int
+	// Identifier, when non-nil, is consulted by HandleConnectDone on a
+	// reused/expired state to check whether the browser already carries a
+	// valid session credential (the mctl_connect_token cookie). When it
+	// does, the request is redirected to /telegram/connect/manage instead of
+	// showing the "link already used" page. nil (the zero value) degrades to
+	// always showing that page — never a panic, never a redirect.
+	Identifier ConnectIdentifier
 	// clock is injectable for tests; nil means time.Now.
 	clock func() time.Time
 }
@@ -77,6 +129,7 @@ type ConnectServer struct {
 	clientID    string
 	mcpPath     string
 	maxSessions int
+	identifier  ConnectIdentifier
 	clock       func() time.Time
 
 	mu       sync.Mutex
@@ -107,9 +160,23 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 		clientID:    cfg.ClientID,
 		mcpPath:     cfg.MCPPath,
 		maxSessions: cfg.MaxSessions,
+		identifier:  cfg.Identifier,
 		clock:       clk,
 		sessions:    map[string]*connectSession{},
 	}
+}
+
+// alreadyConnected reports whether r carries a credential the configured
+// Identifier accepts as an already-connected browser session. Returns true
+// only for a non-nil Identifier that yields a non-nil identity and a nil
+// error — a nil Identifier (shared-hmac mode, or a test that wires none)
+// always degrades to false, never a panic.
+func (s *ConnectServer) alreadyConnected(r *http.Request) bool {
+	if s.identifier == nil {
+		return false
+	}
+	id, err := s.identifier.Authenticate(r)
+	return err == nil && id != nil
 }
 
 // HandleConnect renders the landing page with a "Connect with Telegram" button.
@@ -158,10 +225,24 @@ func (s *ConnectServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 // confirm the MTProto session is live) and renders either the success page or
 // an error page.
 func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request) {
+	// Prefetch refusal comes before anything else touches s.sessions: a
+	// browser or crawler prefetch of this single-use URL must not consume the
+	// pending state the user's own click still needs.
+	if isPrefetch(r) {
+		slog.Info("connect: request rejected",
+			"route", "/telegram/connect/done",
+			"reason", reasonPrefetchRefused,
+			"prefetch", true)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	q := r.URL.Query()
 
 	// Surface Telegram OIDC errors (e.g. user cancelled at oauth.telegram.org).
 	if oidcErr := q.Get("error"); oidcErr != "" {
+		logConnectReject(r, reasonOIDCError)
 		renderConnectError(w, "Telegram sign-in was not completed. Please try again.", s.issuer+"/telegram/connect")
 		return
 	}
@@ -169,6 +250,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	code := q.Get("code")
 	state := q.Get("state")
 	if code == "" || state == "" {
+		logConnectReject(r, reasonMissingState)
 		renderConnectError(w, "Missing authorization code or state. Please start again.", s.issuer+"/telegram/connect")
 		return
 	}
@@ -181,13 +263,26 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	s.mu.Unlock()
 
 	if !ok || s.clock().Sub(sess.createdAt) > s.codeTTL {
-		renderConnectError(w, "This connect session has expired or is unknown. Please start again.", s.issuer+"/telegram/connect")
+		reason := reasonUnknownState
+		if ok {
+			reason = reasonExpiredState
+		}
+		logConnectReject(r, reason)
+		if s.alreadyConnected(r) {
+			http.Redirect(w, r, "/telegram/connect/manage", http.StatusSeeOther)
+			return
+		}
+		renderConnectReused(w, s.issuer+"/telegram/connect")
 		return
 	}
 
 	tok, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
 	if err != nil {
-		slog.Error("connect: ExchangeConnect failed", "err", err)
+		slog.Error("connect: request rejected",
+			"route", "/telegram/connect/done",
+			"reason", reasonExchangeFailed,
+			"prefetch", isPrefetch(r),
+			"err", err)
 		renderConnectError(w, "Could not confirm your Telegram session. Please try again.", s.issuer+"/telegram/connect")
 		return
 	}
@@ -328,6 +423,15 @@ var connectErrorTemplate = template.Must(template.New("connectError").Parse(conn
     <p class="meta"><a href="{{.RetryURL}}">Try again</a></p>
 ` + connectFoot))
 
+// connectReusedTemplate is shown instead of connectErrorTemplate when a
+// connect link is unknown or already consumed and the browser carries no
+// valid session credential — a correct answer to a well-formed request about
+// an expired link, hence status 200 rather than 400 (see renderConnectReused).
+var connectReusedTemplate = template.Must(template.New("connectReused").Parse(connectHead + `    <h1>Link already used</h1>
+    <p>{{.Message}}</p>
+    <p class="meta"><a class="btn" href="{{.RetryURL}}">Start again</a></p>
+` + connectFoot))
+
 func renderConnectPage(w http.ResponseWriter, data connectLandingData) {
 	renderConnect(w, http.StatusOK, connectLandingTemplate, data)
 }
@@ -339,6 +443,16 @@ func renderConnectSuccess(w http.ResponseWriter, data connectSuccessData) {
 func renderConnectError(w http.ResponseWriter, msg, retryURL string) {
 	renderConnect(w, http.StatusBadRequest, connectErrorTemplate, connectErrorData{
 		Message:  msg,
+		RetryURL: retryURL,
+	})
+}
+
+// renderConnectReused renders the "this link was already used" page at 200 —
+// a correct answer about an expired/reused link, not a client error. Names
+// no state or code value in the body.
+func renderConnectReused(w http.ResponseWriter, retryURL string) {
+	renderConnect(w, http.StatusOK, connectReusedTemplate, connectErrorData{
+		Message:  "This link was already used. Connect links work once. Start again if you still need to connect.",
 		RetryURL: retryURL,
 	})
 }

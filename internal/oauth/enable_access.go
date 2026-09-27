@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	tdauth "github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -1015,11 +1016,29 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.done:
 		if lf.err != nil {
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			reason := shortReason(lf.err)
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "")
 			// Terminal, same as in handleEnableCode: a mode conflict is not a
 			// wrong password and restarting cannot clear it.
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
 				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				return
+			}
+			if reason == "bad_password" {
+				// Ideally this would re-render the password step directly so
+				// the user only retypes the password. That is unsafe here:
+				// gotd's Flow.password() has already returned by the time
+				// lf.done closes, so the login goroutine has exited and
+				// es.flow cannot accept a second password — a resubmit would
+				// just replay this same stale lf.err forever, never checking
+				// the new password (see design.md's caveat). Falling back to
+				// the phone step keeps the audit label and the exact wording
+				// contract; only the "stay on this step" affordance is given
+				// up, as design.md's caveat allows.
+				renderEnablePhoneStep(w, es, enablePhonePage{
+					Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
+					Error: friendlyErr(lf.err),
+				})
 				return
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
@@ -1134,7 +1153,12 @@ func friendlyErr(err error) string {
 			return "The login code has expired. Start again to receive a fresh code."
 		case strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_"):
 			return "Telegram rate limit reached. Wait a moment before trying again."
+		case rpcErr.Message == "AUTH_RESTART":
+			return "Telegram ended the sign-in session. Submit your phone number again to get a fresh code."
 		}
+	}
+	if isBadPasswordErr(err) {
+		return "That two-step verification password was not accepted. Check it and try again."
 	}
 	m := err.Error()
 	if len(m) > 200 {
@@ -1172,10 +1196,33 @@ func shortReason(err error) string {
 			return "code_expired"
 		case strings.HasPrefix(rpcErr.Message, "FLOOD_WAIT_"):
 			return "flood_wait"
+		case rpcErr.Message == "AUTH_RESTART":
+			return "auth_restart"
 		}
 	}
 	if strings.Contains(err.Error(), "different Telegram account") {
 		return "identity_mismatch"
 	}
+	if isBadPasswordErr(err) {
+		return "bad_password"
+	}
 	return "unknown"
+}
+
+// isBadPasswordErr reports whether err is gotd/td's rejected-2FA-password
+// error. The observed error string is "sign in with password: invalid
+// password" — telegram/auth.Flow.password wraps gotd/td's exported
+// auth.ErrPasswordInvalid sentinel (github.com/gotd/td/telegram/auth), which
+// errors.Is reaches through the wrapping (go-faster/errors.Wrap implements
+// the standard Unwrap() error interface, same as fmt.Errorf("%w")). The
+// case-insensitive substring fallback on "invalid password" /
+// "PASSWORD_HASH_INVALID" covers a future gotd/td release that changes the
+// sentinel's identity but keeps recognisable wording or the underlying
+// tgerr message — see requirements.md's Open questions.
+func isBadPasswordErr(err error) bool {
+	if errors.Is(err, tdauth.ErrPasswordInvalid) {
+		return true
+	}
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "invalid password") || strings.Contains(m, "password_hash_invalid")
 }

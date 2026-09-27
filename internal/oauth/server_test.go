@@ -1,12 +1,14 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -371,9 +373,10 @@ func TestTelegramCallback_ErrorRedirect(t *testing.T) {
 		t.Fatalf("error redirect status = %d, want a friendly 400 page", rec.Code)
 	}
 
-	// The pending entry must already be consumed — a replay is rejected.
-	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
-		t.Errorf("state not consumed by the error redirect: replay got %d", rec2.Code)
+	// The pending entry must already be consumed — a replay renders the
+	// friendly "already used" page at 200 (issue-695), not the old bare 400.
+	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusOK {
+		t.Errorf("state not consumed by the error redirect: replay got %d, want 200", rec2.Code)
 	}
 }
 
@@ -396,9 +399,10 @@ func TestTelegramCallback_ExchangeError_ConsumesState(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "token endpoint refused the code") {
 		t.Errorf("raw exchange error leaked to the browser: %s", rec.Body.String())
 	}
-	// State must be consumed — a replay is rejected.
-	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusBadRequest {
-		t.Errorf("state not consumed on exchange error: replay got %d", rec2.Code)
+	// State must be consumed — a replay renders the friendly "already used"
+	// page at 200 (issue-695), not the old bare 400.
+	if rec2 := callbackWithState(t, mux, state); rec2.Code != http.StatusOK {
+		t.Errorf("state not consumed on exchange error: replay got %d, want 200", rec2.Code)
 	}
 }
 
@@ -848,6 +852,10 @@ func TestToken_EchoesGrantedScope(t *testing.T) {
 	}
 }
 
+// TestTelegramCallback_RejectsStaleState confirms a stale (expired) state
+// renders the friendly "already used or expired" page at 200 rather than a
+// bare 400 (issue-695) — the request is well-formed, the link is just no
+// longer valid.
 func TestTelegramCallback_RejectsStaleState(t *testing.T) {
 	// Fast-forward past CodeTTL between authorize and callback.
 	srv := newTestServer(t, func(c *Config) { c.CodeTTL = 1 * time.Second })
@@ -859,8 +867,175 @@ func TestTelegramCallback_RejectsStaleState(t *testing.T) {
 	srv.clock = func() time.Time { return time.Now().Add(10 * time.Second) }
 
 	rec := callbackWithState(t, mux, state)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (friendly page) for stale state, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already used") {
+		t.Errorf("stale-state page should mention the link was already used: %s", rec.Body.String())
+	}
+}
+
+// callbackWithStateHeaders is callbackWithState plus caller-supplied request
+// headers (used for the prefetch tests below).
+func callbackWithStateHeaders(t *testing.T, mux *mockRouter, state string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{"state": {state}, "code": {"tg-auth-code"}}
+	req := httptest.NewRequest("GET", "/oauth/telegram/callback?"+q.Encode(), nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+	return rec
+}
+
+// captureOAuthLog swaps slog's default handler for a text handler writing to
+// a buffer, restoring the previous default on test cleanup. Matches the
+// pattern in internal/oauth/enable_access_abandonment_test.go's
+// captureEnableLog.
+func captureOAuthLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestHandleTelegramCallback_ReusedState_FriendlyPage confirms an unknown
+// state on the callback renders HTML (not a plain-text body) at 200, with one
+// WARN log line carrying reason=unknown_state — for both the in-memory and
+// the DB-backed pending store.
+func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
+	t.Run("in-memory", func(t *testing.T) {
+		buf := captureOAuthLog(t)
+		srv := newTestServer(t)
+		mux := newMockRouter()
+		srv.Register(mux)
+
+		rec := callbackWithState(t, mux, "never-issued-state")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "<html") && !strings.Contains(rec.Body.String(), "<!doctype") {
+			t.Errorf("expected an HTML page, got: %s", rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "already used") {
+			t.Errorf("expected the friendly reused-link copy, got: %s", rec.Body.String())
+		}
+		if !strings.Contains(buf.String(), "reason="+reasonUnknownState) {
+			t.Errorf("expected a log line with reason=%s, got:\n%s", reasonUnknownState, buf.String())
+		}
+	})
+
+	// The DB-backed path (ConsumeOAuthPending) needs the real Postgres OAuth
+	// tables, which only exist against TEST_DATABASE_URL — see
+	// newPostgresOAuthStore in dcr_allowlist_pg_test.go. Skipped when unset,
+	// same as that file's tests.
+	t.Run("db-backed", func(t *testing.T) {
+		buf := captureOAuthLog(t)
+		store := newPostgresOAuthStore(t)
+		srv, err := New(context.Background(), Config{
+			Issuer:              testIssuer,
+			JWTSecret:           testJWTSecret,
+			TelegramOIDC:        newFakeAuthenticator(),
+			AdminTelegramIDs:    map[int64]bool{500100101: true},
+			AccessTokenTTL:      time.Hour,
+			CodeTTL:             time.Minute,
+			AllowImplicitClient: true,
+			UseDBForOAuth:       true,
+		}, store)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if !srv.useDB {
+			t.Fatal("server is not on the DB path")
+		}
+		mux := newMockRouter()
+		srv.Register(mux)
+
+		rec := callbackWithState(t, mux, "never-issued-db-state")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "already used") {
+			t.Errorf("expected the friendly reused-link copy, got: %s", rec.Body.String())
+		}
+		if !strings.Contains(buf.String(), "reason="+reasonUnknownState) {
+			t.Errorf("expected a log line with reason=%s, got:\n%s", reasonUnknownState, buf.String())
+		}
+	})
+}
+
+// TestHandleTelegramCallback_MissingState_StillFourHundred confirms a
+// missing-state request keeps the genuine 400 (it is malformed, not a reused
+// link) and still logs one WARN with reason=missing_state.
+func TestHandleTelegramCallback_MissingState_StillFourHundred(t *testing.T) {
+	buf := captureOAuthLog(t)
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/telegram/callback?code=abc", nil)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/oauth/telegram/callback", rec, req)
+
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for stale state, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "reason="+reasonMissingState) {
+		t.Errorf("expected a log line with reason=%s, got:\n%s", reasonMissingState, buf.String())
+	}
+}
+
+// TestHandleTelegramCallback_PrefetchDoesNotConsumeState mirrors the
+// connect.go prefetch test: a prefetch request must not consume the pending
+// state, and must not reach the Local Bridge activation dispatch either.
+func TestHandleTelegramCallback_PrefetchDoesNotConsumeState(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	// A returning admin already has an MTProto session, so the real request
+	// at the end of this test issues a code directly instead of diverting
+	// into the enable_access phone-step screen (see TestFullFlow_PKCEHappyPath).
+	seedSession(t, srv, 500100101)
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	// Seed an activation keyed by its own state, to confirm the prefetch
+	// refusal short-circuits before the activation dispatch ever looks at it.
+	act := &localBridgeActivation{
+		deviceCode: "prefetch-test-device-code",
+		createdAt:  time.Now(),
+		oidcState:  "prefetch-test-activation-state",
+	}
+	srv.mu.Lock()
+	srv.activationsByState[act.oidcState] = act
+	srv.mu.Unlock()
+
+	rec1 := callbackWithStateHeaders(t, mux, state, map[string]string{"Sec-Purpose": "prefetch;prerender"})
+	if rec1.Code != http.StatusNoContent {
+		t.Fatalf("Sec-Purpose prefetch: status = %d, want 204", rec1.Code)
+	}
+
+	rec2 := callbackWithStateHeaders(t, mux, state, map[string]string{"Purpose": "prefetch"})
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("Purpose prefetch: status = %d, want 204", rec2.Code)
+	}
+
+	// The activation-keyed state must be untouched: the dispatch never ran.
+	srv.mu.Lock()
+	_, stillIndexed := srv.activationsByState[act.oidcState]
+	srv.mu.Unlock()
+	if !stillIndexed {
+		t.Error("prefetch reached the activation dispatch and consumed its state")
+	}
+
+	// The real request should still succeed.
+	rec3 := callbackWithState(t, mux, state)
+	loc := authCodeRedirect(t, rec3)
+	if loc.Query().Get("state") != "client-state-abc" {
+		t.Errorf("real request after prefetch did not complete the flow: %s", loc)
 	}
 }
 
