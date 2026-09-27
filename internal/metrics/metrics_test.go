@@ -20,6 +20,7 @@ var expectedMetricNames = []string{
 	"mctl_rate_limit_events_total",
 	"mctl_tool_invocations_total",
 	"mctl_tool_invocation_duration_seconds",
+	"mctl_tool_call_errors_total",
 	"mctl_telegram_client_pool_size",
 	"mctl_telegram_pool_capacity",
 	"mctl_telegram_client_errors_total",
@@ -55,6 +56,7 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.RateLimitEventsTotal.WithLabelValues("anon").Add(0)
 	reg.ToolInvocationsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
 	reg.ToolInvocationDuration.WithLabelValues("list_dialogs").Observe(0)
+	reg.ToolCallErrorsTotal.WithLabelValues("search_messages", "scope_denied").Add(0)
 	reg.TelegramClientPoolSize.Set(0)
 	reg.TelegramPoolCapacity.Set(0)
 	reg.TelegramClientErrorsTotal.Add(0)
@@ -232,6 +234,49 @@ func TestNew_RegistersIssue580Metrics(t *testing.T) {
 			if !gotLabels[want] {
 				t.Errorf("%s: missing label %q, got %v", c.name, want, gotLabels)
 			}
+		}
+	}
+}
+
+// TestNew_RegistersToolCallErrorsTotal pins the type and label-name set of
+// mctl_tool_call_errors_total (mctl-telegram#696): a COUNTER labeled by
+// exactly {tool, reason}. Renaming a label or the family itself must fail
+// this test.
+func TestNew_RegistersToolCallErrorsTotal(t *testing.T) {
+	reg := New()
+	reg.ToolCallErrorsTotal.WithLabelValues("search_messages", "scope_denied").Inc()
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	var mf *dto.MetricFamily
+	for _, m := range mfs {
+		if m.GetName() == "mctl_tool_call_errors_total" {
+			mf = m
+			break
+		}
+	}
+	if mf == nil {
+		t.Fatal("metric family mctl_tool_call_errors_total not found in gathered output")
+	}
+	if mf.GetType() != dto.MetricType_COUNTER {
+		t.Errorf("type = %v, want COUNTER", mf.GetType())
+	}
+	if len(mf.GetMetric()) == 0 {
+		t.Fatal("no series gathered")
+	}
+	wantLabels := map[string]bool{"tool": true, "reason": true}
+	gotLabels := map[string]bool{}
+	for _, lp := range mf.GetMetric()[0].GetLabel() {
+		gotLabels[lp.GetName()] = true
+	}
+	if len(gotLabels) != len(wantLabels) {
+		t.Errorf("label set = %v, want %v", gotLabels, wantLabels)
+	}
+	for want := range wantLabels {
+		if !gotLabels[want] {
+			t.Errorf("missing label %q, got %v", want, gotLabels)
 		}
 	}
 }
