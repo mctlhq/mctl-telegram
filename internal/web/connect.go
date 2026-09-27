@@ -50,6 +50,7 @@ type ConnectIdentifier interface {
 // OAuthExchanger exists: internal/web must not import internal/oauth.
 const (
 	reasonMissingState    = "missing_state"
+	reasonMissingCode     = "missing_code"
 	reasonUnknownState    = "unknown_state"
 	reasonExpiredState    = "expired_state"
 	reasonExchangeFailed  = "exchange_failed"
@@ -176,7 +177,18 @@ func (s *ConnectServer) alreadyConnected(r *http.Request) bool {
 		return false
 	}
 	id, err := s.identifier.Authenticate(r)
-	return err == nil && id != nil
+	if err != nil {
+		// Authenticate returns (nil, nil) when no credential is present, so
+		// an error means a credential was sent and rejected: expired,
+		// revoked, or an infrastructure failure (DB, revocation cache). Stay
+		// fail-closed, but make the "redirect did not happen" case
+		// attributable. The error never carries the token value.
+		slog.Warn("connect: session credential rejected on reused link",
+			"route", "/telegram/connect/done",
+			"err", err)
+		return false
+	}
+	return id != nil
 }
 
 // HandleConnect renders the landing page with a "Connect with Telegram" button.
@@ -250,7 +262,11 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	code := q.Get("code")
 	state := q.Get("state")
 	if code == "" || state == "" {
-		logConnectReject(r, reasonMissingState)
+		reason := reasonMissingState
+		if state != "" {
+			reason = reasonMissingCode
+		}
+		logConnectReject(r, reason)
 		renderConnectError(w, "Missing authorization code or state. Please start again.", s.issuer+"/telegram/connect")
 		return
 	}

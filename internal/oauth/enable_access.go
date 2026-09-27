@@ -828,10 +828,18 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 				result = "timeout"
 			}
 			observePhoneStep(result)
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "")
+			reason := shortReason(lf.err)
+			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "")
+			msg := "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again."
+			if reason == "auth_restart" {
+				// AUTH_RESTART is not a rejection and friendlyErr already
+				// carries the full instruction; the generic wrapper would
+				// frame it twice.
+				msg = friendlyErr(lf.err)
+			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
-				Error: "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again.",
+				Error: msg,
 			})
 			return
 		}
@@ -1035,14 +1043,13 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 				// the phone step keeps the audit label and the exact wording
 				// contract; only the "stay on this step" affordance is given
 				// up, as design.md's caveat allows.
+				// The copy must match the page it lands on: this is the phone
+				// step, so it tells the user to restart rather than echoing
+				// friendlyErr's "check it and try again", which only makes
+				// sense on a live password step.
 				renderEnablePhoneStep(w, es, enablePhonePage{
 					Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-					// This is rendered on the phone-entry form, not a password
-					// field, so swap friendlyErr's "Check it and try again."
-					// for an instruction that matches what's actually on
-					// screen: re-enter the phone number for a fresh code.
-					Error: strings.TrimSuffix(friendlyErr(lf.err), "Check it and try again.") +
-						"Enter your phone number again to get a fresh login code.",
+					Error: badPasswordRestartMsg,
 				})
 				return
 			}
@@ -1214,6 +1221,11 @@ func shortReason(err error) string {
 	return "unknown"
 }
 
+// badPasswordRestartMsg is shown on the phone step after a rejected two-step
+// verification password. The login flow has already ended by then, so the
+// only way forward is a fresh phone + code round.
+const badPasswordRestartMsg = "That two-step verification password was not accepted. Submit your phone number again to get a fresh code, then enter the correct password."
+
 // isBadPasswordErr reports whether err is gotd/td's rejected-2FA-password
 // error. The observed error string is "sign in with password: invalid
 // password" — telegram/auth.Flow.password wraps gotd/td's exported
@@ -1225,6 +1237,9 @@ func shortReason(err error) string {
 // sentinel's identity but keeps recognisable wording or the underlying
 // tgerr message — see requirements.md's Open questions.
 func isBadPasswordErr(err error) bool {
+	if err == nil {
+		return false
+	}
 	if errors.Is(err, tdauth.ErrPasswordInvalid) {
 		return true
 	}

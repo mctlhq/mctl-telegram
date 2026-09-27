@@ -322,6 +322,36 @@ func TestHandleConnectDone_ReusedState_NoIdentity_ShowsReusedPage(t *testing.T) 
 	}
 }
 
+// TestHandleConnectDone_ReusedState_IdentifierError_FailsClosed pins the
+// fail-closed contract of alreadyConnected: when the Identifier rejects the
+// presented credential (expired or revoked token, DB or revocation-cache
+// failure), a reused link shows the "already used" page rather than
+// redirecting, and the rejection is logged so the missing redirect is
+// attributable.
+func TestHandleConnectDone_ReusedState_IdentifierError_FailsClosed(t *testing.T) {
+	buf := captureConnectLog(t)
+	srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+		cfg.Identifier = &stubIdentifier{err: errors.New("revocation cache unavailable")}
+	})
+
+	rec := httptest.NewRecorder()
+	srv.HandleConnectDone(rec, httptest.NewRequest("GET", "/telegram/connect/done?code=abc&state=never-issued", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (reused page, no redirect)", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("unexpected redirect to %q on an identifier error", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "already used") {
+		t.Errorf("expected the reused-link page, got: %s", rec.Body.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "session credential rejected") || !strings.Contains(out, "revocation cache unavailable") {
+		t.Errorf("expected a WARN line naming the identifier error, got:\n%s", out)
+	}
+}
+
 // TestHandleConnectDone_LogsOneWarnPerBranch confirms each 4xx-equivalent
 // branch of HandleConnectDone emits exactly one log line carrying the
 // expected reason, and that no line names the state or code value.
@@ -335,6 +365,12 @@ func TestHandleConnectDone_LogsOneWarnPerBranch(t *testing.T) {
 			name:   "missing_state",
 			setup:  func(_ *ConnectServer) string { return "/telegram/connect/done?code=abc" },
 			reason: reasonMissingState,
+		},
+		{
+			// A state without a code must not be reported as a missing state.
+			name:   "missing_code",
+			setup:  func(_ *ConnectServer) string { return "/telegram/connect/done?state=some-state" },
+			reason: reasonMissingCode,
 		},
 		{
 			name:   "unknown_state",

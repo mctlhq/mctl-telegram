@@ -132,8 +132,14 @@ func TestEnablePassword_WrongPassword_AuditAndCopy(t *testing.T) {
 		t.Fatalf("password: %d %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "That two-step verification password was not accepted. Enter your phone number again to get a fresh login code.") {
-		t.Errorf("expected the new bad_password wording, got: %s", body)
+	// The user lands on the phone step, so the copy must send them back
+	// through phone + code rather than promise a password retry that the
+	// already-exited login flow cannot accept.
+	if !strings.Contains(body, badPasswordRestartMsg) {
+		t.Errorf("expected the restart wording for bad_password, got: %s", body)
+	}
+	if strings.Contains(body, "Check it and try again") {
+		t.Errorf("phone-step page promises a password retry it cannot offer: %s", body)
 	}
 	if strings.Contains(body, "invalid password") {
 		t.Errorf("rendered page leaked the raw gotd error string: %s", body)
@@ -170,6 +176,9 @@ func TestEnableStart_AuthRestart_AuditLabel(t *testing.T) {
 		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
+	if strings.Contains(body, "Telegram rejected the request") {
+		t.Errorf("AUTH_RESTART is framed as a rejection (double wrapper): %s", body)
+	}
 	if !strings.Contains(body, "Telegram ended the sign-in session") {
 		t.Errorf("expected the auth_restart wording on the phone step, got: %s", body)
 	}
@@ -192,5 +201,13 @@ func TestEnableStart_AuthRestart_AuditLabel(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected an audit entry connect:failed:auth_restart, got: %+v", entries)
+	}
+}
+
+// TestIsBadPasswordErr_Nil pins that the predicate is nil-safe like its
+// siblings, so a future caller that skips the nil guard cannot panic.
+func TestIsBadPasswordErr_Nil(t *testing.T) {
+	if isBadPasswordErr(nil) {
+		t.Error("isBadPasswordErr(nil) = true, want false")
 	}
 }

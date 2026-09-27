@@ -1515,6 +1515,8 @@ func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
 // import.
 const (
 	reasonMissingState    = "missing_state"
+	reasonMissingCode     = "missing_code"
+	reasonOIDCError       = "oidc_error"
 	reasonUnknownState    = "unknown_state"
 	reasonExpiredState    = "expired_state"
 	reasonPrefetchRefused = "prefetch_refused"
@@ -1659,11 +1661,13 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// request. The pending entry is already consumed above; show a friendly
 	// page rather than a 500 or a blank screen.
 	if oidcErr := q.Get("error"); oidcErr != "" {
+		logCallbackReject(r, reasonOIDCError)
 		renderEnableError(w, "Telegram sign-in was not completed ("+sanitizeOIDCError(oidcErr)+"). Close this page and try connecting again from your MCP client.")
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
+		logCallbackReject(r, reasonMissingCode)
 		renderEnableError(w, "Telegram sign-in did not return an authorization code. Close this page and try again.")
 		return
 	}

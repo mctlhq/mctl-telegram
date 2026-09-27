@@ -23,6 +23,9 @@ func TestRootPostHint(t *testing.T) {
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}
+	if allow := rec.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("Allow = %q, want GET (RFC 9110 15.5.6 requires it on a 405)", allow)
+	}
 
 	var body struct {
 		JSONRPC string `json:"jsonrpc"`

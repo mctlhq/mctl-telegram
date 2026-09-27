@@ -988,6 +988,50 @@ func TestHandleTelegramCallback_MissingState_StillFourHundred(t *testing.T) {
 	}
 }
 
+// TestHandleTelegramCallback_OIDCErrorAndMissingCode_Logged confirms the two
+// remaining 4xx branches after the state lookup log one line each with a
+// distinct reason, so an operator can tell a user cancellation (oidc_error)
+// from a truncated redirect (missing_code).
+func TestHandleTelegramCallback_OIDCErrorAndMissingCode_Logged(t *testing.T) {
+	cases := []struct {
+		name   string
+		extra  url.Values
+		reason string
+	}{
+		{"oidc_error", url.Values{"error": {"access_denied"}}, reasonOIDCError},
+		{"missing_code", url.Values{}, reasonMissingCode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mux := newMockRouter()
+			srv.Register(mux)
+			_, challenge := pkceVerifierAndChallenge()
+			state := stateFromAuthorize(t, mux, challenge)
+
+			buf := captureOAuthLog(t)
+			q := url.Values{"state": {state}}
+			for k, v := range tc.extra {
+				q[k] = v
+			}
+			req := httptest.NewRequest("GET", "/oauth/telegram/callback?"+q.Encode(), nil)
+			rec := httptest.NewRecorder()
+			mux.serve("GET", "/oauth/telegram/callback", rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			out := strings.TrimRight(buf.String(), "\n")
+			if strings.Count(out, "reason=") != 1 || !strings.Contains(out, "reason="+tc.reason) {
+				t.Errorf("want exactly one line with reason=%s, got:\n%s", tc.reason, out)
+			}
+			if strings.Contains(out, state) {
+				t.Errorf("log leaked the state value:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestHandleTelegramCallback_PrefetchDoesNotConsumeState mirrors the
 // connect.go prefetch test: a prefetch request must not consume the pending
 // state, and must not reach the Local Bridge activation dispatch either.
