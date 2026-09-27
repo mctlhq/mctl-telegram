@@ -27,13 +27,30 @@ type searchInvoker interface {
 	MessagesSearch(ctx context.Context, req *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error)
 }
 
-// unixSeconds converts t to Unix seconds for the MTProto MinDate/MaxDate
-// fields, returning 0 (Telegram's "unbounded" value) for the zero time.
-func unixSeconds(t time.Time) int {
+// minDateUnix converts a min_date bound to the Unix seconds value for the
+// MTProto MinDate field. The user-facing min_date bound is inclusive, but
+// MessagesSearch(Global) treats MinDate as exclusive (it returns only
+// messages with date > MinDate), so the bound is shifted back by one second
+// to include messages sent exactly at min_date. Returns 0 (Telegram's
+// "unbounded" value) for the zero time.
+func minDateUnix(t time.Time) int {
 	if t.IsZero() {
 		return 0
 	}
-	return int(t.Unix())
+	return int(t.Unix()) - 1
+}
+
+// maxDateUnix converts a max_date bound to the Unix seconds value for the
+// MTProto MaxDate field. The user-facing max_date bound is inclusive, but
+// MessagesSearch(Global) treats MaxDate as exclusive (it returns only
+// messages with date < MaxDate), so the bound is shifted forward by one
+// second to include messages sent exactly at max_date. Returns 0
+// (Telegram's "unbounded" value) for the zero time.
+func maxDateUnix(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	return int(t.Unix()) + 1
 }
 
 // SearchMessages searches for messages matching query.
@@ -68,8 +85,8 @@ func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([
 		Filter:     &tg.InputMessagesFilterEmpty{},
 		OffsetPeer: &tg.InputPeerEmpty{},
 		Limit:      p.Limit,
-		MinDate:    unixSeconds(p.MinDate),
-		MaxDate:    unixSeconds(p.MaxDate),
+		MinDate:    minDateUnix(p.MinDate),
+		MaxDate:    maxDateUnix(p.MaxDate),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
@@ -85,8 +102,8 @@ func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerCla
 		Q:       p.Query,
 		Filter:  &tg.InputMessagesFilterEmpty{},
 		Limit:   p.Limit,
-		MinDate: unixSeconds(p.MinDate),
-		MaxDate: unixSeconds(p.MaxDate),
+		MinDate: minDateUnix(p.MinDate),
+		MaxDate: maxDateUnix(p.MaxDate),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("MessagesSearch: %w", err)

@@ -57,11 +57,11 @@ func TestSearchGlobalWith_SetsDateBounds(t *testing.T) {
 	if req == nil {
 		t.Fatal("MessagesSearchGlobal was not called")
 	}
-	if req.MinDate != int(minDate.Unix()) {
-		t.Errorf("MinDate = %d, want %d", req.MinDate, minDate.Unix())
+	if want := int(minDate.Unix()) - 1; req.MinDate != want {
+		t.Errorf("MinDate = %d, want %d", req.MinDate, want)
 	}
-	if req.MaxDate != int(maxDate.Unix()) {
-		t.Errorf("MaxDate = %d, want %d", req.MaxDate, maxDate.Unix())
+	if want := int(maxDate.Unix()) + 1; req.MaxDate != want {
+		t.Errorf("MaxDate = %d, want %d", req.MaxDate, want)
 	}
 	if req.Q != "roof rack" {
 		t.Errorf("Q = %q, want %q", req.Q, "roof rack")
@@ -97,11 +97,11 @@ func TestSearchPeerWith_SetsDateBounds(t *testing.T) {
 	if req == nil {
 		t.Fatal("MessagesSearch was not called")
 	}
-	if req.MinDate != int(minDate.Unix()) {
-		t.Errorf("MinDate = %d, want %d", req.MinDate, minDate.Unix())
+	if want := int(minDate.Unix()) - 1; req.MinDate != want {
+		t.Errorf("MinDate = %d, want %d", req.MinDate, want)
 	}
-	if req.MaxDate != int(maxDate.Unix()) {
-		t.Errorf("MaxDate = %d, want %d", req.MaxDate, maxDate.Unix())
+	if want := int(maxDate.Unix()) + 1; req.MaxDate != want {
+		t.Errorf("MaxDate = %d, want %d", req.MaxDate, want)
 	}
 	if req.Peer != peer {
 		t.Errorf("Peer = %v, want %v", req.Peer, peer)
@@ -182,12 +182,22 @@ func TestSearchPeerWith_UnboundedEncodingUnchanged(t *testing.T) {
 	}
 }
 
-func TestUnixSeconds(t *testing.T) {
-	if got := unixSeconds(time.Time{}); got != 0 {
-		t.Errorf("unixSeconds(zero) = %d, want 0", got)
+func TestMinDateUnix(t *testing.T) {
+	if got := minDateUnix(time.Time{}); got != 0 {
+		t.Errorf("minDateUnix(zero) = %d, want 0", got)
 	}
 	tm := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
-	if got := unixSeconds(tm); got != int(tm.Unix()) {
-		t.Errorf("unixSeconds(%v) = %d, want %d", tm, got, tm.Unix())
+	if got, want := minDateUnix(tm), int(tm.Unix())-1; got != want {
+		t.Errorf("minDateUnix(%v) = %d, want %d", tm, got, want)
+	}
+}
+
+func TestMaxDateUnix(t *testing.T) {
+	if got := maxDateUnix(time.Time{}); got != 0 {
+		t.Errorf("maxDateUnix(zero) = %d, want 0", got)
+	}
+	tm := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	if got, want := maxDateUnix(tm), int(tm.Unix())+1; got != want {
+		t.Errorf("maxDateUnix(%v) = %d, want %d", tm, got, want)
 	}
 }
