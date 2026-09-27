@@ -23,6 +23,7 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - `internal/db/` — schema, migrations, audit chain
 - `internal/bridge/` — Local Bridge websocket relay (M4)
 - `internal/crypto/` — AES-256-GCM session encryption, HKDF key derivation
+- `internal/workctx/` — outbound mctl-api work-context client (issue-443, flag-gated); see [docs/work-context.md](docs/work-context.md)
 - `Dockerfile` — multi-stage build
 - `Dockerfile.agent-worker` — dedicated runtime image for `cmd/agent-worker`
   (Node.js + pinned Claude Code CLI), separate from the main Go-only image

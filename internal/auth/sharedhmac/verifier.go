@@ -126,13 +126,23 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
 	payload, err := verifyJWT(tok, p.Secret, p.ExpectedIssuer)
 	if err != nil {
+		if payload != nil {
+			// A post-signature failure (issuer/expiry/audience-shape): the
+			// claims were vouched for by our own HMAC key and are safe to
+			// attribute to the "auth failed" log line. This payload has no
+			// client_id or jti, so attrFromPayload leaves them empty.
+			return nil, &auth.AttributedError{Attr: attrFromPayload(payload), Err: err}
+		}
 		return nil, err
 	}
 	if err := checkAudience(payload.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
-		return nil, err
+		return nil, &auth.AttributedError{Attr: attrFromPayload(payload), Err: err}
 	}
 	if len(p.AllowedGroups) > 0 && !intersect(payload.Groups, p.AllowedGroups) {
-		return nil, fmt.Errorf("none of identity groups %v are allowed", payload.Groups)
+		return nil, &auth.AttributedError{
+			Attr: attrFromPayload(payload),
+			Err:  fmt.Errorf("none of identity groups %v are allowed", payload.Groups),
+		}
 	}
 	scopes := deriveScopes(payload.Groups, p.Groups2Scopes)
 	uid, err := p.Store.EnsureUser(r.Context(), payload.Subject, "", "mctl-api")
@@ -231,18 +241,32 @@ func verifyJWT(token string, secret []byte, expectedIssuer string) (*jwtPayload,
 	if err := json.Unmarshal(payloadJSON, &p); err != nil {
 		return nil, errors.New("malformed JWT payload")
 	}
+	// Everything below this line validates a payload whose signature already
+	// checked out, so it is safe to return alongside the error.
 	if p.Issuer != expectedIssuer {
-		return nil, fmt.Errorf("unexpected JWT issuer: %q", p.Issuer)
+		return &p, fmt.Errorf("unexpected JWT issuer: %q", p.Issuer)
 	}
 	if time.Now().Unix() > p.ExpiresAt {
-		return nil, errors.New("JWT expired")
+		return &p, errors.New("JWT expired")
 	}
 	aud, err := audienceList(p.AudienceRaw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid JWT audience claim: %w", err)
+		return &p, fmt.Errorf("invalid JWT audience claim: %w", err)
 	}
 	p.Audience = aud
 	return &p, nil
+}
+
+// attrFromPayload copies the loggable identifying claims out of p into an
+// auth.TokenAttribution. mctl-api's JWT shape has no client_id or jti, so
+// those fields are simply left at their zero value — auth.middleware builds
+// its log attributes conditionally, so an absent claim produces no key
+// rather than an empty one.
+func attrFromPayload(p *jwtPayload) auth.TokenAttribution {
+	return auth.TokenAttribution{
+		Subject:   p.Subject,
+		ExpiresAt: p.ExpiresAt,
+	}
 }
 
 // audienceList normalises the polymorphic `aud` claim into a string slice.

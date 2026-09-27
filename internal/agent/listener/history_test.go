@@ -73,7 +73,7 @@ func (s *capturedSelfSender) SendToSelfWithRandomID(_ context.Context, _, _ int6
 	return 1, nil
 }
 
-func (r *lockedRecordingRouter) HandleSavedText(_ context.Context, _ int64, text string) error {
+func (r *lockedRecordingRouter) HandleSavedText(_ context.Context, _ control.SavedMeta, text string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

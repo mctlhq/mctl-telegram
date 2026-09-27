@@ -257,6 +257,7 @@ func TestNew_RejectsBadPreregisteredClients(t *testing.T) {
 		{"non-loopback http", PreregisteredClient{ClientID: "x", RedirectURIs: []string{"http://portal.example.test/cb"}}, "scheme"},
 		{"fragment", PreregisteredClient{ClientID: "x", RedirectURIs: []string{portalCallback + "#frag"}}, "fragment"},
 		{"collides with built-in", PreregisteredClient{ClientID: ConnectClientID, RedirectURIs: []string{portalCallback}}, "already registered"},
+		{"reserved pinned DCR prefix", PreregisteredClient{ClientID: "tgdcr_portal", RedirectURIs: []string{portalCallback}}, "reserved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

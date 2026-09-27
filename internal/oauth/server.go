@@ -64,6 +64,9 @@ type Server struct {
 	// used unchanged.
 	useDB   bool
 	metrics metricsIface
+	// dcrRedirectURIs is cfg.DCRRedirectURIs as a set, built once in New and
+	// read-only afterwards, so it needs no lock.
+	dcrRedirectURIs map[string]struct{}
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
@@ -177,6 +180,10 @@ type metricsIface interface {
 	// ObserveLoginPhoneStep records the duration and outcome of the enable_access
 	// phone -> SendCode wait. result is "ok", "timeout", or "error".
 	ObserveLoginPhoneStep(result string, seconds float64)
+	// CountOAuthClientRegistration increments mctl_oauth_client_registrations_total
+	// for one /oauth/register outcome. Both outcome and reason are closed
+	// compile-time constants — see regReason in registration_audit.go.
+	CountOAuthClientRegistration(outcome, reason string)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the
@@ -268,6 +275,14 @@ type Config struct {
 	// Checked after AdminTelegramIDs and before the client tier, so
 	// full-admin membership always takes precedence over a dual listing.
 	LookupAdminTelegramIDs map[int64]bool
+	// BroadcastOperatorTelegramIDs (issue-439, BROADCAST_OPERATORS) adds
+	// admin:broadcast -- prepare/list/get/cancel of client broadcasts -- to
+	// an identity that is ALSO a full platform admin. Membership here alone
+	// grants nothing: a broadcast reaches every opted-in client, so it stays
+	// inside the admin tier. Like admin:users it is granted by membership,
+	// never negotiable via DCR and never in a worker/device mint allowlist.
+	// Approval is not a scope at all; see internal/web/broadcasts.go.
+	BroadcastOperatorTelegramIDs map[int64]bool
 	// AutoApproveClients opens registration: when true, any Telegram-authenticated
 	// user whose users.access_tier is unset resolves to the client tier without
 	// an operator action. An explicit DB tier of "none" still bans them.
@@ -320,6 +335,33 @@ type Config struct {
 	// example) and whose callback host should not be trusted for anything
 	// but this one client.
 	PreregisteredClients []PreregisteredClient
+	// DCRRedirectURIs is an exact-match allowlist of redirect URIs that an
+	// RFC 7591 registration may claim WITHOUT passing AllowedImplicitHosts.
+	// It exists for the Cloudflare MCP portal in automatic (DCR) mode
+	// (mctlhq/.github#137): the portal registers its own callbacks, whose
+	// hosts must not join the implicit-host list because that list also
+	// governs every unregistered client_id (see #585).
+	//
+	// A registration is accepted through this path only when EVERY one of
+	// its redirect_uris is on the list, compared byte for byte (no prefix,
+	// no host or path normalisation). A registration that names at least one
+	// listed URI and anything else is refused with invalid_redirect_uri, even
+	// if the other URI would pass the implicit-host check: a portal-class
+	// registration never picks up a second destination. A registration naming
+	// no listed URI takes the unchanged AllowedImplicitHosts path.
+	//
+	// Such a registration is "pinned": its client_id is derived from its
+	// redirect set (so repeating it is idempotent and the rows it can create
+	// are bounded by subsets of this list), it is exempt from the
+	// ClientRegistrationTTL sweep and the MaxRegisteredClients cap, and at
+	// /oauth/authorize each redirect_uri must still be on the CURRENT list,
+	// so removing a URI here revokes it without touching the database.
+	//
+	// Empty (the default) ⇒ no registration is pinned and /oauth/register
+	// behaves exactly as before. In the server binary this comes from
+	// OAUTH_DCR_REDIRECT_URIS (comma-separated). Entries are validated at
+	// construction with the same rules as PreregisteredClients' redirect_uris.
+	DCRRedirectURIs []string
 	// ClientRegistrationTTL bounds how long a dynamically-registered client
 	// is kept in memory before the sweeper evicts it. Defaults to 24h.
 	// Set to a negative duration to disable eviction (not recommended in
@@ -705,6 +747,15 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			CreatedAt:    time.Time{}, // zero — never swept
 		}
 	}
+	// Fail closed on a malformed DCR allowlist entry, for the same reason as
+	// a malformed preregistered client: the operator is relying on it.
+	s.dcrRedirectURIs = make(map[string]struct{}, len(cfg.DCRRedirectURIs))
+	for i, raw := range cfg.DCRRedirectURIs {
+		if err := validateExactRedirectURI(raw); err != nil {
+			return nil, fmt.Errorf("oauth: DCR redirect URI %d: %w", i, err)
+		}
+		s.dcrRedirectURIs[raw] = struct{}{}
+	}
 	return s, nil
 }
 
@@ -726,24 +777,18 @@ func validatePreregisteredClient(c PreregisteredClient) error {
 	if strings.TrimSpace(c.ClientID) == "" {
 		return errors.New("client_id is required")
 	}
+	// The prefix marks a pinned DCR registration, whose redirect_uri is
+	// re-checked against DCRRedirectURIs at /oauth/authorize; a static client
+	// carrying it would fail every login with a confusing error.
+	if strings.HasPrefix(c.ClientID, db.PinnedClientIDPrefix) {
+		return fmt.Errorf("client %q: client_id must not use the reserved %q prefix", c.ClientID, db.PinnedClientIDPrefix)
+	}
 	if len(c.RedirectURIs) == 0 {
 		return fmt.Errorf("client %q: at least one redirect_uri is required", c.ClientID)
 	}
 	for _, raw := range c.RedirectURIs {
-		u, err := validateRedirectURIShape(raw)
-		if err != nil {
+		if err := validateExactRedirectURI(raw); err != nil {
 			return fmt.Errorf("client %q: %w", c.ClientID, err)
-		}
-		if u.Fragment != "" || strings.Contains(raw, "#") {
-			return fmt.Errorf("client %q: redirect_uri must not contain a fragment", c.ClientID)
-		}
-		// The shape check does not require an authority, and for the implicit
-		// path it need not: an empty host cannot match the allowlist, so the
-		// allowlist is the backstop. Pre-registration deliberately skips that
-		// allowlist, which leaves nothing checking the authority — "https:///cb"
-		// would otherwise be seeded as a valid exact-match target.
-		if u.Host == "" {
-			return fmt.Errorf("client %q: redirect_uri must have a host", c.ClientID)
 		}
 	}
 	return nil
@@ -798,10 +843,11 @@ const ConnectClientID = "mctl_self_connect"
 // and scope resolution in handleTokenAuthCode but is callable in-process from
 // the /telegram/connect/done handler, avoiding a loopback HTTP round-trip.
 //
-// The returned access token is discarded by the caller; ExchangeConnect is
-// called only to confirm that the code is valid and that the MTProto session
-// was provisioned successfully. An error signals that the code was invalid,
-// expired, or the PKCE verifier did not match.
+// The returned access token becomes the browser's mctl_connect_token cookie
+// (internal/web/connect.go) and carries client_id=ConnectClientID. This is
+// the only place such a token is minted: the token endpoint refuses this
+// client's codes and refresh tokens. An error signals that the code was
+// invalid, expired, or the PKCE verifier did not match.
 func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, redirectURI string) (string, error) {
 	if code == "" || verifier == "" || clientID == "" || redirectURI == "" {
 		return "", errors.New("invalid_request: code, verifier, client_id, redirect_uri are required")
@@ -866,7 +912,7 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// Same bound as handleTokenAuthCode, so the two exchange paths mint the
 	// same token for the same code even though this one is discarded.
 	scopes = narrowGrant(scopes, entry.Scope)
-	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		return "", fmt.Errorf("server_error: could not mint token: %w", err)
 	}
@@ -960,8 +1006,8 @@ func (s *Server) sweep(now time.Time) {
 	// must never be evicted.
 	if s.cfg.ClientRegistrationTTL > 0 {
 		for k, c := range s.clients {
-			if c.CreatedAt.IsZero() {
-				continue // built-in client — never sweep
+			if c.CreatedAt.IsZero() || isPinnedClientID(k) {
+				continue // built-in or pinned DCR client — never sweep
 			}
 			if now.Sub(c.CreatedAt) > s.cfg.ClientRegistrationTTL {
 				delete(s.clients, k)
@@ -1058,7 +1104,7 @@ func cancelEnableFlow(e *enableSession) bool {
 // fails the token issuance rather than silently under-granting.
 func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes []string, err error) {
 	if s.cfg.AdminTelegramIDs[tgID] {
-		return []string{"platform-admins", "admins"}, []string{
+		granted := []string{
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
@@ -1072,7 +1118,11 @@ func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes 
 			// stays admin:users-only; see design.md's open question on
 			// admin-initiated device revocation).
 			"account:manage",
-		}, nil
+		}
+		if s.cfg.BroadcastOperatorTelegramIDs[tgID] {
+			granted = append(granted, "admin:broadcast")
+		}
+		return []string{"platform-admins", "admins"}, granted, nil
 	}
 	// The lookup tier's scope is admin:users:read, NOT admin:users. That
 	// distinction is the whole tier: admin:users is a single flat scope
@@ -1939,6 +1989,17 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "code, client_id, code_verifier are required", http.StatusBadRequest)
 		return
 	}
+	// The self-connect client's codes are redeemed only in-process, by
+	// ExchangeConnect with the verifier the /telegram/connect handler holds
+	// server-side. Refusing them here keeps a token whose client_id is
+	// ConnectClientID mintable ONLY by the browser Telegram login -- the
+	// property the broadcast approval page relies on (issue-439). Without
+	// this, whoever started an authorize request for that client with their
+	// own PKCE pair and got hold of the resulting code could mint one here.
+	if clientID == ConnectClientID {
+		writeTokenError(w, "unauthorized_client", "this client's codes are not redeemable at the token endpoint", http.StatusBadRequest)
+		return
+	}
 	if err := validPKCEString(codeVerifier); err != nil {
 		writeTokenError(w, "invalid_request", "code_verifier "+err.Error(), http.StatusBadRequest)
 		return
@@ -2015,7 +2076,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
 	)
-	tok, err := s.mintAccessToken(entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2143,7 +2204,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
-	tok, mErr := s.mintAccessToken(child.TelegramID, child.TelegramUsername, groups, scopes)
+	tok, mErr := s.mintAccessToken(child.ClientID, child.TelegramID, child.TelegramUsername, groups, scopes)
 	if mErr != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return graceServerError
@@ -2166,6 +2227,14 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	clientID := r.FormValue("client_id")
 	if refreshTok == "" || clientID == "" {
 		writeTokenError(w, "invalid_request", "refresh_token and client_id are required", http.StatusBadRequest)
+		return
+	}
+	// ExchangeConnect never issues a refresh token, and the token endpoint
+	// refuses the self-connect client's codes (see handleTokenAuthCode), so
+	// no legitimate refresh for it exists; refuse one outright rather than
+	// mint a self-connect access token from it.
+	if clientID == ConnectClientID {
+		writeTokenError(w, "unauthorized_client", "this client cannot refresh", http.StatusBadRequest)
 		return
 	}
 	rt, err := s.store.LookupRefreshToken(r.Context(), refreshTok)
@@ -2239,7 +2308,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
-	tok, err := s.mintAccessToken(rt.TelegramID, rt.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(rt.ClientID, rt.TelegramID, rt.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2465,7 +2534,7 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // per RFC 7519). Binding aud to client_id like an earlier default would have
 // failed /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE — a
 // misconfiguration trap codex flagged.
-func (s *Server) mintAccessToken(tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
 	var audience []string
 	if s.cfg.JWTAudience != "" {
 		audience = []string{s.cfg.JWTAudience}
@@ -2477,6 +2546,7 @@ func (s *Server) mintAccessToken(tgID int64, tgUsername string, groups, scopes [
 		Groups:           groups,
 		Scopes:           scopes,
 		Audience:         audience,
+		ClientID:         clientID,
 	}, s.cfg.AccessTokenTTL)
 }
 
@@ -2526,12 +2596,13 @@ func writeTokenError(w http.ResponseWriter, code, desc string, status int) {
 // ----- /oauth/register (RFC 7591) -----
 
 func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request) {
+	userAgent := r.Header.Get("User-Agent")
 	// /oauth/register is unauthenticated. Rate-limit first so a flood never
 	// reaches the JSON decoder or the registration map. The audit line
 	// records outcome only — no request body, no IP (the limiter already
 	// keys on it), no client secret (DCR here is public-client).
 	if !s.allowRegister(s.clientIP(r)) {
-		slog.Info("oauth: client_registration audit", "outcome", "rate_limited")
+		s.auditRegistration(regOutcomeRateLimited, regRateLimited, "", "", "", "")
 		w.Header().Set("Retry-After", "60")
 		writeTokenError(w, "temporarily_unavailable", "too many registration attempts", http.StatusTooManyRequests)
 		return
@@ -2549,6 +2620,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// into the typed struct for actual processing.
 	var raw map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, "", userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2564,7 +2636,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		redirectURICount = len(uris)
 	}
 	slog.Info("oauth: client_registration request",
-		"user_agent", r.Header.Get("User-Agent"),
+		"user_agent", userAgent,
 		"keys", strings.Join(keys, ","),
 		"client_name", rawClientName,
 		"redirect_uri_count", redirectURICount,
@@ -2573,6 +2645,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	// Re-encode + decode to extract the typed shape we actually use.
 	buf, err := json.Marshal(raw)
 	if err != nil {
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
@@ -2581,39 +2654,88 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		RedirectURIs []string `json:"redirect_uris"`
 	}
 	if err := json.Unmarshal(buf, &req); err != nil {
+		s.auditRegistration(regOutcomeRejected, regMalformedBody, rawClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "could not decode request", http.StatusBadRequest)
 		return
 	}
 	if len(req.RedirectURIs) == 0 {
+		s.auditRegistration(regOutcomeRejected, regNoRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", "redirect_uris is required", http.StatusBadRequest)
 		return
 	}
 	if s.cfg.MaxRedirectURIs > 0 && len(req.RedirectURIs) > s.cfg.MaxRedirectURIs {
+		s.auditRegistration(regOutcomeRejected, regTooManyRedirectURIs, req.ClientName, userAgent, "", "")
 		writeTokenError(w, "invalid_client_metadata", fmt.Sprintf("too many redirect_uris (max %d)", s.cfg.MaxRedirectURIs), http.StatusBadRequest)
 		return
 	}
 	for _, raw := range req.RedirectURIs {
 		if s.cfg.MaxRedirectURILength > 0 && len(raw) > s.cfg.MaxRedirectURILength {
+			scheme, host := redirectOrigin(raw)
+			s.auditRegistration(regOutcomeRejected, regRedirectTooLong, req.ClientName, userAgent, scheme, host)
 			writeTokenError(w, "invalid_redirect_uri", fmt.Sprintf("redirect_uri exceeds %d bytes", s.cfg.MaxRedirectURILength), http.StatusBadRequest)
 			return
 		}
 	}
-	// Apply the SAME scheme + host policy as implicit clients. Without
-	// this, a malicious /oauth/register call could supply an http://
-	// attacker-controlled redirect_uri, and a later /oauth/authorize
-	// call against that client_id would skip the implicit-host check
-	// because validateClient trusts registered redirect_uris on
-	// exact-match. Result: authorization codes redirected to an
-	// attacker URL.
-	for _, raw := range req.RedirectURIs {
-		if err := s.validateImplicitRedirectURI(raw); err != nil {
-			writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
-			return
+	// A registration naming any URI on the exact DCR allowlist is a
+	// portal-class registration and must consist of listed URIs only; see
+	// Config.DCRRedirectURIs. With the list empty this is always false and
+	// the implicit-host path below runs exactly as before.
+	pinned := s.namesDCRRedirect(req.RedirectURIs)
+	if pinned {
+		for _, raw := range req.RedirectURIs {
+			if _, ok := s.dcrRedirectURIs[raw]; !ok {
+				scheme, host := redirectOrigin(raw)
+				s.auditRegistration(regOutcomeRejected, regNotOnDCRList, req.ClientName, userAgent, scheme, host)
+				writeTokenError(w, "invalid_redirect_uri", "redirect_uris must all be on the DCR redirect allowlist when any of them is", http.StatusBadRequest)
+				return
+			}
+		}
+	} else {
+		// Apply the SAME scheme + host policy as implicit clients. Without
+		// this, a malicious /oauth/register call could supply an http://
+		// attacker-controlled redirect_uri, and a later /oauth/authorize
+		// call against that client_id would skip the implicit-host check
+		// because validateClient trusts registered redirect_uris on
+		// exact-match. Result: authorization codes redirected to an
+		// attacker URL.
+		for _, raw := range req.RedirectURIs {
+			if err := s.validateImplicitRedirectURI(raw); err != nil {
+				scheme, host := redirectOrigin(raw)
+				s.auditRegistration(regOutcomeRejected, classifyRegistrationError(err), req.ClientName, userAgent, scheme, host)
+				writeTokenError(w, "invalid_redirect_uri", err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	clientID := "tgmcp_" + randomToken(16)
+	if pinned {
+		req.RedirectURIs = canonicalRedirectSet(req.RedirectURIs)
+		clientID = pinnedClientID(req.RedirectURIs)
+		// Server-assigned name; the caller's client_name is ignored. See
+		// db.PinnedClientName.
+		req.ClientName = db.PinnedClientName
+	}
 	now := s.clock()
-	if s.useDB {
+	if s.useDB && pinned {
+		// No cap eviction: a pinned registration is not counted toward the
+		// cap and a replay adds no row, so evicting here would let anyone
+		// destroy real dynamic registrations for free by replaying the
+		// portal's public registration. The name is db.PinnedClientName, and
+		// the row is written once and kept as it is.
+		stored, err := s.store.InsertPinnedClientReg(r.Context(), db.OAuthClientReg{
+			ClientID:     clientID,
+			ClientName:   req.ClientName,
+			RedirectURIs: req.RedirectURIs,
+			CreatedAt:    now,
+		})
+		if err != nil {
+			slog.Error("oauth: persist pinned client_reg failed", "err", err)
+			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
+			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
+			return
+		}
+		req.ClientName = stored.ClientName
+	} else if s.useDB {
 		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
 			slog.Warn("oauth: client_reg eviction failed", "err", err)
@@ -2625,6 +2747,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			CreatedAt:    now,
 		}); err != nil {
 			slog.Error("oauth: persist client_reg failed", "err", err)
+			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
 			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
 			return
 		}
@@ -2632,14 +2755,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		s.mu.Lock()
 		// Enforce the global cap. If we are at the limit, evict the oldest
 		// dynamic entry (linear scan — fine at N≈1000). Built-in clients
-		// (zero CreatedAt) are not counted toward the cap and are never evicted.
-		if s.cfg.MaxRegisteredClients > 0 {
+		// (zero CreatedAt) and pinned DCR clients are not counted toward the
+		// cap and are never evicted; a pinned re-registration overwrites its
+		// own entry, so it never needs room either.
+		if s.cfg.MaxRegisteredClients > 0 && !pinned {
 			var dynamicCount int
 			var oldestKey string
 			var oldestAt time.Time
 			for k, c := range s.clients {
-				if c.CreatedAt.IsZero() {
-					continue // built-in client — skip
+				if c.CreatedAt.IsZero() || isPinnedClientID(k) {
+					continue // built-in or pinned client — skip
 				}
 				dynamicCount++
 				if oldestKey == "" || c.CreatedAt.Before(oldestAt) {
@@ -2651,11 +2776,16 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 				delete(s.clients, oldestKey)
 			}
 		}
-		s.clients[clientID] = &clientReg{
-			ClientID:     clientID,
-			ClientName:   req.ClientName,
-			RedirectURIs: req.RedirectURIs,
-			CreatedAt:    now,
+		if existing, ok := s.clients[clientID]; ok && pinned {
+			// Write-once, as on the DB path: a replay keeps the stored entry.
+			req.ClientName = existing.ClientName
+		} else {
+			s.clients[clientID] = &clientReg{
+				ClientID:     clientID,
+				ClientName:   req.ClientName,
+				RedirectURIs: req.RedirectURIs,
+				CreatedAt:    now,
+			}
 		}
 		s.mu.Unlock()
 	}
@@ -2667,14 +2797,75 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
-	slog.Info("oauth: client_registration audit",
-		"outcome", "accepted",
-		"client_name", req.ClientName,
+	s.auditRegistration(regOutcomeAccepted, regOK, req.ClientName, userAgent, "", "",
 		"redirect_uri_count", len(req.RedirectURIs),
+		"dcr_allowlisted", pinned,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// namesDCRRedirect reports whether any of uris is on the exact DCR allowlist.
+// Always false when the allowlist is empty.
+func (s *Server) namesDCRRedirect(uris []string) bool {
+	if len(s.dcrRedirectURIs) == 0 {
+		return false
+	}
+	for _, u := range uris {
+		if _, ok := s.dcrRedirectURIs[u]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalRedirectSet returns uris deduplicated and sorted. The strings are
+// not otherwise touched: matching is byte-exact, so trimming or case-folding
+// here would store a URI the allowlist check never saw.
+func canonicalRedirectSet(uris []string) []string {
+	seen := make(map[string]struct{}, len(uris))
+	out := make([]string, 0, len(uris))
+	for _, u := range uris {
+		if _, dup := seen[u]; dup {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pinnedClientID derives the client_id of a pinned DCR registration from its
+// canonical redirect set. Repeating the same registration therefore returns
+// the same client_id instead of minting a new row, and the number of pinned
+// rows is bounded by the distinct subsets of the allowlist that are actually
+// registered. client_id is public for a public PKCE client, so a
+// deterministic value discloses nothing.
+func pinnedClientID(canonical []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(canonical, "\n")))
+	return db.PinnedClientIDPrefix + base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
+// isPinnedClientID reports whether clientID was minted by pinnedClientID.
+func isPinnedClientID(clientID string) bool {
+	return strings.HasPrefix(clientID, db.PinnedClientIDPrefix)
+}
+
+// checkPinnedRedirect re-applies the CURRENT DCR allowlist to a pinned
+// client's redirect_uri at /oauth/authorize. A pinned registration outlives
+// the TTL sweep, so without this an operator who removes a URI from
+// OAUTH_DCR_REDIRECT_URIS would still see it accepted for as long as the row
+// exists. Non-pinned clients are unaffected.
+func (s *Server) checkPinnedRedirect(clientID, redirectURI string) error {
+	if !isPinnedClientID(clientID) {
+		return nil
+	}
+	if _, ok := s.dcrRedirectURIs[redirectURI]; !ok {
+		return fmt.Errorf("redirect_uri %q is no longer on the DCR redirect allowlist", redirectURI)
+	}
+	return nil
 }
 
 // allowRegister records one /oauth/register attempt for ip and reports
@@ -2744,7 +2935,35 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 	if isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("redirect_uri host %q is not in the allowlist", host)
+	return withReason(
+		fmt.Errorf("redirect_uri host %q is not in the allowlist", host),
+		errRedirectHost,
+	)
+}
+
+// validateExactRedirectURI validates an operator-configured redirect URI that
+// will be matched byte for byte and so bypasses the implicit-host allowlist:
+// a PreregisteredClients entry or a DCRRedirectURIs entry. It applies the
+// shared shape rules (scheme, userinfo, backslash) and additionally refuses a
+// fragment, which RFC 6749 §3.1.2 forbids and an exact-match comparison would
+// otherwise carry into the redirect.
+func validateExactRedirectURI(raw string) error {
+	u, err := validateRedirectURIShape(raw)
+	if err != nil {
+		return err
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return errors.New("redirect_uri must not contain a fragment")
+	}
+	// The shape check does not require an authority, and for the implicit
+	// path it need not: an empty host cannot match the allowlist, so the
+	// allowlist is the backstop. Exact registration deliberately skips that
+	// allowlist, which leaves nothing checking the authority — "https:///cb"
+	// would otherwise be accepted as a valid exact-match target.
+	if u.Host == "" {
+		return errors.New("redirect_uri must have a host")
+	}
+	return nil
 }
 
 // validateRedirectURIShape applies the host-independent redirect_uri rules
@@ -2758,7 +2977,7 @@ func validateRedirectURIShape(raw string) (*url.URL, error) {
 	// the host approved here need not be the host a browser dials. Reject
 	// before parsing so the two can never diverge.
 	if strings.ContainsRune(raw, '\\') {
-		return nil, errors.New("redirect_uri must not contain a backslash")
+		return nil, errRedirectBackslash
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -2770,11 +2989,14 @@ func validateRedirectURIShape(raw string) (*url.URL, error) {
 	// reading as evil.com to anything that splits on the first '@' or renders
 	// the URL to a user.
 	if u.User != nil {
-		return nil, errors.New("redirect_uri must not contain userinfo")
+		return nil, errRedirectUserinfo
 	}
 	if u.Scheme != "https" {
 		if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
-			return nil, fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme)
+			return nil, withReason(
+				fmt.Errorf("redirect_uri scheme %q is not allowed (must be https except for http loopback)", u.Scheme),
+				errRedirectScheme,
+			)
 		}
 	}
 	return u, nil
@@ -2832,7 +3054,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 		if err == nil {
 			for _, u := range dbReg.RedirectURIs {
 				if u == redirectURI {
-					return nil
+					return s.checkPinnedRedirect(clientID, redirectURI)
 				}
 			}
 			return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)
@@ -2853,7 +3075,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 	if ok {
 		for _, u := range reg.RedirectURIs {
 			if u == redirectURI {
-				return nil
+				return s.checkPinnedRedirect(clientID, redirectURI)
 			}
 		}
 		return fmt.Errorf("redirect_uri %q is not registered for client_id %q", redirectURI, clientID)

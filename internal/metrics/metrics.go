@@ -61,6 +61,11 @@ type Registry struct {
 	// OAuthPendingAuthSize reflects the current count of pending OAuth
 	// authorization flows. Refreshed every minute by oauth.Server.
 	OAuthPendingAuthSize prometheus.Gauge
+	// OAuthClientRegistrationsTotal counts /oauth/register outcomes, labeled
+	// by outcome (accepted, rejected, rate_limited, error) and reason. Both
+	// label sets are closed compile-time constants from internal/oauth — a
+	// client-supplied string never reaches either label.
+	OAuthClientRegistrationsTotal *prometheus.CounterVec
 
 	// Inbound events outbox (internal/events). Published envelopes, failed
 	// publish attempts (the row stays pending), and the unpublished backlog.
@@ -176,6 +181,14 @@ type Registry struct {
 	// domain id, a small deployment-time constant, never a Telegram id,
 	// username, peer, or the credential itself.
 	AgentCredentialDomain *prometheus.GaugeVec // {domain_id}
+
+	// WorkContextRequestsTotal counts outbound mctl-api calls made by the
+	// issue-443 work-context adapter, labeled by route (a short bounded
+	// name, never a raw path containing an id) and outcome (ok, error).
+	WorkContextRequestsTotal *prometheus.CounterVec // {route, outcome}
+	// WorkContextBindingsTotal counts work_item_bindings writes, labeled by
+	// result (created, reused, refused).
+	WorkContextBindingsTotal *prometheus.CounterVec // {result}
 }
 
 // Policy-denial surfaces — the call site that consumed a policy.Deny
@@ -287,6 +300,16 @@ func JobStatuses() []string {
 var (
 	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
 	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
+	// workContextRoutes and friends are the closed label sets for
+	// WorkContextRequestsTotal/WorkContextBindingsTotal (issue-443), primed
+	// below for the same reason as the two lists above — see #591.
+	workContextRoutes = []string{
+		"redeem_link", "create_work_item", "get_work_item", "append_intent",
+		"request_execution", "get_execution_request", "list_execution_requests",
+		"add_surface_ref",
+	}
+	workContextOutcomes       = []string{"ok", "error"}
+	workContextBindingResults = []string{"created", "reused", "refused"}
 )
 
 // CountPolicyDenial increments AgentPolicyDenialsTotal for the given
@@ -298,6 +321,25 @@ func (r *Registry) CountPolicyDenial(reason, surface string) {
 		return
 	}
 	r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Inc()
+}
+
+// CountWorkContextRequest increments mctl_work_context_requests_total for one
+// outbound mctl-api call made by the work-context adapter (issue-443).
+// Nil-safe, matching CountPolicyDenial above.
+func (r *Registry) CountWorkContextRequest(route, outcome string) {
+	if r == nil {
+		return
+	}
+	r.WorkContextRequestsTotal.WithLabelValues(route, outcome).Inc()
+}
+
+// CountWorkContextBinding increments mctl_work_context_bindings_total for one
+// work_item_bindings write attempted by the work-context adapter. Nil-safe.
+func (r *Registry) CountWorkContextBinding(result string) {
+	if r == nil {
+		return
+	}
+	r.WorkContextBindingsTotal.WithLabelValues(result).Inc()
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -318,6 +360,14 @@ var loginPhaseBuckets = []float64{.5, 1, 2, 5, 10, 20, 30, 45, 60, 90}
 // passed to oauth.Server.WithMetrics without importing this package from oauth.
 func (r *Registry) SetOAuthPendingAuthSize(n float64) {
 	r.OAuthPendingAuthSize.Set(n)
+}
+
+// CountOAuthClientRegistration increments mctl_oauth_client_registrations_total
+// for one /oauth/register outcome. Satisfies oauth.metricsIface. Both outcome
+// and reason come from a closed compile-time set in internal/oauth — never
+// from a client-supplied string.
+func (r *Registry) CountOAuthClientRegistration(outcome, reason string) {
+	r.OAuthClientRegistrationsTotal.WithLabelValues(outcome, reason).Inc()
 }
 
 // ObserveLoginPhoneStep records the outcome and latency of one enable_access
@@ -388,6 +438,11 @@ func New() *Registry {
 		Name: "mctl_oauth_pending_auth_size",
 		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
 	})
+
+	r.OAuthClientRegistrationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_oauth_client_registrations_total",
+		Help: "Total /oauth/register outcomes, labeled by outcome (accepted, rejected, rate_limited, error) and reason. Both labels are closed compile-time constants from internal/oauth.",
+	}, []string{"outcome", "reason"})
 
 	r.LoginPhoneStepTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_phone_step_total",
@@ -501,6 +556,16 @@ func New() *Registry {
 		Help: "Info gauge (always 1) identifying the credential domain an agent-worker replica is running against. Label domain_id is sourced from AGENT_CREDENTIAL_DOMAIN_ID, a non-secret operator-chosen identifier (e.g. a Vault path or account label) bounded to 128 characters of [A-Za-z0-9._:/-].",
 	}, []string{"domain_id"})
 
+	r.WorkContextRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_work_context_requests_total",
+		Help: "Total outbound mctl-api calls made by the work-context adapter (issue-443), labeled by route and outcome (ok, error).",
+	}, []string{"route", "outcome"})
+
+	r.WorkContextBindingsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_work_context_bindings_total",
+		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created; reused: redelivery or same-issue rebind; refused: thread already bound to a different issue).",
+	}, []string{"result"})
+
 	r.EventsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_events_published_total",
 		Help: "Event envelopes published to Valkey Streams.",
@@ -534,6 +599,7 @@ func New() *Registry {
 		r.BotUpdatesTotal,
 		r.SessionsActiveGauge,
 		r.OAuthPendingAuthSize,
+		r.OAuthClientRegistrationsTotal,
 		r.LoginPhoneStepTotal,
 		r.LoginPhoneToCodeDuration,
 		r.SessionsBorrowTotal,
@@ -551,6 +617,8 @@ func New() *Registry {
 		r.AgentJobCostUSDTotal,
 		r.AgentClaudeResultErrorsTotal,
 		r.AgentCredentialDomain,
+		r.WorkContextRequestsTotal,
+		r.WorkContextBindingsTotal,
 	)
 
 	// Give every agent counter an alert reads through increase() a zero
@@ -591,6 +659,14 @@ func New() *Registry {
 		for _, surface := range policySurfaces {
 			r.AgentPolicyDenialsTotal.WithLabelValues(reason, surface).Add(0)
 		}
+	}
+	for _, route := range workContextRoutes {
+		for _, outcome := range workContextOutcomes {
+			r.WorkContextRequestsTotal.WithLabelValues(route, outcome).Add(0)
+		}
+	}
+	for _, result := range workContextBindingResults {
+		r.WorkContextBindingsTotal.WithLabelValues(result).Add(0)
 	}
 
 	return r

@@ -5,6 +5,7 @@
 ## Key Resources & Submissions
 
 - [Public Documentation](https://tg.mctl.ai/docs): Getting started and tool documentation.
+- [Troubleshooting](https://github.com/mctlhq/mctl-telegram/blob/main/docs/troubleshooting.md): Client-facing error families (peer id errors, get_media confirmation errors, session/auth failures, OAuth redirect rules) and what to do about each.
 - [Local Bridge](https://tg.mctl.ai/docs/local-bridge): Optional self-hosted session mode. Quick start at `/docs/local-bridge/quickstart`.
 - [Security & Trust Model](https://tg.mctl.ai/security): Data minimization and session encryption details.
 - [ChatGPT App Directory Submission](https://github.com/mctlhq/mctl-telegram/blob/main/chatgpt-submission-package.md): Reviewer notes and submission package.

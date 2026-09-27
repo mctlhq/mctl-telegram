@@ -1,5 +1,115 @@
 # Changelog
 
+## [0.69.0](https://github.com/mctlhq/mctl-telegram/compare/0.68.0...0.69.0) (2026-09-26)
+
+
+### Features
+
+* **agent:** add WorkHandler for /mctl work and /mctl link ([5b88c3f](https://github.com/mctlhq/mctl-telegram/commit/5b88c3f8e3a0d2f337b97a63d1d2d245e69322b2))
+* **agents:** issue-443-feat-work-context-bind-telegram-threads ([4bfde72](https://github.com/mctlhq/mctl-telegram/commit/4bfde728402d23223a7e15f31039b5adbd254e2f))
+* **agent:** widen Saved Messages dispatch with SavedMeta, add work/link parsing ([e3ed4a9](https://github.com/mctlhq/mctl-telegram/commit/e3ed4a93d27d46722040e478ddc98414ff0e4ec8))
+* **agent:** wire the work-context adapter behind WORK_CONTEXT_ENABLED ([1fde4c3](https://github.com/mctlhq/mctl-telegram/commit/1fde4c3433a7bb1901d16debe620b94f652adbc7))
+* **db:** add work_item_bindings table and TelegramIDByUserID ([84ae564](https://github.com/mctlhq/mctl-telegram/commit/84ae56421cfe35b47b4176f814e234135a1721c3))
+* **oauth:** exact-match DCR redirect allowlist for the MCP portal ([f8004b4](https://github.com/mctlhq/mctl-telegram/commit/f8004b49d84a6835a72a96222e03ee840e71cf36))
+* **oauth:** exact-match DCR redirect allowlist for the MCP portal ([d0bf000](https://github.com/mctlhq/mctl-telegram/commit/d0bf000ec6f2229c53de7afa5aab5c829a2fc171))
+* **product-updates:** curated feed, schema validator and release gate ([6cea8e1](https://github.com/mctlhq/mctl-telegram/commit/6cea8e1a92b41ebd75a58e0c9f7b339cdd1fe3ef))
+* **product-updates:** curated feed, schema validator and release gate ([#440](https://github.com/mctlhq/mctl-telegram/issues/440)) ([d1133e8](https://github.com/mctlhq/mctl-telegram/commit/d1133e8d512df140f733eea501ce749c3aab8745))
+* **product-updates:** persist frozen digests, publication dedupe and campaign source_ref ([3caf023](https://github.com/mctlhq/mctl-telegram/commit/3caf0233b642a52b185e0699acd3af86e2cef875))
+* **product-updates:** persist frozen digests, publication dedupe and campaign source_ref ([12d4784](https://github.com/mctlhq/mctl-telegram/commit/12d4784a49d7de9fb833004b1d72b7db5d775e8d))
+* **product-updates:** snapshot the MCP tool surface and diff it between releases ([29da1f5](https://github.com/mctlhq/mctl-telegram/commit/29da1f5261cc7bae388f87056669b639d4afd4dd))
+* **product-updates:** snapshot the MCP tool surface and diff it between releases ([0df1857](https://github.com/mctlhq/mctl-telegram/commit/0df1857194b8d17deb74724b624805374918dd9d)), closes [#440](https://github.com/mctlhq/mctl-telegram/issues/440)
+* **workctx:** add outbound mctl-api work-context client ([f8d9f9b](https://github.com/mctlhq/mctl-telegram/commit/f8d9f9bae6798ddd97a707d5e953e47afe07ed3d))
+
+
+### Bug Fixes
+
+* address review findings ([5947064](https://github.com/mctlhq/mctl-telegram/commit/59470643b5ba70b1a6dc8df2cd24d2cec5dab63d))
+* **agents:** address P1/P2 codex findings on issue-443-feat-work-context-bind-telegram-threads ([de79498](https://github.com/mctlhq/mctl-telegram/commit/de794984f50dd975c5de22be9f420d697b367ee5))
+* **agents:** address P1/P2 codex findings on issue-443-feat-work-context-bind-telegram-threads ([bde809c](https://github.com/mctlhq/mctl-telegram/commit/bde809c31c2865e6db8d733236bed50f79f1bce8))
+* **agents:** address P1/P2 codex findings on issue-443-feat-work-context-bind-telegram-threads ([9284339](https://github.com/mctlhq/mctl-telegram/commit/928433944367a01e97730606bfb97fe93740da8f))
+* **ci:** portal allowlist dispatch runs from main only; link the vendor run ([fca4133](https://github.com/mctlhq/mctl-telegram/commit/fca4133b5a9de3ab17faf9e660e94de0eefb425e))
+* **oauth:** no cap eviction and write-once name for pinned DCR clients ([f783dad](https://github.com/mctlhq/mctl-telegram/commit/f783dad2b12028ea87173bed549318b9e822fcd2))
+* **oauth:** server-assigned client_name for pinned DCR clients ([0322b89](https://github.com/mctlhq/mctl-telegram/commit/0322b89d843bc76d15572481c7eded72ea04a31e))
+* **product-updates:** a product update always cites the diff ([5c4636f](https://github.com/mctlhq/mctl-telegram/commit/5c4636fc5518d14467dc5177fa6c8a49fea6d792))
+* **product-updates:** check what the bootstrap window can check ([e23fc1b](https://github.com/mctlhq/mctl-telegram/commit/e23fc1b74900179c919b9b64401117808fc48b8d))
+* **product-updates:** citations pass as unverified before the first baseline; notices are not held to HEAD ([663e927](https://github.com/mctlhq/mctl-telegram/commit/663e927a46ca252a65632f5e96adc16bb624d157))
+* **product-updates:** compare digest entry ids in byte order; hold entry ownership in the database ([f7f6db0](https://github.com/mctlhq/mctl-telegram/commit/f7f6db02cb01ee711423e7b21f97b907aff3871b))
+* **product-updates:** enforce the no-tools and self-name rules on every path ([2f5298d](https://github.com/mctlhq/mctl-telegram/commit/2f5298da511598e00c6017f1f43dfbc66c3ac16c))
+* **product-updates:** hold bootstrap entries to their tools, not only their claims ([b6ef707](https://github.com/mctlhq/mctl-telegram/commit/b6ef707a46e282c130aee8b3cdec05ced657043e))
+* **product-updates:** label the snapshot with the surface actually enumerated ([83f13a3](https://github.com/mctlhq/mctl-telegram/commit/83f13a3158a9414397459a45065ef14a45da6a4e))
+* **product-updates:** one dedupe authority, same-key race answers as a retry, hash-checked refs ([526f778](https://github.com/mctlhq/mctl-telegram/commit/526f778cb124f9b7f00ff04a158550b5b6ab157c))
+* **product-updates:** refuse a shallow clone, announce only shipped updates ([7a534ef](https://github.com/mctlhq/mctl-telegram/commit/7a534eff5f4a2745688d30c1ed942c39da37fd55))
+* **product-updates:** refuse an empty snapshot, canonicalise on write, one surface spelling ([c7ed12f](https://github.com/mctlhq/mctl-telegram/commit/c7ed12f12bffa44823f27223f9c6109dc21e386c))
+* **productupdates:** require a bootstrap citation to name an existing release tag ([acaa702](https://github.com/mctlhq/mctl-telegram/commit/acaa702ec45cc18edc659b3757cbcd8bd48b1542))
+* **productupdates:** require a bootstrap citation to name an existing release tag ([1107e76](https://github.com/mctlhq/mctl-telegram/commit/1107e76b19cf0ac216255c6c3643dd83c64749b2)), closes [#685](https://github.com/mctlhq/mctl-telegram/issues/685)
+* **work:** bare /mctl link usage reply and carried review P3s ([e9d351e](https://github.com/mctlhq/mctl-telegram/commit/e9d351e2ed55c881d9ce9557466b43bde2901f13))
+* **work:** redo an unrecorded start on redelivery; cover /mctl link ([16ffc6d](https://github.com/mctlhq/mctl-telegram/commit/16ffc6d3fdade61b89dbe7dddeff4125c5c2bd7d))
+
+## [0.68.0](https://github.com/mctlhq/mctl-telegram/compare/0.67.0...0.68.0) (2026-09-23)
+
+
+### Features
+
+* **agents:** issue-438-feat-clients-model-notification-identity ([04b461d](https://github.com/mctlhq/mctl-telegram/commit/04b461db66c720a9e788ac8b36e6b4f8c426ef2a))
+* **agents:** issue-438-feat-clients-model-notification-identity ([73ae9bc](https://github.com/mctlhq/mctl-telegram/commit/73ae9bcaa0b39ffad232e5fb31caca592b70fc83))
+* **agents:** issue-569-spike-mcp-apps-prototype-a-telegram-rese ([2fdf9af](https://github.com/mctlhq/mctl-telegram/commit/2fdf9af711ff02eba3d5b81ac21420aa01ffe12b))
+* **agents:** issue-569-spike-mcp-apps-prototype-a-telegram-rese ([7c3e1f9](https://github.com/mctlhq/mctl-telegram/commit/7c3e1f9c82f4a8cd5844260b3f4046679a2e3b25))
+* **agents:** issue-605-mcpprobe-four-p3s-left-open-when-604-mer ([2c065a6](https://github.com/mctlhq/mctl-telegram/commit/2c065a6d6518568e6bf1d138b35ea8ed8a904dcd))
+* **agents:** issue-617-feat-audit-measure-what-reaches-tg-mctl ([0896685](https://github.com/mctlhq/mctl-telegram/commit/0896685d60c399be9b6670ba996dfd5a8d601685))
+* **agents:** issue-617-feat-audit-measure-what-reaches-tg-mctl ([d0bfb8d](https://github.com/mctlhq/mctl-telegram/commit/d0bfb8d7e8ce26468330e7afcac9affa0b1f98a9))
+* **agents:** issue-668-feat-observability-audit-rejected-client ([e77d16a](https://github.com/mctlhq/mctl-telegram/commit/e77d16aa3de07dd0947d2c2f3a8ed6b354e86c63))
+* **agents:** issue-668-feat-observability-audit-rejected-client ([42c8139](https://github.com/mctlhq/mctl-telegram/commit/42c813918120546656039f24cf15303bf08eb730))
+* **agents:** issue-669-docs-troubleshooting-page-for-the-error ([40e36ce](https://github.com/mctlhq/mctl-telegram/commit/40e36ce1db5a7e2e5123b2c610d681419bf39ba0))
+* **bot:** inbound update receiver for the login bot ([00fec8c](https://github.com/mctlhq/mctl-telegram/commit/00fec8c43d6df227451e689cc2a223eebb3a9617))
+* **bot:** inbound update receiver for the login bot ([0da0619](https://github.com/mctlhq/mctl-telegram/commit/0da06199a08e10a8ff6123d1fff228b5fbe87b27))
+* **broadcast:** campaign store with server-side audience and bound approval ([1f33eca](https://github.com/mctlhq/mctl-telegram/commit/1f33eca4a7c962877740c819a332496cee5235ac)), closes [#439](https://github.com/mctlhq/mctl-telegram/issues/439)
+* **broadcast:** campaign store with server-side audience and bound approval ([#439](https://github.com/mctlhq/mctl-telegram/issues/439), 1/3) ([0379364](https://github.com/mctlhq/mctl-telegram/commit/0379364826a31abbf94146b3f3b8b25030bf179f))
+* **broadcast:** operator MCP tools and browser-only approval page ([6056cbb](https://github.com/mctlhq/mctl-telegram/commit/6056cbbcfb37b89db29c270ab27530366cea30cb))
+* **broadcast:** operator MCP tools and browser-only approval page ([e534ecd](https://github.com/mctlhq/mctl-telegram/commit/e534ecdee6e6e1407cec93578bd0f7bd695008d2))
+* **broadcast:** rate-limited, idempotent delivery of approved campaigns ([6307058](https://github.com/mctlhq/mctl-telegram/commit/630705871192554ece646d19caaa1d76310d2d9a)), closes [#439](https://github.com/mctlhq/mctl-telegram/issues/439)
+* **broadcast:** rate-limited, idempotent delivery of approved campaigns ([#439](https://github.com/mctlhq/mctl-telegram/issues/439), 2/3) ([1010a5c](https://github.com/mctlhq/mctl-telegram/commit/1010a5c7ac91e01bd5fc6ddbcd4695f02c118a5e))
+* **events:** publish telegram.message.created to Valkey Streams ([d9a3f7f](https://github.com/mctlhq/mctl-telegram/commit/d9a3f7ff9b824cd7b320489dc33fa8f94dc62af8))
+* **events:** publish telegram.message.created to Valkey Streams ([ab16626](https://github.com/mctlhq/mctl-telegram/commit/ab166266b4e1ac079c02f7cbadcc8e7100b7f3b4)), closes [#646](https://github.com/mctlhq/mctl-telegram/issues/646)
+* **web:** server-rendered notification preferences on the manage page ([96634d5](https://github.com/mctlhq/mctl-telegram/commit/96634d57efe52bb545bece439690c72c39bca618))
+* **web:** server-rendered notification preferences on the manage page ([4633dff](https://github.com/mctlhq/mctl-telegram/commit/4633dffae5fe388190286f9cd2718ee5e8338e49))
+
+
+### Bug Fixes
+
+* address review findings ([c0222ec](https://github.com/mctlhq/mctl-telegram/commit/c0222ec085c92bdeeaa7468011ac82e7c4611bcc))
+* address review findings ([e192ce7](https://github.com/mctlhq/mctl-telegram/commit/e192ce758b9fd2876f0680af6fafc4a3aec10158))
+* address review findings ([adfdfb0](https://github.com/mctlhq/mctl-telegram/commit/adfdfb055270c9701585114f9b78f76af1b1fa12))
+* address review findings ([deab197](https://github.com/mctlhq/mctl-telegram/commit/deab1975066d96158de1e1683e565205ed499710))
+* **agents:** address P1/P2 codex findings on issue-669-docs-troubleshooting-page-for-the-error ([98b47ff](https://github.com/mctlhq/mctl-telegram/commit/98b47ff0bab22b7ce79b0ba11b94ea037475986e))
+* **bot:** scrub handler error text before logging ([b39ec98](https://github.com/mctlhq/mctl-telegram/commit/b39ec9889e7e209fd9d6efd3c0ccd7445cc20327))
+* **bot:** stop the batch when an update fails to become durable ([1c3b138](https://github.com/mctlhq/mctl-telegram/commit/1c3b1386162ae11203057785cb6cb8dded458662))
+* **bot:** sweep in the poll loop, drain the whole backlog, redact the URL ([4afce6a](https://github.com/mctlhq/mctl-telegram/commit/4afce6a24b3c99a74cb550bb74e7ea27cf8a9dd4))
+* **broadcast:** address review P3s on the campaign store ([ac75760](https://github.com/mctlhq/mctl-telegram/commit/ac75760c684cd24ad83772e37ae1b17ce84193ed))
+* **broadcast:** claim exactly the batch on Postgres, release unattempted rows ([d1dfa1d](https://github.com/mctlhq/mctl-telegram/commit/d1dfa1dbeca562d7991778e69196ff9f684c2ba4))
+* **broadcast:** finish the batch on shutdown, bound a failing row ([eee7432](https://github.com/mctlhq/mctl-telegram/commit/eee74325e43c18402368e721b611fbb42e1b1c89))
+* **broadcast:** refuse cancel without a known actor; cover connected_via end to end ([79c4793](https://github.com/mctlhq/mctl-telegram/commit/79c4793ee0ebbaa47ea878b78c0d53d9b1cd7e55))
+* **broadcast:** refuse revoked operators on every tool; keep live campaigns visible ([d9f9b60](https://github.com/mctlhq/mctl-telegram/commit/d9f9b6017f8be52d1a73bf84fd059a010c6a02ef))
+* **broadcast:** review round on the operator surface ([fd527f7](https://github.com/mctlhq/mctl-telegram/commit/fd527f777e42a4f778218e20b9eaf22dd5c3cb81))
+* **ci:** fix failing required checks on issue-438-feat-clients-model-notification-identity ([83e1a52](https://github.com/mctlhq/mctl-telegram/commit/83e1a5231698f076556b1475b51c60f192c95460))
+* **db:** backfill telegram_login_id on the legacy capture fallback ([262c3ac](https://github.com/mctlhq/mctl-telegram/commit/262c3ac63fad718eda7833163bae3edb0691ccd8))
+* **db:** stamp revoked_reason from the TTL sweeps; correct the value list and runbook ([bcb7408](https://github.com/mctlhq/mctl-telegram/commit/bcb7408b22deb78365e3cab4dbd22eeaad181ff9))
+* **events:** bind the cancel callback to its own connection ([979b4a3](https://github.com/mctlhq/mctl-telegram/commit/979b4a3eddfd54570d21a22736b2ad679f596ca8))
+* **events:** bound best-effort audit, coalesce lease retries, synthetic fixture id ([8108783](https://github.com/mctlhq/mctl-telegram/commit/81087838e6f00b778e5816b81e0b1edd0b8314a6))
+* **events:** context-aware client, rune-safe truncation, nil userinfo guard ([9ba8db9](https://github.com/mctlhq/mctl-telegram/commit/9ba8db9e1cfc4a2718bb4dc60a80959ebf74fdfd))
+* **events:** one relay owns the outbox across replicas, backoff holds, one deadline per call ([afaf5bf](https://github.com/mctlhq/mctl-telegram/commit/afaf5bf85a0c19158ada51109713deeff019e9e1))
+* **events:** reject a Valkey user without a password ([975c60e](https://github.com/mctlhq/mctl-telegram/commit/975c60e849347428c3a08f2fd86d0b1ca486b854))
+* **events:** Telegram account id in the subject; keep relay ownership during a batch ([4c6d51a](https://github.com/mctlhq/mctl-telegram/commit/4c6d51acd626bf70141acdbdb5de47a99b43f19e))
+* **events:** validate the whole listener event id; bound relay database calls and bulk replies ([591cfb1](https://github.com/mctlhq/mctl-telegram/commit/591cfb16e019089b75ec801aeaa54d53dd4bb886))
+* **events:** wake the relay only for written rows; guard stale failure marks ([efa224f](https://github.com/mctlhq/mctl-telegram/commit/efa224f32efed41e7fb239733d26e5ed51882ae9))
+* **mcpprobe:** classify Apps.* string fields in the report origin table ([b94d59a](https://github.com/mctlhq/mctl-telegram/commit/b94d59a1d80787a9c774856a979057a3b5bb2fe2))
+* **oauth:** carry a pre-registered client's display name onto refresh tokens ([58be55e](https://github.com/mctlhq/mctl-telegram/commit/58be55e985433b382c693217487393b3a47e2e14))
+* **observability:** address review findings on the issue-668 implementation ([1f285eb](https://github.com/mctlhq/mctl-telegram/commit/1f285eb5f785d8458be76e3751b07f13ec494bd3))
+* **oidc:** document the unsplit name fallback and isolate the test decode ([d70b4ff](https://github.com/mctlhq/mctl-telegram/commit/d70b4ff71628a2adc6187f7f650647d0e91c7614))
+* **oidc:** read profile claims under the names Telegram actually sends ([760568d](https://github.com/mctlhq/mctl-telegram/commit/760568d7e3503cf3cfe124fe90956fa060699c7f))
+* **oidc:** read profile claims under the names Telegram actually sends ([dc5e509](https://github.com/mctlhq/mctl-telegram/commit/dc5e509c9ad19b50bd033d649d56ef25a9683c37)), closes [#667](https://github.com/mctlhq/mctl-telegram/issues/667)
+* **web:** audit the manage-page consent write and reject non-form bodies ([943680b](https://github.com/mctlhq/mctl-telegram/commit/943680b68ad3833984d68134a5f59f609f5a5f8b))
+* **web:** name the real table in the privacy matrix ([d67784d](https://github.com/mctlhq/mctl-telegram/commit/d67784d6287f2268b7552469af0ff72c83697e48))
+
 ## [0.67.0](https://github.com/mctlhq/mctl-telegram/compare/0.66.0...0.67.0) (2026-09-12)
 
 

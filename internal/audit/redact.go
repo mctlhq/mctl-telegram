@@ -67,6 +67,12 @@ var sensitiveKeys = map[string]struct{}{
 	"device_registration_key": {},
 	"worker_token":            {},
 	"bridge_token":            {},
+	// mctl_surface_telegram_token is the surface:telegram bearer the
+	// work-context adapter (issue-443) authenticates outbound mctl-api
+	// calls with — never MCTL_API_TOKEN or an mctl-agent credential, and
+	// like every other credential in this list it must never reach a log
+	// line.
+	"mctl_surface_telegram_token": {},
 	// Login-bot update receiver (issue-619). The receiver never decodes
 	// message text or callback data, so these keys should never be reachable
 	// from it -- they are here so that a LATER handler that does decode
@@ -87,6 +93,20 @@ var sensitiveKeys = map[string]struct{}{
 	// log only ids, categories, states and reason codes, never these.
 	"first_name": {},
 	"last_name":  {},
+	// Broadcast campaigns (issue-439). content is the operator-authored
+	// broadcast text; it is stored for delivery and must never reach a log
+	// line, whichever handler (worker, web approval, MCP tool) holds it.
+	"content":          {},
+	"campaign_content": {},
+	"broadcast_text":   {},
+	// sub, client_id, jti and exp (attributed auth failures, issue-668) are
+	// DELIBERATELY absent from this list, for the same reason as
+	// credential_domain_id above: none of the four is a secret. They are
+	// identifiers this service itself minted into a token it signed with its
+	// own HMAC key, attached to the "auth failed" log line only for claims
+	// that already passed that signature check (see
+	// internal/auth.AttributedError) -- the token material itself stays
+	// covered by the existing "authorization"/"bearer" entries.
 }
 
 // RedactingHandler wraps a slog.Handler and rewrites attribute values for

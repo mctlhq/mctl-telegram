@@ -12,6 +12,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/mcpui"
@@ -60,6 +61,11 @@ type Server struct {
 	// registers every tool; "read-only" registers only tools with
 	// ReadOnlyHint=true (set via WithToolFilter).
 	ToolFilter string
+	// Broadcast is the issue-439 broadcast service behind the operator
+	// tools; nil makes those tools refuse. BroadcastApprovalURL is the web
+	// page a human approves prepared campaigns on. See WithBroadcast.
+	Broadcast            *broadcast.Service
+	BroadcastApprovalURL string
 	// MediaStore holds pending media download references keyed by confirmation_id.
 	MediaStore *MediaStore
 	// MediaDownloadMaxBytes is the maximum number of bytes allowed per get_media
@@ -390,6 +396,12 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSetReaction()
+		s.addTool(srv, t, h)
+	}
+	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
+		s.toolPrepareBroadcast, s.toolListBroadcasts, s.toolGetBroadcast, s.toolCancelBroadcast,
+	} {
+		t, h := reg()
 		s.addTool(srv, t, h)
 	}
 	return srv

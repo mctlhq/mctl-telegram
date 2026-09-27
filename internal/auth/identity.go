@@ -40,6 +40,14 @@ type Identity struct {
 	// the device and Hub.EvictDevice can find it -- see
 	// internal/bridge/tokenhandler.go.
 	DeviceID string
+	// ClientID is the OAuth client the presented access token was issued
+	// to, from the token's client_id claim (localjwt only; empty for every
+	// other provider and for worker/bridge/agent credentials). It is a
+	// property of the credential, set by the issuer at mint time -- NOT of
+	// how the request carried it: a token is the same token in a header or
+	// a cookie, so "arrived as a cookie" proves nothing, while "was issued
+	// to the self-connect client" proves a browser Telegram login minted it.
+	ClientID string
 }
 
 func (i *Identity) HasScope(s string) bool {

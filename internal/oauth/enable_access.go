@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/tgerr"
@@ -104,6 +105,34 @@ type loginFlow struct {
 	// provides the happens-before edge, so no mutex is needed.
 	tgUserID int64
 	err      error
+
+	// step is the last onboarding stage this flow reached. Written around
+	// the loginFn call below on the login goroutine, and inside askCode/
+	// askPassword -- which in production run on a goroutine gotd's
+	// client.Run spawns for its callback (telegram.Login ->
+	// client.Run(ctx, fn)), NOT on the login goroutine. It is still read
+	// unsynchronised by the deferred logger, and that is safe because
+	// client.Run joins its callback goroutine before it returns: loginFn
+	// returning is the happens-before edge between the last write and the
+	// read. Do not add a mutex; do not read step anywhere else.
+	step string
+	// superseded is set by a /start re-submission before it calls cancel(),
+	// so the deferred logger can tell "user started over" from "user walked
+	// away". Both surface as context.Canceled/DeadlineExceeded and are
+	// otherwise indistinguishable (see the comment on abandonFlow and its
+	// sibling call site). atomic.Bool because its writers are HTTP handler
+	// goroutines, not this flow's own login goroutine.
+	superseded atomic.Bool
+}
+
+// isAbandonment reports whether err is the shape a walked-away user leaves
+// behind: the flow's own CodeTTL deadline, or its context being cancelled
+// with no explicit supersession recorded. errors.Is, never a string match on
+// "context canceled" -- see design.md's Alternatives section for why a
+// string match cannot distinguish this from any other error that happens to
+// wrap a cancelled context.
+func isAbandonment(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // startLoginFlow launches telegram.Login in a background goroutine driven by
@@ -124,24 +153,28 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	lf.cancel = cancel
 
 	askCode := func(ctx context.Context) (string, error) {
+		lf.step = "code_requested"
 		select {
 		case lf.needCode <- struct{}{}:
 		default:
 		}
 		select {
 		case c := <-lf.codeCh:
+			lf.step = "code_submitted"
 			return c, nil
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
 	}
 	askPassword := func(ctx context.Context) (string, error) {
+		lf.step = "password_requested"
 		select {
 		case lf.needPw <- struct{}{}:
 		default:
 		}
 		select {
 		case p := <-lf.pwCh:
+			lf.step = "password_submitted"
 			return p, nil
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -159,14 +192,45 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// final outcome here regardless of whether a handler is still waiting.
 		started := time.Now()
 		defer func() {
-			if lf.err != nil {
-				slog.Error("enable: telegram login failed",
-					"uid", uid, "want_tg_id", wantTgID,
-					"elapsed", time.Since(started).String(), "err", lf.err)
-			} else {
+			elapsed := time.Since(started).String()
+			switch {
+			case lf.err == nil:
 				slog.Info("enable: telegram login succeeded",
 					"uid", uid, "tg_id", lf.tgUserID,
-					"elapsed", time.Since(started).String())
+					"elapsed", elapsed)
+			case lf.superseded.Load() && isAbandonment(lf.err):
+				// A later /start re-submission cancelled this flow — the user
+				// started over, not walked away. INFO, not an error: this is
+				// an ordinary UI interaction, and logging it at WARN/ERROR
+				// would make the abandonment reclassification below noisy for
+				// no reason. The error must actually be the cancellation:
+				// superseded is stored by handler goroutines and can land
+				// while this goroutine already holds a real failure
+				// (FLOOD_WAIT, identity mismatch, errModeCheckFailed), which
+				// must keep falling through to the ERROR arm with its err.
+				slog.Info("enable: login flow superseded",
+					"uid", uid, "step", lf.step, "elapsed", elapsed)
+			case isAbandonment(lf.err) && (lf.step == "code_requested" || lf.step == "password_requested"):
+				// The CodeTTL deadline expired while parked in askCode/
+				// askPassword: a user who walked away from the browser. WARN,
+				// not ERROR -- see design.md's rationale. No err attribute:
+				// "context canceled"/"context deadline exceeded" is the
+				// deadline restated, and dropping it is what keeps a
+				// log-scraper from alerting on the word "canceled" itself.
+				//
+				// Gated on the step: bgCtx's deadline covers the whole loginFn
+				// call, so the same context error also surfaces when SendCode
+				// or the sign-in RPC hangs (step phone_submitted /
+				// code_submitted / password_submitted) or when the
+				// hasActiveLocalAccount query above times out. Those are
+				// Telegram- or DB-side stalls, not a user walking away, and
+				// they keep the ERROR arm with the underlying err.
+				slog.Warn("enable: onboarding abandoned",
+					"uid", uid, "step", lf.step, "elapsed", elapsed)
+			default:
+				slog.Error("enable: telegram login failed",
+					"uid", uid, "want_tg_id", wantTgID,
+					"elapsed", elapsed, "err", lf.err)
 			}
 		}()
 		// Serialise login work for this uid. A /start re-submission cancels
@@ -201,6 +265,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			lf.err = db.ErrAccountModeConflict
 			return
 		}
+		lf.step = "phone_submitted"
 		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
 		if err != nil {
 			lf.err = err
@@ -513,6 +578,7 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 func (es *enableSession) abandonFlow() {
 	es.step = stepPhone
 	if es.flow != nil && es.flow.cancel != nil {
+		es.flow.superseded.Store(true)
 		es.flow.cancel()
 	}
 	es.flow = nil
@@ -701,6 +767,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 
 	// Supersede any prior in-flight attempt (the user restarted after an error).
 	if es.flow != nil && es.flow.cancel != nil {
+		es.flow.superseded.Store(true)
 		es.flow.cancel()
 	}
 	es.phone = phone

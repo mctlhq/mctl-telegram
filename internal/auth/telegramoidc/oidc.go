@@ -195,12 +195,24 @@ func (c *Client) Exchange(ctx context.Context, code, codeVerifier, expectedNonce
 // idTokenClaims is the subset of id_token claims the broker consumes. `id` is
 // kept raw because Telegram delivers it as a JSON string (spike #48), not a
 // number — parseTelegramID normalises it.
+//
+// The profile fields use the standard OIDC claim names. Telegram's id_token
+// carries exactly `iss, aud, sub, id, iat, exp, name, given_name,
+// family_name, preferred_username, picture, nonce` (measured live in #48) —
+// NOT the Login Widget's `username` / `first_name` / `last_name`. The tags
+// used to be the widget names, so every OIDC sign-in decoded to an empty
+// username and display name (#667). TestIDTokenClaimsDecodeTelegramShape
+// pins the real shape.
 type idTokenClaims struct {
 	ID        json.RawMessage `json:"id"`
 	Sub       string          `json:"sub"`
-	Username  string          `json:"username"`
-	FirstName string          `json:"first_name"`
-	LastName  string          `json:"last_name"`
+	Username  string          `json:"preferred_username"`
+	FirstName string          `json:"given_name"`
+	LastName  string          `json:"family_name"`
+	// Name is the composite display name. It is only consulted when both
+	// split name claims are absent, so a provider that sends `name` alone
+	// still yields a non-empty display name downstream.
+	Name string `json:"name"`
 }
 
 // parseIdentity converts verified claims into an Identity. It is pure and
@@ -216,6 +228,15 @@ func parseIdentity(c idTokenClaims) (*Identity, error) {
 		Username:   c.Username,
 		FirstName:  c.FirstName,
 		LastName:   c.LastName,
+	}
+	// Contingency only: Telegram sends the split claims (#48), so this arm
+	// runs for a provider that emits `name` alone. The composite lands in
+	// FirstName unsplit — and is persisted as users.telegram_first_name
+	// verbatim — because guessing a first/last boundary from whitespace is
+	// wrong for single-word and multi-part names, and the downstream display
+	// name (first + " " + last) is correct either way.
+	if id.FirstName == "" && id.LastName == "" {
+		id.FirstName = strings.TrimSpace(c.Name)
 	}
 	if id.TelegramID == 0 && id.Sub == "" {
 		return nil, errors.New("telegramoidc: id_token carries neither an id claim nor a sub")

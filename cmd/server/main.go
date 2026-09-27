@@ -31,7 +31,9 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
 	"github.com/mctlhq/mctl-telegram/internal/bot"
+	"github.com/mctlhq/mctl-telegram/internal/botapi"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -44,6 +46,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
+	"github.com/mctlhq/mctl-telegram/internal/workctx"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
@@ -241,7 +244,23 @@ func main() {
 	if cfg.AgentApprovalTTL > 0 {
 		agentNotifier.MaxPendingAge = cfg.AgentApprovalTTL
 	}
-	agentListener.Router = control.NewRouter(store, agentExecutor, agentNotifier)
+	agentRouter := control.NewRouter(store, agentExecutor, agentNotifier)
+	agentListener.Router = agentRouter
+
+	// Work-context surface adapter (issue-443): off by default, like every
+	// other agent-adjacent surface. With the flag off, no workctx.Client is
+	// constructed, no outbound HTTP is ever possible, and agentRouter.Work
+	// stays nil — HandleSavedText's CmdWork/CmdLink branch falls through to
+	// the pre-#443 unknown-command reply, so this is a genuine no-op, not
+	// just an unused client. Config.Load already refused to start if the
+	// flag is on with an empty token or tenant, so both are guaranteed
+	// non-empty here.
+	if cfg.WorkContextEnabled {
+		workClient := workctx.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, cfg.WorkItemTenant, nil)
+		workClient.Metrics = m
+		agentRouter.Work = &control.WorkHandler{Store: store, Client: workClient, Notifier: agentNotifier, Metrics: m}
+	}
+	slog.Info("work context adapter", "enabled", cfg.WorkContextEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 
 	// Runtime profile reads are always tenant-scoped and DB-backed. Missing
 	// documents are allowed (the worker endpoint returns 404 and the
@@ -441,6 +460,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Broadcast service (issue-439), shared by the MCP operator tools and the
+	// web approval page below. Disabled when BROADCAST_OPERATORS is empty.
+	broadcastSvc := newBroadcastService(store, cfg)
+
 	// Session management dashboard — only mounted in local-jwt mode alongside
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
@@ -453,6 +476,14 @@ func main() {
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
+		// Broadcast approval (issue-439). Under /telegram/connect so the
+		// connect-session cookie reaches it; the handler itself requires a
+		// token issued to the self-connect client, so an MCP token can
+		// never approve. See internal/web/broadcasts.go.
+		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID)
+		mux.With(manageAuth).Get("/telegram/connect/broadcasts", broadcastWeb.HandleList)
+		mux.With(manageAuth).Post("/telegram/connect/broadcasts/approve", broadcastWeb.HandleApprove)
+		mux.With(manageAuth).Post("/telegram/connect/broadcasts/cancel", broadcastWeb.HandleCancel)
 	}
 
 	// Account endpoints — self-service disconnect/delete + status.
@@ -463,6 +494,9 @@ func main() {
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
 	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled)
+	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
+	// Approval lives only on the web page registered with the manage routes.
+	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
 	// Off by default; see internal/config.Config.AppsEnabled and
@@ -621,7 +655,9 @@ func main() {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	workerDeadline := time.Now().Add(broadcastShutdownGrace)
 	_ = srv.Shutdown(shutCtx)
+	waitBroadcastWorker(workerDeadline)
 }
 
 // metricsHandler wraps the Prometheus exposition handler with an optional CIDR
@@ -832,21 +868,25 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AdminTelegramIDs:         admins,
 		ClientTelegramIDs:        clients,
 		LookupAdminTelegramIDs:   lookupAdmins,
-		AutoApproveClients:       cfg.AutoApproveClients,
-		AccessTokenTTL:           cfg.OAUTHAccessTokenTTL,
-		RefreshTokenTTL:          cfg.OAUTHRefreshTokenTTL,
-		CodeTTL:                  cfg.OAUTHCodeTTL,
-		AllowImplicitClient:      cfg.OAUTHAllowImplicitClient,
-		AllowedImplicitHosts:     cfg.OAUTHAllowedImplicitHosts,
-		PreregisteredClients:     preregisteredClients(cfg.OAUTHPreregisteredClients),
-		RegisterRatePerMin:       cfg.OAUTHRegisterRatePerMin,
-		TGAPIID:                  cfg.TGAPIID,
-		TGAPIHash:                cfg.TGAPIHash,
-		UseDBForOAuth:            useDBForOAuth,
-		DemoReviewerEnabled:      cfg.DemoReviewerEnabled,
-		DemoReviewerUsername:     cfg.DemoReviewerUsername,
-		DemoReviewerPassword:     cfg.DemoReviewerPassword,
-		DemoReviewerTGID:         cfg.DemoReviewerTGID,
+		// admin:broadcast (issue-439) goes only to ids that are ALSO in
+		// admins; ResolveScopes ignores a non-admin operator.
+		BroadcastOperatorTelegramIDs: telegramIDSet(cfg.BroadcastOperators),
+		AutoApproveClients:           cfg.AutoApproveClients,
+		AccessTokenTTL:               cfg.OAUTHAccessTokenTTL,
+		RefreshTokenTTL:              cfg.OAUTHRefreshTokenTTL,
+		CodeTTL:                      cfg.OAUTHCodeTTL,
+		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
+		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
+		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		DCRRedirectURIs:              cfg.OAUTHDCRRedirectURIs,
+		RegisterRatePerMin:           cfg.OAUTHRegisterRatePerMin,
+		TGAPIID:                      cfg.TGAPIID,
+		TGAPIHash:                    cfg.TGAPIHash,
+		UseDBForOAuth:                useDBForOAuth,
+		DemoReviewerEnabled:          cfg.DemoReviewerEnabled,
+		DemoReviewerUsername:         cfg.DemoReviewerUsername,
+		DemoReviewerPassword:         cfg.DemoReviewerPassword,
+		DemoReviewerTGID:             cfg.DemoReviewerTGID,
 	}, store)
 	if err != nil {
 		return nil, err
@@ -864,6 +904,32 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		slog.Warn("TELEGRAM_LOGIN_BOT_TOKEN unset — the daily new-client digest will not be delivered")
 	}
 	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
+	// Broadcast delivery worker (issue-439). It only ever sends campaigns a
+	// human approved, so with no operators configured there is nothing it
+	// could send and it is not started at all. The delivery QUEUE is safe
+	// with several replicas (SKIP LOCKED on Postgres, state-guarded updates
+	// everywhere); the RATE is not -- the limiter is per process, so N
+	// replicas send at N x BROADCAST_RATE_PER_SEC. main waits for the worker
+	// on shutdown (waitBroadcastWorker) so an in-flight send is recorded and
+	// the rest of its batch is handed back rather than left to the stale
+	// sweep.
+	if len(cfg.BroadcastOperators) > 0 {
+		if cfg.TelegramLoginBotToken == "" {
+			slog.Warn("BROADCAST_OPERATORS set but TELEGRAM_LOGIN_BOT_TOKEN unset — broadcast delivery is disabled")
+		} else {
+			worker := broadcast.NewWorker(store, &botapi.Client{Token: cfg.TelegramLoginBotToken}, broadcast.WorkerConfig{
+				Policy:        broadcastPolicy(cfg),
+				RatePerSecond: cfg.BroadcastRatePerSec,
+				BatchSize:     cfg.BroadcastBatchSize,
+				MaxAttempts:   cfg.BroadcastMaxAttempts,
+			}, nil)
+			startBroadcastWorker(ctx, worker)
+			if cfg.BroadcastBatchSize > 0 && worker.BatchSize() != cfg.BroadcastBatchSize {
+				slog.Warn("broadcast: batch size lowered to fit the claim lease", "requested", cfg.BroadcastBatchSize, "effective", worker.BatchSize(), "rate_per_sec", cfg.BroadcastRatePerSec)
+			}
+			slog.Info("broadcast delivery worker started", "operators", len(cfg.BroadcastOperators), "rate_per_sec", cfg.BroadcastRatePerSec, "batch_size", worker.BatchSize())
+		}
+	}
 	// Inbound login-bot updates (issue-619). Transport only: updates are made
 	// durable exactly once and handed to a registry that currently has no
 	// handlers registered -- commands belong to the #438 split, delivery
@@ -889,6 +955,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
 		"preregistered_clients", len(cfg.OAUTHPreregisteredClients),
+		"dcr_redirect_uris", len(cfg.OAUTHDCRRedirectURIs),
 		"demo_reviewer", cfg.DemoReviewerEnabled,
 	)
 	if cfg.DemoReviewerEnabled {

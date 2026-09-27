@@ -110,8 +110,21 @@ type Config struct {
 	// The records carry no secret: the authorization server is public-client
 	// + PKCE only and this variable does not widen that contract.
 	OAUTHPreregisteredClients []PreregisteredClient
-	AutoApproveClients        bool // open registration: every widget login auto-gets the client tier
-	DigestHourUTC             int  // UTC hour (0-23) for the daily new-client digest; default 9
+	// OAUTHDCRRedirectURIs is the exact-match redirect URI allowlist for RFC
+	// 7591 dynamic registration, parsed from OAUTH_DCR_REDIRECT_URIS
+	// (comma-separated). A registration whose redirect_uris are ALL on this
+	// list is accepted without consulting OAUTHAllowedImplicitHosts; one that
+	// mixes a listed URI with anything else is refused. It is how the
+	// Cloudflare MCP portal runs this server in automatic (DCR) mode
+	// (mctlhq/.github#137) without its callback hosts joining the implicit
+	// allowlist, which also governs every unregistered client_id. Matching is
+	// byte for byte: no prefix, wildcard or host semantics. Unset ⇒ empty ⇒
+	// /oauth/register behaves exactly as before. Entries are validated at
+	// startup (https or loopback http, a host, no userinfo, no fragment) and a
+	// bad entry aborts the boot. See internal/oauth Config.DCRRedirectURIs.
+	OAUTHDCRRedirectURIs []string
+	AutoApproveClients   bool // open registration: every widget login auto-gets the client tier
+	DigestHourUTC        int  // UTC hour (0-23) for the daily new-client digest; default 9
 	// BotReceiverEnabled turns on the inbound login-bot update receiver
 	// (issue-619). Default OFF, and deliberately so: getUpdates allows exactly
 	// one consumer per bot token, so enabling it in two environments that
@@ -119,6 +132,19 @@ type Config struct {
 	// other. An explicit opt-in makes claiming the token a decision rather
 	// than a side effect of deploying.
 	BotReceiverEnabled bool
+	// Safe client broadcasts (issue-439). BroadcastOperators is the
+	// allow-list of Telegram ids who may prepare, approve and cancel a
+	// broadcast; empty (the default) turns the whole workflow off,
+	// delivery worker included. The remaining knobs tune delivery through
+	// the login bot: messages per second across all campaigns, rows per
+	// worker pass, attempts per recipient on transient failures, the
+	// per-campaign audience cap and how long a preview stays approvable.
+	BroadcastOperators      []int64
+	BroadcastRatePerSec     float64
+	BroadcastBatchSize      int
+	BroadcastMaxAttempts    int
+	BroadcastRecipientLimit int
+	BroadcastApprovalTTL    time.Duration
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -255,6 +281,29 @@ type Config struct {
 	// outside a deliberate drill window — every real send on the pod is hit
 	// by this, not just a chosen one. Set via AGENT_TEST_CRASH_AFTER_RESERVE.
 	AgentTestCrashAfterReserve bool
+
+	// WorkContextEnabled gates the issue-443 work-context surface adapter:
+	// the outbound mctl-api client and the /mctl work|link subcommands. Off
+	// by default like every other agent-adjacent surface — with it false,
+	// no workctx.Client is constructed, no outbound request is ever made,
+	// and /mctl work|link fall through to the pre-#443 unknown-command
+	// reply. Set via WORK_CONTEXT_ENABLED.
+	WorkContextEnabled bool
+	// MCTLAPIBaseURL is the mctl-api root the workctx client talks to. Set
+	// via MCTL_API_BASE_URL, default https://api.mctl.ai.
+	MCTLAPIBaseURL string
+	// MCTLSurfaceTelegramToken is the bearer credential for the
+	// surface:telegram principal — never MCTL_API_TOKEN or an mctl-agent
+	// credential. Bare os.Getenv, matching the TG_API_HASH secret pattern:
+	// no default, and registered in internal/audit/redact.go's
+	// sensitiveKeys so it can never reach a log line. Set via
+	// MCTL_SURFACE_TELEGRAM_TOKEN.
+	MCTLSurfaceTelegramToken string
+	// WorkItemTenant is the single configured mctl-api tenant every
+	// Telegram-originated work item belongs to (see requirements.md's Open
+	// questions — this repository's own "tenant" concept is a different
+	// thing). Set via MCTL_WORK_ITEM_TENANT.
+	WorkItemTenant string
 }
 
 func Load() (*Config, error) {
@@ -305,6 +354,15 @@ func Load() (*Config, error) {
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 		BotReceiverEnabled:            envBool("BOT_RECEIVER_ENABLED", false),
+		BroadcastRatePerSec:           envFloat("BROADCAST_RATE_PER_SEC", 10),
+		BroadcastBatchSize:            envInt("BROADCAST_BATCH_SIZE", 20),
+		BroadcastMaxAttempts:          envInt("BROADCAST_MAX_ATTEMPTS", 5),
+		BroadcastRecipientLimit:       envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
+		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
+		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
+		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
+		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
+		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
@@ -340,6 +398,15 @@ func Load() (*Config, error) {
 	if c.AgentProfilePath != "" && c.AgentProfileOwnerTGID <= 0 {
 		return nil, fmt.Errorf("AGENT_PROFILE_OWNER_TG_ID must be set to a positive Telegram id when AGENT_PROFILE_PATH is set")
 	}
+	// Mirrors the DemoReviewer validation immediately above: an adapter
+	// enabled with no way to authenticate to mctl-api, or no tenant to file
+	// work items under, would either fail every call at runtime or (worse)
+	// silently misfile work — refuse to start rather than degrade quietly.
+	if c.WorkContextEnabled {
+		if c.MCTLSurfaceTelegramToken == "" || c.WorkItemTenant == "" {
+			return nil, fmt.Errorf("WORK_CONTEXT_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN and MCTL_WORK_ITEM_TENANT")
+		}
+	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
@@ -370,6 +437,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 	}
 	c.OAUTHPreregisteredClients = preregistered
+	c.OAUTHDCRRedirectURIs = parseStringCSV(os.Getenv("OAUTH_DCR_REDIRECT_URIS"))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
@@ -384,6 +452,7 @@ func Load() (*Config, error) {
 	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TGLoginLookupAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_LOOKUP_ADMINS"))
+	c.BroadcastOperators = parseInt64CSV(os.Getenv("BROADCAST_OPERATORS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
 	if v := os.Getenv("TG_API_ID"); v != "" {

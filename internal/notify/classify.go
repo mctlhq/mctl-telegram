@@ -5,7 +5,10 @@
 // alternative, which is dropped and forbidden by the issue).
 package notify
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Reachability states. Mirrors the four-state model in design.md: a plain
 // boolean cannot express "never observed" (the state almost every client is
@@ -39,6 +42,10 @@ type DeliveryOutcome struct {
 type APIError struct {
 	StatusCode  int
 	Description string
+	// RetryAfter is Telegram's parameters.retry_after on a 429 (flood
+	// control), zero when absent. It is advice for the caller's backoff,
+	// never a reachability signal.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {

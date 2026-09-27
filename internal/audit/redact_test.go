@@ -153,3 +153,14 @@ func TestRedactAttr_BotReceiverKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactAttr_BroadcastContentKeys(t *testing.T) {
+	for _, k := range []string{"content", "campaign_content", "broadcast_text", "Content"} {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "New tool released today"))
+			if !strings.HasPrefix(got.Value.String(), "[redacted len=") || strings.Contains(got.Value.String(), "New tool") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+		})
+	}
+}

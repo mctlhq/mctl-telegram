@@ -521,6 +521,37 @@ func agentSchemaSQLite() []string {
 			last_message_id INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Telegram-thread <-> mctl-api WorkItem bindings (issue-443). The row
+		// IS the correlation boundary: it holds only numeric Telegram
+		// identifiers and the platform's own opaque ids/state, never a
+		// message body, title or peer handle — the "do not persist the
+		// transcript" requirement is enforced by the schema, not by reviewer
+		// vigilance, the same argument bot_updates already makes for itself
+		// (internal/db/db.go). A "thread" is (user_id, chat_tg_id,
+		// root_tg_message_id) where the root message is the /mctl work
+		// command itself, in Saved Messages — see design.md's Open questions.
+		// idx_work_item_bindings_item is deliberately NOT unique: mctl-api
+		// dedupes open work on (tenant, external_key), so the same owner
+		// running /mctl work <same-issue-url> in two threads binds two
+		// threads to the same work_item_id.
+		`CREATE TABLE IF NOT EXISTS work_item_bindings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			chat_tg_id INTEGER NOT NULL,
+			root_tg_message_id INTEGER NOT NULL,
+			work_item_id TEXT NOT NULL,
+			external_key TEXT NOT NULL,
+			last_state TEXT NOT NULL DEFAULT '',
+			last_state_version INTEGER NOT NULL DEFAULT 0,
+			last_execution_id TEXT NOT NULL DEFAULT '',
+			last_request_id TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_bindings_thread
+			ON work_item_bindings(user_id, chat_tg_id, root_tg_message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_item_bindings_item
+			ON work_item_bindings(user_id, work_item_id)`,
 	}
 }
 
@@ -760,5 +791,24 @@ func agentSchemaPG() []string {
 			last_message_id BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// see the sqliteSchema comment on work_item_bindings.
+		`CREATE TABLE IF NOT EXISTS work_item_bindings (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			chat_tg_id BIGINT NOT NULL,
+			root_tg_message_id BIGINT NOT NULL,
+			work_item_id TEXT NOT NULL,
+			external_key TEXT NOT NULL,
+			last_state TEXT NOT NULL DEFAULT '',
+			last_state_version BIGINT NOT NULL DEFAULT 0,
+			last_execution_id TEXT NOT NULL DEFAULT '',
+			last_request_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_work_item_bindings_thread
+			ON work_item_bindings(user_id, chat_tg_id, root_tg_message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_item_bindings_item
+			ON work_item_bindings(user_id, work_item_id)`,
 	}
 }

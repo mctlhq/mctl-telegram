@@ -49,6 +49,10 @@ for the authoritative full list.
 | `set_account_send`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: enables or disables the per-account real-send gate. |
 | `get_user_audit_log`          | `readOnly=true`, `destructive=false`, `openWorld=false` | Admin-only: reads another Telegram user's audit rows, with audit metadata. |
 | `revoke_telegram_session`     | `readOnly=false`, `destructive=true`, `openWorld=false` | Admin-only: revokes a user's active MTProto session on this server. |
+| `prepare_broadcast`           | `readOnly=false`, `destructive=false`, `openWorld=false` | Broadcast operators only (`admin:broadcast` = platform admin AND `BROADCAST_OPERATORS`). Previews a broadcast to opted-in clients and records it as a prepared campaign; sends nothing. Returns the eligible/skipped counts and an `approval_url`. **No tool can approve**: a human operator approves on `/telegram/connect/broadcasts`, signed in with Telegram in a browser. See [docs/runbook.md](docs/runbook.md#broadcast-delivery-issue-439). |
+| `list_broadcasts`             | `readOnly=true`, `destructive=false`, `openWorld=false` | Broadcast operators only: lists campaigns, optionally by state. |
+| `get_broadcast`               | `readOnly=true`, `destructive=false`, `openWorld=false` | Broadcast operators only: one campaign plus its aggregate delivery report (no recipients named). |
+| `cancel_broadcast`            | `readOnly=false`, `destructive=true`, `openWorld=false` | Broadcast operators only: cancels a campaign that has not finished; unsent messages are skipped. |
 
 ## MCP Apps (prototype, flag-gated)
 
@@ -115,6 +119,7 @@ Key variables:
 | `OAUTH_ACCESS_TOKEN_TTL`      | optional, default `1h`                                                      |
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
 | `OAUTH_PREREGISTERED_CLIENTS` | optional; JSON array of `{"client_id","redirect_uris"}` seeded as static clients with byte-exact redirect matching. For a counterpart that cannot use dynamic registration; carries no secret. See [SECURITY.md](SECURITY.md) and [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
+| `OAUTH_DCR_REDIRECT_URIS`     | optional; comma-separated, byte-exact redirect URI allowlist for `POST /oauth/register`. A registration whose `redirect_uris` are all on it is accepted without the implicit-host allowlist; mixing in any other URI is refused. For an MCP gateway that registers itself (the Cloudflare MCP portal in automatic mode). Unset changes nothing. See [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
 
 > `OAUTH_JWT_SECRET` is a deprecated alias of `OAUTH_JWT_SIGNING_KEY`. It is
 > still accepted as a fallback but logs a warning at startup. Use
@@ -164,6 +169,8 @@ docker compose up -d
 Services started: `app` (mctl-telegram on port 8080) and `db` (Postgres 16).
 
 For Beta-tier service-level objectives, error-budget policy, and burn-rate alert definitions, see [docs/slo.md](docs/slo.md).
+
+If a tool call or the OAuth flow returned an error string and you need to know what it means and what to do next, see [docs/troubleshooting.md](docs/troubleshooting.md) — a client-facing page for the error families clients actually hit, distinct from the alert-driven [docs/runbook.md](docs/runbook.md).
 
 ## Connecting to Claude.ai
 

@@ -10,13 +10,20 @@ header says which is which.
 Canary incidents are out of scope here; see
 [docs/runbooks/canary.md](runbooks/canary.md).
 
+This runbook is alert-driven — it is organized by Prometheus alert rule, for
+on-call response. For the client-facing error families a client or LLM agent
+actually hits (the exact string a tool or the OAuth flow returned, and what
+to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
+
 ---
 
 ## Table of contents
 
+- [Troubleshooting: error families clients actually hit](troubleshooting.md)
 - [MctlTelegramNearCapacity — session pool near capacity](#mctltelegramnearcapacity)
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
+- [Rejected dynamic client registrations (issue-668)](#oauthclientregistrations)
 - [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
 - [Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS](#lookup-admin-tier-and-tg_login_lookup_admins)
 - [JwtFailures — authentication failure spike](#jwtfailures)
@@ -1013,6 +1020,66 @@ Open a postmortem if:
 
 ---
 
+<a id="oauthclientregistrations"></a>
+## Rejected dynamic client registrations (issue-668)
+
+No dedicated alert ships with this yet — see design.md's Out-of-scope note;
+a baseline is needed before choosing thresholds. This section documents what
+is available today.
+
+Every `POST /oauth/register` call now reaches a terminal outcome logged as a
+single `oauth: client_registration audit` line and counted in
+`mctl_oauth_client_registrations_total{outcome,reason}`:
+
+- `outcome` is one of `accepted`, `rejected`, `rate_limited`, `error`.
+- `reason` is a closed, compile-time token set: `ok`, `rate_limited`,
+  `malformed_body`, `no_redirect_uris`, `too_many_redirect_uris`,
+  `redirect_uri_too_long`, `redirect_scheme_not_allowed`,
+  `redirect_host_not_allowed`, `redirect_userinfo`, `redirect_backslash`,
+  `redirect_unparseable`, `persist_failed`, `redirect_not_on_dcr_list`.
+  Neither label is ever a client-supplied string, so the series count is
+  bounded.
+
+`redirect_not_on_dcr_list` means a registration named at least one URI on
+`OAUTH_DCR_REDIRECT_URIS` together with one that is not; such a set is refused
+whole. An `accepted` line carries `dcr_allowlisted=true` when the registration
+went through that exact list (the Cloudflare MCP portal in automatic mode)
+rather than the implicit-host path. If the portal's registration is refused,
+compare the `redirect_host` on the rejection with the list: the portal's
+dashboard callback embeds the account id and the portal server id, and each
+must be listed byte for byte.
+
+A rejection's log line also carries `client_name`, `user_agent`, and — only
+when the refusal concerns a redirect URI — `redirect_scheme` and
+`redirect_host` (never the full URI, its path, or its query string). A
+rate-limited attempt carries neither the caller's IP nor `client_name`.
+
+Rejected registrations are deliberately **not** written to `audit_logs`:
+`/oauth/register` is unauthenticated and has no `user_id` to key a
+hash-chained row on. See design.md's Alternatives section.
+
+Useful queries:
+
+```promql
+sum(rate(mctl_oauth_client_registrations_total{outcome="rejected"}[15m])) by (reason)
+```
+
+```sh
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=1h \
+  | grep 'oauth: client_registration audit' | grep 'outcome=rejected'
+```
+
+A sustained run of `redirect_scheme_not_allowed` or
+`redirect_host_not_allowed` from one `client_name`/`user_agent` is a client
+whose redirect URI the current policy refuses — see the issue's own open
+question about RFC 8252 §7.1 private-use schemes before changing that
+policy. A regression in `validateRedirectURIShape`/`validateImplicitRedirectURI`
+that starts refusing every client would show up as `accepted` dropping to
+near zero while `rejected` climbs — that is the case this counter exists to
+catch quickly.
+
+---
+
 <a id="jwtfailures"></a>
 ## JwtFailures — authentication failure spike
 
@@ -1047,6 +1114,24 @@ Open a postmortem if:
 - **`other`**: Catch-all for unexpected validation errors; check pod logs.
 - **Provider context:** `provider` label values are `local-jwt`,
   `shared-hmac`, and `local-dev`.
+
+### Attribution (issue-668)
+
+The `auth failed` WARN line itself now carries more than `err`:
+`edge_request_id` and `edge_route` (from `Cf-Ray`/`Cf-Worker`, `direct` when
+neither header is present) and the chi route pattern in `route`, on every
+failure. When the failure happened *after* the token's HMAC signature
+verified — expired, wrong issuer, wrong audience, revoked — it additionally
+carries `sub`, `client_id`, `jti` and `exp`, taken from the token's own
+claims and omitting any the token did not carry. A token that fails at or
+before the signature check (malformed JWT, bad signature, malformed payload,
+non-Bearer scheme) NEVER carries any of the four: that payload is
+unauthenticated attacker-controlled input, and logging claims from it would
+turn the log into a write channel for whoever sends the token. `sub` /
+`client_id` / `jti` / `exp` are not treated as sensitive by the redacting
+slog handler — they are identifiers this service itself minted and signed,
+not secrets — see the comment in `internal/audit/redact.go`. No new counter:
+`mctl_auth_failures_total{reason,provider}` is unchanged.
 
 ### Diagnostic queries
 
@@ -1529,12 +1614,32 @@ diagnosis:
 
 ```sh
 kubectl -n mctl-telegram logs -l app=mctl-telegram --since=30m \
-  | grep -E 'telegram login: (connecting|connection established)|enable: telegram login failed'
+  | grep -E 'telegram login: (connecting|connection established)|enable: telegram login failed|enable: onboarding abandoned'
 ```
 
 "connecting" with no "connection established" is a network or datacenter
 problem. Both present, followed by the deferred failure line, means
 `SendCode` itself is slow — see `MctlTelegramLoginSlow` below.
+
+`enable: onboarding abandoned` (WARN, added by issue-668) is the same
+deferred goroutine's line for a flow that ran out its `CodeTTL` deadline
+while parked waiting for a code or password no one ever submitted — i.e. a
+user who walked away, not a Telegram-side stall. It carries `step` and
+`elapsed`, but no `err`, and `step` is always one of the two prompt states,
+`code_requested` or `password_requested`: the arm is gated on them because
+the same deadline also covers the `SendCode` and sign-in RPCs. A deadline
+that fires at any other step (`phone_submitted`, `code_submitted`,
+`password_submitted`) is a Telegram- or DB-side stall and keeps the ERROR
+line with its `err` — so an `enable: telegram login failed` at
+`step=phone_submitted` with `context deadline exceeded` is a reliable
+"Telegram never answered SendCode" signal, not something to disambiguate.
+A `/start` re-submission superseding a live flow logs `enable: login flow
+superseded` (INFO) with the same `uid`/`step` and is not a failure at all,
+but only when the flow's own error is the cancellation; a flow that already
+held a real failure (FLOOD_WAIT, identity mismatch) when it was superseded
+still logs the ERROR line. A drop in `enable: telegram login failed` volume
+after this change is expected, not a regression: it means abandoned and
+superseded flows stopped being counted as failures, which is the point.
 
 ### Mitigation
 
@@ -2215,3 +2320,98 @@ from the batch in memory. So:
 
 Adding a queue would introduce a second place to lose an update in exchange for a
 guarantee Telegram already gives for 24 hours.
+
+## Broadcast delivery (issue-439)
+
+A broadcast is a campaign that one call prepares (a preview) and a human
+operator approves. Delivery is done by a background worker through the login
+bot, and only ever for an approved campaign. The worker starts only when
+`BROADCAST_OPERATORS` is non-empty **and** `TELEGRAM_LOGIN_BOT_TOKEN` is set.
+With the default empty allow-list the whole workflow is off.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BROADCAST_OPERATORS` | empty (off) | Telegram ids allowed to prepare, approve and cancel broadcasts |
+| `BROADCAST_RATE_PER_SEC` | `10` | messages per second across all campaigns, **per replica** (Telegram's bot-wide ceiling is about 30). The limiter is in-process: with N replicas running the worker the bot sends up to N× this rate |
+| `BROADCAST_BATCH_SIZE` | `20` | deliveries claimed per worker pass (every 5 s) |
+| `BROADCAST_MAX_ATTEMPTS` | `5` | sends per recipient on transient failures (429 / 5xx / connection refused) |
+| `BROADCAST_RECIPIENT_LIMIT` | `1000` | per-campaign audience cap, enforced at preview and again at start (stored on the campaign when it is prepared) |
+| `BROADCAST_APPROVAL_TTL` | `30m` | how long a preview stays approvable |
+
+### Who can do what
+
+| Step | Where | Requires |
+|---|---|---|
+| prepare (preview), list, get, cancel | MCP tools `prepare_broadcast`, `list_broadcasts`, `get_broadcast`, `cancel_broadcast` | the `admin:broadcast` scope: a platform admin (`TG_LOGIN_ADMINS`) who is also in `BROADCAST_OPERATORS` |
+| **approve** (and cancel) | web page `/telegram/connect/broadcasts` | the same operator, signed in with Telegram **in a browser** |
+
+There is no approve tool. The approval page accepts only an access token whose
+`client_id` is the built-in self-connect client (`oauth.ConnectClientID`). Such a
+token is minted only by the browser Telegram login (`/telegram/connect`); the
+token endpoint refuses that client's codes and refresh tokens. An assistant's
+MCP token -- even an operator's, even presented as the connect cookie --
+carries its own client id and is refused (403, audited as
+`broadcast_approve_web` with status `error`). Every POST must also carry a
+same-origin `Origin` header. Access tokens issued before this release carry no
+`client_id`; an operator signed in before it simply signs in again.
+
+To approve: open the `approval_url` the assistant returns, sign in with
+Telegram if asked (`/telegram/connect`), check the exact text, selector and
+preview counts, and press **Approve and send**. The approval is bound to the
+text and selector hashes the page rendered; if the campaign changed, it is
+refused.
+
+### Lifecycle
+
+`prepared → approved → sending → completed`, with two exits:
+
+- `cancelled`: by an operator at any point before completion, or by the
+  worker at start. Only unsent work stops.
+- `expired`: a preview that was never approved in time.
+
+At start the worker **resolves the audience again**. A client who unsubscribed,
+was banned or became unreachable after the preview is not queued. Right before
+**each** send it re-checks consent, eligibility and the campaign state again.
+
+### Reading a delivery's `reason`
+
+| Status / reason | Meaning |
+|---|---|
+| `delivered` | the Bot API accepted the message. This is **not** a read receipt |
+| `skipped/unsubscribed`, `…/unreachable`, `…/policy`, `…/no_account`, `…/out_of_audience` | dropped by the pre-send re-check |
+| `skipped/cancelled` | the campaign was cancelled (or halted by the integrity check below) before this recipient's turn |
+| `failed/bot_blocked`, `…/user_deactivated`, `…/cannot_initiate_conversation`, `…/chat_not_found` | a permanent refusal; bot reachability is updated so the next campaign skips the client up front |
+| `failed/rejected_<status>` | another 4xx that says nothing about the client; not retried, reachability untouched |
+| `failed/retries_exhausted` | transient failures (or database errors while checking this recipient) until `BROADCAST_MAX_ATTEMPTS` |
+| `failed/outcome_unknown` | the request may have reached Telegram (a timeout, or a crash mid-send). Deliberately **never re-sent**, so a recipient can get the message at most once |
+
+A campaign-level `end_reason` is set when the worker ended a campaign:
+`no_eligible_recipients_at_send` or `recipient_limit_exceeded_at_send` at
+start, or `content_or_selector_integrity_mismatch` at start **or mid-send**
+(the stored row no longer matches what was approved: nothing more of it is
+delivered, and its remaining queue is closed as `skipped/cancelled`).
+
+A claimed row that was never attempted -- a database error earlier in the
+batch, a shutdown while waiting for the rate limiter, or too little lease left
+to finish a send -- goes back to `pending` without counting an attempt. A
+database error while checking a row itself counts as an attempt and backs the
+row off, so a row that keeps failing ends as `retries_exhausted` instead of
+holding its campaign open. `BROADCAST_BATCH_SIZE` is lowered automatically to
+what the rate can send inside the 2-minute claim lease.
+
+On shutdown the server waits up to 20 s for the worker: a send already under
+way is completed and recorded (never aborted), and the rest of the batch goes
+back to `pending`.
+
+### Inspecting a campaign
+
+Aggregates only. The table never stores Telegram's response text, and campaign
+content is redacted from logs.
+
+```sql
+SELECT id, state, end_reason, approved_by, approved_at, completed_at
+  FROM broadcast_campaigns ORDER BY created_at DESC LIMIT 10;
+
+SELECT status, reason, COUNT(*) FROM broadcast_deliveries
+ WHERE campaign_id = '<id>' GROUP BY status, reason;
+```

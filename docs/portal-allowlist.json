@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must carry a `reason` that says what the tool exposes and why that is acceptable on a shared surface, and `upstream_gates`: the exact set of server-side checks the handler performs (scope tokens from requireScope/requireAnyScope, `send-gate` for evaluateSendGate/evaluateWriteGate, or `self-only` for a tool the test knows acts on the caller alone). The guard test re-derives that set from the Go source and fails on any difference, so the field cannot drift from the code. The portal allowlist is a per-server on/off switch that cannot see users; the upstream gate is the access control (decision 2026-09-12, mctlhq/.github#35). Apply with scripts/portal-allowlist-apply.sh.",
+  "$comment": "Source of truth for the Cloudflare MCP portal mapping of server `tg` (mctlhq/.github#35). Every tool this server registers must appear here with an explicit decision; internal/mcp/portal_allowlist_test.go fails the build otherwise. An enabled tool must carry a `reason` that says what the tool exposes and why that is acceptable on a shared surface, and `upstream_gates`: the exact set of server-side checks the handler performs (scope tokens from requireScope/requireAnyScope, `send-gate` for evaluateSendGate/evaluateWriteGate, or `self-only` for a tool the test knows acts on the caller alone). The guard test re-derives that set from the Go source and fails on any difference, so the field cannot drift from the code. The portal allowlist is a per-server on/off switch that cannot see users; the upstream gate is the access control (decision 2026-09-12, mctlhq/.github#35). Published by .github/workflows/portal-allowlist-dispatch.yml into mctlhq/mctl-gitops, which vendors it byte-identical and applies it with OpenTofu (mctlhq/mctl-gitops#1370).",
   "portal": "mcp",
   "server": "tg",
   "default_disabled": true,
@@ -273,6 +273,38 @@
         "admin:users"
       ],
       "reason": "Admin-only grant/revoke of the client access tier; refused upstream without admin:users."
+    },
+    {
+      "name": "prepare_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: records a campaign preview (normalized text, server-resolved audience counts, redacted sample). Sends nothing; approval is web-only and cannot be done by any tool."
+    },
+    {
+      "name": "list_broadcasts",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: lists campaigns with their operator-authored text, selector and preview counts. No recipient identities."
+    },
+    {
+      "name": "get_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: one campaign plus its aggregate delivery report (counts by status and reason). No recipient identities, no message reads."
+    },
+    {
+      "name": "cancel_broadcast",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:broadcast"
+      ],
+      "reason": "Broadcast operators only: cancels a campaign that has not finished; unsent work is skipped, delivered messages stay delivered. Can only stop delivery, never start it."
     }
   ]
 }

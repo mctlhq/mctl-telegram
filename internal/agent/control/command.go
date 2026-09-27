@@ -22,12 +22,32 @@ const (
 	CmdApprove       CommandType = "approve"
 	CmdReject        CommandType = "reject"
 	CmdConversations CommandType = "conversations"
+	// CmdWork is issue-443's /mctl work <issue-url|status|note|resume>
+	// subcommand. Its own sub-action is carried on Command.Sub, since "work"
+	// itself is not enough to dispatch on — see the Sub* constants below.
+	CmdWork CommandType = "work"
+	// CmdLink is /mctl link <code>, the one-time surface-identity redeem
+	// flow. Sub is always empty for this command.
+	CmdLink CommandType = "link"
 )
 
-// Command is a parsed owner instruction typed into Saved Messages.
+// Sub values for a parsed CmdWork command — which /mctl work form the owner
+// typed. Every other (pre-existing) CommandType keeps an empty Sub, so their
+// Command{} zero values stay byte-identical to before this field existed.
+const (
+	SubWorkOpen   = "open"
+	SubWorkStatus = "status"
+	SubWorkNote   = "note"
+	SubWorkResume = "resume"
+)
+
+// Command is a parsed owner instruction typed into Saved Messages. Sub is
+// populated only for CmdWork (one of the Sub* constants above); every other
+// CommandType leaves it empty.
 type Command struct {
 	Type CommandType
 	Arg  string
+	Sub  string
 }
 
 // ErrNotACommand means the text does not start with /mctl at all. The
@@ -87,7 +107,43 @@ func ParseCommand(text string) (Command, error) {
 			return Command{}, fmt.Errorf("%w: /mctl %s <arg>", ErrMissingArg, sub)
 		}
 		return Command{Type: sub, Arg: arg}, nil
+	case CmdLink:
+		if arg == "" {
+			return Command{}, fmt.Errorf("%w: /mctl link <code>", ErrMissingArg)
+		}
+		// Only the first token is the code, same rationale as
+		// approve/reject above: a code never legitimately contains spaces.
+		return Command{Type: sub, Arg: fields[2]}, nil
+	case CmdWork:
+		return parseWorkCommand(fields)
 	default:
 		return Command{}, fmt.Errorf("%w: %q", ErrUnknownCommand, fields[1])
+	}
+}
+
+// parseWorkCommand parses everything after "/mctl work". URL validation
+// (CanonicalIssueURL) deliberately does NOT happen here — ParseCommand stays
+// a pure function with no notion of what a valid GitHub issue URL looks
+// like; that belongs to internal/workctx.CanonicalIssueURL, called by the
+// work handler.
+func parseWorkCommand(fields []string) (Command, error) {
+	if len(fields) < 3 {
+		return Command{}, fmt.Errorf("%w: /mctl work <issue-url>|status|note <text>|resume", ErrMissingArg)
+	}
+	switch strings.ToLower(fields[2]) {
+	case SubWorkStatus:
+		return Command{Type: CmdWork, Sub: SubWorkStatus}, nil
+	case SubWorkResume:
+		return Command{Type: CmdWork, Sub: SubWorkResume}, nil
+	case SubWorkNote:
+		if len(fields) < 4 {
+			return Command{}, fmt.Errorf("%w: /mctl work note <text>", ErrMissingArg)
+		}
+		return Command{Type: CmdWork, Sub: SubWorkNote, Arg: strings.Join(fields[3:], " ")}, nil
+	default:
+		// Anything else is taken as the issue-url argument to "open" — the
+		// URL itself is validated later by workctx.CanonicalIssueURL, not
+		// here.
+		return Command{Type: CmdWork, Sub: SubWorkOpen, Arg: strings.Join(fields[2:], " ")}, nil
 	}
 }

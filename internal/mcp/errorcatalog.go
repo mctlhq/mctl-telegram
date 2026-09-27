@@ -26,7 +26,15 @@ type transientEntry struct {
 var mtprotoErrCatalog = map[string]catalogEntry{
 	"PEER_ID_INVALID": {
 		message: "The peer ID is not valid for this account. Use @username, user:<id>, chat:<id>, or channel:<id>.",
-		action:  "Check the peer argument and retry.",
+		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.",
+	},
+	"CHANNEL_INVALID": {
+		message: "The channel or supergroup reference is not valid for this account.",
+		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.",
+	},
+	"CHAT_ID_INVALID": {
+		message: "The chat reference is not valid for this account.",
+		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.",
 	},
 	"USERNAME_INVALID": {
 		message: "The username is not valid.",

@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -41,7 +42,7 @@ type sentMessageKey struct {
 }
 
 type CommandRouter interface {
-	HandleSavedText(ctx context.Context, userID int64, text string) error
+	HandleSavedText(ctx context.Context, meta control.SavedMeta, text string) error
 }
 
 type Listener struct {
@@ -361,7 +362,13 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			return fmt.Errorf("check saved command event: %w", err)
 		}
 		if l.Router != nil && ex.SavedCommandText != "" {
-			if err := l.Router.HandleSavedText(ctx, acct.userID, ex.SavedCommandText); err != nil {
+			meta := control.SavedMeta{
+				UserID:      acct.userID,
+				SelfTGID:    acct.tgID,
+				ChatTGID:    ex.Event.ChatTGID,
+				TGMessageID: ex.Event.MessageID,
+			}
+			if err := l.Router.HandleSavedText(ctx, meta, ex.SavedCommandText); err != nil {
 				return fmt.Errorf("route saved command: %w", err)
 			}
 		}
