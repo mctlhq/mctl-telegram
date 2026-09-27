@@ -151,6 +151,19 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// reason column on audit_logs (mctl-telegram#696). Operator-only
+	// classification of a failing tool call (scope_denied, invalid_argument,
+	// telegram_error, ...), populated by internal/mcp's recording wrapper.
+	// Nullable with no DEFAULT, following the call_path precedent exactly:
+	// reason is deliberately NOT part of hashAuditEntry's input (see
+	// internal/db/audit_chain.go), so adding this column and writing it never
+	// changes the canonical hash of any row, old or new — VerifyAuditChain
+	// stays byte-for-byte unchanged and a rolled-back binary still verifies
+	// every row the new binary wrote.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "reason",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// Correlation columns on audit_logs (mctl-telegram#617 Slice 2). They
 	// record how the call arrived: edge_request_id is Cf-Ray, edge_route is
 	// portal/direct decided by Cf-Worker, and mcp_method / mcp_name /

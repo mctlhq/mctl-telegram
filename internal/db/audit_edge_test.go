@@ -25,7 +25,7 @@ func TestLogToolCall_RecordsHowTheCallArrived(t *testing.T) {
 		MCPName:         "get_my_identity",
 		ProtocolVersion: "2026-07-28",
 	})
-	s.LogToolCall(called, uid, "get_my_identity", "", "ok", "", "")
+	s.LogToolCall(called, uid, "get_my_identity", "", "ok", "", "", "")
 
 	entries, err := s.ListAuditFor(ctx, uid, 10, time.Time{})
 	if err != nil {
@@ -56,7 +56,7 @@ func TestLogToolCall_LeavesCorrelationEmptyWithoutAnEdgeContext(t *testing.T) {
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "bob", "", "test")
 
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "", "")
 
 	entries, err := s.ListAuditFor(ctx, uid, 10, time.Time{})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestVerifyAuditChain_DetectsARewrittenEdgeRequestID(t *testing.T) {
 	s.LogToolCall(edgectx.With(ctx, edgectx.Context{
 		RequestID: "a39ad476896f4649-IAD",
 		Route:     edgectx.RoutePortal,
-	}), uid, "get_my_identity", "", "ok", "", "")
+	}), uid, "get_my_identity", "", "ok", "", "", "")
 
 	if v, err := s.VerifyAuditChain(ctx, uid); err != nil || !v.OK {
 		t.Fatalf("precondition: chain should verify, ok=%v err=%v", v.OK, err)
@@ -127,7 +127,7 @@ func TestVerifyAuditChain_PreSlice2NullCorrelationVerifies(t *testing.T) {
 
 	// A Slice 2 row chains on top of it.
 	s.LogToolCall(edgectx.With(ctx, edgectx.Context{RequestID: "ray", Route: edgectx.RouteDirect}),
-		uid, "list_dialogs", "", "ok", "", "")
+		uid, "list_dialogs", "", "ok", "", "", "")
 
 	v, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {

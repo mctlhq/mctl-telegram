@@ -1742,7 +1742,14 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // serialise. SQLite uses BEGIN IMMEDIATE which acquires a write lock for
 // the same effect on a single-writer connection. Without this, two
 // concurrent writes would race on prev_hash and break the chain.
-func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath string) {
+//
+// reason (mctl-telegram#696) is an operator-only classification of a
+// failing call (see internal/mcp's reason taxonomy); non-MCP callers pass
+// "". It is written to its own nullable column and is deliberately NOT
+// folded into hashAuditEntry's input — see internal/db/audit_chain.go — so
+// it never changes the canonical hash of a row and is invisible to
+// VerifyAuditChain and to db.AuditEntry / ListAuditFor.
+func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath, reason string) {
 	createdAt := time.Now().UTC()
 	// How the call arrived (mctl-telegram#617 Slice 2). Captured in
 	// internal/mcp.httpContext, which builds the context of every MCP tool
@@ -1791,10 +1798,10 @@ func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacte
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
-		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, reason)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
-		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion),
+		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason),
 	); err != nil {
 		return
 	}

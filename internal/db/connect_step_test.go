@@ -48,12 +48,12 @@ func TestLastConnectStepFor_MostRecentStepAndNeverStarted(t *testing.T) {
 	}
 
 	// Alice: two connect steps — the later one must win.
-	s.LogToolCall(ctx, aliceUID, "connect:phone_submitted", "", "ok", "", "")
+	s.LogToolCall(ctx, aliceUID, "connect:phone_submitted", "", "ok", "", "", "")
 	time.Sleep(2 * time.Millisecond)
-	s.LogToolCall(ctx, aliceUID, "connect:failed:flood_wait", "", "error", "FLOOD_WAIT_300", "")
+	s.LogToolCall(ctx, aliceUID, "connect:failed:flood_wait", "", "error", "FLOOD_WAIT_300", "", "")
 
 	// Bob: only a non-connect tool call — must be absent from the result.
-	s.LogToolCall(ctx, bobUID, "list_dialogs", "", "ok", "", "")
+	s.LogToolCall(ctx, bobUID, "list_dialogs", "", "ok", "", "", "")
 
 	// Carol: no audit rows at all.
 	_ = carolUID
@@ -125,7 +125,7 @@ func TestLastConnectStepFor_NeverSelectsPeerOrError(t *testing.T) {
 	}
 	const peerMarker = "@erin_synthetic_handle"
 	const errorMarker = "DO-NOT-LEAK-ERROR-MARKER-4471"
-	s.LogToolCall(ctx, uid, "connect:failed:code_invalid", peerMarker, "error", errorMarker, "")
+	s.LogToolCall(ctx, uid, "connect:failed:code_invalid", peerMarker, "error", errorMarker, "", "")
 
 	out, err := s.LastConnectStepFor(ctx, []int64{500100105})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestVerifyAuditChain_UnaffectedByRevokedReasonColumn(t *testing.T) {
 		t.Fatalf("ensure user: %v", err)
 	}
 
-	s.LogToolCall(ctx, uid, "connect:phone_submitted", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "connect:phone_submitted", "", "ok", "", "", "")
 	if res, err := s.VerifyAuditChain(ctx, uid); err != nil || !res.OK {
 		t.Fatalf("chain before revoke: OK=%v err=%v", res.OK, err)
 	}
@@ -168,7 +168,7 @@ func TestVerifyAuditChain_UnaffectedByRevokedReasonColumn(t *testing.T) {
 	if _, err := s.RevokeActiveSession(ctx, uid, "disconnect"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	s.LogToolCall(ctx, uid, "connect:success", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "connect:success", "", "ok", "", "", "")
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {

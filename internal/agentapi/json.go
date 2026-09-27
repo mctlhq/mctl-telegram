@@ -72,7 +72,7 @@ func (s *Server) audit(ctx context.Context, userID int64, tool, status, errMsg s
 	if s.Store == nil {
 		return
 	}
-	s.Store.LogToolCall(ctx, userID, tool, "", status, errMsg, "")
+	s.Store.LogToolCall(ctx, userID, tool, "", status, errMsg, "", "")
 }
 
 func logHandlerErr(tool string, err error) {

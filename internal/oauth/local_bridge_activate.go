@@ -1093,7 +1093,7 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		s.unindexActivation(act)
 	}
 	s.mu.Unlock()
-	s.store.LogToolCall(ctx, uid, "local_bridge_activate", "", "ok", "", "")
+	s.store.LogToolCall(ctx, uid, "local_bridge_activate", "", "ok", "", "", "")
 	clearActivationConsentCookie(w)
 	renderActivationDone(w)
 }

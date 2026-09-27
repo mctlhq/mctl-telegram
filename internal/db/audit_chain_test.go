@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 )
 
 func TestVerifyAuditChain_EmptyChainIsOK(t *testing.T) {
@@ -26,9 +28,9 @@ func TestVerifyAuditChain_FreshChainVerifies(t *testing.T) {
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
 
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "")
-	s.LogToolCall(ctx, uid, "send_message:draft", "user:hash", "ok", "", "")
+	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "", "")
+	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "", "")
+	s.LogToolCall(ctx, uid, "send_message:draft", "user:hash", "ok", "", "", "")
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {
@@ -46,9 +48,9 @@ func TestVerifyAuditChain_DetectsTamperedRow(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "")
-	s.LogToolCall(ctx, uid, "send_message:sent", "user:hash", "ok", "", "")
+	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "", "")
+	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "", "")
+	s.LogToolCall(ctx, uid, "send_message:sent", "user:hash", "ok", "", "", "")
 
 	// Tamper: rewrite the middle row's tool_name without touching its hash.
 	var middleID int64
@@ -80,8 +82,8 @@ func TestLogToolCall_ChainsAcrossEntries(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "a", "", "ok", "", "")
-	s.LogToolCall(ctx, uid, "b", "", "ok", "", "")
+	s.LogToolCall(ctx, uid, "a", "", "ok", "", "", "")
+	s.LogToolCall(ctx, uid, "b", "", "ok", "", "", "")
 
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT entry_hash, prev_hash FROM audit_logs WHERE user_id=$1 ORDER BY id ASC`,
@@ -138,7 +140,7 @@ func TestVerifyAuditChain_PreM4NullCallPathVerifies(t *testing.T) {
 	}
 
 	// An M4 row (non-NULL call_path) chains on top of the legacy row.
-	s.LogToolCall(ctx, uid, "m4_tool", "", "ok", "", "local")
+	s.LogToolCall(ctx, uid, "m4_tool", "", "ok", "", "local", "")
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {
@@ -157,9 +159,9 @@ func TestVerifyAuditChain_IsolatedPerUser(t *testing.T) {
 	s := newTestStore(t)
 	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
 	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
-	s.LogToolCall(ctx, alice, "a", "", "ok", "", "")
-	s.LogToolCall(ctx, bob, "b", "", "ok", "", "")
-	s.LogToolCall(ctx, alice, "c", "", "ok", "", "")
+	s.LogToolCall(ctx, alice, "a", "", "ok", "", "", "")
+	s.LogToolCall(ctx, bob, "b", "", "ok", "", "", "")
+	s.LogToolCall(ctx, alice, "c", "", "ok", "", "", "")
 
 	// alice's chain doesn't include bob's row, so alice's chain is
 	// a→c (verified). bob's chain has one row (verified). Tamper bob
@@ -175,5 +177,78 @@ func TestVerifyAuditChain_IsolatedPerUser(t *testing.T) {
 	}
 	if !res.OK {
 		t.Fatalf("tampering bob's row must not affect alice's chain, got %+v", res)
+	}
+}
+
+// reason (mctl-telegram#696) is deliberately excluded from hashAuditEntry's
+// input: it is a classification derived from status/error, which are
+// already hashed, so the column can be added and populated without ever
+// changing a row's canonical hash. This is what lets a rolled-back binary
+// (which writes reason="") still verify every row a newer binary wrote with
+// a real reason, and what keeps the hash chain code itself untouched by
+// this proposal (see internal/db/audit_chain.go and design.md's Rollback
+// section).
+func TestLogToolCall_ReasonIsExcludedFromTheHash(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
+	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
+
+	// Two fresh users so both rows chain on the same genesis prev_hash; the
+	// only difference between the two calls is the trailing reason
+	// argument. hashAuditEntry itself takes no reason parameter at all, so
+	// recomputing it from each row's own stored fields (everything except
+	// reason) and comparing against the stored entry_hash proves reason
+	// played no part in producing it — whether or not the row actually
+	// carries one.
+	s.LogToolCall(ctx, alice, "search_messages", "user:hash", "error", "identity missing scope telegram:messages:read", "", "scope_denied")
+	s.LogToolCall(ctx, bob, "search_messages", "user:hash", "error", "identity missing scope telegram:messages:read", "", "")
+
+	for _, tc := range []struct {
+		name       string
+		uid        int64
+		wantReason string
+	}{
+		{"row written with reason", alice, "scope_denied"},
+		{"row written with empty reason", bob, ""},
+	} {
+		var entryHash []byte
+		var createdAt time.Time
+		var reasonCol sql.NullString
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT entry_hash, created_at, reason FROM audit_logs WHERE user_id = $1`, tc.uid,
+		).Scan(&entryHash, &createdAt, &reasonCol); err != nil {
+			t.Fatalf("%s: read row: %v", tc.name, err)
+		}
+		gotReason := reasonCol.String
+		if !reasonCol.Valid {
+			gotReason = ""
+		}
+		if gotReason != tc.wantReason {
+			t.Fatalf("%s: reason column = %q, want %q", tc.name, gotReason, tc.wantReason)
+		}
+		want := hashAuditEntry(make([]byte, sha256.Size), tc.uid, "search_messages", "user:hash", "error",
+			"identity missing scope telegram:messages:read", sql.NullString{String: "", Valid: true}, createdAt, auditEdge{})
+		if !bytesEqual(entryHash, want) {
+			t.Fatalf("%s: stored entry_hash does not match hashAuditEntry recomputed with no reason input at all — reason must stay outside the hash", tc.name)
+		}
+	}
+
+	// Mixed with call_path and edge columns set (M4 / Slice 2 style rows),
+	// a chain carrying reason on some rows and not others must still
+	// verify end to end for both users.
+	s.LogToolCall(edgectx.With(ctx, edgectx.Context{RequestID: "ray", Route: edgectx.RoutePortal}),
+		alice, "list_dialogs", "", "ok", "", "local", "")
+	s.LogToolCall(ctx, alice, "get_my_audit_log", "", "error", "before must be RFC3339 (e.g. 2026-05-14T00:00:00Z)", "", "invalid_argument")
+
+	res, err := s.VerifyAuditChain(ctx, alice)
+	if err != nil {
+		t.Fatalf("verify alice: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("a chain mixing rows with and without reason, call_path and edge columns must verify, got %+v", res)
+	}
+	if res.Verified != 3 {
+		t.Fatalf("expected Verified=3, got %d", res.Verified)
 	}
 }
