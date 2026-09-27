@@ -31,16 +31,18 @@ References:
 ### Description
 mctl-telegram lets a user access and manage **their own** Telegram account from Claude after
 explicit OAuth authorization. It supports reading recent chats, summarizing messages, drafting
-replies, **preview-only sending by default**, confirmed pin actions, audit review, and account
-disconnect/delete controls. It is an **independent project — not an official Telegram app or
-Telegram API partner**, and Telegram message content is treated as untrusted user-generated data.
+replies, **consent-gated sending** (write tools are registered, but sending requires per-account
+opt-in), confirmed pin actions, audit review, and account disconnect/delete controls. It is an
+**independent project — not an official Telegram app or Telegram API partner**, and Telegram
+message content is treated as untrusted user-generated data.
 
 Existing Telegram MCP tools are mostly local/self-hosted with broad surfaces. mctl-telegram is
 intentionally narrower and safer for hosted review: 9 user-facing tools + 5 admin-only
 operator controls (14 total), each tool is read XOR write, no contact management, no media
 upload, no admin group operations. Write operations
-require explicit confirmation steps; per-peer rate limits prevent AI-driven flooding; send is
-disabled by default. Users can cryptographically verify their audit log via hash chain.
+require explicit confirmation steps; per-peer rate limits prevent AI-driven flooding; sending is
+disabled by default for any account that has not given explicit `send_enabled` consent. Users can
+cryptographically verify their audit log via hash chain.
 
 ## Tools (14)
 Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capability is by
@@ -52,7 +54,7 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 | `list_dialogs` | read | List the connected account's Telegram dialogs (optional query filter). |
 | `get_unread_messages` | read | Return unread messages, optionally for one peer. |
 | `get_messages` | read | Return recent message history for a specific peer. |
-| `send_message` | write | Send a message. **Preview-only by default**: real send requires `ALLOW_SEND=true` + `telegram:messages:send` scope + per-account `send_enabled=true`; otherwise returns `sent=false` dry-run. |
+| `send_message` | write | Send a message. **Write-gated per identity**: real send requires `ALLOW_SEND=true` (enabled in production) + `telegram:messages:send` scope + per-account `send_enabled=true`; otherwise returns `sent=false` dry-run. |
 | `prepare_pin_message` | prep (`readOnlyHint=false`, `destructiveHint=false`) | Create a local one-shot confirmation id for a later `pin_message`. No Telegram mutation, but it writes a local confirmation record, so it is not annotated read-only. |
 | `pin_message` | write | Pin/unpin a message after a matching confirmation id. |
 | `get_my_audit_log` | read | Return the authenticated user's own audit rows. |
@@ -226,7 +228,9 @@ submission.
 - [ ] Errors are actionable, not generic 500s
 
 **Send gates**
-- [ ] `ALLOW_SEND=false` default documented
+- [ ] Per-identity send model documented (all send-capable tools are always registered;
+      a real send requires ALLOW_SEND=true, per-account opt-in, and scope together —
+      not a single global default)
 - [ ] Per-user `send_enabled` gate documented
 - [ ] `telegram:messages:send` scope requirement documented
 - [ ] No tool argument bypasses send gate

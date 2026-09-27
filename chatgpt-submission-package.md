@@ -140,7 +140,8 @@ sent=false and a dry_reason field.
 - [ ] Read tools: `readOnlyHint=true`
 - [ ] Write/destructive tools: `destructiveHint=true`
 - [ ] No tool mixes read + write operations
-- [ ] `send_message` description mentions preview-only default
+- [ ] `send_message` description documents per-identity send gating (ALLOW_SEND + scope +
+      per-account `send_enabled`), not a global preview-only default
 - [ ] Submitted test cases cover only repeatable reviewer-safe user flows
 - [ ] Admin/destructive/stateful tools are documented but not submitted as reviewer pass/fail cases
 
