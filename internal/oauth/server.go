@@ -1509,10 +1509,17 @@ func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
 // ----- /oauth/telegram/callback -----
 
 // Reason vocabulary for logCallbackReject / the prefetch-refusal log line.
-// Duplicated (not shared) from internal/web/connect.go's identical set: that
-// package must not import this one, so the six constants are kept in sync by
-// the per-branch regression tests in both packages rather than by a shared
-// import.
+// Duplicated (not shared) from internal/web/connect.go: that package must not
+// import this one, so the shared values are kept in sync by the per-branch
+// regression tests in both packages rather than by a shared import.
+// connect.go additionally has exchange_failed; here the token-exchange failure
+// is already logged by its own slog.Error line in handleTelegramCallback.
+//
+// Known limit: expired_state is only reachable on the in-memory pending store.
+// The DB store (useDB, i.e. every Postgres deployment) collapses an expired
+// and a never-issued state into db.ErrOAuthNotFound, so production logs
+// unknown_state for both. Splitting them needs ConsumeOAuthPending to report
+// the TTL case separately; tracked as a follow-up, not in this change.
 const (
 	reasonMissingState    = "missing_state"
 	reasonMissingCode     = "missing_code"
@@ -1680,7 +1687,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// The raw error may embed Telegram's token-endpoint response body
 		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
 		// server-side, return an opaque message to the browser.
-		slog.Error("telegram OIDC token exchange failed", "err", err)
+		slog.Error("telegram OIDC token exchange failed", "reason", "exchange_failed", "err", err)
 		http.Error(w, "telegram authentication failed", http.StatusUnauthorized)
 		return
 	}

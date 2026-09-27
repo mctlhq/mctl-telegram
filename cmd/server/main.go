@@ -431,7 +431,10 @@ func main() {
 
 	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {
-		slog.Error("invalid AUTH_MODE; refusing to start", "err", err)
+		// Mode-agnostic headline: since the hoist above, this also reports a
+		// missing signing key or issuer for local-jwt, not only a bad
+		// AUTH_MODE, so it must not blame AUTH_MODE for every failure.
+		slog.Error("auth provider init failed; refusing to start", "auth_mode", cfg.AuthMode, "err", err)
 		os.Exit(1)
 	}
 
