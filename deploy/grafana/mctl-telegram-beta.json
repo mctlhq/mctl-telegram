@@ -761,6 +761,36 @@
       ],
       "title": "Tool availability burn rate (1h and 6h)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "MCP tools/call failures per second, split by tool and the closed-set reason classification (mctl-telegram#696): scope_denied, invalid_argument, telegram_error, tool_not_found, ... Not pre-created at zero, so a brand-new (tool, reason) pair's first occurrence is visible here before it is visible to increase().",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 67},
+      "id": 26,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(mctl_tool_call_errors_total{namespace=\"$namespace\",pod=~\"$pod\",instance=~\"$instance\"}[$__rate_interval])) by (tool, reason)",
+          "legendFormat": "{{tool}} {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool-call error breakdown by reason",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
