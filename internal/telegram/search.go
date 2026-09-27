@@ -10,50 +10,90 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// SearchParams describes one search_messages query. Zero MinDate/MaxDate mean
+// unbounded, which is Telegram's own encoding for those fields.
+type SearchParams struct {
+	Peer    string
+	Query   string
+	Limit   int
+	MinDate time.Time
+	MaxDate time.Time
+}
+
+// searchInvoker is the slice of *tg.Client the search path uses. It exists so
+// tests can capture the constructed requests without a live MTProto client.
+type searchInvoker interface {
+	MessagesSearchGlobal(ctx context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error)
+	MessagesSearch(ctx context.Context, req *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error)
+}
+
+// unixSeconds converts t to Unix seconds for the MTProto MinDate/MaxDate
+// fields, returning 0 (Telegram's "unbounded" value) for the zero time.
+func unixSeconds(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	return int(t.Unix())
+}
+
 // SearchMessages searches for messages matching query.
-// When peerSpec is non-empty the search is scoped to that chat;
+// When p.Peer is non-empty the search is scoped to that chat;
 // when empty a global Telegram search is performed.
-func SearchMessages(ctx context.Context, c *gotdtelegram.Client, peerSpec, query string, limit int, cache *PeerCache, userID int64) ([]Message, error) {
-	if query == "" {
+func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams, cache *PeerCache, userID int64) ([]Message, error) {
+	if p.Query == "" {
 		return nil, fmt.Errorf("query must not be empty")
 	}
-	if limit <= 0 {
-		limit = 20
-	} else if limit > 100 {
-		limit = 100
+	if p.Limit <= 0 {
+		p.Limit = 20
+	} else if p.Limit > 100 {
+		p.Limit = 100
 	}
 	api := c.API()
 
-	if peerSpec == "" {
-		res, err := api.MessagesSearchGlobal(ctx, &tg.MessagesSearchGlobalRequest{
-			Q:          query,
-			Filter:     &tg.InputMessagesFilterEmpty{},
-			OffsetPeer: &tg.InputPeerEmpty{},
-			Limit:      limit,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
-		}
-		users, chats := extractSearchMaps(res)
-		return decodeGlobalSearchMessages(res, users, chats, limit), nil
+	if p.Peer == "" {
+		return searchGlobalWith(ctx, api, p)
 	}
 
-	inputPeer, err := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
+	inputPeer, err := ResolvePeerCached(ctx, c, p.Peer, cache, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve peer: %w", err)
 	}
+	return searchPeerWith(ctx, api, inputPeer, p)
+}
+
+// searchGlobalWith runs a global search_messages query against api.
+func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([]Message, error) {
+	res, err := api.MessagesSearchGlobal(ctx, &tg.MessagesSearchGlobalRequest{
+		Q:          p.Query,
+		Filter:     &tg.InputMessagesFilterEmpty{},
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      p.Limit,
+		MinDate:    unixSeconds(p.MinDate),
+		MaxDate:    unixSeconds(p.MaxDate),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
+	}
+	users, chats := extractSearchMaps(res)
+	return decodeGlobalSearchMessages(res, users, chats, p.Limit), nil
+}
+
+// searchPeerWith runs a per-peer search_messages query against api.
+func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerClass, p SearchParams) ([]Message, error) {
 	res, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
-		Peer:   inputPeer,
-		Q:      query,
-		Filter: &tg.InputMessagesFilterEmpty{},
-		Limit:  limit,
+		Peer:    peer,
+		Q:       p.Query,
+		Filter:  &tg.InputMessagesFilterEmpty{},
+		Limit:   p.Limit,
+		MinDate: unixSeconds(p.MinDate),
+		MaxDate: unixSeconds(p.MaxDate),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("MessagesSearch: %w", err)
 	}
-	hint := &Dialog{ID: peerSpec, Title: peerSpec}
+	hint := &Dialog{ID: p.Peer, Title: p.Peer}
 	users, chats := extractSearchMaps(res)
-	return decodeMessages(res, hint, users, chats, limit), nil
+	return decodeMessages(res, hint, users, chats, p.Limit), nil
 }
 
 // decodeGlobalSearchMessages decodes global-search results preserving the

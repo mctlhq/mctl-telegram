@@ -106,6 +106,12 @@
           <td>Full history of a specific peer, not just unread.</td>
         </tr>
         <tr>
+          <td><code>search_messages</code></td>
+          <td><span class="pill pill-read">read</span></td>
+          <td><code>telegram:messages:read</code></td>
+          <td>Inputs: <code>query</code>, optional <code>peer</code>, <code>limit</code> (default 20, max 100), <code>min_date</code>/<code>max_date</code> (inclusive UTC bounds, RFC 3339 or plain <code>YYYY-MM-DD</code>) to bound the search to a time window. Results are newest-first.</td>
+        </tr>
+        <tr>
           <td><code>send_message</code></td>
           <td><span class="pill pill-write">write</span></td>
           <td><code>telegram:messages:send</code></td>

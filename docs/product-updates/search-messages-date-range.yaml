@@ -1,0 +1,24 @@
+schema: mctl-telegram.product-update/v1
+id: search-messages-date-range
+kind: changed_behavior
+title: Bound search_messages to a date range
+summary: >-
+  search_messages now accepts optional min_date/max_date inputs (RFC 3339 or a
+  plain YYYY-MM-DD date, inclusive, interpreted in UTC) so a search can be
+  scoped to a time window instead of always scanning full history for the
+  newest matches.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [search_messages]
+evidence:
+  from: 0.69.0
+  changes:
+    - {tool: search_messages, change: schema}
+status: draft
+provenance:
+  author: mctl-agents
+  assisted_by: claude-sonnet-5
+  reviewed_by: ""
+created_at: "2026-09-27"
+reviewed_at: ""

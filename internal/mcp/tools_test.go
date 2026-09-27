@@ -1178,6 +1178,111 @@ func TestToolSearchMessages_MissingQuery(t *testing.T) {
 	}
 }
 
+// TestToolSearchMessages_InvalidDate proves a malformed or inverted
+// min_date/max_date is rejected with a tool error naming the offending
+// argument before any Telegram RPC would run, rather than being silently
+// ignored.
+func TestToolSearchMessages_InvalidDate(t *testing.T) {
+	srv := &Server{Store: newToolsTestStore(t)}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
+	ctx := auth.With(context.Background(), id)
+	_, handler := srv.toolSearchMessages()
+
+	t.Run("unparseable min_date", func(t *testing.T) {
+		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name:      "search_messages",
+			Arguments: map[string]any{"query": "roof rack", "min_date": "yesterday"},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !result.IsError {
+			t.Fatal("expected error for unparseable min_date")
+		}
+		got := contentText(result)
+		if !strings.Contains(got, "min_date") || !strings.Contains(got, "RFC3339") || !strings.Contains(got, "2026-08-27") {
+			t.Fatalf("error %q does not name min_date and both accepted formats", got)
+		}
+	})
+
+	t.Run("inverted range", func(t *testing.T) {
+		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name: "search_messages",
+			Arguments: map[string]any{
+				"query":    "roof rack",
+				"min_date": "2026-09-27T00:00:00Z",
+				"max_date": "2026-08-27T00:00:00Z",
+			},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !result.IsError {
+			t.Fatal("expected error for inverted date range")
+		}
+		got := contentText(result)
+		if !strings.Contains(got, "min_date must not be after max_date") {
+			t.Fatalf("error %q does not report the inverted range", got)
+		}
+	})
+}
+
+// TestToolSearchMessages_LocalBridgeRefusalUnchanged proves the existing
+// local-bridge refusal string is returned byte for byte whether or not
+// min_date/max_date are supplied — the refusal must be evaluated before date
+// validation, never replaced by a date error.
+func TestToolSearchMessages_LocalBridgeRefusalUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const tgID int64 = 12348
+	uid := seedAccountWithMode(t, store, tgID, "local")
+	srv := &Server{Store: store, Hub: bridge.NewHub()}
+	id := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: []string{"telegram:messages:read"}}
+	ctx = auth.With(ctx, id)
+	_, handler := srv.toolSearchMessages()
+
+	const wantRefusal = "search_messages is not yet supported for local-bridge accounts"
+
+	t.Run("valid dates", func(t *testing.T) {
+		res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name: "search_messages",
+			Arguments: map[string]any{
+				"query":    "roof rack",
+				"min_date": "2026-08-27",
+				"max_date": "2026-09-27",
+			},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !res.IsError {
+			t.Fatal("expected local-bridge refusal")
+		}
+		if got := contentText(res); got != wantRefusal {
+			t.Fatalf("refusal text = %q, want %q", got, wantRefusal)
+		}
+	})
+
+	t.Run("invalid min_date", func(t *testing.T) {
+		res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name: "search_messages",
+			Arguments: map[string]any{
+				"query":    "roof rack",
+				"min_date": "yesterday",
+			},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !res.IsError {
+			t.Fatal("expected local-bridge refusal")
+		}
+		if got := contentText(res); got != wantRefusal {
+			t.Fatalf("refusal text = %q, want %q (must not be replaced by a date error)", got, wantRefusal)
+		}
+	})
+}
+
 func TestToolSetReaction_MissingArgs(t *testing.T) {
 	ctx := context.Background()
 	srv := &Server{Store: newToolsTestStore(t), AllowSend: true}
