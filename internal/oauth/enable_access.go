@@ -1037,7 +1037,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 				// up, as design.md's caveat allows.
 				renderEnablePhoneStep(w, es, enablePhonePage{
 					Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-					Error: friendlyErr(lf.err),
+					// This is rendered on the phone-entry form, not a password
+					// field, so swap friendlyErr's "Check it and try again."
+					// for an instruction that matches what's actually on
+					// screen: re-enter the phone number for a fresh code.
+					Error: strings.TrimSuffix(friendlyErr(lf.err), "Check it and try again.") +
+						"Enter your phone number again to get a fresh login code.",
 				})
 				return
 			}

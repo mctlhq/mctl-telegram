@@ -132,7 +132,7 @@ func TestEnablePassword_WrongPassword_AuditAndCopy(t *testing.T) {
 		t.Fatalf("password: %d %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "That two-step verification password was not accepted. Check it and try again.") {
+	if !strings.Contains(body, "That two-step verification password was not accepted. Enter your phone number again to get a fresh login code.") {
 		t.Errorf("expected the new bad_password wording, got: %s", body)
 	}
 	if strings.Contains(body, "invalid password") {
