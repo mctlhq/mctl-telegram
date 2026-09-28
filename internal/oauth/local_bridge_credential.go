@@ -304,7 +304,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 	device, err := s.verifyDevicePoP(r, deviceID, req.Nonce, req.Signature)
 	if err != nil {
 		s.recordActivationFailure(ip)
-		s.store.LogToolCall(r.Context(), 0, "local_bridge_device_issue", "", "error", devicePoPGenericRejection, "")
+		s.store.LogToolCall(r.Context(), 0, "local_bridge_device_issue", "", "error", devicePoPGenericRejection, "", "")
 		s.writeActivateError(w, http.StatusForbidden, devicePoPGenericRejection)
 		return
 	}
@@ -341,7 +341,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 		// revoked_at IS NULL predicate catches both, T5e). Refuse with no
 		// credential minted; the device retries and, if it already has a
 		// lineage, the refresh endpoint is the path forward.
-		s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_issue", "", "error", "lineage already claimed or device revoked", "")
+		s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_issue", "", "error", "lineage already claimed or device revoked", "", "")
 		s.writeActivateError(w, http.StatusConflict, "device credential already issued for this device, or the device was just revoked -- retry via the refresh endpoint")
 		return
 	}
@@ -365,7 +365,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_issue", "", "ok", "", "")
+	s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_issue", "", "ok", "", "", "")
 	writeDeviceCredentialResponse(w, mt)
 }
 
@@ -388,7 +388,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 	device, err := s.verifyDevicePoP(r, deviceID, req.Nonce, req.Signature)
 	if err != nil {
 		s.recordActivationFailure(ip)
-		s.store.LogToolCall(r.Context(), 0, "local_bridge_device_refresh", "", "error", devicePoPGenericRejection, "")
+		s.store.LogToolCall(r.Context(), 0, "local_bridge_device_refresh", "", "error", devicePoPGenericRejection, "", "")
 		s.writeActivateError(w, http.StatusForbidden, devicePoPGenericRejection)
 		return
 	}
@@ -400,7 +400,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 	// comment and design.md's "Refresh refuses a device that has never
 	// issued".
 	if device.CurrentJti == "" || device.CredentialIssuedAt == nil {
-		s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_refresh", "", "error", "no credential lineage -- first issuance required", "")
+		s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_refresh", "", "error", "no credential lineage -- first issuance required", "", "")
 		s.writeActivateError(w, http.StatusConflict, "this device has not completed first issuance -- call the credential endpoint first")
 		return
 	}
@@ -444,7 +444,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_refresh", "", "ok", "", "")
+	s.store.LogToolCall(r.Context(), device.UserID, "local_bridge_device_refresh", "", "ok", "", "", "")
 	writeDeviceCredentialResponse(w, mt)
 }
 

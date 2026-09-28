@@ -128,7 +128,7 @@ func (s *ManageServer) auditNotifications(r *http.Request, id *auth.Identity, er
 		msg = err.Error()
 	}
 	s.store.LogToolCall(r.Context(), id.UserID,
-		"POST /telegram/connect/manage/notifications", "", status, msg, "")
+		"POST /telegram/connect/manage/notifications", "", status, msg, "", "")
 }
 
 // notificationRow is one rendered checkbox on the dashboard.

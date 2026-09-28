@@ -251,6 +251,15 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	opts := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
+		// mctl-telegram#696: a single recording path for every tools/call
+		// outcome. recordToolCall wraps every resolved tool handler so a
+		// tool added later cannot reintroduce the pre-#696 blind spots
+		// (early returns that skip Server.audit); jsonrpcHooks covers the
+		// JSON-RPC-level rejections that never resolve a handler at all
+		// (unknown tool, unparsable body, disabled capability). See
+		// record.go.
+		mcpserver.WithToolHandlerMiddleware(s.recordToolCall),
+		mcpserver.WithHooks(s.jsonrpcHooks()),
 	}
 	if s.AppsEnabled {
 		opts = append(opts,

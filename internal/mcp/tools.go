@@ -2315,11 +2315,23 @@ func jsonResult(v any) (*mcplib.CallToolResult, error) {
 	return res, nil
 }
 
+// audit records one tool call's outcome. Its signature is unchanged by
+// mctl-telegram#696 — every one of the ~90 existing call sites keeps
+// compiling and behaving exactly as before.
+//
+// If a *callRecorder has been installed in ctx (only true inside
+// Server.recordToolCall, the tools/call middleware), the outcome is staged
+// rather than written: durations are computed now, from startedAt, so a
+// later flush still reports honest elapsed time, but the actual
+// LogToolCall / metrics / slog work is deferred to
+// Server.flushRecordedCall, which may still reconcile this record's status
+// before it is ever written (see design.md section B).
+//
+// With no recorder in ctx — every direct-handler test in this package, and
+// every production call path before mctl-telegram#696 registered the
+// middleware — this writes through immediately, byte-for-byte as before
+// the recorder existed.
 func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, callPath ...string) {
-	uid := int64(0)
-	if id != nil {
-		uid = id.UserID
-	}
 	status := "ok"
 	msg := ""
 	if err != nil {
@@ -2330,23 +2342,55 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	if len(callPath) > 0 {
 		cp = callPath[0]
 	}
-	s.Store.LogToolCall(ctx, uid, tool, peer, status, msg, cp)
-	if s.Metrics != nil && !startedAt.IsZero() {
-		elapsed := time.Since(startedAt).Seconds()
-		s.Metrics.ToolInvocationDuration.WithLabelValues(tool).Observe(elapsed)
-		s.Metrics.ToolInvocationsTotal.WithLabelValues(tool, status).Inc()
+	rec := callRecord{
+		tool:     tool,
+		peer:     peer,
+		status:   status,
+		errMsg:   msg,
+		callPath: cp,
+		id:       id,
+	}
+	if !startedAt.IsZero() {
+		rec.elapsed = time.Since(startedAt)
+		rec.hasElapsed = true
+	}
+	if recorder := recorderFrom(ctx); recorder != nil {
+		recorder.stage(rec)
+		return
+	}
+	s.writeAuditRow(ctx, rec)
+}
+
+// writeAuditRow is the write-through primitive: one audit_logs row, the
+// ToolInvocationsTotal / ToolInvocationDuration samples, and the "mcp tool
+// call" slog mirror. It is the entire body of the pre-#696 Server.audit,
+// unchanged, now parameterized over a callRecord so both audit's
+// write-through branch and Server.flushRecordedCall's flush (record.go)
+// share one implementation instead of two copies that could drift.
+func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
+	uid := int64(0)
+	if rec.id != nil {
+		uid = rec.id.UserID
+	}
+	s.Store.LogToolCall(ctx, uid, rec.tool, rec.peer, rec.status, rec.errMsg, rec.callPath, rec.reason)
+	if s.Metrics != nil && rec.hasElapsed && !rec.exemptFromSLO {
+		s.Metrics.ToolInvocationDuration.WithLabelValues(rec.tool).Observe(rec.elapsed.Seconds())
+		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.status).Inc()
 	}
 
 	// Mirror the outcome to slog so tool-call activity and failures are
 	// visible in Loki, not only in the audit_logs table. Only fields already
 	// vetted as non-sensitive for audit_logs are emitted — never raw args or
 	// message bodies; peer is the pre-redacted value passed by the caller.
-	attrs := []any{"tool", tool, "user_id", uid, "status", status}
-	if peer != "" {
-		attrs = append(attrs, "peer", peer)
+	attrs := []any{"tool", rec.tool, "user_id", uid, "status", rec.status}
+	if rec.peer != "" {
+		attrs = append(attrs, "peer", rec.peer)
 	}
-	if cp != "" {
-		attrs = append(attrs, "call_path", cp)
+	if rec.callPath != "" {
+		attrs = append(attrs, "call_path", rec.callPath)
+	}
+	if rec.reason != "" {
+		attrs = append(attrs, "reason", rec.reason)
 	}
 	// Correlation facts, mirrored so a Loki line can be joined to the audit
 	// row and to the edge (mctl-telegram#617 Slice 2). The same facts are
@@ -2371,12 +2415,12 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 			attrs = append(attrs, "protocol_version", ec.ProtocolVersion)
 		}
 	}
-	setAuditSpanAttributes(ctx, ec, tool, status, uid)
-	if err != nil {
+	setAuditSpanAttributes(ctx, ec, rec.tool, rec.status, uid)
+	if rec.status == "error" {
 		// Resolution failures format the user-supplied peer verbatim
 		// (`peer %q not found`); scrub @handles / phone numbers so a raw
 		// dialog identifier never reaches centralized logs.
-		slog.Warn("mcp tool call", append(attrs, "err", audit.ScrubText(msg))...)
+		slog.Warn("mcp tool call", append(attrs, "err", audit.ScrubText(rec.errMsg))...)
 	} else {
 		slog.Info("mcp tool call", attrs...)
 	}

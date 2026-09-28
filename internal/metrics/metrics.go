@@ -25,6 +25,15 @@ type Registry struct {
 	// MCP tool layer — labeled by tool and status ("ok" or "error").
 	ToolInvocationsTotal   *prometheus.CounterVec
 	ToolInvocationDuration *prometheus.HistogramVec
+	// ToolCallErrorsTotal counts MCP tools/call failures, labeled by tool and
+	// a closed-set reason (mctl-telegram#696) — covers both a registered
+	// tool's handler failing (scope_denied, invalid_argument, ...) and a
+	// JSON-RPC-level tools/call rejection (tool_not_found,
+	// unparsable_message, capability_disabled, jsonrpc_error). reason is
+	// always one of internal/mcp's compile-time constants, never a
+	// client-supplied string, so label cardinality stays bounded. Not
+	// pre-created at zero — see requirements.md Open questions.
+	ToolCallErrorsTotal *prometheus.CounterVec
 
 	// Telegram client pool.
 	TelegramClientPoolSize    prometheus.Gauge
@@ -414,6 +423,11 @@ func New() *Registry {
 		Buckets: toolDurationBuckets,
 	}, []string{"tool"})
 
+	r.ToolCallErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_tool_call_errors_total",
+		Help: "MCP tool-call failures, labeled by tool and a closed-set reason.",
+	}, []string{"tool", "reason"})
+
 	r.TelegramClientPoolSize = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_telegram_client_pool_size",
 		Help: "Number of currently live Telegram MTProto client pool entries.",
@@ -590,6 +604,7 @@ func New() *Registry {
 		r.RateLimitEventsTotal,
 		r.ToolInvocationsTotal,
 		r.ToolInvocationDuration,
+		r.ToolCallErrorsTotal,
 		r.TelegramClientPoolSize,
 		r.TelegramClientErrorsTotal,
 		r.TelegramPoolCapacity,
