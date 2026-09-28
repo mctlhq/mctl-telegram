@@ -2496,6 +2496,12 @@ happens after the gate slot is released. Total worst case is roughly
 `BULK_MEDIA_BYTE_CAP` for bulk fetches or `MEDIA_DOWNLOAD_MAX_BYTES` for
 `get_media`.
 
+Not covered either: `send_media` is outside the gate, and one call can hold
+up to `MEDIA_UPLOAD_MAX_BYTES` (default 20 MiB: the `file_url` body, or the
+base64 argument plus its decoded bytes), with no limit on how many run at
+once. Size the pod limit with concurrent sends in mind, not only with the
+formula above.
+
 Exception: for accounts in Local Bridge mode, `get_media` relays the file
 from the daemon through `bridgeCall` before the admission gate and before
 `mediaJSONResult`, so those relays are bounded by neither

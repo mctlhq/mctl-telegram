@@ -158,3 +158,39 @@ func TestGetMedia_GateCancelledContextIsNotCapacity(t *testing.T) {
 		t.Errorf("retry Claim after cancelled wait = %v, want nil (confirmation_id must remain usable)", cerr)
 	}
 }
+
+// TestMediaGateRefused_PerToolLabels covers the refusal path shared by all
+// three gated tools (get_media is exercised end to end above; get_messages
+// and get_unread_messages reach the gate only after a live history fetch, so
+// their handlers call this same function and it is pinned here directly):
+// errMediaBusy is counted under the tool's own label and reported as
+// capacity; a context error is neither counted nor reported as capacity.
+func TestMediaGateRefused_PerToolLabels(t *testing.T) {
+	for _, tool := range []string{"get_messages", "get_unread_messages", "get_media"} {
+		t.Run(tool, func(t *testing.T) {
+			s, uid := newGetMediaGateTestServer(t)
+			reg := metrics.New()
+			s.Metrics = reg
+			id := &auth.Identity{UserID: uid, TelegramID: getMediaGateTestTGID}
+			ctx := auth.With(context.Background(), id)
+
+			res := s.mediaGateRefused(ctx, id, tool, "user:<redacted>", errMediaBusy, time.Now())
+			if !res.IsError || !strings.Contains(resultText(res), "at capacity") {
+				t.Errorf("busy refusal = %q, want the capacity message", resultText(res))
+			}
+			if got := testutil.ToFloat64(reg.MediaGateRejectionsTotal.WithLabelValues(tool)); got != 1 {
+				t.Errorf("MediaGateRejectionsTotal{%s} after busy = %v, want 1", tool, got)
+			}
+
+			cctx, cancel := context.WithCancel(ctx)
+			cancel()
+			res = s.mediaGateRefused(cctx, id, tool, "user:<redacted>", cctx.Err(), time.Now())
+			if !res.IsError || strings.Contains(resultText(res), "at capacity") {
+				t.Errorf("cancelled refusal = %q, want an error that is not the capacity message", resultText(res))
+			}
+			if got := testutil.ToFloat64(reg.MediaGateRejectionsTotal.WithLabelValues(tool)); got != 1 {
+				t.Errorf("MediaGateRejectionsTotal{%s} after cancel = %v, want still 1", tool, got)
+			}
+		})
+	}
+}

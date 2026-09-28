@@ -241,11 +241,10 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 		// any bytes streamed by earlier attempts a flood-wait retry discarded.
 		totalBytes += consumed
 		encoded := base64.StdEncoding.EncodeToString(data)
-		// issue #705: drop the raw buffer as soon as it's been base64-encoded
-		// so it's collectable before the next iteration's download, instead
-		// of staying reachable (raw + base64 of the same file both live)
-		// until the next loop iteration reassigns data.
-		data = nil
+		// data is not read after this point. It is a plain local that is never
+		// address-taken, so Go's stack liveness analysis already lets the GC
+		// reclaim the raw buffer before the next download; no explicit nil is
+		// needed here (unlike buf in toolGetMedia, which a closure captures).
 		msgs[i].MediaData = &encoded
 		summary.Fetched++
 	}
