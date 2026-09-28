@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -131,7 +132,17 @@ func (s *Server) recordToolCall(next mcpserver.ToolHandlerFunc) mcpserver.ToolHa
 		var explicitReason string
 		defer func() {
 			if p := recover(); p != nil {
-				result = mcplib.NewToolResultError(fmt.Sprintf("panic recovered in %s tool handler: %v", req.Params.Name, p))
+				// The recovered value can carry request-scoped material (a
+				// session token, peer id, ...) baked into a panic message
+				// upstream; log it (with a stack trace) for debugging but
+				// never echo it back into the client response or the audit
+				// row, both of which classifyReason's caller persists.
+				slog.Error("panic recovered in tool handler",
+					"tool", req.Params.Name,
+					"panic", fmt.Sprintf("%v", p),
+					"stack", string(debug.Stack()),
+				)
+				result = mcplib.NewToolResultError(fmt.Sprintf("internal error in %s tool handler", req.Params.Name))
 				err = nil
 				explicitReason = ReasonPanic
 			}
@@ -305,7 +316,16 @@ func (s *Server) jsonrpcHooks() *mcpserver.Hooks {
 		}
 		slog.Warn("mcp jsonrpc error", attrs...)
 		if s.Metrics != nil {
-			s.Metrics.ToolCallErrorsTotal.WithLabelValues(toolName, reason).Inc()
+			// The metric label must stay bounded: toolName is a client-supplied
+			// string (unlike the registered-tool path, this request never
+			// resolved a handler), so an unregistered/unparsable name is
+			// collapsed to a fixed sentinel here. The log line above still
+			// carries the verbatim name for debugging.
+			labelTool := toolName
+			if reason == ReasonToolNotFound || reason == ReasonUnparsableMessage {
+				labelTool = "unregistered"
+			}
+			s.Metrics.ToolCallErrorsTotal.WithLabelValues(labelTool, reason).Inc()
 		}
 	})
 	return hooks

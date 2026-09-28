@@ -242,8 +242,8 @@ func TestJSONRPCHook_ToolNotFound(t *testing.T) {
 	if !strings.Contains(buf.String(), `"reason":"tool_not_found"`) {
 		t.Errorf("expected reason=tool_not_found: %s", buf.String())
 	}
-	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("no_such_tool", ReasonToolNotFound)); got != 1 {
-		t.Fatalf("ToolCallErrorsTotal{no_such_tool,tool_not_found} = %v, want 1", got)
+	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("unregistered", ReasonToolNotFound)); got != 1 {
+		t.Fatalf("ToolCallErrorsTotal{unregistered,tool_not_found} = %v, want 1", got)
 	}
 }
 
@@ -538,5 +538,58 @@ func TestAudit_WriteThroughWithNoRecorderIsSynchronous(t *testing.T) {
 	}
 	if reason := latestAuditReason(t, store, uid); reason != "" {
 		t.Fatalf("reason = %q, want empty on the write-through path", reason)
+	}
+}
+
+// --- T12: Rule 3 synthesis for a handler that never audits its success ----
+
+// TestFlushRecordedCall_SynthesizesOKRowOnUnauditedSuccess pins Rule 3: a
+// successful call whose handler stages no records at all (it never calls
+// Server.audit) still gets exactly one synthesized "ok" row, one INFO log
+// line, a ToolInvocationsTotal{tool,ok} increment, and no
+// ToolCallErrorsTotal sample — unless the tool is in auditExemptOnSuccess
+// (covered separately by T10).
+func TestFlushRecordedCall_SynthesizesOKRowOnUnauditedSuccess(t *testing.T) {
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	buf := captureSlog(t)
+
+	const uid int64 = 4211
+	id := &auth.Identity{UserID: uid}
+
+	mcpSrv := mcpserver.NewMCPServer("record-test", "0",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
+		mcpserver.WithHooks(srv.jsonrpcHooks()),
+	)
+	mcpSrv.AddTool(mcplib.NewTool("quiet_success"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return jsonResult(map[string]any{"ok": true})
+	})
+
+	ctx := auth.With(context.Background(), id)
+	result := callTool(t, ctx, mcpSrv, "quiet_success", map[string]any{})
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %+v", result)
+	}
+
+	if n := countAuditRows(t, store, uid); n != 1 {
+		t.Fatalf("audit rows = %d, want 1 synthesized", n)
+	}
+	tool, status, errMsg := latestAudit(t, store, uid)
+	if tool != "quiet_success" || status != "ok" || errMsg != "" {
+		t.Fatalf("audit = (%q, %q, %q), want (quiet_success, ok, \"\")", tool, status, errMsg)
+	}
+	if reason := latestAuditReason(t, store, uid); reason != "" {
+		t.Fatalf("reason = %q, want empty on success", reason)
+	}
+	if n := countSlogRecords(t, buf.String(), "INFO", "mcp tool call"); n != 1 {
+		t.Fatalf("INFO mcp tool call lines = %d, want 1: %s", n, buf.String())
+	}
+	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("quiet_success", ReasonUnknown)); got != 0 {
+		t.Fatalf("ToolCallErrorsTotal must stay at 0 on success, got %v", got)
+	}
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("quiet_success", "ok")); got != 1 {
+		t.Fatalf("ToolInvocationsTotal{quiet_success,ok} = %v, want 1", got)
 	}
 }

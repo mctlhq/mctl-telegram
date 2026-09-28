@@ -113,6 +113,17 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 		return ReasonModeUnsupported
 	}
 
+	// Telegram permanent-error catalog (errorcatalog.go's mtprotoErrCatalog),
+	// rendered by mtprotoErrResult as "<entry.message>[ <entry.action>]".
+	// Checked before argument validation below: CHANNEL_PRIVATE's message
+	// contains "must be " (via its action text), which would otherwise be
+	// misclassified as ReasonInvalidArgument.
+	for _, entry := range mtprotoErrCatalog {
+		if strings.HasPrefix(text, entry.message) {
+			return ReasonTelegramError
+		}
+	}
+
 	// Argument validation: the handlers in tools.go / media_tools.go /
 	// apps.go phrase every "you gave me something I can't use" refusal with
 	// one of these fragments. Order matters only in that each case below is
