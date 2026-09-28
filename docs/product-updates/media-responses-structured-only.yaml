@@ -1,0 +1,32 @@
+schema: mctl-telegram.product-update/v1
+id: media-responses-structured-only
+kind: changed_behavior
+title: Large media is returned once, in structured content
+summary: >-
+  get_media, and get_messages / get_unread_messages with fetch_media=true, now
+  return media larger than 1 MiB (base64) only in structured content; the text
+  block keeps the same shape with a placeholder per item, and new
+  data_omitted_from_text / media_data_omitted_from_text flags mark the mode.
+  Smaller media is returned exactly as before. fetch_media now fetches at most
+  8 MiB of media per call, and when several media downloads run at once a call
+  may be asked to retry shortly.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [get_media, get_messages, get_unread_messages]
+evidence:
+  from: 0.69.0
+  changes:
+    - {tool: get_media, change: schema}
+    - {tool: get_messages, change: schema}
+    - {tool: get_unread_messages, change: schema}
+  links:
+    - https://github.com/mctlhq/mctl-telegram/issues/705
+    - https://github.com/mctlhq/mctl-telegram/pull/706
+status: draft
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: ""
+created_at: "2026-09-28"
+reviewed_at: ""
