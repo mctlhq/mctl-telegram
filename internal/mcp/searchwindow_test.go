@@ -84,6 +84,17 @@ func TestParseSearchWindow(t *testing.T) {
 			wantErrSub: "min_date is out of range",
 		},
 		{
+			// A plain max_date resolves to 23:59:59Z, past the int32 edge.
+			name:       "plain max_date on the last supported day is out of range",
+			maxRaw:     "2038-01-19",
+			wantErrSub: "max_date must be 2038-01-18 or earlier",
+		},
+		{
+			name:    "plain max_date one day earlier is accepted",
+			maxRaw:  "2038-01-18",
+			wantMax: time.Date(2038, 1, 18, 23, 59, 59, 0, time.UTC),
+		},
+		{
 			name:    "max_date one second below the int32 edge is accepted",
 			maxRaw:  "2038-01-19T03:14:06Z",
 			wantMax: time.Date(2038, 1, 19, 3, 14, 6, 0, time.UTC),

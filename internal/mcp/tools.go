@@ -2689,8 +2689,9 @@ Inputs (optional):
   max_date — inclusive upper bound, interpreted in UTC. Same formats as
              min_date; a plain date is interpreted as 23:59:59 UTC of that
              day, so a plain-date range includes both boundary days.
-Example: to search the last 30 days, pass min_date as today's date minus
-30 days.
+Example: to search the last 30 days, pass min_date as the current date
+minus 30 days. This tool does not report the current date; take it from
+your context, and if you do not know it, ask the user rather than guessing.
 Telegram's search does not stem or expand word forms: it matches the query
 as given. If a query finds nothing, try a shorter stem or other forms of
 the word, or synonyms.`),

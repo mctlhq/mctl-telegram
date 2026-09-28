@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -199,5 +200,25 @@ func TestMaxDateUnix(t *testing.T) {
 	tm := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	if got, want := maxDateUnix(tm), int(tm.Unix())+1; got != want {
 		t.Errorf("maxDateUnix(%v) = %d, want %d", tm, got, want)
+	}
+}
+
+func TestCheckSearchBound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		t       time.Time
+		wantErr bool
+	}{
+		{"zero is unbounded", time.Time{}, false},
+		{"epoch would go negative after -1", time.Unix(0, 0), true},
+		{"one second after epoch", time.Unix(1, 0), false},
+		{"int32 edge would wrap after +1", time.Unix(math.MaxInt32, 0), true},
+		{"one second below int32 edge", time.Unix(math.MaxInt32-1, 0), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkSearchBound("MaxDate", tc.t); (err != nil) != tc.wantErr {
+				t.Fatalf("checkSearchBound(%v) err = %v, wantErr %v", tc.t, err, tc.wantErr)
+			}
+		})
 	}
 }

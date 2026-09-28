@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 
 // SearchParams describes one search_messages query. Zero MinDate/MaxDate mean
 // unbounded, which is Telegram's own encoding for those fields.
+//
+// A non-zero MinDate/MaxDate must lie in [1970-01-01T00:00:01Z,
+// 2038-01-19T03:14:06Z]: the MTProto fields are 32-bit and
+// minDateUnix/maxDateUnix shift each bound by one second, so a value outside
+// that range would wrap or go negative. SearchMessages rejects such values
+// instead of sending them.
 type SearchParams struct {
 	Peer    string
 	Query   string
@@ -20,7 +27,7 @@ type SearchParams struct {
 	MaxDate time.Time
 }
 
-// searchInvoker is the slice of *tg.Client the search path uses. It exists so
+// searchInvoker is the subset of *tg.Client methods the search path uses. It exists so
 // tests can capture the constructed requests without a live MTProto client.
 type searchInvoker interface {
 	MessagesSearchGlobal(ctx context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error)
@@ -53,12 +60,30 @@ func maxDateUnix(t time.Time) int {
 	return int(t.Unix()) + 1
 }
 
+// checkSearchBound reports whether a non-zero bound survives the one-second
+// shift in minDateUnix/maxDateUnix without leaving the int32 range.
+func checkSearchBound(name string, t time.Time) error {
+	if t.IsZero() {
+		return nil
+	}
+	if u := t.Unix(); u < 1 || u > math.MaxInt32-1 {
+		return fmt.Errorf("%s %s is outside the supported range", name, t.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // SearchMessages searches for messages matching query.
 // When p.Peer is non-empty the search is scoped to that chat;
 // when empty a global Telegram search is performed.
 func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams, cache *PeerCache, userID int64) ([]Message, error) {
 	if p.Query == "" {
 		return nil, fmt.Errorf("query must not be empty")
+	}
+	if err := checkSearchBound("MinDate", p.MinDate); err != nil {
+		return nil, err
+	}
+	if err := checkSearchBound("MaxDate", p.MaxDate); err != nil {
+		return nil, err
 	}
 	if p.Limit <= 0 {
 		p.Limit = 20
