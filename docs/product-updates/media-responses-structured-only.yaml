@@ -15,7 +15,7 @@ delivery: next_digest
 high_value: false
 tools: [get_media, get_messages, get_unread_messages]
 evidence:
-  from: 0.69.0
+  from: 0.70.0
   changes:
     - {tool: get_media, change: schema}
     - {tool: get_messages, change: schema}
