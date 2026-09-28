@@ -2691,9 +2691,9 @@ Inputs (optional):
              day, so a plain-date range includes both boundary days.
 Example: to search the last 30 days, pass min_date as today's date minus
 30 days.
-Telegram's search matches word forms as its own server does; if a query
-finds nothing, try alternative word forms rather than expecting morphology
-expansion.`),
+Telegram's search does not stem or expand word forms: it matches the query
+as given. If a query finds nothing, try a shorter stem or other forms of
+the word, or synonyms.`),
 		mcplib.WithString("query", mcplib.Required(), mcplib.Description("Text to search for.")),
 		mcplib.WithString("peer", mcplib.Description("Scope search to this chat. Omit for global search.")),
 		mcplib.WithNumber("limit", mcplib.Description("Maximum number of results (default 20, max 100).")),
@@ -2720,6 +2720,16 @@ expansion.`),
 				// daemon. Return a clear error rather than routing to the bridge
 				// (which would return an opaque "unknown tool" error).
 				return mcplib.NewToolResultError("search_messages is not yet supported for local-bridge accounts"), nil
+			}
+		}
+		// stringArg silently falls back to "" for a non-string value, which
+		// would turn a bounded search into an unbounded one without telling
+		// the caller. Reject wrong types explicitly; JSON null counts as absent.
+		for _, k := range []string{"min_date", "max_date"} {
+			if v, ok := args[k]; ok && v != nil {
+				if _, isStr := v.(string); !isStr {
+					return mcplib.NewToolResultError(k + " must be a string: RFC3339 (e.g. 2026-08-27T00:00:00Z) or a plain date (e.g. 2026-08-27)"), nil
+				}
 			}
 		}
 		minDate, maxDate, derr := parseSearchWindow(

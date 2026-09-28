@@ -71,6 +71,24 @@ func TestParseSearchWindow(t *testing.T) {
 			wantErrSub: "min_date is out of range",
 		},
 		{
+			// max_date is shifted +1 on the wire; the int32 edge itself
+			// would overflow to a negative MaxDate.
+			name:       "max_date at the int32 edge is out of range",
+			maxRaw:     "2038-01-19T03:14:07Z",
+			wantErrSub: "max_date is out of range",
+		},
+		{
+			// min_date is shifted -1 on the wire; the epoch would go negative.
+			name:       "min_date at the epoch is out of range",
+			minRaw:     "1970-01-01T00:00:00Z",
+			wantErrSub: "min_date is out of range",
+		},
+		{
+			name:    "max_date one second below the int32 edge is accepted",
+			maxRaw:  "2038-01-19T03:14:06Z",
+			wantMax: time.Date(2038, 1, 19, 3, 14, 6, 0, time.UTC),
+		},
+		{
 			name:       "year-3000 max_date is out of range",
 			maxRaw:     "3000-01-01T00:00:00Z",
 			wantErrSub: "max_date is out of range",

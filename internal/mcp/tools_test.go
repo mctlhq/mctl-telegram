@@ -1205,6 +1205,22 @@ func TestToolSearchMessages_InvalidDate(t *testing.T) {
 		}
 	})
 
+	t.Run("non-string min_date is rejected, not ignored", func(t *testing.T) {
+		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name:      "search_messages",
+			Arguments: map[string]any{"query": "roof rack", "min_date": float64(20260827)},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !result.IsError {
+			t.Fatal("expected an error for a numeric min_date instead of an unbounded search")
+		}
+		if got := contentText(result); !strings.Contains(got, "min_date must be a string") {
+			t.Fatalf("error %q does not name min_date's type", got)
+		}
+	})
+
 	t.Run("inverted range", func(t *testing.T) {
 		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
 			Name: "search_messages",

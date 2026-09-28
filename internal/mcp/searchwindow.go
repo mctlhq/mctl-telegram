@@ -49,8 +49,13 @@ func parseSearchBound(argName, raw string, endOfDay bool) (time.Time, error) {
 	} else {
 		return time.Time{}, fmt.Errorf("%s must be RFC3339 (e.g. 2026-08-27T00:00:00Z) or a plain date (e.g. 2026-08-27)", argName)
 	}
+	// The wire fields are 32-bit and telegram.SearchMessages shifts each
+	// bound by one second to turn Telegram's exclusive bounds into inclusive
+	// ones (min_date - 1, max_date + 1). Keep one second of headroom at both
+	// ends so the shifted value still fits and a min_date at the epoch never
+	// becomes negative.
 	unix := t.Unix()
-	if unix < 0 || unix > math.MaxInt32 {
+	if unix < 1 || unix > math.MaxInt32-1 {
 		return time.Time{}, fmt.Errorf("%s is out of range (supported: 1970-01-01 to 2038-01-19)", argName)
 	}
 	return t, nil
