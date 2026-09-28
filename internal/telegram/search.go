@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -10,50 +11,131 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// SearchParams describes one search_messages query. Zero MinDate/MaxDate mean
+// unbounded, which is Telegram's own encoding for those fields.
+//
+// A non-zero MinDate/MaxDate must lie in [1970-01-01T00:00:01Z,
+// 2038-01-19T03:14:06Z]: the MTProto fields are 32-bit and
+// minDateUnix/maxDateUnix shift each bound by one second, so a value outside
+// that range would wrap or go negative. SearchMessages rejects such values
+// instead of sending them.
+type SearchParams struct {
+	Peer    string
+	Query   string
+	Limit   int
+	MinDate time.Time
+	MaxDate time.Time
+}
+
+// searchInvoker is the subset of *tg.Client methods the search path uses. It exists so
+// tests can capture the constructed requests without a live MTProto client.
+type searchInvoker interface {
+	MessagesSearchGlobal(ctx context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error)
+	MessagesSearch(ctx context.Context, req *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error)
+}
+
+// minDateUnix converts a min_date bound to the Unix seconds value for the
+// MTProto MinDate field. The user-facing min_date bound is inclusive, but
+// MessagesSearch(Global) treats MinDate as exclusive (it returns only
+// messages with date > MinDate), so the bound is shifted back by one second
+// to include messages sent exactly at min_date. Returns 0 (Telegram's
+// "unbounded" value) for the zero time.
+func minDateUnix(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	return int(t.Unix()) - 1
+}
+
+// maxDateUnix converts a max_date bound to the Unix seconds value for the
+// MTProto MaxDate field. The user-facing max_date bound is inclusive, but
+// MessagesSearch(Global) treats MaxDate as exclusive (it returns only
+// messages with date < MaxDate), so the bound is shifted forward by one
+// second to include messages sent exactly at max_date. Returns 0
+// (Telegram's "unbounded" value) for the zero time.
+func maxDateUnix(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	return int(t.Unix()) + 1
+}
+
+// checkSearchBound reports whether a non-zero bound survives the one-second
+// shift in minDateUnix/maxDateUnix without leaving the int32 range.
+func checkSearchBound(name string, t time.Time) error {
+	if t.IsZero() {
+		return nil
+	}
+	if u := t.Unix(); u < 1 || u > math.MaxInt32-1 {
+		return fmt.Errorf("%s %s is outside the supported range", name, t.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // SearchMessages searches for messages matching query.
-// When peerSpec is non-empty the search is scoped to that chat;
+// When p.Peer is non-empty the search is scoped to that chat;
 // when empty a global Telegram search is performed.
-func SearchMessages(ctx context.Context, c *gotdtelegram.Client, peerSpec, query string, limit int, cache *PeerCache, userID int64) ([]Message, error) {
-	if query == "" {
+func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams, cache *PeerCache, userID int64) ([]Message, error) {
+	if p.Query == "" {
 		return nil, fmt.Errorf("query must not be empty")
 	}
-	if limit <= 0 {
-		limit = 20
-	} else if limit > 100 {
-		limit = 100
+	if err := checkSearchBound("MinDate", p.MinDate); err != nil {
+		return nil, err
+	}
+	if err := checkSearchBound("MaxDate", p.MaxDate); err != nil {
+		return nil, err
+	}
+	if p.Limit <= 0 {
+		p.Limit = 20
+	} else if p.Limit > 100 {
+		p.Limit = 100
 	}
 	api := c.API()
 
-	if peerSpec == "" {
-		res, err := api.MessagesSearchGlobal(ctx, &tg.MessagesSearchGlobalRequest{
-			Q:          query,
-			Filter:     &tg.InputMessagesFilterEmpty{},
-			OffsetPeer: &tg.InputPeerEmpty{},
-			Limit:      limit,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
-		}
-		users, chats := extractSearchMaps(res)
-		return decodeGlobalSearchMessages(res, users, chats, limit), nil
+	if p.Peer == "" {
+		return searchGlobalWith(ctx, api, p)
 	}
 
-	inputPeer, err := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
+	inputPeer, err := ResolvePeerCached(ctx, c, p.Peer, cache, userID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve peer: %w", err)
 	}
+	return searchPeerWith(ctx, api, inputPeer, p)
+}
+
+// searchGlobalWith runs a global search_messages query against api.
+func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([]Message, error) {
+	res, err := api.MessagesSearchGlobal(ctx, &tg.MessagesSearchGlobalRequest{
+		Q:          p.Query,
+		Filter:     &tg.InputMessagesFilterEmpty{},
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      p.Limit,
+		MinDate:    minDateUnix(p.MinDate),
+		MaxDate:    maxDateUnix(p.MaxDate),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
+	}
+	users, chats := extractSearchMaps(res)
+	return decodeGlobalSearchMessages(res, users, chats, p.Limit), nil
+}
+
+// searchPeerWith runs a per-peer search_messages query against api.
+func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerClass, p SearchParams) ([]Message, error) {
 	res, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
-		Peer:   inputPeer,
-		Q:      query,
-		Filter: &tg.InputMessagesFilterEmpty{},
-		Limit:  limit,
+		Peer:    peer,
+		Q:       p.Query,
+		Filter:  &tg.InputMessagesFilterEmpty{},
+		Limit:   p.Limit,
+		MinDate: minDateUnix(p.MinDate),
+		MaxDate: maxDateUnix(p.MaxDate),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("MessagesSearch: %w", err)
 	}
-	hint := &Dialog{ID: peerSpec, Title: peerSpec}
+	hint := &Dialog{ID: p.Peer, Title: p.Peer}
 	users, chats := extractSearchMaps(res)
-	return decodeMessages(res, hint, users, chats, limit), nil
+	return decodeMessages(res, hint, users, chats, p.Limit), nil
 }
 
 // decodeGlobalSearchMessages decodes global-search results preserving the
