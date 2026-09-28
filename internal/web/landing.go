@@ -4,6 +4,7 @@ package web
 
 import (
 	_ "embed"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -118,6 +119,32 @@ func BrowserRedirect(next http.Handler, landingPath string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RootPostHint answers a POST / with a JSON-RPC 2.0 error object naming the
+// real MCP endpoint, instead of chi's default bare 405 with an empty body —
+// the response an MCP client sees when it is misconfigured with the bare
+// origin instead of mcpPath. Status stays 405 (a client keying on the status
+// alone is unaffected); only the body changes from empty to informative.
+// GET / is untouched — this handler is registered only for POST.
+func RootPostHint(mcpPath string) http.HandlerFunc {
+	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		// RFC 9110 15.5.6: a 405 must list the methods the target accepts. Only
+		// GET / is registered (no GetHead middleware), so that is the list.
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      nil,
+			"error": map[string]any{
+				"code":    -32600,
+				"message": "This is not the MCP endpoint. Use " + mcpPath + " instead.",
+			},
+		})
+	}
 }
 
 func isBrowserGet(accept string) bool {
