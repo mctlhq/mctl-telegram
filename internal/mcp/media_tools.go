@@ -258,19 +258,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		if gerr := s.mediaGate.acquire(ctx); gerr != nil {
 			s.Confirms.Unclaim(confID)
 			released = true
-			if !errors.Is(gerr, errMediaBusy) {
-				// gerr is ctx.Err() (canceled/deadline-exceeded), not a capacity
-				// refusal — audit the real error via a detached context, same as
-				// the fmErr branch in get_messages/get_unread_messages, since ctx
-				// may already be done here.
-				s.auditDetached(ctx, id, "get_media", telegram.RedactPeer(peer), gerr, startedAt)
-				return toolErr("get_media: %v", gerr), nil
-			}
-			if s.Metrics != nil {
-				s.Metrics.MediaGateRejectionsTotal.WithLabelValues("get_media").Inc()
-			}
-			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), errMediaBusy, startedAt)
-			return mcplib.NewToolResultError(errMediaBusy.Error()), nil
+			return s.mediaGateRefused(ctx, id, "get_media", telegram.RedactPeer(peer), gerr, startedAt), nil
 		}
 		defer s.mediaGate.release()
 

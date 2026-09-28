@@ -9,7 +9,9 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 const getMediaGateTestTGID = int64(730500001) // synthetic; not a real account
@@ -100,5 +102,59 @@ func TestGetMedia_GateRefusalPreservesConfirmation(t *testing.T) {
 	// refusal — only Unclaim, which does not touch MediaStore).
 	if s.MediaStore.Get(conf.ID) == nil {
 		t.Error("MediaStore ref was deleted on gate refusal; it must survive for a retry")
+	}
+}
+
+// TestGetMedia_GateCancelledContextIsNotCapacity pins that a caller whose
+// context ends while waiting for a gate slot is not reported, counted or
+// audited as a capacity refusal: MediaGateRejectionsTotal must measure
+// saturation, not client disconnects. The confirmation must still survive.
+func TestGetMedia_GateCancelledContextIsNotCapacity(t *testing.T) {
+	s, uid := newGetMediaGateTestServer(t)
+	reg := metrics.New()
+	s.Metrics = reg
+
+	s.mediaGate = newMediaGate(1, nil)
+	if err := s.mediaGate.acquire(context.Background()); err != nil {
+		t.Fatalf("pre-acquiring the only slot: %v", err)
+	}
+
+	const peer = "user:12345"
+	const messageID = 42
+	conf, cerr := s.Confirms.Issue(uid, "media", HashMediaPayload(peer, int64(messageID)))
+	if cerr != nil {
+		t.Fatalf("Confirms.Issue: %v", cerr)
+	}
+	s.MediaStore.Set(conf.ID, &MediaDownloadRef{
+		Peer:      peer,
+		MessageID: messageID,
+		MediaType: "document",
+		Size:      100,
+		Location:  telegram.MediaFileLocation{IsDocument: true, DocID: 1, AccessHash: 1},
+	})
+
+	id := &auth.Identity{UserID: uid, TelegramID: getMediaGateTestTGID, Scopes: []string{"telegram:messages:read"}}
+	ctx, cancel := context.WithCancel(auth.With(context.Background(), id))
+	cancel()
+	tool, handler := s.toolGetMedia()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: tool.Name, Arguments: map[string]any{
+		"peer":            peer,
+		"message_id":      float64(messageID),
+		"confirmation_id": conf.ID,
+	}}})
+	if err != nil {
+		t.Fatalf("handler returned a Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected an error result for a cancelled context")
+	}
+	if text := resultText(res); strings.Contains(text, "at capacity") {
+		t.Errorf("result text = %q; a cancelled caller must not be told the gate is at capacity", text)
+	}
+	if got := testutil.ToFloat64(reg.MediaGateRejectionsTotal.WithLabelValues("get_media")); got != 0 {
+		t.Errorf("MediaGateRejectionsTotal{get_media} = %v, want 0 for a cancelled caller", got)
+	}
+	if _, cerr := s.Confirms.Claim(conf.ID, uid, HashMediaPayload(peer, int64(messageID))); cerr != nil {
+		t.Errorf("retry Claim after cancelled wait = %v, want nil (confirmation_id must remain usable)", cerr)
 	}
 }

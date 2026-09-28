@@ -5,7 +5,10 @@ import (
 	"errors"
 	"time"
 
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 )
 
 // mediaGateWait bounds how long a media operation (fetchMediaInline call, or
@@ -50,6 +53,10 @@ func (g *mediaGate) acquire(ctx context.Context) error {
 	if g == nil {
 		return nil
 	}
+	// A stoppable timer rather than time.After: the common case acquires a
+	// slot immediately, and time.After would keep a live 2s timer per call.
+	timer := time.NewTimer(mediaGateWait)
+	defer timer.Stop()
 	select {
 	case g.slots <- struct{}{}:
 		if g.inFlight != nil {
@@ -58,7 +65,7 @@ func (g *mediaGate) acquire(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(mediaGateWait):
+	case <-timer.C:
 		return errMediaBusy
 	}
 }
@@ -76,4 +83,23 @@ func (g *mediaGate) release() {
 	if g.inFlight != nil {
 		g.inFlight.Dec()
 	}
+}
+
+// mediaGateRefused renders a failed mediaGate.acquire for tool. Only
+// errMediaBusy is a capacity refusal: it is counted in
+// MediaGateRejectionsTotal and returned as the retryable capacity message.
+// Any other error is the caller's own context ending while it waited for a
+// slot; that is audited with the real error and never counted or reported as
+// capacity, so the rejection metric and the audit trail keep measuring
+// saturation rather than client disconnects.
+func (s *Server) mediaGateRefused(ctx context.Context, id *auth.Identity, tool, peer string, gerr error, startedAt time.Time) *mcplib.CallToolResult {
+	if !errors.Is(gerr, errMediaBusy) {
+		s.audit(ctx, id, tool, peer, gerr, startedAt)
+		return mcplib.NewToolResultError("request ended while waiting for a media download slot: " + gerr.Error())
+	}
+	if s.Metrics != nil {
+		s.Metrics.MediaGateRejectionsTotal.WithLabelValues(tool).Inc()
+	}
+	s.audit(ctx, id, tool, peer, errMediaBusy, startedAt)
+	return mcplib.NewToolResultError(errMediaBusy.Error())
 }

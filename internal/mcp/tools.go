@@ -318,18 +318,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			// construction (mediaJSONResult) too. A nil s.mediaGate
 			// (MEDIA_MAX_CONCURRENT=0 or unset) imposes no limit.
 			if gerr := s.mediaGate.acquire(ctx); gerr != nil {
-				if !errors.Is(gerr, errMediaBusy) {
-					// gerr is ctx.Err(), not a capacity refusal — audit via a
-					// detached context, matching the fmErr branch below, since
-					// ctx may already be canceled/deadline-exceeded here.
-					s.auditDetached(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), gerr, startedAt)
-					return borrowErrResult("get_unread_messages", gerr), nil
-				}
-				if s.Metrics != nil {
-					s.Metrics.MediaGateRejectionsTotal.WithLabelValues("get_unread_messages").Inc()
-				}
-				s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), errMediaBusy, startedAt)
-				return mcplib.NewToolResultError(errMediaBusy.Error()), nil
+				return s.mediaGateRefused(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), gerr, startedAt), nil
 			}
 			defer s.mediaGate.release()
 			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
@@ -598,17 +587,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			// fetchMediaInline, released only when the handler returns
 			// (defer), so the slot covers response construction too.
 			if gerr := s.mediaGate.acquire(ctx); gerr != nil {
-				if !errors.Is(gerr, errMediaBusy) {
-					// See the matching branch in get_unread_messages: gerr is
-					// ctx.Err() here, not a capacity refusal.
-					s.auditDetached(ctx, id, "get_messages", telegram.RedactPeer(peer), gerr, startedAt)
-					return borrowErrResult("get_messages", gerr), nil
-				}
-				if s.Metrics != nil {
-					s.Metrics.MediaGateRejectionsTotal.WithLabelValues("get_messages").Inc()
-				}
-				s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), errMediaBusy, startedAt)
-				return mcplib.NewToolResultError(errMediaBusy.Error()), nil
+				return s.mediaGateRefused(ctx, id, "get_messages", telegram.RedactPeer(peer), gerr, startedAt), nil
 			}
 			defer s.mediaGate.release()
 			summary, fmErr := s.fetchMediaInline(ctx, id.UserID, rawMsgs, msgs)
