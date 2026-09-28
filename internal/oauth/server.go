@@ -1508,15 +1508,71 @@ func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
 
 // ----- /oauth/telegram/callback -----
 
+// Reason vocabulary for logCallbackReject / the prefetch-refusal log line.
+// Duplicated (not shared) from internal/web/connect.go: that package must not
+// import this one, so the shared values are kept in sync by the per-branch
+// regression tests in both packages rather than by a shared import.
+// connect.go additionally has exchange_failed; here the token-exchange failure
+// is already logged by its own slog.Error line in handleTelegramCallback.
+//
+// Known limit: expired_state is only reachable on the in-memory pending store.
+// The DB store (useDB, i.e. every Postgres deployment) collapses an expired
+// and a never-issued state into db.ErrOAuthNotFound, so production logs
+// unknown_state for both. Splitting them needs ConsumeOAuthPending to report
+// the TTL case separately; tracked as a follow-up, not in this change.
+const (
+	reasonMissingState    = "missing_state"
+	reasonMissingCode     = "missing_code"
+	reasonOIDCError       = "oidc_error"
+	reasonUnknownState    = "unknown_state"
+	reasonExpiredState    = "expired_state"
+	reasonPrefetchRefused = "prefetch_refused"
+)
+
+// isPrefetch reports whether r looks like a browser or crawler prefetch
+// rather than a real navigation, per the Sec-Purpose / legacy Purpose
+// request headers. See internal/web/connect.go's identical helper.
+func isPrefetch(r *http.Request) bool {
+	if strings.Contains(strings.ToLower(r.Header.Get("Sec-Purpose")), "prefetch") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Purpose")), "prefetch")
+}
+
+// logCallbackReject emits one WARN line for a rejected /oauth/telegram/callback
+// request. Attributes are deliberately limited to route, reason and the
+// prefetch boolean — never code, state, or a cookie value.
+func logCallbackReject(r *http.Request, reason string) {
+	slog.Warn("oauth: callback request rejected",
+		"route", "/oauth/telegram/callback",
+		"reason", reason,
+		"prefetch", isPrefetch(r))
+}
+
 // handleTelegramCallback receives Telegram's OIDC redirect: ?code=&state= on
 // success, or ?error=&state= when the user cancelled or Telegram refused. It
 // consumes the pending entry, exchanges the code for a JWKS-verified id_token,
 // resolves the Telegram identity, issues an authorization_code, and redirects
 // the browser to the MCP client's redirect_uri.
 func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) {
+	// Prefetch refusal comes before anything else, including the Local Bridge
+	// activation dispatch below: a browser or crawler prefetch of this
+	// single-use URL must not consume any pending state a real click still
+	// needs.
+	if isPrefetch(r) {
+		slog.Info("oauth: callback request rejected",
+			"route", "/oauth/telegram/callback",
+			"reason", reasonPrefetchRefused,
+			"prefetch", true)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	q := r.URL.Query()
 	serverState := q.Get("state")
 	if serverState == "" {
+		logCallbackReject(r, reasonMissingState)
 		http.Error(w, "missing state", http.StatusBadRequest)
 		return
 	}
@@ -1566,7 +1622,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	if s.useDB {
 		dbPA, err := s.store.ConsumeOAuthPending(r.Context(), serverState, s.cfg.CodeTTL)
 		if errors.Is(err, db.ErrOAuthNotFound) {
-			http.Error(w, "unknown or expired state", http.StatusBadRequest)
+			logCallbackReject(r, reasonUnknownState)
+			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
 		if err != nil {
@@ -1592,7 +1649,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		delete(s.pending, serverState)
 		s.mu.Unlock()
 		if !ok {
-			http.Error(w, "unknown or expired state", http.StatusBadRequest)
+			logCallbackReject(r, reasonUnknownState)
+			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
 		// Defensive TTL check: the background sweeper drops stale entries on a
@@ -1600,7 +1658,8 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// sweep tick would still be served if we only relied on map presence.
 		// CodeTTL bounds how long we trust serverState; reject if exceeded.
 		if s.clock().Sub(pending.CreatedAt) > s.cfg.CodeTTL {
-			http.Error(w, "state expired", http.StatusBadRequest)
+			logCallbackReject(r, reasonExpiredState)
+			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
 	}
@@ -1609,11 +1668,13 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// request. The pending entry is already consumed above; show a friendly
 	// page rather than a 500 or a blank screen.
 	if oidcErr := q.Get("error"); oidcErr != "" {
+		logCallbackReject(r, reasonOIDCError)
 		renderEnableError(w, "Telegram sign-in was not completed ("+sanitizeOIDCError(oidcErr)+"). Close this page and try connecting again from your MCP client.")
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
+		logCallbackReject(r, reasonMissingCode)
 		renderEnableError(w, "Telegram sign-in did not return an authorization code. Close this page and try again.")
 		return
 	}
@@ -1626,7 +1687,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// The raw error may embed Telegram's token-endpoint response body
 		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
 		// server-side, return an opaque message to the browser.
-		slog.Error("telegram OIDC token exchange failed", "err", err)
+		slog.Error("telegram OIDC token exchange failed", "reason", "exchange_failed", "err", err)
 		http.Error(w, "telegram authentication failed", http.StatusUnauthorized)
 		return
 	}

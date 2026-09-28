@@ -407,6 +407,7 @@ func main() {
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
+	mux.Post("/", web.RootPostHint(cfg.MCPPath))
 	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
 	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
@@ -416,6 +417,26 @@ func main() {
 	localBridge := web.LocalBridge(cfg.PublicBaseURL, showManage)
 	mux.Get("/docs/local-bridge", localBridge)
 	mux.Get("/docs/local-bridge/*", localBridge)
+
+	// Shared across every localjwt.Provider this process constructs (plain
+	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
+	// is rejected everywhere it could otherwise still authenticate, not just
+	// at /mcp. Cheap to share: the cache is read-mostly and its own mutex
+	// already makes it safe for concurrent use across providers.
+	//
+	// Hoisted above the local-jwt block below (selectProvider depends only on
+	// cfg, store and this cache) so `provider` exists in time to be passed as
+	// web.ConnectConfig.Identifier when constructing the connect server.
+	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
+
+	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
+	if err != nil {
+		// Mode-agnostic headline: since the hoist above, this also reports a
+		// missing signing key or issuer for local-jwt, not only a bad
+		// AUTH_MODE, so it must not blame AUTH_MODE for every failure.
+		slog.Error("auth provider init failed; refusing to start", "auth_mode", cfg.AuthMode, "err", err)
+		os.Exit(1)
+	}
 
 	// Wire the OAuth issuer when we're running in local-jwt mode. This adds
 	// /oauth/authorize, /oauth/telegram/callback, /oauth/token,
@@ -434,6 +455,11 @@ func main() {
 		oauthSrv.WithLoginConfig(telegram.LoginConfig{GlobalMiddleware: globalTGLimiter})
 		// Browser-based Telegram account onboarding. Only meaningful when the
 		// OAuth issuer is active (local-jwt mode); returns 404 otherwise.
+		// Identifier is the same provider /mcp and friends authenticate
+		// against, so HandleConnectDone can recognise an already-connected
+		// browser (mctl_connect_token cookie) on a reused/expired state and
+		// redirect to /telegram/connect/manage instead of showing the
+		// "link already used" page.
 		connectSrv := web.NewConnectServer(web.ConnectConfig{
 			Issuer:               strings.TrimRight(cfg.PublicBaseURL, "/"),
 			OAuthServer:          oauthSrv,
@@ -442,22 +468,10 @@ func main() {
 			ClientID:             oauth.ConnectClientID,
 			MCPPath:              cfg.MCPPath,
 			MaxSessions:          500,
+			Identifier:           provider,
 		})
 		mux.Get("/telegram/connect", connectSrv.HandleConnect)
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
-	}
-
-	// Shared across every localjwt.Provider this process constructs (plain
-	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
-	// is rejected everywhere it could otherwise still authenticate, not just
-	// at /mcp. Cheap to share: the cache is read-mostly and its own mutex
-	// already makes it safe for concurrent use across providers.
-	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
-
-	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
-	if err != nil {
-		slog.Error("invalid AUTH_MODE; refusing to start", "err", err)
-		os.Exit(1)
 	}
 
 	// Broadcast service (issue-439), shared by the MCP operator tools and the

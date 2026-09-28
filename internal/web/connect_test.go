@@ -1,13 +1,17 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 )
 
 const testConnectIssuer = "https://tg.test"
@@ -22,6 +26,29 @@ func (s *stubExchanger) ExchangeConnect(_ context.Context, _, _, _, _ string) (s
 		return "", s.err
 	}
 	return "fake-access-token", nil
+}
+
+// stubIdentifier implements ConnectIdentifier for tests.
+type stubIdentifier struct {
+	id  *auth.Identity
+	err error
+}
+
+func (s *stubIdentifier) Authenticate(_ *http.Request) (*auth.Identity, error) {
+	return s.id, s.err
+}
+
+// captureConnectLog swaps slog's default handler for a text handler writing
+// to buf, restoring the previous default on test cleanup. Matches the
+// pattern in internal/oauth/enable_access_abandonment_test.go's
+// captureEnableLog.
+func captureConnectLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func newTestConnectServer(t *testing.T, opts ...func(*ConnectConfig)) *ConnectServer {
@@ -148,24 +175,28 @@ func TestHandleConnectDone_CSPPresent(t *testing.T) {
 }
 
 // TestHandleConnectDone_UnknownState confirms that /telegram/connect/done
-// with an unknown state renders the error page with HTTP 400.
+// with an unknown state, and no already-connected credential, renders the
+// "link already used" page at 200 rather than a bare 400 (issue-695: a
+// reused/unknown state is a correct answer about link state, not a client
+// error).
 func TestHandleConnectDone_UnknownState(t *testing.T) {
 	srv := newTestConnectServer(t)
 	req := httptest.NewRequest("GET", "/telegram/connect/done?code=abc&state=bogus", nil)
 	rec := httptest.NewRecorder()
 	srv.HandleConnectDone(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("unknown state: status = %d, want 400", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("unknown state: status = %d, want 200 (reused-link page)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "expired") && !strings.Contains(rec.Body.String(), "unknown") {
-		t.Errorf("error page body should mention expiry/unknown: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "already used") {
+		t.Errorf("reused-link page body should mention the link was already used: %s", rec.Body.String())
 	}
 }
 
 // TestHandleConnectDone_ExpiredSession confirms that a session past CodeTTL
 // is swept on the next HandleConnect call and that HandleConnectDone then
-// renders the error page.
+// renders the "link already used" page at 200 (no already-connected
+// credential is wired in this test, so no redirect to manage is possible).
 func TestHandleConnectDone_ExpiredSession(t *testing.T) {
 	now := time.Now()
 	srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
@@ -206,12 +237,241 @@ func TestHandleConnectDone_ExpiredSession(t *testing.T) {
 		t.Error("expired session was not swept by the second HandleConnect call")
 	}
 
-	// HandleConnectDone with the swept state should return 400.
+	// HandleConnectDone with the swept state should render the reused page
+	// (should return 200, not 400): the session no longer exists in
+	// s.sessions, so this is indistinguishable from an unknown state.
 	req3 := httptest.NewRequest("GET", "/telegram/connect/done?code=x&state="+state, nil)
 	rec3 := httptest.NewRecorder()
 	srv.HandleConnectDone(rec3, req3)
-	if rec3.Code != http.StatusBadRequest {
-		t.Errorf("expired session done: status = %d, want 400", rec3.Code)
+	if rec3.Code != http.StatusOK {
+		t.Errorf("expired session done: status = %d, want 200 (reused-link page)", rec3.Code)
+	}
+	if !strings.Contains(rec3.Body.String(), "already used") {
+		t.Errorf("expired session done body should mention the link was already used: %s", rec3.Body.String())
+	}
+}
+
+// TestHandleConnectDone_ReusedState_RedirectsToManage confirms that a replay
+// of a consumed state redirects to /telegram/connect/manage (303) when the
+// request carries a credential the configured Identifier accepts.
+func TestHandleConnectDone_ReusedState_RedirectsToManage(t *testing.T) {
+	ident := &stubIdentifier{id: &auth.Identity{UserID: 1, Subject: "tg:1"}}
+	srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+		cfg.Identifier = ident
+	})
+
+	state := "reused-state-with-identity"
+	srv.mu.Lock()
+	srv.sessions[state] = &connectSession{verifier: strings.Repeat("a", 43), createdAt: time.Now()}
+	srv.mu.Unlock()
+	url := "/telegram/connect/done?code=abc&state=" + state
+
+	// First call consumes the state.
+	firstRec := httptest.NewRecorder()
+	srv.HandleConnectDone(firstRec, httptest.NewRequest("GET", url, nil))
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first call: status = %d, body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	// Replay: state is now unknown. The stub Identifier reports the browser
+	// as already connected, so this must redirect rather than show the
+	// reused page.
+	replayRec := httptest.NewRecorder()
+	srv.HandleConnectDone(replayRec, httptest.NewRequest("GET", url, nil))
+	if replayRec.Code != http.StatusSeeOther {
+		t.Fatalf("replay with identity: status = %d, want 303, body=%s", replayRec.Code, replayRec.Body.String())
+	}
+	if loc := replayRec.Header().Get("Location"); loc != "/telegram/connect/manage" {
+		t.Errorf("Location = %q, want /telegram/connect/manage", loc)
+	}
+}
+
+// TestHandleConnectDone_ReusedState_NoIdentity_ShowsReusedPage confirms that
+// a replay of a consumed state with no Identifier (or one that reports no
+// identity) shows the "link already used" page at 200, carrying the CSP
+// header and a link back to /telegram/connect.
+func TestHandleConnectDone_ReusedState_NoIdentity_ShowsReusedPage(t *testing.T) {
+	srv := newTestConnectServer(t)
+
+	state := "reused-state-no-identity"
+	srv.mu.Lock()
+	srv.sessions[state] = &connectSession{verifier: strings.Repeat("a", 43), createdAt: time.Now()}
+	srv.mu.Unlock()
+	url := "/telegram/connect/done?code=abc&state=" + state
+
+	firstRec := httptest.NewRecorder()
+	srv.HandleConnectDone(firstRec, httptest.NewRequest("GET", url, nil))
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first call: status = %d, body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	replayRec := httptest.NewRecorder()
+	srv.HandleConnectDone(replayRec, httptest.NewRequest("GET", url, nil))
+	if replayRec.Code != http.StatusOK {
+		t.Fatalf("replay status = %d, want 200", replayRec.Code)
+	}
+	body := replayRec.Body.String()
+	if !strings.Contains(body, "already used") {
+		t.Errorf("reused page missing 'already used' copy: %s", body)
+	}
+	if replayRec.Header().Get("Content-Security-Policy") == "" {
+		t.Error("reused page missing Content-Security-Policy header")
+	}
+	if !strings.Contains(body, `href="`+testConnectIssuer+`/telegram/connect"`) {
+		t.Errorf("reused page missing link back to /telegram/connect: %s", body)
+	}
+}
+
+// TestHandleConnectDone_ReusedState_IdentifierError_FailsClosed pins the
+// fail-closed contract of alreadyConnected: when the Identifier rejects the
+// presented credential (expired or revoked token, DB or revocation-cache
+// failure), a reused link shows the "already used" page rather than
+// redirecting, and the rejection is logged so the missing redirect is
+// attributable.
+func TestHandleConnectDone_ReusedState_IdentifierError_FailsClosed(t *testing.T) {
+	buf := captureConnectLog(t)
+	srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+		cfg.Identifier = &stubIdentifier{err: errors.New("revocation cache unavailable")}
+	})
+
+	rec := httptest.NewRecorder()
+	srv.HandleConnectDone(rec, httptest.NewRequest("GET", "/telegram/connect/done?code=abc&state=never-issued", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (reused page, no redirect)", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("unexpected redirect to %q on an identifier error", loc)
+	}
+	if !strings.Contains(rec.Body.String(), "already used") {
+		t.Errorf("expected the reused-link page, got: %s", rec.Body.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "session credential rejected") || !strings.Contains(out, "revocation cache unavailable") {
+		t.Errorf("expected a WARN line naming the identifier error, got:\n%s", out)
+	}
+}
+
+// TestHandleConnectDone_LogsOneWarnPerBranch confirms each 4xx-equivalent
+// branch of HandleConnectDone emits exactly one log line carrying the
+// expected reason, and that no line names the state or code value.
+func TestHandleConnectDone_LogsOneWarnPerBranch(t *testing.T) {
+	cases := []struct {
+		name   string
+		setup  func(srv *ConnectServer) string // returns the request path+query
+		reason string
+	}{
+		{
+			name:   "missing_state",
+			setup:  func(_ *ConnectServer) string { return "/telegram/connect/done?code=abc" },
+			reason: reasonMissingState,
+		},
+		{
+			// A state without a code must not be reported as a missing state.
+			name:   "missing_code",
+			setup:  func(_ *ConnectServer) string { return "/telegram/connect/done?state=some-state" },
+			reason: reasonMissingCode,
+		},
+		{
+			name:   "unknown_state",
+			setup:  func(_ *ConnectServer) string { return "/telegram/connect/done?code=abc&state=never-issued" },
+			reason: reasonUnknownState,
+		},
+		{
+			name: "expired_state",
+			setup: func(srv *ConnectServer) string {
+				state := "log-branch-expired-state"
+				srv.mu.Lock()
+				srv.sessions[state] = &connectSession{verifier: strings.Repeat("a", 43), createdAt: time.Now().Add(-1 * time.Hour)}
+				srv.mu.Unlock()
+				return "/telegram/connect/done?code=abc&state=" + state
+			},
+			reason: reasonExpiredState,
+		},
+		{
+			name: "exchange_failed",
+			setup: func(srv *ConnectServer) string {
+				state := "log-branch-exchange-failed-state"
+				srv.mu.Lock()
+				srv.sessions[state] = &connectSession{verifier: strings.Repeat("a", 43), createdAt: time.Now()}
+				srv.mu.Unlock()
+				return "/telegram/connect/done?code=abc&state=" + state
+			},
+			reason: reasonExchangeFailed,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureConnectLog(t)
+			srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+				if tc.name == "exchange_failed" {
+					cfg.OAuthServer = &stubExchanger{err: errors.New("invalid_grant")}
+				}
+			})
+			path := tc.setup(srv)
+			rec := httptest.NewRecorder()
+			srv.HandleConnectDone(rec, httptest.NewRequest("GET", path, nil))
+
+			out := strings.TrimRight(buf.String(), "\n")
+			if out == "" {
+				t.Fatalf("expected exactly one log line, got none")
+			}
+			lines := strings.Split(out, "\n")
+			if len(lines) != 1 {
+				t.Fatalf("expected exactly one log line, got %d:\n%s", len(lines), out)
+			}
+			if !strings.Contains(lines[0], "reason="+tc.reason) {
+				t.Errorf("log line = %q, want reason=%s", lines[0], tc.reason)
+			}
+			if strings.Contains(lines[0], "state=") || strings.Contains(lines[0], "code=") || strings.Contains(lines[0], "cookie") {
+				t.Errorf("log line leaked state/code/cookie: %s", lines[0])
+			}
+		})
+	}
+}
+
+// TestHandleConnectDone_PrefetchDoesNotConsumeState confirms that a
+// Sec-Purpose: prefetch (and legacy Purpose: prefetch) request gets 204 and
+// leaves the pending state usable by the subsequent real request.
+func TestHandleConnectDone_PrefetchDoesNotConsumeState(t *testing.T) {
+	srv := newTestConnectServer(t)
+	state := "prefetch-state"
+	srv.mu.Lock()
+	srv.sessions[state] = &connectSession{verifier: strings.Repeat("a", 43), createdAt: time.Now()}
+	srv.mu.Unlock()
+	url := "/telegram/connect/done?code=abc&state=" + state
+
+	req1 := httptest.NewRequest("GET", url, nil)
+	req1.Header.Set("Sec-Purpose", "prefetch;prerender")
+	rec1 := httptest.NewRecorder()
+	srv.HandleConnectDone(rec1, req1)
+	if rec1.Code != http.StatusNoContent {
+		t.Fatalf("Sec-Purpose prefetch: status = %d, want 204", rec1.Code)
+	}
+
+	req2 := httptest.NewRequest("GET", url, nil)
+	req2.Header.Set("Purpose", "prefetch")
+	rec2 := httptest.NewRecorder()
+	srv.HandleConnectDone(rec2, req2)
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("Purpose prefetch: status = %d, want 204", rec2.Code)
+	}
+
+	srv.mu.Lock()
+	_, ok := srv.sessions[state]
+	srv.mu.Unlock()
+	if !ok {
+		t.Fatal("prefetch requests consumed the pending state")
+	}
+
+	rec3 := httptest.NewRecorder()
+	srv.HandleConnectDone(rec3, httptest.NewRequest("GET", url, nil))
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("real request after prefetch: status = %d, body=%s", rec3.Code, rec3.Body.String())
+	}
+	if !strings.Contains(rec3.Body.String(), "connected") {
+		t.Errorf("real request should render the success page: %s", rec3.Body.String())
 	}
 }
 

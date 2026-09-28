@@ -316,6 +316,15 @@ func renderEnableError(w http.ResponseWriter, msg string) {
 	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{Message: msg}, "")
 }
 
+// renderEnableReused renders the same chrome as renderEnableError but at 200:
+// a reused or expired sign-in link is a correct answer about link state, not
+// a client error, so intermediaries should not treat it as a server/request
+// failure. Used only by handleTelegramCallback's unknown/expired branches;
+// the missing-state branch on that same handler stays a genuine 400.
+func renderEnableReused(w http.ResponseWriter, msg string) {
+	renderEnable(w, http.StatusOK, enableErrorTemplate, enableErrorPage{Message: msg}, "")
+}
+
 func renderEnablePermissions(w http.ResponseWriter, p enablePermissionsPage) {
 	renderEnable(w, http.StatusOK, enablePermissionsTemplate, p, "")
 }
