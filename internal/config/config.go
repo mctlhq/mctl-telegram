@@ -449,8 +449,18 @@ func Load() (*Config, error) {
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
 	c.BulkMediaByteCap = envInt64("BULK_MEDIA_BYTE_CAP", 8388608)
+	if c.BulkMediaByteCap <= 0 {
+		slog.Warn("BULK_MEDIA_BYTE_CAP must be positive; falling back to the 8388608-byte default "+
+			"(unlike MEDIA_DOWNLOAD_MAX_BYTES/MEDIA_TEXT_INLINE_CAP_BYTES, 0 here would silently skip every bulk media item instead of uncapping)",
+			"bulk_media_byte_cap", c.BulkMediaByteCap)
+		c.BulkMediaByteCap = 8388608
+	}
 	c.MediaTextInlineCapBytes = envInt64("MEDIA_TEXT_INLINE_CAP_BYTES", 1048576)
 	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", 2)
+	if c.MediaMaxConcurrent < 0 {
+		slog.Warn("MEDIA_MAX_CONCURRENT is negative; treating as unlimited (no gate)",
+			"media_max_concurrent", c.MediaMaxConcurrent)
+	}
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	preregistered, err := parsePreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))
 	if err != nil {

@@ -2481,7 +2481,7 @@ Three env vars, alongside the existing `MEDIA_DOWNLOAD_MAX_BYTES`
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `BULK_MEDIA_BYTE_CAP` | `8388608` (8 MiB) | Aggregate raw-byte budget for one `fetch_media=true` call across all items, independent of `MEDIA_DOWNLOAD_MAX_BYTES`. Lowered from the old 20 MiB alias and made configurable by #705. |
+| `BULK_MEDIA_BYTE_CAP` | `8388608` (8 MiB) | Aggregate raw-byte budget for one `fetch_media=true` call across all items, independent of `MEDIA_DOWNLOAD_MAX_BYTES`. Lowered from the old 20 MiB alias and made configurable by #705. Unlike the other two knobs below, `0` or negative does *not* mean uncapped — `Load` rejects it and falls back to the 8 MiB default, since letting it through would silently skip every item. |
 | `MEDIA_TEXT_INLINE_CAP_BYTES` | `1048576` (1 MiB) | Total base64 length above which a media-bearing tool result (`get_messages`, `get_unread_messages`, `get_media`) omits the bytes from the text content block — they remain in `structuredContent` only, and the text block carries a placeholder plus an additive `*_omitted_from_text` flag. `0` restores the pre-#705 behavior (base64 always in both places) for a text-only client that cannot read `structuredContent`, at the pre-#705 memory cost. |
 | `MEDIA_MAX_CONCURRENT` | `2` | Maximum number of media operations (one `fetch_media=true` bulk fetch, one `get_media` download) allowed in flight at once. A caller beyond the limit waits up to 2s for a slot, then gets a retryable "media downloads are at capacity" error; no download is attempted. `0` disables the gate entirely — documented as unsafe, since it removes the one bound that stops concurrent media calls from compounding. |
 
