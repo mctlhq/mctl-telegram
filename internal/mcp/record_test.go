@@ -154,6 +154,43 @@ func TestRecordToolCall_ScopeDenied(t *testing.T) {
 	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("search_messages", ReasonScopeDenied)); got != 1 {
 		t.Fatalf("ToolCallErrorsTotal{search_messages,scope_denied} = %v, want 1", got)
 	}
+	// The Rule 2 synthesized error record must not feed the SLO-input pair:
+	// it never had an elapsed duration to begin with, and counting it in
+	// ToolInvocationsTotal would inflate mctl_tool_availability's error
+	// numerator on every scope-denied/invalid-argument call, which can
+	// false-page an on-call via MctlToolAvailabilityFastBurn.
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("search_messages", "error")); got != 0 {
+		t.Fatalf("ToolInvocationsTotal{search_messages,error} = %v, want 0 (Rule 2 records must not feed the availability SLO)", got)
+	}
+	if got := histogramSampleCount(t, reg, "search_messages"); got != 0 {
+		t.Fatalf("ToolInvocationDuration sample count for search_messages = %d, want 0", got)
+	}
+}
+
+// histogramSampleCount returns the total sample count observed under
+// ToolInvocationDuration for the given tool label, across every other label
+// value (e.g. outcome), by gathering the raw Prometheus metric family.
+func histogramSampleCount(t *testing.T, m *metrics.Registry, tool string) uint64 {
+	t.Helper()
+	mfs, err := m.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "mctl_tool_invocation_duration_seconds" {
+			continue
+		}
+		var total uint64
+		for _, metric := range mf.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				if l.GetName() == "tool" && l.GetValue() == tool {
+					total += metric.GetHistogram().GetSampleCount()
+				}
+			}
+		}
+		return total
+	}
+	return 0
 }
 
 // TestRecordToolCall_InvalidArgument is T4: search_messages with an empty

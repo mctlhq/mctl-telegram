@@ -24,7 +24,17 @@ type callRecord struct {
 	tool, peer, status, reason, errMsg, callPath string
 	elapsed                                      time.Duration
 	hasElapsed                                   bool
-	id                                           *auth.Identity
+	// exemptFromSLO is set on a Rule 2 synthesized record: the call never
+	// reached Server.audit at all, so before mctl-telegram#696 it touched
+	// neither ToolInvocationsTotal nor ToolInvocationDuration. Those two
+	// series are the tool-availability SLO's input (deploy/alerts/mctl-telegram.rules.yaml),
+	// and Rule 2's failures are overwhelmingly client-caused (invalid_argument,
+	// scope_denied, ...) — counting them would let a looping bad client page
+	// on-call for a healthy server. writeAuditRow still writes the audit_logs
+	// row and (via Rule 5) ToolCallErrorsTotal for it; only the SLO pair is
+	// skipped, keeping the SLO's input set exactly what it was before #696.
+	exemptFromSLO bool
+	id            *auth.Identity
 }
 
 // callRecorder buffers every callRecord staged during one tools/call
@@ -195,13 +205,14 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			reason = classifyReason("", final)
 		}
 		records = append(records, callRecord{
-			tool:       req.Params.Name,
-			status:     "error",
-			reason:     reason,
-			errMsg:     firstResultText(final),
-			id:         auth.From(ctx),
-			elapsed:    time.Since(startedAt),
-			hasElapsed: true,
+			tool:          req.Params.Name,
+			status:        "error",
+			reason:        reason,
+			errMsg:        firstResultText(final),
+			id:            auth.From(ctx),
+			elapsed:       time.Since(startedAt),
+			hasElapsed:    true,
+			exemptFromSLO: true,
 		})
 	case len(records) == 0 && !isError:
 		// Rule 3: a successful call whose handler never calls Server.audit
