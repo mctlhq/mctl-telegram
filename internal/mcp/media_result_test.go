@@ -25,7 +25,7 @@ func TestMediaJSONResult_BelowCapKeepsLegacyShape(t *testing.T) {
 		t.Fatalf("test setup: mediaBytes=%d must be <= cap=%d", mediaBytes, s.MediaTextInlineCapBytes)
 	}
 
-	got, err := s.mediaJSONResult(result, mediaBytes, messagesTextView(result))
+	got, err := s.mediaJSONResult(result, mediaBytes, func() any { return messagesTextView(result) })
 	if err != nil {
 		t.Fatalf("mediaJSONResult error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestMediaJSONResult_CapZeroAlwaysInlines(t *testing.T) {
 		Notice:   untrustedContentNotice,
 	}
 	mediaBytes := sumMediaDataBytes(result.Messages)
-	got, err := s.mediaJSONResult(result, mediaBytes, messagesTextView(result))
+	got, err := s.mediaJSONResult(result, mediaBytes, func() any { return messagesTextView(result) })
 	if err != nil {
 		t.Fatalf("mediaJSONResult error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestMediaJSONResult_AboveCapEmitsBytesOnce(t *testing.T) {
 		t.Fatalf("test setup: mediaBytes=%d must exceed cap=%d", mediaBytes, s.MediaTextInlineCapBytes)
 	}
 
-	got, err := s.mediaJSONResult(result, mediaBytes, messagesTextView(result))
+	got, err := s.mediaJSONResult(result, mediaBytes, func() any { return messagesTextView(result) })
 	if err != nil {
 		t.Fatalf("mediaJSONResult error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestBulkMedia_OmittedFlagOnlyWhenOmitted(t *testing.T) {
 			summary.MediaDataOmittedFromText = true
 		}
 		result := messagesResult{Messages: msgs, Notice: untrustedContentNotice, FetchMediaSummary: summary}
-		res, err := s.mediaJSONResult(result, mediaBytes, messagesTextView(result))
+		res, err := s.mediaJSONResult(result, mediaBytes, func() any { return messagesTextView(result) })
 		if err != nil {
 			t.Fatalf("mediaJSONResult error: %v", err)
 		}
@@ -164,7 +164,7 @@ func TestGetMediaResult_AboveCapSetsOmittedFlag(t *testing.T) {
 		if s.mediaTextOmitted(mediaBytes) {
 			result.DataOmittedFromText = true
 		}
-		res, err := s.mediaJSONResult(result, mediaBytes, getMediaTextView(result))
+		res, err := s.mediaJSONResult(result, mediaBytes, func() any { return getMediaTextView(result) })
 		if err != nil {
 			t.Fatalf("mediaJSONResult error: %v", err)
 		}

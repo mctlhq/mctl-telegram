@@ -1473,6 +1473,7 @@ adds the classification — a closed, compile-time reason set (`auth_required`,
 `scope_denied`, `invalid_argument`, `mode_unsupported`, `refused`,
 `rate_limited`, `not_found`, `confirmation_rejected`, `telegram_error`,
 `bridge_error`, `store_error`, `encode_failed`, `handler_error`, `panic`,
+`media_capacity`,
 `unknown`, plus the JSON-RPC-only `tool_not_found`, `unparsable_message`,
 `capability_disabled`, `jsonrpc_error`) — recorded for every tools/call
 failure, including the early-return paths that used to leave no audit row
@@ -2494,6 +2495,13 @@ happens after the gate slot is released. Total worst case is roughly
 `MEDIA_MAX_CONCURRENT * ~4 * cap` above baseline, where `cap` is
 `BULK_MEDIA_BYTE_CAP` for bulk fetches or `MEDIA_DOWNLOAD_MAX_BYTES` for
 `get_media`.
+
+Exception: for accounts in Local Bridge mode, `get_media` relays the file
+from the daemon through `bridgeCall` before the admission gate and before
+`mediaJSONResult`, so those relays are bounded by neither
+`MEDIA_MAX_CONCURRENT` nor `MEDIA_TEXT_INLINE_CAP_BYTES` (only by the
+bridge frame limit, `MaxMediaFrameBytes`). `fetch_media=true` is refused in
+Local Bridge mode, so the bulk path is unaffected.
 
 Two new Prometheus series expose the gate's behavior: `mctl_media_inflight`
 (gauge, current in-flight media operations) and

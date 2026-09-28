@@ -48,7 +48,7 @@ func fetchAndMarshal(t testing.TB, s *Server, rawMsgs []*tg.Message, msgs []tele
 		summary.MediaDataOmittedFromText = true
 	}
 	result := messagesResult{Messages: wrapped, Notice: untrustedContentNotice, FetchMediaSummary: &summary}
-	res, err := s.mediaJSONResult(result, mediaBytes, messagesTextView(result))
+	res, err := s.mediaJSONResult(result, mediaBytes, func() any { return messagesTextView(result) })
 	if err != nil {
 		t.Fatalf("mediaJSONResult: %v", err)
 	}

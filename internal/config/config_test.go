@@ -516,3 +516,22 @@ func TestLoadAgentProfileOwnerRequired(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadNonPositiveBulkMediaByteCapFallsBack pins that a non-positive
+// BULK_MEDIA_BYTE_CAP (which would make fetch_media=true silently skip every
+// item, since it has no "0 = unlimited" meaning) falls back to the 8 MiB
+// default rather than being used as-is.
+func TestLoadNonPositiveBulkMediaByteCapFallsBack(t *testing.T) {
+	for _, val := range []string{"0", "-1"} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("BULK_MEDIA_BYTE_CAP", val)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.BulkMediaByteCap != 8388608 {
+				t.Errorf("BulkMediaByteCap = %d, want the 8388608 default for %q", cfg.BulkMediaByteCap, val)
+			}
+		})
+	}
+}

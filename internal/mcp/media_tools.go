@@ -306,7 +306,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		if s.mediaTextOmitted(mediaBytes) {
 			result.DataOmittedFromText = true
 		}
-		return s.mediaJSONResult(result, mediaBytes, getMediaTextView(result))
+		return s.mediaJSONResult(result, mediaBytes, func() any { return getMediaTextView(result) })
 	}
 	return tool, handler
 }

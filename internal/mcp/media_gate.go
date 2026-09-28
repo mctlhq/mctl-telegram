@@ -94,8 +94,10 @@ func (g *mediaGate) release() {
 // saturation rather than client disconnects.
 func (s *Server) mediaGateRefused(ctx context.Context, id *auth.Identity, tool, peer string, gerr error, startedAt time.Time) *mcplib.CallToolResult {
 	if !errors.Is(gerr, errMediaBusy) {
-		s.audit(ctx, id, tool, peer, gerr, startedAt)
-		return mcplib.NewToolResultError("request ended while waiting for a media download slot: " + gerr.Error())
+		// ctx is already done here, so audit detached, as the fmErr branch
+		// in the handlers does for the same reason.
+		s.auditDetached(ctx, id, tool, peer, gerr, startedAt)
+		return borrowErrResult(tool, gerr)
 	}
 	if s.Metrics != nil {
 		s.Metrics.MediaGateRejectionsTotal.WithLabelValues(tool).Inc()

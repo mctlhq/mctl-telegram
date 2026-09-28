@@ -39,11 +39,16 @@ func (s *Server) mediaTextOmitted(mediaBytes int64) bool {
 // delegates to jsonResult(v) and is byte-for-byte identical to the pre-#705
 // behavior, including json.MarshalIndent formatting — jsonResult itself is
 // untouched, along with its ~90 other call sites.
-func (s *Server) mediaJSONResult(v any, mediaBytes int64, textView any) (*mcplib.CallToolResult, error) {
+//
+// textView is called only on the omitted path, so the common below-cap path
+// never builds the placeholder copy. The view carries no media bytes, so it
+// is indented like jsonResult's output: the text block keeps one format on
+// both sides of the cap.
+func (s *Server) mediaJSONResult(v any, mediaBytes int64, textView func() any) (*mcplib.CallToolResult, error) {
 	if !s.mediaTextOmitted(mediaBytes) {
 		return jsonResult(v)
 	}
-	b, err := json.Marshal(textView)
+	b, err := json.MarshalIndent(textView(), "", "  ")
 	if err != nil {
 		return mcplib.NewToolResultError("encode: " + err.Error()), nil
 	}
