@@ -347,7 +347,7 @@ action rows, and close the test window if it dead-letters again.
 | `agent_jobs`, `agent_job_attempts` | Queue state, attempt timing, bounded error text, result IDs | Account lifetime; message body is not copied here | Hard account deletion |
 | `agent_profiles` | Policy settings and per-tenant encrypted owner profile | Account lifetime | Hard account deletion; a content-free legacy-import tombstone may remain while the login identity remains |
 | update/cursor/sent-marker tables | Telegram watermarks, Saved Messages cursor, dedup IDs | Account lifetime | Hard account deletion |
-| `audit_logs` | Tool/action metadata, redacted errors, and how the call arrived (`edge_request_id`, `edge_route`, `mcp_method`, `mcp_name`, `protocol_version`); no message body/token/session | `AUDIT_RETENTION_DAYS` (90d default) | Audit sweeper; approved early-purge SQL if required |
+| `audit_logs` | Tool/action metadata, redacted errors, an operator-only failure classification (`reason`, `mctl-telegram#696`, never exposed via `get_my_audit_log`), and how the call arrived (`edge_request_id`, `edge_route`, `mcp_method`, `mcp_name`, `protocol_version`); no message body/token/session | `AUDIT_RETENTION_DAYS` (90d default) | Audit sweeper; approved early-purge SQL if required |
 | worker Claude session | No persisted conversation (`--no-session-persistence`) | Process lifetime | Process/pod exit |
 | container logs | Redacted structured operational logs | Platform Loki policy, normally 14–30d | Platform log retention |
 | database backups / PVC snapshots | Encrypted database pages and worker credential state | Platform backup policy | Natural backup expiry; selective row deletion cannot rewrite immutable historical snapshots |
@@ -1463,6 +1463,52 @@ Tool error rate broken down by tool:
 ```promql
 sum(rate(mctl_tool_invocations_total{status="error"}[5m])) by (tool)
 ```
+
+#### Tool-call error breakdown (mctl-telegram#696)
+
+`mctl_tool_invocations_total{tool,status="error"}` says *that* a tool
+failed; it does not say why. `mctl_tool_call_errors_total{tool,reason}`
+adds the classification — a closed, compile-time reason set (`auth_required`,
+`scope_denied`, `invalid_argument`, `mode_unsupported`, `refused`,
+`rate_limited`, `not_found`, `confirmation_rejected`, `telegram_error`,
+`bridge_error`, `store_error`, `encode_failed`, `handler_error`, `panic`,
+`unknown`, plus the JSON-RPC-only `tool_not_found`, `unparsable_message`,
+`capability_disabled`, `jsonrpc_error`) — recorded for every tools/call
+failure, including the early-return paths that used to leave no audit row
+at all (`internal/mcp/record.go`).
+
+Break down failures by reason, across all tools:
+
+```promql
+sum by (tool, reason) (rate(mctl_tool_call_errors_total[5m]))
+```
+
+Isolate a suspected scope-change regression:
+
+```promql
+sum(rate(mctl_tool_call_errors_total{reason="scope_denied"}[15m])) by (tool)
+```
+
+The corresponding Loki lines: `mcp tool call` at WARN carries `tool`,
+`user_id`, `status`, `reason` (plus `peer`/`call_path`/edge fields when
+present) for any call that resolved a handler and failed; `mcp jsonrpc
+error` at WARN carries `mcp_method`, `tool`, `jsonrpc_code`, `reason`,
+`user_id` for a tools/call that mcp-go rejected before a handler ever ran
+(unknown tool, unparsable body, disabled capability). Neither line ever
+carries raw tool arguments, message text or an unredacted peer.
+
+**Caveat:** unlike the zero-baselined agent counters elsewhere in this
+registry, `mctl_tool_call_errors_total` is **not** pre-created at zero —
+`internal/metrics` does not know the tool list, and the full cross product
+(~36 tools × ~18 reasons) would be several hundred mostly-zero series. A
+`(tool, reason)` pair's series does not exist until its first occurrence,
+so `increase()` over a window that starts before that first occurrence
+under-counts by exactly the samples before the series existed — in
+practice, the *first* occurrence of a new `(tool, reason)` pair is never
+visible to `increase()`, only to the running counter value and to the Loki
+lines above. Prefer `sum by (tool, reason) (rate(...))` for a live view; do
+not rely on `increase()` alone to catch a brand-new failure mode's first
+occurrence.
 
 OAuth endpoint 5xx rate (1h window):
 

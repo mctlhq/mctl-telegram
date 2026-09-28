@@ -53,7 +53,7 @@ func TestMigrate_IdempotentAndNonDestructive(t *testing.T) {
 	}
 
 	// Log a tool call so VerifyAuditChain has something to walk.
-	s.LogToolCall(ctx, clientUID, "get_my_identity", "", "ok", "", "")
+	s.LogToolCall(ctx, clientUID, "get_my_identity", "", "ok", "", "", "")
 
 	// Snapshot every pre-existing value the migration must not rewrite.
 	// sessionEncrypted is read as a string (not []byte) so the snapshot
