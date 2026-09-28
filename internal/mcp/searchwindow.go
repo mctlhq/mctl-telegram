@@ -56,7 +56,13 @@ func parseSearchBound(argName, raw string, endOfDay bool) (time.Time, error) {
 	// becomes negative.
 	unix := t.Unix()
 	if unix < 1 || unix > math.MaxInt32-1 {
-		return time.Time{}, fmt.Errorf("%s is out of range (supported: 1970-01-01T00:00:01Z to 2038-01-19T03:14:06Z; as a plain date, max_date must be 2038-01-18 or earlier)", argName)
+		// A plain date resolves to a different time of day for each bound,
+		// so the plain-date range differs too: name the one for this argument.
+		plainRange, omit := "1970-01-02 to 2038-01-19", "to search from the beginning"
+		if endOfDay {
+			plainRange, omit = "1970-01-01 to 2038-01-18", "for no upper bound"
+		}
+		return time.Time{}, fmt.Errorf("%s is out of range (supported: 1970-01-01T00:00:01Z to 2038-01-19T03:14:06Z; as a plain date, %s; omit %s %s)", argName, plainRange, argName, omit)
 	}
 	return t, nil
 }

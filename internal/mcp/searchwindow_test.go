@@ -87,7 +87,19 @@ func TestParseSearchWindow(t *testing.T) {
 			// A plain max_date resolves to 23:59:59Z, past the int32 edge.
 			name:       "plain max_date on the last supported day is out of range",
 			maxRaw:     "2038-01-19",
-			wantErrSub: "max_date must be 2038-01-18 or earlier",
+			wantErrSub: "max_date is out of range (supported: 1970-01-01T00:00:01Z to 2038-01-19T03:14:06Z; as a plain date, 1970-01-01 to 2038-01-18; omit max_date for no upper bound)",
+		},
+		{
+			// A plain min_date resolves to 00:00:00Z, so the epoch day is
+			// rejected; the error must name min_date's own plain range.
+			name:       "plain min_date on the epoch day names min_date's range",
+			minRaw:     "1970-01-01",
+			wantErrSub: "min_date is out of range (supported: 1970-01-01T00:00:01Z to 2038-01-19T03:14:06Z; as a plain date, 1970-01-02 to 2038-01-19; omit min_date to search from the beginning)",
+		},
+		{
+			name:    "plain min_date on the day after the epoch is accepted",
+			minRaw:  "1970-01-02",
+			wantMin: time.Date(1970, 1, 2, 0, 0, 0, 0, time.UTC),
 		},
 		{
 			name:    "plain max_date one day earlier is accepted",
