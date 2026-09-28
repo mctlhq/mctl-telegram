@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.70.0](https://github.com/mctlhq/mctl-telegram/compare/0.69.0...0.70.0) (2026-09-28)
+
+
+### Features
+
+* **agents:** issue-695-connect-oauth-reused-single-use-links-sh ([06e0d7e](https://github.com/mctlhq/mctl-telegram/commit/06e0d7e777e5eb1d9d33ff8c6f8f63adb2bf4ea7))
+* **agents:** issue-696-mcp-tool-call-failures-before-audit-and ([864fdd4](https://github.com/mctlhq/mctl-telegram/commit/864fdd4c359d47847e2c75287f3c7bdb8d0ef9cd))
+* **agents:** issue-697-search-messages-add-min-date-max-date-to ([0480a43](https://github.com/mctlhq/mctl-telegram/commit/0480a439da5235cad059835f2459939de3a04886))
+* bound search_messages with min_date/max_date ([9c96969](https://github.com/mctlhq/mctl-telegram/commit/9c9696997ed247ecf190103f4b8b0cafd2f10216))
+* **db:** thread an operator-only reason column through audit_logs ([ac201ed](https://github.com/mctlhq/mctl-telegram/commit/ac201ed974b3ac74e12ede4499e1db08ce245b0d))
+* **mcp:** a single recording path for every tools/call outcome ([d3e59d4](https://github.com/mctlhq/mctl-telegram/commit/d3e59d485e6488dfffb1e71684145b95e9ae9649))
+
+
+### Bug Fixes
+
+* address review findings ([53f5a12](https://github.com/mctlhq/mctl-telegram/commit/53f5a12664287aab64a343f11c463f0390d53bd6))
+* address review findings ([0de0eb1](https://github.com/mctlhq/mctl-telegram/commit/0de0eb12f4e381cd518dd3b11856b8dfe105f501))
+* **agents:** address P1/P2 codex findings on issue-695-connect-oauth-reused-single-use-links-sh ([2c9ff9d](https://github.com/mctlhq/mctl-telegram/commit/2c9ff9d396a2e4ecd057b54806b29777a7337c35))
+* **agents:** address P1/P2 codex findings on issue-697-search-messages-add-min-date-max-date-to ([d1ab796](https://github.com/mctlhq/mctl-telegram/commit/d1ab79671e162d20cfe0282bdcaf427ec530ad80))
+* **mcp:** guard search_messages date bounds against int32 shift and wrong types ([80b281d](https://github.com/mctlhq/mctl-telegram/commit/80b281d84505871d14f9c034d0928a1d2db6c1aa))
+* **mcp:** name each date argument's own plain-date range in the range error ([959c37c](https://github.com/mctlhq/mctl-telegram/commit/959c37c50fcc8c82740b444e38fc854b9678d978))
+* **oauth:** address review on reused-link recovery ([30cd8da](https://github.com/mctlhq/mctl-telegram/commit/30cd8da59cab2f1ced499ec54dcc3c7b929dea6f))
+* **oauth:** clearer auth-provider startup error, document callback reasons ([1005a0d](https://github.com/mctlhq/mctl-telegram/commit/1005a0dae6fe503d530f2bd4fa77c917b2642bd8))
+* **oauth:** make reused connect/oauth links observable and recoverable ([1b27a8e](https://github.com/mctlhq/mctl-telegram/commit/1b27a8e14ca512b22853b1be58e8071b62b0b6d3))
+* **search:** name the exact supported range and enforce it in the telegram layer ([a327723](https://github.com/mctlhq/mctl-telegram/commit/a32772311e3188716d0c1d4a1e2a47425e3e9bb7))
+
 ## [0.69.0](https://github.com/mctlhq/mctl-telegram/compare/0.68.0...0.69.0) (2026-09-26)
 
 
