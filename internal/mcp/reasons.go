@@ -80,6 +80,11 @@ const (
 	// ReasonJSONRPCError is the JSON-RPC error hook's fallback for any other
 	// tools/call dispatch error mcp-go returns.
 	ReasonJSONRPCError = "jsonrpc_error"
+	// ReasonMediaCapacity (issue #705) is raised when the media admission
+	// gate refuses a fetch_media=true bulk fetch or a get_media download
+	// because MEDIA_MAX_CONCURRENT operations are already in flight and no
+	// slot freed within mediaGateWait.
+	ReasonMediaCapacity = "media_capacity"
 )
 
 // classifyToolResultReason infers a Reason* constant from the text of a
@@ -111,6 +116,8 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 		return ReasonEncodeFailed
 	case strings.HasSuffix(text, " is not yet supported for local-bridge accounts"):
 		return ReasonModeUnsupported
+	case text == errMediaBusy.Error():
+		return ReasonMediaCapacity
 	}
 
 	// Telegram permanent-error catalog (errorcatalog.go's mtprotoErrCatalog),

@@ -41,6 +41,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
 - [Login-bot update receiver](#login-bot-update-receiver)
+- [Media response memory bounds (issue #705)](#media-response-memory-bounds)
 
 ---
 
@@ -2461,3 +2462,52 @@ SELECT id, state, end_reason, approved_by, approved_at, completed_at
 SELECT status, reason, COUNT(*) FROM broadcast_deliveries
  WHERE campaign_id = '<id>' GROUP BY status, reason;
 ```
+
+---
+
+<a id="media-response-memory-bounds"></a>
+## Media response memory bounds (issue #705)
+
+On 2026-09-28 a `get_messages` call with `fetch_media=true` that downloaded 5
+media items OOM-killed the pod at its 256Mi limit within one 30s scrape
+interval. The response envelope held several copies of the same base64
+payload (the marshalled text block, its retained structured-content value,
+and mcp-go's own encoding of both), the download buffer was never
+preallocated, and there was no limit on concurrent media operations. See
+`mctlhq/mctl-telegram#705` for the full investigation.
+
+Three env vars, alongside the existing `MEDIA_DOWNLOAD_MAX_BYTES`
+(single-file `get_media` cap, unchanged, default 20 MiB):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `BULK_MEDIA_BYTE_CAP` | `8388608` (8 MiB) | Aggregate raw-byte budget for one `fetch_media=true` call across all items, independent of `MEDIA_DOWNLOAD_MAX_BYTES`. Lowered from the old 20 MiB alias and made configurable by #705. |
+| `MEDIA_TEXT_INLINE_CAP_BYTES` | `1048576` (1 MiB) | Total base64 length above which a media-bearing tool result (`get_messages`, `get_unread_messages`, `get_media`) omits the bytes from the text content block — they remain in `structuredContent` only, and the text block carries a placeholder plus an additive `*_omitted_from_text` flag. `0` restores the pre-#705 behavior (base64 always in both places) for a text-only client that cannot read `structuredContent`, at the pre-#705 memory cost. |
+| `MEDIA_MAX_CONCURRENT` | `2` | Maximum number of media operations (one `fetch_media=true` bulk fetch, one `get_media` download) allowed in flight at once. A caller beyond the limit waits up to 2s for a slot, then gets a retryable "media downloads are at capacity" error; no download is attempted. `0` disables the gate entirely — documented as unsafe, since it removes the one bound that stops concurrent media calls from compounding. |
+
+Rough memory estimate per concurrent media operation, with the raw download
+buffer released before marshalling: `~4x` the operation's byte cap (1.33x for
+base64 expansion, plus growth overhead in the final JSON marshal). This is an
+estimate, not a guaranteed ceiling — `MEDIA_MAX_CONCURRENT` bounds concurrent
+downloads and result construction, not the final mcp-go marshal, which
+happens after the gate slot is released. Total worst case is roughly
+`MEDIA_MAX_CONCURRENT * ~4 * cap` above baseline, where `cap` is
+`BULK_MEDIA_BYTE_CAP` for bulk fetches or `MEDIA_DOWNLOAD_MAX_BYTES` for
+`get_media`.
+
+Two new Prometheus series expose the gate's behavior: `mctl_media_inflight`
+(gauge, current in-flight media operations) and
+`mctl_media_gate_rejections_total{tool}` (counter, admission refusals). A
+non-zero rejection rate with the default `MEDIA_MAX_CONCURRENT=2` is a signal
+to revisit the limit with the observed traffic, not necessarily a problem on
+its own.
+
+Config-only mitigation, without a redeploy, in increasing order of reversal:
+`MEDIA_TEXT_INLINE_CAP_BYTES=0` restores inline text-block base64 for a
+text-only client; `MEDIA_MAX_CONCURRENT=0` disables the admission gate;
+`BULK_MEDIA_BYTE_CAP=20971520` restores the old 20 MiB aggregate cap. The
+`mctlhq/mctl-gitops#1450` stopgap (768Mi pod limit, `GOMEMLIMIT=600MiB`)
+stays in place until this change has run for a full week with
+`mctl_media_inflight` and `mctl_media_gate_rejections_total` observed; only
+then should a follow-up gitops PR lower the limit (target ~384Mi,
+`GOMEMLIMIT≈300MiB`).

@@ -213,6 +213,23 @@ type Config struct {
 	// download are different trust/cost boundaries. Set via
 	// MEDIA_UPLOAD_MAX_BYTES.
 	MediaUploadMaxBytes int64 // MEDIA_UPLOAD_MAX_BYTES
+	// BulkMediaByteCap (issue #705) bounds the total raw bytes
+	// get_messages/get_unread_messages fetch_media=true may pull across all
+	// items in one call, independent of MediaDownloadMaxBytes. Default 8 MiB.
+	// Set via BULK_MEDIA_BYTE_CAP.
+	BulkMediaByteCap int64 // BULK_MEDIA_BYTE_CAP
+	// MediaTextInlineCapBytes (issue #705) is the total base64 length above
+	// which a media-bearing tool result omits the bytes from the text content
+	// block (keeping them in structuredContent only) and substitutes a
+	// placeholder instead. Default 1 MiB; 0 means always inline (restores the
+	// pre-#705 dual-encoded behavior, at the pre-#705 memory cost). Set via
+	// MEDIA_TEXT_INLINE_CAP_BYTES.
+	MediaTextInlineCapBytes int64 // MEDIA_TEXT_INLINE_CAP_BYTES
+	// MediaMaxConcurrent (issue #705) bounds how many media operations
+	// (a fetchMediaInline call, a get_media download) may be in flight at
+	// once. Default 2; 0 means unlimited (no admission gate — documented as
+	// unsafe). Set via MEDIA_MAX_CONCURRENT.
+	MediaMaxConcurrent int // MEDIA_MAX_CONCURRENT
 	// AgentRetentionDays bounds how long the communication agent's stored
 	// message content (incoming_events, conversation_messages) is kept before
 	// the retention sweeper deletes it. Unlike audit rows this is third-party
@@ -431,6 +448,9 @@ func Load() (*Config, error) {
 	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
+	c.BulkMediaByteCap = envInt64("BULK_MEDIA_BYTE_CAP", 8388608)
+	c.MediaTextInlineCapBytes = envInt64("MEDIA_TEXT_INLINE_CAP_BYTES", 1048576)
+	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", 2)
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	preregistered, err := parsePreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))
 	if err != nil {

@@ -346,13 +346,57 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// mediaPreallocSize returns the capacity DownloadMediaSized should preallocate
+// its accumulation buffer to, given the declared file size (sizeHint, 0 when
+// unknown — e.g. photos, which MTProto never reports a size for) and the
+// effective byte cap (maxBytes, 0 = uncapped). It returns min(sizeHint,
+// maxBytes) only when BOTH are positive; otherwise it returns 0 (no
+// preallocation, matching pre-#705 behavior) — in particular, an unknown
+// size (sizeHint == 0) must never fall back to preallocating maxBytes, which
+// would reserve the full cap (today up to 20 MiB) for every small photo.
+func mediaPreallocSize(maxBytes, sizeHint int64) int64 {
+	if sizeHint <= 0 || maxBytes <= 0 {
+		return 0
+	}
+	if sizeHint < maxBytes {
+		return sizeHint
+	}
+	return maxBytes
+}
+
+// newCappedBufferSized builds a cappedBuffer for a maxBytes-capped download,
+// preallocating its backing slice per mediaPreallocSize's rule so
+// cappedBuffer.Write does not grow a large accumulation via repeated append
+// doubling. The cap field (the hard limit enforced in Write) is always
+// maxBytes regardless of any preallocation — a sizeHint larger than maxBytes
+// only affects how much is preallocated up front, never how much is allowed
+// through.
+func newCappedBufferSized(maxBytes, sizeHint int64) *cappedBuffer {
+	return &cappedBuffer{cap: maxBytes, buf: make([]byte, 0, mediaPreallocSize(maxBytes, sizeHint))}
+}
+
 // DownloadMedia fetches the file identified by loc, enforcing maxBytes
-// (0 = uncapped). It uses gotd's downloader rather than a manual
-// upload.getFile loop: the library stops cleanly on the final short chunk
-// (a manual loop keeps requesting past EOF and trips OFFSET_INVALID on files
-// whose size is not 4KB-aligned) and follows upload.fileCdnRedirect for
-// CDN-served popular media, which a bare *tg.UploadFile type assertion would
-// reject.
+// (0 = uncapped). It is a thin wrapper over DownloadMediaSized with no
+// declared-size hint (sizeHint=0, i.e. no preallocation) — kept with this
+// exact signature so cmd/local/daemon.go and this package's own tests compile
+// unchanged.
+func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
+	return DownloadMediaSized(ctx, c, loc, maxBytes, 0)
+}
+
+// DownloadMediaSized is DownloadMedia plus sizeHint: the file's declared size
+// (telegram.MediaInfo.Size / MediaDownloadRef.Size), when known, so the
+// accumulation buffer can be preallocated to min(sizeHint, maxBytes) instead
+// of growing by append doubling (issue #705). sizeHint == 0 (unknown size,
+// e.g. photos) means no preallocation, exactly like DownloadMedia's prior
+// behavior — never falling back to preallocating maxBytes itself, which
+// would reserve the full cap for every small photo.
+//
+// It uses gotd's downloader rather than a manual upload.getFile loop: the
+// library stops cleanly on the final short chunk (a manual loop keeps
+// requesting past EOF and trips OFFSET_INVALID on files whose size is not
+// 4KB-aligned) and follows upload.fileCdnRedirect for CDN-served popular
+// media, which a bare *tg.UploadFile type assertion would reject.
 //
 // On error the returned slice is whatever cappedBuffer had accumulated
 // before the failure (possibly empty, e.g. an immediate RPC error before any
@@ -370,7 +414,7 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // select over `case part := <-toWrite`, abandoning an already-fully-fetched
 // block that was sitting in the channel without ever calling our Write.
 // cappedBuffer has no visibility into that case at all (Write is simply
-// never called with it), so DownloadMedia itself charges one
+// never called with it), so DownloadMediaSized itself charges one
 // downloaderReadAheadBlocks*downloaderPartSize margin here instead — but
 // only when w.rejected is false (a genuine cap rejection already charged
 // its own margin inside Write; charging twice would double-count) AND
@@ -379,8 +423,8 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 // necessarily still empty, so there is nothing that could have been
 // stranded, and charging the margin would overcharge a call that
 // transferred zero bytes.
-func DownloadMedia(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes int64) ([]byte, int64, error) {
-	w := &cappedBuffer{cap: maxBytes}
+func DownloadMediaSized(ctx context.Context, c *telegram.Client, loc MediaFileLocation, maxBytes, sizeHint int64) ([]byte, int64, error) {
+	w := newCappedBufferSized(maxBytes, sizeHint)
 	d := downloader.NewDownloader().WithAllowCDN(true)
 	if _, err := d.Download(c.API(), loc.inputLocation()).Stream(ctx, w); err != nil {
 		if !w.rejected && w.wrote {

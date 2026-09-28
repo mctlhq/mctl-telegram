@@ -284,6 +284,46 @@ func TestCappedBuffer_NoWrite_NotWrote(t *testing.T) {
 	}
 }
 
+// TestDownloadMediaSized_PreallocatesFromHint locks in issue #705's buffer
+// preallocation: when both a declared size hint and a positive cap are
+// known, the accumulation buffer is preallocated to min(sizeHint, maxBytes)
+// up front rather than starting at zero capacity and growing by append
+// doubling. An unknown size (sizeHint == 0, e.g. photos) must NOT fall back
+// to preallocating the cap — that would reserve the full cap for every small
+// photo — so capacity stays 0, exactly like the pre-#705 default.
+func TestDownloadMediaSized_PreallocatesFromHint(t *testing.T) {
+	w := newCappedBufferSized(1000, 500)
+	if got := cap(w.buf); got != 500 {
+		t.Errorf("cap(buf) = %d, want 500 (min(sizeHint, maxBytes))", got)
+	}
+	if w.cap != 1000 {
+		t.Errorf("w.cap = %d, want 1000 (the hard limit is unaffected by preallocation)", w.cap)
+	}
+
+	w2 := newCappedBufferSized(1000, 0)
+	if got := cap(w2.buf); got != 0 {
+		t.Errorf("cap(buf) = %d, want 0 for an unknown declared size (no fallback to preallocating the cap)", got)
+	}
+}
+
+// TestDownloadMediaSized_HintDoesNotWidenCap locks in the other half of
+// issue #705's contract: a sizeHint above maxBytes only bounds how much is
+// preallocated (never more than maxBytes), and never lets more than maxBytes
+// bytes actually through Write — the existing cappedBuffer cap-rejection
+// tests already cover the Write-time enforcement; this test covers that
+// preallocation specifically respects the same ceiling.
+func TestDownloadMediaSized_HintDoesNotWidenCap(t *testing.T) {
+	w := newCappedBufferSized(100, 5000) // hint far exceeds the cap
+	if got := cap(w.buf); got != 100 {
+		t.Errorf("cap(buf) = %d, want 100 (preallocation must not exceed maxBytes even when sizeHint is larger)", got)
+	}
+	// The hard limit is still maxBytes regardless of the oversized hint: a
+	// write past it is still rejected.
+	if _, err := w.Write(make([]byte, 150)); err == nil {
+		t.Error("expected a write exceeding maxBytes to be rejected despite the larger sizeHint")
+	}
+}
+
 // TestCappedBuffer_Write_UnderCap_NotRejected guards the flip side of
 // rejected: a cappedBuffer that never hit its cap must report rejected ==
 // false, since DownloadMedia uses that to decide whether a later Stream()

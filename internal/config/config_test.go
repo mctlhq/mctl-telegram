@@ -262,6 +262,114 @@ func TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap(t *testing.T) {
 	}
 }
 
+// TestLoadBulkMediaByteCap (issue #705, T9) covers BULK_MEDIA_BYTE_CAP's
+// default and an env override, mirroring TestLoadMediaUploadMaxBytes.
+func TestLoadBulkMediaByteCap(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want int64
+	}{
+		{name: "default is 8 MiB", env: map[string]string{}, want: 8388608},
+		{name: "env override", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "1048576"}, want: 1048576},
+		{name: "garbage value falls back to default", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "notanumber"}, want: 8388608},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.BulkMediaByteCap != tc.want {
+				t.Errorf("BulkMediaByteCap = %d, want %d", cfg.BulkMediaByteCap, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadMediaTextInlineCapBytes (issue #705, T9) covers
+// MEDIA_TEXT_INLINE_CAP_BYTES's default and env override, including the 0
+// ("always inline") special case.
+func TestLoadMediaTextInlineCapBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want int64
+	}{
+		{name: "default is 1 MiB", env: map[string]string{}, want: 1048576},
+		{name: "env override", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "2097152"}, want: 2097152},
+		{name: "zero means always inline", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "0"}, want: 0},
+		{name: "garbage value falls back to default", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "notanumber"}, want: 1048576},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.MediaTextInlineCapBytes != tc.want {
+				t.Errorf("MediaTextInlineCapBytes = %d, want %d", cfg.MediaTextInlineCapBytes, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadMediaMaxConcurrent (issue #705, T9) covers MEDIA_MAX_CONCURRENT's
+// default and env override, including the 0 ("unlimited") special case.
+func TestLoadMediaMaxConcurrent(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want int
+	}{
+		{name: "default is 2", env: map[string]string{}, want: 2},
+		{name: "env override", env: map[string]string{"MEDIA_MAX_CONCURRENT": "5"}, want: 5},
+		{name: "zero means unlimited", env: map[string]string{"MEDIA_MAX_CONCURRENT": "0"}, want: 0},
+		{name: "garbage value falls back to default", env: map[string]string{"MEDIA_MAX_CONCURRENT": "notanumber"}, want: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.MediaMaxConcurrent != tc.want {
+				t.Errorf("MediaMaxConcurrent = %d, want %d", cfg.MediaMaxConcurrent, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadMediaGateConfig_IndependentFromDownloadCap guards against issue
+// #705's three new knobs being accidentally collapsed with
+// MEDIA_DOWNLOAD_MAX_BYTES, mirroring
+// TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap.
+func TestLoadMediaGateConfig_IndependentFromDownloadCap(t *testing.T) {
+	t.Setenv("MEDIA_DOWNLOAD_MAX_BYTES", "5000000")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.BulkMediaByteCap != 8388608 {
+		t.Errorf("BulkMediaByteCap = %d, want unaffected default 8388608", cfg.BulkMediaByteCap)
+	}
+	if cfg.MediaTextInlineCapBytes != 1048576 {
+		t.Errorf("MediaTextInlineCapBytes = %d, want unaffected default 1048576", cfg.MediaTextInlineCapBytes)
+	}
+	if cfg.MediaMaxConcurrent != 2 {
+		t.Errorf("MediaMaxConcurrent = %d, want unaffected default 2", cfg.MediaMaxConcurrent)
+	}
+}
+
 // TestLoadAppsEnabled is T13: MCP_APPS_ENABLED defaults to false and parses
 // "true", mirroring AGENT_ENABLED's envBool wiring.
 func TestLoadAppsEnabled(t *testing.T) {

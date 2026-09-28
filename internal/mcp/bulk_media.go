@@ -24,10 +24,18 @@ const BulkMediaFetchCap = 5
 // response past 100 MiB raw — more once base64-encoded and duplicated into
 // both the text and structured MCP response fields by jsonResult — and
 // MEDIA_DOWNLOAD_MAX_BYTES=0 (documented as uncapped for a single get_media
-// call) would remove the per-file half of that bound entirely. A package
-// variable, not a const, so tests can shrink it instead of allocating
-// megabytes of fixture data.
-var BulkMediaByteCap int64 = telegram.DefaultMediaDownloadMaxBytes
+// call) would remove the per-file half of that bound entirely.
+//
+// issue #705: lowered from telegram.DefaultMediaDownloadMaxBytes (20 MiB) to
+// 8 MiB and deliberately decoupled from it. The two caps used to be aliased,
+// so raising the single-file MEDIA_DOWNLOAD_MAX_BYTES silently raised the
+// bulk aggregate cap too; they now protect different things (one file's
+// download vs. a whole fetch_media=true call's memory footprint) and are
+// configured independently — BULK_MEDIA_BYTE_CAP for this one,
+// MEDIA_DOWNLOAD_MAX_BYTES for the per-file limit. A package variable, not a
+// const, so tests can shrink it instead of allocating megabytes of fixture
+// data.
+var BulkMediaByteCap int64 = 8 << 20
 
 // FetchMediaSummary is attached to messagesResult whenever fetch_media=true
 // was requested (even when Fetched is 0), so callers can distinguish "nothing
@@ -36,6 +44,11 @@ type FetchMediaSummary struct {
 	Fetched int `json:"fetched"`
 	Skipped int `json:"skipped"`
 	Cap     int `json:"cap"`
+	// MediaDataOmittedFromText is true only when at least one fetched item's
+	// media_data was replaced by a placeholder in the text content block
+	// (issue #705, MEDIA_TEXT_INLINE_CAP_BYTES exceeded) — absent (omitempty)
+	// otherwise, so existing clients see no new field in the common case.
+	MediaDataOmittedFromText bool `json:"media_data_omitted_from_text,omitempty"`
 }
 
 // mediaDownloader abstracts the byte-fetch step of fetchMediaInline so unit
@@ -49,9 +62,12 @@ type FetchMediaSummary struct {
 // means Borrow failed in its own preflight/acquire/client-startup path
 // (session check, pool capacity, connection setup) before ever reaching the
 // callback, which fetchMediaInline treats as systemic regardless of the
-// error's type.
-var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) (data []byte, consumed int64, err error, attemptedFn bool) {
-	return s.downloadMediaViaPool(ctx, userID, loc, maxBytes)
+// error's type. sizeHint (issue #705) is the item's declared size
+// (telegram.MediaInfo.Size, 0 when unknown, e.g. photos) — threaded down to
+// telegram.DownloadMediaSized so the accumulation buffer can be preallocated
+// instead of growing by append doubling.
+var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64, sizeHint int64) (data []byte, consumed int64, err error, attemptedFn bool) {
+	return s.downloadMediaViaPool(ctx, userID, loc, maxBytes, sizeHint)
 }
 
 // downloadMediaViaPool borrows a pooled client and downloads loc's bytes,
@@ -75,7 +91,7 @@ var mediaDownloader = func(s *Server, ctx context.Context, userID int64, loc tel
 // callback but whose later Borrow call then fails in its own
 // preflight/acquire path (never reaching the callback again) doesn't leave a
 // stale true from the earlier attempt.
-func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64) ([]byte, int64, error, bool) {
+func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc telegram.MediaFileLocation, maxBytes int64, sizeHint int64) ([]byte, int64, error, bool) {
 	var buf []byte
 	var consumed int64
 	attempted := false
@@ -83,7 +99,7 @@ func (s *Server) downloadMediaViaPool(ctx context.Context, userID int64, loc tel
 		attempted = true
 		var derr error
 		var thisConsumed int64
-		buf, thisConsumed, derr = telegram.DownloadMedia(ctx, c, loc, maxBytes)
+		buf, thisConsumed, derr = telegram.DownloadMediaSized(ctx, c, loc, maxBytes, sizeHint)
 		consumed += thisConsumed
 		return derr
 	}, func() { attempted = false })
@@ -187,12 +203,19 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 		// info.Size is 0 for photos (MTProto does not expose a declared byte size
 		// for photos); they always proceed to the downloader, where cappedBuffer
 		// enforces perItemCap mid-stream and an abort is counted as Skipped.
-		if info := msgs[i].MediaInfo; info != nil && info.Size > 0 && info.Size > perItemCap {
-			summary.Skipped++
-			continue
+		// sizeHint (issue #705) is threaded down to the downloader so its
+		// accumulation buffer can be preallocated instead of growing by append
+		// doubling; it stays 0 for photos, which must never preallocate the cap.
+		var sizeHint int64
+		if info := msgs[i].MediaInfo; info != nil {
+			sizeHint = info.Size
+			if sizeHint > 0 && sizeHint > perItemCap {
+				summary.Skipped++
+				continue
+			}
 		}
 		attempted++
-		data, consumed, dlErr, attemptedFn := mediaDownloader(s, ctx, userID, *loc, perItemCap)
+		data, consumed, dlErr, attemptedFn := mediaDownloader(s, ctx, userID, *loc, perItemCap, sizeHint)
 		if dlErr != nil {
 			if isSystemicPoolErr(dlErr) || !attemptedFn {
 				return summary, dlErr
@@ -218,6 +241,11 @@ func (s *Server) fetchMediaInline(ctx context.Context, userID int64, rawMsgs []*
 		// any bytes streamed by earlier attempts a flood-wait retry discarded.
 		totalBytes += consumed
 		encoded := base64.StdEncoding.EncodeToString(data)
+		// issue #705: drop the raw buffer as soon as it's been base64-encoded
+		// so it's collectable before the next iteration's download, instead
+		// of staying reachable (raw + base64 of the same file both live)
+		// until the next loop iteration reassigns data.
+		data = nil
 		msgs[i].MediaData = &encoded
 		summary.Fetched++
 	}
