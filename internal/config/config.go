@@ -23,7 +23,10 @@ const maxOAUTHAccessTokenTTL = 24 * time.Hour
 
 // The three issue #705 media knobs share their defaults between the envInt*
 // call that resolves them and the clamp branch that falls back to the same
-// value on invalid input; hoisted here so the literal is not repeated.
+// value on a negative (or, for BULK_MEDIA_BYTE_CAP, zero) input; hoisted here
+// so the literal is not repeated. A typo therefore always lands on the bounded
+// default, never on an unbounded meaning: only an explicit 0 opts out of
+// MEDIA_TEXT_INLINE_CAP_BYTES or MEDIA_MAX_CONCURRENT.
 const (
 	defaultBulkMediaByteCap        = 8388608
 	defaultMediaTextInlineCapBytes = 1048576
@@ -239,8 +242,8 @@ type Config struct {
 	// MediaMaxConcurrent (issue #705) bounds how many media operations
 	// (a fetchMediaInline call, a get_media download) may be in flight at
 	// once. Default 2; 0 means unlimited (no admission gate — documented as
-	// unsafe). A negative value is normalised to 0, matching the "unlimited"
-	// policy WithMediaConcurrency already enforces for any n <= 0. Set via
+	// unsafe). A negative value falls back to the default of 2 rather than to
+	// 0, so a config typo cannot silently disarm the gate. Set via
 	// MEDIA_MAX_CONCURRENT.
 	MediaMaxConcurrent int // MEDIA_MAX_CONCURRENT
 	// AgentRetentionDays bounds how long the communication agent's stored
@@ -477,9 +480,10 @@ func Load() (*Config, error) {
 	}
 	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", defaultMediaMaxConcurrent)
 	if c.MediaMaxConcurrent < 0 {
-		slog.Warn("MEDIA_MAX_CONCURRENT is negative; normalised to 0 (no gate, unlimited)",
+		slog.Warn("MEDIA_MAX_CONCURRENT is negative; falling back to the default of 2 "+
+			"(set it to exactly 0 to explicitly disable the media admission gate)",
 			"media_max_concurrent", c.MediaMaxConcurrent)
-		c.MediaMaxConcurrent = 0
+		c.MediaMaxConcurrent = defaultMediaMaxConcurrent
 	}
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	preregistered, err := parsePreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))

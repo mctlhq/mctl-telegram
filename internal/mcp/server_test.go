@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestServer_WithVersion_EmptyLeavesUnset(t *testing.T) {
 // installed gate actually admits n holders and refuses the next.
 func TestWithMediaConcurrency(t *testing.T) {
 	for _, n := range []int{0, -1} {
-		t.Run("unlimited", func(t *testing.T) {
+		t.Run(fmt.Sprintf("unlimited n=%d", n), func(t *testing.T) {
 			s := (&Server{}).WithMediaConcurrency(n)
 			if s.mediaGate != nil {
 				t.Fatalf("WithMediaConcurrency(%d).mediaGate = %v, want nil (unlimited)", n, s.mediaGate)
@@ -47,7 +48,7 @@ func TestWithMediaConcurrency(t *testing.T) {
 		if s.mediaGate == nil {
 			t.Fatal("WithMediaConcurrency(1).mediaGate = nil, want a gate")
 		}
-		s.mediaGate.wait = 50 * time.Millisecond
+		s.mediaGate = newMediaGateWithWait(1, s.mediaGate.inFlight, 50*time.Millisecond)
 		if err := s.mediaGate.acquire(context.Background()); err != nil {
 			t.Fatalf("first acquire() = %v, want nil", err)
 		}
@@ -102,7 +103,7 @@ func TestWithMediaConcurrency_GaugeWiredInEitherOrder(t *testing.T) {
 		s := (&Server{}).WithMediaConcurrency(1)
 		// Shrink the wait so the refused second acquire below doesn't block
 		// this test for the full 2s production default.
-		s.mediaGate.wait = 50 * time.Millisecond
+		s.mediaGate = newMediaGateWithWait(1, s.mediaGate.inFlight, 50*time.Millisecond)
 		if err := s.mediaGate.acquire(context.Background()); err != nil {
 			t.Fatalf("acquire() = %v, want nil", err)
 		}

@@ -54,8 +54,13 @@ func newMediaGate(n int, inFlight prometheus.Gauge) *mediaGate {
 
 // newMediaGateWithWait builds a mediaGate with n slots and an explicit
 // admission wait d, for tests that need to shrink the wait below the 2s
-// production default without touching any other gate's timing.
+// production default without touching any other gate's timing. A d <= 0
+// falls back to the default: an already-expired timer would make acquire's
+// select pick errMediaBusy at random even with a free slot.
 func newMediaGateWithWait(n int, inFlight prometheus.Gauge, d time.Duration) *mediaGate {
+	if d <= 0 {
+		d = defaultMediaGateWait
+	}
 	return &mediaGate{slots: make(chan struct{}, n), inFlight: inFlight, wait: d}
 }
 
