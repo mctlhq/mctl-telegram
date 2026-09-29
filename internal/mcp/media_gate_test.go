@@ -69,10 +69,12 @@ func TestMediaGate_ReleasesOnAllPaths(t *testing.T) {
 
 // TestMediaGate_AcquireRespectsContextCancellation verifies a canceled
 // context aborts the wait immediately rather than blocking the full
-// admission wait. Uses its own gate (newMediaGateWithWait) for the same
-// no-shared-state reason as TestMediaGate_RefusesWhenFull.
+// admission wait. It keeps the 2s production wait on purpose: the canceled
+// call never spends the wait, which only serves as the "returned immediately"
+// threshold below, so a shrunken wait would just cut the headroom against a
+// scheduling stall on a loaded -race runner.
 func TestMediaGate_AcquireRespectsContextCancellation(t *testing.T) {
-	g := newMediaGateWithWait(1, nil, 50*time.Millisecond)
+	g := newMediaGate(1, nil)
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("first acquire() = %v, want nil", err)
 	}
@@ -157,5 +159,12 @@ func TestMediaGate_DefaultWaitIsTwoSeconds(t *testing.T) {
 	g := newMediaGate(1, nil)
 	if g.wait != defaultMediaGateWait {
 		t.Errorf("newMediaGate(...).wait = %v, want defaultMediaGateWait (%v)", g.wait, defaultMediaGateWait)
+	}
+	// A d <= 0 must not reach the struct: an expired timer would make acquire
+	// pick errMediaBusy at random on a free gate.
+	for _, d := range []time.Duration{0, -time.Second} {
+		if g := newMediaGateWithWait(1, nil, d); g.wait != defaultMediaGateWait {
+			t.Errorf("newMediaGateWithWait(1, nil, %v).wait = %v, want defaultMediaGateWait", d, g.wait)
+		}
 	}
 }
