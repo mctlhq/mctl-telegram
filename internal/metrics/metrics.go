@@ -201,7 +201,7 @@ type Registry struct {
 
 	// MediaGateRejectionsTotal counts issue #705's media admission-gate
 	// refusals (MEDIA_MAX_CONCURRENT operations already in flight, no slot
-	// freed within mediaGateWait), labeled by tool
+	// freed within the gate's admission wait), labeled by tool
 	// (get_messages/get_unread_messages/get_media).
 	MediaGateRejectionsTotal *prometheus.CounterVec // {tool}
 	// MediaInflight is the current number of media operations holding a
@@ -311,14 +311,18 @@ func JobStatuses() []string {
 	return out
 }
 
-// claudeResultClasses and jobCostResults complete the set of label-value lists
-// New() writes a zero baseline for; jobStatuses, policySurfaces and
-// policyDenyReasons above are the others. Adding a label value to any of those
-// counters means adding it to the matching list, or the new child goes back to
-// being created lazily on first use.
+// claudeResultClasses, jobCostResults and mediaGateTools complete the set of
+// label-value lists New() writes a zero baseline for; jobStatuses,
+// policySurfaces and policyDenyReasons above are the others. Adding a label
+// value to any of those counters means adding it to the matching list, or the
+// new child goes back to being created lazily on first use.
 var (
 	claudeResultClasses = []string{ClaudeResultClassUsageLimit, ClaudeResultClassOther}
 	jobCostResults      = []string{JobCostResultSuccess, JobCostResultError}
+	// mediaGateTools is the fixed label set of mctl_media_gate_rejections_total:
+	// the tools that acquire the media admission gate (issue #705). Unexported
+	// like its siblings above — nothing outside this package consumes it.
+	mediaGateTools = []string{"get_messages", "get_unread_messages", "get_media"}
 	// workContextRoutes and friends are the closed label sets for
 	// WorkContextRequestsTotal/WorkContextBindingsTotal (issue-443), primed
 	// below for the same reason as the two lists above — see #591.
@@ -675,7 +679,7 @@ func New() *Registry {
 	// baseline, one series per gated tool. The runbook sizes the pod memory
 	// limit from this series, so a first burst of rejections must register
 	// in increase() and the family must read 0, not "no data", before it.
-	for _, tool := range MediaGateTools {
+	for _, tool := range mediaGateTools {
 		r.MediaGateRejectionsTotal.WithLabelValues(tool).Add(0)
 	}
 	for _, result := range jobCostResults {
@@ -715,7 +719,3 @@ func New() *Registry {
 
 	return r
 }
-
-// MediaGateTools is the fixed label set of mctl_media_gate_rejections_total:
-// the tools that acquire the media admission gate (issue #705).
-var MediaGateTools = []string{"get_messages", "get_unread_messages", "get_media"}
