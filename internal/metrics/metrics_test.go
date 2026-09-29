@@ -545,3 +545,18 @@ func TestNew_WorkContextCountersZeroBaseline(t *testing.T) {
 		}
 	}
 }
+
+// TestNew_MediaGateRejectionsZeroBaseline pins that every gated tool's
+// rejection series exists at 0 before any rejection (issue #705), so
+// increase() sees the first burst and dashboards read 0 rather than no data.
+func TestNew_MediaGateRejectionsZeroBaseline(t *testing.T) {
+	reg := New()
+	if got := testutil.CollectAndCount(reg.MediaGateRejectionsTotal); got != len(MediaGateTools) {
+		t.Fatalf("mctl_media_gate_rejections_total series = %d, want %d", got, len(MediaGateTools))
+	}
+	for _, tool := range MediaGateTools {
+		if got := testutil.ToFloat64(reg.MediaGateRejectionsTotal.WithLabelValues(tool)); got != 0 {
+			t.Errorf("rejections{tool=%q} = %v, want 0", tool, got)
+		}
+	}
+}

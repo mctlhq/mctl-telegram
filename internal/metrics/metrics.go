@@ -198,6 +198,16 @@ type Registry struct {
 	// WorkContextBindingsTotal counts work_item_bindings writes, labeled by
 	// result (created, reused, refused).
 	WorkContextBindingsTotal *prometheus.CounterVec // {result}
+
+	// MediaGateRejectionsTotal counts issue #705's media admission-gate
+	// refusals (MEDIA_MAX_CONCURRENT operations already in flight, no slot
+	// freed within mediaGateWait), labeled by tool
+	// (get_messages/get_unread_messages/get_media).
+	MediaGateRejectionsTotal *prometheus.CounterVec // {tool}
+	// MediaInflight is the current number of media operations holding a
+	// mediaGate slot (issue #705). Always 0 when MEDIA_MAX_CONCURRENT=0 or
+	// unset (no gate configured).
+	MediaInflight prometheus.Gauge
 }
 
 // Policy-denial surfaces — the call site that consumed a policy.Deny
@@ -580,6 +590,16 @@ func New() *Registry {
 		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created; reused: redelivery or same-issue rebind; refused: thread already bound to a different issue).",
 	}, []string{"result"})
 
+	r.MediaGateRejectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_media_gate_rejections_total",
+		Help: "Total media admission-gate refusals (MEDIA_MAX_CONCURRENT operations already in flight, no slot freed within the wait), labeled by tool.",
+	}, []string{"tool"})
+
+	r.MediaInflight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_media_inflight",
+		Help: "Current number of media operations holding an admission-gate slot (see MEDIA_MAX_CONCURRENT). Always 0 when no gate is configured.",
+	})
+
 	r.EventsPublishedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "mctl_events_published_total",
 		Help: "Event envelopes published to Valkey Streams.",
@@ -634,6 +654,8 @@ func New() *Registry {
 		r.AgentCredentialDomain,
 		r.WorkContextRequestsTotal,
 		r.WorkContextBindingsTotal,
+		r.MediaGateRejectionsTotal,
+		r.MediaInflight,
 	)
 
 	// Give every agent counter an alert reads through increase() a zero
@@ -648,6 +670,13 @@ func New() *Registry {
 	// each one costs and what breaks without it.
 	for _, class := range claudeResultClasses {
 		r.AgentClaudeResultErrorsTotal.WithLabelValues(class).Add(0)
+	}
+	// issue #705: the media gate's rejection counter gets the same zero
+	// baseline, one series per gated tool. The runbook sizes the pod memory
+	// limit from this series, so a first burst of rejections must register
+	// in increase() and the family must read 0, not "no data", before it.
+	for _, tool := range MediaGateTools {
+		r.MediaGateRejectionsTotal.WithLabelValues(tool).Add(0)
 	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
@@ -686,3 +715,7 @@ func New() *Registry {
 
 	return r
 }
+
+// MediaGateTools is the fixed label set of mctl_media_gate_rejections_total:
+// the tools that acquire the media admission gate (issue #705).
+var MediaGateTools = []string{"get_messages", "get_unread_messages", "get_media"}

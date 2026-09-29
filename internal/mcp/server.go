@@ -18,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/mcpui"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Server struct {
@@ -74,6 +75,18 @@ type Server struct {
 	// MediaUploadMaxBytes is the maximum number of bytes allowed per send_media
 	// upload (file_url fetch or file_base64 decode). 0 means no cap.
 	MediaUploadMaxBytes int64
+	// MediaTextInlineCapBytes (issue #705) is the total base64 length above
+	// which a media-bearing result (messagesResult, getMediaResult) omits the
+	// bytes from the text content block, keeping them in structuredContent
+	// only. 0 (the zero value, and the default for any *Server not wired
+	// through cmd/server/main.go's config plumbing) means "always inline" —
+	// byte-for-byte the pre-#705 behavior, which is also the documented
+	// MEDIA_TEXT_INLINE_CAP_BYTES=0 escape hatch. See mediaJSONResult.
+	MediaTextInlineCapBytes int64
+	// mediaGate (issue #705) bounds how many media operations (a
+	// fetchMediaInline call, a get_media download) may be in flight at once.
+	// nil (default) imposes no limit — see WithMediaConcurrency.
+	mediaGate *mediaGate
 	// Version is reported to MCP clients in the initialize response. Empty
 	// falls back to "dev" in HTTPHandler.
 	Version string
@@ -181,6 +194,29 @@ func (s *Server) WithToolFilter(f string) *Server {
 // receiver for chaining, following the WithToolFilter shape.
 func (s *Server) WithAppsEnabled(b bool) *Server {
 	s.AppsEnabled = b
+	return s
+}
+
+// WithMediaConcurrency bounds the number of concurrent media operations
+// (fetchMediaInline calls, get_media downloads) to n. n<=0 means unlimited —
+// no gate is installed (mediaGate stays nil), which is what every *Server not
+// explicitly opted in (including every existing test and mcp.New's bare
+// construction) gets. When a *metrics.Registry is already wired (WithMetrics
+// called first — cmd/server/main.go's construction order), the gate's
+// in-flight gauge is connected to it; called before WithMetrics, or without
+// it at all, the gate still enforces the limit but reports no gauge. Returns
+// the receiver for chaining, following the WithToolFilter/WithAppsEnabled
+// shape.
+func (s *Server) WithMediaConcurrency(n int) *Server {
+	if n <= 0 {
+		s.mediaGate = nil
+		return s
+	}
+	var inFlight prometheus.Gauge
+	if s.Metrics != nil {
+		inFlight = s.Metrics.MediaInflight
+	}
+	s.mediaGate = newMediaGate(n, inFlight)
 	return s
 }
 

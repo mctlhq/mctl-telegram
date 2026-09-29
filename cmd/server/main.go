@@ -513,6 +513,13 @@ func main() {
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
+	// issue #705: bound media response memory — the aggregate bulk-fetch raw
+	// byte cap, the inline-text base64 threshold, and the concurrent-media
+	// admission gate. WithMediaConcurrency is called after WithMetrics
+	// (above) so the gate's in-flight gauge is connected to m.
+	mcpapp.BulkMediaByteCap = cfg.BulkMediaByteCap
+	mcpSrv.MediaTextInlineCapBytes = cfg.MediaTextInlineCapBytes
+	mcpSrv = mcpSrv.WithMediaConcurrency(cfg.MediaMaxConcurrent)
 	// Off by default; see internal/config.Config.AppsEnabled and
 	// docs/reports/mcp-apps-spike.md. Logged at startup like AGENT_ENABLED so
 	// the resolved value is visible in the deployment logs, not just in env.

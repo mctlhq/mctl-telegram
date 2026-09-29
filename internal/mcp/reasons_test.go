@@ -39,6 +39,9 @@ func TestClassifyToolResultReason_MatchesHandlerLiterals(t *testing.T) {
 		{"search_messages local-bridge refusal", "search_messages is not yet supported for local-bridge accounts", ReasonModeUnsupported},
 		{"edit_message local-bridge refusal", "edit_message is not yet supported for local-bridge accounts", ReasonModeUnsupported},
 
+		// Media admission gate refusal (issue #705, media_gate.go).
+		{"media gate capacity refusal", "media downloads are at capacity - retry shortly", ReasonMediaCapacity},
+
 		// Argument validation (tools.go / media_tools.go / apps.go).
 		{"single required field", "peer is required", ReasonInvalidArgument},
 		{"two required fields", "peer and text are required", ReasonInvalidArgument},

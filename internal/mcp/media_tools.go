@@ -35,6 +35,10 @@ type getMediaResult struct {
 	FileName  string `json:"file_name,omitempty"`
 	Size      int64  `json:"size"`
 	Data      string `json:"data"` // standard base64
+	// DataOmittedFromText is true only when Data was replaced by a
+	// placeholder in the text content block (issue #705,
+	// MEDIA_TEXT_INLINE_CAP_BYTES exceeded) — absent (omitempty) otherwise.
+	DataOmittedFromText bool `json:"data_omitted_from_text,omitempty"`
 }
 
 // sendMediaFetchTimeout bounds a send_media file_url fetch, mirroring the
@@ -152,6 +156,12 @@ The confirmation becomes in-flight on first use and is released when the downloa
 Returns the raw bytes encoded as standard base64 in the "data" field. Maximum download
 size is controlled by MEDIA_DOWNLOAD_MAX_BYTES (default 20 MiB).
 
+Above MEDIA_TEXT_INLINE_CAP_BYTES (default 1 MiB) of encoded data, the bytes are
+returned in structuredContent only: the text content block instead carries a
+placeholder naming the omitted byte count, and "data_omitted_from_text" is set to
+true. When the call is refused for being at the server's concurrent media-download
+capacity (MEDIA_MAX_CONCURRENT), the confirmation_id remains valid for a retry.
+
 Inputs (required): peer, message_id, confirmation_id.
 Output: {media_type, mime_type, file_name, size, data}.`),
 		mcplib.WithString("peer",
@@ -238,12 +248,26 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 			return toolErr("file size %d bytes exceeds the %d-byte download cap", ref.Size, s.MediaDownloadMaxBytes), nil
 		}
 
+		// issue #705: admission gate on concurrent media downloads, acquired
+		// after the confirmation is claimed (above) and before the actual
+		// download call, released via defer so the slot is held through
+		// response construction too. A nil s.mediaGate (MEDIA_MAX_CONCURRENT=0
+		// or unset) imposes no limit. On refusal the confirmation is released
+		// via Unclaim, exactly like the download-timeout branch below, so the
+		// confirmation_id remains usable for a retry.
+		if gerr := s.mediaGate.acquire(ctx); gerr != nil {
+			s.Confirms.Unclaim(confID)
+			released = true
+			return s.mediaGateRefused(ctx, id, "get_media", telegram.RedactPeer(peer), gerr, startedAt), nil
+		}
+		defer s.mediaGate.release()
+
 		var buf []byte
 		downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		dlErr := s.borrowWithRetry(downloadCtx, "get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
-			buf, _, err = telegram.DownloadMedia(ctx, c, ref.Location, s.MediaDownloadMaxBytes)
+			buf, _, err = telegram.DownloadMediaSized(ctx, c, ref.Location, s.MediaDownloadMaxBytes, ref.Size)
 			return err
 		})
 		s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), dlErr, startedAt)
@@ -265,13 +289,24 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 			}
 			return toolErr("get_media: %v", dlErr), nil
 		}
-		return jsonResult(getMediaResult{
+		// issue #705: encode into a local, then drop the raw buffer before
+		// constructing the result, so raw and base64 copies of the same file
+		// are not both reachable while the response is built/marshalled.
+		dataB64 := base64.StdEncoding.EncodeToString(buf)
+		size := int64(len(buf))
+		buf = nil
+		mediaBytes := int64(len(dataB64))
+		result := getMediaResult{
 			MediaType: ref.MediaType,
 			MimeType:  ref.MimeType,
 			FileName:  ref.FileName,
-			Size:      int64(len(buf)),
-			Data:      base64.StdEncoding.EncodeToString(buf),
-		})
+			Size:      size,
+			Data:      dataB64,
+		}
+		if s.mediaTextOmitted(mediaBytes) {
+			result.DataOmittedFromText = true
+		}
+		return s.mediaJSONResult(result, mediaBytes, func() any { return getMediaTextView(result) })
 	}
 	return tool, handler
 }
