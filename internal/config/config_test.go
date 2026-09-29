@@ -263,7 +263,8 @@ func TestLoadMediaUploadMaxBytes_IndependentFromDownloadCap(t *testing.T) {
 }
 
 // TestLoadBulkMediaByteCap (issue #705, T9) covers BULK_MEDIA_BYTE_CAP's
-// default and an env override, mirroring TestLoadMediaUploadMaxBytes.
+// default, an env override and the <= 0 fallback, mirroring
+// TestLoadMediaUploadMaxBytes.
 func TestLoadBulkMediaByteCap(t *testing.T) {
 	tests := []struct {
 		name string
@@ -273,6 +274,8 @@ func TestLoadBulkMediaByteCap(t *testing.T) {
 		{name: "default is 8 MiB", env: map[string]string{}, want: 8388608},
 		{name: "env override", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "1048576"}, want: 1048576},
 		{name: "garbage value falls back to default", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "notanumber"}, want: 8388608},
+		{name: "zero falls back to the default", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "0"}, want: 8388608},
+		{name: "negative falls back to the default", env: map[string]string{"BULK_MEDIA_BYTE_CAP": "-1"}, want: 8388608},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,7 +305,7 @@ func TestLoadMediaTextInlineCapBytes(t *testing.T) {
 		{name: "default is 1 MiB", env: map[string]string{}, want: 1048576},
 		{name: "env override", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "2097152"}, want: 2097152},
 		{name: "zero means always inline", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "0"}, want: 0},
-		{name: "negative is treated as zero", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "-1"}, want: 0},
+		{name: "negative falls back to the default", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "-1"}, want: 1048576},
 		{name: "garbage value falls back to default", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "notanumber"}, want: 1048576},
 	}
 	for _, tc := range tests {
@@ -332,6 +335,7 @@ func TestLoadMediaMaxConcurrent(t *testing.T) {
 		{name: "default is 2", env: map[string]string{}, want: 2},
 		{name: "env override", env: map[string]string{"MEDIA_MAX_CONCURRENT": "5"}, want: 5},
 		{name: "zero means unlimited", env: map[string]string{"MEDIA_MAX_CONCURRENT": "0"}, want: 0},
+		{name: "negative falls back to the default", env: map[string]string{"MEDIA_MAX_CONCURRENT": "-1"}, want: 2},
 		{name: "garbage value falls back to default", env: map[string]string{"MEDIA_MAX_CONCURRENT": "notanumber"}, want: 2},
 	}
 	for _, tc := range tests {

@@ -157,9 +157,18 @@ func (s *Server) WithWorkerTokenMinter(m WorkerTokenMinter) *Server {
 }
 
 // WithMetrics wires a *metrics.Registry so tool invocations are counted and
-// their durations are histogrammed. Returns the receiver for chaining.
+// their durations are histogrammed. If a media admission gate is already
+// installed (WithMediaConcurrency called first), its in-flight gauge is
+// back-filled from m so the gauge ends up wired regardless of call order —
+// see WithMediaConcurrency. Both options are startup-only: they run during
+// *Server construction, before any goroutine can call mediaGate.acquire, so
+// this assignment never races the hot path. Returns the receiver for
+// chaining.
 func (s *Server) WithMetrics(m *metrics.Registry) *Server {
 	s.Metrics = m
+	if s.mediaGate != nil && m != nil {
+		s.mediaGate.inFlight = m.MediaInflight
+	}
 	return s
 }
 
@@ -202,11 +211,12 @@ func (s *Server) WithAppsEnabled(b bool) *Server {
 // no gate is installed (mediaGate stays nil), which is what every *Server not
 // explicitly opted in (including every existing test and mcp.New's bare
 // construction) gets. When a *metrics.Registry is already wired (WithMetrics
-// called first — cmd/server/main.go's construction order), the gate's
-// in-flight gauge is connected to it; called before WithMetrics, or without
-// it at all, the gate still enforces the limit but reports no gauge. Returns
-// the receiver for chaining, following the WithToolFilter/WithAppsEnabled
-// shape.
+// called first), the gate's in-flight gauge is connected to it immediately;
+// called before WithMetrics, WithMetrics back-fills the gauge once it runs —
+// see WithMetrics. Either order ends with the gauge wired; only omitting
+// WithMetrics entirely leaves the gate enforcing its limit with no gauge.
+// Returns the receiver for chaining, following the
+// WithToolFilter/WithAppsEnabled shape.
 func (s *Server) WithMediaConcurrency(n int) *Server {
 	if n <= 0 {
 		s.mediaGate = nil

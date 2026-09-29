@@ -11,16 +11,18 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 )
 
-// mediaGateWait bounds how long a media operation (fetchMediaInline call, or
-// a get_media download) waits for a free admission-gate slot before being
-// refused. See requirements.md's admission-control acceptance criteria
+// defaultMediaGateWait bounds how long a media operation (fetchMediaInline
+// call, or a get_media download) waits for a free admission-gate slot before
+// being refused. See requirements.md's admission-control acceptance criteria
 // (issue #705).
-// A package var, not a const, so tests can shrink it instead of sleeping the
-// full production wait.
-var mediaGateWait = 2 * time.Second
+// A const, not a package var: the wait is carried per-gate on mediaGate.wait
+// instead (set from this default by newMediaGate), so a test that shrinks
+// its own gate's wait cannot race a different test's gate goroutines still
+// reading a shared variable.
+const defaultMediaGateWait = 2 * time.Second
 
 // errMediaBusy is returned by mediaGate.acquire when no slot became free
-// within mediaGateWait, and is the exact text surfaced to the MCP caller —
+// within the gate's wait, and is the exact text surfaced to the MCP caller —
 // classified as ReasonMediaCapacity by classifyToolResultReason.
 var errMediaBusy = errors.New("media downloads are at capacity - retry shortly")
 
@@ -37,17 +39,33 @@ type mediaGate struct {
 	// *metrics.Registry (WithMetrics never called) leaves this nil, and every
 	// use below is nil-guarded.
 	inFlight prometheus.Gauge
+	// wait bounds how long acquire waits for a free slot before returning
+	// errMediaBusy. Set by newMediaGate to defaultMediaGateWait; tests use
+	// newMediaGateWithWait to shrink it on their own gate, never a shared one.
+	wait time.Duration
 }
 
-// newMediaGate builds a mediaGate with n slots. n must be positive; callers
-// (WithMediaConcurrency) treat n<=0 as "no gate" and leave Server.mediaGate
-// nil instead of calling this.
+// newMediaGate builds a mediaGate with n slots and the production admission
+// wait. n must be positive; callers (WithMediaConcurrency) treat n<=0 as "no
+// gate" and leave Server.mediaGate nil instead of calling this.
 func newMediaGate(n int, inFlight prometheus.Gauge) *mediaGate {
-	return &mediaGate{slots: make(chan struct{}, n), inFlight: inFlight}
+	return newMediaGateWithWait(n, inFlight, defaultMediaGateWait)
 }
 
-// acquire reserves one slot, waiting up to mediaGateWait for one to free up.
-// It returns nil once a slot is held, errMediaBusy on timeout, or ctx's own
+// newMediaGateWithWait builds a mediaGate with n slots and an explicit
+// admission wait d, for tests that need to shrink the wait below the 2s
+// production default without touching any other gate's timing. A d <= 0
+// falls back to the default: an already-expired timer would make acquire's
+// select pick errMediaBusy at random even with a free slot.
+func newMediaGateWithWait(n int, inFlight prometheus.Gauge, d time.Duration) *mediaGate {
+	if d <= 0 {
+		d = defaultMediaGateWait
+	}
+	return &mediaGate{slots: make(chan struct{}, n), inFlight: inFlight, wait: d}
+}
+
+// acquire reserves one slot, waiting up to g.wait for one to free up. It
+// returns nil once a slot is held, errMediaBusy on timeout, or ctx's own
 // error if ctx is done first. A nil receiver always returns nil immediately
 // (unlimited). Every acquire that returns nil must be paired with exactly one
 // release (typically via defer).
@@ -57,7 +75,7 @@ func (g *mediaGate) acquire(ctx context.Context) error {
 	}
 	// A stoppable timer rather than time.After: the common case acquires a
 	// slot immediately, and time.After would keep a live 2s timer per call.
-	timer := time.NewTimer(mediaGateWait)
+	timer := time.NewTimer(g.wait)
 	defer timer.Stop()
 	select {
 	case g.slots <- struct{}{}:

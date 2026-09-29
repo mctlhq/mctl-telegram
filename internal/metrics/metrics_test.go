@@ -42,6 +42,8 @@ var expectedMetricNames = []string{
 	"mctl_agent_credential_domain",
 	"mctl_work_context_requests_total",
 	"mctl_work_context_bindings_total",
+	"mctl_media_inflight",
+	"mctl_media_gate_rejections_total",
 }
 
 // TestNew_RegistersAllMetrics verifies that Gather() returns a MetricFamily
@@ -551,12 +553,23 @@ func TestNew_WorkContextCountersZeroBaseline(t *testing.T) {
 // increase() sees the first burst and dashboards read 0 rather than no data.
 func TestNew_MediaGateRejectionsZeroBaseline(t *testing.T) {
 	reg := New()
-	if got := testutil.CollectAndCount(reg.MediaGateRejectionsTotal); got != len(MediaGateTools) {
-		t.Fatalf("mctl_media_gate_rejections_total series = %d, want %d", got, len(MediaGateTools))
+	if got := testutil.CollectAndCount(reg.MediaGateRejectionsTotal); got != len(mediaGateTools) {
+		t.Fatalf("mctl_media_gate_rejections_total series = %d, want %d", got, len(mediaGateTools))
 	}
-	for _, tool := range MediaGateTools {
+	for _, tool := range mediaGateTools {
 		if got := testutil.ToFloat64(reg.MediaGateRejectionsTotal.WithLabelValues(tool)); got != 0 {
 			t.Errorf("rejections{tool=%q} = %v, want 0", tool, got)
 		}
+	}
+}
+
+// TestNew_MediaInflightStartsAtZero pins mctl_media_inflight's starting value
+// at 0 on a fresh registry — the gauge the runbook sizes the pod memory limit
+// from (issue #705) must never read "no data" before the first media
+// operation acquires a slot.
+func TestNew_MediaInflightStartsAtZero(t *testing.T) {
+	reg := New()
+	if got := testutil.ToFloat64(reg.MediaInflight); got != 0 {
+		t.Errorf("MediaInflight on a fresh registry = %v, want 0", got)
 	}
 }

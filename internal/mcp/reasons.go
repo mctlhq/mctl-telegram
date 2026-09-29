@@ -83,7 +83,7 @@ const (
 	// ReasonMediaCapacity (issue #705) is raised when the media admission
 	// gate refuses a fetch_media=true bulk fetch or a get_media download
 	// because MEDIA_MAX_CONCURRENT operations are already in flight and no
-	// slot freed within mediaGateWait.
+	// slot freed within the gate's admission wait.
 	ReasonMediaCapacity = "media_capacity"
 )
 

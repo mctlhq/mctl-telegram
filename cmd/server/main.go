@@ -515,8 +515,10 @@ func main() {
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
 	// issue #705: bound media response memory — the aggregate bulk-fetch raw
 	// byte cap, the inline-text base64 threshold, and the concurrent-media
-	// admission gate. WithMediaConcurrency is called after WithMetrics
-	// (above) so the gate's in-flight gauge is connected to m.
+	// admission gate. Call order relative to WithMetrics (above) no longer
+	// matters: WithMetrics back-fills the gate's in-flight gauge if the gate
+	// was installed first, and WithMediaConcurrency wires it directly if
+	// metrics came first — see both doc comments in internal/mcp/server.go.
 	mcpapp.BulkMediaByteCap = cfg.BulkMediaByteCap
 	mcpSrv.MediaTextInlineCapBytes = cfg.MediaTextInlineCapBytes
 	mcpSrv = mcpSrv.WithMediaConcurrency(cfg.MediaMaxConcurrent)
