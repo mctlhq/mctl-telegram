@@ -21,6 +21,15 @@ import (
 // OAUTH_REFRESH_TOKEN_TTL.
 const maxOAUTHAccessTokenTTL = 24 * time.Hour
 
+// The three issue #705 media knobs share their defaults between the envInt*
+// call that resolves them and the clamp branch that falls back to the same
+// value on invalid input; hoisted here so the literal is not repeated.
+const (
+	defaultBulkMediaByteCap        = 8388608
+	defaultMediaTextInlineCapBytes = 1048576
+	defaultMediaMaxConcurrent      = 2
+)
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -222,13 +231,17 @@ type Config struct {
 	// which a media-bearing tool result omits the bytes from the text content
 	// block (keeping them in structuredContent only) and substitutes a
 	// placeholder instead. Default 1 MiB; 0 means always inline (restores the
-	// pre-#705 dual-encoded behavior, at the pre-#705 memory cost). Set via
-	// MEDIA_TEXT_INLINE_CAP_BYTES.
+	// pre-#705 dual-encoded behavior, at the pre-#705 memory cost) and must be
+	// set explicitly — a negative value is normalised to the 1 MiB default
+	// rather than to 0, so a config typo cannot silently re-arm the pre-#705
+	// memory cost. Set via MEDIA_TEXT_INLINE_CAP_BYTES.
 	MediaTextInlineCapBytes int64 // MEDIA_TEXT_INLINE_CAP_BYTES
 	// MediaMaxConcurrent (issue #705) bounds how many media operations
 	// (a fetchMediaInline call, a get_media download) may be in flight at
 	// once. Default 2; 0 means unlimited (no admission gate — documented as
-	// unsafe). Set via MEDIA_MAX_CONCURRENT.
+	// unsafe). A negative value is normalised to 0, matching the "unlimited"
+	// policy WithMediaConcurrency already enforces for any n <= 0. Set via
+	// MEDIA_MAX_CONCURRENT.
 	MediaMaxConcurrent int // MEDIA_MAX_CONCURRENT
 	// AgentRetentionDays bounds how long the communication agent's stored
 	// message content (incoming_events, conversation_messages) is kept before
@@ -448,23 +461,25 @@ func Load() (*Config, error) {
 	}
 	c.MediaDownloadMaxBytes = int64(envInt("MEDIA_DOWNLOAD_MAX_BYTES", 20971520))
 	c.MediaUploadMaxBytes = int64(envInt("MEDIA_UPLOAD_MAX_BYTES", 20971520))
-	c.BulkMediaByteCap = envInt64("BULK_MEDIA_BYTE_CAP", 8388608)
+	c.BulkMediaByteCap = envInt64("BULK_MEDIA_BYTE_CAP", defaultBulkMediaByteCap)
 	if c.BulkMediaByteCap <= 0 {
 		slog.Warn("BULK_MEDIA_BYTE_CAP must be positive; falling back to the 8388608-byte default "+
 			"(unlike MEDIA_DOWNLOAD_MAX_BYTES/MEDIA_TEXT_INLINE_CAP_BYTES, 0 here would silently skip every bulk media item instead of uncapping)",
 			"bulk_media_byte_cap", c.BulkMediaByteCap)
-		c.BulkMediaByteCap = 8388608
+		c.BulkMediaByteCap = defaultBulkMediaByteCap
 	}
-	c.MediaTextInlineCapBytes = envInt64("MEDIA_TEXT_INLINE_CAP_BYTES", 1048576)
+	c.MediaTextInlineCapBytes = envInt64("MEDIA_TEXT_INLINE_CAP_BYTES", defaultMediaTextInlineCapBytes)
 	if c.MediaTextInlineCapBytes < 0 {
-		slog.Warn("MEDIA_TEXT_INLINE_CAP_BYTES is negative; treating as 0 (media base64 always inlined in the text block)",
+		slog.Warn("MEDIA_TEXT_INLINE_CAP_BYTES is negative; falling back to the 1048576-byte default "+
+			"(set it to exactly 0 to explicitly opt into always inlining media base64 in the text block)",
 			"media_text_inline_cap_bytes", c.MediaTextInlineCapBytes)
-		c.MediaTextInlineCapBytes = 0
+		c.MediaTextInlineCapBytes = defaultMediaTextInlineCapBytes
 	}
-	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", 2)
+	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", defaultMediaMaxConcurrent)
 	if c.MediaMaxConcurrent < 0 {
-		slog.Warn("MEDIA_MAX_CONCURRENT is negative; treating as unlimited (no gate)",
+		slog.Warn("MEDIA_MAX_CONCURRENT is negative; normalised to 0 (no gate, unlimited)",
 			"media_max_concurrent", c.MediaMaxConcurrent)
+		c.MediaMaxConcurrent = 0
 	}
 	c.OAUTHAllowedImplicitHosts = parseStringCSV(os.Getenv("OAUTH_ALLOWED_IMPLICIT_HOSTS"))
 	preregistered, err := parsePreregisteredClients(os.Getenv("OAUTH_PREREGISTERED_CLIENTS"))
