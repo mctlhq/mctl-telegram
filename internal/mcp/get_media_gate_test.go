@@ -53,6 +53,7 @@ func newGetMediaGateTestServer(t *testing.T) (*Server, int64) {
 // a retry with the same confirmation_id must still find it.
 func TestGetMedia_GateRefusalPreservesConfirmation(t *testing.T) {
 	s, uid := newGetMediaGateTestServer(t)
+	withMediaGateWait(t, 50*time.Millisecond)
 
 	// Fill the single gate slot so get_media's own acquire times out.
 	s.mediaGate = newMediaGate(1, nil)

@@ -302,6 +302,7 @@ func TestLoadMediaTextInlineCapBytes(t *testing.T) {
 		{name: "default is 1 MiB", env: map[string]string{}, want: 1048576},
 		{name: "env override", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "2097152"}, want: 2097152},
 		{name: "zero means always inline", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "0"}, want: 0},
+		{name: "negative is treated as zero", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "-1"}, want: 0},
 		{name: "garbage value falls back to default", env: map[string]string{"MEDIA_TEXT_INLINE_CAP_BYTES": "notanumber"}, want: 1048576},
 	}
 	for _, tc := range tests {

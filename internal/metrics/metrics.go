@@ -671,6 +671,13 @@ func New() *Registry {
 	for _, class := range claudeResultClasses {
 		r.AgentClaudeResultErrorsTotal.WithLabelValues(class).Add(0)
 	}
+	// issue #705: the media gate's rejection counter gets the same zero
+	// baseline, one series per gated tool. The runbook sizes the pod memory
+	// limit from this series, so a first burst of rejections must register
+	// in increase() and the family must read 0, not "no data", before it.
+	for _, tool := range MediaGateTools {
+		r.MediaGateRejectionsTotal.WithLabelValues(tool).Add(0)
+	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
 	}
@@ -708,3 +715,7 @@ func New() *Registry {
 
 	return r
 }
+
+// MediaGateTools is the fixed label set of mctl_media_gate_rejections_total:
+// the tools that acquire the media admission gate (issue #705).
+var MediaGateTools = []string{"get_messages", "get_unread_messages", "get_media"}

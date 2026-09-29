@@ -15,7 +15,9 @@ import (
 // a get_media download) waits for a free admission-gate slot before being
 // refused. See requirements.md's admission-control acceptance criteria
 // (issue #705).
-const mediaGateWait = 2 * time.Second
+// A package var, not a const, so tests can shrink it instead of sleeping the
+// full production wait.
+var mediaGateWait = 2 * time.Second
 
 // errMediaBusy is returned by mediaGate.acquire when no slot became free
 // within mediaGateWait, and is the exact text surfaced to the MCP caller —

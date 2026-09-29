@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ func TestMediaGate_NilIsUnlimited(t *testing.T) {
 // gate itself performs no download; this documents the contract the
 // tool handlers rely on).
 func TestMediaGate_RefusesWhenFull(t *testing.T) {
+	withMediaGateWait(t, 50*time.Millisecond)
 	g := newMediaGate(1, nil)
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("first acquire() = %v, want nil", err)
@@ -119,5 +122,31 @@ func TestMediaGate_ConcurrentAcquireReleaseStaysWithinCapacity(t *testing.T) {
 	wg.Wait()
 	if peak > slots {
 		t.Errorf("peak concurrent holders = %d, want <= %d", peak, slots)
+	}
+}
+
+// withMediaGateWait shrinks mediaGateWait for one test, restoring it after.
+func withMediaGateWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := mediaGateWait
+	mediaGateWait = d
+	t.Cleanup(func() { mediaGateWait = orig })
+}
+
+// TestMediaGate_InFlightGaugeTracksHeldSlots pins that mctl_media_inflight
+// rises on a successful acquire and falls on release, so the gauge the
+// runbook sizes the pod from cannot drift.
+func TestMediaGate_InFlightGaugeTracksHeldSlots(t *testing.T) {
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_media_inflight"})
+	g := newMediaGate(1, gauge)
+	if err := g.acquire(context.Background()); err != nil {
+		t.Fatalf("acquire() = %v", err)
+	}
+	if got := testutil.ToFloat64(gauge); got != 1 {
+		t.Errorf("gauge while holding a slot = %v, want 1", got)
+	}
+	g.release()
+	if got := testutil.ToFloat64(gauge); got != 0 {
+		t.Errorf("gauge after release = %v, want 0", got)
 	}
 }

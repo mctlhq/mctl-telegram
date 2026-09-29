@@ -456,6 +456,11 @@ func Load() (*Config, error) {
 		c.BulkMediaByteCap = 8388608
 	}
 	c.MediaTextInlineCapBytes = envInt64("MEDIA_TEXT_INLINE_CAP_BYTES", 1048576)
+	if c.MediaTextInlineCapBytes < 0 {
+		slog.Warn("MEDIA_TEXT_INLINE_CAP_BYTES is negative; treating as 0 (media base64 always inlined in the text block)",
+			"media_text_inline_cap_bytes", c.MediaTextInlineCapBytes)
+		c.MediaTextInlineCapBytes = 0
+	}
 	c.MediaMaxConcurrent = envInt("MEDIA_MAX_CONCURRENT", 2)
 	if c.MediaMaxConcurrent < 0 {
 		slog.Warn("MEDIA_MAX_CONCURRENT is negative; treating as unlimited (no gate)",
