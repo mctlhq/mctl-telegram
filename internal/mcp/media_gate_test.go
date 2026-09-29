@@ -3,11 +3,12 @@ package mcp
 import (
 	"context"
 	"errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // TestMediaGate_NilIsUnlimited (T6) verifies a nil *mediaGate — the zero
@@ -24,13 +25,14 @@ func TestMediaGate_NilIsUnlimited(t *testing.T) {
 }
 
 // TestMediaGate_RefusesWhenFull (T6) verifies that once every slot is held, a
-// further acquire waits up to mediaGateWait and then fails with errMediaBusy
-// — and that no caller observing that error ever "started" anything (the
-// gate itself performs no download; this documents the contract the
-// tool handlers rely on).
+// further acquire waits up to the gate's own wait and then fails with
+// errMediaBusy — and that no caller observing that error ever "started"
+// anything (the gate itself performs no download; this documents the
+// contract the tool handlers rely on). Uses its own gate with a shrunk wait
+// (newMediaGateWithWait) rather than a shared package var, so it cannot race
+// another test's gate goroutines.
 func TestMediaGate_RefusesWhenFull(t *testing.T) {
-	withMediaGateWait(t, 50*time.Millisecond)
-	g := newMediaGate(1, nil)
+	g := newMediaGateWithWait(1, nil, 50*time.Millisecond)
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("first acquire() = %v, want nil", err)
 	}
@@ -40,8 +42,8 @@ func TestMediaGate_RefusesWhenFull(t *testing.T) {
 	if !errors.Is(err, errMediaBusy) {
 		t.Fatalf("second acquire() = %v, want errMediaBusy", err)
 	}
-	if elapsed < mediaGateWait {
-		t.Errorf("acquire() returned after %v, want at least mediaGateWait (%v)", elapsed, mediaGateWait)
+	if elapsed < g.wait {
+		t.Errorf("acquire() returned after %v, want at least g.wait (%v)", elapsed, g.wait)
 	}
 	g.release()
 }
@@ -67,9 +69,10 @@ func TestMediaGate_ReleasesOnAllPaths(t *testing.T) {
 
 // TestMediaGate_AcquireRespectsContextCancellation verifies a canceled
 // context aborts the wait immediately rather than blocking the full
-// mediaGateWait.
+// admission wait. Uses its own gate (newMediaGateWithWait) for the same
+// no-shared-state reason as TestMediaGate_RefusesWhenFull.
 func TestMediaGate_AcquireRespectsContextCancellation(t *testing.T) {
-	g := newMediaGate(1, nil)
+	g := newMediaGateWithWait(1, nil, 50*time.Millisecond)
 	if err := g.acquire(context.Background()); err != nil {
 		t.Fatalf("first acquire() = %v, want nil", err)
 	}
@@ -81,7 +84,7 @@ func TestMediaGate_AcquireRespectsContextCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("acquire(canceled ctx) = %v, want context.Canceled", err)
 	}
-	if elapsed >= mediaGateWait {
+	if elapsed >= g.wait {
 		t.Errorf("acquire(canceled ctx) took %v, want to return immediately on cancellation", elapsed)
 	}
 	g.release()
@@ -101,7 +104,7 @@ func TestMediaGate_ConcurrentAcquireReleaseStaysWithinCapacity(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), mediaGateWait+500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), g.wait+500*time.Millisecond)
 			defer cancel()
 			if err := g.acquire(ctx); err != nil {
 				return
@@ -125,14 +128,6 @@ func TestMediaGate_ConcurrentAcquireReleaseStaysWithinCapacity(t *testing.T) {
 	}
 }
 
-// withMediaGateWait shrinks mediaGateWait for one test, restoring it after.
-func withMediaGateWait(t *testing.T, d time.Duration) {
-	t.Helper()
-	orig := mediaGateWait
-	mediaGateWait = d
-	t.Cleanup(func() { mediaGateWait = orig })
-}
-
 // TestMediaGate_InFlightGaugeTracksHeldSlots pins that mctl_media_inflight
 // rises on a successful acquire and falls on release, so the gauge the
 // runbook sizes the pod from cannot drift.
@@ -148,5 +143,19 @@ func TestMediaGate_InFlightGaugeTracksHeldSlots(t *testing.T) {
 	g.release()
 	if got := testutil.ToFloat64(gauge); got != 0 {
 		t.Errorf("gauge after release = %v, want 0", got)
+	}
+}
+
+// TestMediaGate_DefaultWaitIsTwoSeconds (T6) pins the production admission
+// wait: newMediaGate must still install defaultMediaGateWait, and that const
+// must still be 2s, so a test shrinking its own gate's wait via
+// newMediaGateWithWait cannot let the production value silently drift.
+func TestMediaGate_DefaultWaitIsTwoSeconds(t *testing.T) {
+	if defaultMediaGateWait != 2*time.Second {
+		t.Fatalf("defaultMediaGateWait = %v, want 2s", defaultMediaGateWait)
+	}
+	g := newMediaGate(1, nil)
+	if g.wait != defaultMediaGateWait {
+		t.Errorf("newMediaGate(...).wait = %v, want defaultMediaGateWait (%v)", g.wait, defaultMediaGateWait)
 	}
 }
