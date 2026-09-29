@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.71.0](https://github.com/mctlhq/mctl-telegram/compare/0.70.0...0.71.0) (2026-09-29)
+
+
+### Features
+
+* **agents:** issue-705-media-responses-amplify-memory-10x-fetch ([165491f](https://github.com/mctlhq/mctl-telegram/commit/165491f055ed535cbec9fd8fd1de745832d36600))
+* **agents:** issue-705-media-responses-amplify-memory-10x-fetch ([6bd066b](https://github.com/mctlhq/mctl-telegram/commit/6bd066b8cfb2a11f844d51462416d8a98c44b530))
+
+
+### Bug Fixes
+
+* **705:** cite the 0.70.0 baseline; drop the platform-dependent alloc ceiling ([6aca3bf](https://github.com/mctlhq/mctl-telegram/commit/6aca3bf067309041f295908df42e2d5b3fe363ab))
+* address review findings ([16b878e](https://github.com/mctlhq/mctl-telegram/commit/16b878e0c2508eb6085f37ceadfb3eb8554d87f1))
+* **mcp,config:** lazy text view, shared gate refusal, config and doc gaps ([4abb563](https://github.com/mctlhq/mctl-telegram/commit/4abb563c10fbbe4a4f047d935660801e04fde219))
+* **mcp:** report a cancelled media-gate wait as cancellation, not capacity ([180aa87](https://github.com/mctlhq/mctl-telegram/commit/180aa8786cf4bbaa9779bf365bd7b14271469817))
+* **metrics,mcp,config:** zero-baseline gate rejections; gauge test; faster gate tests ([f0e1757](https://github.com/mctlhq/mctl-telegram/commit/f0e17573b2ea2594e2ecc2da667c9a20e87d750a))
+
 ## [0.70.0](https://github.com/mctlhq/mctl-telegram/compare/0.69.0...0.70.0) (2026-09-28)
 
 
