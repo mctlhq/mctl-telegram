@@ -964,6 +964,30 @@ func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
 		if !strings.Contains(buf.String(), "reason="+reasonUnknownState) {
 			t.Errorf("expected a log line with reason=%s, got:\n%s", reasonUnknownState, buf.String())
 		}
+
+		// A row that exists but is past CodeTTL must log reason=expired_state,
+		// not unknown_state — the case db.ErrOAuthExpired exists to
+		// distinguish on the DB-backed store.
+		_, expiredChallenge := pkceVerifierAndChallenge()
+		expiredState := stateFromAuthorize(t, mux, expiredChallenge)
+		if _, err := store.DB.ExecContext(context.Background(),
+			`UPDATE oauth_pending_auth SET created_at = $1 WHERE state = $2`,
+			time.Now().UTC().Add(-time.Hour), expiredState,
+		); err != nil {
+			t.Fatalf("backdate oauth_pending_auth: %v", err)
+		}
+
+		buf.Reset()
+		recExpired := callbackWithState(t, mux, expiredState)
+		if recExpired.Code != http.StatusOK {
+			t.Fatalf("expired: status = %d, want 200; body=%s", recExpired.Code, recExpired.Body.String())
+		}
+		if !strings.Contains(recExpired.Body.String(), "already used") {
+			t.Errorf("expired: expected the friendly reused-link copy, got: %s", recExpired.Body.String())
+		}
+		if !strings.Contains(buf.String(), "reason="+reasonExpiredState) {
+			t.Errorf("expired: expected a log line with reason=%s, got:\n%s", reasonExpiredState, buf.String())
+		}
 	})
 }
 
@@ -1028,7 +1052,40 @@ func TestHandleTelegramCallback_OIDCErrorAndMissingCode_Logged(t *testing.T) {
 			if strings.Contains(out, state) {
 				t.Errorf("log leaked the state value:\n%s", out)
 			}
+			// Schema-stability: the prefetch attribute is retained on every
+			// reject line (always false here, since a real prefetch never
+			// reaches this far), so one prefetch= query matches every line
+			// this route emits.
+			if !strings.Contains(out, "prefetch=false") {
+				t.Errorf("want the reject line to carry prefetch=false, got:\n%s", out)
+			}
 		})
+	}
+}
+
+// TestHandleTelegramCallback_ExchangeFailureLogsReason confirms a failed
+// Telegram OIDC token exchange logs reason=exchange_failed (the named const,
+// not a bare literal) and answers 401 with an opaque body that names no
+// Telegram id.
+func TestHandleTelegramCallback_ExchangeFailureLogsReason(t *testing.T) {
+	buf := captureOAuthLog(t)
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	authFake(srv).exchangeErr = errors.New("token endpoint: boom")
+
+	_, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorize(t, mux, challenge)
+
+	rec := callbackWithState(t, mux, state)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "500100101") {
+		t.Errorf("response body leaked a Telegram id: %s", rec.Body.String())
+	}
+	if !strings.Contains(buf.String(), "reason="+reasonExchangeFailed) {
+		t.Errorf("expected a log line with reason=%s, got:\n%s", reasonExchangeFailed, buf.String())
 	}
 }
 
@@ -1061,10 +1118,32 @@ func TestHandleTelegramCallback_PrefetchDoesNotConsumeState(t *testing.T) {
 	if rec1.Code != http.StatusNoContent {
 		t.Fatalf("Sec-Purpose prefetch: status = %d, want 204", rec1.Code)
 	}
+	if got := rec1.Header().Values("Vary"); len(got) != 1 || got[0] != "Sec-Purpose, Purpose" {
+		t.Errorf("Sec-Purpose prefetch: Vary = %v, want exactly one \"Sec-Purpose, Purpose\"", got)
+	}
 
 	rec2 := callbackWithStateHeaders(t, mux, state, map[string]string{"Purpose": "prefetch"})
 	if rec2.Code != http.StatusNoContent {
 		t.Fatalf("Purpose prefetch: status = %d, want 204", rec2.Code)
+	}
+	if got := rec2.Header().Values("Vary"); len(got) != 1 || got[0] != "Sec-Purpose, Purpose" {
+		t.Errorf("Purpose prefetch: Vary = %v, want exactly one \"Sec-Purpose, Purpose\"", got)
+	}
+
+	// Also send two prefetch requests carrying the activation's own state:
+	// the two requests above only prove the pending-auth state survives, and
+	// activationsByState is a different map keyed by a different state, so
+	// nothing before this point can actually fail the stillIndexed assertion
+	// below. Exercising both states is what makes the guard's position
+	// (before, not after, the activation dispatch) load-bearing for the test.
+	rec1Act := callbackWithStateHeaders(t, mux, act.oidcState, map[string]string{"Sec-Purpose": "prefetch;prerender"})
+	if rec1Act.Code != http.StatusNoContent {
+		t.Fatalf("Sec-Purpose prefetch (activation state): status = %d, want 204", rec1Act.Code)
+	}
+
+	rec2Act := callbackWithStateHeaders(t, mux, act.oidcState, map[string]string{"Purpose": "prefetch"})
+	if rec2Act.Code != http.StatusNoContent {
+		t.Fatalf("Purpose prefetch (activation state): status = %d, want 204", rec2Act.Code)
 	}
 
 	// The activation-keyed state must be untouched: the dispatch never ran.

@@ -407,7 +407,13 @@ func main() {
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
 	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
-	mux.Post("/", web.RootPostHint(cfg.MCPPath))
+	// Belt-and-braces alongside config.Load's own MCP_PATH validation: a
+	// Config built directly (bypassing Load, e.g. in a test or another
+	// binary) must not be able to reintroduce the "/" shadow between this
+	// route, the MCP mount, and the landing page.
+	if strings.Trim(cfg.MCPPath, "/") != "" {
+		mux.Post("/", web.RootPostHint(cfg.MCPPath))
+	}
 	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
 	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))

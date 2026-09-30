@@ -132,9 +132,12 @@ func RootPostHint(mcpPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		// RFC 9110 15.5.6: a 405 must list the methods the target accepts. Only
-		// GET / is registered (no GetHead middleware), so that is the list.
-		w.Header().Set("Allow", http.MethodGet)
+		// RFC 9110 15.5.6: a 405 must list the methods the target resource
+		// supports. POST / is registered alongside GET / (cmd/server/main.go),
+		// so chi's own 405 for PUT/DELETE/HEAD lists both — this handler must
+		// agree. Listing POST while answering 405 to POST is intentional: the
+		// method is routed, this handler just refuses it with a hint.
+		w.Header().Set("Allow", "GET, POST")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"jsonrpc": "2.0",

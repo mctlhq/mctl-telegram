@@ -286,6 +286,64 @@ func TestHandleConnectDone_ReusedState_RedirectsToManage(t *testing.T) {
 	}
 }
 
+// TestHandleConnectDone_RecoveredRedirect confirms that an unknown/expired
+// state whose request carries a credential the configured Identifier accepts
+// logs the recovery under its own reason (recovered_redirect) instead of the
+// failure reasons (unknown_state/expired_state) — so a successful redirect to
+// /manage does not inflate the failure count a real operator greps and
+// alerts on.
+func TestHandleConnectDone_RecoveredRedirect(t *testing.T) {
+	t.Run("identifier accepts: logs recovered_redirect, not a failure reason", func(t *testing.T) {
+		buf := captureConnectLog(t)
+		ident := &stubIdentifier{id: &auth.Identity{UserID: 1, Subject: "tg:1"}}
+		srv := newTestConnectServer(t, func(cfg *ConnectConfig) {
+			cfg.Identifier = ident
+		})
+
+		rec := httptest.NewRecorder()
+		srv.HandleConnectDone(rec, httptest.NewRequest("GET", "/telegram/connect/done?code=abc&state=never-issued", nil))
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303, body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); loc != "/telegram/connect/manage" {
+			t.Errorf("Location = %q, want /telegram/connect/manage", loc)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "reason="+reasonRecoveredRedirect) {
+			t.Errorf("expected a log line with reason=%s, got:\n%s", reasonRecoveredRedirect, out)
+		}
+		if strings.Contains(out, "reason="+reasonUnknownState) {
+			t.Errorf("must not log reason=%s on a recovered redirect, got:\n%s", reasonUnknownState, out)
+		}
+		if strings.Contains(out, "reason="+reasonExpiredState) {
+			t.Errorf("must not log reason=%s on a recovered redirect, got:\n%s", reasonExpiredState, out)
+		}
+	})
+
+	t.Run("no identifier: unchanged unknown_state WARN and reused page", func(t *testing.T) {
+		buf := captureConnectLog(t)
+		srv := newTestConnectServer(t)
+
+		rec := httptest.NewRecorder()
+		srv.HandleConnectDone(rec, httptest.NewRequest("GET", "/telegram/connect/done?code=abc&state=never-issued", nil))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (reused page)", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "already used") {
+			t.Errorf("expected the reused-link page, got: %s", rec.Body.String())
+		}
+		out := buf.String()
+		if !strings.Contains(out, "reason="+reasonUnknownState) {
+			t.Errorf("expected a log line with reason=%s, got:\n%s", reasonUnknownState, out)
+		}
+		if strings.Contains(out, "reason="+reasonRecoveredRedirect) {
+			t.Errorf("must not log reason=%s with no Identifier, got:\n%s", reasonRecoveredRedirect, out)
+		}
+	})
+}
+
 // TestHandleConnectDone_ReusedState_NoIdentity_ShowsReusedPage confirms that
 // a replay of a consumed state with no Identifier (or one that reports no
 // identity) shows the "link already used" page at 200, carrying the CSP
@@ -427,6 +485,13 @@ func TestHandleConnectDone_LogsOneWarnPerBranch(t *testing.T) {
 			if strings.Contains(lines[0], "state=") || strings.Contains(lines[0], "code=") || strings.Contains(lines[0], "cookie") {
 				t.Errorf("log line leaked state/code/cookie: %s", lines[0])
 			}
+			// Schema-stability: the prefetch attribute is retained on every
+			// reject line (always false here, since a real prefetch never
+			// reaches this far), so one prefetch= query matches every line
+			// this route emits.
+			if !strings.Contains(lines[0], "prefetch=false") {
+				t.Errorf("log line = %q, want prefetch=false", lines[0])
+			}
 		})
 	}
 }
@@ -449,6 +514,9 @@ func TestHandleConnectDone_PrefetchDoesNotConsumeState(t *testing.T) {
 	if rec1.Code != http.StatusNoContent {
 		t.Fatalf("Sec-Purpose prefetch: status = %d, want 204", rec1.Code)
 	}
+	if got := rec1.Header().Values("Vary"); len(got) != 1 || got[0] != "Sec-Purpose, Purpose" {
+		t.Errorf("Sec-Purpose prefetch: Vary = %v, want exactly one \"Sec-Purpose, Purpose\"", got)
+	}
 
 	req2 := httptest.NewRequest("GET", url, nil)
 	req2.Header.Set("Purpose", "prefetch")
@@ -456,6 +524,9 @@ func TestHandleConnectDone_PrefetchDoesNotConsumeState(t *testing.T) {
 	srv.HandleConnectDone(rec2, req2)
 	if rec2.Code != http.StatusNoContent {
 		t.Fatalf("Purpose prefetch: status = %d, want 204", rec2.Code)
+	}
+	if got := rec2.Header().Values("Vary"); len(got) != 1 || got[0] != "Sec-Purpose, Purpose" {
+		t.Errorf("Purpose prefetch: Vary = %v, want exactly one \"Sec-Purpose, Purpose\"", got)
 	}
 
 	srv.mu.Lock()

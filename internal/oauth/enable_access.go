@@ -830,13 +830,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			observePhoneStep(result)
 			reason := shortReason(lf.err)
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "", "")
-			msg := "Telegram rejected the request: " + friendlyErr(lf.err) + " Try again."
-			if reason == "auth_restart" {
-				// AUTH_RESTART is not a rejection and friendlyErr already
-				// carries the full instruction; the generic wrapper would
-				// frame it twice.
-				msg = friendlyErr(lf.err)
-			}
+			msg := framedLoginErr("Telegram rejected the request: ", lf.err, " Try again.")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 				Error: msg,
@@ -947,7 +941,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-				Error: "The code was not accepted: " + friendlyErr(lf.err) + " Start again to get a fresh code.",
+				Error: framedLoginErr("The code was not accepted: ", lf.err, " Start again to get a fresh code."),
 			})
 			return
 		}
@@ -1055,7 +1049,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-				Error: "The password was not accepted: " + friendlyErr(lf.err) + " Start again.",
+				Error: framedLoginErr("The password was not accepted: ", lf.err, " Start again."),
 			})
 			return
 		}
@@ -1169,6 +1163,10 @@ func friendlyErr(err error) string {
 			return "Telegram ended the sign-in session. Submit your phone number again to get a fresh code."
 		}
 	}
+	// Live 2FA rejections never reach this arm: handleEnablePassword renders
+	// badPasswordRestartMsg instead, because the login goroutine has already
+	// exited. Kept for friendlyErr's own contract and pinned by
+	// enable_access_friendly_test.go.
 	if isBadPasswordErr(err) {
 		return "That two-step verification password was not accepted. Check it and try again."
 	}
@@ -1180,6 +1178,20 @@ func friendlyErr(err error) string {
 		m += "."
 	}
 	return m
+}
+
+// framedLoginErr renders a login failure for a step page, wrapping
+// friendlyErr in prefix/suffix except for AUTH_RESTART, which friendlyErr
+// already renders as a complete instruction ("Telegram ended the sign-in
+// session. Submit your phone number again to get a fresh code."). Wrapping
+// that both misattributes the failure to the step the user just completed and
+// repeats the instruction. Telegram raises AUTH_RESTART from auth.signIn, so
+// the code step is the step that actually sees it.
+func framedLoginErr(prefix string, err error, suffix string) string {
+	if shortReason(err) == "auth_restart" {
+		return friendlyErr(err)
+	}
+	return prefix + friendlyErr(err) + suffix
 }
 
 // shortReason maps a login error to a short token suitable for use in an audit

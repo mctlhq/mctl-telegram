@@ -444,6 +444,16 @@ func Load() (*Config, error) {
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
+	// A root MCPPath would shadow the landing page and the POST / hint route:
+	// cmd/server/main.go mounts the MCP handler at cfg.MCPPath and registers
+	// GET / and POST / separately, so "/" collapses all three onto the same
+	// route. Reject at load rather than silently falling back to /mcp —
+	// matching the fail-closed posture above for MCP_TOOL_FILTER and (below)
+	// ENCRYPTION_KEY.
+	if strings.Trim(c.MCPPath, "/") == "" {
+		return nil, fmt.Errorf("MCP_PATH must name a path below the origin, got %q: "+
+			"mounting MCP at the root would shadow the landing page and the POST / hint route", c.MCPPath)
+	}
 	// An access token is the credential an attacker gets to keep when one
 	// leaks, and its TTL is the only thing bounding how long they keep it.
 	// This variable had no ceiling, so a deployment could — and did — set
