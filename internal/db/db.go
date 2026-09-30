@@ -629,6 +629,10 @@ func ensureCampaignSourceDigestFK(ctx context.Context, dbConn *sql.DB, pg bool) 
 	if pg {
 		stmts = []string{`DO $$
 BEGIN
+	-- Lock product_update_digests first, in the mode
+	-- DiscardUnusedProductUpdateDigest takes, so this block acquires locks in
+	-- the same order (digests, then campaigns) and cannot deadlock with it.
+	LOCK TABLE product_update_digests IN SHARE ROW EXCLUSIVE MODE;
 	BEGIN
 		ALTER TABLE broadcast_campaigns ADD CONSTRAINT chk_broadcast_campaigns_source_ref_complete
 			CHECK ((source_digest_id IS NULL) = (source_digest_version IS NULL)
