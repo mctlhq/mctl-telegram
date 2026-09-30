@@ -22,21 +22,37 @@ package web
 // served under the manage CSP: no script, form-action 'self'.
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 )
 
 // broadcastFormLimit caps a parsed approve/cancel body: three short fields.
 const broadcastFormLimit = 8 << 10
+
+// DigestSource is what the broadcasts page needs from the product-update
+// feed (issue-683) loaded once at server start, to drive the "Prepare from
+// digest" action: the parsed Feed, any load error (LoadErr set makes every
+// prepare-from-digest attempt refuse with it, never freeze from a partial
+// feed), and the release this build claims to be (LatestRelease, empty for a
+// non-release build such as "dev" -- see productupdate.Entry.Shipped).
+type DigestSource struct {
+	Feed          productupdate.Feed
+	LoadErr       error
+	LatestRelease string
+}
 
 // BroadcastServer serves the approval page. connectClient is the only OAuth
 // client whose tokens may use it -- the self-connect client
@@ -47,12 +63,15 @@ type BroadcastServer struct {
 	issuer        string
 	connectClient string
 	now           func() time.Time
+	digests       DigestSource
 }
 
 // NewBroadcastServer builds the approval page. connectClientID must be the
-// self-connect OAuth client id.
-func NewBroadcastServer(store *db.Store, svc *broadcast.Service, issuer, connectClientID string) *BroadcastServer {
-	return &BroadcastServer{store: store, svc: svc, issuer: strings.TrimRight(issuer, "/"), connectClient: connectClientID, now: time.Now}
+// self-connect OAuth client id. digests is the product-update feed loaded
+// once at server start; the "Prepare from digest" action (HandlePrepareDigest)
+// reads it on every request rather than re-reading the filesystem.
+func NewBroadcastServer(store *db.Store, svc *broadcast.Service, issuer, connectClientID string, digests DigestSource) *BroadcastServer {
+	return &BroadcastServer{store: store, svc: svc, issuer: strings.TrimRight(issuer, "/"), connectClient: connectClientID, now: time.Now, digests: digests}
 }
 
 // authorize returns the operator actor, or writes the refusal and returns
@@ -122,12 +141,17 @@ type broadcastRow struct {
 	ExpiresAt    string
 	Report       *broadcast.Report
 	ReportErr    bool
+	// SourceRef is the frozen product-update digest this campaign was
+	// prepared from ("digest-id v2 sha256:abcd..."), or "" for a manual
+	// campaign (issue-683 task 9).
+	SourceRef string
 }
 
 type broadcastPageData struct {
-	Pending []broadcastRow
-	Recent  []broadcastRow
-	Notice  string
+	Pending    []broadcastRow
+	Recent     []broadcastRow
+	Notice     string
+	Categories []string
 }
 
 // HandleList renders pending campaigns (approvable) and recent ones.
@@ -157,12 +181,16 @@ func (b *BroadcastServer) HandleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recent := append(live, finished...)
-	// Only the two known actions produce a notice; the query string is not
+	// Only the known actions produce a notice; the query string is not
 	// echoed, so a crafted link cannot put arbitrary text on this page.
 	data := broadcastPageData{Notice: map[string]string{
-		"broadcast_approve_web": "campaign approved for delivery",
-		"broadcast_cancel_web":  "campaign cancelled",
+		"broadcast_approve_web":        "campaign approved for delivery",
+		"broadcast_cancel_web":         "campaign cancelled",
+		"broadcast_prepare_digest_web": "digest campaign prepared",
 	}[r.URL.Query().Get("done")]}
+	for _, c := range db.NotificationCategories() {
+		data.Categories = append(data.Categories, string(c))
+	}
 	now := b.now()
 	for _, c := range pending {
 		if !c.ExpiresAt.After(now) {
@@ -183,7 +211,7 @@ func (b *BroadcastServer) HandleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
-	return broadcastRow{
+	row := broadcastRow{
 		ID: c.ID, State: c.State, EndReason: c.EndReason, Category: c.Category,
 		Selector: c.SelectorJSON, Text: c.Content, Preview: c.PreviewCounts,
 		ContentHash: c.ContentHash, SelectorHash: c.SelectorHash, CreatedBy: c.CreatedBy, Surface: c.Surface,
@@ -191,6 +219,10 @@ func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
 		ExpiresAt: c.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC"),
 		Report:    rep,
 	}
+	if c.SourceRef != nil {
+		row.SourceRef = fmt.Sprintf("%s v%d sha256:%s", c.SourceRef.DigestID, c.SourceRef.DigestVersion, strings.TrimPrefix(c.SourceRef.ContentHash, "sha256:"))
+	}
+	return row
 }
 
 // HandleApprove approves one campaign. The form carries the content and
@@ -207,6 +239,150 @@ func (b *BroadcastServer) HandleCancel(w http.ResponseWriter, r *http.Request) {
 	b.handleAction(w, r, "broadcast_cancel_web", func(actor broadcast.Actor, form url.Values) error {
 		return b.svc.Cancel(r.Context(), actor, form.Get("campaign_id"))
 	})
+}
+
+// HandlePrepareDigest freezes the next digest for a category and prepares
+// its campaign (issue-683 task 6', the replacement for the withdrawn
+// prepare_product_update_digest MCP tool). It goes through the same action
+// helper as approve/cancel, so it inherits the admin:broadcast scope,
+// IsOperator and same-origin checks, and the refused/failed/done logging,
+// unchanged.
+func (b *BroadcastServer) HandlePrepareDigest(w http.ResponseWriter, r *http.Request) {
+	b.handleAction(w, r, "broadcast_prepare_digest_web", func(actor broadcast.Actor, form url.Values) error {
+		_, err := b.prepareFromDigest(r.Context(), actor, form)
+		return err
+	})
+}
+
+// errDigestRefused wraps every refusal prepareFromDigest returns -- a bad
+// form field, a busy category, an unknown version-1, or anything
+// FreezeNextDigest/RenderBroadcast/Prepare itself refuses. It is always
+// operator-actionable text (never a raw internal error), so
+// isBroadcastConflict shows it on the page rather than hiding it behind a
+// generic failure message. Wrapping with %w twice (Go 1.20+) keeps
+// errors.Is working for both this marker and whatever sentinel (for example
+// db.ErrDigestNotFound) the refusal actually carries.
+var errDigestRefused = errors.New("prepare-from-digest refused")
+
+// prepareFromDigest runs the guards and sequence from design.md's
+// "Correction 2026-09-30": feed loaded and LatestRelease known; no
+// non-terminal campaign already exists for the category; version>1 requires
+// version-1 to be stored; FreezeNextDigest; RenderBroadcast; Prepare with the
+// digest's category and source_ref. A text field, or a category that
+// disagrees with the digest's, is refused before any of that runs -- a
+// digest campaign's body and category come from the digest, never from the
+// caller.
+func (b *BroadcastServer) prepareFromDigest(ctx context.Context, actor broadcast.Actor, form url.Values) (*broadcast.Preview, error) {
+	p, err := b.doPrepareFromDigest(ctx, actor, form)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errDigestRefused, err)
+	}
+	return p, nil
+}
+
+func (b *BroadcastServer) doPrepareFromDigest(ctx context.Context, actor broadcast.Actor, form url.Values) (*broadcast.Preview, error) {
+	if strings.TrimSpace(form.Get("text")) != "" {
+		return nil, errors.New("a digest campaign's body comes from the digest, not from the caller")
+	}
+	category := strings.TrimSpace(form.Get("category"))
+	if !validNotificationCategory(category) {
+		return nil, fmt.Errorf("unknown category %q", category)
+	}
+	digestID := strings.TrimSpace(form.Get("digest_id"))
+	if digestID == "" {
+		return nil, errors.New("digest_id is required")
+	}
+	version, err := strconv.Atoi(strings.TrimSpace(form.Get("version")))
+	if err != nil || version < 1 {
+		return nil, errors.New("version must be a positive integer")
+	}
+	activeWithinDays := 0
+	if v := strings.TrimSpace(form.Get("active_within_days")); v != "" {
+		activeWithinDays, err = strconv.Atoi(v)
+		if err != nil {
+			return nil, errors.New("active_within_days must be an integer")
+		}
+	}
+
+	// Guard 1: feed loaded and LatestRelease known. A load failure or a
+	// non-release build version refuses every freeze rather than freezing a
+	// partial feed or an empty baseline.
+	if b.digests.LoadErr != nil {
+		return nil, fmt.Errorf("product update feed is not loaded: %w", b.digests.LoadErr)
+	}
+	if b.digests.LatestRelease == "" {
+		return nil, errors.New("this build's version is not a released tag; cannot tell which release has shipped")
+	}
+
+	// Guard 2: one campaign per category, prepared/approved/sending.
+	nonTerminal, err := b.store.ListBroadcastCampaigns(ctx, db.MaxCampaignListLimit, db.CampaignPrepared, db.CampaignApproved, db.CampaignSending)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range nonTerminal {
+		if c.Category == category {
+			return nil, fmt.Errorf("a %s campaign is already %s; only one campaign per category at a time", category, c.State)
+		}
+	}
+
+	// Guard 3: a correction (version > 1) needs the earlier version stored,
+	// so a version number cannot be invented.
+	if version > 1 {
+		if _, err := b.store.GetProductUpdateDigest(ctx, digestID, version-1); err != nil {
+			return nil, fmt.Errorf("version %d needs a stored version %d first: %w", version, version-1, err)
+		}
+	}
+
+	// Freeze, render, prepare -- in that order, atomically handing the
+	// rendered text and source_ref to Prepare in one call.
+	digest, _, err := productupdate.FreezeNextDigest(ctx, b.store, b.digests.Feed, digestID, version,
+		db.NotificationCategory(category), b.digests.LatestRelease, actor.UserID, b.now())
+	if err != nil {
+		return nil, err
+	}
+	if string(digest.Category) != category {
+		return nil, fmt.Errorf("digest category %s differs from the requested %s", digest.Category, category)
+	}
+	docsURL := b.issuer + "/docs/product-updates"
+	text, err := productupdate.RenderBroadcast(digest, b.digests.Feed, docsURL, broadcast.MaxTextUnits)
+	if err != nil {
+		return nil, err
+	}
+	return b.svc.Prepare(ctx, actor, broadcast.PrepareRequest{
+		Selector: broadcast.Selector{
+			Category:         string(digest.Category),
+			Tiers:            splitCSV(form.Get("tiers")),
+			ConnectedVia:     splitCSV(form.Get("connected_via")),
+			ActiveWithinDays: activeWithinDays,
+		},
+		Text:      text,
+		SourceRef: &db.CampaignSourceRef{DigestID: digest.ID, DigestVersion: digest.Version, ContentHash: digest.ContentHash},
+	})
+}
+
+func validNotificationCategory(c string) bool {
+	for _, known := range db.NotificationCategories() {
+		if string(known) == c {
+			return true
+		}
+	}
+	return false
+}
+
+// splitCSV splits a comma-separated form field into trimmed, non-empty
+// parts. Returns nil for an empty or blank field, matching the "no
+// restriction" zero value broadcast.Selector expects.
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (b *BroadcastServer) handleAction(w http.ResponseWriter, r *http.Request, action string, do func(broadcast.Actor, url.Values) error) {
@@ -247,6 +423,7 @@ func isBroadcastConflict(err error) bool {
 	for _, target := range []error{
 		db.ErrCampaignNotFound, db.ErrCampaignExpired, db.ErrCampaignNotPrepared,
 		db.ErrCampaignMismatch, db.ErrCampaignTerminal, broadcast.ErrNotBroadcastAdmin,
+		errDigestRefused,
 	} {
 		if errors.Is(err, target) {
 			return true
@@ -273,6 +450,7 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
       <pre>{{.Text}}</pre>
       <div class="meta">Selector <code>{{.Selector}}</code></div>
       <div class="meta">Preview <code>{{.Preview}}</code></div>
+      {{if .SourceRef}}<div class="meta">Source digest <code>{{.SourceRef}}</code></div>{{end}}
       <form method="POST" action="/telegram/connect/broadcasts/approve" style="display:inline">
         <input type="hidden" name="campaign_id" value="{{.ID}}">
         <input type="hidden" name="content_hash" value="{{.ContentHash}}">
@@ -287,10 +465,26 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
     {{else}}
     <p class="meta">Nothing is awaiting approval.</p>
     {{end}}
+    <h2>Prepare from digest</h2>
+    <p class="meta">Freezes the next weekly digest for a category and prepares its campaign from the reviewed feed text. Preparing never approves: approval stays the separate action above. A busy category (already prepared, approved or sending) refuses.</p>
+    <form method="POST" action="/telegram/connect/broadcasts/prepare-digest">
+      <label>Category
+        <select name="category">
+          {{range .Categories}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </label>
+      <label>Digest id <input type="text" name="digest_id" placeholder="product_updates-2026-w39" required></label>
+      <label>Version <input type="number" name="version" value="1" min="1" required></label>
+      <label>Tiers (optional, comma-separated: client, admin) <input type="text" name="tiers" placeholder="client"></label>
+      <label>Connected via (optional, comma-separated) <input type="text" name="connected_via"></label>
+      <label>Active within days (optional) <input type="number" name="active_within_days" min="0"></label>
+      <button type="submit" class="btn">Prepare from digest</button>
+    </form>
     <h2>Recent</h2>
     {{range .Recent}}
     <div class="bc">
       <div><strong>{{.State}}</strong>{{if .EndReason}} ({{.EndReason}}){{end}} · {{.Category}} · <code>{{.ID}}</code></div>
+      {{if .SourceRef}}<div class="meta">Source digest <code>{{.SourceRef}}</code></div>{{end}}
       {{if .ReportErr}}<div class="meta">Delivery report unavailable right now.</div>{{end}}
       {{with .Report}}<div class="meta">queued {{.Queued}} · delivered {{.Delivered}} · pending {{.Pending}} · transient failures {{.TransientFailure}} · outcome unknown {{.OutcomeUnknown}} · skipped {{range $k, $v := .Skipped}}{{$k}}={{$v}} {{end}} · permanent {{range $k, $v := .PermanentFailure}}{{$k}}={{$v}} {{end}}</div>{{end}}
       {{if eq .State "approved"}}<form method="POST" action="/telegram/connect/broadcasts/cancel"><input type="hidden" name="campaign_id" value="{{.ID}}"><button type="submit" class="btn-secondary">Cancel</button></form>{{end}}

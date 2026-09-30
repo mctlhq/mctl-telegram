@@ -102,3 +102,41 @@ The notification category is derived from `kind` and is never written:
 `security` → security, `maintenance` → maintenance, everything else →
 `product_updates` (opt-in). A digest is built for one category only, so opt-in
 content never reaches people who did not opt in.
+
+## Operator steps: freeze, prepare, approve (issue-683)
+
+Turning approved entries into a delivered broadcast is a single page action,
+not an MCP tool -- the owner decided v1 keeps this on
+`/telegram/connect/broadcasts`, where a human operator is present by
+construction:
+
+1. Open `/telegram/connect/broadcasts`.
+2. Under **Prepare from digest**, choose the category, a digest id (the
+   recommended convention is `<category>-<YYYY>-w<WW>`, e.g.
+   `product_updates-2026-w39`) and a version (`1` for a new digest). Optional
+   audience narrowing (tiers, connected-via, active-within-days) works the same
+   as a manually prepared broadcast.
+3. Submitting freezes the next digest for that category from the approved,
+   shipped, not-yet-sent entries in this feed, persists it, and prepares one
+   campaign whose text is the frozen digest rendered verbatim -- title and
+   summary copied exactly as reviewed, never reworded. The campaign shows its
+   digest id, version and content hash right there on the list.
+4. **Review, then Approve.** Preparing never approves: approval stays the
+   separate, explicit action the page already has for a manually prepared
+   broadcast.
+
+A version greater than `1` is a correction to an already-frozen digest and
+needs the earlier version already stored -- the page refuses otherwise, so a
+version number cannot be invented. Per `FreezeNextDigest`'s own warning: a new
+version of the same id also picks up every entry approved since, and reusing
+an id that was already sent reopens its entries as candidates. Limiting a
+correction to the earlier entry set is the operator's call, not something the
+page enforces.
+
+The rendered text is full (title + summary per entry) when it fits the
+broadcast limit, else titles only, else the page refuses and names the entry
+count -- the remedy is marking surplus entries `delivery: docs_only` in a
+follow-up pull request, never truncating reviewed text.
+
+The same reviewed feed also serves `/docs/product-updates`: every approved,
+English entry, including `docs_only` ones, grouped by the release they cite.

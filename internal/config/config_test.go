@@ -4,7 +4,31 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 )
+
+func TestLoadProductUpdateFeedDir(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.ProductUpdateFeedDir != productupdate.FeedDir {
+			t.Errorf("ProductUpdateFeedDir = %q, want default %q", cfg.ProductUpdateFeedDir, productupdate.FeedDir)
+		}
+	})
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("PRODUCT_UPDATE_FEED_DIR", "/srv/product-updates")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.ProductUpdateFeedDir != "/srv/product-updates" {
+			t.Errorf("ProductUpdateFeedDir = %q, want override", cfg.ProductUpdateFeedDir)
+		}
+	})
+}
 
 func TestLoadDBPoolEnvVars(t *testing.T) {
 	tests := []struct {

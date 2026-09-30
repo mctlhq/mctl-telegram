@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+</head>
+<body>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Product updates</span>
+    </div>
+    <h1>Product <span class="accent">updates</span></h1>
+    <p class="lead">
+      What changed in mctl-telegram, reviewed and grouped by release. The same text is used for the client
+      broadcast digest sent through Telegram.
+    </p>
+  </section>
+
+  {{if .LoadErr}}
+  <section id="notice">
+    <p class="muted">The product-update feed could not be loaded on this server. Nothing is shown below; this
+      is a server configuration problem, not an empty feed.</p>
+  </section>
+  {{else if not .Groups}}
+  <section id="notice">
+    <p class="muted">No approved product updates yet.</p>
+  </section>
+  {{else}}
+  {{range .Groups}}
+  <section>
+    <div class="section-head">
+      <h2>{{if .Release}}{{.Release}}{{else}}Other{{end}}</h2>
+    </div>
+    {{range .Entries}}
+    <div class="update-entry">
+      <h3>{{.Title}}{{if .DocsOnly}} <span class="muted">(docs only)</span>{{end}}</h3>
+      <p class="muted">{{.Kind}}{{if .Tools}} · {{range $i, $t := .Tools}}{{if $i}}, {{end}}{{$t}}{{end}}{{end}}</p>
+      <p>{{.Summary}}</p>
+      {{if .Links}}
+      <ul class="ctrl">
+        {{range .Links}}<li><a href="{{.}}" target="_blank" rel="noopener">{{.}}</a></li>{{end}}
+      </ul>
+      {{end}}
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+  {{end}}
+
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
+</body>
+</html>

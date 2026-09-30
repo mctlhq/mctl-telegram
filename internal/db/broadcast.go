@@ -245,22 +245,59 @@ type BroadcastCampaign struct {
 // CreateBroadcastCampaign inserts a new campaign in the prepared state. The
 // caller computes the id, hashes, preview counts and expiry; now stamps
 // created_at/updated_at from the same clock that computed the expiry.
+//
+// When c.SourceRef is set (issue-683: a campaign prepared from a frozen
+// product-update digest), the three source_* columns are written in this
+// SAME INSERT, guarded by the EXISTS predicate SetBroadcastCampaignSourceRef
+// also uses: the row is inserted only if a stored digest with that id,
+// version, content hash AND category exists. Zero rows written is
+// ErrCampaignSourceMismatch -- no campaign is ever created naming a digest
+// that does not exist or whose category disagrees, so there is no window in
+// which a prepared campaign has digest-rendered text and no source_ref.
 func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign, now time.Time) error {
 	if c.ID == "" || c.ContentHash == "" || c.SelectorHash == "" || c.CreatedBy <= 0 {
 		return errors.New("create broadcast campaign: id, hashes and creator are required")
 	}
 	now = now.UTC()
-	_, err := s.DB.ExecContext(ctx,
+	if c.SourceRef == nil {
+		_, err := s.DB.ExecContext(ctx,
+			`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
+			     content, content_hash, created_by, surface, recipient_limit, preview_counts,
+			     expires_at, created_at, updated_at)
+			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+			c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
+			c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
+			c.ExpiresAt.UTC(), now,
+		)
+		if err != nil {
+			return fmt.Errorf("create broadcast campaign: %w", err)
+		}
+		return nil
+	}
+	ref := c.SourceRef
+	if ref.DigestID == "" || ref.DigestVersion < 1 || ref.ContentHash == "" {
+		return errors.New("create broadcast campaign: source ref digest id, version and content hash are required")
+	}
+	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
 		     content, content_hash, created_by, surface, recipient_limit, preview_counts,
-		     expires_at, created_at, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+		     expires_at, created_at, updated_at, source_digest_id, source_digest_version, source_content_hash)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,$16
+		  WHERE EXISTS (SELECT 1 FROM product_update_digests d
+		                 WHERE d.id = $14 AND d.version = $15 AND d.content_hash = $16 AND d.category = $3)`,
 		c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
 		c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
-		c.ExpiresAt.UTC(), now,
+		c.ExpiresAt.UTC(), now, ref.DigestID, ref.DigestVersion, ref.ContentHash,
 	)
 	if err != nil {
 		return fmt.Errorf("create broadcast campaign: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("create broadcast campaign: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrCampaignSourceMismatch
 	}
 	return nil
 }

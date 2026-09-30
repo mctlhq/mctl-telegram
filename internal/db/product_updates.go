@@ -56,9 +56,9 @@ type ProductUpdateDigest struct {
 // CampaignSourceRef names the frozen digest a broadcast campaign was prepared
 // from.
 type CampaignSourceRef struct {
-	DigestID      string
-	DigestVersion int
-	ContentHash   string
+	DigestID      string `json:"digest_id"`
+	DigestVersion int    `json:"digest_version"`
+	ContentHash   string `json:"content_hash"`
 }
 
 func (d ProductUpdateDigest) validate() error {

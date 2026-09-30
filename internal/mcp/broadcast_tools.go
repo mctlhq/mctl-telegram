@@ -86,6 +86,10 @@ type broadcastSummary struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
 	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+	// SourceRef names the frozen product-update digest this campaign was
+	// prepared from (issue-683); null/omitted for a manual campaign. Read
+	// only -- there is no tool that sets it.
+	SourceRef *db.CampaignSourceRef `json:"source_ref,omitempty"`
 }
 
 type listBroadcastsResult struct {
@@ -108,6 +112,7 @@ func summarize(c db.BroadcastCampaign) broadcastSummary {
 		CampaignID: c.ID, State: c.State, EndReason: c.EndReason, Category: c.Category,
 		Selector: c.SelectorJSON, Text: c.Content, Preview: c.PreviewCounts,
 		CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, ApprovedAt: c.ApprovedAt,
+		SourceRef: c.SourceRef,
 	}
 }
 

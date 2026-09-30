@@ -30,6 +30,12 @@ COPY --from=builder /mctl-telegram /usr/local/bin/mctl-telegram
 COPY --from=builder /mctl-telegram-login /usr/local/bin/mctl-telegram-login
 COPY --from=builder /mctl-telegram-canary /usr/local/bin/mctl-telegram-canary
 
+# The reviewed product-update feed (issue-683): docs/product-updates is the
+# same tree go run ./cmd/productupdates gate validates in this build, copied
+# verbatim so the image carries exactly the feed that release reviewed.
+# PRODUCT_UPDATE_FEED_DIR (set in deploy/ values) points here.
+COPY --from=builder /app/docs/product-updates /srv/product-updates
+
 USER app:app
 
 EXPOSE 8080
