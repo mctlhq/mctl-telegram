@@ -456,6 +456,52 @@ func TestLoadToolFilter(t *testing.T) {
 	}
 }
 
+// TestLoad_RejectsRootMCPPath confirms MCP_PATH that trims to the empty
+// string under strings.Trim(v, "/") — "/" or "//" — or that lacks a leading
+// slash ("mcp") makes Load return an error naming MCP_PATH: a root path would
+// shadow the landing page and the POST / hint route, and a relative one
+// panics chi's Mount at startup. Unset, "/mcp" and "/v1/mcp" behave exactly
+// as before.
+func TestLoad_RejectsRootMCPPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string // empty exercises the default (envOr treats "" as unset)
+		want    string
+		wantErr bool
+	}{
+		{name: "unset defaults to /mcp", env: "", want: "/mcp"},
+		{name: "/mcp accepted", env: "/mcp", want: "/mcp"},
+		{name: "mcp (no leading slash) rejected", env: "mcp", wantErr: true},
+		{name: "v1/mcp (no leading slash) rejected", env: "v1/mcp", wantErr: true},
+		{name: "/v1/mcp accepted", env: "/v1/mcp", want: "/v1/mcp"},
+		{name: "root / rejected", env: "/", wantErr: true},
+		{name: "root // rejected", env: "//", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Always set, so an MCP_PATH exported in the ambient environment
+			// cannot leak into the "unset" case.
+			t.Setenv("MCP_PATH", tc.env)
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "MCP_PATH") {
+					t.Errorf("error should mention MCP_PATH, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.MCPPath != tc.want {
+				t.Errorf("MCPPath = %q, want %q", cfg.MCPPath, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadAgentProfileOwnerRequired covers a Codex finding on #307:
 // AGENT_PROFILE_OWNER_TG_ID is documented as required whenever
 // AGENT_PROFILE_PATH is set, but a missing or malformed value silently

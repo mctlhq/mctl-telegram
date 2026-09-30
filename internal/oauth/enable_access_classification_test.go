@@ -204,6 +204,139 @@ func TestEnableStart_AuthRestart_AuditLabel(t *testing.T) {
 	}
 }
 
+// TestAuthRestartAtCodeStep_NotDoubleFramed is T1: AUTH_RESTART surfacing
+// after the SMS code was submitted (Telegram raises it from auth.signIn, so
+// the code step is the step that actually sees it — see design.md) must
+// render exactly friendlyErr's instruction, not the code step's generic
+// "The code was not accepted: ... Start again to get a fresh code." wrapper
+// double-framed around it.
+func TestAuthRestartAtCodeStep_NotDoubleFramed(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, tgerr.New(500, "AUTH_RESTART")))
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	const want = "Telegram ended the sign-in session. Submit your phone number again to get a fresh code."
+	if n := strings.Count(body, want); n != 1 {
+		t.Errorf("expected %q exactly once, found %d times in: %s", want, n, body)
+	}
+	if strings.Contains(body, "The code was not accepted") {
+		t.Errorf("AUTH_RESTART at the code step is still double-framed: %s", body)
+	}
+	if strings.Contains(body, "Start again to get a fresh code") {
+		t.Errorf("AUTH_RESTART at the code step repeats the restart instruction: %s", body)
+	}
+
+	ctx := context.Background()
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
+	entries, err := srv.store.ListAuditFor(ctx, uid, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("ListAuditFor: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.ToolName == "connect:failed:auth_restart" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an audit entry connect:failed:auth_restart, got: %+v", entries)
+	}
+}
+
+// TestAuthRestartAtPasswordStep_NotDoubleFramed is T2: AUTH_RESTART surfacing
+// after the 2FA password was submitted must render exactly friendlyErr's
+// instruction through handleEnablePassword's generic fallback arm, not the
+// "The password was not accepted: ... Start again." wrapper double-framed
+// around it.
+func TestAuthRestartAtPasswordStep_NotDoubleFramed(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(true, tgerr.New(500, "AUTH_RESTART")))
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("code did not render 2FA screen: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"whatever"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("password: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	const want = "Telegram ended the sign-in session. Submit your phone number again to get a fresh code."
+	if n := strings.Count(body, want); n != 1 {
+		t.Errorf("expected %q exactly once, found %d times in: %s", want, n, body)
+	}
+	if strings.Contains(body, "The password was not accepted") {
+		t.Errorf("AUTH_RESTART at the password step is still double-framed: %s", body)
+	}
+
+	ctx := context.Background()
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
+	entries, err := srv.store.ListAuditFor(ctx, uid, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("ListAuditFor: %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.ToolName == "connect:failed:auth_restart" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an audit entry connect:failed:auth_restart, got: %+v", entries)
+	}
+}
+
+// TestFramedLoginErr_TableTest is the second half of T2: a table over the
+// three step handlers' exact prefix/suffix pairs, proving non-AUTH_RESTART
+// errors keep the legacy wording byte-for-byte while AUTH_RESTART always
+// collapses to the bare friendlyErr instruction.
+func TestFramedLoginErr_TableTest(t *testing.T) {
+	cases := []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{"phone step", "Telegram rejected the request: ", " Try again."},
+		{"code step", "The code was not accepted: ", " Start again to get a fresh code."},
+		{"password step", "The password was not accepted: ", " Start again."},
+	}
+	authRestartErr := tgerr.New(500, "AUTH_RESTART")
+	otherErr := tgerr.New(400, "PHONE_NUMBER_INVALID")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := framedLoginErr(tc.prefix, authRestartErr, tc.suffix), friendlyErr(authRestartErr); got != want {
+				t.Errorf("framedLoginErr(%q, AUTH_RESTART, %q) = %q, want bare friendlyErr %q", tc.prefix, tc.suffix, got, want)
+			}
+			want := tc.prefix + friendlyErr(otherErr) + tc.suffix
+			if got := framedLoginErr(tc.prefix, otherErr, tc.suffix); got != want {
+				t.Errorf("framedLoginErr(%q, PHONE_NUMBER_INVALID, %q) = %q, want %q", tc.prefix, tc.suffix, got, want)
+			}
+		})
+	}
+}
+
 // TestIsBadPasswordErr_Nil pins that the predicate is nil-safe like its
 // siblings, so a future caller that skips the nil guard cannot panic.
 func TestIsBadPasswordErr_Nil(t *testing.T) {

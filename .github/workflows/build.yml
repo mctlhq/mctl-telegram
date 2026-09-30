@@ -109,9 +109,10 @@ jobs:
           #   TestClientRegPinned_PostgresExemptFromSweepAndEviction,
           #   TestDropColumnIfPresent_Postgres, TestEventOutbox_PostgresLifecycle,
           #   TestProductUpdateDigestStore_Postgres,
-          #   TestFamilyEverHeldScope_Postgres
+          #   TestFamilyEverHeldScope_Postgres,
+          #   TestConsumeOAuthPending_PostgresExpiredIsDistinguishable
           #   internal/oauth: TestDCRAllowlist_PostgresPinnedWiring
-          expected=13
+          expected=14
           passed=$(grep -c "^--- PASS" /tmp/pg-tests.log || true)
           if [ "$passed" -lt "$expected" ]; then
             echo "::error::expected at least $expected Postgres-backed tests to pass, saw $passed"

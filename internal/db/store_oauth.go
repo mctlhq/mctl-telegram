@@ -14,6 +14,12 @@ import (
 // does not exist, has been consumed, or has exceeded its TTL.
 var ErrOAuthNotFound = errors.New("oauth: not found or expired")
 
+// ErrOAuthExpired is returned by ConsumeOAuthPending when the row existed but
+// was older than the caller's ttl. It wraps ErrOAuthNotFound so every existing
+// errors.Is(err, ErrOAuthNotFound) caller is unaffected; check ErrOAuthExpired
+// FIRST when the two need distinguishing.
+var ErrOAuthExpired = fmt.Errorf("oauth: expired: %w", ErrOAuthNotFound)
+
 // ErrOAuthStateConflict is returned by InsertOAuthPending when the state token
 // already exists in the table (duplicate PKCE state). The caller should abort
 // the authorization flow — a collision is either a bug or an attack attempt.
@@ -23,16 +29,16 @@ var ErrOAuthStateConflict = errors.New("oauth: state already exists")
 // authorization flow, mirroring the in-memory pendingAuth struct in
 // internal/oauth/server.go.
 type OAuthPendingAuth struct {
-	State               string
-	ClientID            string
-	RedirectURI         string
-	ClientState         string
-	CodeChallenge       string
-	ChallengeMethod     string
-	Scope               string
-	Nonce               string
-	TGCodeVerifier      string
-	CreatedAt           time.Time
+	State           string
+	ClientID        string
+	RedirectURI     string
+	ClientState     string
+	CodeChallenge   string
+	ChallengeMethod string
+	Scope           string
+	Nonce           string
+	TGCodeVerifier  string
+	CreatedAt       time.Time
 }
 
 // OAuthCode is the persistent representation of an issued authorization code.
@@ -175,20 +181,25 @@ func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 }
 
 // ConsumeOAuthPending atomically deletes and returns the pending entry for the
-// given state. Returns ErrOAuthNotFound when the row is absent or expired
-// (older than ttl). DELETE ... RETURNING is atomic at the DB level regardless
-// of isolation, eliminating the TOCTOU race that a SELECT + DELETE transaction
-// at READ COMMITTED would have.
+// given state. Returns ErrOAuthNotFound when the row is absent, and
+// ErrOAuthExpired (which wraps ErrOAuthNotFound) when the row existed but its
+// created_at is older than ttl — the TTL check runs in Go against the
+// returned created_at rather than as a DELETE predicate, so a row that merely
+// expired is now consumed on the attempt rather than left for the sweeper to
+// find later; a second replay of the same expired state reports
+// ErrOAuthNotFound. DELETE ... RETURNING stays atomic at the DB level
+// regardless of isolation, eliminating the TOCTOU race that a SELECT + DELETE
+// transaction at READ COMMITTED would have.
 func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.Duration) (*OAuthPendingAuth, error) {
 	cutoff := time.Now().UTC().Add(-ttl)
 	var p OAuthPendingAuth
 	var clientState, scope sql.NullString
 	err := s.DB.QueryRowContext(ctx,
 		`DELETE FROM oauth_pending_auth
-		  WHERE state = $1 AND created_at >= $2
+		  WHERE state = $1
 		RETURNING state, client_id, redirect_uri, client_state, code_challenge,
 		          challenge_method, scope, nonce, tg_code_verifier, created_at`,
-		state, cutoff,
+		state,
 	).Scan(
 		&p.State, &p.ClientID, &p.RedirectURI, &clientState, &p.CodeChallenge,
 		&p.ChallengeMethod, &scope, &p.Nonce, &p.TGCodeVerifier, &p.CreatedAt,
@@ -201,6 +212,9 @@ func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.
 	}
 	p.ClientState = clientState.String
 	p.Scope = scope.String
+	if p.CreatedAt.Before(cutoff) {
+		return nil, ErrOAuthExpired
+	}
 	return &p, nil
 }
 

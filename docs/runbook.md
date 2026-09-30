@@ -42,6 +42,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
 - [Login-bot update receiver](#login-bot-update-receiver)
 - [Media response memory bounds (issue #705)](#media-response-memory-bounds)
+- [Connect and OAuth callback rejection reasons](#connectrejectionreasons)
 
 ---
 
@@ -2525,3 +2526,47 @@ stays in place until this change has run for a full week with
 `mctl_media_inflight` and `mctl_media_gate_rejections_total` observed; only
 then should a follow-up gitops PR lower the limit (target ~384Mi,
 `GOMEMLIMIT≈300MiB`).
+
+---
+
+<a id="connectrejectionreasons"></a>
+## Connect and OAuth callback rejection reasons
+
+Two unauthenticated routes each emit a structured log line naming a `reason`
+whenever they refuse a request: `/telegram/connect/done`
+(`internal/web/connect.go`, self-connect flow) and
+`/oauth/telegram/callback` (`internal/oauth/server.go`, every OAuth client and
+the Local Bridge activation flow). The reason vocabulary is deliberately
+duplicated as two separate const blocks — `internal/web` must not import
+`internal/oauth` — so both packages carry a doc test
+(`TestRunbookDocumentsConnectReasons`, `TestRunbookDocumentsCallbackReasons`)
+that fails if a new `reason*` const is added without a row here.
+
+Every line also carries a `prefetch` attribute. It is always `false` on these
+reject lines — the routes already answered `204` and returned before any
+reject path runs — and is kept anyway so one `prefetch=` query matches every
+line both routes emit.
+
+| Reason | Routes | Level | Meaning | First action |
+|---|---|---|---|---|
+| `missing_state` | both | WARN | The callback/done request carried no `state` query parameter at all. | Usually a hand-typed or truncated URL. Not actionable unless the rate is sustained, which suggests a broken client integration. |
+| `missing_code` | both | WARN | `state` was present but `code` was not, and no `error` parameter explains why. | Check whether the upstream OAuth provider (Telegram, or `oauth.telegram.org`) changed its redirect shape; otherwise treat as a malformed/truncated redirect. |
+| `unknown_state` | both | WARN | The `state` does not match any pending authorization — never issued or already consumed. Both stores report a state past its TTL separately as `expired_state`. | A single occurrence is normal (a reused bookmark, browser back-button, or double-click). A sustained rate suggests a forged or replayed link, or a client retrying a stale redirect. |
+| `expired_state` | both | WARN | The `state` matches a pending authorization whose `created_at` is older than `CodeTTL` (default 10 minutes). On the DB-backed store this is `db.ErrOAuthExpired`, checked before the plain not-found case — see item 6 of `mctlhq/mctl-telegram#701`. | A slow user (stepped away from the browser) is expected occasionally. A sustained rate suggests `CodeTTL` is too short for real user behaviour, or clients are not completing the round trip promptly. |
+| `exchange_failed` | both | ERROR | The server-to-server Telegram OIDC token exchange (`tgoidc.Exchange`) failed after `code`/`state` validated. The raw error is logged server-side only — it may embed Telegram's token-endpoint response body — and the browser gets an opaque message. | Check the logged `err` for the underlying cause (network failure to `oauth.telegram.org`, a JWKS fetch failure, an expired/replayed `code`). A spike correlates with a Telegram-side outage or a client that raced the code's single-use window. |
+| `oidc_error` | both | WARN | The redirect carried Telegram's own `error` parameter — the user cancelled at `oauth.telegram.org`, or Telegram itself refused the request. | Normal at low, steady volume (users who back out of sign-in). A spike suggests users are hitting a problem at the Telegram consent screen itself, not this service. |
+| `prefetch_refused` | both | INFO | A browser or crawler prefetch (`Sec-Purpose: prefetch`, or legacy `Purpose: prefetch`) of the single-use callback/done URL was refused with `204` before touching any pending state. Best-effort: Safari sends no prefetch-purpose header, and Firefox's legacy `X-moz: prefetch` is not matched (see both `isPrefetch` doc comments). | Informational; not a failure. Only worth investigating if the real (non-prefetch) request that should follow never arrives. |
+| `recovered_redirect` | `/telegram/connect/done` only | INFO | The `state` was unknown/expired, but the browser already carried a valid connect-flow session cookie (set on a prior successful connect), so the request was redirected to `/telegram/connect/manage` (303) instead of shown the "link already used" page. This is a success path, logged under its own reason precisely so it does not inflate `unknown_state`/`expired_state` counts. | Informational; not a failure. If a user reports being redirected to `/manage` unexpectedly, this is the line that confirms why. |
+
+### Startup failure: `auth provider init failed`
+
+`cmd/server/main.go` logs `slog.Error("auth provider init failed; refusing to
+start", "auth_mode", ..., "err", ...)` and calls `os.Exit(1)` when
+`selectProvider` cannot construct the configured `auth.Provider` — a bad
+`AUTH_MODE`, or (since `auth.Provider` construction was hoisted above the
+OAuth wiring) a missing signing key or issuer for `local-jwt` mode. The
+process does not start in a degraded state; it refuses to start at all. Check
+the logged `err` for the specific missing/invalid configuration value, and
+`internal/config`'s own `Load` errors (e.g. the `MCP_PATH` root-shadow guard
+in item 4 of `mctlhq/mctl-telegram#701`) for a related class of startup
+refusal.

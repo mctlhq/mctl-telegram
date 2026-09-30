@@ -444,6 +444,21 @@ func Load() (*Config, error) {
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
+	// MCPPath must be an absolute path below the origin. A root value would
+	// shadow the landing page and the POST / hint route: cmd/server/main.go
+	// mounts the MCP handler at cfg.MCPPath and registers GET / and POST /
+	// separately, so "/" collapses all three onto the same route. A value
+	// without a leading slash ("mcp") is just as unusable: chi's Mount panics
+	// on a pattern that does not begin with '/', and main.go concatenates
+	// MCPPath onto "/.well-known/oauth-protected-resource", which would yield
+	// ".../oauth-protected-resourcemcp". Reject both at load rather than
+	// silently normalising — matching the fail-closed posture above for
+	// MCP_TOOL_FILTER and (below) ENCRYPTION_KEY.
+	if !strings.HasPrefix(c.MCPPath, "/") || strings.Trim(c.MCPPath, "/") == "" {
+		return nil, fmt.Errorf("MCP_PATH must be an absolute path below the origin (e.g. /mcp), got %q: "+
+			"a root path would shadow the landing page and the POST / hint route, and a path "+
+			"without a leading slash cannot be mounted", c.MCPPath)
+	}
 	// An access token is the credential an attacker gets to keep when one
 	// leaks, and its TTL is the only thing bounding how long they keep it.
 	// This variable had no ceiling, so a deployment could — and did — set

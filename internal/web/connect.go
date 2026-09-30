@@ -49,13 +49,14 @@ type ConnectIdentifier interface {
 // Duplicated (not shared) in internal/oauth/server.go for the same reason
 // OAuthExchanger exists: internal/web must not import internal/oauth.
 const (
-	reasonMissingState    = "missing_state"
-	reasonMissingCode     = "missing_code"
-	reasonUnknownState    = "unknown_state"
-	reasonExpiredState    = "expired_state"
-	reasonExchangeFailed  = "exchange_failed"
-	reasonOIDCError       = "oidc_error"
-	reasonPrefetchRefused = "prefetch_refused"
+	reasonMissingState      = "missing_state"
+	reasonMissingCode       = "missing_code"
+	reasonUnknownState      = "unknown_state"
+	reasonExpiredState      = "expired_state"
+	reasonExchangeFailed    = "exchange_failed"
+	reasonOIDCError         = "oidc_error"
+	reasonPrefetchRefused   = "prefetch_refused"
+	reasonRecoveredRedirect = "recovered_redirect"
 )
 
 // isPrefetch reports whether r looks like a browser or crawler prefetch
@@ -63,6 +64,10 @@ const (
 // request headers. Sec-Purpose is a structured list so it is matched by
 // substring; Purpose is the legacy bare-token header so it is matched
 // exactly (case-insensitively, trimmed).
+//
+// Best-effort. Safari sends no prefetch-purpose header at all, and Firefox's
+// legacy X-moz: prefetch is not matched, so a 204 here proves a prefetch but
+// a 200 does not prove a real navigation.
 func isPrefetch(r *http.Request) bool {
 	if strings.Contains(strings.ToLower(r.Header.Get("Sec-Purpose")), "prefetch") {
 		return true
@@ -72,7 +77,10 @@ func isPrefetch(r *http.Request) bool {
 
 // logConnectReject emits one WARN line for a rejected /telegram/connect/done
 // request. Attributes are deliberately limited to route, reason and the
-// prefetch boolean — never code, state, or a cookie value.
+// prefetch boolean — never code, state, or a cookie value. prefetch is always
+// false here — the guard above returns 204 before any reject path — and is
+// retained deliberately so one prefetch= query matches every line both
+// routes emit.
 func logConnectReject(r *http.Request, reason string) {
 	slog.Warn("connect: request rejected",
 		"route", "/telegram/connect/done",
@@ -246,6 +254,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 			"reason", reasonPrefetchRefused,
 			"prefetch", true)
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Vary", "Sec-Purpose, Purpose")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -279,15 +288,23 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	s.mu.Unlock()
 
 	if !ok || s.clock().Sub(sess.createdAt) > s.codeTTL {
+		if s.alreadyConnected(r) {
+			// Not a failure: the browser still holds a valid
+			// mctl_connect_token, so a reopened single-use link lands on
+			// /manage. Logged at Info under its own reason so the
+			// unknown_state count keeps measuring only real failures.
+			slog.Info("connect: request recovered",
+				"route", "/telegram/connect/done",
+				"reason", reasonRecoveredRedirect,
+				"prefetch", isPrefetch(r))
+			http.Redirect(w, r, "/telegram/connect/manage", http.StatusSeeOther)
+			return
+		}
 		reason := reasonUnknownState
 		if ok {
 			reason = reasonExpiredState
 		}
 		logConnectReject(r, reason)
-		if s.alreadyConnected(r) {
-			http.Redirect(w, r, "/telegram/connect/manage", http.StatusSeeOther)
-			return
-		}
 		renderConnectReused(w, s.issuer+"/telegram/connect")
 		return
 	}
