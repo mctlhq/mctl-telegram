@@ -459,6 +459,27 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		   WHERE source_digest_id IS NOT NULL AND state IN ('prepared', 'approved', 'sending')`); err != nil {
 		return fmt.Errorf("create idx_broadcast_campaigns_digest_category_active: %w", err)
 	}
+	// A campaign's source digest must exist (issue-683): the composite foreign
+	// key makes the database refuse a DiscardUnusedProductUpdateDigest that
+	// races a SetBroadcastCampaignSourceRef, instead of orphaning the campaign.
+	// Postgres only: SQLite cannot add a constraint to an existing table, and
+	// it is the single-writer local-dev dialect. Added NOT VALID so a database
+	// holding an older orphan still starts; new writes are checked regardless.
+	if pg {
+		if _, err := dbConn.ExecContext(ctx, `DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'fk_broadcast_campaigns_source_digest'
+                    AND conrelid = to_regclass('broadcast_campaigns')) THEN
+    ALTER TABLE broadcast_campaigns
+      ADD CONSTRAINT fk_broadcast_campaigns_source_digest
+      FOREIGN KEY (source_digest_id, source_digest_version)
+      REFERENCES product_update_digests(id, version) NOT VALID;
+  END IF;
+END $$`); err != nil {
+			return fmt.Errorf("add fk_broadcast_campaigns_source_digest: %w", err)
+		}
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
