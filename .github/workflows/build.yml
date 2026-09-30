@@ -245,8 +245,29 @@ jobs:
         with:
           context: .
           push: false
+          # Loaded into the runner's daemon only so the next step can look
+          # inside it; nothing is pushed.
+          load: true
+          tags: mctl-telegram:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # The runtime image must carry the reviewed product-update feed verbatim
+      # and point the server at it (issue-683 task 2). The image once shipped
+      # without it because .dockerignore excluded docs/, and nothing noticed
+      # until review. Compares every *.yaml by SHA-256 against the checkout.
+      - name: Assert the product-update feed is in the image
+        run: |
+          set -eu
+          dir=$(docker run --rm --entrypoint printenv mctl-telegram:ci PRODUCT_UPDATE_FEED_DIR)
+          test "$dir" = /srv/product-updates || { echo "PRODUCT_UPDATE_FEED_DIR=$dir, want /srv/product-updates"; exit 1; }
+          want=$(cd docs/product-updates && sha256sum -- *.yaml)
+          got=$(docker run --rm --entrypoint sh mctl-telegram:ci -c 'cd /srv/product-updates && sha256sum -- *.yaml')
+          test -n "$want"
+          if [ "$want" != "$got" ]; then
+            printf 'feed in the image differs from docs/product-updates\nwant:\n%s\ngot:\n%s\n' "$want" "$got"
+            exit 1
+          fi
+          echo "$got"
 
   # This repo ships a second deployable image from the same commit: cmd/agent-worker
   # on a node:22-slim runtime with the claude CLI (see Dockerfile.agent-worker).
