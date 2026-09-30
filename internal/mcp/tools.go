@@ -2737,6 +2737,28 @@ Inputs (required):
 	return tool, handler
 }
 
+// messageSearcher abstracts the pool-borrow step of toolSearchMessages so unit
+// tests can assert that the arguments the handler parsed reach
+// telegram.SearchParams unchanged, without a live MTProto connection.
+// Production code always calls through to (*Server).searchViaPool; tests that
+// reassign this package variable must restore the original via t.Cleanup.
+var messageSearcher = func(s *Server, ctx context.Context, userID int64, p telegram.SearchParams) ([]telegram.Message, error) {
+	return s.searchViaPool(ctx, userID, p)
+}
+
+// searchViaPool borrows a pooled client and runs one search_messages query,
+// mirroring the pattern downloadMediaViaPool uses (s.borrowWithRetry +
+// a single telegram call).
+func (s *Server) searchViaPool(ctx context.Context, userID int64, p telegram.SearchParams) ([]telegram.Message, error) {
+	var msgs []telegram.Message
+	err := s.borrowWithRetry(ctx, "search_messages", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		var inner error
+		msgs, inner = telegram.SearchMessages(ctx, c, p, s.PeerCache, userID)
+		return inner
+	})
+	return msgs, err
+}
+
 func (s *Server) toolSearchMessages() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("search_messages",
 		mcplib.WithTitleAnnotation("Search Telegram Messages"),
@@ -2810,17 +2832,12 @@ the word, or synonyms.`),
 		if derr != nil {
 			return mcplib.NewToolResultError(derr.Error()), nil
 		}
-		var msgs []telegram.Message
-		err := s.borrowWithRetry(ctx, "search_messages", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-			var inner error
-			msgs, inner = telegram.SearchMessages(ctx, c, telegram.SearchParams{
-				Peer:    peer,
-				Query:   query,
-				Limit:   limit,
-				MinDate: minDate,
-				MaxDate: maxDate,
-			}, s.PeerCache, id.UserID)
-			return inner
+		msgs, err := messageSearcher(s, ctx, id.UserID, telegram.SearchParams{
+			Peer:    peer,
+			Query:   query,
+			Limit:   limit,
+			MinDate: minDate,
+			MaxDate: maxDate,
 		})
 		s.audit(ctx, id, "search_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
