@@ -403,7 +403,15 @@ func (b *BroadcastServer) prepareFromDigest(ctx context.Context, actor broadcast
 		if stored {
 			// Detached from the request: a cancelled request must not leave
 			// the digest claimed.
-			if derr := b.store.DiscardUnusedProductUpdateDigest(context.WithoutCancel(ctx), digest.ID, digest.Version, digest.ContentHash); derr != nil {
+			derr := b.store.DiscardUnusedProductUpdateDigest(context.WithoutCancel(ctx), digest.ID, digest.Version, digest.ContentHash)
+			switch {
+			case derr == nil:
+			case errors.Is(derr, db.ErrCampaignSourceRefSet):
+				// A concurrent submit's campaign names this digest: keeping
+				// it is the correct outcome of that race, not a fault.
+				slog.Info("broadcast web: kept a digest another campaign names",
+					"digest_id", digest.ID, "version", digest.Version)
+			default:
 				slog.Error("broadcast web: could not discard a digest whose campaign was not prepared",
 					"digest_id", digest.ID, "version", digest.Version, "err", derr)
 			}

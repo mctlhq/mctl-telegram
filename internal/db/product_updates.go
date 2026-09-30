@@ -248,6 +248,13 @@ func (s *Store) DiscardUnusedProductUpdateDigest(ctx context.Context, id string,
 		`DELETE FROM product_update_digests WHERE id = $1 AND version = $2`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt, id, version); err != nil {
+			// The COUNT above is only a read: a campaign inserted after it
+			// is caught here by the source digest foreign key (see
+			// ensureCampaignSourceDigestFK), and the whole discard rolls
+			// back, publications and ownerships included.
+			if isForeignKeyViolation(err) {
+				return fmt.Errorf("%w: %s v%d is a campaign's source", ErrCampaignSourceRefSet, id, version)
+			}
 			return fmt.Errorf("discard product update digest: %w", err)
 		}
 	}

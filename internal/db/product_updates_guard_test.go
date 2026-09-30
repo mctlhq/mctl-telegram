@@ -259,3 +259,210 @@ func endActiveCampaigns(t *testing.T, s *Store, category NotificationCategory) {
 		t.Fatalf("clear active campaigns: %v", err)
 	}
 }
+
+// The source digest reference is held by the database on both dialects: a
+// campaign cannot name a digest that is not stored, a source_ref is all set
+// or all NULL, and a digest a campaign names cannot be deleted.
+func TestCampaignSourceDigestReference_SQLite(t *testing.T) {
+	assertCampaignSourceDigestReference(t, newTestStore(t), 830000014)
+}
+
+func TestCampaignSourceDigestReference_Postgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	assertCampaignSourceDigestReference(t, newPostgresTestStore(t, dsn), 840000014)
+}
+
+func assertCampaignSourceDigestReference(t *testing.T, s *Store, tgID int64) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	uid := productUpdateTestUser(t, s, tgID, now)
+	clearActiveCampaigns(t, s, CategoryProductUpdates)
+	d := guardDigest(uid, fmt.Sprintf("fk-%d", tgID), fmt.Sprintf("fk-entry-%d", tgID))
+	if _, err := s.SaveProductUpdateDigest(ctx, d, now); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id string, digestID any, version any, hash any) error {
+		_, err := s.DB.ExecContext(ctx,
+			`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash, content, content_hash,
+			     created_by, surface, recipient_limit, preview_counts, expires_at, created_at, updated_at,
+			     source_digest_id, source_digest_version, source_content_hash)
+			 VALUES($1,'cancelled',$2,'{}','sh','text','ch',$3,'web',10,'{}',$4,$5,$5,$6,$7,$8)`,
+			id, string(CategoryProductUpdates), uid, now.Add(time.Hour), now, digestID, version, hash)
+		return err
+	}
+	if err := insert(fmt.Sprintf("bc_fk_missing_%d", tgID), "no-such-digest", 1, "sha256:x"); !isForeignKeyViolation(err) {
+		t.Fatalf("campaign naming a digest that is not stored: %v, want a foreign key violation", err)
+	}
+	if err := insert(fmt.Sprintf("bc_fk_half_%d", tgID), d.ID, nil, nil); err == nil {
+		t.Fatal("a half-set source_ref was inserted")
+	}
+	if err := insert(fmt.Sprintf("bc_fk_manual_%d", tgID), nil, nil, nil); err != nil {
+		t.Fatalf("a manual campaign (all source columns NULL): %v", err)
+	}
+	if err := insert(fmt.Sprintf("bc_fk_ok_%d", tgID), d.ID, 1, d.ContentHash); err != nil {
+		t.Fatalf("campaign naming the stored digest: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM product_update_digests WHERE id = $1 AND version = 1`, d.ID); !isForeignKeyViolation(err) {
+		t.Fatalf("deleting a digest a campaign names: %v, want a foreign key violation", err)
+	}
+}
+
+// TestDiscardRacesCreate_Postgres is the #715 review race: submit R1 stored
+// digest D and its Prepare refused, so it discards D, while submit R2 (same
+// digest id+version, another selector) creates its campaign naming D. A
+// third transaction holds a table lock that parks the discard at a chosen
+// statement, so each interleaving is forced rather than hoped for:
+//
+//   - "create lands mid-discard": the discard has read "no campaign names
+//     D" and is parked before its DELETEs; R2's campaign commits; the
+//     discard resumes and must refuse, leaving D and its entries held.
+//   - "discard deletes first": the discard has deleted D (uncommitted) and
+//     is parked before its last statement; R2's INSERT still sees D in its
+//     snapshot; the discard commits and R2 must refuse, writing nothing.
+//
+// In both, a stored campaign never names a missing digest, and D's entries
+// are never eligible again while a campaign carries them.
+func TestDiscardRacesCreate_Postgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	uid := productUpdateTestUser(t, s, 840000015, now)
+
+	type setup struct {
+		d     ProductUpdateDigest
+		ref   CampaignSourceRef
+		entry string
+		cid   string
+	}
+	prep := func(t *testing.T, name string) setup {
+		clearActiveCampaigns(t, s, CategoryProductUpdates)
+		entry := "race-entry-" + name
+		d := guardDigest(uid, "race-"+name, entry)
+		if _, err := s.SaveProductUpdateDigest(ctx, d, now); err != nil {
+			t.Fatal(err)
+		}
+		return setup{d: d, ref: CampaignSourceRef{DigestID: d.ID, DigestVersion: 1, ContentHash: d.ContentHash}, entry: entry, cid: "bc_race_" + name}
+	}
+	// park holds lockSQL in its own transaction and returns its release.
+	park := func(t *testing.T, lockSQL string) func() {
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, lockSQL); err != nil {
+			t.Fatal(err)
+		}
+		released := false
+		release := func() {
+			if !released {
+				released = true
+				_ = tx.Commit()
+			}
+		}
+		t.Cleanup(release)
+		return release
+	}
+	check := func(t *testing.T, st setup) (campaignStored bool) {
+		t.Helper()
+		_, err := s.GetBroadcastCampaign(ctx, st.cid)
+		campaignStored = err == nil
+		if !campaignStored && !errors.Is(err, ErrCampaignNotFound) {
+			t.Fatalf("read campaign: %v", err)
+		}
+		_, err = s.GetProductUpdateDigest(ctx, st.d.ID, 1)
+		digestStored := err == nil
+		if !digestStored && !errors.Is(err, ErrDigestNotFound) {
+			t.Fatalf("read digest: %v", err)
+		}
+		published, err := s.PublishedProductUpdateEntries(ctx, "someone-else")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if campaignStored && !digestStored {
+			t.Fatalf("campaign %s names digest %s, which was discarded", st.cid, st.d.ID)
+		}
+		if campaignStored && !published[st.entry] {
+			t.Fatalf("campaign %s carries %s, but the entry is eligible again", st.cid, st.entry)
+		}
+		return campaignStored
+	}
+
+	t.Run("create lands mid-discard", func(t *testing.T) {
+		st := prep(t, "mid")
+		// SHARE on publications blocks the discard's first DELETE, after its
+		// campaign COUNT has already run.
+		release := park(t, `LOCK TABLE product_update_publications IN SHARE MODE`)
+		discardErr := make(chan error, 1)
+		go func() { discardErr <- s.DiscardUnusedProductUpdateDigest(ctx, st.d.ID, 1, st.d.ContentHash) }()
+		waitForLockWait(t, s, "DELETE FROM product_update_publications%")
+		createErr := s.CreateBroadcastCampaign(ctx, guardCampaign(uid, st.cid, st.ref), now)
+		release()
+		derr := <-discardErr
+		if createErr != nil {
+			t.Fatalf("create: %v", createErr)
+		}
+		if !errors.Is(derr, ErrCampaignSourceRefSet) {
+			t.Fatalf("discard after a campaign named the digest: %v, want ErrCampaignSourceRefSet", derr)
+		}
+		if !check(t, st) {
+			t.Fatal("the created campaign is missing")
+		}
+	})
+
+	t.Run("discard deletes first", func(t *testing.T) {
+		st := prep(t, "first")
+		// SHARE on entry owners blocks the discard's last DELETE, after it
+		// has deleted the digest row (uncommitted).
+		release := park(t, `LOCK TABLE product_update_entry_owners IN SHARE MODE`)
+		discardErr := make(chan error, 1)
+		go func() { discardErr <- s.DiscardUnusedProductUpdateDigest(ctx, st.d.ID, 1, st.d.ContentHash) }()
+		waitForLockWait(t, s, "DELETE FROM product_update_entry_owners%")
+		createErr := make(chan error, 1)
+		go func() { createErr <- s.CreateBroadcastCampaign(ctx, guardCampaign(uid, st.cid, st.ref), now) }()
+		// Give the INSERT time to take its snapshot (which still shows D)
+		// and reach the digest row, then let the discard commit.
+		waitForLockWaitOrTimeout(s, "INSERT INTO broadcast_campaigns%", 2*time.Second)
+		release()
+		if derr := <-discardErr; derr != nil {
+			t.Fatalf("discard: %v", derr)
+		}
+		if cerr := <-createErr; !errors.Is(cerr, ErrCampaignSourceMismatch) {
+			t.Fatalf("create naming a digest discarded under it: %v, want ErrCampaignSourceMismatch", cerr)
+		}
+		if check(t, st) {
+			t.Fatal("a campaign was stored for a discarded digest")
+		}
+	})
+}
+
+// waitForLockWait blocks until a backend running a query matching like is
+// waiting on a lock, failing the test after five seconds.
+func waitForLockWait(t *testing.T, s *Store, like string) {
+	t.Helper()
+	if !waitForLockWaitOrTimeout(s, like, 5*time.Second) {
+		t.Fatalf("no backend waiting on a lock for %q", like)
+	}
+}
+
+func waitForLockWaitOrTimeout(s *Store, like string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var n int
+		err := s.DB.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM pg_stat_activity
+			  WHERE wait_event_type = 'Lock' AND ltrim(query) LIKE $1`, like).Scan(&n)
+		if err == nil && n > 0 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
