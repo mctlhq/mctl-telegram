@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.74.0](https://github.com/mctlhq/mctl-telegram/compare/0.73.0...0.74.0) (2026-09-30)
+
+
+### Features
+
+* **agents:** issue-703-follow-ups-from-700-mcp-tool-call-failur ([4fcc662](https://github.com/mctlhq/mctl-telegram/commit/4fcc662b8f0e8713534b472a56121f9d9e74d521))
+
+
+### Bug Fixes
+
+* **agents:** issue-703-follow-ups-from-700-mcp-tool-call-failur ([aaccfd6](https://github.com/mctlhq/mctl-telegram/commit/aaccfd63af8cda8a955f58d3ea2774454e26a705))
+* **mcp:** keep refusals out of Rule 1's completed-action branch ([c6b9963](https://github.com/mctlhq/mctl-telegram/commit/c6b9963cff1974f178c7d9374636f71ff37af1e4))
+* **mcp:** record refusals as SLO-exempt errors ([fdd8ed2](https://github.com/mctlhq/mctl-telegram/commit/fdd8ed2ec34dbbf4214eb2b28a1b96e57acc2fdb))
+
 ## [0.73.0](https://github.com/mctlhq/mctl-telegram/compare/0.72.0...0.73.0) (2026-09-30)
 
 
