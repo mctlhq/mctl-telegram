@@ -106,7 +106,7 @@ func TestToolSearchMessages_PassesParsedBounds(t *testing.T) {
 			"query":    "roof rack",
 			"min_date": "2026-08-27",
 		})
-		if p.MaxDate.IsZero() != true {
+		if !p.MaxDate.IsZero() {
 			t.Fatalf("MaxDate should be zero, got %v", p.MaxDate)
 		}
 		want := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
@@ -241,34 +241,5 @@ func TestToolSearchMessages_SeamErrorIsToolError(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected a tool error result")
-	}
-}
-
-// TestToolSearchMessages_SeamNotReachedOnInvalidDate proves an unparseable
-// min_date is rejected before the seam is ever called.
-func TestToolSearchMessages_SeamNotReachedOnInvalidDate(t *testing.T) {
-	srv := &Server{Store: newToolsTestStore(t)}
-	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
-	ctx := auth.With(context.Background(), id)
-
-	calls := 0
-	stubMessageSearcher(t, func(s *Server, ctx context.Context, userID int64, p telegram.SearchParams) ([]telegram.Message, error) {
-		calls++
-		return nil, nil
-	})
-
-	_, handler := srv.toolSearchMessages()
-	result, err := handler(ctx, callSearchMessages(map[string]any{
-		"query":    "roof rack",
-		"min_date": "yesterday",
-	}))
-	if err != nil {
-		t.Fatalf("unexpected Go error: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected error for unparseable min_date")
-	}
-	if calls != 0 {
-		t.Fatalf("seam invoked %d times, want 0", calls)
 	}
 }

@@ -1205,6 +1205,29 @@ func TestToolSearchMessages_InvalidDate(t *testing.T) {
 		}
 	})
 
+	t.Run("unparseable min_date never reaches the search", func(t *testing.T) {
+		// Pins the early return before any Telegram RPC: the seam that
+		// replaces the pool borrow must not be invoked at all.
+		calls := 0
+		stubMessageSearcher(t, func(s *Server, ctx context.Context, userID int64, p telegram.SearchParams) ([]telegram.Message, error) {
+			calls++
+			return nil, nil
+		})
+		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name:      "search_messages",
+			Arguments: map[string]any{"query": "roof rack", "min_date": "yesterday"},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !result.IsError {
+			t.Fatal("expected error for unparseable min_date")
+		}
+		if calls != 0 {
+			t.Fatalf("search seam invoked %d times, want 0", calls)
+		}
+	})
+
 	t.Run("non-string min_date is rejected, not ignored", func(t *testing.T) {
 		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
 			Name:      "search_messages",
