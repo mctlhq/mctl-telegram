@@ -37,7 +37,9 @@ func TestConsumeOAuthPending_PostgresExpiredIsDistinguishable(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres not available: %v", err)
 	}
-	defer conn.Close()
+	// Close in t.Cleanup, registered first so it runs last: a defer would run
+	// before the row cleanup below and leave that DELETE on a closed pool.
+	t.Cleanup(func() { _ = conn.Close() })
 	if err := Migrate(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
