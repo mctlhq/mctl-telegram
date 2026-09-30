@@ -26,8 +26,9 @@ type callRecord struct {
 	elapsed                                      time.Duration
 	hasElapsed                                   bool
 	// synthesized is set on every record Server.flushRecordedCall creates
-	// itself (Rule 1's appended error record, Rule 2, Rule 3) as opposed to a
-	// record staged by Server.audit. A synthesized record never reached
+	// itself (Rule 1's appended error record, Rule 2, Rule 3) and on a refusal
+	// staged by Server.auditRefusal, as opposed to a record staged by
+	// Server.audit. A synthesized record never reached
 	// Server.audit, so before mctl-telegram#696 it touched neither
 	// ToolInvocationsTotal nor ToolInvocationDuration. Those two series are
 	// the tool-availability SLO's input (deploy/alerts/mctl-telegram.rules.yaml),
@@ -235,8 +236,8 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			// really completed; a later failure (jsonResult encode) must not
 			// rewrite it. Keep it and append a separate error record carrying
 			// the same peer and route. This relies on every handler staging
-			// "ok" only for a completed action: a refusal must be audited
-			// with its error (see the :rate_limited and rows == 0 sites).
+			// "ok" only for a completed action: a refusal goes through
+			// Server.auditRefusal instead.
 			records = append(records, callRecord{
 				tool:        req.Params.Name,
 				peer:        last.peer,

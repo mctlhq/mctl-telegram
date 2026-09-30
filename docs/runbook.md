@@ -1521,7 +1521,10 @@ counts only records staged by a handler's own `Server.audit` call. Records
 synthesized by `flushRecordedCall` — every Rule 1 appended error record, every
 Rule 2 record (a failure that never reached `Server.audit`) and every Rule 3
 record (an unaudited success) — never feed the SLO pair, whatever their
-reason. The reason-error counter therefore runs **higher** than the SLO
+reason. Neither do refusals staged through `Server.auditRefusal` (the per-peer
+`:rate_limited` refusals and the "no active session" `rows == 0` paths): they
+are audited as `error` with their reason, but a client tripping a policy limit
+does not burn the availability SLO. The reason-error counter therefore runs **higher** than the SLO
 numerator, permanently; a difference is not a lost sample. Server faults are
 visible in `mctl_tool_call_errors_total` and through the
 `MctlToolHandlerFaults` alert, not in the availability SLO.

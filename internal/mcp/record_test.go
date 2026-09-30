@@ -812,6 +812,17 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 		return got
 	}
 
+	// A refusal is a client/policy outcome: it must neither read as an SLO
+	// success nor burn the paging availability SLO.
+	assertNoSLOSample := func(t *testing.T, tool string) {
+		t.Helper()
+		for _, status := range []string{"ok", "error"} {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, status)); n != 0 {
+				t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want 0", tool, status, n)
+			}
+		}
+	}
+
 	t.Run("rate limited", func(t *testing.T) {
 		const uid int64 = 4270
 		id := &auth.Identity{UserID: uid}
@@ -828,9 +839,10 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
 			t.Fatalf("audit rows = %v, want %v", got, want)
 		}
-		if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("prepare_pin_message:rate_limited", "ok")); n != 0 {
-			t.Fatalf("a refusal counted as an SLO success: %v", n)
+		if r := latestAuditReason(t, store, uid); r != ReasonRateLimited {
+			t.Fatalf("reason = %q, want %q", r, ReasonRateLimited)
 		}
+		assertNoSLOSample(t, "prepare_pin_message:rate_limited")
 	})
 
 	t.Run("zero rows updated", func(t *testing.T) {
@@ -848,6 +860,12 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
 			t.Fatalf("audit rows = %v, want %v", got, want)
 		}
+		// not_found (not scope_denied or unknown) proves the rows == 0
+		// branch itself produced the row.
+		if r := latestAuditReason(t, store, uid); r != ReasonNotFound {
+			t.Fatalf("reason = %q, want %q", r, ReasonNotFound)
+		}
+		assertNoSLOSample(t, "set_send_consent")
 	})
 }
 

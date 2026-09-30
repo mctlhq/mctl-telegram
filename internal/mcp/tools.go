@@ -113,9 +113,12 @@ func bridgeResultErr(res *mcplib.CallToolResult) error {
 // tools surface errors via *mcplib.CallToolResult, not Go error returns.
 func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string, args any) (res *mcplib.CallToolResult, callErr error) {
 	// Every failure result below means the call was relayed (or attempted) to
-	// the Local Bridge path; name it so it is recorded as bridge_error.
+	// the Local Bridge path; name it so it is recorded as bridge_error. The
+	// one exception is a local json.Marshal failure on our own arguments,
+	// which never left the server and is an encode bug.
+	encodeFailed := false
 	defer func() {
-		if res != nil && res.IsError {
+		if res != nil && res.IsError && !encodeFailed {
 			hintReason(ctx, ReasonBridgeError)
 		}
 	}()
@@ -124,6 +127,8 @@ func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string,
 	}
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
+		encodeFailed = true
+		hintReason(ctx, ReasonEncodeFailed)
 		return toolErr("bridge: marshal args: %v", err), nil
 	}
 	callID := uuid.New().String()
@@ -675,7 +680,7 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 		peerRedacted := telegram.RedactPeer(peer)
 		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
 			limitErr := errors.New("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient")
-			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, limitErr, startedAt)
+			s.auditRefusal(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, limitErr, startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(limitErr.Error()), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
@@ -1241,6 +1246,7 @@ The user must have an active session. New accounts are NOT send-enabled: SaveSes
 		if err != nil {
 			s.audit(ctx, id, "set_account_send", "", err, startedAt)
 			if errors.Is(err, db.ErrUserNotFound) {
+				hintReason(ctx, ReasonNotFound)
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
 			return s.storeErr(ctx, "set_account_send", err), nil
@@ -1255,7 +1261,7 @@ The user must have an active session. New accounts are NOT send-enabled: SaveSes
 		// as the refusal it is (nothing was written).
 		if rows == 0 {
 			noSession := fmt.Errorf("no active Telegram session for telegram id %d — they must connect an account first", tgID)
-			s.audit(ctx, id, "set_account_send", "", noSession, startedAt)
+			s.auditRefusal(ctx, id, "set_account_send", "", noSession, startedAt, ReasonNotFound)
 			return toolErr("%v", noSession), nil
 		}
 		s.audit(ctx, id, "set_account_send", "", nil, startedAt)
@@ -1316,7 +1322,7 @@ This is the owner-facing counterpart of the admin set_account_send tool (which r
 		// Zero rows: nothing was written, so audit the refusal, not an ok.
 		if rows == 0 {
 			noSession := errors.New("no active Telegram session for your account — connect an account first")
-			s.audit(ctx, id, "set_send_consent", "", noSession, startedAt)
+			s.auditRefusal(ctx, id, "set_send_consent", "", noSession, startedAt, ReasonNotFound)
 			return toolErr("%v", noSession), nil
 		}
 		s.audit(ctx, id, "set_send_consent", "", nil, startedAt)
@@ -1579,6 +1585,7 @@ never completed a hosted login.`),
 		if err != nil {
 			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
 			if errors.Is(err, db.ErrUserNotFound) {
+				hintReason(ctx, ReasonNotFound)
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
 			return s.storeErr(ctx, "set_account_mode", err), nil
@@ -1726,6 +1733,7 @@ READ THESE AS EVIDENCE, NOT AS IDENTITY. They are headers as received, and on th
 		if err != nil {
 			s.audit(ctx, id, "get_user_audit_log", "", err, startedAt)
 			if errors.Is(err, db.ErrUserNotFound) {
+				hintReason(ctx, ReasonNotFound)
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
 			return s.storeErr(ctx, "get_user_audit_log", err), nil
@@ -1778,6 +1786,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 		if err != nil {
 			s.audit(ctx, id, "revoke_telegram_session", "", err, startedAt)
 			if errors.Is(err, db.ErrUserNotFound) {
+				hintReason(ctx, ReasonNotFound)
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
 			return s.storeErr(ctx, "revoke_telegram_session", err), nil
@@ -2415,6 +2424,34 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	s.writeAuditRow(ctx, rec)
 }
 
+// auditRefusal records a refusal: the handler declined the call (rate
+// limiter, nothing to update) before doing any work. The staged record is an
+// error with the given reason, so it can never read as a completed action,
+// and it is marked synthesized so a client tripping a policy limit does not
+// burn the availability SLO — the same treatment Rule 2 gives a scope or
+// argument refusal that never reached Server.audit.
+func (s *Server) auditRefusal(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, reason string) {
+	hintReason(ctx, reason)
+	rec := callRecord{
+		tool:        tool,
+		peer:        peer,
+		status:      "error",
+		reason:      reason,
+		errMsg:      err.Error(),
+		id:          id,
+		synthesized: true,
+	}
+	if !startedAt.IsZero() {
+		rec.elapsed = time.Since(startedAt)
+		rec.hasElapsed = true
+	}
+	if recorder := recorderFrom(ctx); recorder != nil {
+		recorder.stage(rec)
+		return
+	}
+	s.writeAuditRow(ctx, rec)
+}
+
 // writeAuditRow is the write-through primitive: one audit_logs row, the
 // ToolInvocationsTotal / ToolInvocationDuration samples, and the "mcp tool
 // call" slog mirror. It is the entire body of the pre-#696 Server.audit,
@@ -2623,7 +2660,7 @@ Inputs (required):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt)
+			s.auditRefusal(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2679,7 +2716,7 @@ Inputs (required):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt)
+			s.auditRefusal(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2739,7 +2776,7 @@ Inputs (required):
 		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
 		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeerRedacted, len(messageIDs)); blocked {
-			s.audit(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt)
+			s.auditRefusal(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2921,7 +2958,7 @@ Inputs (optional):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt)
+			s.auditRefusal(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
