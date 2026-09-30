@@ -175,3 +175,90 @@ func assertDigestNotStored(t *testing.T, e *bcEnv, id string, version int, entry
 		t.Fatalf("%s is claimed by a digest that never became a campaign", entryID)
 	}
 }
+
+// T8 at the page level: each refusal below is a 409 with its documented
+// message, and writes no campaign and no digest.
+func TestBroadcastPage_PrepareFromDigest_GuardRefusals(t *testing.T) {
+	entry := maintenanceDigestEntry("maint-note")
+	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
+	for _, tc := range []struct {
+		name    string
+		source  DigestSource
+		version string
+		want    string
+	}{
+		{"version 2 without version 1", DigestSource{Feed: feed, LatestRelease: "0.70.0"}, "2", "needs a stored version 1 first"},
+		{"empty LatestRelease (a dev build)", DigestSource{Feed: feed, LatestRelease: ""}, "1", "is not a released tag"},
+		{"feed not loaded", DigestSource{Feed: feed, LatestRelease: "0.70.0", LoadErr: errors.New("product update feed directory \"/srv/x\" does not exist")}, "1", "feed is not loaded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newBroadcastEnv(t, func(d *DigestSource) { *d = tc.source })
+			form := url.Values{"category": {"maintenance"}, "digest_id": {"maint-2026-w39"}, "version": {tc.version}}
+			w := e.prepareDigest(e.connectIdentity(), bcIssuer, form)
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("prepare-digest = %d %s, want 409 containing %q", w.Code, w.Body.String(), tc.want)
+			}
+			list, err := e.store.ListBroadcastCampaigns(context.Background(), 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list) != 0 {
+				t.Fatalf("campaigns after the refusal = %d, want 0", len(list))
+			}
+			for _, v := range []int{1, 2} {
+				if _, err := e.store.GetProductUpdateDigest(context.Background(), "maint-2026-w39", v); !errors.Is(err, db.ErrDigestNotFound) {
+					t.Fatalf("digest v%d after the refusal: %v, want ErrDigestNotFound", v, err)
+				}
+			}
+			assertDigestNotStored(t, e, "maint-2026-w39", 1, entry.ID)
+		})
+	}
+}
+
+// T9 consent safety: a product_updates digest is prepared with the
+// product_updates selector category -- the opt-in category -- so it reaches
+// only subscribers, never the opt-out maintenance audience.
+func TestBroadcastPage_PrepareFromDigest_ProductUpdatesKeepsItsCategory(t *testing.T) {
+	entry := productupdate.Entry{
+		Schema: productupdate.EntrySchema, ID: "send-message", Kind: productupdate.KindNewTool,
+		Title: "Send messages", Summary: "You can now send a message to a chat.",
+		Locale: "en", Delivery: productupdate.DeliveryNextDigest,
+		Tools:      []string{"send_message"},
+		Evidence:   productupdate.Evidence{From: "0.69.0", Changes: []productupdate.Claim{{Tool: "send_message", Change: productupdate.ClaimAdded}}},
+		Status:     productupdate.StatusApproved,
+		Provenance: productupdate.Provenance{Author: "alice", ReviewedBy: "alice"},
+		CreatedAt:  "2026-09-24", ReviewedAt: "2026-09-24",
+	}
+	if entry.Category() != db.CategoryProductUpdates {
+		t.Fatalf("fixture category = %s, want product_updates", entry.Category())
+	}
+	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
+	e := newBroadcastEnv(t, func(d *DigestSource) { *d = DigestSource{Feed: feed, LatestRelease: "0.70.0"} })
+	// product_updates is opt-in: without a subscriber there is no audience.
+	ctx := context.Background()
+	if err := e.store.SetNotificationPrefs(ctx, e.clients[0], map[string]string{
+		string(db.CategoryProductUpdates): db.PrefSubscribed,
+	}, "account_api"); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"category": {"product_updates"}, "digest_id": {"product-updates-2026-w39"}, "version": {"1"}}
+	if w := e.prepareDigest(e.connectIdentity(), bcIssuer, form); w.Code != http.StatusSeeOther {
+		t.Fatalf("prepare-digest = %d %s", w.Code, w.Body.String())
+	}
+	list, err := e.store.ListBroadcastCampaigns(ctx, 10, db.CampaignPrepared)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("prepared campaigns = %d (%v), want 1", len(list), err)
+	}
+	c := list[0]
+	if c.Category != string(db.CategoryProductUpdates) {
+		t.Fatalf("campaign category = %s, want product_updates", c.Category)
+	}
+	if !strings.Contains(c.SelectorJSON, `"category":"product_updates"`) {
+		t.Fatalf("selector %s does not carry the product_updates category", c.SelectorJSON)
+	}
+	d, err := e.store.GetProductUpdateDigest(ctx, "product-updates-2026-w39", 1)
+	if err != nil || d.Category != string(db.CategoryProductUpdates) {
+		t.Fatalf("stored digest = %+v, %v; want category product_updates", d, err)
+	}
+}

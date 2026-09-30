@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 // ProductUpdateFeedSource holds the parsed feed plus any load error (a
@@ -71,4 +72,11 @@ func feedDirPresent(dir string) error {
 		return fmt.Errorf("product update feed directory %q is not a directory", dir)
 	}
 	return nil
+}
+
+// DigestSource is what main hands the broadcasts page: the loaded feed, its
+// load error and the resolved release, unchanged. Kept here so the wiring
+// the server does is the wiring its tests exercise.
+func (s ProductUpdateFeedSource) DigestSource() web.DigestSource {
+	return web.DigestSource{Feed: s.Feed, LoadErr: s.Err, LatestRelease: s.LatestRelease}
 }

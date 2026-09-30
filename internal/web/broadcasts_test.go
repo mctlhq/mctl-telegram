@@ -414,8 +414,8 @@ func TestBroadcastPage_PrepareFromDigest_EndToEnd(t *testing.T) {
 // TestBroadcastPage_PrepareFromDigest_Refusals is T6 (amended): the page
 // action refuses each of the following as approve/cancel do -- a missing
 // admin:broadcast scope, a non-operator, a cross-origin POST, a text field,
-// a category mismatch, and a second non-terminal campaign in the same
-// category.
+// a category with no entries of its own, and a second non-terminal campaign
+// in the same category.
 func TestBroadcastPage_PrepareFromDigest_Refusals(t *testing.T) {
 	entry := maintenanceDigestEntry("maint-note")
 	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
@@ -457,14 +457,19 @@ func TestBroadcastPage_PrepareFromDigest_Refusals(t *testing.T) {
 			t.Fatalf("code = %d %s, want 409", w.Code, w.Body.String())
 		}
 	})
-	t.Run("category mismatch is refused", func(t *testing.T) {
+	// A category that disagrees with the feed's entries cannot freeze them:
+	// DigestCandidates offers only entries of the requested category, so the
+	// reachable refusal is "has no entries" (a digest's category is its
+	// request's by construction; there is no separate mismatch to hit).
+	t.Run("a category with no entries of its own freezes nothing", func(t *testing.T) {
 		e := env(t)
 		f := baseForm()
 		f.Set("category", "security") // the seeded entry is "maintenance"
 		w := e.prepareDigest(e.connectIdentity(), bcIssuer, f)
-		if w.Code != http.StatusConflict {
-			t.Fatalf("code = %d %s, want 409", w.Code, w.Body.String())
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "has no entries") {
+			t.Fatalf("code = %d %s, want 409 \"has no entries\"", w.Code, w.Body.String())
 		}
+		assertDigestNotStored(t, e, "maint-2026-w39", 1, entry.ID)
 	})
 	t.Run("a second non-terminal campaign in the same category is refused", func(t *testing.T) {
 		e := env(t)

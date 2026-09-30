@@ -295,9 +295,10 @@ func classifyDigestErr(err error) error {
 // "Correction 2026-09-30": feed loaded and LatestRelease known; no
 // non-terminal campaign already exists for the category; version>1 requires
 // version-1 to be stored; freeze; render; Prepare with the digest's category
-// and source_ref. A text field, or a category that disagrees with the
-// digest's, is refused before any of that runs -- a digest campaign's body
-// and category come from the digest, never from the caller.
+// and source_ref. A text field is refused before any of that runs, and a
+// category with no approved entries of its own freezes nothing ("has no
+// entries") -- a digest campaign's body and category come from the digest,
+// never from the caller.
 //
 // The digest is frozen and rendered in memory first and persisted only once
 // it renders, so a render refusal stores nothing. Prepare needs the stored
@@ -380,9 +381,12 @@ func (b *BroadcastServer) prepareFromDigest(ctx context.Context, actor broadcast
 	if err != nil {
 		return nil, refuseDigest(err)
 	}
-	if string(digest.Category) != category {
-		return nil, refuseDigest(fmt.Errorf("digest category %s differs from the requested %s", digest.Category, category))
-	}
+	// The digest's category is the requested one by construction
+	// (FreezeDigest stamps its category argument, and DigestCandidates offers
+	// only entries of that category), so there is no mismatch left to check
+	// here. A category with no candidates of its own refuses above with "has
+	// no entries"; CreateBroadcastCampaign's d.category = category predicate
+	// is the database-side guard.
 	docsURL := b.issuer + "/docs/product-updates"
 	text, err := productupdate.RenderBroadcast(digest, b.digests.Feed, docsURL, broadcast.MaxTextUnits)
 	if err != nil {

@@ -514,9 +514,7 @@ func main() {
 		// connect-session cookie reaches it; the handler itself requires a
 		// token issued to the self-connect client, so an MCP token can
 		// never approve. See internal/web/broadcasts.go.
-		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID, web.DigestSource{
-			Feed: productUpdates.Feed, LoadErr: productUpdates.Err, LatestRelease: productUpdates.LatestRelease,
-		})
+		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID, productUpdates.DigestSource())
 		mux.With(manageAuth).Get("/telegram/connect/broadcasts", broadcastWeb.HandleList)
 		mux.With(manageAuth).Post("/telegram/connect/broadcasts/approve", broadcastWeb.HandleApprove)
 		mux.With(manageAuth).Post("/telegram/connect/broadcasts/cancel", broadcastWeb.HandleCancel)
