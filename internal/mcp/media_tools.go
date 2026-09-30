@@ -191,6 +191,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
 		}
 		if confID == "" {
+			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("confirmation_id required — call prepare_get_media first"), nil
 		}
 		if s.Hub != nil {
@@ -484,7 +485,7 @@ OGG/Opus; the server does not transcode.`),
 		})
 		s.audit(ctx, id, "send_media:sent", peerRedacted, err, startedAt)
 		if err != nil {
-			return borrowErrResult("send_media", err), nil
+			return borrowErrResult(ctx, "send_media", err), nil
 		}
 		return jsonResult(result)
 	}

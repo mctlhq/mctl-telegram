@@ -345,7 +345,7 @@ func TestDirectSendLimiter_BlocksWhenExhausted(t *testing.T) {
 // known session sentinel errors must still produce a non-nil error result
 // whose content mentions "session".
 func TestBorrowErrResultSessionSentinelsUnchanged(t *testing.T) {
-	result := borrowErrResult("t", db.ErrSessionRevoked)
+	result := borrowErrResult(context.Background(), "t", db.ErrSessionRevoked)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -363,7 +363,7 @@ func TestBorrowErrResultSessionSentinelsUnchanged(t *testing.T) {
 // retry_after_seconds field.
 func TestBorrowErrResultFloodWait(t *testing.T) {
 	wrapped := fmt.Errorf("list_dialogs: %w", tgerr.New(420, "FLOOD_WAIT_30"))
-	result := borrowErrResult("list_dialogs", wrapped)
+	result := borrowErrResult(context.Background(), "list_dialogs", wrapped)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}

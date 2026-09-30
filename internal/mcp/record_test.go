@@ -6,20 +6,25 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tgerr"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // --- shared test helpers --------------------------------------------------
@@ -155,7 +160,7 @@ func TestRecordToolCall_ScopeDenied(t *testing.T) {
 		t.Fatalf("ToolCallErrorsTotal{search_messages,scope_denied} = %v, want 1", got)
 	}
 	// The Rule 2 synthesized error record must not feed the SLO-input pair:
-	// it never had an elapsed duration to begin with, and counting it in
+	// callRecord.synthesized gates it (feedsSLO), and counting it in
 	// ToolInvocationsTotal would inflate mctl_tool_availability's error
 	// numerator on every scope-denied/invalid-argument call, which can
 	// false-page an on-call via MctlToolAvailabilityFastBurn.
@@ -168,8 +173,8 @@ func TestRecordToolCall_ScopeDenied(t *testing.T) {
 }
 
 // histogramSampleCount returns the total sample count observed under
-// ToolInvocationDuration for the given tool label, across every other label
-// value (e.g. outcome), by gathering the raw Prometheus metric family.
+// ToolInvocationDuration for the given tool label (its only label), by
+// gathering the raw Prometheus metric family.
 func histogramSampleCount(t *testing.T, m *metrics.Registry, tool string) uint64 {
 	t.Helper()
 	mfs, err := m.Prometheus.Gather()
@@ -311,14 +316,13 @@ func TestJSONRPCHook_UnparsableMessage(t *testing.T) {
 
 // --- T8: encode-after-ok-audit reconciliation -----------------------------
 
-// TestFlushRecordedCall_ReconcilesEncodeFailureAfterOKAudit is T8: a test
-// tool whose handler calls Server.audit with err=nil (staging an "ok"
-// record) and then hits jsonResult's json.MarshalIndent failure path must
-// end up with exactly one row, status=error, reason=encode_failed — never
-// the "ok" row the handler already staged. This is the exact bug design.md
-// documents: jsonResult (tools.go) returning an IsError result *after* the
-// handler already audited success.
-func TestFlushRecordedCall_ReconcilesEncodeFailureAfterOKAudit(t *testing.T) {
+// TestFlushRecordedCall_KeepsCompletedActionRow is T6/T8: a test tool whose
+// handler calls Server.audit with err=nil (staging an "ok" record, like
+// send_message:sent after a real send) and then hits jsonResult's
+// json.MarshalIndent failure path must keep the staged "ok" row untouched and
+// append a separate error row (reason=encode_failed) — the audit log must
+// never deny an action that completed. Exactly one ToolCallErrorsTotal sample.
+func TestFlushRecordedCall_KeepsCompletedActionRow(t *testing.T) {
 	store := newToolsTestStore(t)
 	reg := metrics.New()
 	srv := &Server{Store: store, Metrics: reg}
@@ -332,8 +336,8 @@ func TestFlushRecordedCall_ReconcilesEncodeFailureAfterOKAudit(t *testing.T) {
 	)
 	mcpSrv.AddTool(mcplib.NewTool("encode_boom"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
-		srv.audit(ctx, id, "encode_boom", "", nil, startedAt) // stages an "ok" record
-		return jsonResult(math.Inf(1))                        // json.MarshalIndent fails on +Inf
+		srv.audit(ctx, id, "encode_boom:sent", "peer#x", nil, startedAt, "local") // stages an "ok" record
+		return jsonResult(math.Inf(1))                                            // json.MarshalIndent fails on +Inf
 	})
 
 	ctx := auth.With(context.Background(), id)
@@ -341,15 +345,36 @@ func TestFlushRecordedCall_ReconcilesEncodeFailureAfterOKAudit(t *testing.T) {
 	if !result.IsError {
 		t.Fatalf("expected an error result from the encode failure, got %+v", result)
 	}
-	if n := countAuditRows(t, store, uid); n != 1 {
-		t.Fatalf("audit rows = %d, want exactly 1 (never both an ok and an error row)", n)
+	rows, err := store.DB.QueryContext(context.Background(),
+		`SELECT tool_name, status, COALESCE(reason, ''), COALESCE(peer_redacted, ''), COALESCE(call_path, '')
+		   FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
+	if err != nil {
+		t.Fatalf("query audit rows: %v", err)
 	}
-	tool, status, _ := latestAudit(t, store, uid)
-	if tool != "encode_boom" || status != "error" {
-		t.Fatalf("audit = (%q, %q), want (encode_boom, error) — the pre-existing ok audit must be reconciled, not left standing", tool, status)
+	defer rows.Close()
+	type row struct{ tool, status, reason, peer, callPath string }
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.tool, &r.status, &r.reason, &r.peer, &r.callPath); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, r)
 	}
-	if reason := latestAuditReason(t, store, uid); reason != ReasonEncodeFailed {
-		t.Fatalf("reason = %q, want %q", reason, ReasonEncodeFailed)
+	want := []row{
+		{"encode_boom:sent", "ok", "", "peer#x", "local"},
+		// The appended failure keeps the staged record's peer and route.
+		{"encode_boom", "error", ReasonEncodeFailed, "peer#x", "local"},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("audit rows = %+v, want %+v", got, want)
+	}
+	if n := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("encode_boom", ReasonEncodeFailed)); n != 1 {
+		t.Fatalf("ToolCallErrorsTotal{encode_boom,encode_failed} = %v, want 1", n)
+	}
+	// The appended record is synthesized; only the staged ok record feeds the SLO.
+	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("encode_boom", "error")); n != 0 {
+		t.Fatalf("ToolInvocationsTotal{encode_boom,error} = %v, want 0", n)
 	}
 }
 
@@ -473,7 +498,7 @@ func TestRecordToolCall_HandlerErrorAbsorbed(t *testing.T) {
 	mcpSrv := mcpserver.NewMCPServer("record-test", "0",
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
-		mcpserver.WithHooks(srv.jsonrpcHooks()),
+		mcpserver.WithHooks(srv.jsonrpcHooks(nil)),
 	)
 	mcpSrv.AddTool(mcplib.NewTool("boom"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		return nil, errors.New("boom")
@@ -521,7 +546,7 @@ func TestRecordToolCall_PanicAbsorbed(t *testing.T) {
 	mcpSrv := mcpserver.NewMCPServer("record-test", "0",
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
-		mcpserver.WithHooks(srv.jsonrpcHooks()),
+		mcpserver.WithHooks(srv.jsonrpcHooks(nil)),
 	)
 	mcpSrv.AddTool(mcplib.NewTool("panics"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		panic("kaboom")
@@ -598,7 +623,7 @@ func TestFlushRecordedCall_SynthesizesOKRowOnUnauditedSuccess(t *testing.T) {
 	mcpSrv := mcpserver.NewMCPServer("record-test", "0",
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
-		mcpserver.WithHooks(srv.jsonrpcHooks()),
+		mcpserver.WithHooks(srv.jsonrpcHooks(nil)),
 	)
 	mcpSrv.AddTool(mcplib.NewTool("quiet_success"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		return jsonResult(map[string]any{"ok": true})
@@ -626,7 +651,380 @@ func TestFlushRecordedCall_SynthesizesOKRowOnUnauditedSuccess(t *testing.T) {
 	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("quiet_success", ReasonUnknown)); got != 0 {
 		t.Fatalf("ToolCallErrorsTotal must stay at 0 on success, got %v", got)
 	}
-	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("quiet_success", "ok")); got != 1 {
-		t.Fatalf("ToolInvocationsTotal{quiet_success,ok} = %v, want 1", got)
+	// A Rule 3 record is synthesized, so it never feeds the SLO pair.
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("quiet_success", "ok")); got != 0 {
+		t.Fatalf("ToolInvocationsTotal{quiet_success,ok} = %v, want 0 (synthesized records never feed the SLO)", got)
+	}
+}
+
+// --- #703 follow-ups -------------------------------------------------------
+
+// hintTestServer builds a server with one tool running handler behind the
+// recording middleware.
+func hintTestServer(t *testing.T, srv *Server, name string, h mcpserver.ToolHandlerFunc) *mcpserver.MCPServer {
+	t.Helper()
+	m := mcpserver.NewMCPServer("record-test", "0",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
+	)
+	m.AddTool(mcplib.NewTool(name), h)
+	return m
+}
+
+// TestHintReason_BeatsTextClassification: a hinted reason beats a
+// contradicting result text, in both the audit row and the error counter.
+func TestHintReason_BeatsTextClassification(t *testing.T) {
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	const uid int64 = 4220
+	m := hintTestServer(t, srv, "hinting", func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		hintReason(ctx, ReasonStoreError)
+		return mcplib.NewToolResultError("thing not found"), nil // classifies as not_found
+	})
+	callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "hinting", map[string]any{})
+	if r := latestAuditReason(t, store, uid); r != ReasonStoreError {
+		t.Fatalf("reason = %q, want %q", r, ReasonStoreError)
+	}
+	if n := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("hinting", ReasonStoreError)); n != 1 {
+		t.Fatalf("ToolCallErrorsTotal{hinting,store_error} = %v, want 1", n)
+	}
+}
+
+// TestHintReason_LosesToPanicAndHandlerError: the wrapper's certain knowledge
+// outranks any hint.
+func TestHintReason_LosesToPanicAndHandlerError(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	for i, tc := range []struct {
+		name string
+		h    mcpserver.ToolHandlerFunc
+		want string
+	}{
+		{"hint_panic", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			hintReason(ctx, ReasonStoreError)
+			panic("kaboom")
+		}, ReasonPanic},
+		{"hint_err", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			hintReason(ctx, ReasonStoreError)
+			return nil, errors.New("boom")
+		}, ReasonHandlerError},
+		// Rule 1: a staged record exists, so precedence is resolved on the
+		// reconcile-in-place and append paths, not Rule 2's.
+		{"staged_ok_hint_panic", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			srv.audit(ctx, auth.From(ctx), "staged_ok_hint_panic", "", nil, time.Now())
+			hintReason(ctx, ReasonStoreError)
+			panic("kaboom")
+		}, ReasonPanic},
+		{"staged_err_hint_err", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			srv.audit(ctx, auth.From(ctx), "staged_err_hint_err", "", errors.New("staged"), time.Now())
+			hintReason(ctx, ReasonStoreError)
+			return nil, errors.New("boom")
+		}, ReasonHandlerError},
+	} {
+		uid := int64(4230 + i)
+		m := hintTestServer(t, srv, tc.name, tc.h)
+		callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, tc.name, map[string]any{})
+		if r := latestAuditReason(t, store, uid); r != tc.want {
+			t.Fatalf("%s: reason = %q, want %q", tc.name, r, tc.want)
+		}
+	}
+}
+
+// TestStoreErr_RecordsStoreError: storeErr keeps the tool-prefixed text and
+// hints store_error.
+func TestStoreErr_RecordsStoreError(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	const uid int64 = 4240
+	m := hintTestServer(t, srv, "store_tool", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return srv.storeErr(ctx, "store_tool", errors.New("row not found")), nil
+	})
+	res := callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "store_tool", map[string]any{})
+	if got := firstResultText(res); got != "store_tool: row not found" {
+		t.Fatalf("text = %q", got)
+	}
+	if r := latestAuditReason(t, store, uid); r != ReasonStoreError {
+		t.Fatalf("reason = %q, want %q", r, ReasonStoreError)
+	}
+}
+
+// TestStoreErrReason_ClientFaultSentinels: the store's client-fault
+// sentinels are not database faults, so storeErr must not file them under
+// store_error.
+func TestStoreErrReason_ClientFaultSentinels(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{errors.New("connection reset"), ReasonStoreError},
+		{fmt.Errorf("get: %w", db.ErrCampaignNotFound), ReasonNotFound},
+		{db.ErrDeviceNotFound, ReasonNotFound},
+		{db.ErrUserNotFound, ReasonNotFound},
+		{db.ErrUnknownNotificationCategory, ReasonInvalidArgument},
+		{fmt.Errorf("set: %w", db.ErrUnknownNotificationState), ReasonInvalidArgument},
+	} {
+		if got := storeErrReason(tc.err); got != tc.want {
+			t.Errorf("storeErrReason(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+
+	// End to end: a get_broadcast-style miss through storeErr is recorded
+	// as not_found, not store_error.
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	const uid int64 = 4272
+	m := hintTestServer(t, srv, "lookup_tool", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return srv.storeErr(ctx, "lookup_tool", db.ErrCampaignNotFound), nil
+	})
+	callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "lookup_tool", map[string]any{})
+	if r := latestAuditReason(t, store, uid); r != ReasonNotFound {
+		t.Fatalf("reason = %q, want %q", r, ReasonNotFound)
+	}
+}
+
+// TestRefusalPaths_AuditOneErrorRow: a handler that refuses (rate limiter,
+// zero rows updated) must stage its refusal as an error, so Rule 1 reconciles
+// in place instead of keeping a staged "ok" for an action that never happened.
+func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	limiter := audit.NewRateLimiter(1000)
+	srv := &Server{Store: store, Metrics: reg, Limiter: limiter}
+	mcpSrv := srv.newMCPServer()
+
+	auditRows := func(uid int64) [][2]string {
+		t.Helper()
+		rows, err := store.DB.QueryContext(context.Background(),
+			`SELECT tool_name, status FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
+		if err != nil {
+			t.Fatalf("query audit rows: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var got [][2]string
+		for rows.Next() {
+			var r [2]string
+			if err := rows.Scan(&r[0], &r[1]); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, r)
+		}
+		return got
+	}
+
+	// A refusal is a client/policy outcome: it must neither read as an SLO
+	// success nor burn the paging availability SLO.
+	assertNoSLOSample := func(t *testing.T, tool string) {
+		t.Helper()
+		for _, status := range []string{"ok", "error"} {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, status)); n != 0 {
+				t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want 0", tool, status, n)
+			}
+		}
+	}
+
+	t.Run("rate limited", func(t *testing.T) {
+		const uid int64 = 4270
+		id := &auth.Identity{UserID: uid}
+		const peer = "@limited_peer"
+		if !limiter.AllowPeerN(id, telegram.RedactPeer(peer), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+			t.Fatal("could not drain the per-peer budget")
+		}
+		res := callTool(t, auth.With(context.Background(), id), mcpSrv, "prepare_pin_message",
+			map[string]any{"peer": peer, "message_id": 7})
+		if !res.IsError {
+			t.Fatalf("expected a rate-limit refusal, got %+v", res)
+		}
+		want := [][2]string{{"prepare_pin_message:rate_limited", "error"}}
+		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("audit rows = %v, want %v", got, want)
+		}
+		if r := latestAuditReason(t, store, uid); r != ReasonRateLimited {
+			t.Fatalf("reason = %q, want %q", r, ReasonRateLimited)
+		}
+		assertNoSLOSample(t, "prepare_pin_message:rate_limited")
+	})
+
+	t.Run("zero rows updated", func(t *testing.T) {
+		uid, err := store.EnsureUserByTelegramID(context.Background(), 4271, "nosession", "No Session")
+		if err != nil {
+			t.Fatalf("EnsureUserByTelegramID: %v", err)
+		}
+		id := &auth.Identity{UserID: uid, Scopes: []string{"account:manage"}}
+		res := callTool(t, auth.With(context.Background(), id), mcpSrv, "set_send_consent",
+			map[string]any{"enabled": true})
+		if !res.IsError {
+			t.Fatalf("expected a no-session refusal, got %+v", res)
+		}
+		want := [][2]string{{"set_send_consent", "error"}}
+		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("audit rows = %v, want %v", got, want)
+		}
+		// not_found (not scope_denied or unknown) proves the rows == 0
+		// branch itself produced the row.
+		if r := latestAuditReason(t, store, uid); r != ReasonNotFound {
+			t.Fatalf("reason = %q, want %q", r, ReasonNotFound)
+		}
+		assertNoSLOSample(t, "set_send_consent")
+	})
+}
+
+// TestBorrowErrResult_UnenumeratedMTProtoIsTelegramError: an MTProto code in
+// neither catalog records telegram_error rather than unknown.
+func TestBorrowErrResult_UnenumeratedMTProtoIsTelegramError(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	const uid int64 = 4241
+	m := hintTestServer(t, srv, "tg_tool", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return borrowErrResult(ctx, "tg_tool", tgerr.New(500, "SOME_UNLISTED_ERROR_XYZ")), nil
+	})
+	callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "tg_tool", map[string]any{})
+	if r := latestAuditReason(t, store, uid); r != ReasonTelegramError {
+		t.Fatalf("reason = %q, want %q", r, ReasonTelegramError)
+	}
+}
+
+// TestRecordToolCall_LocalRefusalIsNotBridgeError: fetch_media=true on a local
+// account is refused without ever calling the bridge.
+func TestRecordToolCall_LocalRefusalIsNotBridgeError(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 4242, false)
+	if _, err := store.SetAccountMode(context.Background(), uid, db.ModeLocal); err != nil {
+		t.Fatalf("SetAccountMode: %v", err)
+	}
+	mcpSrv := (&Server{Store: store, Metrics: metrics.New(), Hub: bridge.NewHub()}).newMCPServer()
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:read"}})
+	res := callTool(t, ctx, mcpSrv, "get_unread_messages", map[string]any{"fetch_media": true})
+	if !res.IsError {
+		t.Fatalf("expected error result, got %+v", res)
+	}
+	if r := latestAuditReason(t, store, uid); r != ReasonModeUnsupported {
+		t.Fatalf("reason = %q, want %q", r, ReasonModeUnsupported)
+	}
+	var cp sql.NullString
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT call_path FROM audit_logs WHERE user_id = $1 ORDER BY id DESC LIMIT 1`, uid).Scan(&cp); err != nil {
+		t.Fatalf("read call_path: %v", err)
+	}
+	if cp.String != "local" {
+		t.Fatalf("call_path = %q, want local", cp.String)
+	}
+}
+
+// TestRecordToolCall_BridgeFailureIsBridgeError: a relay to an absent daemon
+// fails and is recorded as bridge_error.
+func TestRecordToolCall_BridgeFailureIsBridgeError(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 4243, false)
+	if _, err := store.SetAccountMode(context.Background(), uid, db.ModeLocal); err != nil {
+		t.Fatalf("SetAccountMode: %v", err)
+	}
+	mcpSrv := (&Server{Store: store, Metrics: metrics.New(), Hub: bridge.NewHub()}).newMCPServer()
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: uid, Scopes: []string{"telegram:dialogs:read"}})
+	res := callTool(t, ctx, mcpSrv, "list_dialogs", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("expected error result, got %+v", res)
+	}
+	if r := latestAuditReason(t, store, uid); r != ReasonBridgeError {
+		t.Fatalf("reason = %q, want %q", r, ReasonBridgeError)
+	}
+}
+
+// TestFeedsSLO_SynthesizedNeverFeedsSLO: no synthesized record samples the SLO
+// pair, whatever its reason; a record staged by Server.audit still does.
+func TestFeedsSLO_SynthesizedNeverFeedsSLO(t *testing.T) {
+	if (callRecord{synthesized: true, reason: ReasonPanic}).feedsSLO() {
+		t.Fatal("a synthesized panic record must not feed the SLO")
+	}
+	if !(callRecord{}).feedsSLO() {
+		t.Fatal("a staged record must feed the SLO")
+	}
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	id := &auth.Identity{UserID: 4250}
+	ctx := auth.With(context.Background(), id)
+	for _, tc := range []struct {
+		name string
+		h    mcpserver.ToolHandlerFunc
+	}{
+		{"t_panic", func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) { panic("x") }},
+		{"t_herr", func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			return nil, errors.New("x")
+		}},
+		{"t_invalid", func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			return mcplib.NewToolResultError("peer is required"), nil
+		}},
+		{"t_ok", func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) { return jsonResult(1) }},
+	} {
+		callTool(t, ctx, hintTestServer(t, srv, tc.name, tc.h), tc.name, map[string]any{})
+		for _, st := range []string{"ok", "error"} {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st)); n != 0 {
+				t.Fatalf("%s: ToolInvocationsTotal{%s} = %v, want 0", tc.name, st, n)
+			}
+		}
+		if n := histogramSampleCount(t, reg, tc.name); n != 0 {
+			t.Fatalf("%s: duration samples = %d, want 0", tc.name, n)
+		}
+	}
+	// A record staged by Server.audit still feeds the pair.
+	m := hintTestServer(t, srv, "t_staged", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		srv.audit(ctx, id, "t_staged", "", nil, time.Now())
+		return jsonResult(1)
+	})
+	callTool(t, ctx, m, "t_staged", map[string]any{})
+	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("t_staged", "ok")); n != 1 {
+		t.Fatalf("staged record: ToolInvocationsTotal = %v, want 1", n)
+	}
+}
+
+// wrappedCodeErr satisfies jsonrpcCoder, like mcp-go's unexported requestError.
+type wrappedCodeErr struct{}
+
+func (wrappedCodeErr) Error() string { return "coded" }
+func (wrappedCodeErr) ToJSONRPCError() mcplib.JSONRPCError {
+	var e mcplib.JSONRPCError
+	e.Error.Code = mcplib.INVALID_PARAMS
+	return e
+}
+
+// TestJSONRPCHook_WrappedErrorKeepsCode: errors.As finds the code through a wrap.
+func TestJSONRPCHook_WrappedErrorKeepsCode(t *testing.T) {
+	srv := &Server{Metrics: metrics.New()}
+	buf := captureSlog(t)
+	hooks := srv.jsonrpcHooks(nil)
+	for _, f := range hooks.OnError {
+		f(context.Background(), 1, mcplib.MethodToolsCall, &mcplib.CallToolRequest{}, fmt.Errorf("wrap: %w", wrappedCodeErr{}))
+	}
+	if !strings.Contains(buf.String(), `"jsonrpc_code":-32602`) {
+		t.Fatalf("expected the wrapped error's real code in the log line: %s", buf.String())
+	}
+}
+
+// TestJSONRPCHook_UnregisteredLabelIsAllowlisted: the metric tool label is
+// verbatim only for a registered name.
+func TestJSONRPCHook_UnregisteredLabelIsAllowlisted(t *testing.T) {
+	reg := metrics.New()
+	srv := &Server{Metrics: reg}
+	captureSlog(t)
+	registered := map[string]struct{}{"list_dialogs": {}}
+	var ptr atomic.Pointer[map[string]struct{}]
+	fire := func(p *atomic.Pointer[map[string]struct{}], name string) {
+		for _, f := range srv.jsonrpcHooks(p).OnError {
+			f(context.Background(), 1, mcplib.MethodToolsCall, &mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: name}}, mcpserver.ErrUnsupported)
+		}
+	}
+	fire(&ptr, "list_dialogs") // set not yet stored: fail closed
+	ptr.Store(&registered)
+	fire(&ptr, "list_dialogs")
+	fire(&ptr, "attacker_chosen_name")
+	if n := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("list_dialogs", ReasonCapabilityDisabled)); n != 1 {
+		t.Fatalf("registered name label = %v, want 1", n)
+	}
+	if n := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("unregistered", ReasonCapabilityDisabled)); n != 2 {
+		t.Fatalf("unregistered label = %v, want 2 (nil set + unknown name)", n)
+	}
+	if n := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("attacker_chosen_name", ReasonCapabilityDisabled)); n != 0 {
+		t.Fatalf("client-supplied name leaked into the label: %v", n)
 	}
 }

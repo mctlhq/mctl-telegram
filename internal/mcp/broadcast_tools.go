@@ -237,7 +237,7 @@ Inputs:
 		list, err := s.Store.ListBroadcastCampaigns(ctx, 50, states...)
 		s.audit(ctx, id, "list_broadcasts", "", err, startedAt)
 		if err != nil {
-			return toolErr("list_broadcasts: %v", err), nil
+			return s.storeErr(ctx, "list_broadcasts", err), nil
 		}
 		out := listBroadcastsResult{Campaigns: make([]broadcastSummary, 0, len(list))}
 		for _, c := range list {
@@ -282,7 +282,7 @@ Inputs:
 		}
 		s.audit(ctx, id, "get_broadcast", "", err, startedAt)
 		if err != nil {
-			return toolErr("get_broadcast: %v", err), nil
+			return s.storeErr(ctx, "get_broadcast", err), nil
 		}
 		return jsonResult(getBroadcastResult{Campaign: summarize(*c), Report: *report})
 	}

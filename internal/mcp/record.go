@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -24,17 +25,29 @@ type callRecord struct {
 	tool, peer, status, reason, errMsg, callPath string
 	elapsed                                      time.Duration
 	hasElapsed                                   bool
-	// exemptFromSLO is set on a Rule 2 synthesized record: the call never
-	// reached Server.audit at all, so before mctl-telegram#696 it touched
-	// neither ToolInvocationsTotal nor ToolInvocationDuration. Those two
-	// series are the tool-availability SLO's input (deploy/alerts/mctl-telegram.rules.yaml),
-	// and Rule 2's failures are overwhelmingly client-caused (invalid_argument,
-	// scope_denied, ...) — counting them would let a looping bad client page
-	// on-call for a healthy server. writeAuditRow still writes the audit_logs
-	// row and (via Rule 5) ToolCallErrorsTotal for it; only the SLO pair is
-	// skipped, keeping the SLO's input set exactly what it was before #696.
-	exemptFromSLO bool
-	id            *auth.Identity
+	// synthesized is set on every record Server.flushRecordedCall creates
+	// itself (Rule 1's appended error record, Rule 2, Rule 3) and on a refusal
+	// staged by Server.auditRefusal, as opposed to a record staged by
+	// Server.audit. A synthesized record never reached
+	// Server.audit, so before mctl-telegram#696 it touched neither
+	// ToolInvocationsTotal nor ToolInvocationDuration. Those two series are
+	// the tool-availability SLO's input (deploy/alerts/mctl-telegram.rules.yaml),
+	// and synthesized failures are overwhelmingly client-caused
+	// (invalid_argument, scope_denied, ...) — counting them would let a
+	// looping bad client page on-call for a healthy server. writeAuditRow
+	// still writes the audit_logs row and (via Rule 5) ToolCallErrorsTotal
+	// for it; only the SLO pair is skipped, keeping the SLO's input set
+	// exactly what it was before #696. Server faults are surfaced by the
+	// MctlToolHandlerFaults alert and mctl_tool_call_errors_total instead.
+	synthesized bool
+	id          *auth.Identity
+}
+
+// feedsSLO reports whether this record may sample the two series the
+// tool-availability SLO reads. Only records staged by Server.audit do
+// (pre-#696 behaviour); a synthesized record never does, whatever its reason.
+func (r callRecord) feedsSLO() bool {
+	return !r.synthesized
 }
 
 // callRecorder buffers every callRecord staged during one tools/call
@@ -45,6 +58,32 @@ type callRecord struct {
 type callRecorder struct {
 	mu     sync.Mutex
 	staged []callRecord
+	// hint is the reason the failing code path named for itself (see
+	// hintReason). Last writer wins.
+	hint string
+}
+
+func (r *callRecorder) setHint(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hint = reason
+}
+
+func (r *callRecorder) snapshotHint() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hint
+}
+
+// hintReason lets the failing code path name its own Reason* constant. A
+// hint outranks classifyToolResultReason's text guess (which stays as the
+// fallback for paths that name nothing) but never the panic / handler_error
+// reasons recordToolCall knows with certainty. With no recorder in ctx it is
+// a no-op, like Server.audit's write-through branch.
+func hintReason(ctx context.Context, reason string) {
+	if rec := recorderFrom(ctx); rec != nil {
+		rec.setHint(reason)
+	}
 }
 
 func (r *callRecorder) stage(rec callRecord) {
@@ -103,18 +142,11 @@ var auditExemptOnSuccess = map[string]bool{
 	"get_my_send_status": true,
 }
 
-// classifyReason turns a staged/synthesized record's callPath plus the
-// call's final tool result into one of the Reason* constants.
-// callPath=="local" is the existing marker for a Local Bridge relay call
-// (see bridgeResultErr and its callers); a call that reached the bridge and
-// failed is classified bridge_error regardless of what its result text
-// happens to say, since the daemon's own error text is not one this
-// package controls or can enumerate. Every other case falls through to the
-// text classifier.
-func classifyReason(callPath string, final *mcplib.CallToolResult) string {
-	if callPath == "local" {
-		return ReasonBridgeError
-	}
+// classifyReason turns the call's final tool result into one of the Reason*
+// constants. It is a thin alias for classifyToolResultReason: explicit
+// classification (bridge relay failures, local-mode refusals, MTProto and
+// store failures) is carried by hintReason, not by the audit call path.
+func classifyReason(_ string, final *mcplib.CallToolResult) string {
 	return classifyToolResultReason(final)
 }
 
@@ -184,35 +216,60 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 
 	switch {
 	case len(records) > 0 && isError:
-		// Rule 1: reconcile the last staged record — this is what fixes the
-		// jsonResult encode-after-ok-audit bug, and also the normal case
-		// where a handler already staged its own error.
-		last := &records[len(records)-1]
-		last.status = "error"
-		if explicitReason != "" {
-			last.reason = explicitReason
-		} else {
-			last.reason = classifyReason(last.callPath, final)
+		// Rule 1: the call failed after staging at least one record.
+		reason := explicitReason
+		if reason == "" {
+			reason = rec.snapshotHint()
 		}
-		if last.errMsg == "" {
-			last.errMsg = firstResultText(final)
+		if reason == "" {
+			reason = classifyReason(records[len(records)-1].callPath, final)
+		}
+		last := &records[len(records)-1]
+		if last.status == "error" {
+			// The handler already staged its own error: reconcile in place.
+			last.reason = reason
+			if last.errMsg == "" {
+				last.errMsg = firstResultText(final)
+			}
+		} else {
+			// A staged success (e.g. send_message:sent) records an action that
+			// really completed; a later failure (jsonResult encode) must not
+			// rewrite it. Keep it and append a separate error record carrying
+			// the same peer and route. This relies on every handler staging
+			// "ok" only for a completed action: a refusal goes through
+			// Server.auditRefusal instead.
+			records = append(records, callRecord{
+				tool:        req.Params.Name,
+				peer:        last.peer,
+				callPath:    last.callPath,
+				status:      "error",
+				reason:      reason,
+				errMsg:      firstResultText(final),
+				id:          auth.From(ctx),
+				elapsed:     time.Since(startedAt),
+				hasElapsed:  true,
+				synthesized: true,
+			})
 		}
 	case len(records) == 0 && isError:
 		// Rule 2: nothing reached Server.audit at all — every early-return
 		// blind spot design.md documents.
 		reason := explicitReason
 		if reason == "" {
+			reason = rec.snapshotHint()
+		}
+		if reason == "" {
 			reason = classifyReason("", final)
 		}
 		records = append(records, callRecord{
-			tool:          req.Params.Name,
-			status:        "error",
-			reason:        reason,
-			errMsg:        firstResultText(final),
-			id:            auth.From(ctx),
-			elapsed:       time.Since(startedAt),
-			hasElapsed:    true,
-			exemptFromSLO: true,
+			tool:        req.Params.Name,
+			status:      "error",
+			reason:      reason,
+			errMsg:      firstResultText(final),
+			id:          auth.From(ctx),
+			elapsed:     time.Since(startedAt),
+			hasElapsed:  true,
+			synthesized: true,
 		})
 	case len(records) == 0 && !isError:
 		// Rule 3: a successful call whose handler never calls Server.audit
@@ -220,11 +277,12 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 		// is exempt.
 		if !auditExemptOnSuccess[req.Params.Name] {
 			records = append(records, callRecord{
-				tool:       req.Params.Name,
-				status:     "ok",
-				id:         auth.From(ctx),
-				elapsed:    time.Since(startedAt),
-				hasElapsed: true,
+				tool:        req.Params.Name,
+				status:      "ok",
+				id:          auth.From(ctx),
+				elapsed:     time.Since(startedAt),
+				hasElapsed:  true,
+				synthesized: true,
 			})
 		}
 	}
@@ -291,14 +349,15 @@ type jsonrpcCoder interface {
 // them; this hook is the only place they are observable at all. Scoped to
 // tools/call, per requirements.md Out of scope (tools/list, initialize,
 // resources/read, ping keep their current, unobserved behaviour).
-func (s *Server) jsonrpcHooks() *mcpserver.Hooks {
+func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *mcpserver.Hooks {
 	hooks := &mcpserver.Hooks{}
 	hooks.AddOnError(func(ctx context.Context, _ any, method mcplib.MCPMethod, message any, err error) {
 		if method != mcplib.MethodToolsCall {
 			return
 		}
 		code := 0
-		if coder, ok := err.(jsonrpcCoder); ok {
+		var coder jsonrpcCoder
+		if errors.As(err, &coder) {
 			code = coder.ToJSONRPCError().Error.Code
 		}
 		toolName := ""
@@ -329,12 +388,18 @@ func (s *Server) jsonrpcHooks() *mcpserver.Hooks {
 		if s.Metrics != nil {
 			// The metric label must stay bounded: toolName is a client-supplied
 			// string (unlike the registered-tool path, this request never
-			// resolved a handler), so an unregistered/unparsable name is
+			// resolved a handler), so any name outside the registered set is
 			// collapsed to a fixed sentinel here. The log line above still
 			// carries the verbatim name for debugging.
-			labelTool := toolName
-			if reason == ReasonToolNotFound || reason == ReasonUnparsableMessage {
-				labelTool = "unregistered"
+			// Only a name in the registered-tool set is emitted verbatim; a nil
+			// set (hook fired before construction finished) fails closed.
+			labelTool := "unregistered"
+			if registered != nil {
+				if names := registered.Load(); names != nil {
+					if _, ok := (*names)[toolName]; ok {
+						labelTool = toolName
+					}
+				}
 			}
 			s.Metrics.ToolCallErrorsTotal.WithLabelValues(labelTool, reason).Inc()
 		}

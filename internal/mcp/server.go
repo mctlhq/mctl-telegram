@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync/atomic"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -295,6 +296,9 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	if v == "" {
 		v = "dev"
 	}
+	// registered is late-bound: the hook is built before the server exists, and
+	// the set of registered tool names is stored once every tool is added.
+	var registered atomic.Pointer[map[string]struct{}]
 	opts := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		// mctl-telegram#696: a single recording path for every tools/call
@@ -305,7 +309,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// (unknown tool, unparsable body, disabled capability). See
 		// record.go.
 		mcpserver.WithToolHandlerMiddleware(s.recordToolCall),
-		mcpserver.WithHooks(s.jsonrpcHooks()),
+		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
 	}
 	if s.AppsEnabled {
 		opts = append(opts,
@@ -459,12 +463,44 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		t, h := reg()
 		s.addTool(srv, t, h)
 	}
+	tools := srv.ListTools()
+	names := make(map[string]struct{}, len(tools))
+	for name := range tools {
+		names[name] = struct{}{}
+	}
+	registered.Store(&names)
 	return srv
 }
 
 // Tiny helper used by tool implementations.
 func toolErr(format string, a ...any) *mcplib.CallToolResult {
 	return mcplib.NewToolResultError(formatErr(format, a...))
+}
+
+// storeErr is toolErr for a *db.Store failure unrelated to the audit log
+// itself: it hints ReasonStoreError so the failure is recorded as such
+// instead of being guessed from the error text. The store's client-fault
+// sentinels (a caller-supplied id that does not exist, an unknown
+// preference key/state) are not database faults and are hinted as
+// not_found / invalid_argument instead, so store_error keeps meaning "our
+// database failed".
+func (s *Server) storeErr(ctx context.Context, tool string, err error) *mcplib.CallToolResult {
+	hintReason(ctx, storeErrReason(err))
+	return toolErr("%s: %v", tool, err)
+}
+
+// storeErrReason maps a *db.Store error to the reason storeErr hints.
+func storeErrReason(err error) string {
+	switch {
+	case errors.Is(err, db.ErrCampaignNotFound),
+		errors.Is(err, db.ErrDeviceNotFound),
+		errors.Is(err, db.ErrUserNotFound):
+		return ReasonNotFound
+	case errors.Is(err, db.ErrUnknownNotificationCategory),
+		errors.Is(err, db.ErrUnknownNotificationState):
+		return ReasonInvalidArgument
+	}
+	return ReasonStoreError
 }
 
 func formatErr(format string, a ...any) string {
