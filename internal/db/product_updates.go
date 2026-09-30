@@ -198,6 +198,72 @@ func (s *Store) SaveProductUpdateDigest(ctx context.Context, d ProductUpdateDige
 	return true, nil
 }
 
+// DiscardUnusedProductUpdateDigest undoes a SaveProductUpdateDigest whose
+// campaign was never created: it deletes the digest (id, version), the
+// entries it carried, and every entry ownership that no other stored version
+// of the same digest id still backs, so those entries are candidates again
+// and the (id, version) can be frozen afresh. It refuses, deleting nothing,
+// when the stored digest's content hash is not contentHash
+// (ErrDigestConflict: another caller's digest) or when any campaign names it
+// as its source_ref (ErrCampaignSourceRefSet: it was handed to a broadcast
+// and is no longer the caller's to take back). A digest that is not stored
+// is ErrDigestNotFound.
+func (s *Store) DiscardUnusedProductUpdateDigest(ctx context.Context, id string, version int, contentHash string) error {
+	pg := s.isPostgres(ctx)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("discard product update digest: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if pg {
+		// The lock SaveProductUpdateDigest takes, so a concurrent save cannot
+		// read an ownership this transaction is about to delete.
+		if _, err := tx.ExecContext(ctx, `LOCK TABLE product_update_digests IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+			return fmt.Errorf("discard product update digest: lock: %w", err)
+		}
+	}
+	var storedHash string
+	err = tx.QueryRowContext(ctx,
+		`SELECT content_hash FROM product_update_digests WHERE id = $1 AND version = $2`, id, version).Scan(&storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrDigestNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("discard product update digest: %w", err)
+	}
+	if storedHash != contentHash {
+		return fmt.Errorf("%w: %s v%d", ErrDigestConflict, id, version)
+	}
+	var refs int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM broadcast_campaigns WHERE source_digest_id = $1 AND source_digest_version = $2`,
+		id, version).Scan(&refs); err != nil {
+		return fmt.Errorf("discard product update digest: campaign check: %w", err)
+	}
+	if refs > 0 {
+		return fmt.Errorf("%w: %s v%d is a campaign's source", ErrCampaignSourceRefSet, id, version)
+	}
+	for _, stmt := range []string{
+		`DELETE FROM product_update_publications WHERE digest_id = $1 AND digest_version = $2`,
+		`DELETE FROM product_update_digests WHERE id = $1 AND version = $2`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt, id, version); err != nil {
+			return fmt.Errorf("discard product update digest: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM product_update_entry_owners
+		  WHERE digest_id = $1
+		    AND entry_id NOT IN (SELECT entry_id FROM product_update_publications WHERE digest_id = $1)`,
+		id); err != nil {
+		return fmt.Errorf("discard product update digest: owners: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("discard product update digest: commit: %w", err)
+	}
+	return nil
+}
+
 // sameAs is nil when stored holds the same content as d (a retry) and
 // ErrDigestConflict otherwise. d.EntryIDs must already be sorted; stored's
 // are, by getProductUpdateDigest.

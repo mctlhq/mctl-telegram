@@ -141,6 +141,11 @@ func TestPrepare_SourceRefPassesThroughAtomically(t *testing.T) {
 	if c.SourceRef != nil {
 		t.Fatalf("a manual campaign has a source_ref: %+v", c.SourceRef)
 	}
+	// A digest campaign needs its category free of active campaigns, manual
+	// ones included (issue-683 Guard 2, enforced by CreateBroadcastCampaign).
+	if err := e.store.CancelBroadcastCampaign(ctx, manual.CampaignID, e.op.UserID, e.now); err != nil {
+		t.Fatal(err)
+	}
 
 	// A stored digest for the "product_updates" category (the maintenance
 	// selector's audience already has an eligible recipient above, reused

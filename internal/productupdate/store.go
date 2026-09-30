@@ -76,7 +76,7 @@ func FreezeNextDigest(ctx context.Context, st DigestStore, feed Feed, id string,
 	if err != nil {
 		return Digest{}, false, err
 	}
-	d, err := FreezeDigest(id, version, category, latestRelease, DigestCandidates(feed, category, latestRelease, published))
+	d, err := NextDigest(feed, published, id, version, category, latestRelease)
 	if err != nil {
 		return Digest{}, false, err
 	}
@@ -85,4 +85,13 @@ func FreezeNextDigest(ctx context.Context, st DigestStore, feed Feed, id string,
 		return Digest{}, false, err
 	}
 	return d, stored, nil
+}
+
+// NextDigest is FreezeNextDigest's freeze without the persist: the digest the
+// feed's candidates minus published (st.PublishedProductUpdateEntries for id)
+// would freeze to, computed in memory. A caller that must render and check
+// the digest before anything is stored (the broadcasts page, which persists
+// only once the digest renders) calls this, then PersistDigest.
+func NextDigest(feed Feed, published map[string]bool, id string, version int, category db.NotificationCategory, latestRelease string) (Digest, error) {
+	return FreezeDigest(id, version, category, latestRelease, DigestCandidates(feed, category, latestRelease, published))
 }

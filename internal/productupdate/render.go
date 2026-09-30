@@ -146,8 +146,11 @@ func RenderDocs(feed Feed) []ReleaseGroup {
 		case b == "":
 			return true
 		default:
-			after, _ := releaseAfter(a, b)
-			return after
+			// Both keys come from entries LoadFeed validated, whose
+			// evidence.from must be a MAJOR.MINOR.PATCH release, so the
+			// error cannot occur; a malformed key sorts as "not after".
+			after, err := releaseAfter(a, b)
+			return err == nil && after
 		}
 	})
 	out := make([]ReleaseGroup, 0, len(releases))

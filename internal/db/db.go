@@ -445,6 +445,20 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 			return err
 		}
 	}
+	// At most one prepared/approved/sending digest campaign per category
+	// (issue-683 Guard 2), held by the database so two concurrent
+	// prepare-from-digest submits cannot both insert. Created here rather
+	// than in sqliteSchema/pgSchema because it names source_digest_id, which
+	// an older database only has once the loop above has run. The same
+	// statement is valid in both dialects. Manual campaigns are outside the
+	// index; CreateBroadcastCampaign's NOT EXISTS keeps a digest campaign
+	// out of a category a manual one already occupies.
+	if _, err := dbConn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_broadcast_campaigns_digest_category_active
+		   ON broadcast_campaigns(category)
+		   WHERE source_digest_id IS NOT NULL AND state IN ('prepared', 'approved', 'sending')`); err != nil {
+		return fmt.Errorf("create idx_broadcast_campaigns_digest_category_active: %w", err)
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
