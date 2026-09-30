@@ -800,7 +800,7 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query audit rows: %v", err)
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var got [][2]string
 		for rows.Next() {
 			var r [2]string
