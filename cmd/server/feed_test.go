@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,21 +28,34 @@ reviewed_at: "2026-09-24"
 `
 
 // TestLoadProductUpdateFeed_MissingDirectory is T13 (boot): a missing feed
-// directory is an empty feed, not a load error -- productupdate.LoadFeed's
-// own contract -- so it never blocks boot. Any digest freeze against an
-// empty feed still refuses (no candidates), which is where "absent feed
-// directory" is actually observed.
+// directory is a load error, not an empty feed -- the server is always
+// configured with a feed directory, so its absence is a packaging or
+// configuration mistake (the #715 image shipped without it) that must show
+// up as "feed not loaded", not as a feed with no entries. It still never
+// blocks boot: Err is only logged, and LatestRelease still resolves.
 func TestLoadProductUpdateFeed_MissingDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	src := loadProductUpdateFeed(dir, "1.2.3")
-	if src.Err != nil {
-		t.Fatalf("Err = %v, want nil for a missing directory", src.Err)
+	if src.Err == nil || !strings.Contains(src.Err.Error(), "does not exist") {
+		t.Fatalf("Err = %v, want a missing-directory load error", src.Err)
 	}
 	if len(src.Feed.Entries) != 0 {
 		t.Fatalf("entries = %d, want 0", len(src.Feed.Entries))
 	}
 	if src.LatestRelease != "1.2.3" {
 		t.Fatalf("LatestRelease = %q, want 1.2.3", src.LatestRelease)
+	}
+}
+
+// TestLoadProductUpdateFeed_NotADirectory: a file where the directory should
+// be is a load error too, not an empty feed.
+func TestLoadProductUpdateFeed_NotADirectory(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "product-updates")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if src := loadProductUpdateFeed(file, "1.2.3"); src.Err == nil {
+		t.Fatal("a file in place of the feed directory did not produce a load error")
 	}
 }
 

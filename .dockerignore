@@ -32,4 +32,6 @@ tmp
 
 # Docs (not needed in image)
 docs
+# ...except the product-update feed, which the runtime image carries.
+!docs/product-updates
 *.md

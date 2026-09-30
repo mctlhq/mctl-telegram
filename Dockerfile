@@ -33,8 +33,10 @@ COPY --from=builder /mctl-telegram-canary /usr/local/bin/mctl-telegram-canary
 # The reviewed product-update feed (issue-683): docs/product-updates is the
 # same tree go run ./cmd/productupdates gate validates in this build, copied
 # verbatim so the image carries exactly the feed that release reviewed.
-# PRODUCT_UPDATE_FEED_DIR (set in deploy/ values) points here.
+# PRODUCT_UPDATE_FEED_DIR points the server here; a deployment may override
+# it, but the image works without any extra configuration.
 COPY --from=builder /app/docs/product-updates /srv/product-updates
+ENV PRODUCT_UPDATE_FEED_DIR=/srv/product-updates
 
 USER app:app
 
