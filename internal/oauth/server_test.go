@@ -1087,6 +1087,13 @@ func TestHandleTelegramCallback_ExchangeFailureLogsReason(t *testing.T) {
 	if !strings.Contains(buf.String(), "reason="+reasonExchangeFailed) {
 		t.Errorf("expected a log line with reason=%s, got:\n%s", reasonExchangeFailed, buf.String())
 	}
+	// Same schema as every other reject line on this route, so a
+	// route= or prefetch= query also finds exchange failures.
+	for _, attr := range []string{"route=/oauth/telegram/callback", "prefetch=false"} {
+		if !strings.Contains(buf.String(), attr) {
+			t.Errorf("expected the exchange_failed line to carry %s, got:\n%s", attr, buf.String())
+		}
+	}
 }
 
 // TestHandleTelegramCallback_PrefetchDoesNotConsumeState mirrors the

@@ -1698,7 +1698,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// The raw error may embed Telegram's token-endpoint response body
 		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
 		// server-side, return an opaque message to the browser.
-		slog.Error("telegram OIDC token exchange failed", "reason", reasonExchangeFailed, "err", err)
+		slog.Error("telegram OIDC token exchange failed",
+			"route", "/oauth/telegram/callback",
+			"reason", reasonExchangeFailed,
+			"prefetch", isPrefetch(r),
+			"err", err)
 		http.Error(w, "telegram authentication failed", http.StatusUnauthorized)
 		return
 	}

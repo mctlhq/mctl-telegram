@@ -20,14 +20,14 @@ func TestErrOAuthExpired_WrapsErrOAuthNotFound(t *testing.T) {
 	}
 }
 
-// TestConsumeOAuthPending_ExpiredIsDistinguishable exercises the Postgres
+// TestConsumeOAuthPending_PostgresExpiredIsDistinguishable exercises the Postgres
 // branch of ConsumeOAuthPending: a row whose created_at is older than ttl
 // must return ErrOAuthExpired (which also satisfies errors.Is(err,
 // ErrOAuthNotFound)), must still be deleted on the attempt, and a state that
 // was never issued must give ErrOAuthNotFound without satisfying
 // errors.Is(err, ErrOAuthExpired). Skipped unless TEST_DATABASE_URL points at
 // a Postgres instance, same as TestRegisterDevice_PostgresUpsert.
-func TestConsumeOAuthPending_ExpiredIsDistinguishable(t *testing.T) {
+func TestConsumeOAuthPending_PostgresExpiredIsDistinguishable(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set")
