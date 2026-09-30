@@ -705,6 +705,18 @@ func TestHintReason_LosesToPanicAndHandlerError(t *testing.T) {
 			hintReason(ctx, ReasonStoreError)
 			return nil, errors.New("boom")
 		}, ReasonHandlerError},
+		// Rule 1: a staged record exists, so precedence is resolved on the
+		// reconcile-in-place and append paths, not Rule 2's.
+		{"staged_ok_hint_panic", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			srv.audit(ctx, auth.From(ctx), "staged_ok_hint_panic", "", nil, time.Now())
+			hintReason(ctx, ReasonStoreError)
+			panic("kaboom")
+		}, ReasonPanic},
+		{"staged_err_hint_err", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			srv.audit(ctx, auth.From(ctx), "staged_err_hint_err", "", errors.New("staged"), time.Now())
+			hintReason(ctx, ReasonStoreError)
+			return nil, errors.New("boom")
+		}, ReasonHandlerError},
 	} {
 		uid := int64(4230 + i)
 		m := hintTestServer(t, srv, tc.name, tc.h)
