@@ -51,7 +51,8 @@ const (
 	ReasonBridgeError = "bridge_error"
 	// ReasonStoreError is raised by *db.Store failures unrelated to the
 	// audit log itself (a lookup or write against another table failing).
-	// Emitted by Server.storeErr.
+	// Emitted by Server.storeErr, which maps the store's client-fault
+	// sentinels (see storeErrReason) to not_found / invalid_argument instead.
 	ReasonStoreError = "store_error"
 	// ReasonEncodeFailed is raised by jsonResult's json.MarshalIndent
 	// failure path (and the inline equivalent in toolSearchMessages).

@@ -233,9 +233,14 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 		} else {
 			// A staged success (e.g. send_message:sent) records an action that
 			// really completed; a later failure (jsonResult encode) must not
-			// rewrite it. Keep it and append a separate error record.
+			// rewrite it. Keep it and append a separate error record carrying
+			// the same peer and route. This relies on every handler staging
+			// "ok" only for a completed action: a refusal must be audited
+			// with its error (see the :rate_limited and rows == 0 sites).
 			records = append(records, callRecord{
 				tool:        req.Params.Name,
+				peer:        last.peer,
+				callPath:    last.callPath,
 				status:      "error",
 				reason:      reason,
 				errMsg:      firstResultText(final),

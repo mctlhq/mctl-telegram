@@ -19,10 +19,12 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // --- shared test helpers --------------------------------------------------
@@ -334,8 +336,8 @@ func TestFlushRecordedCall_KeepsCompletedActionRow(t *testing.T) {
 	)
 	mcpSrv.AddTool(mcplib.NewTool("encode_boom"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
-		srv.audit(ctx, id, "encode_boom:sent", "", nil, startedAt) // stages an "ok" record
-		return jsonResult(math.Inf(1))                             // json.MarshalIndent fails on +Inf
+		srv.audit(ctx, id, "encode_boom:sent", "peer#x", nil, startedAt, "local") // stages an "ok" record
+		return jsonResult(math.Inf(1))                                            // json.MarshalIndent fails on +Inf
 	})
 
 	ctx := auth.With(context.Background(), id)
@@ -344,23 +346,25 @@ func TestFlushRecordedCall_KeepsCompletedActionRow(t *testing.T) {
 		t.Fatalf("expected an error result from the encode failure, got %+v", result)
 	}
 	rows, err := store.DB.QueryContext(context.Background(),
-		`SELECT tool_name, status, COALESCE(reason, '') FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
+		`SELECT tool_name, status, COALESCE(reason, ''), COALESCE(peer_redacted, ''), COALESCE(call_path, '')
+		   FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
 	if err != nil {
 		t.Fatalf("query audit rows: %v", err)
 	}
 	defer rows.Close()
-	type row struct{ tool, status, reason string }
+	type row struct{ tool, status, reason, peer, callPath string }
 	var got []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.tool, &r.status, &r.reason); err != nil {
+		if err := rows.Scan(&r.tool, &r.status, &r.reason, &r.peer, &r.callPath); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		got = append(got, r)
 	}
 	want := []row{
-		{"encode_boom:sent", "ok", ""},
-		{"encode_boom", "error", ReasonEncodeFailed},
+		{"encode_boom:sent", "ok", "", "peer#x", "local"},
+		// The appended failure keeps the staged record's peer and route.
+		{"encode_boom", "error", ReasonEncodeFailed, "peer#x", "local"},
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("audit rows = %+v, want %+v", got, want)
@@ -743,6 +747,108 @@ func TestStoreErr_RecordsStoreError(t *testing.T) {
 	if r := latestAuditReason(t, store, uid); r != ReasonStoreError {
 		t.Fatalf("reason = %q, want %q", r, ReasonStoreError)
 	}
+}
+
+// TestStoreErrReason_ClientFaultSentinels: the store's client-fault
+// sentinels are not database faults, so storeErr must not file them under
+// store_error.
+func TestStoreErrReason_ClientFaultSentinels(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{errors.New("connection reset"), ReasonStoreError},
+		{fmt.Errorf("get: %w", db.ErrCampaignNotFound), ReasonNotFound},
+		{db.ErrDeviceNotFound, ReasonNotFound},
+		{db.ErrUserNotFound, ReasonNotFound},
+		{db.ErrUnknownNotificationCategory, ReasonInvalidArgument},
+		{fmt.Errorf("set: %w", db.ErrUnknownNotificationState), ReasonInvalidArgument},
+	} {
+		if got := storeErrReason(tc.err); got != tc.want {
+			t.Errorf("storeErrReason(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+
+	// End to end: a get_broadcast-style miss through storeErr is recorded
+	// as not_found, not store_error.
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	const uid int64 = 4272
+	m := hintTestServer(t, srv, "lookup_tool", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return srv.storeErr(ctx, "lookup_tool", db.ErrCampaignNotFound), nil
+	})
+	callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "lookup_tool", map[string]any{})
+	if r := latestAuditReason(t, store, uid); r != ReasonNotFound {
+		t.Fatalf("reason = %q, want %q", r, ReasonNotFound)
+	}
+}
+
+// TestRefusalPaths_AuditOneErrorRow: a handler that refuses (rate limiter,
+// zero rows updated) must stage its refusal as an error, so Rule 1 reconciles
+// in place instead of keeping a staged "ok" for an action that never happened.
+func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	limiter := audit.NewRateLimiter(1000)
+	srv := &Server{Store: store, Metrics: reg, Limiter: limiter}
+	mcpSrv := srv.newMCPServer()
+
+	auditRows := func(uid int64) [][2]string {
+		t.Helper()
+		rows, err := store.DB.QueryContext(context.Background(),
+			`SELECT tool_name, status FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
+		if err != nil {
+			t.Fatalf("query audit rows: %v", err)
+		}
+		defer rows.Close()
+		var got [][2]string
+		for rows.Next() {
+			var r [2]string
+			if err := rows.Scan(&r[0], &r[1]); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, r)
+		}
+		return got
+	}
+
+	t.Run("rate limited", func(t *testing.T) {
+		const uid int64 = 4270
+		id := &auth.Identity{UserID: uid}
+		const peer = "@limited_peer"
+		if !limiter.AllowPeerN(id, telegram.RedactPeer(peer), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+			t.Fatal("could not drain the per-peer budget")
+		}
+		res := callTool(t, auth.With(context.Background(), id), mcpSrv, "prepare_pin_message",
+			map[string]any{"peer": peer, "message_id": 7})
+		if !res.IsError {
+			t.Fatalf("expected a rate-limit refusal, got %+v", res)
+		}
+		want := [][2]string{{"prepare_pin_message:rate_limited", "error"}}
+		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("audit rows = %v, want %v", got, want)
+		}
+		if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("prepare_pin_message:rate_limited", "ok")); n != 0 {
+			t.Fatalf("a refusal counted as an SLO success: %v", n)
+		}
+	})
+
+	t.Run("zero rows updated", func(t *testing.T) {
+		uid, err := store.EnsureUserByTelegramID(context.Background(), 4271, "nosession", "No Session")
+		if err != nil {
+			t.Fatalf("EnsureUserByTelegramID: %v", err)
+		}
+		id := &auth.Identity{UserID: uid, Scopes: []string{"account:manage"}}
+		res := callTool(t, auth.With(context.Background(), id), mcpSrv, "set_send_consent",
+			map[string]any{"enabled": true})
+		if !res.IsError {
+			t.Fatalf("expected a no-session refusal, got %+v", res)
+		}
+		want := [][2]string{{"set_send_consent", "error"}}
+		if got := auditRows(uid); len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("audit rows = %v, want %v", got, want)
+		}
+	})
 }
 
 // TestBorrowErrResult_UnenumeratedMTProtoIsTelegramError: an MTProto code in

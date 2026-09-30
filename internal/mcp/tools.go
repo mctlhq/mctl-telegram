@@ -674,8 +674,9 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, nil, startedAt)
-			return mcplib.NewToolResultError("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient"), nil
+			limitErr := errors.New("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient")
+			s.audit(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, limitErr, startedAt)
+			return mcplib.NewToolResultError(limitErr.Error()), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
 		action := "pin"
@@ -1245,15 +1246,19 @@ The user must have an active session. New accounts are NOT send-enabled: SaveSes
 			return s.storeErr(ctx, "set_account_send", err), nil
 		}
 		rows, err := s.Store.SetSendEnabled(ctx, targetUID, enabled)
-		s.audit(ctx, id, "set_account_send", "", err, startedAt)
 		if err != nil {
+			s.audit(ctx, id, "set_account_send", "", err, startedAt)
 			return s.storeErr(ctx, "set_account_send", err), nil
 		}
 		// SetSendEnabled silently matches zero rows when the user has no active
-		// session; surface that instead of a misleading ok=true.
+		// session; surface that instead of a misleading ok=true, and audit it
+		// as the refusal it is (nothing was written).
 		if rows == 0 {
-			return toolErr("no active Telegram session for telegram id %d — they must connect an account first", tgID), nil
+			noSession := fmt.Errorf("no active Telegram session for telegram id %d — they must connect an account first", tgID)
+			s.audit(ctx, id, "set_account_send", "", noSession, startedAt)
+			return toolErr("%v", noSession), nil
 		}
+		s.audit(ctx, id, "set_account_send", "", nil, startedAt)
 		return jsonResult(setAccountSendResult{TelegramID: tgID, SendEnabled: enabled, OK: true})
 	}
 	return tool, handler
@@ -1304,13 +1309,17 @@ This is the owner-facing counterpart of the admin set_account_send tool (which r
 		}
 		enabled := boolArg(req.GetArguments(), "enabled", false)
 		rows, err := s.Store.SetSendEnabled(ctx, id.UserID, enabled)
-		s.audit(ctx, id, "set_send_consent", "", err, startedAt)
 		if err != nil {
+			s.audit(ctx, id, "set_send_consent", "", err, startedAt)
 			return s.storeErr(ctx, "set_send_consent", err), nil
 		}
+		// Zero rows: nothing was written, so audit the refusal, not an ok.
 		if rows == 0 {
-			return toolErr("no active Telegram session for your account — connect an account first"), nil
+			noSession := errors.New("no active Telegram session for your account — connect an account first")
+			s.audit(ctx, id, "set_send_consent", "", noSession, startedAt)
+			return toolErr("%v", noSession), nil
 		}
+		s.audit(ctx, id, "set_send_consent", "", nil, startedAt)
 		return jsonResult(setSendConsentResult{SendEnabled: enabled, OK: true})
 	}
 	return tool, handler
@@ -2614,7 +2623,7 @@ Inputs (required):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "edit_message:rate_limited", peerRedacted, nil, startedAt)
+			s.audit(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2670,7 +2679,7 @@ Inputs (required):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "delete_messages:rate_limited", peerRedacted, nil, startedAt)
+			s.audit(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2730,7 +2739,7 @@ Inputs (required):
 		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
 		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeerRedacted, len(messageIDs)); blocked {
-			s.audit(ctx, id, "forward_messages:rate_limited", toPeerRedacted, nil, startedAt)
+			s.audit(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2912,7 +2921,7 @@ Inputs (optional):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
-			s.audit(ctx, id, "set_reaction:rate_limited", peerRedacted, nil, startedAt)
+			s.audit(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt)
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {

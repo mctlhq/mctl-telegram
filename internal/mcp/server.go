@@ -479,10 +479,28 @@ func toolErr(format string, a ...any) *mcplib.CallToolResult {
 
 // storeErr is toolErr for a *db.Store failure unrelated to the audit log
 // itself: it hints ReasonStoreError so the failure is recorded as such
-// instead of being guessed from the error text.
+// instead of being guessed from the error text. The store's client-fault
+// sentinels (a caller-supplied id that does not exist, an unknown
+// preference key/state) are not database faults and are hinted as
+// not_found / invalid_argument instead, so store_error keeps meaning "our
+// database failed".
 func (s *Server) storeErr(ctx context.Context, tool string, err error) *mcplib.CallToolResult {
-	hintReason(ctx, ReasonStoreError)
+	hintReason(ctx, storeErrReason(err))
 	return toolErr("%s: %v", tool, err)
+}
+
+// storeErrReason maps a *db.Store error to the reason storeErr hints.
+func storeErrReason(err error) string {
+	switch {
+	case errors.Is(err, db.ErrCampaignNotFound),
+		errors.Is(err, db.ErrDeviceNotFound),
+		errors.Is(err, db.ErrUserNotFound):
+		return ReasonNotFound
+	case errors.Is(err, db.ErrUnknownNotificationCategory),
+		errors.Is(err, db.ErrUnknownNotificationState):
+		return ReasonInvalidArgument
+	}
+	return ReasonStoreError
 }
 
 func formatErr(format string, a ...any) string {
