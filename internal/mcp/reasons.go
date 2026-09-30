@@ -51,6 +51,7 @@ const (
 	ReasonBridgeError = "bridge_error"
 	// ReasonStoreError is raised by *db.Store failures unrelated to the
 	// audit log itself (a lookup or write against another table failing).
+	// Emitted by Server.storeErr.
 	ReasonStoreError = "store_error"
 	// ReasonEncodeFailed is raised by jsonResult's json.MarshalIndent
 	// failure path (and the inline equivalent in toolSearchMessages).
@@ -114,12 +115,16 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 		return ReasonScopeDenied
 	case strings.HasPrefix(text, "encode: "):
 		return ReasonEncodeFailed
-	case strings.HasSuffix(text, " is not yet supported for local-bridge accounts"):
+	case strings.HasSuffix(text, " is not yet supported for local-bridge accounts"),
+		strings.Contains(text, "is not supported in Local Bridge mode"):
 		return ReasonModeUnsupported
 	case text == errMediaBusy.Error():
 		return ReasonMediaCapacity
 	}
 
+	// Fallback only: an explicit hintReason (borrowErrResult) outranks this
+	// text match. Catalog messages must not be prefixes of one another, or
+	// the result would depend on map iteration order (see reasons_test.go).
 	// Telegram permanent-error catalog (errorcatalog.go's mtprotoErrCatalog),
 	// rendered by mtprotoErrResult as "<entry.message>[ <entry.action>]".
 	// Checked before argument validation below: CHANNEL_PRIVATE's message
@@ -138,6 +143,7 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 	switch {
 	case strings.Contains(text, " is required"),
 		strings.Contains(text, " are required"),
+		strings.Contains(text, "confirmation_id required"),
 		strings.Contains(text, "must be "),
 		strings.Contains(text, "must be one of"),
 		strings.Contains(text, "mutually exclusive"),
@@ -151,8 +157,7 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 	case strings.Contains(text, "confirmation_id was issued for a different"),
 		strings.Contains(text, "confirmation_id belongs to another identity"):
 		return ReasonConfirmationRejected
-	case strings.Contains(text, "confirmation_id not found, expired, or already used"),
-		strings.Contains(text, "confirmation_id required"):
+	case strings.Contains(text, "confirmation_id not found, expired, or already used"):
 		return ReasonNotFound
 	}
 

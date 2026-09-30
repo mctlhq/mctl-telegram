@@ -111,7 +111,14 @@ func bridgeResultErr(res *mcplib.CallToolResult) error {
 // bridgeCall forwards a tool invocation to the Local Bridge daemon registered
 // for the user. It returns a clean error result (never a Go error) because MCP
 // tools surface errors via *mcplib.CallToolResult, not Go error returns.
-func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string, args any) (*mcplib.CallToolResult, error) {
+func (s *Server) bridgeCall(ctx context.Context, id *auth.Identity, tool string, args any) (res *mcplib.CallToolResult, callErr error) {
+	// Every failure result below means the call was relayed (or attempted) to
+	// the Local Bridge path; name it so it is recorded as bridge_error.
+	defer func() {
+		if res != nil && res.IsError {
+			hintReason(ctx, ReasonBridgeError)
+		}
+	}()
 	if !s.Hub.HasDaemon(id.UserID) {
 		return toolErr("local-bridge daemon not connected — run `mctl-telegram-local daemon`"), nil
 	}
@@ -229,7 +236,7 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 		})
 		s.audit(ctx, id, "list_dialogs", "", err, startedAt)
 		if err != nil {
-			return borrowErrResult("list_dialogs", err), nil
+			return borrowErrResult(ctx, "list_dialogs", err), nil
 		}
 		return jsonResult(listDialogsResult{Dialogs: dialogs})
 	}
@@ -280,6 +287,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			if err == nil && mode == "local" {
 				if fetchMedia {
 					localErr := fmt.Errorf("fetch_media=true is not supported in Local Bridge mode — use prepare_get_media and get_media per item instead")
+					hintReason(ctx, ReasonModeUnsupported)
 					s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(stringArg(args, "peer", "")), localErr, startedAt, "local")
 					return toolErr("%v", localErr), nil
 				}
@@ -308,7 +316,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 		}
 		if err != nil {
 			s.audit(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), err, startedAt)
-			return borrowErrResult("get_unread_messages", err), nil
+			return borrowErrResult(ctx, "get_unread_messages", err), nil
 		}
 		var fetchSummary *FetchMediaSummary
 		if fetchMedia {
@@ -329,7 +337,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 				// doesn't fail before the row is written but also can't
 				// block forever on a stalled audit DB.
 				s.auditDetached(ctx, id, "get_unread_messages", telegram.RedactPeer(peer), fmErr, startedAt)
-				return borrowErrResult("get_unread_messages", fmErr), nil
+				return borrowErrResult(ctx, "get_unread_messages", fmErr), nil
 			}
 			fetchSummary = &summary
 			if summary.Fetched > 0 {
@@ -473,7 +481,7 @@ Inputs (optional):
 		})
 		s.audit(ctx, id, "send_message:sent", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return borrowErrResult("send_message", err), nil
+			return borrowErrResult(ctx, "send_message", err), nil
 		}
 		return jsonResult(result)
 	}
@@ -549,6 +557,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 			if err == nil && mode == "local" {
 				if fetchMedia {
 					localErr := fmt.Errorf("fetch_media=true is not supported in Local Bridge mode — use prepare_get_media and get_media per item instead")
+					hintReason(ctx, ReasonModeUnsupported)
 					s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), localErr, startedAt, "local")
 					return toolErr("%v", localErr), nil
 				}
@@ -578,7 +587,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 		}
 		if err != nil {
 			s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
-			return borrowErrResult("get_messages", err), nil
+			return borrowErrResult(ctx, "get_messages", err), nil
 		}
 		var fetchSummary *FetchMediaSummary
 		if fetchMedia {
@@ -596,7 +605,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 				// already be canceled/deadline-exceeded, so audit with a
 				// detached, bounded context.
 				s.auditDetached(ctx, id, "get_messages", telegram.RedactPeer(peer), fmErr, startedAt)
-				return borrowErrResult("get_messages", fmErr), nil
+				return borrowErrResult(ctx, "get_messages", fmErr), nil
 			}
 			fetchSummary = &summary
 			if summary.Fetched > 0 {
@@ -736,6 +745,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
 		}
 		if confID == "" {
+			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("confirmation_id required — call prepare_pin_message first"), nil
 		}
 		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID, "telegram:messages:pin")
@@ -772,7 +782,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		}
 		s.audit(ctx, id, "pin_message:"+action, telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return borrowErrResult("pin_message", err), nil
+			return borrowErrResult(ctx, "pin_message", err), nil
 		}
 		return jsonResult(pinMessageResult{Status: action, Peer: peer, MessageID: messageID})
 	}
@@ -824,7 +834,7 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		})
 		s.audit(ctx, id, "disconnect_telegram_account", "", err, startedAt)
 		if err != nil {
-			return toolErr("disconnect: %v", err), nil
+			return s.storeErr(ctx, "disconnect", err), nil
 		}
 		return jsonResult(disconnectResult{
 			Disconnected:     true,
@@ -875,7 +885,7 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		})
 		s.audit(ctx, id, "delete_telegram_account", "", err, startedAt)
 		if err != nil {
-			return toolErr("delete: %v", err), nil
+			return s.storeErr(ctx, "delete", err), nil
 		}
 		return jsonResult(deleteResult{
 			Deleted:     true,
@@ -982,7 +992,7 @@ disable it for an authenticated user. It takes no inputs.`),
 				// The verdict depends on the flag we just failed to read.
 				// Answering "disabled" here would send the caller to turn on
 				// something that may already be on.
-				return toolErr("get_my_send_status: %v", err), nil
+				return s.storeErr(ctx, "get_my_send_status", err), nil
 			case err != nil:
 				// The verdict is already settled without the row, so the
 				// answer still stands; the account fields are simply omitted
@@ -1037,7 +1047,7 @@ This is the self-service counterpart of list_telegram_identities: it reports onl
 		if s.Store != nil && id.UserID != 0 {
 			tgID, username, display, err := s.Store.GetLoginIdentity(ctx, id.UserID)
 			if err != nil {
-				return toolErr("get_my_identity: %v", err), nil
+				return s.storeErr(ctx, "get_my_identity", err), nil
 			}
 			if tgID != 0 {
 				out.TelegramID = tgID
@@ -1101,7 +1111,7 @@ This tool is part of the self-service transparency surface — operators cannot 
 		// without adding signal. If we change this in M3 hash-chain work,
 		// re-evaluate then.
 		if err != nil {
-			return toolErr("get_my_audit_log: %v", err), nil
+			return s.storeErr(ctx, "get_my_audit_log", err), nil
 		}
 		return jsonResult(auditLogResult{
 			Entries: entries,
@@ -1136,7 +1146,7 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 		rows, err := s.Store.ListIdentities(ctx)
 		s.audit(ctx, id, "list_telegram_identities", "", err, startedAt)
 		if err != nil {
-			return toolErr("list_telegram_identities: %v", err), nil
+			return s.storeErr(ctx, "list_telegram_identities", err), nil
 		}
 		return jsonResult(identitiesResult{Identities: rows, Count: len(rows)})
 	}
@@ -1183,7 +1193,7 @@ The user must have signed in via the Login Widget at least once (so a users row 
 		err := s.Store.SetAccessTier(ctx, tgID, tier)
 		s.audit(ctx, id, "set_telegram_access", "", err, startedAt)
 		if err != nil {
-			return toolErr("set_telegram_access: %v", err), nil
+			return s.storeErr(ctx, "set_telegram_access", err), nil
 		}
 		return jsonResult(setAccessResult{TelegramID: tgID, AccessTier: tier, OK: true})
 	}
@@ -1232,12 +1242,12 @@ The user must have an active session. New accounts are NOT send-enabled: SaveSes
 			if errors.Is(err, db.ErrUserNotFound) {
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
-			return toolErr("set_account_send: %v", err), nil
+			return s.storeErr(ctx, "set_account_send", err), nil
 		}
 		rows, err := s.Store.SetSendEnabled(ctx, targetUID, enabled)
 		s.audit(ctx, id, "set_account_send", "", err, startedAt)
 		if err != nil {
-			return toolErr("set_account_send: %v", err), nil
+			return s.storeErr(ctx, "set_account_send", err), nil
 		}
 		// SetSendEnabled silently matches zero rows when the user has no active
 		// session; surface that instead of a misleading ok=true.
@@ -1296,7 +1306,7 @@ This is the owner-facing counterpart of the admin set_account_send tool (which r
 		rows, err := s.Store.SetSendEnabled(ctx, id.UserID, enabled)
 		s.audit(ctx, id, "set_send_consent", "", err, startedAt)
 		if err != nil {
-			return toolErr("set_send_consent: %v", err), nil
+			return s.storeErr(ctx, "set_send_consent", err), nil
 		}
 		if rows == 0 {
 			return toolErr("no active Telegram session for your account — connect an account first"), nil
@@ -1372,7 +1382,7 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 		jti, err := s.Store.RevokeDeviceAndDenylist(ctx, deviceID, id.TelegramID, "owner revoked", id.UserID)
 		if err != nil {
 			s.audit(ctx, id, "revoke_local_bridge_device", "", err, startedAt)
-			return toolErr("revoke_local_bridge_device: %v", err), nil
+			return s.storeErr(ctx, "revoke_local_bridge_device", err), nil
 		}
 		result := revokeLocalBridgeDeviceResult{DeviceID: deviceID, Revoked: true}
 
@@ -1437,7 +1447,7 @@ This preference confers no scope or permission; it only records what you want to
 		prefs, err := s.Store.ResolveNotificationPrefs(ctx, id.UserID)
 		s.audit(ctx, id, "get_my_notification_preferences", "", err, startedAt)
 		if err != nil {
-			return toolErr("get_my_notification_preferences: %v", err), nil
+			return s.storeErr(ctx, "get_my_notification_preferences", err), nil
 		}
 		return jsonResult(notificationPrefsResult{Categories: prefs})
 	}
@@ -1490,11 +1500,11 @@ Output: the full resolved set of preferences after the change, same shape as get
 		err := s.Store.SetNotificationPrefs(ctx, id.UserID, changes, "mcp_tool")
 		s.audit(ctx, id, "set_my_notification_preferences", "", err, startedAt)
 		if err != nil {
-			return toolErr("set_my_notification_preferences: %v", err), nil
+			return s.storeErr(ctx, "set_my_notification_preferences", err), nil
 		}
 		prefs, err := s.Store.ResolveNotificationPrefs(ctx, id.UserID)
 		if err != nil {
-			return toolErr("set_my_notification_preferences: %v", err), nil
+			return s.storeErr(ctx, "set_my_notification_preferences", err), nil
 		}
 		return jsonResult(notificationPrefsResult{Categories: prefs})
 	}
@@ -1562,12 +1572,12 @@ never completed a hosted login.`),
 			if errors.Is(err, db.ErrUserNotFound) {
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
-			return toolErr("set_account_mode: %v", err), nil
+			return s.storeErr(ctx, "set_account_mode", err), nil
 		}
 		rows, err := s.Store.SetAccountMode(ctx, targetUID, mode)
 		if err != nil {
 			s.audit(ctx, id, "set_account_mode", "", err, startedAt)
-			return toolErr("set_account_mode: %v", err), nil
+			return s.storeErr(ctx, "set_account_mode", err), nil
 		}
 		// rows == 0 means the UPDATE matched nothing, so the mode did not
 		// change. Auditing before this check recorded that refusal as
@@ -1636,7 +1646,7 @@ set_account_mode to migrate an existing account instead.`),
 		targetUID, err := s.Store.EnsureUserByTelegramID(ctx, tgID, username, displayName)
 		if err != nil {
 			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
-			return toolErr("provision_local_account: %v", err), nil
+			return s.storeErr(ctx, "provision_local_account", err), nil
 		}
 		if err := s.Store.ProvisionLocalAccount(ctx, targetUID, tgID, displayName, username); err != nil {
 			if errors.Is(err, db.ErrAccountAlreadyActive) {
@@ -1644,7 +1654,7 @@ set_account_mode to migrate an existing account instead.`),
 					"to migrate an existing account to local mode instead", tgID), nil
 			}
 			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
-			return toolErr("provision_local_account: %v", err), nil
+			return s.storeErr(ctx, "provision_local_account", err), nil
 		}
 		s.audit(ctx, id, "provision_local_account", "", nil, startedAt)
 		return jsonResult(provisionLocalAccountResult{TelegramID: tgID, Mode: db.ModeLocal, OK: true})
@@ -1709,12 +1719,12 @@ READ THESE AS EVIDENCE, NOT AS IDENTITY. They are headers as received, and on th
 			if errors.Is(err, db.ErrUserNotFound) {
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
-			return toolErr("get_user_audit_log: %v", err), nil
+			return s.storeErr(ctx, "get_user_audit_log", err), nil
 		}
 		entries, err := s.Store.ListAuditFor(ctx, targetUID, limit, before)
 		s.audit(ctx, id, "get_user_audit_log", "", err, startedAt)
 		if err != nil {
-			return toolErr("get_user_audit_log: %v", err), nil
+			return s.storeErr(ctx, "get_user_audit_log", err), nil
 		}
 		return jsonResult(auditLogResult{
 			Entries: entries,
@@ -1761,7 +1771,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 			if errors.Is(err, db.ErrUserNotFound) {
 				return toolErr("no user with telegram id %d — they must sign in once first", tgID), nil
 			}
-			return toolErr("revoke_telegram_session: %v", err), nil
+			return s.storeErr(ctx, "revoke_telegram_session", err), nil
 		}
 		// Pool eviction and DB revoke under the same mutex acquire() takes —
 		// see the comment on toolDisconnectAccount.
@@ -1773,7 +1783,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 		})
 		s.audit(ctx, id, "revoke_telegram_session", "", err, startedAt)
 		if err != nil {
-			return toolErr("revoke_telegram_session: %v", err), nil
+			return s.storeErr(ctx, "revoke_telegram_session", err), nil
 		}
 		return jsonResult(revokeSessionResult{TelegramID: tgID, Revoked: revoked})
 	}
@@ -1860,7 +1870,7 @@ Output: JSON {jti, telegram_id, revoked, hub_evicted}.`),
 		}
 		if err != nil {
 			s.audit(ctx, id, "revoke_worker_token", "", err, startedAt)
-			return toolErr("revoke_worker_token: %v", err), nil
+			return s.storeErr(ctx, "revoke_worker_token", err), nil
 		}
 		result.Revoked = true
 
@@ -2058,15 +2068,22 @@ func sessionErrText(err error) string {
 // borrowErrResult turns a Pool.Borrow / session error into an MCP error
 // result: a friendly, actionable message for the known session sentinels,
 // otherwise the generic "<tool>: <err>" form.
-func borrowErrResult(tool string, err error) *mcplib.CallToolResult {
+func borrowErrResult(ctx context.Context, tool string, err error) *mcplib.CallToolResult {
 	if friendly := sessionErrText(err); friendly != "" {
+		hintReason(ctx, ReasonTelegramError)
 		return mcplib.NewToolResultError(friendly)
 	}
 	if errors.Is(err, telegram.ErrPoolFull) {
+		hintReason(ctx, ReasonTelegramError)
 		return mcplib.NewToolResultError("server at session capacity — try again later")
 	}
 	if res := mtprotoErrResult(tool, err); res != nil {
+		hintReason(ctx, ReasonTelegramError)
 		return res
+	}
+	if _, ok := tgerr.As(err); ok {
+		// An MTProto code in neither catalog: still a Telegram-side failure.
+		hintReason(ctx, ReasonTelegramError)
 	}
 	return toolErr("%s: %v", tool, err)
 }
@@ -2401,7 +2418,7 @@ func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
 		uid = rec.id.UserID
 	}
 	s.Store.LogToolCall(ctx, uid, rec.tool, rec.peer, rec.status, rec.errMsg, rec.callPath, rec.reason)
-	if s.Metrics != nil && rec.hasElapsed && !rec.exemptFromSLO {
+	if s.Metrics != nil && rec.hasElapsed && rec.feedsSLO() {
 		s.Metrics.ToolInvocationDuration.WithLabelValues(rec.tool).Observe(rec.elapsed.Seconds())
 		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.status).Inc()
 	}
@@ -2614,7 +2631,7 @@ Inputs (required):
 		})
 		s.audit(ctx, id, "edit_message", peerRedacted, err, startedAt)
 		if err != nil {
-			return borrowErrResult("edit_message", err), nil
+			return borrowErrResult(ctx, "edit_message", err), nil
 		}
 		return jsonResult(result)
 	}
@@ -2670,7 +2687,7 @@ Inputs (required):
 		})
 		s.audit(ctx, id, "delete_messages", peerRedacted, err, startedAt)
 		if err != nil {
-			return borrowErrResult("delete_messages", err), nil
+			return borrowErrResult(ctx, "delete_messages", err), nil
 		}
 		return jsonResult(result)
 	}
@@ -2730,7 +2747,7 @@ Inputs (required):
 		})
 		s.audit(ctx, id, "forward_messages", toPeerRedacted, err, startedAt)
 		if err != nil {
-			return borrowErrResult("forward_messages", err), nil
+			return borrowErrResult(ctx, "forward_messages", err), nil
 		}
 		return jsonResult(result)
 	}
@@ -2841,7 +2858,7 @@ the word, or synonyms.`),
 		})
 		s.audit(ctx, id, "search_messages", telegram.RedactPeer(peer), err, startedAt)
 		if err != nil {
-			return borrowErrResult("search_messages", err), nil
+			return borrowErrResult(ctx, "search_messages", err), nil
 		}
 		wrapped := wrapMessages(msgs)
 		result := searchMessagesResult{Query: query, Matches: wrapped}
@@ -2909,7 +2926,7 @@ Inputs (optional):
 		})
 		s.audit(ctx, id, "set_reaction", peerRedacted, err, startedAt)
 		if err != nil {
-			return borrowErrResult("set_reaction", err), nil
+			return borrowErrResult(ctx, "set_reaction", err), nil
 		}
 		return jsonResult(setReactionResult{
 			Peer:      peer,

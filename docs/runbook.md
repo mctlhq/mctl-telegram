@@ -1513,6 +1513,48 @@ lines above. Prefer `sum by (tool, reason) (rate(...))` for a live view; do
 not rely on `increase()` alone to catch a brand-new failure mode's first
 occurrence.
 
+**Why the two families deliberately disagree.**
+`mctl_tool_call_errors_total` counts every `tools/call` failure, including
+client faults and the JSON-RPC rejections that never resolve a handler.
+`mctl_tool_invocations_total{status="error"}` (the availability SLO input)
+counts only records staged by a handler's own `Server.audit` call. Records
+synthesized by `flushRecordedCall` — every Rule 1 appended error record, every
+Rule 2 record (a failure that never reached `Server.audit`) and every Rule 3
+record (an unaudited success) — never feed the SLO pair, whatever their
+reason. The reason-error counter therefore runs **higher** than the SLO
+numerator, permanently; a difference is not a lost sample. Server faults are
+visible in `mctl_tool_call_errors_total` and through the
+`MctlToolHandlerFaults` alert, not in the availability SLO.
+
+**Row volume.** Every Rule 2 client-fault rejection (scope denied, invalid
+argument, ...) is a hash-chained `audit_logs` write, bounded per identity by
+`RATE_LIMIT_PER_USER` (default 30/min, i.e. at most 1800 rows/hour/identity).
+Each such write serializes on that user's chain lock (`SELECT ... FOR UPDATE`
+on Postgres, `BEGIN IMMEDIATE` on SQLite), so a client looping on a scope error
+costs write throughput on that user's chain and audit-table growth until
+`AUDIT_RETENTION_DAYS` sweeps it.
+
+Reason notes: the reason is named by the failing code path where one exists
+(`store_error` via `Server.storeErr`, `telegram_error` via `borrowErrResult`,
+`bridge_error` for a call that reached the Local Bridge path,
+`mode_unsupported` for a local-mode refusal that never called the bridge) and
+only otherwise inferred from the error text. A completed action's staged `ok`
+audit row (for example `send_message:sent`) is never rewritten by a later
+failure; the failure is appended as its own `error` row.
+
+<a id="mctltoolhandlerfaults"></a>
+##### MctlToolHandlerFaults
+
+Fires (warning) when `mctl_tool_call_errors_total{reason=~"panic|handler_error"}`
+has a non-zero rate over 15 minutes, sustained for 5 minutes. `panic` is a
+recovered panic in a tool handler; `handler_error` is a handler returning a Go
+error instead of an error result. Both are server bugs, and neither burns the
+availability SLO, so this alert is their only signal. Find the tool from the
+alert's `tool` label, then the `panic recovered in tool handler` line (with
+stack) in Loki. `store_error` and `encode_failed` are observable in
+`mctl_tool_call_errors_total{reason}` but are deliberately **not** part of this
+alert.
+
 OAuth endpoint 5xx rate (1h window):
 
 ```promql

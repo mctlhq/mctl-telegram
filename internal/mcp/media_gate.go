@@ -117,7 +117,7 @@ func (s *Server) mediaGateRefused(ctx context.Context, id *auth.Identity, tool, 
 		// ctx is already done here, so audit detached, as the fmErr branch
 		// in the handlers does for the same reason.
 		s.auditDetached(ctx, id, tool, peer, gerr, startedAt)
-		return borrowErrResult(tool, gerr)
+		return borrowErrResult(ctx, tool, gerr)
 	}
 	if s.Metrics != nil {
 		s.Metrics.MediaGateRejectionsTotal.WithLabelValues(tool).Inc()

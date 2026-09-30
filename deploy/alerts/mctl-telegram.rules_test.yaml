@@ -371,3 +371,39 @@ tests:
               summary: "Communication-agent policy-denial share is high for reason global_kill"
               description: "global_kill denials are above 20% of claimed agent jobs over the last 30 minutes, with at least 5 denials in the window. Check agent_actions.policy_reasons to decide whether this is the guarded system working as designed or a new/runaway denial reason.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentpolicydenialratehigh"
+
+  # MctlToolHandlerFaults firing: a panicking handler keeps incrementing
+  # mctl_tool_call_errors_total{reason="panic"}.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_call_errors_total{tool="send_message",reason="panic"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlToolHandlerFaults
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              tool: send_message
+              reason: panic
+            exp_annotations:
+              summary: "mctl-telegram MCP tool handler fault (panic on send_message)"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltoolhandlerfaults"
+
+  # MctlToolHandlerFaults silence: client-fault, store_error and encode_failed
+  # reasons climbing, and a flat panic counter, must not fire it.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_call_errors_total{tool="send_message",reason="scope_denied"}'
+        values: '0+5x40'
+      - series: 'mctl_tool_call_errors_total{tool="send_message",reason="store_error"}'
+        values: '0+1x40'
+      - series: 'mctl_tool_call_errors_total{tool="send_message",reason="encode_failed"}'
+        values: '0+1x40'
+      - series: 'mctl_tool_call_errors_total{tool="send_message",reason="panic"}'
+        values: '3+0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MctlToolHandlerFaults
+        exp_alerts: []
