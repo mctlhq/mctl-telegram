@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.72.0](https://github.com/mctlhq/mctl-telegram/compare/0.71.0...0.72.0) (2026-09-29)
+
+
+### Features
+
+* **agents:** issue-707-follow-ups-from-706-media-gate-and-confi ([72b3aad](https://github.com/mctlhq/mctl-telegram/commit/72b3aad6d772d17e33226935c6bd5c28afb77c87))
+
+
+### Bug Fixes
+
+* **config:** clamp negative MEDIA_TEXT_INLINE_CAP_BYTES to the safe default ([0dcb262](https://github.com/mctlhq/mctl-telegram/commit/0dcb2628d5e928710f655a093b08ade7c0f47068)), closes [#707](https://github.com/mctlhq/mctl-telegram/issues/707)
+* **config:** fall back to the default for negative MEDIA_MAX_CONCURRENT ([caed133](https://github.com/mctlhq/mctl-telegram/commit/caed133df7c12e3c1abb1992e20314058ea8af40)), closes [#707](https://github.com/mctlhq/mctl-telegram/issues/707)
+
 ## [0.71.0](https://github.com/mctlhq/mctl-telegram/compare/0.70.0...0.71.0) (2026-09-29)
 
 
