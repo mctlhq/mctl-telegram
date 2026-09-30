@@ -334,7 +334,11 @@ func (b *BroadcastServer) doPrepareFromDigest(ctx context.Context, actor broadca
 	}
 
 	// Freeze, render, prepare -- in that order, atomically handing the
-	// rendered text and source_ref to Prepare in one call.
+	// rendered text and source_ref to Prepare in one call. FreezeNextDigest
+	// persists as soon as it freezes, before render/prepare run below, so a
+	// failure past this point must be retried with this SAME digestID and
+	// version (a no-op re-freeze) -- never a new id/version, which would
+	// strand these entries and exclude them from every later digest.
 	digest, _, err := productupdate.FreezeNextDigest(ctx, b.store, b.digests.Feed, digestID, version,
 		db.NotificationCategory(category), b.digests.LatestRelease, actor.UserID, b.now())
 	if err != nil {
@@ -473,7 +477,7 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
           {{range .Categories}}<option value="{{.}}">{{.}}</option>{{end}}
         </select>
       </label>
-      <label>Digest id <input type="text" name="digest_id" placeholder="product_updates-2026-w39" required></label>
+      <label>Digest id <input type="text" name="digest_id" placeholder="product-updates-2026-w39" required></label>
       <label>Version <input type="number" name="version" value="1" min="1" required></label>
       <label>Tiers (optional, comma-separated: client, admin) <input type="text" name="tiers" placeholder="client"></label>
       <label>Connected via (optional, comma-separated) <input type="text" name="connected_via"></label>

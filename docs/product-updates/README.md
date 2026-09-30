@@ -113,7 +113,7 @@ construction:
 1. Open `/telegram/connect/broadcasts`.
 2. Under **Prepare from digest**, choose the category, a digest id (the
    recommended convention is `<category>-<YYYY>-w<WW>`, e.g.
-   `product_updates-2026-w39`) and a version (`1` for a new digest). Optional
+   `product-updates-2026-w39`) and a version (`1` for a new digest). Optional
    audience narrowing (tiers, connected-via, active-within-days) works the same
    as a manually prepared broadcast.
 3. Submitting freezes the next digest for that category from the approved,
@@ -121,6 +121,15 @@ construction:
    campaign whose text is the frozen digest rendered verbatim -- title and
    summary copied exactly as reviewed, never reworded. The campaign shows its
    digest id, version and content hash right there on the list.
+
+   The digest is persisted as soon as it is frozen, before the campaign is
+   rendered and prepared -- if the page then fails (rendering refuses, or
+   `Prepare` refuses), the entries are already frozen. Retry with the exact
+   same digest id and version: re-freezing an already-stored digest is a
+   no-op that returns the same frozen digest rather than erroring, so the
+   retry is harmless. Retrying with a new id or version instead would strand
+   the frozen entries and skip them in every future digest for this
+   category.
 4. **Review, then Approve.** Preparing never approves: approval stays the
    separate, explicit action the page already has for a manually prepared
    broadcast.
