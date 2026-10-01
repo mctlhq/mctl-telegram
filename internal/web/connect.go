@@ -441,6 +441,11 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))
 
+// connectSuccessTemplate's "Choose your notifications" step only renders on
+// this (self-hosted connect wizard) success page. External OAuth clients
+// (claude.ai / chatgpt.com) complete via internal/oauth's own
+// renderConnectSuccess interstitial instead and never see this prompt — see
+// docs/runbook.md's "Login bot /start and onboarding (issue-679)" section.
 var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>

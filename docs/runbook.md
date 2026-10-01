@@ -2643,3 +2643,13 @@ handler: a `/start` the client sent to the login bot.
 - **Rollback.** Unset `BOT_RECEIVER_ENABLED` to stop inbound writes. Rows with
   `source = bot_start` are valid observations; to remove them run
   `DELETE FROM client_bot_reachability WHERE source = 'bot_start'`.
+- **Known limitation.** The "Choose your notifications" onboarding step (and
+  the Start-the-bot link) is rendered only by `internal/web`'s self-hosted
+  connect wizard success page (`connectSuccessTemplate` in
+  `internal/web/connect.go`). External OAuth clients (claude.ai, chatgpt.com)
+  complete via `internal/oauth`'s own `renderConnectSuccess` interstitial and
+  never see this prompt, so the explicit marketing-consent choice is
+  unreachable on that path. Users who connect via an external OAuth client
+  can still set notification preferences later from the manage page
+  (`/telegram/connect/manage`); surfacing the same prompt on the OAuth
+  success page is tracked as follow-up work, not part of issue-679.
