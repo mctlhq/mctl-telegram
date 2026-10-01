@@ -154,6 +154,20 @@ func TestRedactAttr_BotReceiverKeys(t *testing.T) {
 	}
 }
 
+func TestRedactAttr_BotStartBridgeTokenKeys(t *testing.T) {
+	for _, k := range []string{"bot_start_bridge_token", "BOT_START_BRIDGE_TOKEN", "BotStartBridgeToken"} {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "bridge-secret-value-abcdefghijklmnop"))
+			if got.Value.Kind() != slog.KindString || !strings.HasPrefix(got.Value.String(), "[redacted len=") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+			if strings.Contains(got.Value.String(), "bridge-secret-value") {
+				t.Fatalf("key %q leaked its value: %v", k, got)
+			}
+		})
+	}
+}
+
 func TestRedactAttr_BroadcastContentKeys(t *testing.T) {
 	for _, k := range []string{"content", "campaign_content", "broadcast_text", "Content"} {
 		t.Run(k, func(t *testing.T) {
