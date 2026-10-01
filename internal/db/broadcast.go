@@ -312,7 +312,7 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 		c.ExpiresAt.UTC(), now, ref.DigestID, ref.DigestVersion, ref.ContentHash,
 		CampaignPrepared, CampaignApproved, CampaignSending,
 	)
-	if isForeignKeyViolation(err) {
+	if isSourceDigestFKViolation(err) {
 		// The digest passed the EXISTS read but was deleted (a concurrent
 		// DiscardUnusedProductUpdateDigest committed) before this row could
 		// reference it: the source_ref no longer names a stored digest.

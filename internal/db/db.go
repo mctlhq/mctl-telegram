@@ -620,37 +620,65 @@ func addColumnIfMissing(ctx context.Context, dbConn *sql.DB, pg bool, table, col
 // already has 60e4ad2's fk_broadcast_campaigns_source_digest keeps it: same
 // name, same columns, and NO ACTION refuses the same deletes as RESTRICT.
 //
+// The ALTERs run only when a constraint is missing (the first boot after
+// this change): ADD CONSTRAINT locks the table before it can find the name
+// taken, and Migrate runs on every start (see dropColumnIfPresent).
+//
 // SQLite cannot add a constraint to an existing table, and this service
-// runs it with PRAGMA foreign_keys off, so the same rules are triggers.
-// Their messages carry SQLite's own "FOREIGN KEY constraint failed" /
-// "CHECK constraint failed" wording, which isForeignKeyViolation matches.
+// runs it with PRAGMA foreign_keys off, so the same rules are triggers. The
+// two reference triggers raise sqliteSourceDigestNotStored and
+// sqliteSourceDigestReferenced, which isSourceDigestFKViolation matches; the completeness trigger raises "CHECK
+// constraint failed", which nothing maps -- a half-set source_ref is a
+// programming error, not an operator refusal.
 func ensureCampaignSourceDigestFK(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	var stmts []string
 	if pg {
 		stmts = []string{`DO $$
+DECLARE
+	have_check boolean;
+	have_fk    boolean;
 BEGIN
+	-- Steady state (every boot after the first): both constraints exist, and
+	-- this catalog read is all the block does -- no table lock, so a pod
+	-- start never queues behind, or in front of, live broadcast traffic.
+	SELECT EXISTS (SELECT 1 FROM pg_constraint
+	                WHERE conrelid = to_regclass('broadcast_campaigns')
+	                  AND conname = 'chk_broadcast_campaigns_source_ref_complete'),
+	       EXISTS (SELECT 1 FROM pg_constraint
+	                WHERE conrelid = to_regclass('broadcast_campaigns')
+	                  AND conname = 'fk_broadcast_campaigns_source_digest')
+	  INTO have_check, have_fk;
+	IF have_check AND have_fk THEN
+		RETURN;
+	END IF;
 	-- Lock product_update_digests first, in the mode
 	-- DiscardUnusedProductUpdateDigest takes, so this block acquires locks in
 	-- the same order (digests, then campaigns) and cannot deadlock with it.
 	LOCK TABLE product_update_digests IN SHARE ROW EXCLUSIVE MODE;
-	BEGIN
-		ALTER TABLE broadcast_campaigns ADD CONSTRAINT chk_broadcast_campaigns_source_ref_complete
-			CHECK ((source_digest_id IS NULL) = (source_digest_version IS NULL)
-			   AND (source_digest_id IS NULL) = (source_content_hash IS NULL)) NOT VALID;
-	EXCEPTION WHEN duplicate_object THEN NULL;
-	END;
-	BEGIN
-		ALTER TABLE broadcast_campaigns ADD CONSTRAINT fk_broadcast_campaigns_source_digest
-			FOREIGN KEY (source_digest_id, source_digest_version)
-			REFERENCES product_update_digests(id, version) ON DELETE RESTRICT NOT VALID;
-	EXCEPTION WHEN duplicate_object THEN NULL;
-	END;
+	-- duplicate_object covers a replica that added the constraint between
+	-- the read above and this ALTER.
+	IF NOT have_check THEN
+		BEGIN
+			ALTER TABLE broadcast_campaigns ADD CONSTRAINT chk_broadcast_campaigns_source_ref_complete
+				CHECK ((source_digest_id IS NULL) = (source_digest_version IS NULL)
+				   AND (source_digest_id IS NULL) = (source_content_hash IS NULL)) NOT VALID;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END;
+	END IF;
+	IF NOT have_fk THEN
+		BEGIN
+			ALTER TABLE broadcast_campaigns ADD CONSTRAINT fk_broadcast_campaigns_source_digest
+				FOREIGN KEY (source_digest_id, source_digest_version)
+				REFERENCES product_update_digests(id, version) ON DELETE RESTRICT NOT VALID;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END;
+	END IF;
 END $$`}
 	} else {
 		const check = `SELECT RAISE(ABORT, 'CHECK constraint failed: broadcast_campaigns source_ref is incomplete')
 			 WHERE (NEW.source_digest_id IS NULL) <> (NEW.source_digest_version IS NULL)
 			    OR (NEW.source_digest_id IS NULL) <> (NEW.source_content_hash IS NULL);
-			SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: broadcast_campaigns source digest is not stored')
+			SELECT RAISE(ABORT, '` + sqliteSourceDigestNotStored + `')
 			 WHERE NEW.source_digest_id IS NOT NULL
 			   AND NOT EXISTS (SELECT 1 FROM product_update_digests
 			                    WHERE id = NEW.source_digest_id AND version = NEW.source_digest_version);`
@@ -662,7 +690,7 @@ END $$`}
 			 BEGIN ` + check + ` END`,
 			`CREATE TRIGGER IF NOT EXISTS trg_product_update_digests_restrict_delete
 			 BEFORE DELETE ON product_update_digests BEGIN
-			  SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: product update digest is a campaign source')
+			  SELECT RAISE(ABORT, '` + sqliteSourceDigestReferenced + `')
 			   WHERE EXISTS (SELECT 1 FROM broadcast_campaigns
 			                  WHERE source_digest_id = OLD.id AND source_digest_version = OLD.version);
 			 END`,
@@ -676,15 +704,27 @@ END $$`}
 	return nil
 }
 
-// isForeignKeyViolation reports whether err is a foreign key violation:
-// SQLSTATE 23503 on Postgres, or the "FOREIGN KEY constraint failed" text
-// SQLite and ensureCampaignSourceDigestFK's triggers raise.
-func isForeignKeyViolation(err error) bool {
+// The SQLite trigger errors that stand in for
+// fk_broadcast_campaigns_source_digest. The text is part of the trigger
+// definition already created in existing databases (CREATE TRIGGER IF NOT
+// EXISTS never rewrites it), so it must not change.
+const (
+	sqliteSourceDigestNotStored  = "FOREIGN KEY constraint failed: broadcast_campaigns source digest is not stored"
+	sqliteSourceDigestReferenced = "FOREIGN KEY constraint failed: product update digest is a campaign source"
+)
+
+// isSourceDigestFKViolation reports whether err is a violation of the
+// campaign source digest reference specifically: SQLSTATE 23503 on
+// fk_broadcast_campaigns_source_digest on Postgres, or one of the two
+// reference trigger errors on SQLite. Any other foreign key (created_by,
+// approved_by, ...) is not this refusal and stays an error.
+func isSourceDigestFKViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23503"
+		return pgErr.Code == "23503" && pgErr.ConstraintName == "fk_broadcast_campaigns_source_digest"
 	}
-	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
+	return err != nil && (strings.Contains(err.Error(), sqliteSourceDigestNotStored) ||
+		strings.Contains(err.Error(), sqliteSourceDigestReferenced))
 }
 
 func sqliteSchema() []string {

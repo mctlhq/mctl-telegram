@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // One active digest campaign per category and the discard of an unused
@@ -294,7 +296,7 @@ func assertCampaignSourceDigestReference(t *testing.T, s *Store, tgID int64) {
 			id, string(CategoryProductUpdates), uid, now.Add(time.Hour), now, digestID, version, hash)
 		return err
 	}
-	if err := insert(fmt.Sprintf("bc_fk_missing_%d", tgID), "no-such-digest", 1, "sha256:x"); !isForeignKeyViolation(err) {
+	if err := insert(fmt.Sprintf("bc_fk_missing_%d", tgID), "no-such-digest", 1, "sha256:x"); !isSourceDigestFKViolation(err) {
 		t.Fatalf("campaign naming a digest that is not stored: %v, want a foreign key violation", err)
 	}
 	if err := insert(fmt.Sprintf("bc_fk_half_%d", tgID), d.ID, nil, nil); err == nil {
@@ -306,7 +308,12 @@ func assertCampaignSourceDigestReference(t *testing.T, s *Store, tgID int64) {
 	if err := insert(fmt.Sprintf("bc_fk_ok_%d", tgID), d.ID, 1, d.ContentHash); err != nil {
 		t.Fatalf("campaign naming the stored digest: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM product_update_digests WHERE id = $1 AND version = 1`, d.ID); !isForeignKeyViolation(err) {
+	// Delete the digest the way DiscardUnusedProductUpdateDigest does, after
+	// its publications, so the campaign reference is the only thing in the way.
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM product_update_publications WHERE digest_id = $1`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM product_update_digests WHERE id = $1 AND version = 1`, d.ID); !isSourceDigestFKViolation(err) {
 		t.Fatalf("deleting a digest a campaign names: %v, want a foreign key violation", err)
 	}
 }
@@ -465,4 +472,72 @@ func waitForLockWaitOrTimeout(s *Store, like string, timeout time.Duration) bool
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// TestSourceDigestFKSteadyStateTakesNoLock_Postgres: on a database that
+// already has both constraints, the boot-time DDL is a catalog read. With
+// another transaction holding locks that the ALTERs and the LOCK TABLE
+// would queue behind -- ACCESS SHARE on broadcast_campaigns (a reader) and
+// ROW EXCLUSIVE on product_update_digests (a digest being saved) -- it
+// must still finish at once, and so must a full Migrate while the digest
+// writer is in flight.
+func TestSourceDigestFKSteadyStateTakesNoLock_Postgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn) // migrated: both constraints exist
+	ctx := context.Background()
+	hold := func(t *testing.T, stmts ...string) {
+		t.Helper()
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = tx.Rollback() })
+		for _, q := range stmts {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+	}
+
+	t.Run("ensureCampaignSourceDigestFK", func(t *testing.T) {
+		hold(t, `SELECT 1 FROM broadcast_campaigns LIMIT 1`, `LOCK TABLE product_update_digests IN ROW EXCLUSIVE MODE`)
+		dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if err := ensureCampaignSourceDigestFK(dctx, s.DB, true); err != nil {
+			t.Fatalf("steady-state source digest DDL waited on a table lock: %v", err)
+		}
+	})
+	t.Run("Migrate", func(t *testing.T) {
+		hold(t, `LOCK TABLE product_update_digests IN ROW EXCLUSIVE MODE`)
+		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := Migrate(dctx, s.DB); err != nil {
+			t.Fatalf("Migrate on a migrated database waited behind a digest writer: %v", err)
+		}
+	})
+}
+
+// isSourceDigestFKViolation answers only for the source digest reference,
+// not for any foreign key on the table.
+func TestIsSourceDigestFKViolationIsSpecific(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"postgres source digest FK", &pgconn.PgError{Code: "23503", ConstraintName: "fk_broadcast_campaigns_source_digest"}, true},
+		{"postgres created_by FK", &pgconn.PgError{Code: "23503", ConstraintName: "broadcast_campaigns_created_by_fkey"}, false},
+		{"postgres unique violation", &pgconn.PgError{Code: "23505", ConstraintName: "fk_broadcast_campaigns_source_digest"}, false},
+		{"sqlite not-stored trigger", fmt.Errorf("x: %s (1811)", sqliteSourceDigestNotStored), true},
+		{"sqlite referenced trigger", fmt.Errorf("x: %s (1811)", sqliteSourceDigestReferenced), true},
+		{"sqlite other FK", errors.New("FOREIGN KEY constraint failed (787)"), false},
+		{"nil", nil, false},
+	} {
+		if got := isSourceDigestFKViolation(tc.err); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

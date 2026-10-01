@@ -252,7 +252,7 @@ func (s *Store) DiscardUnusedProductUpdateDigest(ctx context.Context, id string,
 			// is caught here by the source digest foreign key (see
 			// ensureCampaignSourceDigestFK), and the whole discard rolls
 			// back, publications and ownerships included.
-			if isForeignKeyViolation(err) {
+			if isSourceDigestFKViolation(err) {
 				return fmt.Errorf("%w: %s v%d is a campaign's source", ErrCampaignSourceRefSet, id, version)
 			}
 			return fmt.Errorf("discard product update digest: %w", err)
