@@ -261,6 +261,76 @@ func productUpdateTestUser(t *testing.T, s *Store, tgID int64, now time.Time) in
 	return uid
 }
 
+// TestCreateBroadcastCampaignWithSourceRef_SQLite is T4: CreateBroadcastCampaign
+// with a source ref writes all three columns in the same INSERT, and refuses
+// (writing nothing) with a ref naming a nonexistent digest, a wrong content
+// hash, or a category that differs from the campaign's.
+func TestCreateBroadcastCampaignWithSourceRef_SQLite(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	uid := productUpdateTestUser(t, s, 830000003, now)
+
+	weekly := ProductUpdateDigest{
+		ID: "weekly-atomic", Version: 1, Category: string(CategoryProductUpdates), ContentHash: "sha256:one",
+		SourceRefs: []string{"a@1"}, EntryIDs: []string{"a"}, CreatedBy: uid,
+	}
+	if stored, err := s.SaveProductUpdateDigest(ctx, weekly, now); err != nil || !stored {
+		t.Fatalf("save weekly: stored=%v err=%v", stored, err)
+	}
+	ref := CampaignSourceRef{DigestID: weekly.ID, DigestVersion: 1, ContentHash: "sha256:one"}
+
+	ok := BroadcastCampaign{
+		ID: "bc_atomic_ok", Category: string(CategoryProductUpdates), SelectorJSON: `{}`, SelectorHash: "sh",
+		Content: "text", ContentHash: "ch", CreatedBy: uid, Surface: "web", RecipientLimit: 10,
+		ExpiresAt: now.Add(time.Hour), SourceRef: &ref,
+	}
+	if err := s.CreateBroadcastCampaign(ctx, ok, now); err != nil {
+		t.Fatalf("create with a valid source ref: %v", err)
+	}
+	c, err := s.GetBroadcastCampaign(ctx, ok.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SourceRef == nil || *c.SourceRef != ref {
+		t.Fatalf("source_ref after create = %+v, want %+v", c.SourceRef, ref)
+	}
+
+	cases := map[string]CampaignSourceRef{
+		"nonexistent digest": {DigestID: "does-not-exist", DigestVersion: 1, ContentHash: "sha256:one"},
+		"wrong content hash": {DigestID: weekly.ID, DigestVersion: 1, ContentHash: "sha256:wrong"},
+	}
+	for name, badRef := range cases {
+		t.Run(name, func(t *testing.T) {
+			id := "bc_atomic_" + name
+			c := BroadcastCampaign{
+				ID: id, Category: string(CategoryProductUpdates), SelectorJSON: `{}`, SelectorHash: "sh",
+				Content: "text", ContentHash: "ch", CreatedBy: uid, Surface: "web", RecipientLimit: 10,
+				ExpiresAt: now.Add(time.Hour), SourceRef: &badRef,
+			}
+			if err := s.CreateBroadcastCampaign(ctx, c, now); !errors.Is(err, ErrCampaignSourceMismatch) {
+				t.Fatalf("create with %s: %v; want ErrCampaignSourceMismatch", name, err)
+			}
+			if _, err := s.GetBroadcastCampaign(ctx, id); !errors.Is(err, ErrCampaignNotFound) {
+				t.Fatalf("a refused campaign was written: %v", err)
+			}
+		})
+	}
+	// Category mismatch: the ref's digest is product_updates, the campaign
+	// claims maintenance.
+	mismatchCat := BroadcastCampaign{
+		ID: "bc_atomic_cat", Category: string(CategoryMaintenance), SelectorJSON: `{}`, SelectorHash: "sh",
+		Content: "text", ContentHash: "ch", CreatedBy: uid, Surface: "web", RecipientLimit: 10,
+		ExpiresAt: now.Add(time.Hour), SourceRef: &ref,
+	}
+	if err := s.CreateBroadcastCampaign(ctx, mismatchCat, now); !errors.Is(err, ErrCampaignSourceMismatch) {
+		t.Fatalf("create with mismatched category: %v; want ErrCampaignSourceMismatch", err)
+	}
+	if _, err := s.GetBroadcastCampaign(ctx, mismatchCat.ID); !errors.Is(err, ErrCampaignNotFound) {
+		t.Fatalf("a category-mismatched campaign was written: %v", err)
+	}
+}
+
 // Every guard in ProductUpdateDigest.validate refuses its shape before
 // anything is written.
 func TestSaveProductUpdateDigestRejectsInvalidShapes(t *testing.T) {

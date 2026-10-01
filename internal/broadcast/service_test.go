@@ -122,6 +122,58 @@ func TestPrepare_ResolvesAudienceServerSideAndSendsNothing(t *testing.T) {
 	}
 }
 
+// TestPrepare_SourceRefPassesThroughAtomically is a regression for issue-683
+// task 5: a PrepareRequest with no SourceRef still creates a campaign whose
+// source_ref is NULL (byte-identical to pre-#683 behaviour), and a
+// PrepareRequest naming a stored digest carries that ref onto the created
+// campaign in the same call.
+func TestPrepare_SourceRefPassesThroughAtomically(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.user(123456701, db.TierClient)
+
+	// No source ref: unchanged behaviour.
+	manual := e.prepare(Selector{Category: "maintenance"}, "Planned maintenance tonight.")
+	c, err := e.store.GetBroadcastCampaign(ctx, manual.CampaignID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SourceRef != nil {
+		t.Fatalf("a manual campaign has a source_ref: %+v", c.SourceRef)
+	}
+	// A digest campaign needs its category free of active campaigns, manual
+	// ones included (issue-683 Guard 2, enforced by CreateBroadcastCampaign).
+	if err := e.store.CancelBroadcastCampaign(ctx, manual.CampaignID, e.op.UserID, e.now); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stored digest for the "product_updates" category (the maintenance
+	// selector's audience already has an eligible recipient above, reused
+	// here via connected_via=none / same tiers since Resolve does not care
+	// about category content, only consent — maintenance stays opt-out).
+	uid := e.user(999888777, db.TierClient)
+	digest := db.ProductUpdateDigest{
+		ID: "weekly-39", Version: 1, Category: "maintenance", ContentHash: "sha256:abc",
+		SourceRefs: []string{"docs/product-updates/x.yaml@content-sha256:" + strings.Repeat("a", 64)},
+		EntryIDs:   []string{"x"}, CreatedBy: uid,
+	}
+	if stored, err := e.store.SaveProductUpdateDigest(ctx, digest, e.now); err != nil || !stored {
+		t.Fatalf("save digest: stored=%v err=%v", stored, err)
+	}
+	ref := &db.CampaignSourceRef{DigestID: digest.ID, DigestVersion: digest.Version, ContentHash: digest.ContentHash}
+	p, err := e.svc.Prepare(ctx, e.op, PrepareRequest{Selector: Selector{Category: "maintenance"}, Text: "From the digest.", SourceRef: ref})
+	if err != nil {
+		t.Fatalf("prepare with source ref: %v", err)
+	}
+	sourced, err := e.store.GetBroadcastCampaign(ctx, p.CampaignID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourced.SourceRef == nil || *sourced.SourceRef != *ref {
+		t.Fatalf("source_ref = %+v, want %+v", sourced.SourceRef, ref)
+	}
+}
+
 func TestPrepare_Refusals(t *testing.T) {
 	e := newEnv(t, func(c *Config) { c.RecipientLimit = 1 })
 	ctx := context.Background()

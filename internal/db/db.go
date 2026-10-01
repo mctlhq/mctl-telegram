@@ -3,10 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -435,7 +437,8 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	// broadcast_campaigns.source_* (issue-683): the frozen product-update
 	// digest a campaign was prepared from -- (digest id, version, content
 	// hash). NULL for manual campaigns and every campaign that predates it;
-	// set at most once, by Store.SetBroadcastCampaignSourceRef.
+	// written in the campaign's own INSERT by Store.CreateBroadcastCampaign
+	// and never changed afterwards.
 	for _, col := range []struct{ name, typ string }{
 		{"source_digest_id", "TEXT"},
 		{"source_digest_version", "INTEGER"},
@@ -444,6 +447,25 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		if err := addColumnIfMissing(ctx, dbConn, pg, "broadcast_campaigns", col.name, col.typ, col.typ); err != nil {
 			return err
 		}
+	}
+	// At most one prepared/approved/sending digest campaign per category
+	// (issue-683 Guard 2), held by the database so two concurrent
+	// prepare-from-digest submits cannot both insert. Created here rather
+	// than in sqliteSchema/pgSchema because it names source_digest_id, which
+	// an older database only has once the loop above has run. The same
+	// statement is valid in both dialects. Manual campaigns are outside the
+	// index; CreateBroadcastCampaign's NOT EXISTS keeps a digest campaign
+	// out of a category a manual one already occupies -- but only a manual
+	// row that is already committed, since that read is not atomic against a
+	// concurrent manual prepare.
+	if _, err := dbConn.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_broadcast_campaigns_digest_category_active
+		   ON broadcast_campaigns(category)
+		   WHERE source_digest_id IS NOT NULL AND state IN ('prepared', 'approved', 'sending')`); err != nil {
+		return fmt.Errorf("create idx_broadcast_campaigns_digest_category_active: %w", err)
+	}
+	if err := ensureCampaignSourceDigestFK(ctx, dbConn, pg); err != nil {
+		return err
 	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
@@ -579,6 +601,130 @@ func addColumnIfMissing(ctx context.Context, dbConn *sql.DB, pg bool, table, col
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+// ensureCampaignSourceDigestFK makes a campaign's source_ref a reference the
+// database holds (issue-683, #715 review): the three source_* columns are
+// all NULL (a manual campaign) or all set, and a set (source_digest_id,
+// source_digest_version) names a stored product_update_digests row, which
+// cannot then be deleted. Without it, DiscardUnusedProductUpdateDigest's
+// "no campaign names this digest" read could race a concurrent
+// CreateBroadcastCampaign and delete a digest the new campaign names.
+//
+// Postgres gets a real composite foreign key (ON DELETE RESTRICT) and a
+// CHECK. Both are added by ALTER TABLE because the columns themselves are
+// added by ALTER on an older database; a replica that loses the race to add
+// them treats duplicate_object as done. Both are NOT VALID (as 60e4ad2 first
+// added the foreign key), so a database holding an older orphan still
+// starts; every new or changed row is checked regardless. A database that
+// already has 60e4ad2's fk_broadcast_campaigns_source_digest keeps it: same
+// name, same columns, and NO ACTION refuses the same deletes as RESTRICT.
+//
+// The ALTERs run only when a constraint is missing (the first boot after
+// this change): ADD CONSTRAINT locks the table before it can find the name
+// taken, and Migrate runs on every start (see dropColumnIfPresent).
+//
+// SQLite cannot add a constraint to an existing table, and this service
+// runs it with PRAGMA foreign_keys off, so the same rules are triggers. The
+// two reference triggers raise sqliteSourceDigestNotStored and
+// sqliteSourceDigestReferenced, which isSourceDigestFKViolation matches; the completeness trigger raises "CHECK
+// constraint failed", which nothing maps -- a half-set source_ref is a
+// programming error, not an operator refusal.
+func ensureCampaignSourceDigestFK(ctx context.Context, dbConn *sql.DB, pg bool) error {
+	var stmts []string
+	if pg {
+		stmts = []string{`DO $$
+DECLARE
+	have_check boolean;
+	have_fk    boolean;
+BEGIN
+	-- Steady state (every boot after the first): both constraints exist, and
+	-- this catalog read is all the block does -- no table lock, so a pod
+	-- start never queues behind, or in front of, live broadcast traffic.
+	SELECT EXISTS (SELECT 1 FROM pg_constraint
+	                WHERE conrelid = to_regclass('broadcast_campaigns')
+	                  AND conname = 'chk_broadcast_campaigns_source_ref_complete'),
+	       EXISTS (SELECT 1 FROM pg_constraint
+	                WHERE conrelid = to_regclass('broadcast_campaigns')
+	                  AND conname = 'fk_broadcast_campaigns_source_digest')
+	  INTO have_check, have_fk;
+	IF have_check AND have_fk THEN
+		RETURN;
+	END IF;
+	-- Lock product_update_digests first, in the mode
+	-- DiscardUnusedProductUpdateDigest takes, so this block acquires locks in
+	-- the same order (digests, then campaigns) and cannot deadlock with it.
+	LOCK TABLE product_update_digests IN SHARE ROW EXCLUSIVE MODE;
+	-- duplicate_object covers a replica that added the constraint between
+	-- the read above and this ALTER.
+	IF NOT have_check THEN
+		BEGIN
+			ALTER TABLE broadcast_campaigns ADD CONSTRAINT chk_broadcast_campaigns_source_ref_complete
+				CHECK ((source_digest_id IS NULL) = (source_digest_version IS NULL)
+				   AND (source_digest_id IS NULL) = (source_content_hash IS NULL)) NOT VALID;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END;
+	END IF;
+	IF NOT have_fk THEN
+		BEGIN
+			ALTER TABLE broadcast_campaigns ADD CONSTRAINT fk_broadcast_campaigns_source_digest
+				FOREIGN KEY (source_digest_id, source_digest_version)
+				REFERENCES product_update_digests(id, version) ON DELETE RESTRICT NOT VALID;
+		EXCEPTION WHEN duplicate_object THEN NULL;
+		END;
+	END IF;
+END $$`}
+	} else {
+		const check = `SELECT RAISE(ABORT, 'CHECK constraint failed: broadcast_campaigns source_ref is incomplete')
+			 WHERE (NEW.source_digest_id IS NULL) <> (NEW.source_digest_version IS NULL)
+			    OR (NEW.source_digest_id IS NULL) <> (NEW.source_content_hash IS NULL);
+			SELECT RAISE(ABORT, '` + sqliteSourceDigestNotStored + `')
+			 WHERE NEW.source_digest_id IS NOT NULL
+			   AND NOT EXISTS (SELECT 1 FROM product_update_digests
+			                    WHERE id = NEW.source_digest_id AND version = NEW.source_digest_version);`
+		stmts = []string{
+			`CREATE TRIGGER IF NOT EXISTS trg_broadcast_campaigns_source_digest_insert
+			 BEFORE INSERT ON broadcast_campaigns BEGIN ` + check + ` END`,
+			`CREATE TRIGGER IF NOT EXISTS trg_broadcast_campaigns_source_digest_update
+			 BEFORE UPDATE OF source_digest_id, source_digest_version, source_content_hash ON broadcast_campaigns
+			 BEGIN ` + check + ` END`,
+			`CREATE TRIGGER IF NOT EXISTS trg_product_update_digests_restrict_delete
+			 BEFORE DELETE ON product_update_digests BEGIN
+			  SELECT RAISE(ABORT, '` + sqliteSourceDigestReferenced + `')
+			   WHERE EXISTS (SELECT 1 FROM broadcast_campaigns
+			                  WHERE source_digest_id = OLD.id AND source_digest_version = OLD.version);
+			 END`,
+		}
+	}
+	for _, stmt := range stmts {
+		if _, err := dbConn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("campaign source digest reference: %w", err)
+		}
+	}
+	return nil
+}
+
+// The SQLite trigger errors that stand in for
+// fk_broadcast_campaigns_source_digest. The text is part of the trigger
+// definition already created in existing databases (CREATE TRIGGER IF NOT
+// EXISTS never rewrites it), so it must not change.
+const (
+	sqliteSourceDigestNotStored  = "FOREIGN KEY constraint failed: broadcast_campaigns source digest is not stored"
+	sqliteSourceDigestReferenced = "FOREIGN KEY constraint failed: product update digest is a campaign source"
+)
+
+// isSourceDigestFKViolation reports whether err is a violation of the
+// campaign source digest reference specifically: SQLSTATE 23503 on
+// fk_broadcast_campaigns_source_digest on Postgres, or one of the two
+// reference trigger errors on SQLite. Any other foreign key (created_by,
+// approved_by, ...) is not this refusal and stays an error.
+func isSourceDigestFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503" && pgErr.ConstraintName == "fk_broadcast_campaigns_source_digest"
+	}
+	return err != nil && (strings.Contains(err.Error(), sqliteSourceDigestNotStored) ||
+		strings.Contains(err.Error(), sqliteSourceDigestReferenced))
 }
 
 func sqliteSchema() []string {

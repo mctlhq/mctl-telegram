@@ -157,6 +157,15 @@ type Config struct {
 	BroadcastMaxAttempts    int
 	BroadcastRecipientLimit int
 	BroadcastApprovalTTL    time.Duration
+	// ProductUpdateFeedDir is the directory the product-update feed
+	// (issue-683) is loaded from at server start: reviewed
+	// docs/product-updates/<id>.yaml entries, the same feed the release gate
+	// validates. Defaults to docs/product-updates (productupdate.FeedDir,
+	// repeated as a literal so config imports no domain package) so local
+	// dev and tests need no configuration; the runtime image sets it to the
+	// path the feed was copied to (see Dockerfile). Set via
+	// PRODUCT_UPDATE_FEED_DIR.
+	ProductUpdateFeedDir string
 	// Observability:
 	// MetricsAllowCIDR restricts /metrics to requests whose remote IP falls
 	// within the given CIDR (e.g. "10.0.0.0/8"). When empty the endpoint is
@@ -396,6 +405,7 @@ func Load() (*Config, error) {
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
+		ProductUpdateFeedDir:          envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)

@@ -40,6 +40,12 @@ var (
 	ErrCampaignNotPrepared = errors.New("broadcast campaign is no longer awaiting approval")
 	ErrCampaignMismatch    = errors.New("broadcast campaign content or selector does not match what was previewed")
 	ErrCampaignTerminal    = errors.New("broadcast campaign has already finished")
+	// ErrCampaignCategoryBusy refuses a new digest campaign when a
+	// non-terminal (prepared, approved or sending) campaign already exists
+	// for the same category. CreateBroadcastCampaign enforces this in the
+	// INSERT itself (a NOT EXISTS predicate plus a partial unique index), so
+	// two concurrent prepares for one category cannot both insert.
+	ErrCampaignCategoryBusy = errors.New("a campaign is already prepared, approved, or sending for this category")
 )
 
 // BroadcastRecipientFacts is everything the audience policy needs to decide
@@ -245,24 +251,116 @@ type BroadcastCampaign struct {
 // CreateBroadcastCampaign inserts a new campaign in the prepared state. The
 // caller computes the id, hashes, preview counts and expiry; now stamps
 // created_at/updated_at from the same clock that computed the expiry.
+//
+// A manual campaign (no SourceRef) is inserted unconditionally: the
+// one-campaign-per-category rule is the digest flow's (issue-683 Guard 2),
+// and prepare_broadcast never had it.
+//
+// When c.SourceRef is set (issue-683: a campaign prepared from a frozen
+// product-update digest), the three source_* columns are written in this
+// SAME INSERT, guarded by the EXISTS predicate SetBroadcastCampaignSourceRef
+// also uses: the row is inserted only if a stored digest with that id,
+// version, content hash AND category exists. Zero rows written with a
+// matching digest still stored is ErrCampaignCategoryBusy; zero rows written
+// with no matching digest is ErrCampaignSourceMismatch -- no campaign is
+// ever created naming a digest that does not exist or whose category
+// disagrees, so there is no window in which a prepared campaign has
+// digest-rendered text and no source_ref.
+//
+// Under Postgres READ COMMITTED the NOT EXISTS predicate alone does not stop
+// two concurrent INSERTs that each cannot see the other's uncommitted row.
+// For digest campaigns the partial unique index
+// idx_broadcast_campaigns_digest_category_active (created in Migrate) holds
+// the invariant in the database; ON CONFLICT DO NOTHING turns the loser's
+// unique violation into zero rows, which reads as ErrCampaignCategoryBusy.
 func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign, now time.Time) error {
 	if c.ID == "" || c.ContentHash == "" || c.SelectorHash == "" || c.CreatedBy <= 0 {
 		return errors.New("create broadcast campaign: id, hashes and creator are required")
 	}
 	now = now.UTC()
-	_, err := s.DB.ExecContext(ctx,
+	if c.SourceRef == nil {
+		_, err := s.DB.ExecContext(ctx,
+			`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
+			     content, content_hash, created_by, surface, recipient_limit, preview_counts,
+			     expires_at, created_at, updated_at)
+			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+			c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
+			c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
+			c.ExpiresAt.UTC(), now,
+		)
+		if err != nil {
+			return fmt.Errorf("create broadcast campaign: %w", err)
+		}
+		return nil
+	}
+	ref := c.SourceRef
+	if ref.DigestID == "" || ref.DigestVersion < 1 || ref.ContentHash == "" {
+		return errors.New("create broadcast campaign: source ref digest id, version and content hash are required")
+	}
+	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
 		     content, content_hash, created_by, surface, recipient_limit, preview_counts,
-		     expires_at, created_at, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+		     expires_at, created_at, updated_at, source_digest_id, source_digest_version, source_content_hash)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,$16
+		  WHERE EXISTS (SELECT 1 FROM product_update_digests d
+		                 WHERE d.id = $14 AND d.version = $15 AND d.content_hash = $16 AND d.category = $3)
+		    AND NOT EXISTS (SELECT 1 FROM broadcast_campaigns
+		                      WHERE category = $3 AND state IN ($17,$18,$19))
+		 ON CONFLICT DO NOTHING`,
 		c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
 		c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
-		c.ExpiresAt.UTC(), now,
+		c.ExpiresAt.UTC(), now, ref.DigestID, ref.DigestVersion, ref.ContentHash,
+		CampaignPrepared, CampaignApproved, CampaignSending,
 	)
+	if isSourceDigestFKViolation(err) {
+		// The digest passed the EXISTS read but was deleted (a concurrent
+		// DiscardUnusedProductUpdateDigest committed) before this row could
+		// reference it: the source_ref no longer names a stored digest.
+		return ErrCampaignSourceMismatch
+	}
 	if err != nil {
 		return fmt.Errorf("create broadcast campaign: %w", err)
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("create broadcast campaign: rows affected: %w", err)
+	}
+	if n == 0 {
+		var exists bool
+		checkErr := s.DB.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM product_update_digests d
+			                 WHERE d.id = $1 AND d.version = $2 AND d.content_hash = $3 AND d.category = $4)`,
+			ref.DigestID, ref.DigestVersion, ref.ContentHash, c.Category,
+		).Scan(&exists)
+		if checkErr != nil {
+			// Could not tell which refusal it was: an error, not a guess.
+			return fmt.Errorf("create broadcast campaign: classify refusal: %w", checkErr)
+		}
+		if exists {
+			return ErrCampaignCategoryBusy
+		}
+		return ErrCampaignSourceMismatch
+	}
 	return nil
+}
+
+// ActiveBroadcastCampaign returns the newest prepared, approved or sending
+// campaign in category, or ErrCampaignNotFound when there is none. It
+// queries by category in SQL, so it does not depend on a list page cap.
+func (s *Store) ActiveBroadcastCampaign(ctx context.Context, category string) (*BroadcastCampaign, error) {
+	row := s.DB.QueryRowContext(ctx,
+		`SELECT `+campaignColumns+` FROM broadcast_campaigns
+		  WHERE category = $1 AND state IN ($2,$3,$4)
+		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		category, CampaignPrepared, CampaignApproved, CampaignSending)
+	c, err := scanCampaign(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrCampaignNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("active broadcast campaign for %s: %w", category, err)
+	}
+	return c, nil
 }
 
 const campaignColumns = `id, state, category, selector_json, selector_hash, content, content_hash,

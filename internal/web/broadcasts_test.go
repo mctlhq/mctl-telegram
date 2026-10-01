@@ -13,6 +13,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 )
 
 const (
@@ -32,7 +33,7 @@ type bcEnv struct {
 	clients []int64
 }
 
-func newBroadcastEnv(t *testing.T) *bcEnv {
+func newBroadcastEnv(t *testing.T, mutate ...func(*DigestSource)) *bcEnv {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := db.Open(ctx, "file:"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory&cache=shared", 0, 0)
@@ -51,7 +52,11 @@ func newBroadcastEnv(t *testing.T) *bcEnv {
 		Operators: map[int64]bool{bcOperator: true},
 		Policy:    e.policy,
 	}, nil)
-	e.srv = NewBroadcastServer(store, e.svc, bcIssuer, bcConnect)
+	var digests DigestSource
+	for _, m := range mutate {
+		m(&digests)
+	}
+	e.srv = NewBroadcastServer(store, e.svc, bcIssuer, bcConnect, digests)
 	return e
 }
 
@@ -107,6 +112,47 @@ func (e *bcEnv) approve(id *auth.Identity, p *broadcast.Preview, origin string, 
 	w := httptest.NewRecorder()
 	e.srv.HandleApprove(w, req)
 	return w
+}
+
+func (e *bcEnv) prepareDigest(id *auth.Identity, origin string, form url.Values) *httptest.ResponseRecorder {
+	e.t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/broadcasts/prepare-digest", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	if id != nil {
+		req = req.WithContext(auth.With(req.Context(), id))
+	}
+	w := httptest.NewRecorder()
+	e.srv.HandlePrepareDigest(w, req)
+	return w
+}
+
+// maintenanceDigestEntry is a valid approved product-update feed entry in
+// the "maintenance" category (opt-out, so the existing bcClient fixture is
+// already an eligible recipient) -- a links-only notice, since maintenance
+// needs no tool-diff evidence.
+func maintenanceDigestEntry(id string) productupdate.Entry {
+	return productupdate.Entry{
+		Schema: productupdate.EntrySchema, ID: id, Kind: productupdate.KindMaintenance,
+		Title: "Scheduled maintenance", Summary: "The service will be briefly unavailable tonight.",
+		Locale: "en", Delivery: productupdate.DeliveryNextDigest,
+		Evidence:   productupdate.Evidence{Links: []string{"https://example.com/maint"}},
+		Status:     productupdate.StatusApproved,
+		Provenance: productupdate.Provenance{Author: "alice", ReviewedBy: "alice"},
+		CreatedAt:  "2026-09-24", ReviewedAt: "2026-09-24",
+	}
+}
+
+// securityDigestEntry is the same shape in the "security" category, so a
+// test can prepare a digest campaign in parallel with a manual maintenance
+// one without tripping the one-campaign-per-category guard.
+func securityDigestEntry(id string) productupdate.Entry {
+	e := maintenanceDigestEntry(id)
+	e.Kind = productupdate.KindSecurity
+	e.Evidence.Links = []string{"https://example.com/sec"}
+	return e
 }
 
 func (e *bcEnv) state(id string) string {
@@ -319,5 +365,158 @@ func TestBroadcastPage_LiveCampaignNeverPushedOffByFinishedOnes(t *testing.T) {
 	e.srv.HandleList(w, req)
 	if !strings.Contains(w.Body.String(), live.CampaignID) {
 		t.Fatal("the approved campaign (and its Cancel button) fell off the page")
+	}
+}
+
+// TestBroadcastPage_PrepareFromDigest_EndToEnd is T5 (amended): the flow is
+// exercised end to end through HandlePrepareDigest on a seeded feed. It
+// freezes, persists, prepares one campaign with source_ref, and sends
+// nothing.
+func TestBroadcastPage_PrepareFromDigest_EndToEnd(t *testing.T) {
+	entry := maintenanceDigestEntry("maint-note")
+	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
+	e := newBroadcastEnv(t, func(d *DigestSource) { *d = DigestSource{Feed: feed, LatestRelease: "0.70.0"} })
+
+	form := url.Values{"category": {"maintenance"}, "digest_id": {"maint-2026-w39"}, "version": {"1"}}
+	w := e.prepareDigest(e.connectIdentity(), bcIssuer, form)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("prepare-digest = %d %s", w.Code, w.Body.String())
+	}
+
+	ctx := context.Background()
+	list, err := e.store.ListBroadcastCampaigns(ctx, 10, db.CampaignPrepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("prepared campaigns = %d, want 1", len(list))
+	}
+	c := list[0]
+	if c.SourceRef == nil || c.SourceRef.DigestID != "maint-2026-w39" || c.SourceRef.DigestVersion != 1 {
+		t.Fatalf("source_ref = %+v", c.SourceRef)
+	}
+	if !strings.Contains(c.Content, entry.Title) || !strings.Contains(c.Content, entry.Summary) {
+		t.Fatalf("content does not carry the reviewed entry text: %q", c.Content)
+	}
+	stored, err := e.store.GetProductUpdateDigest(ctx, "maint-2026-w39", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ContentHash != c.SourceRef.ContentHash {
+		t.Fatalf("stored digest content hash %q != campaign source_ref hash %q", stored.ContentHash, c.SourceRef.ContentHash)
+	}
+	// Nothing sent: still prepared, awaiting the separate approval action.
+	if c.State != db.CampaignPrepared {
+		t.Fatalf("state = %s, want prepared", c.State)
+	}
+}
+
+// TestBroadcastPage_PrepareFromDigest_Refusals is T6 (amended): the page
+// action refuses each of the following as approve/cancel do -- a missing
+// admin:broadcast scope, a non-operator, a cross-origin POST, a text field,
+// a category with no entries of its own, and a second non-terminal campaign
+// in the same category.
+func TestBroadcastPage_PrepareFromDigest_Refusals(t *testing.T) {
+	entry := maintenanceDigestEntry("maint-note")
+	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
+	env := func(t *testing.T) *bcEnv {
+		return newBroadcastEnv(t, func(d *DigestSource) { *d = DigestSource{Feed: feed, LatestRelease: "0.70.0"} })
+	}
+	baseForm := func() url.Values {
+		return url.Values{"category": {"maintenance"}, "digest_id": {"maint-2026-w39"}, "version": {"1"}}
+	}
+
+	t.Run("missing admin:broadcast scope", func(t *testing.T) {
+		e := env(t)
+		id := e.connectIdentity()
+		id.Scopes = nil
+		if w := e.prepareDigest(id, bcIssuer, baseForm()); w.Code != http.StatusForbidden {
+			t.Fatalf("code = %d, want 403", w.Code)
+		}
+	})
+	t.Run("non-operator", func(t *testing.T) {
+		e := env(t)
+		id := e.connectIdentity()
+		id.TelegramID = bcClient
+		if w := e.prepareDigest(id, bcIssuer, baseForm()); w.Code != http.StatusForbidden {
+			t.Fatalf("code = %d, want 403", w.Code)
+		}
+	})
+	t.Run("cross-origin POST", func(t *testing.T) {
+		e := env(t)
+		if w := e.prepareDigest(e.connectIdentity(), "https://evil.example", baseForm()); w.Code != http.StatusForbidden {
+			t.Fatalf("code = %d, want 403", w.Code)
+		}
+	})
+	t.Run("text field is refused", func(t *testing.T) {
+		e := env(t)
+		f := baseForm()
+		f.Set("text", "hand-written body")
+		w := e.prepareDigest(e.connectIdentity(), bcIssuer, f)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("code = %d %s, want 409", w.Code, w.Body.String())
+		}
+	})
+	// A category that disagrees with the feed's entries cannot freeze them:
+	// DigestCandidates offers only entries of the requested category, so the
+	// reachable refusal is "has no entries" (a digest's category is its
+	// request's by construction; there is no separate mismatch to hit).
+	t.Run("a category with no entries of its own freezes nothing", func(t *testing.T) {
+		e := env(t)
+		f := baseForm()
+		f.Set("category", "security") // the seeded entry is "maintenance"
+		w := e.prepareDigest(e.connectIdentity(), bcIssuer, f)
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "has no entries") {
+			t.Fatalf("code = %d %s, want 409 \"has no entries\"", w.Code, w.Body.String())
+		}
+		assertDigestNotStored(t, e, "maint-2026-w39", 1, entry.ID)
+	})
+	t.Run("a second non-terminal campaign in the same category is refused", func(t *testing.T) {
+		e := env(t)
+		if w := e.prepareDigest(e.connectIdentity(), bcIssuer, baseForm()); w.Code != http.StatusSeeOther {
+			t.Fatalf("first prepare = %d %s", w.Code, w.Body.String())
+		}
+		f := baseForm()
+		f.Set("digest_id", "maint-2026-w40")
+		w := e.prepareDigest(e.connectIdentity(), bcIssuer, f)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("second prepare = %d %s, want 409", w.Code, w.Body.String())
+		}
+		list, err := e.store.ListBroadcastCampaigns(context.Background(), 10, db.CampaignPrepared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("prepared campaigns = %d, want 1 (the second must not have been created)", len(list))
+		}
+	})
+}
+
+// TestBroadcastPage_ListShowsSourceRefForDigestCampaignOnly is T10: the
+// broadcast page shows the digest id, version and content hash for a sourced
+// campaign and nothing extra for a manual one.
+func TestBroadcastPage_ListShowsSourceRefForDigestCampaignOnly(t *testing.T) {
+	entry := securityDigestEntry("sec-note") // a different category than e.prepared's "maintenance"
+	feed := productupdate.Feed{Entries: []productupdate.Entry{entry}}
+	e := newBroadcastEnv(t, func(d *DigestSource) { *d = DigestSource{Feed: feed, LatestRelease: "0.70.0"} })
+
+	manual := e.prepared("Manual campaign text.")
+	form := url.Values{"category": {"security"}, "digest_id": {"sec-2026-w39"}, "version": {"1"}}
+	if w := e.prepareDigest(e.connectIdentity(), bcIssuer, form); w.Code != http.StatusSeeOther {
+		t.Fatalf("prepare-digest = %d %s", w.Code, w.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/broadcasts", nil)
+	req = req.WithContext(auth.With(req.Context(), e.connectIdentity()))
+	w := httptest.NewRecorder()
+	e.srv.HandleList(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, "sec-2026-w39 v1 sha256:") {
+		t.Fatalf("page does not show the source digest for the sourced campaign:\n%s", body)
+	}
+	// The manual campaign's block must carry no "Source digest" line. Count
+	// occurrences: exactly one (the digest campaign's), not two.
+	if n := strings.Count(body, "Source digest"); n != 1 {
+		t.Fatalf(`"Source digest" appears %d times, want 1 (manual campaign %s must not show one)`, n, manual.CampaignID)
 	}
 }

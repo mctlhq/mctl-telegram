@@ -198,6 +198,109 @@ func TestBroadcastTools_ListAndGetReport(t *testing.T) {
 	}
 }
 
+// TestBroadcastTools_ListAndGetShowSourceRef is issue-683 task 9: the
+// read-only list_broadcasts/get_broadcast tools expose source_ref for a
+// campaign prepared from a digest, and null/omitted for a manual one. No
+// tool sets it -- there is no MCP path to prepare a digest campaign
+// (issue-683's Correction 2026-09-30 withdrew it), so the sourced campaign
+// here is created the same way the web handler does, straight through the
+// broadcast.Service and the store.
+func TestBroadcastTools_ListAndGetShowSourceRef(t *testing.T) {
+	srv, store, opUID := newBroadcastToolServer(t, true)
+	id := &auth.Identity{UserID: opUID, TelegramID: bcOperatorTG, Scopes: []string{BroadcastScope}}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Manual campaign: no source_ref.
+	res := callBroadcastTool(t, srv.toolPrepareBroadcast, id, map[string]any{"category": "maintenance", "text": "Manual text."})
+	if res.IsError {
+		t.Fatalf("prepare manual: %s", resultText(res))
+	}
+	var manual struct {
+		CampaignID string `json:"campaign_id"`
+	}
+	if err := json.Unmarshal([]byte(resultText(res)), &manual); err != nil {
+		t.Fatal(err)
+	}
+
+	// A frozen digest, stored the way productupdate.PersistDigest would.
+	digest := db.ProductUpdateDigest{
+		ID: "weekly-39", Version: 1, Category: string(db.CategorySecurity), ContentHash: "sha256:abc",
+		SourceRefs: []string{"docs/product-updates/x.yaml@content-sha256:" + strings.Repeat("a", 64)},
+		EntryIDs:   []string{"x"}, CreatedBy: opUID,
+	}
+	if stored, err := store.SaveProductUpdateDigest(ctx, digest, now); err != nil || !stored {
+		t.Fatalf("save digest: stored=%v err=%v", stored, err)
+	}
+	sourced, err := srv.Broadcast.Prepare(ctx, broadcast.Actor{UserID: opUID, TelegramID: bcOperatorTG, Surface: "web"}, broadcast.PrepareRequest{
+		Selector: broadcast.Selector{Category: "security"}, Text: "From the digest.",
+		SourceRef: &db.CampaignSourceRef{DigestID: digest.ID, DigestVersion: digest.Version, ContentHash: digest.ContentHash},
+	})
+	if err != nil {
+		t.Fatalf("prepare sourced: %v", err)
+	}
+
+	res = callBroadcastTool(t, srv.toolListBroadcasts, id, map[string]any{"state": "prepared"})
+	if res.IsError {
+		t.Fatalf("list: %s", resultText(res))
+	}
+	var list struct {
+		Campaigns []struct {
+			CampaignID string `json:"campaign_id"`
+			SourceRef  *struct {
+				DigestID      string `json:"digest_id"`
+				DigestVersion int    `json:"digest_version"`
+				ContentHash   string `json:"content_hash"`
+			} `json:"source_ref"`
+		} `json:"campaigns"`
+	}
+	if err := json.Unmarshal([]byte(resultText(res)), &list); err != nil {
+		t.Fatal(err)
+	}
+	var sawManual, sawSourced bool
+	for _, c := range list.Campaigns {
+		switch c.CampaignID {
+		case manual.CampaignID:
+			sawManual = true
+			if c.SourceRef != nil {
+				t.Fatalf("manual campaign has a source_ref: %+v", c.SourceRef)
+			}
+		case sourced.CampaignID:
+			sawSourced = true
+			if c.SourceRef == nil || c.SourceRef.DigestID != digest.ID || c.SourceRef.DigestVersion != digest.Version || c.SourceRef.ContentHash != digest.ContentHash {
+				t.Fatalf("sourced campaign source_ref = %+v, want %+v", c.SourceRef, digest)
+			}
+		}
+	}
+	if !sawManual || !sawSourced {
+		t.Fatalf("list did not include both campaigns: manual=%v sourced=%v (%+v)", sawManual, sawSourced, list)
+	}
+
+	res = callBroadcastTool(t, srv.toolGetBroadcast, id, map[string]any{"campaign_id": sourced.CampaignID})
+	if res.IsError {
+		t.Fatalf("get sourced: %s", resultText(res))
+	}
+	if !strings.Contains(resultText(res), digest.ID) || !strings.Contains(resultText(res), digest.ContentHash) {
+		t.Fatalf("get_broadcast does not show the source_ref: %s", resultText(res))
+	}
+}
+
+// TestNoDigestMCPTool is T-no-tool (issue-683's Correction 2026-09-30): the
+// owner decided v1 of the digest-to-broadcast hand-off goes through the
+// broadcasts page, not a new MCP mutation tool. No registered tool name may
+// contain "digest", and the portal allowlist golden file must not change --
+// TestPortalAllowlist_CoversEveryRegisteredTool already fails on any drift
+// between the registered tool set and docs/portal-allowlist.json, so an
+// unchanged allowlist run alongside this name check is the two-part
+// guarantee the correction asks for.
+func TestNoDigestMCPTool(t *testing.T) {
+	for _, tool := range (&Server{ToolFilter: ""}).newMCPServer().ListTools() {
+		if strings.Contains(tool.Tool.Name, "digest") {
+			t.Errorf("tool %q was registered; issue-683's Correction 2026-09-30 withdrew the digest MCP tool", tool.Tool.Name)
+		}
+	}
+}
+
 // The scope proves operator membership at mint time only. An id removed
 // from BROADCAST_OPERATORS keeps a live token until it expires, and that
 // token must be refused by every tool, the read-only ones included.

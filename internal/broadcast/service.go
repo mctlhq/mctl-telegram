@@ -108,6 +108,12 @@ type Actor struct {
 type PrepareRequest struct {
 	Selector Selector
 	Text     string
+	// SourceRef names the frozen product-update digest this body was
+	// rendered from (issue-683); nil for an operator-written campaign.
+	// CreateBroadcastCampaign writes it in the same INSERT as the rest of
+	// the row, so a prepared campaign can never carry digest-rendered text
+	// with no source_ref.
+	SourceRef *db.CampaignSourceRef
 }
 
 // SampleRecipient is one redacted entry of the preview sample: enough for an
@@ -223,6 +229,7 @@ func (s *Service) Prepare(ctx context.Context, actor Actor, req PrepareRequest) 
 		RecipientLimit: s.cfg.RecipientLimit,
 		PreviewCounts:  string(countsJSON),
 		ExpiresAt:      p.ExpiresAt,
+		SourceRef:      req.SourceRef,
 	}, now); err != nil {
 		return nil, err
 	}

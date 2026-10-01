@@ -43,6 +43,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/netctx"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
+	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/web"
@@ -94,6 +95,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Product-update feed (issue-683): loaded exactly once, for the process
+	// lifetime. A load failure or a non-release build version never blocks
+	// boot -- it is only ever consulted by the broadcasts page's
+	// "Prepare from digest" action and the /docs/product-updates page, both
+	// wired further down.
+	productUpdates := loadProductUpdateFeed(cfg.ProductUpdateFeedDir, version)
 
 	rawDB, err := db.OpenWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns,
 		dbConnectRetryInterval, dbConnectRetryTimeout)
@@ -423,6 +431,12 @@ func main() {
 	localBridge := web.LocalBridge(cfg.PublicBaseURL, showManage)
 	mux.Get("/docs/local-bridge", localBridge)
 	mux.Get("/docs/local-bridge/*", localBridge)
+	// The approved product-update feed, rendered for docs and web (issue-683
+	// task 10): the same loaded Feed that the broadcasts page's
+	// "Prepare from digest" action renders from, so docs, web and Telegram
+	// all read the same reviewed bytes.
+	mux.Get("/docs/product-updates", web.ProductUpdates(
+		productupdate.RenderDocs(productUpdates.Feed), productUpdates.Err, cfg.PublicBaseURL, showManage))
 
 	// Shared across every localjwt.Provider this process constructs (plain
 	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
@@ -500,10 +514,14 @@ func main() {
 		// connect-session cookie reaches it; the handler itself requires a
 		// token issued to the self-connect client, so an MCP token can
 		// never approve. See internal/web/broadcasts.go.
-		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID)
+		broadcastWeb := web.NewBroadcastServer(store, broadcastSvc, cfg.PublicBaseURL, oauth.ConnectClientID, productUpdates.DigestSource())
 		mux.With(manageAuth).Get("/telegram/connect/broadcasts", broadcastWeb.HandleList)
 		mux.With(manageAuth).Post("/telegram/connect/broadcasts/approve", broadcastWeb.HandleApprove)
 		mux.With(manageAuth).Post("/telegram/connect/broadcasts/cancel", broadcastWeb.HandleCancel)
+		// "Prepare from digest" (issue-683 task 6'): freezes the next digest
+		// for a category and prepares its campaign from the reviewed feed
+		// text. Same guard chain as approve/cancel above -- no new MCP tool.
+		mux.With(manageAuth).Post("/telegram/connect/broadcasts/prepare-digest", broadcastWeb.HandlePrepareDigest)
 	}
 
 	// Account endpoints — self-service disconnect/delete + status.
