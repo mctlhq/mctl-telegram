@@ -132,13 +132,7 @@ func (s *Store) UpdateReceivedAtTx(ctx context.Context, tx *sql.Tx, updateID int
 // ErrUpdateNotClaimable), where there is no dispatch transaction to read in
 // and the stored routing is immutable.
 func (s *Store) UpdateRouting(ctx context.Context, updateID int64) (kind string, chatID sql.NullInt64, err error) {
-	err = s.DB.QueryRowContext(ctx,
-		`SELECT kind, chat_id FROM bot_updates WHERE update_id = $1`, updateID,
-	).Scan(&kind, &chatID)
-	if err != nil {
-		return "", sql.NullInt64{}, fmt.Errorf("update routing: %w", err)
-	}
-	return kind, chatID, nil
+	return updateRouting(ctx, s.DB, updateID)
 }
 
 // UpdateRoutingTx returns the stored kind and chat_id of update_id, read inside
@@ -146,7 +140,12 @@ func (s *Store) UpdateRouting(ctx context.Context, updateID int64) (kind string,
 // a row whose stored routing facts differ from the request that names it: an
 // update_id is only ever dispatched as what it was accepted as.
 func (s *Store) UpdateRoutingTx(ctx context.Context, tx *sql.Tx, updateID int64) (kind string, chatID sql.NullInt64, err error) {
-	err = tx.QueryRowContext(ctx,
+	return updateRouting(ctx, tx, updateID)
+}
+
+// updateRouting serves both: *sql.DB and *sql.Tx each satisfy queryer.
+func updateRouting(ctx context.Context, q queryer, updateID int64) (kind string, chatID sql.NullInt64, err error) {
+	err = q.QueryRowContext(ctx,
 		`SELECT kind, chat_id FROM bot_updates WHERE update_id = $1`, updateID,
 	).Scan(&kind, &chatID)
 	if err != nil {

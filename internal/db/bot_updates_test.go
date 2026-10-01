@@ -267,3 +267,53 @@ func TestBotUpdates_MarkUpdateFailedIsTerminalAndDoesNotResurrect(t *testing.T) 
 		t.Errorf("outcome = %q, want %q -- a processed row must not be rewritten", outcome, OutcomeUnknownChat)
 	}
 }
+
+// TestBotUpdates_UpdateRoutingReadsTheStoredRow pins both entry points of the
+// shared routing read: the transactional one sees what the bridge dispatch
+// sees, the plain one what its processed-row path sees, and a missing row is
+// an error rather than an empty routing that could compare equal to anything.
+func TestBotUpdates_UpdateRoutingReadsTheStoredRow(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		assertUpdateRouting(t, newTestStore(t))
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := os.Getenv("TEST_DATABASE_URL")
+		if dsn == "" {
+			t.Skip("TEST_DATABASE_URL not set")
+		}
+		s := newPostgresTestStore(t, dsn)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM bot_updates`) })
+		assertUpdateRouting(t, s)
+	})
+}
+
+func assertUpdateRouting(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.AcceptUpdate(ctx, 9101, KindStartCommand, chat(4242)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptUpdate(ctx, 9102, KindUnsupported, sql.NullInt64{}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, read func(int64) (string, sql.NullInt64, error)) {
+		kind, c, err := read(9101)
+		if err != nil || kind != KindStartCommand || c != chat(4242) {
+			t.Errorf("%s(9101) = %q, %+v, %v; want start_command, 4242", name, kind, c, err)
+		}
+		kind, c, err = read(9102)
+		if err != nil || kind != KindUnsupported || c.Valid {
+			t.Errorf("%s(9102) = %q, %+v, %v; want unsupported, NULL chat", name, kind, c, err)
+		}
+		if _, _, err := read(9199); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("%s(missing) err = %v, want sql.ErrNoRows", name, err)
+		}
+	}
+	check("UpdateRouting", func(id int64) (string, sql.NullInt64, error) { return s.UpdateRouting(ctx, id) })
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	check("UpdateRoutingTx", func(id int64) (string, sql.NullInt64, error) { return s.UpdateRoutingTx(ctx, tx, id) })
+}
