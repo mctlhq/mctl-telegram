@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.76.0](https://github.com/mctlhq/mctl-telegram/compare/0.75.0...0.76.0) (2026-10-01)
+
+
+### Features
+
+* **agents:** issue-679-feat-client-lifecycle-integrate-identity ([5f31bfc](https://github.com/mctlhq/mctl-telegram/commit/5f31bfc0816b3a88ed85a55b555132a5d0de8400))
+* **agents:** issue-679-feat-client-lifecycle-integrate-identity ([93b3f18](https://github.com/mctlhq/mctl-telegram/commit/93b3f181389c41989f959cc2f90c727a45ac6d64))
+
+
+### Bug Fixes
+
+* address review findings ([03647e0](https://github.com/mctlhq/mctl-telegram/commit/03647e0a2764604a94cc5dea46ba66240f8eb79c))
+* **bot:** case-insensitive /start, stale-safe reachability, proposal tests ([c226470](https://github.com/mctlhq/mctl-telegram/commit/c226470292f896483a35ed2cb81d0919cc3c69b0))
+* **web:** gate the onboarding callout on an unsaved choice; tighten tests ([7ff031d](https://github.com/mctlhq/mctl-telegram/commit/7ff031dfafd52972067c086d12aded9df4dd0073))
+* **web:** treat a failed preferences read as unknown on the manage page ([e8ca8ff](https://github.com/mctlhq/mctl-telegram/commit/e8ca8ffe9fc195483a604e77bfbb6bcd4d69853f))
+
 ## [0.75.0](https://github.com/mctlhq/mctl-telegram/compare/0.74.0...0.75.0) (2026-10-01)
 
 
