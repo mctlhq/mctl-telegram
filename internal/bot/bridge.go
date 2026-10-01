@@ -294,6 +294,14 @@ func decodeObservation(w http.ResponseWriter, r *http.Request) (botStartObservat
 	if jsonstrict.RejectDuplicateKeys(raw) != nil {
 		return obs, http.StatusBadRequest
 	}
+	// Nor does it catch spelling: encoding/json matches struct fields
+	// case-insensitively, so "UPDATE_ID" would fill UpdateID, and
+	// {"update_id":1,"UPDATE_ID":2,...} passes the exact duplicate check above
+	// and decodes as 2. Require exactly the three lowercase names.
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || !exactObservationKeys(members) {
+		return obs, http.StatusBadRequest
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&obs); err != nil {
@@ -310,6 +318,21 @@ func decodeObservation(w http.ResponseWriter, r *http.Request) (botStartObservat
 	}
 	obs.ObservedAt = obs.ObservedAt.UTC()
 	return obs, 0
+}
+
+// observationKeys is the whole member set of an observation, spelled exactly.
+var observationKeys = [...]string{"update_id", "telegram_id", "observed_at"}
+
+func exactObservationKeys(members map[string]json.RawMessage) bool {
+	if len(members) != len(observationKeys) {
+		return false
+	}
+	for _, k := range observationKeys {
+		if _, ok := members[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func writeBridgeJSON(w http.ResponseWriter, status int, body string) {

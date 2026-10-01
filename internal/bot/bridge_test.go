@@ -98,6 +98,16 @@ func TestBridge_RejectsAnythingButTheThreeFields(t *testing.T) {
 		"duplicate update_id":   fmt.Sprintf(`{"update_id":1,"update_id":2,"telegram_id":4242,"observed_at":%q}`, at),
 		"duplicate telegram_id": fmt.Sprintf(`{"update_id":1,"telegram_id":9999,"telegram_id":4242,"observed_at":%q}`, at),
 		"duplicate observed_at": fmt.Sprintf(`{"update_id":1,"telegram_id":4242,"observed_at":%q,"observed_at":%q}`, at, at),
+		// encoding/json also matches fields case-insensitively: an alias
+		// alone, or a lowercase+uppercase pair that the exact duplicate
+		// check sees as two names, must not decode.
+		"alias UPDATE_ID":           fmt.Sprintf(`{"UPDATE_ID":1,"telegram_id":4242,"observed_at":%q}`, at),
+		"alias Telegram_Id":         fmt.Sprintf(`{"update_id":1,"Telegram_Id":4242,"observed_at":%q}`, at),
+		"alias Observed_At":         fmt.Sprintf(`{"update_id":1,"telegram_id":4242,"Observed_At":%q}`, at),
+		"update_id + UPDATE_ID":     fmt.Sprintf(`{"update_id":1,"UPDATE_ID":2,"telegram_id":4242,"observed_at":%q}`, at),
+		"telegram_id + TELEGRAM_ID": fmt.Sprintf(`{"update_id":1,"telegram_id":9999,"TELEGRAM_ID":4242,"observed_at":%q}`, at),
+		"observed_at + OBSERVED_AT": fmt.Sprintf(`{"update_id":1,"telegram_id":4242,"observed_at":%q,"OBSERVED_AT":%q}`, at, at),
+		"array body":                `[1,2,3]`,
 	} {
 		if w := postObservation(h, "Bearer "+testBridgeToken, body); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", name, w.Code)
