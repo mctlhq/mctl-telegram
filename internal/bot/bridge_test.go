@@ -93,8 +93,9 @@ func TestBridge_RejectsAnythingButTheThreeFields(t *testing.T) {
 		"future time":   obsBody(1, 4242, time.Now().Add(time.Hour)),
 		"trailing":      obsBody(1, 4242, time.Now().Add(-time.Minute)) + `{}`,
 		"not json":      `update_id=1`,
-		// encoding/json keeps the LAST of a repeated member, which
-		// DisallowUnknownFields does not catch.
+		// encoding/json keeps the LAST of a repeated member, and the
+		// member-set check alone would see three keys; jsonstrict's
+		// duplicate walk is what rejects these.
 		"duplicate update_id":   fmt.Sprintf(`{"update_id":1,"update_id":2,"telegram_id":4242,"observed_at":%q}`, at),
 		"duplicate telegram_id": fmt.Sprintf(`{"update_id":1,"telegram_id":9999,"telegram_id":4242,"observed_at":%q}`, at),
 		"duplicate observed_at": fmt.Sprintf(`{"update_id":1,"telegram_id":4242,"observed_at":%q,"observed_at":%q}`, at, at),
@@ -543,6 +544,26 @@ func TestBridge_OversizedBodyIsRejected(t *testing.T) {
 	atLimit := valid + strings.Repeat(" ", maxObservationBody-len(valid))
 	if w := postObservation(h, "Bearer "+testBridgeToken, atLimit); w.Code != http.StatusAccepted {
 		t.Errorf("body of exactly the limit: status = %d, want 202", w.Code)
+	}
+}
+
+func TestBridge_MethodGuardAfterAuth(t *testing.T) {
+	h := bridgeHandler(t, newBotTestStore(t), nil)
+	get := func(auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, BotStartObservationPath, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	if w := get(""); w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET = %d, want 401 like every other unauthenticated request", w.Code)
+	}
+	w := get("Bearer " + testBridgeToken)
+	if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodPost {
+		t.Errorf("authenticated GET = %d Allow=%q, want 405 Allow=POST", w.Code, w.Header().Get("Allow"))
 	}
 }
 

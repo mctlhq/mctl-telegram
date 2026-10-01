@@ -152,13 +152,17 @@ func newBotStartObservationHandler(store bridgeStore, record recordFunc, auth Br
 		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Authentication first, so an unauthenticated caller gets 401 for
+		// every method. Mounted with chi's mux.Method, a non-POST never
+		// reaches this handler (chi answers 405 itself); the method check is
+		// for a mount that does not filter methods.
+		if auth == nil || !auth.Authenticate(r) {
+			writeBridgeJSON(w, http.StatusUnauthorized, `{"error":"unauthorized"}`)
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			writeBridgeJSON(w, http.StatusMethodNotAllowed, `{"error":"method_not_allowed"}`)
-			return
-		}
-		if auth == nil || !auth.Authenticate(r) {
-			writeBridgeJSON(w, http.StatusUnauthorized, `{"error":"unauthorized"}`)
 			return
 		}
 		obs, status := decodeObservation(w, r)
