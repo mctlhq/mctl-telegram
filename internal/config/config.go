@@ -152,7 +152,8 @@ type Config struct {
 	// BotStartBridgeToken authenticates the bot-start bridge (issue-679):
 	// mctl-agent owns the login bot's webhook and forwards a client's /start
 	// to POST /internal/bot-start-observations with this bearer token. Empty
-	// (the default) leaves the route unmounted. In production this, not
+	// (the default) leaves the route unmounted; set but shorter than
+	// bot.MinBridgeTokenLen fails startup. In production this, not
 	// BotReceiverEnabled, is how /start reaches this service: getUpdates
 	// cannot run against a bot whose webhook is set.
 	BotStartBridgeToken string

@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -34,25 +40,121 @@ func TestMountBotStartBridge(t *testing.T) {
 		return w.Code
 	}
 
-	for name, token := range map[string]string{
-		"unset": "",
-		"short": strings.Repeat("a", bot.MinBridgeTokenLen-1),
-	} {
-		mux := chi.NewRouter()
-		if mountBotStartBridge(mux, store, m, token) {
-			t.Errorf("%s token: bridge reported mounted", name)
-		}
-		if code := post(mux); code != http.StatusNotFound {
-			t.Errorf("%s token: status = %d, want 404 (route absent)", name, code)
-		}
+	// Unset: not configured, not an error, route absent.
+	mux := chi.NewRouter()
+	if mounted, err := mountBotStartBridge(mux, store, m, ""); mounted || err != nil {
+		t.Errorf("unset token: mounted=%v err=%v, want false, nil", mounted, err)
+	}
+	if code := post(mux); code != http.StatusNotFound {
+		t.Errorf("unset token: status = %d, want 404 (route absent)", code)
 	}
 
-	mux := chi.NewRouter()
-	if !mountBotStartBridge(mux, store, m, strings.Repeat("a", bot.MinBridgeTokenLen)) {
-		t.Fatal("valid token: bridge not mounted")
+	// Set but too short: a startup error (main exits), route absent, and the
+	// error does not echo the token.
+	short := strings.Repeat("s", bot.MinBridgeTokenLen-1)
+	mux = chi.NewRouter()
+	mounted, err := mountBotStartBridge(mux, store, m, short)
+	if err == nil || mounted {
+		t.Errorf("short token: mounted=%v err=%v, want false and an error", mounted, err)
+	}
+	if err != nil && strings.Contains(err.Error(), short) {
+		t.Errorf("startup error echoes the token: %v", err)
+	}
+	if code := post(mux); code != http.StatusNotFound {
+		t.Errorf("short token: status = %d, want 404 (route absent)", code)
+	}
+
+	mux = chi.NewRouter()
+	if mounted, err := mountBotStartBridge(mux, store, m, strings.Repeat("a", bot.MinBridgeTokenLen)); !mounted || err != nil {
+		t.Fatalf("valid token: mounted=%v err=%v", mounted, err)
 	}
 	// Mounted, and guarded by its own auth rather than open.
 	if code := post(mux); code != http.StatusUnauthorized {
 		t.Errorf("valid token, unauthenticated call: status = %d, want 401", code)
 	}
+}
+
+// TestServerBootWithBridgeToken is the process-level half: a set but too short
+// BOT_START_BRIDGE_TOKEN makes the real binary exit non-zero before serving,
+// without echoing the token, while an unset one boots normally.
+func TestServerBootWithBridgeToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the server binary")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "server")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build server: %v\n%s", err, out)
+	}
+	start := func(t *testing.T, token string) (*exec.Cmd, *syncBuffer, chan error, string) {
+		addr := freeLoopbackAddr(t)
+		cmd := exec.Command(bin)
+		cmd.Env = append(os.Environ(),
+			"AUTH_MODE=local-dev",
+			"ADDR="+addr,
+			"PUBLIC_BASE_URL=http://"+addr,
+			"DATABASE_URL=file:"+filepath.Join(t.TempDir(), "boot.db"),
+			"BOT_START_BRIDGE_TOKEN="+token,
+		)
+		logs := &syncBuffer{}
+		cmd.Stdout, cmd.Stderr = logs, logs
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		return cmd, logs, exited, addr
+	}
+
+	t.Run("set but short is fatal", func(t *testing.T) {
+		short := "short-bridge-token-value"
+		cmd, logs, exited, _ := start(t, short)
+		select {
+		case err := <-exited:
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() == 0 {
+				t.Fatalf("exit = %v, want a non-zero exit\n%s", err, logs.String())
+			}
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			<-exited
+			t.Fatalf("server kept running with a short bridge token\n%s", logs.String())
+		}
+		out := logs.String()
+		if !strings.Contains(out, "BOT_START_BRIDGE_TOKEN is set but shorter than") {
+			t.Errorf("exit did not name the bridge token problem:\n%s", out)
+		}
+		if strings.Contains(out, short) {
+			t.Errorf("startup log echoes the token:\n%s", out)
+		}
+	})
+
+	t.Run("unset boots", func(t *testing.T) {
+		cmd, logs, exited, addr := start(t, "")
+		t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			resp, err := http.Get("http://" + addr + "/healthz")
+			if err == nil {
+				_ = resp.Body.Close()
+				break
+			}
+			select {
+			case werr := <-exited:
+				exited <- werr
+				t.Fatalf("server exited without a bridge token: %v\n%s", werr, logs.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("server never answered /healthz\n%s", logs.String())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !strings.Contains(logs.String(), "bot-start bridge disabled") {
+			t.Errorf("unset token did not log the bridge as disabled:\n%s", logs.String())
+		}
+	})
 }

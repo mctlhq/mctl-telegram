@@ -680,7 +680,13 @@ func main() {
 	// MCP surface, behind its own bearer token, and only when that token is
 	// configured. Like every route, it must be registered before srv below
 	// starts serving the router.
-	mountBotStartBridge(mux, store, m, cfg.BotStartBridgeToken)
+	// A set but unusable token fails startup like any other auth init
+	// failure: an operator who configured the bridge must not get a pod that
+	// silently 404s every forwarded /start.
+	if _, err := mountBotStartBridge(mux, store, m, cfg.BotStartBridgeToken); err != nil {
+		slog.Error("bot-start bridge", "err", err)
+		os.Exit(1)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -1227,19 +1233,20 @@ func preregisteredClients(in []config.PreregisteredClient) []oauth.Preregistered
 }
 
 // mountBotStartBridge mounts POST /internal/bot-start-observations when token
-// is set and long enough; otherwise the route does not exist. Split out of main
-// so a test can assert both halves.
-func mountBotStartBridge(mux chi.Router, store *db.Store, m *metrics.Registry, token string) bool {
+// is set. An empty token means the bridge is not configured: the route does
+// not exist and the result is (false, nil). A token that is set but unusable
+// is an error, which main treats as fatal. Split out of main so a test can
+// assert every case.
+func mountBotStartBridge(mux chi.Router, store *db.Store, m *metrics.Registry, token string) (bool, error) {
 	if token == "" {
 		slog.Info("bot-start bridge disabled", "reason", "BOT_START_BRIDGE_TOKEN not set")
-		return false
+		return false, nil
 	}
 	auth, err := bot.NewBearerTokenAuth(token)
 	if err != nil {
-		slog.Warn("bot-start bridge disabled", "reason", "BOT_START_BRIDGE_TOKEN shorter than the minimum length")
-		return false
+		return false, fmt.Errorf("BOT_START_BRIDGE_TOKEN is set but shorter than %d characters", bot.MinBridgeTokenLen)
 	}
 	mux.Method(http.MethodPost, bot.BotStartObservationPath, bot.BotStartObservationHandler(store, auth, bot.NewMetricsCounter(m)))
 	slog.Info("bot-start bridge enabled", "path", bot.BotStartObservationPath)
-	return true
+	return true, nil
 }
