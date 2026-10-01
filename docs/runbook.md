@@ -2659,16 +2659,30 @@ this client". It arrives by one of two paths that share one business rule
   — so the caller learns nothing about who is a client. `401` missing or wrong
   token. `400` any other field (including `user_id`), trailing data, a
   non-positive id, or an `observed_at` that is missing or more than 5 minutes
-  in the future. `503` database failure: retry with the same body.
+  in the future. `413` a body over 4 KiB. `503` a database or handler
+  failure: retry with the same body.
 - **Idempotency.** `update_id` is the key in `bot_updates`, as for the
   receiver. A repeat is counted `duplicate` and changes nothing; a row whose
   earlier dispatch failed is processed by the retry. An `update_id` already
-  stored for another chat or kind is never dispatched as this one.
+  stored for another chat or kind is never dispatched as this one: it is
+  answered `202`, counted `routing_mismatch` and logged at Warn without ids.
+  A correct forwarder never produces it, so any count is worth investigating.
+- **Recovery is the caller's retry, and nothing else.** In production no
+  sweeper exists for a stranded bridge row: the receiver's pending-row sweep
+  runs only inside the long-poll receiver, which is off. A row accepted on a
+  `503` stays unprocessed until the caller resends the same body. The
+  mctl-agent forwarder therefore retries on every 5xx (and on a transport
+  error) with the identical `update_id`; a forwarder that gives up leaves that
+  `/start` unrecorded.
 - **Ordering.** `observed_at` is the observation time. A `/start` older than a
   stored conclusive outcome (for example a later `blocked` from a broadcast)
   does not overwrite it.
 - **Metrics and logs.** The same `mctl_bot_updates_total{kind="start_command"}`
-  series as the receiver. Logs carry the error only, never ids or text.
+  series as the receiver, with the same split: `dispatch_error` is the
+  database or routing failing, `handler_error` is the business rule failing,
+  plus the bridge-only `routing_mismatch`. Error text is logged only after
+  removing the token, the request's ids and phone-like digit runs; never
+  message text.
 - **Config.** `BOT_START_BRIDGE_TOKEN` on this service; the same value goes to
   mctl-agent through Vault/ExternalSecret (never in mctl-gitops values, which
   is public). Rotate by writing a new value to both and restarting both; until
