@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 )
 
-const testBridgeToken = "bridge-token-0123456789abcdef0123456789"
+const testBridgeToken = "bridge-token-abcdefghijklmnopqrstuvwxyzABCDEF"
 
 func bridgeHandler(t *testing.T, store *db.Store, c Counter) http.Handler {
 	t.Helper()
@@ -282,37 +283,181 @@ func TestBridge_UpdateIDOfAnotherChatIsNotDispatched(t *testing.T) {
 	if _, err := store.AcceptUpdateAt(ctx, 50, db.KindStartCommand, sql.NullInt64{Int64: 7777, Valid: true}, at); err != nil {
 		t.Fatal(err)
 	}
-	if w := postObservation(bridgeHandler(t, store, nil), "Bearer "+testBridgeToken, obsBody(50, 4242, at)); w.Code != http.StatusAccepted {
+	c := newCounter()
+	if w := postObservation(bridgeHandler(t, store, c), "Bearer "+testBridgeToken, obsBody(50, 4242, at)); w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d", w.Code)
 	}
 	if r, _ := store.GetBotReachability(ctx, victim); r != nil {
 		t.Errorf("an update_id accepted for another chat recorded reachability for this one: %+v", r)
 	}
+	if got := c.get("start_command/routing_mismatch"); got != 1 {
+		t.Errorf("routing_mismatch = %d, want 1", got)
+	}
+	if got := c.get("start_command/duplicate"); got != 0 {
+		t.Errorf("duplicate = %d, want 0: a routing mismatch must not read as a benign redelivery", got)
+	}
 }
 
-func TestBridge_LogsNoIdentifiers(t *testing.T) {
-	store := newBotTestStore(t)
-	seedStartUser(t, store, 4242)
+// faultStore wraps the real store and lets a test fail one step with an
+// error of its choosing.
+type faultStore struct {
+	*db.Store
+	acceptErr   error
+	dispatchErr error
+}
+
+func (f faultStore) AcceptUpdateAt(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64, receivedAt time.Time) (bool, error) {
+	if f.acceptErr != nil {
+		return false, f.acceptErr
+	}
+	return f.Store.AcceptUpdateAt(ctx, updateID, kind, chatID, receivedAt)
+}
+
+func (f faultStore) DispatchOnce(ctx context.Context, updateID int64, fn func(context.Context, *sql.Tx) (string, error)) error {
+	if f.dispatchErr != nil {
+		return f.dispatchErr
+	}
+	return f.Store.DispatchOnce(ctx, updateID, fn)
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
-	h := bridgeHandler(t, store, nil)
-	postObservation(h, "Bearer "+testBridgeToken, obsBody(60, 4242, time.Now().Add(-time.Minute)))
-	// Force the logged failure path: a closed database.
-	_ = store.DB.Close()
-	if w := postObservation(h, "Bearer "+testBridgeToken, obsBody(61, 4242, time.Now().Add(-time.Minute))); w.Code != http.StatusServiceUnavailable {
-		t.Errorf("store failure status = %d, want 503", w.Code)
+func faultHandler(t *testing.T, fs faultStore, record recordFunc, c Counter) http.Handler {
+	t.Helper()
+	auth, err := NewBearerTokenAuth(testBridgeToken)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "bot-start bridge") {
-		t.Fatalf("captured no bridge log line, so absence proves nothing: %q", out)
+	if record == nil {
+		record = func(ctx context.Context, tx *sql.Tx, tg, upd int64) (string, error) {
+			return RecordBotStartTx(ctx, fs.Store, tx, tg, upd)
+		}
 	}
-	for _, leak := range []string{"4242", testBridgeToken, "\"60\"", "update_id=6"} {
+	return newBotStartObservationHandler(fs, record, auth, c)
+}
+
+// leakyErr names every secret the bridge holds for this request: a short
+// Telegram id (below audit.ScrubText's 7-digit threshold), the update_id and
+// the bearer token.
+func leakyErr(tgID, updateID int64) error {
+	return fmt.Errorf("lookup chat %d (update %d) failed: Authorization: Bearer %s", tgID, updateID, testBridgeToken)
+}
+
+func assertScrubbed(t *testing.T, out, wantLine string, tgID, updateID int64) {
+	t.Helper()
+	if !strings.Contains(out, wantLine) {
+		t.Fatalf("captured no %q log line, so absence proves nothing: %q", wantLine, out)
+	}
+	if !strings.Contains(out, "[redacted]") {
+		t.Errorf("error was not logged in scrubbed form: %s", out)
+	}
+	for _, leak := range []string{strconv.FormatInt(tgID, 10), strconv.FormatInt(updateID, 10), testBridgeToken} {
 		if strings.Contains(out, leak) {
 			t.Errorf("log leaks %q: %s", leak, out)
 		}
+	}
+}
+
+func TestBridge_ErrorsAreScrubbedAndSplitByCause(t *testing.T) {
+	const tgID, updateID = int64(4242), int64(987654)
+	at := time.Now().Add(-time.Minute)
+	cases := []struct {
+		name, line, outcome string
+		fs                  func(*db.Store) faultStore
+		record              recordFunc
+	}{
+		{
+			name: "accept fails", line: "bot-start bridge: accept failed", outcome: "dispatch_error",
+			fs: func(s *db.Store) faultStore { return faultStore{Store: s, acceptErr: leakyErr(tgID, updateID)} },
+		},
+		{
+			name: "dispatch infrastructure fails", line: "bot-start bridge: dispatch failed", outcome: "dispatch_error",
+			fs: func(s *db.Store) faultStore { return faultStore{Store: s, dispatchErr: leakyErr(tgID, updateID)} },
+		},
+		{
+			name: "handler fails", line: "bot-start bridge: handler failed", outcome: "handler_error",
+			fs: func(s *db.Store) faultStore { return faultStore{Store: s} },
+			record: func(context.Context, *sql.Tx, int64, int64) (string, error) {
+				return "", leakyErr(tgID, updateID)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newBotTestStore(t)
+			seedStartUser(t, store, tgID)
+			buf := captureLogs(t)
+			c := newCounter()
+			w := postObservation(faultHandler(t, tc.fs(store), tc.record, c), "Bearer "+testBridgeToken, obsBody(updateID, tgID, at))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Errorf("status = %d, want 503", w.Code)
+			}
+			for _, o := range []string{"dispatch_error", "handler_error"} {
+				want := 0
+				if o == tc.outcome {
+					want = 1
+				}
+				if got := c.get("start_command/" + o); got != want {
+					t.Errorf("%s = %d, want %d", o, got, want)
+				}
+			}
+			assertScrubbed(t, buf.String(), tc.line, tgID, updateID)
+		})
+	}
+}
+
+func TestBridge_RoutingMismatchLogIsScrubbed(t *testing.T) {
+	ctx := context.Background()
+	store := newBotTestStore(t)
+	seedStartUser(t, store, 4242)
+	at := time.Now().Add(-time.Minute)
+	if _, err := store.AcceptUpdateAt(ctx, 55, db.KindStartCommand, sql.NullInt64{Int64: 7777, Valid: true}, at); err != nil {
+		t.Fatal(err)
+	}
+	buf := captureLogs(t)
+	postObservation(bridgeHandler(t, store, nil), "Bearer "+testBridgeToken, obsBody(55, 4242, at))
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "different routing") {
+		t.Fatalf("routing mismatch produced no warning: %q", out)
+	}
+	for _, leak := range []string{"4242", "7777", "=55 ", testBridgeToken} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log leaks %q: %s", leak, out)
+		}
+	}
+}
+
+func TestBridge_OversizedBodyIsRejected(t *testing.T) {
+	store := newBotTestStore(t)
+	uid := seedStartUser(t, store, 4242)
+	h := bridgeHandler(t, store, nil)
+	valid := obsBody(70, 4242, time.Now().Add(-time.Minute))
+	for name, body := range map[string]string{
+		// A valid object padded past the limit with JSON whitespace: a
+		// LimitReader would show the decoder a clean EOF and accept it.
+		"padded past the limit": valid + strings.Repeat(" ", maxObservationBody),
+		// The first 4 KiB decode cleanly; the excess is a second object.
+		"trailing object past the limit": valid + strings.Repeat(" ", maxObservationBody-len(valid)) + `{"user_id":1}`,
+	} {
+		w := postObservation(h, "Bearer "+testBridgeToken, body)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s: status = %d, want 413", name, w.Code)
+		}
+	}
+	if r, _ := store.GetBotReachability(context.Background(), uid); r != nil {
+		t.Errorf("an oversized body recorded reachability: %+v", r)
+	}
+	// Exactly at the limit is still accepted.
+	atLimit := valid + strings.Repeat(" ", maxObservationBody-len(valid))
+	if w := postObservation(h, "Bearer "+testBridgeToken, atLimit); w.Code != http.StatusAccepted {
+		t.Errorf("body of exactly the limit: status = %d, want 202", w.Code)
 	}
 }
 
