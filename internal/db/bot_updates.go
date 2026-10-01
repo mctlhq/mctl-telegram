@@ -79,11 +79,25 @@ type PendingUpdate struct {
 // already be claimed or processed and rewriting it would resurrect work that
 // has been done.
 func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64) (accepted bool, err error) {
+	return s.AcceptUpdateAt(ctx, updateID, kind, chatID, time.Now().UTC())
+}
+
+// AcceptUpdateAt is AcceptUpdate with a caller-supplied received_at. It exists
+// for updates this service did not poll itself: the bot-start bridge
+// (issue-679) records a /start that mctl-agent took off the bot's webhook, and
+// the trusted time of that observation is Telegram's message date, not the
+// moment the bridge call arrived. Handlers read received_at as the observation
+// time (UpdateReceivedAtTx), so a late or retried forward still compares as
+// the observation it is.
+//
+// The same never-overwrite rule applies: an existing row keeps its kind,
+// chat_id and received_at.
+func (s *Store) AcceptUpdateAt(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64, receivedAt time.Time) (accepted bool, err error) {
 	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO bot_updates(update_id, kind, chat_id, received_at)
 		 VALUES($1, $2, $3, $4)
 		 ON CONFLICT (update_id) DO NOTHING`,
-		updateID, kind, chatID, time.Now().UTC(),
+		updateID, kind, chatID, receivedAt.UTC(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("accept update: %w", err)
@@ -113,12 +127,47 @@ func (s *Store) UpdateReceivedAtTx(ctx context.Context, tx *sql.Tx, updateID int
 	return at.Time.UTC(), nil
 }
 
+// UpdateRouting is UpdateRoutingTx outside a transaction. The bridge uses it
+// for a row that is already processed (DispatchOnce answered
+// ErrUpdateNotClaimable), where there is no dispatch transaction to read in
+// and the stored routing is immutable.
+func (s *Store) UpdateRouting(ctx context.Context, updateID int64) (kind string, chatID sql.NullInt64, err error) {
+	return updateRouting(ctx, s.DB, updateID)
+}
+
+// UpdateRoutingTx returns the stored kind and chat_id of update_id, read inside
+// the dispatch transaction. The bot-start bridge uses it to refuse dispatching
+// a row whose stored routing facts differ from the request that names it: an
+// update_id is only ever dispatched as what it was accepted as.
+func (s *Store) UpdateRoutingTx(ctx context.Context, tx *sql.Tx, updateID int64) (kind string, chatID sql.NullInt64, err error) {
+	return updateRouting(ctx, tx, updateID)
+}
+
+// updateRouting serves both: *sql.DB and *sql.Tx each satisfy queryer.
+func updateRouting(ctx context.Context, q queryer, updateID int64) (kind string, chatID sql.NullInt64, err error) {
+	err = q.QueryRowContext(ctx,
+		`SELECT kind, chat_id FROM bot_updates WHERE update_id = $1`, updateID,
+	).Scan(&kind, &chatID)
+	if err != nil {
+		return "", sql.NullInt64{}, fmt.Errorf("update routing: %w", err)
+	}
+	return kind, chatID, nil
+}
+
 // NextOffset returns the offset to pass to the next getUpdates call: one past
 // the highest update_id this table durably holds, or 0 when it is empty (which
 // Telegram reads as "send me whatever you have").
 //
 // Read from the database, never from memory. See the package comment -- this is
 // what keeps the acknowledgement behind durable ownership.
+//
+// Rows written through AcceptUpdateAt by the bot-start bridge (issue-679) carry
+// the same Telegram update_id space and count here too. That only matters to a
+// long-poll consumer, and a long-poll consumer cannot exist on a token whose
+// webhook is set (getUpdates answers 409), which is exactly the token the
+// bridge serves. If the two were ever pointed at one token after a webhook
+// removal, the offset would skip past updates the bridge already holds, which
+// is correct: those updates are durably owned.
 func (s *Store) NextOffset(ctx context.Context) (int64, error) {
 	var maxID sql.NullInt64
 	if err := s.DB.QueryRowContext(ctx,

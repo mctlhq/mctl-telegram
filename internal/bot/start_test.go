@@ -329,8 +329,11 @@ func TestStartMetrics(t *testing.T) {
 
 	ch := make(chan *prometheus.Desc, 1)
 	m.BotUpdatesTotal.Describe(ch)
-	if d := (<-ch).String(); !strings.Contains(d, db.OutcomeReachabilityRecorded) {
-		t.Errorf("metric help does not name %q: %s", db.OutcomeReachabilityRecorded, d)
+	d := (<-ch).String()
+	for _, o := range []string{db.OutcomeReachabilityRecorded, OutcomeRoutingMismatch, OutcomeDuplicate, OutcomeDispatchError, db.OutcomeHandlerError} {
+		if !strings.Contains(d, o) {
+			t.Errorf("metric help does not name %q: %s", o, d)
+		}
 	}
 
 	allowed := map[string]bool{db.KindMessage: true, db.KindStartCommand: true, db.KindCallbackQuery: true, db.KindUnsupported: true}

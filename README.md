@@ -104,6 +104,8 @@ Key variables:
 | `TELEGRAM_OIDC_CLIENT_SECRET` | OIDC client secret for the login bot                                        |
 | `TELEGRAM_LOGIN_BOT_TOKEN`    | Bot token — used only for the new-client welcome digest                     |
 | `TELEGRAM_LOGIN_BOT_USERNAME` | Optional. Login bot @username for the `t.me` start link on the connect success and manage pages (issue-679). Not the 0.16.0 widget variable of the same name, which was removed (see CHANGELOG 0.16.0) |
+| `BOT_RECEIVER_ENABLED`        | Optional, default off. `true` long-polls `getUpdates` for the login bot. Dev/local bots only: production updates arrive through mctl-agent's webhook, and polling a webhook-owned token only returns 409. Never enable it against such a token, and never call `deleteWebhook` to make it work |
+| `BOT_START_BRIDGE_TOKEN`      | Optional. Bearer token (min 32 chars) for `POST /internal/bot-start-observations`, through which mctl-agent forwards a client's `/start` (issue-679). Unset: the route is not mounted. Set but shorter than 32: startup fails. See the runbook |
 | `TG_API_ID`                   | Telegram API id from my.telegram.org                                        |
 | `TG_API_HASH`                 | Telegram API hash from my.telegram.org                                      |
 | `ENCRYPTION_KEY`              | 32-byte hex key for encrypting session blobs at rest                        |

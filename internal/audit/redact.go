@@ -83,6 +83,11 @@ var sensitiveKeys = map[string]struct{}{
 	"callback_data":    {},
 	"callback_payload": {},
 	"update_json":      {},
+	// Bot-start bridge (issue-679). The shared bearer mctl-agent presents,
+	// under every key a config dump or a log line would plausibly use: the
+	// env name and the Go field name, both matched case-insensitively.
+	"bot_start_bridge_token": {},
+	"botstartbridgetoken":    {},
 	// send_media byte sources. file_base64 is file contents; file_path is a
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},

@@ -83,6 +83,15 @@ func main() {
 		slog.Error("boot guard", "err", err)
 		os.Exit(1)
 	}
+	// The bot-start bridge authenticator is validated here, before anything
+	// is opened or any background worker starts, so a set but unusable
+	// BOT_START_BRIDGE_TOKEN exits without skipping a shutdown tail. The
+	// route itself is mounted later with the rest of the router.
+	bridgeAuth, err := botStartBridgeAuth(cfg.BotStartBridgeToken)
+	if err != nil {
+		slog.Error("bot-start bridge", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("starting",
 		"auth_mode", cfg.AuthMode,
 		"auth_required", cfg.AuthRequired,
@@ -674,6 +683,15 @@ func main() {
 	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
 	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
 
+	// The bot-start bridge (issue-679) is the production path for a client's
+	// /start: the login bot's webhook belongs to mctl-agent, which forwards
+	// one normalised observation here. Mounted outside auth.Middleware and the
+	// MCP surface, behind its own bearer token, and only when that token is
+	// configured. Like every route, it must be registered before srv below
+	// starts serving the router.
+	// bridgeAuth was validated at the top of main; nil means not configured.
+	mountBotStartBridge(mux, store, m, bridgeAuth)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           mux,
@@ -1216,4 +1234,34 @@ func preregisteredClients(in []config.PreregisteredClient) []oauth.Preregistered
 		})
 	}
 	return out
+}
+
+// botStartBridgeAuth builds the bridge authenticator from token. An empty
+// token means the bridge is not configured: (nil, nil). A token that is set
+// but unusable is an error, which main treats as fatal: an operator who
+// configured the bridge must not get a pod that silently 404s every
+// forwarded /start. The constructor's error is wrapped, never replaced, and
+// neither ever contains the token.
+func botStartBridgeAuth(token string) (*bot.BearerTokenAuth, error) {
+	if token == "" {
+		return nil, nil
+	}
+	auth, err := bot.NewBearerTokenAuth(token)
+	if err != nil {
+		return nil, fmt.Errorf("BOT_START_BRIDGE_TOKEN is set but unusable: %w", err)
+	}
+	return auth, nil
+}
+
+// mountBotStartBridge mounts POST /internal/bot-start-observations when auth
+// is non-nil; otherwise the route does not exist. Split out of main so a test
+// can assert both halves.
+func mountBotStartBridge(mux chi.Router, store *db.Store, m *metrics.Registry, auth *bot.BearerTokenAuth) bool {
+	if auth == nil {
+		slog.Info("bot-start bridge disabled", "reason", "BOT_START_BRIDGE_TOKEN not set")
+		return false
+	}
+	mux.Method(http.MethodPost, bot.BotStartObservationPath, bot.BotStartObservationHandler(store, auth, bot.NewMetricsCounter(m)))
+	slog.Info("bot-start bridge enabled", "path", bot.BotStartObservationPath)
+	return true
 }
