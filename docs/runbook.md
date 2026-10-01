@@ -2285,6 +2285,15 @@ message and edit that the agent listener ingests also gets an `event_outbox` row
 <a id="login-bot-update-receiver"></a>
 ## Login-bot update receiver
 
+> **Production does not use this receiver.** The login bot's webhook is set to
+> mctl-agent, which owns it (the operator channel lives on the same bot), and
+> `getUpdates` answers `409 Conflict` for as long as a webhook is set. A
+> client's `/start` therefore reaches this service through the bot-start bridge
+> (see "Login bot `/start` and onboarding (issue-679)" below). Never enable
+> `BOT_RECEIVER_ENABLED` against a webhook-owned token and never call
+> `deleteWebhook` to make it work: that takes the bot away from mctl-agent.
+> The receiver remains for bots without a webhook (local/dev).
+
 Inbound Bot API updates for the login bot (issue-619). **Transport only** — it
 makes updates durable and hands them to a handler registry. It implements no
 commands: `/subscribe` and `/settings` belong to the #438 split, delivery
@@ -2355,7 +2364,11 @@ sent, that information does not exist in our systems by design.
 
 ### Symptom: `409 Conflict: terminated by other getUpdates request`
 
-Two consumers are polling one token. Check whether the receiver is enabled in
+If the error text instead says `can't use getUpdates method while webhook is
+active`, the receiver was enabled against a webhook-owned token (in production,
+mctl-agent's). Turn `BOT_RECEIVER_ENABLED` off; do not delete the webhook.
+
+Otherwise two consumers are polling one token. Check whether the receiver is enabled in
 more than one environment, or whether a developer is running a local instance
 against the production token. The poll fails, backs off and retries; **no update
 is lost** while this is happening, because a failed poll acknowledges nothing.
@@ -2618,10 +2631,55 @@ refusal.
 
 ## Login bot `/start` and onboarding (issue-679)
 
-The inbound login-bot receiver (`BOT_RECEIVER_ENABLED`, issue-619) has one
-handler: a `/start` the client sent to the login bot.
+A `/start` the client sent to the login bot records "the bot may now message
+this client". It arrives by one of two paths that share one business rule
+(`bot.RecordBotStartTx`):
 
-- **Kind.** A private `message` whose first entity is a `bot_command` at offset 0
+- **Production: the bot-start bridge.** The login bot's webhook belongs to
+  mctl-agent. mctl-agent recognises a private `/start` and calls
+  `POST /internal/bot-start-observations` with exactly
+  `{"update_id", "telegram_id", "observed_at"}` (Telegram's `update_id`,
+  `message.from.id`, `message.date` as RFC 3339). No text, payload, internal
+  user id or state ever crosses: the Telegram id is resolved here.
+- **Dev/local only: the long-poll receiver** (`BOT_RECEIVER_ENABLED`,
+  issue-619), for bots without a webhook. See "Login-bot update receiver" for
+  why it must stay off in production.
+
+### The bot-start bridge
+
+- **Auth.** `Authorization: Bearer <BOT_START_BRIDGE_TOKEN>`, compared in
+  constant time; minimum 32 characters. Unset or too short: the route is not
+  mounted at all (404), and startup logs `bot-start bridge disabled`. The route
+  sits outside `auth.Middleware` and the MCP surface; it is not an MCP tool and
+  accepts nothing but this observation. The authenticator is an interface
+  (`bot.BridgeAuthenticator`), so the shared token can later be replaced by a
+  Kubernetes service-account token review without touching the handler.
+- **Responses.** `202 {"status":"accepted"}` for every authenticated,
+  well-formed observation — known client, unknown id, ambiguous id, duplicate
+  — so the caller learns nothing about who is a client. `401` missing or wrong
+  token. `400` any other field (including `user_id`), trailing data, a
+  non-positive id, or an `observed_at` that is missing or more than 5 minutes
+  in the future. `503` database failure: retry with the same body.
+- **Idempotency.** `update_id` is the key in `bot_updates`, as for the
+  receiver. A repeat is counted `duplicate` and changes nothing; a row whose
+  earlier dispatch failed is processed by the retry. An `update_id` already
+  stored for another chat or kind is never dispatched as this one.
+- **Ordering.** `observed_at` is the observation time. A `/start` older than a
+  stored conclusive outcome (for example a later `blocked` from a broadcast)
+  does not overwrite it.
+- **Metrics and logs.** The same `mctl_bot_updates_total{kind="start_command"}`
+  series as the receiver. Logs carry the error only, never ids or text.
+- **Config.** `BOT_START_BRIDGE_TOKEN` on this service; the same value goes to
+  mctl-agent through Vault/ExternalSecret (never in mctl-gitops values, which
+  is public). Rotate by writing a new value to both and restarting both; until
+  both have it, forwarded observations get 401 and mctl-agent should retry.
+- **NextOffset.** Bridge rows share Telegram's `update_id` space and count
+  toward the receiver's `NextOffset`. Harmless: the receiver cannot run on a
+  webhook-owned token, and an update the bridge holds is durably owned.
+
+### Handler semantics (both paths)
+
+- **Kind (receiver).** A private `message` whose first entity is a `bot_command` at offset 0
   naming `/start` (bare, `@<bot>`-suffixed, or with a payload) is stored with
   kind `start_command`. Only that classification is kept; the text and payload
   are never held, logged or stored. Any other `message` keeps kind `message`,
@@ -2636,11 +2694,16 @@ handler: a `/start` the client sent to the login bot.
   for the `https://t.me/<username>?start=onboarding` link on the connect success
   page and the manage page. An invalid value is ignored with a startup warning;
   without it the pages show plain-text instructions.
-- **Rollout order.** Release the code (receiver stays off) -> a separate
-  mctl-gitops PR sets `BOT_RECEIVER_ENABLED` and `TELEGRAM_LOGIN_BOT_USERNAME`
-  -> live proof: onboarding, `/start`, reachability `reachable`, explicit
+- **Rollout order.** Release this service with the bridge (route unmounted
+  until configured) -> store `BOT_START_BRIDGE_TOKEN` in Vault for both
+  services and wire it via a mctl-gitops PR (`TELEGRAM_LOGIN_BOT_USERNAME` in
+  the same PR) -> release mctl-agent's forwarder -> live proof: onboarding,
+  `/start`, reachability `reachable` with `source = bot_start`, explicit
   category preferences saved, a broadcast preview respects them.
-- **Rollback.** Unset `BOT_RECEIVER_ENABLED` to stop inbound writes. Rows with
+  `BOT_RECEIVER_ENABLED` stays off throughout; this supersedes the earlier
+  order that enabled the receiver.
+- **Rollback.** Unset `BOT_START_BRIDGE_TOKEN` (or stop mctl-agent forwarding)
+  to stop inbound writes. Rows with
   `source = bot_start` are valid observations; to remove them run
   `DELETE FROM client_bot_reachability WHERE source = 'bot_start'`.
 - **Known limitation: external OAuth clients.** The "Choose your

@@ -149,6 +149,13 @@ type Config struct {
 	// other. An explicit opt-in makes claiming the token a decision rather
 	// than a side effect of deploying.
 	BotReceiverEnabled bool
+	// BotStartBridgeToken authenticates the bot-start bridge (issue-679):
+	// mctl-agent owns the login bot's webhook and forwards a client's /start
+	// to POST /internal/bot-start-observations with this bearer token. Empty
+	// (the default) leaves the route unmounted. In production this, not
+	// BotReceiverEnabled, is how /start reaches this service: getUpdates
+	// cannot run against a bot whose webhook is set.
+	BotStartBridgeToken string
 	// Safe client broadcasts (issue-439). BroadcastOperators is the
 	// allow-list of Telegram ids who may prepare, approve and cancel a
 	// broadcast; empty (the default) turns the whole workflow off,
@@ -402,6 +409,7 @@ func Load() (*Config, error) {
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
 		BotReceiverEnabled:            envBool("BOT_RECEIVER_ENABLED", false),
+		BotStartBridgeToken:           strings.TrimSpace(os.Getenv("BOT_START_BRIDGE_TOKEN")),
 		BroadcastRatePerSec:           envFloat("BROADCAST_RATE_PER_SEC", 10),
 		BroadcastBatchSize:            envInt("BROADCAST_BATCH_SIZE", 20),
 		BroadcastMaxAttempts:          envInt("BROADCAST_MAX_ATTEMPTS", 5),

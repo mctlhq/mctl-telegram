@@ -674,6 +674,14 @@ func main() {
 	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
 	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
 
+	// The bot-start bridge (issue-679) is the production path for a client's
+	// /start: the login bot's webhook belongs to mctl-agent, which forwards
+	// one normalised observation here. Mounted outside auth.Middleware and the
+	// MCP surface, behind its own bearer token, and only when that token is
+	// configured. Like every route, it must be registered before srv below
+	// starts serving the router.
+	mountBotStartBridge(mux, store, m, cfg.BotStartBridgeToken)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           mux,
@@ -1216,4 +1224,22 @@ func preregisteredClients(in []config.PreregisteredClient) []oauth.Preregistered
 		})
 	}
 	return out
+}
+
+// mountBotStartBridge mounts POST /internal/bot-start-observations when token
+// is set and long enough; otherwise the route does not exist. Split out of main
+// so a test can assert both halves.
+func mountBotStartBridge(mux chi.Router, store *db.Store, m *metrics.Registry, token string) bool {
+	if token == "" {
+		slog.Info("bot-start bridge disabled", "reason", "BOT_START_BRIDGE_TOKEN not set")
+		return false
+	}
+	auth, err := bot.NewBearerTokenAuth(token)
+	if err != nil {
+		slog.Warn("bot-start bridge disabled", "reason", "BOT_START_BRIDGE_TOKEN shorter than the minimum length")
+		return false
+	}
+	mux.Method(http.MethodPost, bot.BotStartObservationPath, bot.BotStartObservationHandler(store, auth, bot.NewMetricsCounter(m)))
+	slog.Info("bot-start bridge enabled", "path", bot.BotStartObservationPath)
+	return true
 }
