@@ -47,10 +47,11 @@ func (s *Store) RecordBotReachability(ctx context.Context, userID int64, outcome
 // observedAt is when the evidence was observed -- for the login bot, the
 // update's received_at, persisted at accept time. Unlike an outbound delivery,
 // which is classified the moment it happens, an inbound update can be
-// dispatched late when the pending sweep retries it. So the write applies only when observedAt is strictly newer than the
-// stored observed_at; a stale /start never overwrites a newer conclusive
-// observation such as a later `blocked`. applied reports whether the row was
-// written; false with a nil error means the stored observation is newer.
+// dispatched late when the pending sweep retries it. So the write applies
+// only when observedAt is strictly newer than the stored observed_at; a stale
+// /start never overwrites a newer conclusive observation such as a later
+// `blocked`. applied reports whether the row was written; false with a nil
+// error means the stored observation is newer.
 func (s *Store) RecordInboundBotReachabilityTx(ctx context.Context, tx *sql.Tx, userID int64, outcome notify.DeliveryOutcome, source string, observedAt time.Time) (applied bool, err error) {
 	if !outcome.Conclusive {
 		return false, nil

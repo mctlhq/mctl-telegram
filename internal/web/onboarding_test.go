@@ -261,3 +261,23 @@ func TestManagePage_OnboardingCalloutRespectsSavedChoice(t *testing.T) {
 		t.Errorf("saved-state line missing: %s", body)
 	}
 }
+
+// A failed preferences read is unknown, not a choice: ?onboarding=1 must make
+// no positive claim either way ("could not observe" is never "observed").
+func TestManagePage_OnboardingPrefsReadFailureClaimsNothing(t *testing.T) {
+	srv, store := newIsolatedManageServer(t)
+	uid := seedManageUser(t, store, 5555)
+	// Safe to drop: this server has its own database.
+	if _, err := store.DB.Exec(`DROP TABLE client_notification_prefs`); err != nil {
+		t.Fatalf("drop prefs table: %v", err)
+	}
+	body := getManagePath(t, srv, uid, "/telegram/connect/manage?onboarding=1")
+	for _, bad := range []string{"choices are saved", "One more step", "You have not chosen yet", "did not subscribe you"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("failed prefs read still claims %q", bad)
+		}
+	}
+	if !strings.Contains(body, "could not load your notification choices") {
+		t.Errorf("unknown-state note missing: %s", body)
+	}
+}

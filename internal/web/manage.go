@@ -124,15 +124,19 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	// disconnected should still be able to stop product updates without
 	// reconnecting first. A read failure degrades to no section rather than
 	// to an error page, because it must not block disconnect.
+	//
+	// The choice state is three-valued: a failed read is unknown, never
+	// "chosen" and never "not chosen" -- could not observe is not observed.
 	var rows []notificationRow
-	notChosen := false
+	choice := choiceUnknown
 	if prefs, err := s.store.ResolveNotificationPrefs(r.Context(), id.UserID); err != nil {
 		slog.Warn("manage: resolve notification prefs", "err", err)
 	} else {
 		rows = buildNotificationRows(prefs)
+		choice = choiceChosen
 		for _, p := range prefs {
 			if p.Category == string(db.CategoryProductUpdates) && !p.Explicit {
-				notChosen = true
+				choice = choiceNotChosen
 			}
 		}
 	}
@@ -153,7 +157,9 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		Issuer:        s.issuer,
 		Notifications: rows,
 		Bot:           botView,
-		NotChosen:     notChosen,
+		NotChosen:     choice == choiceNotChosen,
+		Chosen:        choice == choiceChosen,
+		ChoiceUnknown: choice == choiceUnknown,
 		// ?onboarding=1 is where the connect success page sends a newly
 		// connected client: the explicit category choice is put first. It
 		// only changes presentation; consent is still written by the form.
@@ -222,9 +228,21 @@ type managePageData struct {
 	Issuer        string
 	Notifications []notificationRow
 	Bot           *botReachabilityView
+	// Exactly one of NotChosen, Chosen and ChoiceUnknown is true.
 	NotChosen     bool
+	Chosen        bool
+	ChoiceUnknown bool
 	Onboarding    bool
 }
+
+// choiceState is whether the client has explicitly chosen product_updates.
+type choiceState int
+
+const (
+	choiceUnknown choiceState = iota // the preference read failed
+	choiceNotChosen
+	choiceChosen
+)
 
 const manageExtraCSS = `
   .field-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
@@ -270,7 +288,7 @@ var manageFoot = `    </div>
 </html>`
 
 var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `    <h1>Manage your Telegram session</h1>
-    {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{end}}{{end}}
+    {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else if .Chosen}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{else}}<p id="onboarding" class="meta">We could not load your notification choices right now.</p>{{end}}{{end}}
     {{if .Connected}}
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>

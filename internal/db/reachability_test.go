@@ -138,25 +138,37 @@ func TestBotReachability_IndependentOfSessionAndToken(t *testing.T) {
 // inbound observation applies when it is newer than the stored one and is
 // ignored, reporting applied=false, when the stored one is newer.
 func TestRecordInboundBotReachability_StaleNeverOverwritesNewer(t *testing.T) {
-	t.Run("sqlite", func(t *testing.T) { assertInboundReachabilityGuard(t, newTestStore(t)) })
+	t.Run("sqlite", func(t *testing.T) { assertInboundReachabilityGuard(t, newTestStore(t), 9191, 77) })
 	t.Run("postgres", func(t *testing.T) {
 		dsn := os.Getenv("TEST_DATABASE_URL")
 		if dsn == "" {
 			t.Skip("TEST_DATABASE_URL not set")
 		}
-		s := newPostgresTestStore(t, dsn)
-		t.Cleanup(func() {
-			_, _ = s.DB.Exec(`DELETE FROM client_bot_reachability`)
-			_, _ = s.DB.Exec(`DELETE FROM bot_updates`)
-		})
-		assertInboundReachabilityGuard(t, s)
+		// tgID and update id are distinct per dialect because the Postgres
+		// database is reused across runs (see identity_capture_test.go).
+		assertInboundReachabilityGuard(t, newPostgresTestStore(t, dsn), 860000001, 860000001)
 	})
 }
 
-func assertInboundReachabilityGuard(t *testing.T, s *Store) {
+// assertInboundReachabilityGuard is the dialect-independent body. Postgres
+// keeps state between runs, so prior rows for tgID and updateID are deleted
+// before seeding, and every setup step's result is checked.
+func assertInboundReachabilityGuard(t *testing.T, s *Store, tgID, updateID int64) {
 	t.Helper()
 	ctx := context.Background()
-	uid, err := s.EnsureUserByTelegramID(ctx, 9191, "alice", "Alice")
+	for _, q := range []struct {
+		sql string
+		arg int64
+	}{
+		{`DELETE FROM client_bot_reachability WHERE user_id IN (SELECT id FROM users WHERE telegram_login_id = $1)`, tgID},
+		{`DELETE FROM users WHERE telegram_login_id = $1`, tgID},
+		{`DELETE FROM bot_updates WHERE update_id = $1`, updateID},
+	} {
+		if _, err := s.DB.ExecContext(ctx, q.sql, q.arg); err != nil {
+			t.Fatalf("clear prior run: %v", err)
+		}
+	}
+	uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -203,22 +215,22 @@ func assertInboundReachabilityGuard(t *testing.T, s *Store) {
 	}
 
 	// The observation time a handler uses is the update's own received_at.
-	if _, err := s.AcceptUpdate(ctx, 77, KindStartCommand, chat(9191)); err != nil {
-		t.Fatal(err)
+	if accepted, err := s.AcceptUpdate(ctx, updateID, KindStartCommand, chat(tgID)); err != nil || !accepted {
+		t.Fatalf("accept update: accepted=%v err=%v", accepted, err)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	at, err := s.UpdateReceivedAtTx(ctx, tx, 77)
+	at, err := s.UpdateReceivedAtTx(ctx, tx, updateID)
 	if err != nil {
 		t.Fatalf("received_at: %v", err)
 	}
 	if d := time.Since(at); d < 0 || d > time.Minute {
 		t.Errorf("received_at = %v, want about now", at)
 	}
-	if _, err := s.UpdateReceivedAtTx(ctx, tx, 78); err == nil {
+	if _, err := s.UpdateReceivedAtTx(ctx, tx, updateID+1); err == nil {
 		t.Error("received_at of an unknown update returned no error")
 	}
 }
