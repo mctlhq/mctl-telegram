@@ -10,12 +10,15 @@ permissions: {}
 
 jobs:
   claude-review:
-    uses: mctlhq/.github/.github/workflows/claude-review.yml@f25ff6a4ec43ecd9f58563051835a3abe062c143
+    uses: mctlhq/.github/.github/workflows/claude-review.yml@3b8aebd41d8f2da197b36b197866f0dd41bd8eea
     permissions:
       contents: read
       pull-requests: write
       issues: write
       id-token: write
+      # The pinned review job requests actions: read to see the PR's CI; a
+      # caller's block caps the called job, so it must be granted here too.
+      actions: read
     with:
       sensitive-paths: '^internal/(auth|crypto|db|mcp|telegram)/'
       # dependabot, mctl-agents and cursor are listed so their PRs get
