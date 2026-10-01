@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.75.0](https://github.com/mctlhq/mctl-telegram/compare/0.74.0...0.75.0) (2026-10-01)
+
+
+### Features
+
+* **agents:** issue-683-product-updates-persist-frozen-digests-a ([f52bc11](https://github.com/mctlhq/mctl-telegram/commit/f52bc1103da4d97edaccc2071a97ab77eccb3f4c))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-683-product-updates-persist-frozen-digests-a ([f5055fd](https://github.com/mctlhq/mctl-telegram/commit/f5055fdcaa24d12a3c4ebb18ca2b3528b75d7f01))
+* **ci:** fix failing required checks on issue-683-product-updates-persist-frozen-digests-a ([0038615](https://github.com/mctlhq/mctl-telegram/commit/00386153a93d20e516fa4b3b6309de17ce775e80))
+* **db:** skip the source digest DDL when both constraints exist ([dfce2bf](https://github.com/mctlhq/mctl-telegram/commit/dfce2bfaa5fd20530df4d1b9537acb58f1bc5003))
+
 ## [0.74.0](https://github.com/mctlhq/mctl-telegram/compare/0.73.0...0.74.0) (2026-09-30)
 
 
