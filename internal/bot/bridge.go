@@ -15,7 +15,6 @@ package bot
 // turned into arbitrary reachability mutation without a code change.
 
 import (
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -288,26 +287,26 @@ func decodeObservation(w http.ResponseWriter, r *http.Request) (botStartObservat
 		}
 		return obs, http.StatusBadRequest
 	}
-	// DisallowUnknownFields does not catch a repeated member: encoding/json
-	// keeps the last value, so {"update_id":1,"update_id":2,...} would decode
-	// as update 2. Reject duplicates first.
+	// Strictness is enforced in two passes on the raw bytes, after which a
+	// plain Unmarshal is safe. encoding/json alone is not strict enough:
+	//
+	//  1. It keeps the last of a repeated member, so
+	//     {"update_id":1,"update_id":2,...} would decode as update 2.
+	//  2. It matches struct fields case-insensitively, so "UPDATE_ID" would
+	//     fill UpdateID, and {"update_id":1,"UPDATE_ID":2,...} passes the
+	//     exact duplicate check as two names and decodes as 2.
+	//
+	// The member-set check also rejects every unknown field (user_id among
+	// them), and json.Unmarshal rejects anything after the object, so neither
+	// DisallowUnknownFields nor a trailing-data decode would add anything.
 	if jsonstrict.RejectDuplicateKeys(raw) != nil {
 		return obs, http.StatusBadRequest
 	}
-	// Nor does it catch spelling: encoding/json matches struct fields
-	// case-insensitively, so "UPDATE_ID" would fill UpdateID, and
-	// {"update_id":1,"UPDATE_ID":2,...} passes the exact duplicate check above
-	// and decodes as 2. Require exactly the three lowercase names.
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &members); err != nil || !exactObservationKeys(members) {
 		return obs, http.StatusBadRequest
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&obs); err != nil {
-		return obs, http.StatusBadRequest
-	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.Unmarshal(raw, &obs); err != nil {
 		return obs, http.StatusBadRequest
 	}
 	if obs.UpdateID <= 0 || obs.TelegramID <= 0 || obs.ObservedAt.IsZero() {

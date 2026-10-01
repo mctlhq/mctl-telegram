@@ -152,6 +152,7 @@ func ParseJSON(raw []byte) (Data, error) {
 // The walk lives in internal/jsonstrict; this wrapper keeps the profile
 // package's error wording unchanged for its callers.
 func RejectDuplicateJSONKeys(raw []byte) error {
+	var delimErr *jsonstrict.UnexpectedDelimError
 	err := jsonstrict.RejectDuplicateKeys(raw)
 	switch {
 	case err == nil:
@@ -167,8 +168,8 @@ func RejectDuplicateJSONKeys(raw []byte) error {
 		return fmt.Errorf("invalid profile object")
 	case errors.Is(err, jsonstrict.ErrInvalidArray):
 		return fmt.Errorf("invalid profile array")
-	case errors.Is(err, jsonstrict.ErrUnexpectedDelim):
-		return fmt.Errorf("unexpected profile delimiter%s", strings.TrimPrefix(err.Error(), jsonstrict.ErrUnexpectedDelim.Error()))
+	case errors.As(err, &delimErr):
+		return fmt.Errorf("unexpected profile delimiter %q", delimErr.Delim)
 	default:
 		return err
 	}

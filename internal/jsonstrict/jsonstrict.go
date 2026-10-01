@@ -24,9 +24,24 @@ var (
 	ErrInvalidObject = errors.New("invalid JSON object")
 	// ErrInvalidArray is an array not closed by ']'.
 	ErrInvalidArray = errors.New("invalid JSON array")
-	// ErrUnexpectedDelim is a delimiter where a value was expected.
+	// ErrUnexpectedDelim is a delimiter where a value was expected. It is
+	// returned as an *UnexpectedDelimError, which carries the delimiter.
 	ErrUnexpectedDelim = errors.New("unexpected JSON delimiter")
 )
+
+// UnexpectedDelimError reports which delimiter appeared where a value was
+// expected. It matches ErrUnexpectedDelim under errors.Is, and carries the
+// delimiter as data so a caller can word the message itself.
+type UnexpectedDelimError struct {
+	Delim json.Delim
+}
+
+func (e *UnexpectedDelimError) Error() string {
+	return fmt.Sprintf("%v %q", ErrUnexpectedDelim, e.Delim)
+}
+
+// Is reports a match against ErrUnexpectedDelim.
+func (e *UnexpectedDelimError) Is(target error) bool { return target == ErrUnexpectedDelim }
 
 // RejectDuplicateKeys validates that raw is exactly one JSON value whose
 // objects, at every depth, repeat no member name. encoding/json keeps the
@@ -91,7 +106,7 @@ func RejectDuplicateKeys(raw []byte) error {
 				return ErrInvalidArray
 			}
 		default:
-			return fmt.Errorf("%w %q", ErrUnexpectedDelim, delim)
+			return &UnexpectedDelimError{Delim: delim}
 		}
 		return nil
 	}

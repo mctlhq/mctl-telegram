@@ -2,6 +2,7 @@ package jsonstrict
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -37,5 +38,22 @@ func TestRejectDuplicateKeys(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// The unexpected-delimiter branch is not reachable through
+// RejectDuplicateKeys (the decoder's token state machine reports a stray
+// closer as a syntax error first), so its error type is pinned directly.
+func TestUnexpectedDelimError(t *testing.T) {
+	var err error = &UnexpectedDelimError{Delim: '}'}
+	if !errors.Is(err, ErrUnexpectedDelim) {
+		t.Error("UnexpectedDelimError does not match ErrUnexpectedDelim")
+	}
+	if got, want := err.Error(), `unexpected JSON delimiter "}"`; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	var de *UnexpectedDelimError
+	if !errors.As(fmt.Errorf("wrapped: %w", err), &de) || de.Delim != '}' {
+		t.Errorf("errors.As through a wrap lost the delimiter: %+v", de)
 	}
 }
