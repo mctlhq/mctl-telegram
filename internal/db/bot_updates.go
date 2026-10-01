@@ -127,6 +127,20 @@ func (s *Store) UpdateReceivedAtTx(ctx context.Context, tx *sql.Tx, updateID int
 	return at.Time.UTC(), nil
 }
 
+// UpdateRouting is UpdateRoutingTx outside a transaction. The bridge uses it
+// for a row that is already processed (DispatchOnce answered
+// ErrUpdateNotClaimable), where there is no dispatch transaction to read in
+// and the stored routing is immutable.
+func (s *Store) UpdateRouting(ctx context.Context, updateID int64) (kind string, chatID sql.NullInt64, err error) {
+	err = s.DB.QueryRowContext(ctx,
+		`SELECT kind, chat_id FROM bot_updates WHERE update_id = $1`, updateID,
+	).Scan(&kind, &chatID)
+	if err != nil {
+		return "", sql.NullInt64{}, fmt.Errorf("update routing: %w", err)
+	}
+	return kind, chatID, nil
+}
+
 // UpdateRoutingTx returns the stored kind and chat_id of update_id, read inside
 // the dispatch transaction. The bot-start bridge uses it to refuse dispatching
 // a row whose stored routing facts differ from the request that names it: an

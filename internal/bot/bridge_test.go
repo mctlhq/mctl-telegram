@@ -304,6 +304,14 @@ type faultStore struct {
 	*db.Store
 	acceptErr   error
 	dispatchErr error
+	routingErr  error
+}
+
+func (f faultStore) UpdateRouting(ctx context.Context, updateID int64) (string, sql.NullInt64, error) {
+	if f.routingErr != nil {
+		return "", sql.NullInt64{}, f.routingErr
+	}
+	return f.Store.UpdateRouting(ctx, updateID)
 }
 
 func (f faultStore) AcceptUpdateAt(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64, receivedAt time.Time) (bool, error) {
@@ -411,6 +419,68 @@ func TestBridge_ErrorsAreScrubbedAndSplitByCause(t *testing.T) {
 			assertScrubbed(t, buf.String(), tc.line, tgID, updateID)
 		})
 	}
+}
+
+func TestBridge_ProcessedRowOfAnotherChatIsRoutingMismatch(t *testing.T) {
+	ctx := context.Background()
+	store := newBotTestStore(t)
+	victim := seedStartUser(t, store, 4242)
+	seedStartUser(t, store, 7777)
+	at := time.Now().Add(-time.Minute)
+	c := newCounter()
+	h := bridgeHandler(t, store, c)
+	// update 80 is fully processed for chat 7777 first.
+	if w := postObservation(h, "Bearer "+testBridgeToken, obsBody(80, 7777, at)); w.Code != http.StatusAccepted {
+		t.Fatalf("seed status = %d", w.Code)
+	}
+	buf := captureLogs(t)
+	conflict := postObservation(h, "Bearer "+testBridgeToken, obsBody(80, 4242, at))
+	same := postObservation(h, "Bearer "+testBridgeToken, obsBody(80, 7777, at))
+	if conflict.Code != http.StatusAccepted || conflict.Body.String() != same.Body.String() {
+		t.Errorf("conflict answered %d %q, want the same 202 as a duplicate (%d %q)", conflict.Code, conflict.Body.String(), same.Code, same.Body.String())
+	}
+	if got := c.get("start_command/routing_mismatch"); got != 1 {
+		t.Errorf("routing_mismatch = %d, want 1", got)
+	}
+	if got := c.get("start_command/duplicate"); got != 1 {
+		t.Errorf("duplicate = %d, want 1 (only the genuine redelivery)", got)
+	}
+	if r, _ := store.GetBotReachability(ctx, victim); r != nil {
+		t.Errorf("conflicting observation recorded reachability: %+v", r)
+	}
+	out := buf.String()
+	if strings.Count(out, "different routing") != 1 || !strings.Contains(out, "level=WARN") {
+		t.Errorf("want exactly one routing-mismatch warning: %q", out)
+	}
+	for _, leak := range []string{"4242", "7777", testBridgeToken} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log leaks %q: %s", leak, out)
+		}
+	}
+}
+
+func TestBridge_ProcessedRowRoutingReadFailureIsDispatchError(t *testing.T) {
+	const tgID, updateID = int64(4242), int64(876543)
+	store := newBotTestStore(t)
+	seedStartUser(t, store, tgID)
+	at := time.Now().Add(-time.Minute)
+	if w := postObservation(bridgeHandler(t, store, nil), "Bearer "+testBridgeToken, obsBody(updateID, tgID, at)); w.Code != http.StatusAccepted {
+		t.Fatalf("seed status = %d", w.Code)
+	}
+	buf := captureLogs(t)
+	c := newCounter()
+	fs := faultStore{Store: store, routingErr: leakyErr(tgID, updateID)}
+	w := postObservation(faultHandler(t, fs, nil, c), "Bearer "+testBridgeToken, obsBody(updateID, tgID, at))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503: an unreadable row is not a known duplicate", w.Code)
+	}
+	if got := c.get("start_command/dispatch_error"); got != 1 {
+		t.Errorf("dispatch_error = %d, want 1", got)
+	}
+	if got := c.get("start_command/duplicate"); got != 0 {
+		t.Errorf("duplicate = %d, want 0", got)
+	}
+	assertScrubbed(t, buf.String(), "bot-start bridge: dispatch failed", tgID, updateID)
 }
 
 func TestBridge_RoutingMismatchLogIsScrubbed(t *testing.T) {

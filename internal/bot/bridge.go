@@ -107,6 +107,7 @@ type bridgeStore interface {
 	AcceptUpdateAt(ctx context.Context, updateID int64, kind string, chatID sql.NullInt64, receivedAt time.Time) (bool, error)
 	DispatchOnce(ctx context.Context, updateID int64, fn func(context.Context, *sql.Tx) (string, error)) error
 	UpdateRoutingTx(ctx context.Context, tx *sql.Tx, updateID int64) (string, sql.NullInt64, error)
+	UpdateRouting(ctx context.Context, updateID int64) (string, sql.NullInt64, error)
 }
 
 // recordFunc is the business rule applied inside the dispatch transaction.
@@ -196,7 +197,7 @@ func newBotStartObservationHandler(store bridgeStore, record recordFunc, auth Br
 			if err != nil {
 				return "", err
 			}
-			if kind != db.KindStartCommand || storedChat != chat {
+			if !routingMatches(kind, storedChat, chat) {
 				return "", errRoutingMismatch
 			}
 			o, err := record(ctx, tx, obs.TelegramID, obs.UpdateID)
@@ -211,8 +212,22 @@ func newBotStartObservationHandler(store bridgeStore, record recordFunc, auth Br
 		case err == nil:
 			count(outcome)
 		case errors.Is(err, db.ErrUpdateNotClaimable):
-			// Already recorded (a redelivery or retry): nothing to do.
-			count(OutcomeDuplicate)
+			// Already processed. A redelivery or retry of this same /start is
+			// a duplicate; an update_id processed as some other update is a
+			// routing mismatch, however long ago it was processed.
+			kind, storedChat, rerr := store.UpdateRouting(ctx, obs.UpdateID)
+			if rerr != nil {
+				count(OutcomeDispatchError)
+				slog.Error("bot-start bridge: dispatch failed", "err", scrub(rerr))
+				writeBridgeJSON(w, http.StatusServiceUnavailable, `{"error":"unavailable"}`)
+				return
+			}
+			if routingMatches(kind, storedChat, chat) {
+				count(OutcomeDuplicate)
+				break
+			}
+			count(OutcomeRoutingMismatch)
+			slog.Warn("bot-start bridge: update_id already stored with different routing", "err", scrub(errRoutingMismatch))
 		case errors.Is(err, errRoutingMismatch):
 			// The update_id names some other update. Not dispatched, and no
 			// difference shown to the caller, but visible to the operator.
@@ -235,6 +250,12 @@ func newBotStartObservationHandler(store bridgeStore, record recordFunc, auth Br
 		}
 		writeBridgeJSON(w, http.StatusAccepted, acceptedBody)
 	})
+}
+
+// routingMatches reports whether a stored bot_updates row is the /start an
+// observation describes.
+func routingMatches(kind string, stored, chat sql.NullInt64) bool {
+	return kind == db.KindStartCommand && stored == chat
 }
 
 // redactID removes one decimal id from s where it stands as a whole number.
