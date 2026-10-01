@@ -93,6 +93,11 @@ func TestBridge_RejectsAnythingButTheThreeFields(t *testing.T) {
 		"future time":   obsBody(1, 4242, time.Now().Add(time.Hour)),
 		"trailing":      obsBody(1, 4242, time.Now().Add(-time.Minute)) + `{}`,
 		"not json":      `update_id=1`,
+		// encoding/json keeps the LAST of a repeated member, which
+		// DisallowUnknownFields does not catch.
+		"duplicate update_id":   fmt.Sprintf(`{"update_id":1,"update_id":2,"telegram_id":4242,"observed_at":%q}`, at),
+		"duplicate telegram_id": fmt.Sprintf(`{"update_id":1,"telegram_id":9999,"telegram_id":4242,"observed_at":%q}`, at),
+		"duplicate observed_at": fmt.Sprintf(`{"update_id":1,"telegram_id":4242,"observed_at":%q,"observed_at":%q}`, at, at),
 	} {
 		if w := postObservation(h, "Bearer "+testBridgeToken, body); w.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", name, w.Code)

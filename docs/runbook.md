@@ -2661,9 +2661,9 @@ this client". It arrives by one of two paths that share one business rule
 - **Responses.** `202 {"status":"accepted"}` for every authenticated,
   well-formed observation — known client, unknown id, ambiguous id, duplicate
   — so the caller learns nothing about who is a client. `401` missing or wrong
-  token. `400` any other field (including `user_id`), trailing data, a
-  non-positive id, or an `observed_at` that is missing or more than 5 minutes
-  in the future. `413` a body over 4 KiB. `503` a database or handler
+  token. `400` any other field (including `user_id`), a repeated field,
+  trailing data, a non-positive id, or an `observed_at` that is missing or
+  more than 5 minutes in the future. `413` a body over 4 KiB. `503` a database or handler
   failure: retry with the same body.
 - **Idempotency.** `update_id` is the key in `bot_updates`, as for the
   receiver. A repeat is counted `duplicate` and changes nothing; a row whose
