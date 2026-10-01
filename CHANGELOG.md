@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.77.0](https://github.com/mctlhq/mctl-telegram/compare/0.76.0...0.77.0) (2026-10-01)
+
+
+### Features
+
+* **bot:** bot-start observation endpoint for the [#679](https://github.com/mctlhq/mctl-telegram/issues/679) bridge ([91b2838](https://github.com/mctlhq/mctl-telegram/commit/91b2838a2f895ce6ff2814250de675891301e499))
+* **bot:** bot-start observation endpoint for the [#679](https://github.com/mctlhq/mctl-telegram/issues/679) bridge ([eac08e9](https://github.com/mctlhq/mctl-telegram/commit/eac08e9d2c8b9e29c0346d7e0fc74b89b81d1244))
+
+
+### Bug Fixes
+
+* **audit:** redact the bot-start bridge token keys ([e983edf](https://github.com/mctlhq/mctl-telegram/commit/e983edf9d91b02f14c461f1d4481f51223674a41)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **bot:** check the bridge method after auth and pin it ([1d9b995](https://github.com/mctlhq/mctl-telegram/commit/1d9b9951777a50c1a53a51fda3d5992bc8be5f11)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **bot:** classify processed-row routing collisions ([ab1a44b](https://github.com/mctlhq/mctl-telegram/commit/ab1a44bc7ac8f7450cb5282ebbbb3db81eb8ac60)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **bot:** reject duplicate JSON members in bridge observations ([e3161a3](https://github.com/mctlhq/mctl-telegram/commit/e3161a36e33943f2fa03dc8ea86a68c1a89afb95)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **bot:** require exact lowercase observation keys ([ca5699c](https://github.com/mctlhq/mctl-telegram/commit/ca5699c4763d1c18600e2979bee3c6da9ca4acd3)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **bot:** scrub bridge errors, cap body, split outcomes ([eef9fae](https://github.com/mctlhq/mctl-telegram/commit/eef9fae3b7cc43c8e0338aaac4a84122baf9a49f)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **server:** fail startup on a short bridge token ([cd02593](https://github.com/mctlhq/mctl-telegram/commit/cd02593f20861f4565c27908ea53bdb17e62122e)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+* **server:** validate the bridge token before startup wiring ([d428531](https://github.com/mctlhq/mctl-telegram/commit/d4285316766b406ab21ef1f6dc1313e98d2c5f85)), closes [#679](https://github.com/mctlhq/mctl-telegram/issues/679)
+
 ## [0.76.0](https://github.com/mctlhq/mctl-telegram/compare/0.75.0...0.76.0) (2026-10-01)
 
 
