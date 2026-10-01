@@ -2643,13 +2643,28 @@ handler: a `/start` the client sent to the login bot.
 - **Rollback.** Unset `BOT_RECEIVER_ENABLED` to stop inbound writes. Rows with
   `source = bot_start` are valid observations; to remove them run
   `DELETE FROM client_bot_reachability WHERE source = 'bot_start'`.
-- **Known limitation.** The "Choose your notifications" onboarding step (and
-  the Start-the-bot link) is rendered only by `internal/web`'s self-hosted
-  connect wizard success page (`connectSuccessTemplate` in
-  `internal/web/connect.go`). External OAuth clients (claude.ai, chatgpt.com)
-  complete via `internal/oauth`'s own `renderConnectSuccess` interstitial and
-  never see this prompt, so the explicit marketing-consent choice is
-  unreachable on that path. Users who connect via an external OAuth client
-  can still set notification preferences later from the manage page
-  (`/telegram/connect/manage`); surfacing the same prompt on the OAuth
-  success page is tracked as follow-up work, not part of issue-679.
+- **Known limitation: external OAuth clients.** The "Choose your
+  notifications" onboarding step (and the Start-the-bot link) is rendered only
+  by `internal/web`'s self-hosted connect wizard success page
+  (`connectSuccessTemplate` in `internal/web/connect.go`). External OAuth
+  clients (claude.ai, chatgpt.com) complete via `internal/oauth`'s own
+  `renderConnectSuccess` interstitial and never see this prompt. What such a
+  client can do today:
+  - **The manage page is not directly reachable.** `/telegram/connect/manage`
+    authenticates a browser only with a Bearer token or the connect session
+    cookie (`internal/auth/localjwt` `Provider.Authenticate`). That cookie is
+    minted solely by `/telegram/connect/done` (`oauth.ExchangeConnect`, the
+    built-in self-connect client `oauth.ConnectClientID`); the external OAuth
+    flow never sets it. Opening
+    `/telegram/connect/manage` from such a browser renders "Sign in to manage
+    your session" with a link to `/telegram/connect`.
+  - **Through the wizard.** Completing the `/telegram/connect` wizard once in
+    that browser (Telegram sign-in, permissions, phone if no session yet) sets
+    the cookie and lands on the success page, which carries the onboarding
+    step; the manage page is reachable from then on.
+  - **Through MCP.** The client can call `get_my_notification_preferences` /
+    `set_my_notification_preferences` with its own OAuth token; a save there is
+    the same explicit, recorded choice.
+  Until one of these happens, product updates stay off by default for that
+  client (authentication is not consent). Surfacing the step on the OAuth
+  success page is an open owner decision, not part of issue-679.
