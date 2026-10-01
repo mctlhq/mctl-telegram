@@ -270,7 +270,7 @@ var manageFoot = `    </div>
 </html>`
 
 var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `    <h1>Manage your Telegram session</h1>
-    {{if .Onboarding}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{end}}
+    {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{end}}{{end}}
     {{if .Connected}}
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>

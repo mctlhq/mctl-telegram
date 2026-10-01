@@ -107,7 +107,7 @@ func TestStartHandler_RecordsReachabilityNotConsent(t *testing.T) {
 	ctx := context.Background()
 	store := newBotTestStore(t)
 	uid := seedStartUser(t, store, 4242)
-	if _, err := store.DB.ExecContext(ctx, `INSERT INTO client_bot_reachability(user_id,state,reason_code,observed_at,source,updated_at) VALUES($1,'blocked','blocked','2026-01-01','digest','2026-01-01')`, uid); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `INSERT INTO client_bot_reachability(user_id,state,reason_code,observed_at,source,updated_at) VALUES($1,'blocked','blocked',$2,'digest',$2)`, uid, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("seed reachability: %v", err)
 	}
 	before, err := store.ResolveNotificationPrefs(ctx, uid)
@@ -278,14 +278,28 @@ func TestStartPath_LogsNoChatIDOrContent(t *testing.T) {
 	store := newBotTestStore(t)
 	seedStartUser(t, store, 4242987)
 	reg := NewRegistry(KnownChatFunc(store))
-	reg.Register(db.KindStartCommand, StartHandler(store))
+	// Update 43 runs the real handler and then fails, so the receiver logs its
+	// handler-failure line on the /start path. That line proves the capture
+	// sees the receiver's logs; without it, "no leak" could just mean "no log".
+	inner := StartHandler(store)
+	reg.Register(db.KindStartCommand, HandlerFunc(func(ctx context.Context, tx *sql.Tx, d Delivery) (string, error) {
+		out, err := inner.HandleUpdate(ctx, tx, d)
+		if err == nil && d.UpdateID == 43 {
+			return "", errors.New("boom")
+		}
+		return out, err
+	}))
 	runPoll(t, store, reg,
 		entUpdate(40, 4242987, "/start secretpayload", "bot_command", 0, 6),
 		msgUpdate(41, 4242987, "secrettext"),
-		entUpdate(42, 7777123, "/start otherpayload", "bot_command", 0, 6))
+		entUpdate(42, 7777123, "/start otherpayload", "bot_command", 0, 6),
+		entUpdate(43, 4242987, "/start failpayload", "bot_command", 0, 6))
 
 	out := buf.String()
-	for _, leak := range []string{"4242987", "7777123", "secretpayload", "secrettext", "otherpayload"} {
+	if !strings.Contains(out, "bot update handler failed") || !strings.Contains(out, "kind="+db.KindStartCommand) {
+		t.Fatalf("log capture did not see the receiver's handler-failure line; the leak checks below would be vacuous:\n%s", out)
+	}
+	for _, leak := range []string{"4242987", "7777123", "secretpayload", "secrettext", "otherpayload", "failpayload"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("log contains %q:\n%s", leak, out)
 		}

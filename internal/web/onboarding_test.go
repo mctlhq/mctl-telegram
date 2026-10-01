@@ -230,3 +230,34 @@ func TestBroadcastRespectsExplicitChoice(t *testing.T) {
 		t.Fatalf("after saving product_updates: %+v, want eligible", d)
 	}
 }
+
+// Once product_updates has been saved explicitly, ?onboarding=1 must not claim
+// the client has not chosen; it shows a neutral "saved" line instead.
+func TestManagePage_OnboardingCalloutRespectsSavedChoice(t *testing.T) {
+	srv, store := newIsolatedManageServer(t)
+	uid := seedManageUser(t, store, 5454)
+	const path = "/telegram/connect/manage?onboarding=1"
+
+	if body := getManagePath(t, srv, uid, path); !strings.Contains(body, "One more step: choose your notifications") {
+		t.Fatalf("not-chosen callout missing before any save: %s", body)
+	}
+
+	form := url.Values{"submitted": {"notifications"}}
+	post := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications", strings.NewReader(form.Encode()))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	pw := httptest.NewRecorder()
+	srv.HandleSetNotifications(pw, withIdentity(post, uid))
+	if pw.Code != http.StatusFound {
+		t.Fatalf("save: status %d: %s", pw.Code, pw.Body.String())
+	}
+
+	body := getManagePath(t, srv, uid, path)
+	for _, bad := range []string{"One more step", "did not subscribe you", "You have not chosen yet"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("after an explicit save the page still says %q", bad)
+		}
+	}
+	if !strings.Contains(body, "Your notification choices are saved") {
+		t.Errorf("saved-state line missing: %s", body)
+	}
+}
