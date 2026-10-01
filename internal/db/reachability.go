@@ -40,20 +40,50 @@ func (s *Store) RecordBotReachability(ctx context.Context, userID int64, outcome
 	return nil
 }
 
-// RecordBotReachabilityTx is RecordBotReachability inside the caller's
-// transaction, for inbound handlers whose write must commit or roll back with
-// the receiver's done mark. Same conclusive-only rule.
-func (s *Store) RecordBotReachabilityTx(ctx context.Context, tx *sql.Tx, userID int64, outcome notify.DeliveryOutcome, source string) error {
+// RecordInboundBotReachabilityTx records reachability learned from an inbound
+// update, inside the caller's transaction so the write commits or rolls back
+// with the receiver's done mark. Same conclusive-only rule.
+//
+// observedAt is when the evidence was observed -- for the login bot, the
+// update's received_at, persisted at accept time. Unlike an outbound delivery,
+// which is classified the moment it happens, an inbound update can be
+// dispatched late: the pending sweep retries it after a restart or a handler
+// error. So the write applies only when observedAt is strictly newer than the
+// stored observed_at; a stale /start never overwrites a newer conclusive
+// observation such as a later `blocked`. applied reports whether the row was
+// written; false with a nil error means the stored observation is newer.
+func (s *Store) RecordInboundBotReachabilityTx(ctx context.Context, tx *sql.Tx, userID int64, outcome notify.DeliveryOutcome, source string, observedAt time.Time) (applied bool, err error) {
 	if !outcome.Conclusive {
-		return nil
+		return false, nil
 	}
 	if userID <= 0 {
-		return errors.New("user id must be positive")
+		return false, errors.New("user id must be positive")
 	}
-	if err := upsertBotReachability(ctx, tx, userID, outcome, source); err != nil {
-		return fmt.Errorf("record bot reachability: %w", err)
+	if observedAt.IsZero() {
+		return false, errors.New("observed time must be set")
 	}
-	return nil
+	observedAt = observedAt.UTC()
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO client_bot_reachability(user_id, state, reason_code, observed_at, source, updated_at)
+		 VALUES($1,$2,$3,$4,$5,$6)
+		 ON CONFLICT (user_id) DO UPDATE SET
+		     state = EXCLUDED.state,
+		     reason_code = EXCLUDED.reason_code,
+		     observed_at = EXCLUDED.observed_at,
+		     source = EXCLUDED.source,
+		     updated_at = EXCLUDED.updated_at
+		 WHERE client_bot_reachability.observed_at IS NULL
+		    OR client_bot_reachability.observed_at < EXCLUDED.observed_at`,
+		userID, outcome.State, outcome.ReasonCode, observedAt, source, time.Now().UTC(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("record inbound bot reachability: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("record inbound bot reachability: rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
 func upsertBotReachability(ctx context.Context, ex execer, userID int64, outcome notify.DeliveryOutcome, source string) error {
@@ -73,14 +103,8 @@ func upsertBotReachability(ctx context.Context, ex execer, userID int64, outcome
 }
 
 // GetBotReachability reads one user's reachability row, or nil when none has
-// ever been recorded (reads as "unknown").
-func (s *Store) GetBotReachability(ctx context.Context, userID int64) (*BotReachability, error) {
-	return s.getBotReachability(ctx, userID)
-}
-
-// getBotReachability reads one user's reachability row, or nil when none has
 // ever been recorded (reads as "unknown" with no observation metadata).
-func (s *Store) getBotReachability(ctx context.Context, userID int64) (*BotReachability, error) {
+func (s *Store) GetBotReachability(ctx context.Context, userID int64) (*BotReachability, error) {
 	var (
 		state      string
 		reasonCode string

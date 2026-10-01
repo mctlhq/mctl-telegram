@@ -49,12 +49,17 @@ func loginBotStartURL(username string) string {
 	return "https://t.me/" + username + "?start=onboarding"
 }
 
-// botReachabilityView is the manage page's login-bot block.
+// botReachabilityView is the manage page's login-bot block. The template
+// branches on the typed flags, never on Label, so rewording the copy cannot
+// silently drop an explanation.
 type botReachabilityView struct {
 	Label        string
 	StartURL     string
 	Username     string
 	NotReachable bool
+	// Unobserved is true when no reachability has ever been recorded: the
+	// state is unknown, not a claim that the client never started the bot.
+	Unobserved bool
 }
 
 func buildBotReachabilityView(r *db.BotReachability, username string) *botReachabilityView {
@@ -73,6 +78,7 @@ func buildBotReachabilityView(r *db.BotReachability, username string) *botReacha
 		v.Label = "Not started"
 	default:
 		v.Label = "Not yet observed"
+		v.Unobserved = true
 	}
 	return v
 }
@@ -148,6 +154,10 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		Notifications: rows,
 		Bot:           botView,
 		NotChosen:     notChosen,
+		// ?onboarding=1 is where the connect success page sends a newly
+		// connected client: the explicit category choice is put first. It
+		// only changes presentation; consent is still written by the form.
+		Onboarding: r.URL.Query().Get("onboarding") == "1",
 	})
 }
 
@@ -213,6 +223,7 @@ type managePageData struct {
 	Notifications []notificationRow
 	Bot           *botReachabilityView
 	NotChosen     bool
+	Onboarding    bool
 }
 
 const manageExtraCSS = `
@@ -259,6 +270,7 @@ var manageFoot = `    </div>
 </html>`
 
 var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `    <h1>Manage your Telegram session</h1>
+    {{if .Onboarding}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{end}}
     {{if .Connected}}
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>
@@ -275,7 +287,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     {{if .Bot}}
     <h2 class="notif-heading">Login bot</h2>
     <div class="field-row"><span class="field-label">Reachability</span><span class="field-value">{{.Bot.Label}}</span></div>
-    {{if eq .Bot.Label "Not yet observed"}}<p class="meta">We have not yet seen your login bot respond; start it to confirm delivery.</p>{{end}}
+    {{if .Bot.Unobserved}}<p class="meta">We have not yet seen your login bot respond; start it to confirm delivery.</p>{{end}}
     {{if .Bot.StartURL}}<p class="meta"><a href="{{.Bot.StartURL}}">Start the login bot</a></p>{{else}}<p class="meta">To start the login bot, open it in Telegram and press Start.</p>{{end}}
     {{if .Bot.NotReachable}}<p class="meta">The login bot cannot deliver the categories you enable until you start it.</p>{{end}}
     {{end}}

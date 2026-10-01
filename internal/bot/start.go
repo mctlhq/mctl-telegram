@@ -33,9 +33,22 @@ func StartHandler(store *db.Store) Handler {
 			}
 			return "", fmt.Errorf("start: resolve user: %w", err)
 		}
+		// The observation time is when the update was received, not now: a
+		// swept /start is dispatched late and must not overwrite a newer
+		// conclusive observation (see RecordInboundBotReachabilityTx).
+		observedAt, err := store.UpdateReceivedAtTx(ctx, tx, d.UpdateID)
+		if err != nil {
+			return "", fmt.Errorf("start: %w", err)
+		}
 		outcome := notify.DeliveryOutcome{State: notify.StateReachable, ReasonCode: reasonBotStart, Conclusive: true}
-		if err := store.RecordBotReachabilityTx(ctx, tx, userID, outcome, reasonBotStart); err != nil {
+		applied, err := store.RecordInboundBotReachabilityTx(ctx, tx, userID, outcome, reasonBotStart, observedAt)
+		if err != nil {
 			return "", fmt.Errorf("start: record reachability: %w", err)
+		}
+		if !applied {
+			// The stored observation is newer than this /start (a swept,
+			// late-dispatched update): handled, nothing written.
+			return db.OutcomeHandled, nil
 		}
 		return db.OutcomeReachabilityRecorded, nil
 	})

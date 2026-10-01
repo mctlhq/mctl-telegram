@@ -251,7 +251,7 @@ func (s *Store) UserIDByTelegramIDTx(ctx context.Context, tx *sql.Tx, tgID int64
 	return userIDByTelegramID(ctx, tx, tgID)
 }
 
-func userIDByTelegramID(ctx context.Context, q rowQuerier, tgID int64) (int64, error) {
+func userIDByTelegramID(ctx context.Context, q queryer, tgID int64) (int64, error) {
 	if tgID <= 0 {
 		return 0, errors.New("telegram id must be positive")
 	}
@@ -278,11 +278,6 @@ func userIDByTelegramID(ctx context.Context, q rowQuerier, tgID int64) (int64, e
 		return 0, fmt.Errorf("%w: telegram id maps to %d users", ErrTelegramIdentityAmbiguous, count)
 	}
 	return id.Int64, nil
-}
-
-// rowQuerier is satisfied by *sql.DB and *sql.Tx.
-type rowQuerier interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // TelegramIDByUserID resolves an internal users.id to its Telegram user id —

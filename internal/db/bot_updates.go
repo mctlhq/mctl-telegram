@@ -95,6 +95,24 @@ func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind string, c
 	return n > 0, nil
 }
 
+// UpdateReceivedAtTx returns when update_id was accepted (its received_at),
+// read inside the dispatch transaction. A handler uses it as the observation
+// time of evidence the update carries: a swept update is dispatched later than
+// it was received, and the receive time is what the evidence describes.
+func (s *Store) UpdateReceivedAtTx(ctx context.Context, tx *sql.Tx, updateID int64) (time.Time, error) {
+	var at sql.NullTime
+	err := tx.QueryRowContext(ctx,
+		`SELECT received_at FROM bot_updates WHERE update_id = $1`, updateID,
+	).Scan(&at)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("update received_at: %w", err)
+	}
+	if !at.Valid {
+		return time.Time{}, fmt.Errorf("update received_at: update %d has none", updateID)
+	}
+	return at.Time.UTC(), nil
+}
+
 // NextOffset returns the offset to pass to the next getUpdates call: one past
 // the highest update_id this table durably holds, or 0 when it is empty (which
 // Telegram reads as "send me whatever you have").

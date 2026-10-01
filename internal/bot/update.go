@@ -47,8 +47,10 @@ type Update struct {
 type Message struct {
 	Chat Chat `json:"chat"`
 	// StartCommand is true when the first entity is a bot_command at offset 0
-	// whose token (up to an optional @suffix) is /start. Any payload after the
-	// command is ignored and never held.
+	// whose token (up to an optional @suffix) is /start, compared
+	// case-insensitively: Telegram bot commands are case-insensitive and mobile
+	// keyboards often send /Start. Any payload after the command is ignored and
+	// never held.
 	StartCommand bool `json:"-"`
 }
 
@@ -78,7 +80,7 @@ func (m *Message) UnmarshalJSON(b []byte) error {
 				if at := strings.IndexByte(token, '@'); at >= 0 {
 					token = token[:at]
 				}
-				m.StartCommand = token == "/start"
+				m.StartCommand = strings.EqualFold(token, "/start")
 			}
 		}
 	}
