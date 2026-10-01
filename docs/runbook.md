@@ -2354,6 +2354,7 @@ other with `409 Conflict`. Enable it in exactly one environment per token.
 | `unknown_chat` | the chat is not a client we recognise | yes — anyone can message a public bot |
 | `unsupported` | an update kind the receiver does not route | yes |
 | `duplicate` | Telegram redelivered an update already accepted | yes, occasionally |
+| `routing_mismatch` | bot-start bridge only: the `update_id` is already stored, pending or processed, as a different kind or for a different chat, so the observation is not dispatched (the caller still gets `202`) | **no** — a correct forwarder never sends a colliding `update_id`; check what mctl-agent forwards |
 | `handler_error` | a registered handler failed; the update stays pending and is retried | **no** |
 | `dispatch_error` | routing or the database failed, not a handler | **no** — look at the database, not at handler code |
 
