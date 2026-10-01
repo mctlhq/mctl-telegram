@@ -128,7 +128,10 @@ func (a *BearerTokenAuth) Redact(s string) string {
 
 // BotStartObservationHandler records a /start forwarded by the webhook owner.
 //
-//   - 401 without valid authentication;
+//   - 401 without valid authentication, whatever the method;
+//   - 405 with Allow: POST for an authenticated non-POST, when the mount does
+//     not filter methods (the server mounts with chi's mux.Method, so chi
+//     answers a non-POST itself and this handler never sees it);
 //   - 400 for anything but exactly the three fields, a non-positive id, or an
 //     observed_at that is zero or in the future beyond clock skew;
 //   - 413 for a body over maxObservationBody;
@@ -152,10 +155,11 @@ func newBotStartObservationHandler(store bridgeStore, record recordFunc, auth Br
 		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Authentication first, so an unauthenticated caller gets 401 for
-		// every method. Mounted with chi's mux.Method, a non-POST never
-		// reaches this handler (chi answers 405 itself); the method check is
-		// for a mount that does not filter methods.
+		// This handler authenticates before it looks at the method, so it
+		// answers 401 to any unauthenticated request whatever the method. The
+		// deployed route differs: mounted with chi's mux.Method, a non-POST
+		// never reaches this handler and chi answers 405 itself. The method
+		// check below exists for a mount that does not filter methods.
 		if auth == nil || !auth.Authenticate(r) {
 			writeBridgeJSON(w, http.StatusUnauthorized, `{"error":"unauthorized"}`)
 			return
