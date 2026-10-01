@@ -30,9 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
 
 // BotStartObservationPath is the bridge route.
@@ -290,9 +290,8 @@ func decodeObservation(w http.ResponseWriter, r *http.Request) (botStartObservat
 	}
 	// DisallowUnknownFields does not catch a repeated member: encoding/json
 	// keeps the last value, so {"update_id":1,"update_id":2,...} would decode
-	// as update 2. Reject duplicates first, with the helper the admin profile
-	// handler uses for the same purpose.
-	if profile.RejectDuplicateJSONKeys(raw) != nil {
+	// as update 2. Reject duplicates first.
+	if jsonstrict.RejectDuplicateKeys(raw) != nil {
 		return obs, http.StatusBadRequest
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))

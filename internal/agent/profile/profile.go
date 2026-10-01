@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +24,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
 
 // RestrictedField is one entry under the profile's restricted section. A
@@ -146,76 +149,29 @@ func ParseJSON(raw []byte) (Data, error) {
 // RejectDuplicateJSONKeys validates duplicate-free JSON objects recursively.
 // It is also used by the admin handler on the complete request envelope before
 // decoding can collapse duplicate tenant selectors or owner_profile fields.
+// The walk lives in internal/jsonstrict; this wrapper keeps the profile
+// package's error wording unchanged for its callers.
 func RejectDuplicateJSONKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-
-	var walk func() error
-	walk = func() error {
-		token, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		delim, ok := token.(json.Delim)
-		if !ok {
-			return nil
-		}
-		switch delim {
-		case '{':
-			seen := make(map[string]struct{})
-			for dec.More() {
-				keyToken, err := dec.Token()
-				if err != nil {
-					return err
-				}
-				key, ok := keyToken.(string)
-				if !ok {
-					return fmt.Errorf("profile object key must be a string")
-				}
-				if _, duplicate := seen[key]; duplicate {
-					return fmt.Errorf("duplicate JSON key %q", key)
-				}
-				seen[key] = struct{}{}
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-			end, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			if end != json.Delim('}') {
-				return fmt.Errorf("invalid profile object")
-			}
-		case '[':
-			for dec.More() {
-				if err := walk(); err != nil {
-					return err
-				}
-			}
-			end, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			if end != json.Delim(']') {
-				return fmt.Errorf("invalid profile array")
-			}
-		default:
-			return fmt.Errorf("unexpected profile delimiter %q", delim)
-		}
+	err := jsonstrict.RejectDuplicateKeys(raw)
+	switch {
+	case err == nil:
 		return nil
-	}
-
-	if err := walk(); err != nil {
+	case errors.Is(err, jsonstrict.ErrDuplicateKey):
+		// Already worded `duplicate JSON key "x"`, as before.
+		return err
+	case errors.Is(err, jsonstrict.ErrTrailingData):
+		return fmt.Errorf("profile document must contain exactly one JSON object")
+	case errors.Is(err, jsonstrict.ErrNonStringKey):
+		return fmt.Errorf("profile object key must be a string")
+	case errors.Is(err, jsonstrict.ErrInvalidObject):
+		return fmt.Errorf("invalid profile object")
+	case errors.Is(err, jsonstrict.ErrInvalidArray):
+		return fmt.Errorf("invalid profile array")
+	case errors.Is(err, jsonstrict.ErrUnexpectedDelim):
+		return fmt.Errorf("unexpected profile delimiter%s", strings.TrimPrefix(err.Error(), jsonstrict.ErrUnexpectedDelim.Error()))
+	default:
 		return err
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("profile document must contain exactly one JSON object")
-		}
-		return err
-	}
-	return nil
 }
 
 // normalizeData recursively converts every map[interface{}]interface{} that
