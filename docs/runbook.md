@@ -2651,8 +2651,9 @@ this client". It arrives by one of two paths that share one business rule
 - **Auth.** `Authorization: Bearer <BOT_START_BRIDGE_TOKEN>`, compared in
   constant time; minimum 32 characters. Unset: the route is not mounted at all
   (404), and startup logs `bot-start bridge disabled`. Set but shorter than 32:
-  startup fails (`BOT_START_BRIDGE_TOKEN is set but shorter than 32
-  characters`, the token itself is not logged), so a misconfigured pod never
+  startup fails before anything else is opened (`BOT_START_BRIDGE_TOKEN is
+  set but unusable: bot-start bridge token is shorter than 32 characters`;
+  the token itself is not logged), so a misconfigured pod never
   becomes ready rather than silently 404ing every forwarded `/start`. The route
   sits outside `auth.Middleware` and the MCP surface; it is not an MCP tool and
   accepts nothing but this observation. The authenticator is an interface

@@ -41,32 +41,39 @@ func TestMountBotStartBridge(t *testing.T) {
 	}
 
 	// Unset: not configured, not an error, route absent.
+	auth, err := botStartBridgeAuth("")
+	if auth != nil || err != nil {
+		t.Errorf("unset token: auth=%v err=%v, want nil, nil", auth, err)
+	}
 	mux := chi.NewRouter()
-	if mounted, err := mountBotStartBridge(mux, store, m, ""); mounted || err != nil {
-		t.Errorf("unset token: mounted=%v err=%v, want false, nil", mounted, err)
+	if mountBotStartBridge(mux, store, m, auth) {
+		t.Error("unset token: bridge reported mounted")
 	}
 	if code := post(mux); code != http.StatusNotFound {
 		t.Errorf("unset token: status = %d, want 404 (route absent)", code)
 	}
 
-	// Set but too short: a startup error (main exits), route absent, and the
-	// error does not echo the token.
+	// Set but too short: a startup error (main exits) that wraps the
+	// constructor's cause and does not echo the token.
 	short := strings.Repeat("s", bot.MinBridgeTokenLen-1)
-	mux = chi.NewRouter()
-	mounted, err := mountBotStartBridge(mux, store, m, short)
-	if err == nil || mounted {
-		t.Errorf("short token: mounted=%v err=%v, want false and an error", mounted, err)
+	auth, err = botStartBridgeAuth(short)
+	if err == nil || auth != nil {
+		t.Fatalf("short token: auth=%v err=%v, want nil and an error", auth, err)
 	}
-	if err != nil && strings.Contains(err.Error(), short) {
+	if _, cause := bot.NewBearerTokenAuth(short); errors.Unwrap(err) == nil || errors.Unwrap(err).Error() != cause.Error() {
+		t.Errorf("startup error %q does not wrap the constructor's error %q", err, cause)
+	}
+	if strings.Contains(err.Error(), short) {
 		t.Errorf("startup error echoes the token: %v", err)
 	}
-	if code := post(mux); code != http.StatusNotFound {
-		t.Errorf("short token: status = %d, want 404 (route absent)", code)
-	}
 
+	auth, err = botStartBridgeAuth(strings.Repeat("a", bot.MinBridgeTokenLen))
+	if auth == nil || err != nil {
+		t.Fatalf("valid token: auth=%v err=%v", auth, err)
+	}
 	mux = chi.NewRouter()
-	if mounted, err := mountBotStartBridge(mux, store, m, strings.Repeat("a", bot.MinBridgeTokenLen)); !mounted || err != nil {
-		t.Fatalf("valid token: mounted=%v err=%v", mounted, err)
+	if !mountBotStartBridge(mux, store, m, auth) {
+		t.Fatal("valid token: bridge not mounted")
 	}
 	// Mounted, and guarded by its own auth rather than open.
 	if code := post(mux); code != http.StatusUnauthorized {
@@ -92,7 +99,17 @@ func TestServerBootWithBridgeToken(t *testing.T) {
 	start := func(t *testing.T, token string) (*exec.Cmd, *syncBuffer, chan error, string) {
 		addr := freeLoopbackAddr(t)
 		cmd := exec.Command(bin)
-		cmd.Env = append(os.Environ(),
+		// Drop any inherited value rather than relying on override order.
+		// os/exec documents that the last duplicate in Cmd.Env wins, so an
+		// appended value already takes effect today; filtering keeps the
+		// child's environment unambiguous regardless.
+		var env []string
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "BOT_START_BRIDGE_TOKEN=") {
+				env = append(env, kv)
+			}
+		}
+		cmd.Env = append(env,
 			"AUTH_MODE=local-dev",
 			"ADDR="+addr,
 			"PUBLIC_BASE_URL=http://"+addr,
@@ -124,8 +141,13 @@ func TestServerBootWithBridgeToken(t *testing.T) {
 			t.Fatalf("server kept running with a short bridge token\n%s", logs.String())
 		}
 		out := logs.String()
-		if !strings.Contains(out, "BOT_START_BRIDGE_TOKEN is set but shorter than") {
+		if !strings.Contains(out, "BOT_START_BRIDGE_TOKEN is set but unusable") || !strings.Contains(out, "shorter than") {
 			t.Errorf("exit did not name the bridge token problem:\n%s", out)
+		}
+		// Validated before any wiring: the process exits before it even logs
+		// "starting", so no store, route or background worker exists yet.
+		if strings.Contains(out, `"msg":"starting"`) {
+			t.Errorf("bridge token validated only after startup began:\n%s", out)
 		}
 		if strings.Contains(out, short) {
 			t.Errorf("startup log echoes the token:\n%s", out)
@@ -152,6 +174,9 @@ func TestServerBootWithBridgeToken(t *testing.T) {
 				t.Fatalf("server never answered /healthz\n%s", logs.String())
 			}
 			time.Sleep(100 * time.Millisecond)
+		}
+		if !strings.Contains(logs.String(), `"msg":"starting"`) {
+			t.Fatalf("no \"starting\" line, so its absence above proves nothing:\n%s", logs.String())
 		}
 		if !strings.Contains(logs.String(), "bot-start bridge disabled") {
 			t.Errorf("unset token did not log the bridge as disabled:\n%s", logs.String())

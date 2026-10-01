@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -64,7 +65,8 @@ type BearerTokenAuth struct{ token []byte }
 // shorter than MinBridgeTokenLen.
 func NewBearerTokenAuth(token string) (*BearerTokenAuth, error) {
 	if len(token) < MinBridgeTokenLen {
-		return nil, errors.New("bot-start bridge token is too short")
+		// Never include the token itself in this error: callers log it.
+		return nil, fmt.Errorf("bot-start bridge token is shorter than %d characters", MinBridgeTokenLen)
 	}
 	return &BearerTokenAuth{token: []byte(token)}, nil
 }
