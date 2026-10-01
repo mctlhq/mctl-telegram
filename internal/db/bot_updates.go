@@ -35,7 +35,12 @@ import (
 // offset advances and Telegram stops redelivering it) and recorded as
 // KindUnsupported without being dispatched.
 const (
-	KindMessage       = "message"
+	KindMessage = "message"
+	// KindStartCommand is a private-chat message whose first entity is a
+	// /start bot_command. It is the only content-derived kind: the classification
+	// is made at accept time and persisted as the kind, so the pending sweep can
+	// redeliver it from the stored row without keeping any text.
+	KindStartCommand  = "start_command"
 	KindCallbackQuery = "callback_query"
 	KindUnsupported   = "unsupported"
 )
@@ -49,6 +54,9 @@ const (
 	OutcomeUnknownChat  = "unknown_chat"
 	OutcomeUnsupported  = "unsupported"
 	OutcomeHandlerError = "handler_error"
+	// OutcomeReachabilityRecorded is returned by the /start handler after it
+	// recorded client_bot_reachability.
+	OutcomeReachabilityRecorded = "reachability_recorded"
 )
 
 // PendingUpdate is an accepted update that has not been dispatched yet. It

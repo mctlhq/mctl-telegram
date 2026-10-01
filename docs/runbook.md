@@ -2615,3 +2615,31 @@ the logged `err` for the specific missing/invalid configuration value, and
 `internal/config`'s own `Load` errors (e.g. the `MCP_PATH` root-shadow guard
 in item 4 of `mctlhq/mctl-telegram#701`) for a related class of startup
 refusal.
+
+## Login bot `/start` and onboarding (issue-679)
+
+The inbound login-bot receiver (`BOT_RECEIVER_ENABLED`, issue-619) has one
+handler: a `/start` the client sent to the login bot.
+
+- **Kind.** A private `message` whose first entity is a `bot_command` at offset 0
+  naming `/start` (bare, `@<bot>`-suffixed, or with a payload) is stored with
+  kind `start_command`. Only that classification is kept; the text and payload
+  are never held, logged or stored. Any other `message` keeps kind `message`,
+  has no handler and ends `no_handler` (inert).
+- **Effect.** The handler upserts `client_bot_reachability` with
+  `state = reachable`, `reason_code = bot_start`, `source = bot_start`, in the
+  dispatch transaction, and the update ends with outcome `reachability_recorded`
+  in `mctl_bot_updates_total`. It changes no notification preference and sends
+  nothing. A chat that is unknown, not private or ambiguous ends `unknown_chat`
+  and records nothing.
+- **Config.** `TELEGRAM_LOGIN_BOT_USERNAME` (optional) is the bot username used
+  for the `https://t.me/<username>?start=onboarding` link on the connect success
+  page and the manage page. An invalid value is ignored with a startup warning;
+  without it the pages show plain-text instructions.
+- **Rollout order.** Release the code (receiver stays off) -> a separate
+  mctl-gitops PR sets `BOT_RECEIVER_ENABLED` and `TELEGRAM_LOGIN_BOT_USERNAME`
+  -> live proof: onboarding, `/start`, reachability `reachable`, explicit
+  category preferences saved, a broadcast preview respects them.
+- **Rollback.** Unset `BOT_RECEIVER_ENABLED` to stop inbound writes. Rows with
+  `source = bot_start` are valid observations; to remove them run
+  `DELETE FROM client_bot_reachability WHERE source = 'bot_start'`.

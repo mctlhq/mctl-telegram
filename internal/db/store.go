@@ -242,6 +242,16 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 // connected accounts so local-dev/shared-HMAC users can be administered too.
 // Multiple distinct owners fail closed instead of choosing one tenant.
 func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, error) {
+	return userIDByTelegramID(ctx, s.DB, tgID)
+}
+
+// UserIDByTelegramIDTx is UserIDByTelegramID inside the caller's transaction,
+// with the same ambiguity rule.
+func (s *Store) UserIDByTelegramIDTx(ctx context.Context, tx *sql.Tx, tgID int64) (int64, error) {
+	return userIDByTelegramID(ctx, tx, tgID)
+}
+
+func userIDByTelegramID(ctx context.Context, q rowQuerier, tgID int64) (int64, error) {
 	if tgID <= 0 {
 		return 0, errors.New("telegram id must be positive")
 	}
@@ -249,7 +259,7 @@ func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, erro
 		id    sql.NullInt64
 		count int
 	)
-	err := s.DB.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT MIN(user_id), COUNT(DISTINCT user_id)
 		   FROM (
 		         SELECT id AS user_id FROM users WHERE telegram_login_id = $1
@@ -268,6 +278,11 @@ func (s *Store) UserIDByTelegramID(ctx context.Context, tgID int64) (int64, erro
 		return 0, fmt.Errorf("%w: telegram id maps to %d users", ErrTelegramIdentityAmbiguous, count)
 	}
 	return id.Int64, nil
+}
+
+// rowQuerier is satisfied by *sql.DB and *sql.Tx.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // TelegramIDByUserID resolves an internal users.id to its Telegram user id —

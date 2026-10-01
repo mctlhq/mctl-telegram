@@ -610,3 +610,22 @@ func TestLoadNonPositiveBulkMediaByteCapFallsBack(t *testing.T) {
 		})
 	}
 }
+
+func TestLoginBotUsernameFromEnv(t *testing.T) {
+	cases := []struct{ name, env, want string }{
+		{"unset", "", ""},
+		{"valid", "mctl_login_bot", "mctl_login_bot"},
+		{"at prefix", "@MctlBot", "MctlBot"},
+		{"too short", "bot", ""},
+		{"no bot suffix", "mctl_login", ""},
+		{"bad chars", "mctl-login-bot", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("TELEGRAM_LOGIN_BOT_USERNAME", c.env)
+			if got := loginBotUsernameFromEnv(); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

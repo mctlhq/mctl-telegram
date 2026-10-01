@@ -34,8 +34,31 @@ func (s *Store) RecordBotReachability(ctx context.Context, userID int64, outcome
 	if userID <= 0 {
 		return errors.New("user id must be positive")
 	}
+	if err := upsertBotReachability(ctx, s.DB, userID, outcome, source); err != nil {
+		return fmt.Errorf("record bot reachability: %w", err)
+	}
+	return nil
+}
+
+// RecordBotReachabilityTx is RecordBotReachability inside the caller's
+// transaction, for inbound handlers whose write must commit or roll back with
+// the receiver's done mark. Same conclusive-only rule.
+func (s *Store) RecordBotReachabilityTx(ctx context.Context, tx *sql.Tx, userID int64, outcome notify.DeliveryOutcome, source string) error {
+	if !outcome.Conclusive {
+		return nil
+	}
+	if userID <= 0 {
+		return errors.New("user id must be positive")
+	}
+	if err := upsertBotReachability(ctx, tx, userID, outcome, source); err != nil {
+		return fmt.Errorf("record bot reachability: %w", err)
+	}
+	return nil
+}
+
+func upsertBotReachability(ctx context.Context, ex execer, userID int64, outcome notify.DeliveryOutcome, source string) error {
 	now := time.Now().UTC()
-	_, err := s.DB.ExecContext(ctx,
+	_, err := ex.ExecContext(ctx,
 		`INSERT INTO client_bot_reachability(user_id, state, reason_code, observed_at, source, updated_at)
 		 VALUES($1,$2,$3,$4,$5,$6)
 		 ON CONFLICT (user_id) DO UPDATE SET
@@ -46,10 +69,13 @@ func (s *Store) RecordBotReachability(ctx context.Context, userID int64, outcome
 		     updated_at = EXCLUDED.updated_at`,
 		userID, outcome.State, outcome.ReasonCode, now, source, now,
 	)
-	if err != nil {
-		return fmt.Errorf("record bot reachability: %w", err)
-	}
-	return nil
+	return err
+}
+
+// GetBotReachability reads one user's reachability row, or nil when none has
+// ever been recorded (reads as "unknown").
+func (s *Store) GetBotReachability(ctx context.Context, userID int64) (*BotReachability, error) {
+	return s.getBotReachability(ctx, userID)
 }
 
 // getBotReachability reads one user's reachability row, or nil when none has
