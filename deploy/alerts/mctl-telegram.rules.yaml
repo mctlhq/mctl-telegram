@@ -553,6 +553,23 @@ spec:
               See docs/slo.md for the error-budget policy and recovery criteria.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
 
+        - alert: MctlToolHandlerFaults
+          # Server-fault reasons never burn the availability SLO (records
+          # synthesized by flushRecordedCall do not feed
+          # mctl_tool_invocations_total), so this rule is the only page-free
+          # signal for a panicking or error-returning tool handler. Scope is
+          # deliberately panic|handler_error: store_error and encode_failed
+          # stay observable in mctl_tool_call_errors_total but are not alerted.
+          expr: |
+            sum by (tool, reason) (rate(mctl_tool_call_errors_total{reason=~"panic|handler_error"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram MCP tool handler fault ({{ $labels.reason }} on {{ $labels.tool }})"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltoolhandlerfaults"
+
     - name: mctl-telegram-oauth-availability
       rules:
         - alert: MctlOAuthAvailabilityFastBurn

@@ -345,7 +345,7 @@ func TestDirectSendLimiter_BlocksWhenExhausted(t *testing.T) {
 // known session sentinel errors must still produce a non-nil error result
 // whose content mentions "session".
 func TestBorrowErrResultSessionSentinelsUnchanged(t *testing.T) {
-	result := borrowErrResult("t", db.ErrSessionRevoked)
+	result := borrowErrResult(context.Background(), "t", db.ErrSessionRevoked)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -363,7 +363,7 @@ func TestBorrowErrResultSessionSentinelsUnchanged(t *testing.T) {
 // retry_after_seconds field.
 func TestBorrowErrResultFloodWait(t *testing.T) {
 	wrapped := fmt.Errorf("list_dialogs: %w", tgerr.New(420, "FLOOD_WAIT_30"))
-	result := borrowErrResult("list_dialogs", wrapped)
+	result := borrowErrResult(context.Background(), "list_dialogs", wrapped)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1202,6 +1202,29 @@ func TestToolSearchMessages_InvalidDate(t *testing.T) {
 		got := contentText(result)
 		if !strings.Contains(got, "min_date") || !strings.Contains(got, "RFC3339") || !strings.Contains(got, "2026-08-27") {
 			t.Fatalf("error %q does not name min_date and both accepted formats", got)
+		}
+	})
+
+	t.Run("unparseable min_date never reaches the search", func(t *testing.T) {
+		// Pins the early return before any Telegram RPC: the seam that
+		// replaces the pool borrow must not be invoked at all.
+		calls := 0
+		stubMessageSearcher(t, func(s *Server, ctx context.Context, userID int64, p telegram.SearchParams) ([]telegram.Message, error) {
+			calls++
+			return nil, nil
+		})
+		result, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{
+			Name:      "search_messages",
+			Arguments: map[string]any{"query": "roof rack", "min_date": "yesterday"},
+		}})
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if !result.IsError {
+			t.Fatal("expected error for unparseable min_date")
+		}
+		if calls != 0 {
+			t.Fatalf("search seam invoked %d times, want 0", calls)
 		}
 	})
 

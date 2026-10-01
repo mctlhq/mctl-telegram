@@ -148,10 +148,12 @@ func TestMediaGate_InFlightGaugeTracksHeldSlots(t *testing.T) {
 	}
 }
 
-// TestMediaGate_DefaultWaitIsTwoSeconds (T6) pins the production admission
-// wait: newMediaGate must still install defaultMediaGateWait, and that const
-// must still be 2s, so a test shrinking its own gate's wait via
-// newMediaGateWithWait cannot let the production value silently drift.
+// TestMediaGate_DefaultWaitIsTwoSeconds (T6) pins two contracts on the
+// admission wait. First, the production value: newMediaGate must still
+// install defaultMediaGateWait, and that const must still be 2s, so a test
+// shrinking its own gate's wait cannot let it silently drift. Second, the
+// guard in newMediaGateWithWait: a d <= 0 must fall back to the default, since
+// an already-expired timer would make acquire refuse a free gate at random.
 func TestMediaGate_DefaultWaitIsTwoSeconds(t *testing.T) {
 	if defaultMediaGateWait != 2*time.Second {
 		t.Fatalf("defaultMediaGateWait = %v, want 2s", defaultMediaGateWait)

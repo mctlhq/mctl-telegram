@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -57,7 +58,9 @@ func TestClassifyToolResultReason_MatchesHandlerLiterals(t *testing.T) {
 		{"confirmation wrong pair", "confirmation_id was issued for a different (peer, text) — re-run prepare_send_message", ReasonConfirmationRejected},
 		{"confirmation wrong user", "confirmation_id belongs to another identity", ReasonConfirmationRejected},
 		{"confirmation not found", "confirmation_id not found, expired, or already used", ReasonNotFound},
-		{"confirmation required", "confirmation_id required — call prepare_pin_message first", ReasonNotFound},
+		{"confirmation required pin", "confirmation_id required — call prepare_pin_message first", ReasonInvalidArgument},
+		{"confirmation required media", "confirmation_id required — call prepare_get_media first", ReasonInvalidArgument},
+		{"confirmation required send", "confirmation_id required — call prepare_send_message first", ReasonInvalidArgument},
 
 		// Rate limiting (audit.RateLimiter).
 		{"per-peer rate limit", "per-peer send rate limit reached (20/hour to one peer) — wait, pick a different recipient, or send fewer messages per call", ReasonRateLimited},
@@ -100,17 +103,25 @@ func TestClassifyToolResultReason_NilResult(t *testing.T) {
 	}
 }
 
-// TestClassifyReason_BridgeErrorOverridesText proves the callPath=="local"
-// marker (already used by every bridgeResultErr call site) takes priority
-// over text classification: a bridge daemon's own error text is not one
-// this package controls or can enumerate, so callPath is the reliable
-// signal for bridge_error.
-func TestClassifyReason_BridgeErrorOverridesText(t *testing.T) {
-	res := errText("query is required") // would otherwise classify invalid_argument
-	if got := classifyReason("local", res); got != ReasonBridgeError {
-		t.Errorf("classifyReason(local, ...) = %q, want %q", got, ReasonBridgeError)
+// TestClassifyReason_CallPathDoesNotSteerClassification: callPath is a routing
+// fact; bridge_error comes from an explicit hint (bridgeCall), not from it.
+func TestClassifyReason_CallPathDoesNotSteerClassification(t *testing.T) {
+	res := errText("query is required")
+	for _, cp := range []string{"local", ""} {
+		if got := classifyReason(cp, res); got != ReasonInvalidArgument {
+			t.Errorf("classifyReason(%q, ...) = %q, want %q", cp, got, ReasonInvalidArgument)
+		}
 	}
-	if got := classifyReason("", res); got != ReasonInvalidArgument {
-		t.Errorf("classifyReason(\"\", ...) = %q, want %q", got, ReasonInvalidArgument)
+}
+
+// TestMTProtoCatalog_NoMessageIsAPrefixOfAnother guards the catalog prefix
+// loop in classifyToolResultReason against map-iteration-order dependence.
+func TestMTProtoCatalog_NoMessageIsAPrefixOfAnother(t *testing.T) {
+	for ka, a := range mtprotoErrCatalog {
+		for kb, b := range mtprotoErrCatalog {
+			if ka != kb && a.message != b.message && strings.HasPrefix(b.message, a.message) {
+				t.Errorf("catalog message %q (%v) is a prefix of %q (%v)", a.message, ka, b.message, kb)
+			}
+		}
 	}
 }
