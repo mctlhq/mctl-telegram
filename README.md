@@ -103,6 +103,7 @@ Key variables:
 | `TELEGRAM_OIDC_CLIENT_ID`     | Login bot's numeric Telegram id (from BotFather; not secret)                |
 | `TELEGRAM_OIDC_CLIENT_SECRET` | OIDC client secret for the login bot                                        |
 | `TELEGRAM_LOGIN_BOT_TOKEN`    | Bot token — used only for the new-client welcome digest                     |
+| `TELEGRAM_LOGIN_BOT_USERNAME` | Optional. Login bot @username for the `t.me` start link on the connect success and manage pages (issue-679). Not the 0.16.0 widget variable of the same name, which was removed (see CHANGELOG 0.16.0) |
 | `TG_API_ID`                   | Telegram API id from my.telegram.org                                        |
 | `TG_API_HASH`                 | Telegram API hash from my.telegram.org                                      |
 | `ENCRYPTION_KEY`              | 32-byte hex key for encrypting session blobs at rest                        |

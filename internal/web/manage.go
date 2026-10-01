@@ -15,6 +15,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
@@ -28,11 +29,58 @@ type ManageServer struct {
 	store  *db.Store
 	pool   ManagePool
 	issuer string
+	// loginBotUsername is the validated login bot @username, or "".
+	loginBotUsername string
 }
 
-// NewManageServer constructs a ManageServer.
-func NewManageServer(store *db.Store, pool ManagePool, issuer string) *ManageServer {
-	return &ManageServer{store: store, pool: pool, issuer: issuer}
+// NewManageServer constructs a ManageServer. loginBotUsername is the validated
+// TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset.
+func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername string) *ManageServer {
+	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername}
+}
+
+// loginBotStartURL is the one place the login bot start link is built, shared
+// by the connect success page and the manage page. It returns "" when the
+// username is unset so callers fall back to plain-text instructions.
+func loginBotStartURL(username string) string {
+	if username == "" {
+		return ""
+	}
+	return "https://t.me/" + username + "?start=onboarding"
+}
+
+// botReachabilityView is the manage page's login-bot block. The template
+// branches on the typed flags, never on Label, so rewording the copy cannot
+// silently drop an explanation.
+type botReachabilityView struct {
+	Label        string
+	StartURL     string
+	Username     string
+	NotReachable bool
+	// Unobserved is true when no reachability has ever been recorded: the
+	// state is unknown, not a claim that the client never started the bot.
+	Unobserved bool
+}
+
+func buildBotReachabilityView(r *db.BotReachability, username string) *botReachabilityView {
+	v := &botReachabilityView{StartURL: loginBotStartURL(username), Username: username, NotReachable: true}
+	state := ""
+	if r != nil {
+		state = r.State
+	}
+	switch state {
+	case notify.StateReachable:
+		v.Label = "Reachable"
+		v.NotReachable = false
+	case notify.StateBlocked:
+		v.Label = "Blocked"
+	case notify.StateCannotInitiate:
+		v.Label = "Not started"
+	default:
+		v.Label = "Not yet observed"
+		v.Unobserved = true
+	}
+	return v
 }
 
 // WriteUnauthorized is the browser-facing 401 for /telegram/connect/manage.
@@ -76,11 +124,29 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	// disconnected should still be able to stop product updates without
 	// reconnecting first. A read failure degrades to no section rather than
 	// to an error page, because it must not block disconnect.
+	//
+	// The choice state is three-valued: a failed read is unknown, never
+	// "chosen" and never "not chosen" -- could not observe is not observed.
 	var rows []notificationRow
+	choice := choiceUnknown
 	if prefs, err := s.store.ResolveNotificationPrefs(r.Context(), id.UserID); err != nil {
 		slog.Warn("manage: resolve notification prefs", "err", err)
 	} else {
 		rows = buildNotificationRows(prefs)
+		choice = choiceChosen
+		for _, p := range prefs {
+			if p.Category == string(db.CategoryProductUpdates) && !p.Explicit {
+				choice = choiceNotChosen
+			}
+		}
+	}
+	// A reachability read failure hides the block; it must not break the page
+	// or the disconnect controls. Read-only: nothing is written on GET.
+	var botView *botReachabilityView
+	if reach, err := s.store.GetBotReachability(r.Context(), id.UserID); err != nil {
+		slog.Warn("manage: get bot reachability", "err", err)
+	} else {
+		botView = buildBotReachabilityView(reach, s.loginBotUsername)
 	}
 	renderManagePage(w, managePageData{
 		Connected:     info.Connected,
@@ -90,6 +156,14 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		SendEnabled:   info.SendEnabled,
 		Issuer:        s.issuer,
 		Notifications: rows,
+		Bot:           botView,
+		NotChosen:     choice == choiceNotChosen,
+		Chosen:        choice == choiceChosen,
+		ChoiceUnknown: choice == choiceUnknown,
+		// ?onboarding=1 is where the connect success page sends a newly
+		// connected client: the explicit category choice is put first. It
+		// only changes presentation; consent is still written by the form.
+		Onboarding: r.URL.Query().Get("onboarding") == "1",
 	})
 }
 
@@ -153,7 +227,22 @@ type managePageData struct {
 	SendEnabled   bool
 	Issuer        string
 	Notifications []notificationRow
+	Bot           *botReachabilityView
+	// Exactly one of NotChosen, Chosen and ChoiceUnknown is true.
+	NotChosen     bool
+	Chosen        bool
+	ChoiceUnknown bool
+	Onboarding    bool
 }
+
+// choiceState is whether the client has explicitly chosen product_updates.
+type choiceState int
+
+const (
+	choiceUnknown choiceState = iota // the preference read failed
+	choiceNotChosen
+	choiceChosen
+)
 
 const manageExtraCSS = `
   .field-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
@@ -199,6 +288,7 @@ var manageFoot = `    </div>
 </html>`
 
 var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `    <h1>Manage your Telegram session</h1>
+    {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else if .Chosen}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{else}}<p id="onboarding" class="meta">We could not load your notification choices right now.</p>{{end}}{{end}}
     {{if .Connected}}
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>
@@ -212,8 +302,16 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     {{else}}
     <p>No active Telegram session found.</p>
     {{end}}
+    {{if .Bot}}
+    <h2 class="notif-heading">Login bot</h2>
+    <div class="field-row"><span class="field-label">Reachability</span><span class="field-value">{{.Bot.Label}}</span></div>
+    {{if .Bot.Unobserved}}<p class="meta">We have not yet seen your login bot respond; start it to confirm delivery.</p>{{end}}
+    {{if .Bot.StartURL}}<p class="meta"><a href="{{.Bot.StartURL}}">Start the login bot</a></p>{{else}}<p class="meta">To start the login bot, open it in Telegram and press Start.</p>{{end}}
+    {{if .Bot.NotReachable}}<p class="meta">The login bot cannot deliver the categories you enable until you start it.</p>{{end}}
+    {{end}}
     {{if .Notifications}}
-    <h2 class="notif-heading">Notifications</h2>
+    <h2 class="notif-heading" id="notifications">Notifications</h2>
+    {{if .NotChosen}}<p class="meta"><strong>You have not chosen yet.</strong> Product updates stay off until you save.</p>{{end}}
     <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
     <form method="POST" action="/telegram/connect/manage/notifications">
       <input type="hidden" name="submitted" value="notifications">

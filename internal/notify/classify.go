@@ -1,6 +1,7 @@
 // Package notify models bot reachability: whether the login bot may
-// currently initiate a chat with a client, derived only from the outcome of
-// a real Telegram Bot API delivery -- never from a probe sent solely to
+// currently initiate a chat with a client, derived from the outcome of a real
+// Telegram Bot API delivery, or from a /start the client themselves sent to the
+// login bot (issue-679) -- never from a probe sent solely to
 // classify reachability (see design.md's "Probe-based classification"
 // alternative, which is dropped and forbidden by the issue).
 package notify

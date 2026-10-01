@@ -489,6 +489,7 @@ func main() {
 			MCPPath:              cfg.MCPPath,
 			MaxSessions:          500,
 			Identifier:           provider,
+			LoginBotUsername:     cfg.TelegramLoginBotUsername,
 		})
 		mux.Get("/telegram/connect", connectSrv.HandleConnect)
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
@@ -502,7 +503,7 @@ func main() {
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"))
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
@@ -978,16 +979,19 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		}
 	}
 	// Inbound login-bot updates (issue-619). Transport only: updates are made
-	// durable exactly once and handed to a registry that currently has no
-	// handlers registered -- commands belong to the #438 split, delivery
-	// results to #439 and callbacks to #571. The digest sender above and the
-	// MCP tools are unaffected either way.
+	// durable exactly once and handed to a registry whose only handler is
+	// /start (kind start_command), which records reachability and nothing else
+	// (issue-679). Plain messages (kind message) and callbacks stay
+	// unregistered and end as no_handler -- other commands belong to the #438
+	// split and callbacks to #571. The digest sender above and the MCP tools
+	// are unaffected either way.
 	//
 	// Off unless BOT_RECEIVER_ENABLED is set. getUpdates permits exactly one
 	// consumer per bot token, so two environments sharing a token must not
 	// both claim it; see internal/config.
 	if cfg.BotReceiverEnabled {
 		botRegistry := bot.NewRegistry(bot.KnownChatFunc(store))
+		botRegistry.Register(db.KindStartCommand, bot.StartHandler(store))
 		bot.NewReceiver(store, botRegistry, bot.NewMetricsCounter(m),
 			cfg.TelegramLoginBotToken, bot.Options{}).Start(ctx)
 	} else {

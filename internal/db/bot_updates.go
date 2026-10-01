@@ -35,7 +35,12 @@ import (
 // offset advances and Telegram stops redelivering it) and recorded as
 // KindUnsupported without being dispatched.
 const (
-	KindMessage       = "message"
+	KindMessage = "message"
+	// KindStartCommand is a private-chat message whose first entity is a
+	// /start bot_command. It is the only content-derived kind: the classification
+	// is made at accept time and persisted as the kind, so the pending sweep can
+	// redeliver it from the stored row without keeping any text.
+	KindStartCommand  = "start_command"
 	KindCallbackQuery = "callback_query"
 	KindUnsupported   = "unsupported"
 )
@@ -49,6 +54,9 @@ const (
 	OutcomeUnknownChat  = "unknown_chat"
 	OutcomeUnsupported  = "unsupported"
 	OutcomeHandlerError = "handler_error"
+	// OutcomeReachabilityRecorded is returned by the /start handler after it
+	// recorded client_bot_reachability.
+	OutcomeReachabilityRecorded = "reachability_recorded"
 )
 
 // PendingUpdate is an accepted update that has not been dispatched yet. It
@@ -85,6 +93,24 @@ func (s *Store) AcceptUpdate(ctx context.Context, updateID int64, kind string, c
 		return false, fmt.Errorf("accept update: rows affected: %w", err)
 	}
 	return n > 0, nil
+}
+
+// UpdateReceivedAtTx returns when update_id was accepted (its received_at),
+// read inside the dispatch transaction. A handler uses it as the observation
+// time of evidence the update carries: a swept update is dispatched later than
+// it was received, and the receive time is what the evidence describes.
+func (s *Store) UpdateReceivedAtTx(ctx context.Context, tx *sql.Tx, updateID int64) (time.Time, error) {
+	var at sql.NullTime
+	err := tx.QueryRowContext(ctx,
+		`SELECT received_at FROM bot_updates WHERE update_id = $1`, updateID,
+	).Scan(&at)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("update received_at: %w", err)
+	}
+	if !at.Valid {
+		return time.Time{}, fmt.Errorf("update received_at: update %d has none", updateID)
+	}
+	return at.Time.UTC(), nil
 }
 
 // NextOffset returns the offset to pass to the next getUpdates call: one past

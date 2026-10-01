@@ -104,6 +104,10 @@ type ConnectConfig struct {
 	// oauth.ConnectClientID from the call site; no default is applied so a
 	// missing value surfaces immediately at link generation.
 	ClientID string
+	// LoginBotUsername is the validated login bot @username used to build the
+	// start-the-bot link on the success page. Empty renders plain-text
+	// instructions instead.
+	LoginBotUsername string
 	// MCPPath is the path component of the MCP URL shown on the success page.
 	// Defaults to "/mcp" when empty.
 	MCPPath string
@@ -139,6 +143,7 @@ type ConnectServer struct {
 	mcpPath     string
 	maxSessions int
 	identifier  ConnectIdentifier
+	loginBot    string
 	clock       func() time.Time
 
 	mu       sync.Mutex
@@ -170,6 +175,7 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 		mcpPath:     cfg.MCPPath,
 		maxSessions: cfg.MaxSessions,
 		identifier:  cfg.Identifier,
+		loginBot:    cfg.LoginBotUsername,
 		clock:       clk,
 		sessions:    map[string]*connectSession{},
 	}
@@ -335,8 +341,9 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	})
 
 	renderConnectSuccess(w, connectSuccessData{
-		ClaudeURL: s.claudeURL,
-		MCPURL:    s.issuer + s.mcpPath,
+		ClaudeURL:        s.claudeURL,
+		MCPURL:           s.issuer + s.mcpPath,
+		LoginBotStartURL: loginBotStartURL(s.loginBot),
 	})
 }
 
@@ -408,8 +415,9 @@ type connectLandingData struct {
 
 // connectSuccessData is the template data for the success page.
 type connectSuccessData struct {
-	ClaudeURL string
-	MCPURL    string
+	ClaudeURL        string
+	MCPURL           string
+	LoginBotStartURL string
 }
 
 // connectErrorData is the template data for the error page.
@@ -433,6 +441,11 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))
 
+// connectSuccessTemplate's "Choose your notifications" step only renders on
+// this (self-hosted connect wizard) success page. External OAuth clients
+// (claude.ai / chatgpt.com) complete via internal/oauth's own
+// renderConnectSuccess interstitial instead and never see this prompt — see
+// docs/runbook.md's "Login bot /start and onboarding (issue-679)" section.
 var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li>Permissions</li>
@@ -447,6 +460,10 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
        your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
        &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
        read your messages.</p>
+    <h2>Choose your notifications</h2>
+    <p><a class="btn" href="/telegram/connect/manage?onboarding=1#notifications">Choose which notifications the login bot may send you</a></p>
+    <p class="meta">Connecting your account does not subscribe you to anything. Product updates stay off until you save your choice.</p>
+    {{if .LoginBotStartURL}}<p class="meta"><a href="{{.LoginBotStartURL}}">Start the login bot</a> so it can reach you.</p>{{else}}<p class="meta">To let the login bot reach you, open it in Telegram and press Start.</p>{{end}}
     <p class="meta"><a href="{{.ClaudeURL}}">Go to Claude.ai connector settings</a> &#183;
        <a href="/telegram/connect/manage">Manage your session</a></p>
 ` + connectFoot))

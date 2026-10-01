@@ -15,7 +15,7 @@ import (
 func newManageNotifTestServer(t *testing.T) (*ManageServer, *db.Store) {
 	t.Helper()
 	store := newAccountTestStore(t)
-	return NewManageServer(store, nil, "https://tg.mctl.ai"), store
+	return NewManageServer(store, nil, "https://tg.mctl.ai", ""), store
 }
 
 // newIsolatedManageServer builds a server over a private in-memory database.
@@ -34,7 +34,7 @@ func newIsolatedManageServer(t *testing.T) (*ManageServer, *db.Store) {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)
-	return NewManageServer(store, nil, "https://tg.mctl.ai"), store
+	return NewManageServer(store, nil, "https://tg.mctl.ai", ""), store
 }
 
 // seedManageUser creates a user the manage handlers can act for.

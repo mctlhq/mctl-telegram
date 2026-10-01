@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -78,10 +79,14 @@ type Config struct {
 	AuditRetentionDays            int
 	LogLevel                      string
 	// Telegram-native OAuth (local-jwt mode):
-	TelegramLoginBotToken string  // bot token used to send the daily new-client digest
-	TGLoginAdmins         []int64 // allowlist of Telegram ids granted platform-admins scopes
-	TGLoginClients        []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
-	TGLoginLookupAdmins   []int64 // allowlist of Telegram ids granted admin:users:read only — the two read-only admin lookups; deliberately not the flat admin:users, which also gates every admin write tool. See oauth.Config.LookupAdminTelegramIDs
+	TelegramLoginBotToken string // bot token used to send the daily new-client digest
+	// TelegramLoginBotUsername is the login bot's @username (no "@"), used to
+	// build the https://t.me/<username>?start=onboarding link. Optional; an
+	// invalid value is ignored with a warning.
+	TelegramLoginBotUsername string
+	TGLoginAdmins            []int64 // allowlist of Telegram ids granted platform-admins scopes
+	TGLoginClients           []int64 // allowlist of Telegram ids granted telegram:* scopes (no admin:users)
+	TGLoginLookupAdmins      []int64 // allowlist of Telegram ids granted admin:users:read only — the two read-only admin lookups; deliberately not the flat admin:users, which also gates every admin write tool. See oauth.Config.LookupAdminTelegramIDs
 	// Telegram OpenID Connect (Relying Party — replaces the legacy widget):
 	TelegramOIDCClientID     string   // OIDC client id = the login bot's numeric id; not secret
 	TelegramOIDCClientSecret string   // OIDC client secret from BotFather; sourced from Vault
@@ -383,6 +388,7 @@ func Load() (*Config, error) {
 		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
 		LogLevel:                      envOr("LOG_LEVEL", "info"),
 		TelegramLoginBotToken:         os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
+		TelegramLoginBotUsername:      loginBotUsernameFromEnv(),
 		TelegramOIDCClientID:          os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
 		TelegramOIDCClientSecret:      os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
 		TelegramOIDCIssuerURL:         envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
@@ -821,4 +827,26 @@ func parsePreregisteredClients(raw string) ([]PreregisteredClient, error) {
 		}
 	}
 	return out, nil
+}
+
+var loginBotUsernameRE = regexp.MustCompile(`^[A-Za-z0-9_]{2,29}[Bb][Oo][Tt]$`)
+
+// ValidLoginBotUsername reports whether s is a valid Telegram bot username:
+// 5-32 characters of [A-Za-z0-9_], ending in "bot" (case-insensitive).
+func ValidLoginBotUsername(s string) bool {
+	return loginBotUsernameRE.MatchString(s)
+}
+
+// loginBotUsernameFromEnv reads TELEGRAM_LOGIN_BOT_USERNAME. Unset yields "";
+// an invalid value is ignored with one warning rather than failing startup.
+func loginBotUsernameFromEnv() string {
+	v := strings.TrimPrefix(strings.TrimSpace(os.Getenv("TELEGRAM_LOGIN_BOT_USERNAME")), "@")
+	if v == "" {
+		return ""
+	}
+	if !ValidLoginBotUsername(v) {
+		slog.Warn("TELEGRAM_LOGIN_BOT_USERNAME is not a valid Telegram bot username; ignoring it")
+		return ""
+	}
+	return v
 }

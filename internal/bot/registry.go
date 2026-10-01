@@ -11,9 +11,11 @@ import (
 // update, and nothing else.
 //
 // There is no text or payload field, by construction. This package never
-// decodes message content or callback data, so a handler cannot log, store or
-// forward it by accident. A handler that genuinely needs content must widen
-// both Update and this struct in a change that argues for itself.
+// keeps message content or callback data, so a handler cannot log, store or
+// forward it by accident. The only content-derived routing fact is
+// Message.StartCommand, which surfaces here as Kind == db.KindStartCommand.
+// A handler that genuinely needs content must widen both Update and this
+// struct in a change that argues for itself.
 type Delivery struct {
 	UpdateID int64
 	Kind     string

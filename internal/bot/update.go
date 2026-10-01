@@ -19,6 +19,8 @@ package bot
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
+	"unicode/utf16"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -28,8 +30,12 @@ import (
 // It is deliberately tiny. Message text, callback payloads, phone numbers,
 // contacts and media are NOT decoded into any field, so they cannot be logged,
 // stored or passed to a handler by accident -- the safest way to keep content
-// out of logs is to never hold it. Handlers that later need content must widen
-// this struct explicitly, in a change that has to argue for itself.
+// out of logs is to never hold it. The one content-derived fact is
+// Message.StartCommand: whether the message opened with /start. It is computed
+// while decoding from locals that are then discarded, and exists because a
+// client pressing Start is the evidence of reachability (issue-679). Handlers
+// that later need more content must widen this struct explicitly, in a change
+// that has to argue for itself.
 type Update struct {
 	UpdateID      int64          `json:"update_id"`
 	Message       *Message       `json:"message"`
@@ -37,8 +43,48 @@ type Update struct {
 }
 
 // Message carries routing facts only -- no text field, by construction.
+// StartCommand is the single content-derived fact; see Update.
 type Message struct {
 	Chat Chat `json:"chat"`
+	// StartCommand is true when the first entity is a bot_command at offset 0
+	// whose token (up to an optional @suffix) is /start, compared
+	// case-insensitively: Telegram bot commands are case-insensitive and mobile
+	// keyboards often send /Start. Any payload after the command is ignored and
+	// never held.
+	StartCommand bool `json:"-"`
+}
+
+// UnmarshalJSON decodes the chat and derives StartCommand. Text and entities
+// are decoded into locals only and dropped when this returns.
+func (m *Message) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Chat     Chat   `json:"chat"`
+		Text     string `json:"text"`
+		Entities []struct {
+			Type   string `json:"type"`
+			Offset int    `json:"offset"`
+			Length int    `json:"length"`
+		} `json:"entities"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	m.Chat = raw.Chat
+	m.StartCommand = false
+	if len(raw.Entities) > 0 {
+		e := raw.Entities[0]
+		if e.Type == "bot_command" && e.Offset == 0 && e.Length > 0 {
+			u := utf16.Encode([]rune(raw.Text))
+			if e.Length <= len(u) {
+				token := string(utf16.Decode(u[:e.Length]))
+				if at := strings.IndexByte(token, '@'); at >= 0 {
+					token = token[:at]
+				}
+				m.StartCommand = strings.EqualFold(token, "/start")
+			}
+		}
+	}
+	return nil
 }
 
 // CallbackQuery carries the query id and originating chat. The `data` payload
@@ -61,6 +107,8 @@ func (u Update) Kind() string {
 	switch {
 	case u.CallbackQuery != nil:
 		return db.KindCallbackQuery
+	case u.Message != nil && u.Message.StartCommand:
+		return db.KindStartCommand
 	case u.Message != nil:
 		return db.KindMessage
 	default:
