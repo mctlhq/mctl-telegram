@@ -127,6 +127,9 @@ func ParseJSON(raw []byte) (Data, error) {
 	if err := RejectDuplicateJSONKeys(trimmed); err != nil {
 		return Data{}, err
 	}
+	if err := requireExactKeys(trimmed); err != nil {
+		return Data{}, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	// Keep the exact numeric token. Decoding into any as float64 would turn
 	// 1000000 into 1e+06 and round integers above 2^53, allowing the original
@@ -144,6 +147,43 @@ func ParseJSON(raw []byte) (Data, error) {
 	}
 	normalizeData(&d)
 	return d, nil
+}
+
+var (
+	dataKeys            = []string{"identity", "public_profile", "skills", "preferences", "restricted"}
+	restrictedFieldKeys = []string{"value", "approval_required", "never_auto_send"}
+)
+
+// requireExactKeys rejects case-variant member names in the struct-typed
+// objects (Data and RestrictedField), which encoding/json would otherwise
+// fold onto the canonical field, e.g. NEVER_AUTO_SEND overriding
+// never_auto_send. Free-form maps are not checked.
+func requireExactKeys(doc []byte) error {
+	if err := jsonstrict.ObjectKeysWithin(doc, dataKeys...); err != nil {
+		return err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &top); err != nil {
+		return err
+	}
+	rawRestricted, ok := top["restricted"]
+	if !ok {
+		return nil
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(rawRestricted, &entries); err != nil {
+		// Not an object (e.g. null): leave it to the typed decode.
+		return nil
+	}
+	for _, entry := range entries {
+		if t := bytes.TrimSpace(entry); len(t) == 0 || t[0] != '{' {
+			continue
+		}
+		if err := jsonstrict.ObjectKeysWithin(entry, restrictedFieldKeys...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RejectDuplicateJSONKeys validates duplicate-free JSON objects recursively.

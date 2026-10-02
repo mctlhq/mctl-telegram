@@ -18,6 +18,9 @@ var (
 	ErrDuplicateKey = errors.New("duplicate JSON key")
 	// ErrTrailingData is anything after the first complete JSON value.
 	ErrTrailingData = errors.New("document must contain exactly one JSON value")
+	// ErrUnknownKey is an object member name not in the allowed set,
+	// compared exactly.
+	ErrUnknownKey = errors.New("unknown JSON key")
 	// ErrNonStringKey is an object member name that is not a string.
 	ErrNonStringKey = errors.New("object key must be a string")
 	// ErrInvalidObject is an object not closed by '}'.
@@ -119,6 +122,35 @@ func RejectDuplicateKeys(raw []byte) error {
 			return ErrTrailingData
 		}
 		return err
+	}
+	return nil
+}
+
+// ObjectKeysWithin requires raw to be a JSON object whose member names are
+// all spelled exactly as one of allowed. It is the exact-spelling complement
+// of RejectDuplicateKeys: encoding/json matches struct fields
+// case-insensitively, so neither DisallowUnknownFields nor the duplicate walk
+// notices an alias such as "TELEGRAM_ID". It does not check duplicates; run
+// RejectDuplicateKeys first.
+func ObjectKeysWithin(raw []byte, allowed ...string) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return fmt.Errorf("document must be a JSON object: %w", err)
+	}
+	if members == nil {
+		return errors.New("document must be a JSON object")
+	}
+	for k := range members {
+		ok := false
+		for _, a := range allowed {
+			if k == a {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("%w %q", ErrUnknownKey, k)
+		}
 	}
 	return nil
 }

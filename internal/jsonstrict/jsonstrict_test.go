@@ -57,3 +57,29 @@ func TestUnexpectedDelimError(t *testing.T) {
 		t.Errorf("errors.As through a wrap lost the delimiter: %+v", de)
 	}
 }
+
+func TestObjectKeysWithin(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+		unknown bool
+	}{
+		{"empty object", `{}`, false, false},
+		{"subset", `{"field":1}`, false, false},
+		{"alias", `{"FIELD":1}`, true, true},
+		{"lower and upper", `{"field":1,"FIELD":2}`, true, true},
+		{"array", `[]`, true, false},
+		{"number", `1`, true, false},
+		{"null", `null`, true, false},
+	}
+	for _, tc := range cases {
+		err := ObjectKeysWithin([]byte(tc.raw), "field", "other")
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+		if tc.unknown && !errors.Is(err, ErrUnknownKey) {
+			t.Fatalf("%s: err = %v, want ErrUnknownKey", tc.name, err)
+		}
+	}
+}

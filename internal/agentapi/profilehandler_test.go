@@ -7,6 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -412,5 +415,59 @@ func TestAdminAgentProfileHandler_RejectsUnknownFields(t *testing.T) {
 	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"totally_made_up_field":true}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (strict decode should reject unknown fields), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminAgentProfileHandler_RejectsCaseFoldedEnvelopeKeys(t *testing.T) {
+	store := newProfileTestStore(t)
+	for _, tgID := range []int64{777, 888} {
+		if _, err := store.EnsureUserByTelegramID(context.Background(), tgID, "", ""); err != nil {
+			t.Fatalf("seed user %d: %v", tgID, err)
+		}
+	}
+	h := NewAdminAgentProfileHandler(store)
+	for _, body := range []string{
+		`{"Telegram_Id":777}`,
+		`{"telegram_id":777,"MODE":"guarded"}`,
+		`{"telegram_id":777,"Listener_Enabled":true}`,
+		`{"telegram_id":777,"TELEGRAM_ID":888}`,
+		`{"telegram_id":777,"mode":"observe","Mode":"guarded"}`,
+		`{"telegram_id":777,"OWNER_PROFILE":{}}`,
+	} {
+		rec := doProfileReq(h, adminIdentity(), body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid request body") {
+			t.Fatalf("body %s: status = %d, body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestAdminAgentProfileHandler_RejectsCaseFoldedOwnerProfileKeys(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "", ""); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	for _, body := range []string{
+		`{"telegram_id":777,"owner_profile":{"Restricted":{"salary":{"value":"1"}}}}`,
+		`{"telegram_id":777,"owner_profile":{"restricted":{"salary":{"value":"1","never_auto_send":true,"NEVER_AUTO_SEND":false}}}}`,
+	} {
+		rec := doProfileReq(h, adminIdentity(), body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid owner_profile") {
+			t.Fatalf("body %s: status = %d, body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestUpsertAgentProfileKeysMatchStructTags(t *testing.T) {
+	rt := reflect.TypeOf(upsertAgentProfileRequest{})
+	var tags []string
+	for i := 0; i < rt.NumField(); i++ {
+		tags = append(tags, strings.Split(rt.Field(i).Tag.Get("json"), ",")[0])
+	}
+	got := append([]string(nil), upsertAgentProfileKeys[:]...)
+	sort.Strings(tags)
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, tags) {
+		t.Fatalf("key list %v drifted from json tags %v", got, tags)
 	}
 }
