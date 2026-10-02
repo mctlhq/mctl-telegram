@@ -6,6 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -480,5 +483,52 @@ func TestReload_PicksUpChangedFile(t *testing.T) {
 	identity := out["identity"].(map[string]any)
 	if identity["name"] != "Updated" {
 		t.Fatalf("name = %v, want Updated", identity["name"])
+	}
+}
+
+func TestParseJSON_RejectsCaseVariantStructKeys(t *testing.T) {
+	for _, doc := range []string{
+		`{"IDENTITY":{}}`,
+		`{"restricted":{"salary":{"value":"1","Approval_Required":true}}}`,
+		`{"restricted":{"salary":{"value":"1","never_auto_send":true,"NEVER_AUTO_SEND":false}}}`,
+	} {
+		if _, err := ParseJSON([]byte(doc)); err == nil {
+			t.Fatalf("ParseJSON(%s) accepted", doc)
+		}
+	}
+	for _, doc := range []string{
+		`{"identity":{"Name":"Alice","name":"Alice"}}`,
+		`{"restricted":{"Salary":{"value":"1","never_auto_send":true}}}`,
+	} {
+		if _, err := ParseJSON([]byte(doc)); err != nil {
+			t.Fatalf("ParseJSON(%s): %v", doc, err)
+		}
+	}
+}
+
+func jsonTags(t *testing.T, v any) []string {
+	t.Helper()
+	rt := reflect.TypeOf(v)
+	var tags []string
+	for i := 0; i < rt.NumField(); i++ {
+		tags = append(tags, strings.Split(rt.Field(i).Tag.Get("json"), ",")[0])
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+func TestExactKeyListsMatchStructTags(t *testing.T) {
+	for name, c := range map[string]struct {
+		keys []string
+		v    any
+	}{
+		"Data":            {dataKeys, Data{}},
+		"RestrictedField": {restrictedFieldKeys, RestrictedField{}},
+	} {
+		got := append([]string(nil), c.keys...)
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, jsonTags(t, c.v)) {
+			t.Fatalf("%s: key list %v drifted from json tags %v", name, got, jsonTags(t, c.v))
+		}
 	}
 }

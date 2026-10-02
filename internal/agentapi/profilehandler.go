@@ -10,6 +10,7 @@ import (
 
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
 
 type upsertAgentProfileRequest struct {
@@ -29,6 +30,14 @@ type upsertAgentProfileRequest struct {
 	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
 	// means unchanged; null clears it.
 	OwnerProfile json.RawMessage `json:"owner_profile,omitempty"`
+}
+
+// upsertAgentProfileKeys lists the JSON names of upsertAgentProfileRequest.
+var upsertAgentProfileKeys = [...]string{
+	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
+	"disclosure_text", "max_autonomous_turns", "max_msgs_per_minute",
+	"max_reply_chars", "intent_allowlist", "blocked_senders",
+	"sender_allowlist", "owner_profile",
 }
 
 type agentProfileResponse struct {
@@ -83,7 +92,11 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		rawRequest, err := io.ReadAll(r.Body)
-		if err != nil || agentprofile.RejectDuplicateJSONKeys(rawRequest) != nil {
+		// encoding/json matches struct fields case-insensitively, so the
+		// duplicate check and DisallowUnknownFields both miss aliases such as
+		// TELEGRAM_ID; require every member name to be spelled exactly.
+		if err != nil || agentprofile.RejectDuplicateJSONKeys(rawRequest) != nil ||
+			jsonstrict.ObjectKeysWithin(rawRequest, upsertAgentProfileKeys[:]...) != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
