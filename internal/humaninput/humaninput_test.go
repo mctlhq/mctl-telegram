@@ -819,14 +819,25 @@ func TestAnswerShapeValidationNeverCallsAPI(t *testing.T) {
 func TestFreeTextAnswerCapAndWhitespace(t *testing.T) {
 	e := newEnv(t)
 	code := deliveredCode(t, e, freeReq(reqB, "h2", "Branch name?"))
+
+	// Over the cap: refused with a hint, nothing submitted, row still open.
 	long := strings.Repeat("x", 2500)
-	reply := e.say(t, 90, "/mctl input "+code+"   use  the   long "+long+"  ")
+	reply := e.say(t, 90, "/mctl input "+code+" use the long "+long)
+	if e.api.postCount() != 0 {
+		t.Fatalf("an over-long answer must not be submitted, posts = %d", e.api.postCount())
+	}
+	if !strings.HasPrefix(reply, "Answer is too long (2000 characters max).") {
+		t.Errorf("reply = %q", reply)
+	}
+
+	// At the cap: submitted unchanged, inner spacing kept, outer trimmed.
+	exact := "use  the   long " + strings.Repeat("x", 2000-len("use  the   long "))
+	reply = e.say(t, 91, "/mctl input "+code+"   "+exact+"  ")
 	if len(e.api.postsCopy()) != 1 {
 		t.Fatalf("posts = %d", len(e.api.postsCopy()))
 	}
-	got := e.api.postsCopy()[0].body["value"].(string)
-	if !strings.HasPrefix(got, "use  the   long x") || len([]rune(got)) != 2000 {
-		t.Errorf("value = %q (len %d), want inner spacing kept and 2000 runes", got[:20], len([]rune(got)))
+	if got := e.api.postsCopy()[0].body["value"].(string); got != exact {
+		t.Errorf("value = %q... (len %d), want the answer unchanged", got[:20], len([]rune(got)))
 	}
 	if !strings.HasPrefix(reply, "Answered by you: use the long") {
 		t.Errorf("reply = %q", reply)

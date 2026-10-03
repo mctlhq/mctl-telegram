@@ -108,7 +108,7 @@ Ref: request hir-<16 hex> v<request_version>
 
 Every line the bot itself writes starts at column 0; agent-written text never does, so a question cannot fake a second `Answer:` line or an extra option.
 
-- Answer a single-choice question with `/mctl input <code> <number>` (or the option's text), and a free-text question with `/mctl input <code> <your answer>` (up to 2000 characters).
+- Answer a single-choice question with `/mctl input <code> <number>` (or the option's text), and a free-text question with `/mctl input <code> <your answer>` (up to 2000 characters; a longer answer is refused, not truncated).
 - `/mctl input status [code]` shows the canonical state from mctl-api; local state is never authoritative. Without a code it checks up to five open questions and lists the codes of the rest.
 - `Answered by you: <value>. Agent will resume.` appears only after mctl-api reports the answer `accepted`. `Submitted: <value>. The platform has not confirmed it yet...` means mctl-api recorded the answer but the workflow has not confirmed it (HTTP 202); the bot follows up once it is confirmed. `This question is no longer active.` means it expired, timed out, was superseded by a newer version (which arrives under a new code), or was answered elsewhere. `Already answered.` means your identical answer was already recorded. If the platform cannot be reached the bot says `Could not confirm; check again with /mctl input status <code>`, never success.
 - Authorization stays in mctl-api. The answer code is not an approval code: `/mctl approve` and `/mctl reject` are unchanged and never accept it.

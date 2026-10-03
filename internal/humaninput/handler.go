@@ -277,9 +277,11 @@ func (h *Handler) optionIndex(row db.HumanInputDelivery, code, value string) (in
 	return 0, usage
 }
 
-// freeText validates a free-text answer: non-empty after trimming, capped at
-// maxAnswerRunes. It returns the value to submit, a short echo for the
-// confirmation, and a usage hint when the value is unusable.
+// freeText validates a free-text answer: non-empty after trimming and at most
+// maxAnswerRunes. A longer answer is refused, never truncated: submitting a
+// value the human did not write would break the binding between what they
+// said and what the agent resumes on. It returns the value to submit, a short
+// echo for the confirmation, and a usage hint when the value is unusable.
 func freeText(code, value string) (submit, echo, hint string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -287,7 +289,7 @@ func freeText(code, value string) (submit, echo, hint string) {
 	}
 	r := []rune(value)
 	if len(r) > maxAnswerRunes {
-		r = r[:maxAnswerRunes]
+		return "", "", fmt.Sprintf("Answer is too long (%d characters max). Shorten it and send again: /mctl input %s <your answer>", maxAnswerRunes, code)
 	}
 	echoRunes := r
 	if len(echoRunes) > maxEchoRunes {
