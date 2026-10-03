@@ -397,10 +397,17 @@ func (s *Store) ListPollableHumanInputActors(ctx context.Context, now time.Time)
 // number of rows inserted.
 func (s *Store) BackfillHumanInputActorsFromBindings(ctx context.Context) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`INSERT INTO human_input_actors(user_id, tg_id, dormant_until, fail_count, last_error, updated_at)
-		 SELECT DISTINCT u.id, u.telegram_login_id, NULL, 0, '', $1
-		   FROM work_item_bindings b JOIN users u ON u.id = b.user_id
+		// No SELECT DISTINCT and no literal NULL: under DISTINCT Postgres
+		// resolves untyped expressions (a NULL, or the $1 placeholder) to
+		// text before the INSERT sees the target column, and text into a
+		// TIMESTAMPTZ column fails with SQLSTATE 42804. users.id is unique,
+		// so an EXISTS filter needs no DISTINCT, and dormant_until is left
+		// to its column default (NULL).
+		`INSERT INTO human_input_actors(user_id, tg_id, fail_count, last_error, updated_at)
+		 SELECT u.id, u.telegram_login_id, 0, '', $1
+		   FROM users u
 		  WHERE u.telegram_login_id IS NOT NULL AND u.telegram_login_id > 0
+		    AND EXISTS (SELECT 1 FROM work_item_bindings b WHERE b.user_id = u.id)
 		 ON CONFLICT(user_id) DO NOTHING`, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("backfill human input actors: %w", err)

@@ -9,22 +9,29 @@ import (
 	"time"
 )
 
-func TestHumanInputStore(t *testing.T) {
-	t.Run("sqlite", func(t *testing.T) {
-		assertHumanInputStore(t, newTestStoreCrypted(t))
-	})
-	t.Run("postgres", func(t *testing.T) {
-		dsn := os.Getenv("TEST_DATABASE_URL")
-		if dsn == "" {
-			t.Skip("TEST_DATABASE_URL not set")
-		}
-		s := newPostgresTestStore(t, dsn)
-		t.Cleanup(func() {
-			_, _ = s.DB.Exec(`DELETE FROM human_input_deliveries`)
-			_, _ = s.DB.Exec(`DELETE FROM human_input_actors`)
-		})
-		assertHumanInputStore(t, s)
-	})
+func TestHumanInputStoreSQLite(t *testing.T) {
+	assertHumanInputStore(t, newTestStoreCrypted(t))
+}
+
+// TestHumanInputStorePostgres carries "Postgres" in its top-level name so the
+// CI step that asserts Postgres-backed tests really ran (-run 'Postgres')
+// selects it.
+func TestHumanInputStorePostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	// The Postgres database outlives a test run, so clean both before (a
+	// previous failed run may have left rows) and after.
+	clean := func() {
+		_, _ = s.DB.Exec(`DELETE FROM human_input_deliveries`)
+		_, _ = s.DB.Exec(`DELETE FROM human_input_actors`)
+		_, _ = s.DB.Exec(`DELETE FROM owner_notifications WHERE kind = $1`, NotificationHumanInput)
+	}
+	clean()
+	t.Cleanup(clean)
+	assertHumanInputStore(t, s)
 }
 
 func assertHumanInputStore(t *testing.T, s *Store) {
