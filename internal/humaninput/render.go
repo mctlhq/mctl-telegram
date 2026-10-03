@@ -57,9 +57,9 @@ func Render(v workctx.RequestView, code string) string {
 	if ref != "" {
 		fmt.Fprintf(&head, "Work: %s\n", oneLine(ref, maxRefRunes))
 	}
-	fmt.Fprintf(&head, "Question: %s\n", sanitize.UserContent(v.Question, maxQuestionRunes))
+	fmt.Fprintf(&head, "Question: %s\n", indentBody(sanitize.UserContent(v.Question, maxQuestionRunes)))
 	if strings.TrimSpace(v.Why) != "" {
-		fmt.Fprintf(&head, "Why: %s\n", sanitize.UserContent(v.Why, maxWhyRunes))
+		fmt.Fprintf(&head, "Why: %s\n", indentBody(sanitize.UserContent(v.Why, maxWhyRunes)))
 	}
 	if v.Kind == workctx.HumanInputKindSingleChoice {
 		head.WriteString("Options:\n")
@@ -100,6 +100,12 @@ func Render(v workctx.RequestView, code string) string {
 		h = h[:budget]
 	}
 	return string(h) + tail.String()
+}
+
+// indentBody prefixes every continuation line so agent-authored multi-line
+// text cannot forge a frame line (Answer:, Ref:, Options:) at column zero.
+func indentBody(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", ""), "\n", "\n  > ")
 }
 
 // oneLine sanitizes a short field into a single capped line.

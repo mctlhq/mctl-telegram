@@ -398,7 +398,7 @@ func (s *Store) ListPollableHumanInputActors(ctx context.Context, now time.Time)
 func (s *Store) BackfillHumanInputActorsFromBindings(ctx context.Context) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO human_input_actors(user_id, tg_id, dormant_until, fail_count, last_error, updated_at)
-		 SELECT DISTINCT u.id, u.telegram_login_id, NULL, 0, '', $1
+		 SELECT DISTINCT u.id, u.telegram_login_id, CAST(NULL AS TIMESTAMPTZ), 0, '', $1
 		   FROM work_item_bindings b JOIN users u ON u.id = b.user_id
 		  WHERE u.telegram_login_id IS NOT NULL AND u.telegram_login_id > 0
 		 ON CONFLICT(user_id) DO NOTHING`, time.Now().UTC())

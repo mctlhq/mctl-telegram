@@ -136,6 +136,16 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 		if _, still := listed[d.RequestID+"\x00"+d.RequestHash]; still {
 			continue
 		}
+		// A single list response can omit a still-open request; confirm
+		// with a direct read before retiring a row that cannot be revived.
+		if cur, gerr := p.API.GetHumanInput(ctx, a.TGID, d.RequestID); gerr != nil {
+			var apiErr *workctx.APIError
+			if !(errors.As(gerr, &apiErr) && apiErr.StatusCode == 404) {
+				continue
+			}
+		} else if cur != nil && cur.RequestHash == d.RequestHash && (cur.State == "" || cur.State == workctx.HumanInputStatePending) {
+			continue
+		}
 		wasSent := d.State == db.HumanInputSent
 		changed, err := p.Store.MarkHumanInputDelivery(ctx, a.UserID, d.ID, db.HumanInputInactive, "left_pending_list")
 		if err != nil {
