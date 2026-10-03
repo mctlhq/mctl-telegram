@@ -9,6 +9,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/humaninput"
 )
 
 // Approver is the subset of *executor.Executor the router needs for /mctl
@@ -58,6 +59,11 @@ type Router struct {
 	// WORK_CONTEXT_ENABLED is false) means /mctl work and /mctl link fall
 	// through to today's unknown-command reply — see HandleSavedText below.
 	Work *WorkHandler
+	// Input is nilable: nil (the default, and always the case when
+	// HUMAN_INPUT_ENABLED is false) means /mctl input falls through to the
+	// unknown-command reply. CmdInput is dispatched to it and ONLY to it —
+	// never to Executor, handleApprove or agent_actions.
+	Input *humaninput.Handler
 }
 
 // NewRouter constructs a Router.
@@ -83,6 +89,9 @@ func (r *Router) HandleSavedText(ctx context.Context, meta SavedMeta, text strin
 		if r.Work != nil && isMissingWorkArg(text) {
 			return r.Notifier.Reply(ctx, userID, workUsage)
 		}
+		if r.Input != nil && isMissingInputArg(text) {
+			return r.Input.Usage(ctx, userID)
+		}
 		return r.Notifier.Reply(ctx, userID, unknownCommandReply)
 	}
 	switch cmd.Type {
@@ -104,6 +113,15 @@ func (r *Router) HandleSavedText(ctx context.Context, meta SavedMeta, text strin
 		return r.handleApprove(ctx, userID, cmd.Arg)
 	case CmdReject:
 		return r.handleReject(ctx, userID, cmd.Arg)
+	case CmdInput:
+		if r.Input == nil {
+			return r.Notifier.Reply(ctx, userID, unknownCommandReply)
+		}
+		hm := humaninput.Meta{UserID: meta.UserID, SelfTGID: meta.SelfTGID, TGMessageID: meta.TGMessageID}
+		if cmd.Sub == SubInputStatus {
+			return r.Input.Status(ctx, hm, cmd.Arg)
+		}
+		return r.Input.Answer(ctx, hm, cmd.Arg, cmd.Value)
 	case CmdWork, CmdLink:
 		// Off (the default) until WORK_CONTEXT_ENABLED wires this field —
 		// falling through to the SAME unknown-command reply as before
@@ -471,4 +489,15 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// isMissingInputArg reports whether text is a /mctl input invocation
+// ParseCommand rejected for a missing argument (bare "/mctl input", or a code
+// with no answer), which gets the input usage line.
+func isMissingInputArg(text string) bool {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "/mctl") || !strings.EqualFold(fields[1], "input") {
+		return false
+	}
+	return len(fields) < 4 && !(len(fields) == 3 && strings.EqualFold(fields[2], SubInputStatus))
 }

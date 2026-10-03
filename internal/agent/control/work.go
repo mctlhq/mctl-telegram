@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/actor"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
@@ -52,6 +53,11 @@ type WorkHandler struct {
 	Client   *workctx.Client
 	Notifier *Notifier
 	Metrics  *metrics.Registry
+	// OnRelaySuccess, when set, is called after a successful relay call
+	// (a completed /mctl link, a successful /mctl work status) for the
+	// resolved actor. Used by issue-571 to enroll the user as a human-input
+	// polling candidate; it is a polling hint, never an authorization.
+	OnRelaySuccess func(ctx context.Context, userID, actorTGID int64)
 }
 
 // resolveActor derives the Telegram user id for the X-MCTL-Surface-Actor
@@ -62,17 +68,7 @@ type WorkHandler struct {
 // no mctl-api call made — never falls back to a deployment allowlist such
 // as TGLoginAdmins/TGLoginClients/AutoApproveClients.
 func (w *WorkHandler) resolveActor(ctx context.Context, meta SavedMeta) (actorTGID int64, ok bool, err error) {
-	if meta.SelfTGID <= 0 {
-		return 0, false, nil
-	}
-	stored, found, err := w.Store.TelegramIDByUserID(ctx, meta.UserID)
-	if err != nil {
-		return 0, false, fmt.Errorf("resolve work-context actor: %w", err)
-	}
-	if !found || stored != meta.SelfTGID {
-		return 0, false, nil
-	}
-	return meta.SelfTGID, true, nil
+	return actor.Resolve(ctx, w.Store, meta.UserID, meta.SelfTGID)
 }
 
 const notLinkedReply = "This Telegram account is not linked to a platform identity yet. An operator needs to resolve this before /mctl work or /mctl link can be used."
@@ -108,6 +104,9 @@ func (w *WorkHandler) handleLink(ctx context.Context, meta SavedMeta, code strin
 	}
 	if err := w.Client.RedeemLink(ctx, actorTGID, code); err != nil {
 		return w.Notifier.Reply(ctx, meta.UserID, "Could not link: "+workctxErrText(err))
+	}
+	if w.OnRelaySuccess != nil {
+		w.OnRelaySuccess(ctx, meta.UserID, actorTGID)
 	}
 	return w.Notifier.Reply(ctx, meta.UserID, "Linked. /mctl work and /mctl work status now act as you.")
 }
@@ -355,6 +354,9 @@ func (w *WorkHandler) handleWorkStatus(ctx context.Context, meta SavedMeta) erro
 	item, err := w.Client.GetWorkItem(ctx, actorTGID, binding.WorkItemID)
 	if err != nil {
 		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+workctxErrText(err))
+	}
+	if w.OnRelaySuccess != nil {
+		w.OnRelaySuccess(ctx, meta.UserID, actorTGID)
 	}
 	execID := ""
 	if item.LatestExecution != nil {

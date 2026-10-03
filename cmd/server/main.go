@@ -39,6 +39,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
 	"github.com/mctlhq/mctl-telegram/internal/events"
+	"github.com/mctlhq/mctl-telegram/internal/humaninput"
 	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/netctx"
@@ -276,8 +277,31 @@ func main() {
 		workClient := workctx.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, cfg.WorkItemTenant, nil)
 		workClient.Metrics = m
 		agentRouter.Work = &control.WorkHandler{Store: store, Client: workClient, Notifier: agentNotifier, Metrics: m}
+
+		// Human-input (agent clarification) Telegram adapter (issue-571):
+		// off by default and only possible on top of the work-context relay
+		// client (Config.Load refuses HUMAN_INPUT_ENABLED without it). With
+		// the flag off, no handler or poller is constructed, agentRouter.Input
+		// stays nil and /mctl input is an unknown command.
+		if cfg.HumanInputEnabled {
+			agentNotifier.Metrics = m
+			agentRouter.Input = &humaninput.Handler{Store: store, API: workClient, Replier: agentNotifier, Metrics: m}
+			agentRouter.Work.OnRelaySuccess = func(ctx context.Context, userID, tgID int64) {
+				if err := store.UpsertHumanInputActor(ctx, userID, tgID); err != nil {
+					slog.Warn("human input actor enroll failed", "user_id", userID, "err", err)
+				}
+			}
+			if n, err := store.BackfillHumanInputActorsFromBindings(ctx); err != nil {
+				slog.Warn("human input actor backfill failed", "err", err)
+			} else if n > 0 {
+				slog.Info("human input actors backfilled from work bindings", "count", n)
+			}
+			humanInputPoller := &humaninput.Poller{Store: store, API: workClient, Metrics: m, GlobalKill: agentGlobalKill}
+			go humanInputPoller.Run(ctx, cfg.HumanInputPollInterval)
+		}
 	}
 	slog.Info("work context adapter", "enabled", cfg.WorkContextEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
+	slog.Info("human input adapter", "enabled", cfg.HumanInputEnabled && cfg.WorkContextEnabled, "poll_interval", cfg.HumanInputPollInterval.String())
 
 	// Runtime profile reads are always tenant-scoped and DB-backed. Missing
 	// documents are allowed (the worker endpoint returns 404 and the

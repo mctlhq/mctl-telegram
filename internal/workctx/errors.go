@@ -48,6 +48,23 @@ var (
 	// transition — a terminal item, or a start on an item that already ran
 	// (409 invalid_transition).
 	ErrInvalidTransition = errors.New("workctx: work item cannot take that transition")
+	// ErrRequestNotActive means a human-input request is no longer open for
+	// an answer: expired, cancelled, or already resolved elsewhere (409/410).
+	ErrRequestNotActive = errors.New("workctx: human-input request is no longer active")
+	// ErrRequestSuperseded means the request_hash the answer named is stale:
+	// a newer version of the request replaced it (409 request_superseded /
+	// request_hash_mismatch).
+	ErrRequestSuperseded = errors.New("workctx: human-input request was superseded")
+	// ErrAlreadyAnswered means the same actor already answered this request
+	// (409 already_answered).
+	ErrAlreadyAnswered = errors.New("workctx: human-input request already answered")
+	// ErrNotEligible means the platform refused the actor as an eligible
+	// responder (403 not_eligible). It is rendered neutrally: eligibility
+	// policy is mctl-api's and is never revealed to the surface user.
+	ErrNotEligible = errors.New("workctx: actor is not eligible to answer")
+	// ErrAnswerInvalid means the platform rejected the shape of the answer
+	// (400/422).
+	ErrAnswerInvalid = errors.New("workctx: human-input answer was rejected as invalid")
 )
 
 // codeToErr maps mctl-api's typed error codes (the JSON "error" field) onto
@@ -69,6 +86,15 @@ var codeToErr = map[string]error{
 	"execution_request_open": ErrExecutionRequestOpen,
 	"execution_active":       ErrExecutionActive,
 	"invalid_transition":     ErrInvalidTransition,
+	// Human-input relay (issue-571), docs/contracts/mctl-api-human-input.md.
+	"request_not_active":    ErrRequestNotActive,
+	"request_expired":       ErrRequestNotActive,
+	"request_cancelled":     ErrRequestNotActive,
+	"request_superseded":    ErrRequestSuperseded,
+	"request_hash_mismatch": ErrRequestSuperseded,
+	"already_answered":      ErrAlreadyAnswered,
+	"not_eligible":          ErrNotEligible,
+	"answer_invalid":        ErrAnswerInvalid,
 }
 
 // APIError is returned for any non-2xx response from mctl-api that this
@@ -81,6 +107,9 @@ type APIError struct {
 	StatusCode int
 	Code       string
 	Message    string
+	// CorrelationID is mctl-api's X-Request-ID response header, kept for
+	// log correlation only. Empty when the response carried none.
+	CorrelationID string
 }
 
 func (e *APIError) Error() string {
@@ -91,10 +120,13 @@ func (e *APIError) Error() string {
 // response: a known code is wrapped so errors.Is(err, ErrLinkNotFound) (etc)
 // works, still carrying the *APIError beneath via errors.Unwrap-compatible
 // wrapping; an unknown code surfaces as a bare *APIError.
-func wrapAPIError(status int, code, message string) error {
-	apiErr := &APIError{StatusCode: status, Code: code, Message: message}
+func wrapAPIError(status int, code, message, correlationID string) error {
+	apiErr := &APIError{StatusCode: status, Code: code, Message: message, CorrelationID: correlationID}
 	if sentinel, ok := codeToErr[code]; ok {
-		return fmt.Errorf("%w: %s", sentinel, apiErr.Error())
+		// Two %w verbs: errors.Is matches the sentinel and errors.As still
+		// reaches the *APIError (status, code, correlation id). The rendered
+		// text is unchanged from the single-%w form.
+		return fmt.Errorf("%w: %w", sentinel, apiErr)
 	}
 	return apiErr
 }

@@ -4,7 +4,11 @@
 // instances never collide on duplicate registration.
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Registry holds every Prometheus collector used by mctl-telegram. Inject the
 // single instance constructed by New() into each subsystem; never use the
@@ -199,6 +203,18 @@ type Registry struct {
 	// result (created, reused, refused).
 	WorkContextBindingsTotal *prometheus.CounterVec // {result}
 
+	// HumanInputTelegramEventsTotal counts issue-571 human-input adapter
+	// events, labeled by event (delivery_attempt, delivered,
+	// response_received, response_submitted, response_rejected) and a short
+	// bounded outcome. Never labeled by request id or any content.
+	HumanInputTelegramEventsTotal *prometheus.CounterVec // {event, outcome}
+	// HumanInputDeliverLatency is seconds from the delivery row being queued
+	// to the Saved Messages send succeeding.
+	HumanInputDeliverLatency prometheus.Histogram
+	// HumanInputRespondLatency is seconds from delivery to the owner's answer
+	// being accepted by mctl-api.
+	HumanInputRespondLatency prometheus.Histogram
+
 	// MediaGateRejectionsTotal counts issue #705's media admission-gate
 	// refusals (MEDIA_MAX_CONCURRENT operations already in flight, no slot
 	// freed within the gate's admission wait), labeled by tool
@@ -330,6 +346,7 @@ var (
 		"redeem_link", "create_work_item", "get_work_item", "append_intent",
 		"request_execution", "get_execution_request", "list_execution_requests",
 		"add_surface_ref",
+		"list_human_input", "get_human_input", "respond_human_input",
 	}
 	workContextOutcomes       = []string{"ok", "error"}
 	workContextBindingResults = []string{"created", "reused", "refused"}
@@ -363,6 +380,43 @@ func (r *Registry) CountWorkContextBinding(result string) {
 		return
 	}
 	r.WorkContextBindingsTotal.WithLabelValues(result).Inc()
+}
+
+// Human-input adapter event names (issue-571), the closed value set of the
+// event label on human_input_telegram_events_total.
+const (
+	HumanInputEventDeliveryAttempt   = "delivery_attempt"
+	HumanInputEventDelivered         = "delivered"
+	HumanInputEventResponseReceived  = "response_received"
+	HumanInputEventResponseSubmitted = "response_submitted"
+	HumanInputEventResponseRejected  = "response_rejected"
+)
+
+// CountHumanInputEvent increments human_input_telegram_events_total. outcome
+// must be a short bounded token (ok, error, stale, ...), never request data.
+// Nil-safe.
+func (r *Registry) CountHumanInputEvent(event, outcome string) {
+	if r == nil {
+		return
+	}
+	r.HumanInputTelegramEventsTotal.WithLabelValues(event, outcome).Inc()
+}
+
+// ObserveHumanInputDeliverLatency records one queue-to-sent latency. Nil-safe.
+func (r *Registry) ObserveHumanInputDeliverLatency(d time.Duration) {
+	if r == nil {
+		return
+	}
+	r.HumanInputDeliverLatency.Observe(d.Seconds())
+}
+
+// ObserveHumanInputRespondLatency records one delivered-to-answered latency.
+// Nil-safe.
+func (r *Registry) ObserveHumanInputRespondLatency(d time.Duration) {
+	if r == nil {
+		return
+	}
+	r.HumanInputRespondLatency.Observe(d.Seconds())
 }
 
 // toolDurationBuckets covers sub-100ms fast reads through 10-second MTProto
@@ -594,6 +648,21 @@ func New() *Registry {
 		Help: "Total work_item_bindings writes attempted by the work-context adapter, labeled by result (created; reused: redelivery or same-issue rebind; refused: thread already bound to a different issue).",
 	}, []string{"result"})
 
+	r.HumanInputTelegramEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "human_input_telegram_events_total",
+		Help: "Human-input (agent clarification) Telegram adapter events, labeled by event and outcome.",
+	}, []string{"event", "outcome"})
+	r.HumanInputDeliverLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "human_input_telegram_deliver_latency_seconds",
+		Help:    "Seconds from a human-input delivery being queued to it being sent to Saved Messages.",
+		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 900, 3600},
+	})
+	r.HumanInputRespondLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "human_input_telegram_respond_latency_seconds",
+		Help:    "Seconds from a human-input question being delivered to the owner's answer being accepted.",
+		Buckets: []float64{5, 15, 30, 60, 300, 900, 3600, 14400, 86400},
+	})
+
 	r.MediaGateRejectionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_media_gate_rejections_total",
 		Help: "Total media admission-gate refusals (MEDIA_MAX_CONCURRENT operations already in flight, no slot freed within the wait), labeled by tool.",
@@ -658,6 +727,9 @@ func New() *Registry {
 		r.AgentCredentialDomain,
 		r.WorkContextRequestsTotal,
 		r.WorkContextBindingsTotal,
+		r.HumanInputTelegramEventsTotal,
+		r.HumanInputDeliverLatency,
+		r.HumanInputRespondLatency,
 		r.MediaGateRejectionsTotal,
 		r.MediaInflight,
 	)
@@ -715,6 +787,14 @@ func New() *Registry {
 	}
 	for _, result := range workContextBindingResults {
 		r.WorkContextBindingsTotal.WithLabelValues(result).Add(0)
+	}
+	for _, event := range []string{
+		HumanInputEventDeliveryAttempt, HumanInputEventDelivered, HumanInputEventResponseReceived,
+		HumanInputEventResponseSubmitted, HumanInputEventResponseRejected,
+	} {
+		for _, outcome := range []string{"ok", "error"} {
+			r.HumanInputTelegramEventsTotal.WithLabelValues(event, outcome).Add(0)
+		}
 	}
 
 	return r

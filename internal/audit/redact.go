@@ -46,6 +46,13 @@ var sensitiveKeys = map[string]struct{}{
 	"encryption_key":              {},
 	"authorization":               {},
 	"bearer":                      {},
+	// Human-input (agent clarification) content, issue-571: the question the
+	// agent asked and the answer the owner typed are private user content.
+	"question": {},
+	"why":      {},
+	"options":  {},
+	"answer":   {},
+	"value":    {},
 	// Local Bridge owner-consent / device-credential surface (issue-483).
 	// device_pubkey is DELIBERATELY absent from this list: it is a public
 	// key, so logging it is not a disclosure, and redacting it would make

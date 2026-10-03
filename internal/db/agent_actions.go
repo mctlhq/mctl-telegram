@@ -1141,6 +1141,10 @@ const (
 	NotificationSummary  = "summary"
 	NotificationApproval = "approval_request"
 	NotificationAlert    = "alert"
+	// NotificationHumanInput is issue-571's agent clarification request (and
+	// its "no longer active" follow-up). Its body is pre-rendered at enqueue
+	// time and passed through unchanged by the notifier.
+	NotificationHumanInput = "human_input"
 
 	NotificationPending = "pending"
 	NotificationSent    = "sent"

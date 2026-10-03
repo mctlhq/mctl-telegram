@@ -30,6 +30,7 @@ func requestStructs() map[string]reflect.Type {
 		"IntentRequest":     reflect.TypeOf(IntentRequest{}),
 		"ExecutionRequest":  reflect.TypeOf(ExecutionRequest{}),
 		"SurfaceRefRequest": reflect.TypeOf(SurfaceRefRequest{}),
+		"ResponseRequest":   reflect.TypeOf(ResponseRequest{}),
 	}
 }
 

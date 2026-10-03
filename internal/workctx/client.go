@@ -132,7 +132,7 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		if msg == "" {
 			msg = string(respBody)
 		}
-		return wrapAPIError(resp.StatusCode, code, msg)
+		return wrapAPIError(resp.StatusCode, code, msg, resp.Header.Get("X-Request-ID"))
 	}
 	if out == nil {
 		return nil
@@ -149,6 +149,9 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("workctx: decode response: %w", err)
 		}
+	}
+	if cs, ok := out.(correlationSetter); ok {
+		cs.setCorrelationID(resp.Header.Get("X-Request-ID"))
 	}
 	if env, ok := out.(versionedEnvelope); ok {
 		if env.schemaVersion() != SchemaVersion {

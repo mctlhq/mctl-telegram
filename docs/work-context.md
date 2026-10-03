@@ -87,3 +87,27 @@ after that, and `/mctl work`/`/mctl link` fall back to the unknown-command
 reply. Every other `/mctl` subcommand, the listener, the executor and the
 notifier are untouched. Already-created work items remain valid canonical
 state, reachable from any other surface.
+
+## Agent clarification questions (`/mctl input`, issue-571)
+
+When an agent stops with a typed `needs_input` outcome, mctl-api records a human-input request and parks the workflow. With `HUMAN_INPUT_ENABLED=true` (which requires `WORK_CONTEXT_ENABLED=true`), mctl-telegram polls `GET /api/v1/human-input` for each enrolled operator and posts one message into Saved Messages:
+
+```
+INPUT REQUEST (not an approval)
+Work: mctlhq/mctl-telegram#571
+Question: ...
+Options:
+  1. ...
+  2. ...
+Deadline: 2026-10-04 12:00 UTC
+Answer: /mctl input K7QM3R <number>
+Ref: request <request_id> v<version>
+```
+
+- Answer a single-choice question with `/mctl input <code> <number>`, and a free-text question with `/mctl input <code> <your answer>`.
+- `/mctl input status [code]` shows the canonical state from mctl-api; local state is never authoritative.
+- The bot replies `Answered by you: <value>. Agent will resume.` only after mctl-api confirms the answer. `This question is no longer active.` means it expired, was cancelled, was superseded by a newer version (which arrives under a new code), or was answered elsewhere. `Already answered.` means the answer was recorded earlier. If the platform cannot be reached the bot says `Could not confirm; check again with /mctl input status <code>`, never success.
+- Authorization stays in mctl-api. The answer code is not an approval code: `/mctl approve` and `/mctl reject` are unchanged and never accept it.
+- Enrollment: an operator is polled once they have run `/mctl link`, a successful `/mctl work status`, or `/mctl input status`; existing work-item bindings are backfilled at startup.
+- The contract the adapter assumes is in [contracts/mctl-api-human-input.md](contracts/mctl-api-human-input.md); it is unverified against a deployed mctl-api until its revision is pinned there.
+- Rollback: set `HUMAN_INPUT_ENABLED=false` and restart. The poller stops and `/mctl input` becomes an unknown command. Pending requests stay owned by mctl-api.
