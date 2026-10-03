@@ -204,13 +204,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		}
 
 		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
-			claimReason := ReasonNotFound
-			switch {
-			case errors.Is(cerr, ErrConfirmationMismatch), errors.Is(cerr, ErrConfirmationWrongUser):
-				claimReason = ReasonConfirmationRejected
-			case errors.Is(cerr, ErrConfirmationInFlight):
-				claimReason = ReasonRefused
-			}
+			claimReason := claimFailureReason(cerr)
 			s.auditRefusal(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt, claimReason)
 			if !errors.Is(cerr, ErrConfirmationInFlight) {
 				// Claim already dropped (or never held) the ConfirmStore entry
@@ -521,4 +515,19 @@ func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 str
 		return nil, "", fmt.Errorf("file_url: %w", err)
 	}
 	return data, mimeType, nil
+}
+
+// claimFailureReason classifies a ConfirmStore.Claim failure. Case order is
+// load-bearing: Claim returns joined errors such as
+// errors.Join(ErrConfirmationWrongUser, ErrConfirmationInFlight), and the
+// mismatch/wrong-user checks must win so those read as confirmation_rejected.
+func claimFailureReason(cerr error) string {
+	switch {
+	case errors.Is(cerr, ErrConfirmationMismatch), errors.Is(cerr, ErrConfirmationWrongUser):
+		return ReasonConfirmationRejected
+	case errors.Is(cerr, ErrConfirmationInFlight):
+		return ReasonRefused
+	default:
+		return ReasonNotFound
+	}
 }

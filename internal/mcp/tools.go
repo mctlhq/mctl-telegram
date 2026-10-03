@@ -1384,6 +1384,12 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 		// account (T7) -- both "not found" and "wrong owner" collapse to
 		// the same generic refusal.
 		device, err := s.Store.GetDevice(ctx, deviceID)
+		if err != nil && !errors.Is(err, db.ErrDeviceNotFound) {
+			// A driver/connection failure is a server fault: keep it on the
+			// SLO-feeding audit path rather than a synthesized not_found.
+			s.audit(ctx, id, "revoke_local_bridge_device", "", err, startedAt)
+			return s.storeErr(ctx, "revoke_local_bridge_device", err), nil
+		}
 		if err != nil || device.UserID != id.UserID {
 			refuseErr := errors.New("no such device on your account")
 			s.auditRefusal(ctx, id, "revoke_local_bridge_device", "", refuseErr, startedAt, ReasonNotFound)
