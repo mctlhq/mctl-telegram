@@ -1522,7 +1522,9 @@ synthesized by `flushRecordedCall` — every Rule 1 appended error record, every
 Rule 2 record (a failure that never reached `Server.audit`) and every Rule 3
 record (an unaudited success) — never feed the SLO pair, whatever their
 reason. Neither do refusals staged through `Server.auditRefusal` (the per-peer
-`:rate_limited` refusals and the "no active session" `rows == 0` paths): they
+`:rate_limited` refusals, the "no active session" `rows == 0` paths, write-gate
+blocks, demo-reviewer account guards, device-ownership refusals, `get_media`
+confirmation/ref refusals and `provision_local_account` refusals): they
 are audited as `error` with their reason, but a client tripping a policy limit
 does not burn the availability SLO. The reason-error counter therefore runs **higher** than the SLO
 numerator, permanently; a difference is not a lost sample. Server faults are

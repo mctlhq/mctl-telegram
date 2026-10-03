@@ -142,14 +142,6 @@ var auditExemptOnSuccess = map[string]bool{
 	"get_my_send_status": true,
 }
 
-// classifyReason turns the call's final tool result into one of the Reason*
-// constants. It is a thin alias for classifyToolResultReason: explicit
-// classification (bridge relay failures, local-mode refusals, MTProto and
-// store failures) is carried by hintReason, not by the audit call path.
-func classifyReason(_ string, final *mcplib.CallToolResult) string {
-	return classifyToolResultReason(final)
-}
-
 // recordToolCall is the mcpserver.ToolHandlerMiddleware registered by
 // newMCPServer (mctl-telegram#696). It is the single place every tools/call
 // dispatch to a resolved handler passes through, so a tool added later
@@ -178,7 +170,7 @@ func (s *Server) recordToolCall(next mcpserver.ToolHandlerFunc) mcpserver.ToolHa
 				// session token, peer id, ...) baked into a panic message
 				// upstream; log it (with a stack trace) for debugging but
 				// never echo it back into the client response or the audit
-				// row, both of which classifyReason's caller persists.
+				// row, both of which the flush persists.
 				slog.Error("panic recovered in tool handler",
 					"tool", req.Params.Name,
 					"panic", fmt.Sprintf("%v", p),
@@ -222,7 +214,7 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			reason = rec.snapshotHint()
 		}
 		if reason == "" {
-			reason = classifyReason(records[len(records)-1].callPath, final)
+			reason = classifyToolResultReason(final)
 		}
 		last := &records[len(records)-1]
 		if last.status == "error" {
@@ -259,7 +251,7 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			reason = rec.snapshotHint()
 		}
 		if reason == "" {
-			reason = classifyReason("", final)
+			reason = classifyToolResultReason(final)
 		}
 		records = append(records, callRecord{
 			tool:        req.Params.Name,

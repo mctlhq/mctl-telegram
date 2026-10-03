@@ -204,7 +204,14 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		}
 
 		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
-			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt)
+			claimReason := ReasonNotFound
+			switch {
+			case errors.Is(cerr, ErrConfirmationMismatch), errors.Is(cerr, ErrConfirmationWrongUser):
+				claimReason = ReasonConfirmationRejected
+			case errors.Is(cerr, ErrConfirmationInFlight):
+				claimReason = ReasonRefused
+			}
+			s.auditRefusal(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt, claimReason)
 			if !errors.Is(cerr, ErrConfirmationInFlight) {
 				// Claim already dropped (or never held) the ConfirmStore entry
 				// for every other failure mode — drop the matching MediaStore
@@ -239,7 +246,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 
 		ref := s.MediaStore.Get(confID)
 		if ref == nil {
-			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt)
+			s.auditRefusal(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt, ReasonNotFound)
 			return toolErr("media reference expired or missing — re-run prepare_get_media"), nil
 		}
 

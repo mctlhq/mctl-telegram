@@ -756,7 +756,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		}
 		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID, "telegram:messages:pin")
 		if !canPin {
-			s.audit(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt)
+			s.auditRefusal(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("pin blocked: " + blockReason), nil
 		}
 		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashPinPayload(peer, int64(messageID), unpin)); cerr != nil {
@@ -822,7 +822,7 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 		// before touching the pool or DB so the session row is left intact, and
 		// record the blocked attempt in the audit log.
 		if isDemoReviewer(id, s.DemoReviewerTGID) {
-			s.audit(ctx, id, "disconnect_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt)
+			s.auditRefusal(ctx, id, "disconnect_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
 		}
 		// Pool eviction and DB revoke happen under the same mutex that
@@ -877,7 +877,7 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		// operator re-login). Refuse before touching the pool or DB so the row is
 		// left intact, and record the blocked attempt in the audit log.
 		if isDemoReviewer(id, s.DemoReviewerTGID) {
-			s.audit(ctx, id, "delete_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt)
+			s.auditRefusal(ctx, id, "delete_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
 		}
 		// RemoveAtomic for the same reason as disconnect — eviction and
@@ -1386,7 +1386,7 @@ A device_id belonging to a DIFFERENT account is refused without revealing whethe
 		device, err := s.Store.GetDevice(ctx, deviceID)
 		if err != nil || device.UserID != id.UserID {
 			refuseErr := errors.New("no such device on your account")
-			s.audit(ctx, id, "revoke_local_bridge_device", "", refuseErr, startedAt)
+			s.auditRefusal(ctx, id, "revoke_local_bridge_device", "", refuseErr, startedAt, ReasonNotFound)
 			return mcplib.NewToolResultError(refuseErr.Error()), nil
 		}
 
@@ -1647,15 +1647,15 @@ set_account_mode to migrate an existing account instead.`),
 		if err := requireScope(id, "admin:users"); err != nil {
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
-		refuse := func(format string, a ...any) *mcplib.CallToolResult {
+		refuse := func(reason, format string, a ...any) *mcplib.CallToolResult {
 			err := errors.New(formatErr(format, a...))
-			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
+			s.auditRefusal(ctx, id, "provision_local_account", "", err, startedAt, reason)
 			return mcplib.NewToolResultError(err.Error())
 		}
 		args := req.GetArguments()
 		tgID := int64(intArg(args, "telegram_id", 0))
 		if tgID <= 0 {
-			return refuse("telegram_id is required and must be a positive integer"), nil
+			return refuse(ReasonInvalidArgument, "telegram_id is required and must be a positive integer"), nil
 		}
 		displayName := stringArg(args, "display_name", "")
 		username := stringArg(args, "username", "")
@@ -1666,7 +1666,7 @@ set_account_mode to migrate an existing account instead.`),
 		}
 		if err := s.Store.ProvisionLocalAccount(ctx, targetUID, tgID, displayName, username); err != nil {
 			if errors.Is(err, db.ErrAccountAlreadyActive) {
-				return refuse("telegram id %d already has an active account — use set_account_mode "+
+				return refuse(ReasonRefused, "telegram id %d already has an active account — use set_account_mode "+
 					"to migrate an existing account to local mode instead", tgID), nil
 			}
 			s.audit(ctx, id, "provision_local_account", "", err, startedAt)
@@ -2429,7 +2429,10 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 // error with the given reason, so it can never read as a completed action,
 // and it is marked synthesized so a client tripping a policy limit does not
 // burn the availability SLO — the same treatment Rule 2 gives a scope or
-// argument refusal that never reached Server.audit.
+// argument refusal that never reached Server.audit. Call sites: rate-limit
+// refusals, write-gate blocks (pin_message:blocked), demo-reviewer account
+// guards, device-ownership refusals, get_media confirmation/ref refusals and
+// provision_local_account refusals.
 func (s *Server) auditRefusal(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, reason string) {
 	hintReason(ctx, reason)
 	rec := callRecord{
