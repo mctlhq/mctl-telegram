@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.79.0](https://github.com/mctlhq/mctl-telegram/compare/0.78.0...0.79.0) (2026-10-03)
+
+
+### Features
+
+* **agents:** issue-571-feat-human-input-telegram-delivery-reply ([ddb8e65](https://github.com/mctlhq/mctl-telegram/commit/ddb8e6536667409e6dbce96c7490e051f791c774))
+* **agents:** issue-571-feat-human-input-telegram-delivery-reply ([707c3f4](https://github.com/mctlhq/mctl-telegram/commit/707c3f4fb3ae238f7c12bd8ac44f9c32ec271576))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-571-feat-human-input-telegram-delivery-reply ([5e1ddb3](https://github.com/mctlhq/mctl-telegram/commit/5e1ddb35410cc1f699ba5edd77182f8d602ee2e2))
+* **db:** type the human-input actor backfill for Postgres ([8a5af5a](https://github.com/mctlhq/mctl-telegram/commit/8a5af5abb5b0aa6741069e6a154b566032b9e3b8))
+* **humaninput:** adapt to the pinned mctl-api human-input contract ([2bcd6d3](https://github.com/mctlhq/mctl-telegram/commit/2bcd6d30744a8400444926d2d0abd1678ec8cb56))
+* **humaninput:** refuse over-long free-text answers instead of truncating ([e63b029](https://github.com/mctlhq/mctl-telegram/commit/e63b02976d295d6a6db786272ca6a1e8d3c51fb2))
+* **humaninput:** track unconfirmed submits and close review round 2 ([296c295](https://github.com/mctlhq/mctl-telegram/commit/296c295f2f473a6ec259e225389870ca6273dccc))
+
 ## [0.78.0](https://github.com/mctlhq/mctl-telegram/compare/0.77.0...0.78.0) (2026-10-03)
 
 
