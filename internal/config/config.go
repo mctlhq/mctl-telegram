@@ -34,6 +34,9 @@ const (
 	defaultMediaMaxConcurrent      = 2
 )
 
+// MinHumanInputPollInterval is the floor for HUMAN_INPUT_POLL_INTERVAL.
+const MinHumanInputPollInterval = 10 * time.Second
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -359,6 +362,16 @@ type Config struct {
 	// questions — this repository's own "tenant" concept is a different
 	// thing). Set via MCTL_WORK_ITEM_TENANT.
 	WorkItemTenant string
+	// HumanInputEnabled gates the issue-571 human-input (agent clarification)
+	// Telegram adapter: the poller, the delivery rows and the /mctl input
+	// command. Requires WorkContextEnabled (it reuses the same relay client).
+	// Off by default; with it false no human-input client call, poller or
+	// command exists. Set via HUMAN_INPUT_ENABLED.
+	HumanInputEnabled bool
+	// HumanInputPollInterval is how often the poller lists pending requests
+	// per enrolled actor. Default 30s, minimum 10s. Set via
+	// HUMAN_INPUT_POLL_INTERVAL.
+	HumanInputPollInterval time.Duration
 }
 
 func Load() (*Config, error) {
@@ -420,6 +433,8 @@ func Load() (*Config, error) {
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
+		HumanInputEnabled:             envBool("HUMAN_INPUT_ENABLED", false),
+		HumanInputPollInterval:        envDuration("HUMAN_INPUT_POLL_INTERVAL", 30*time.Second),
 		ProductUpdateFeedDir:          envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
@@ -463,6 +478,14 @@ func Load() (*Config, error) {
 	if c.WorkContextEnabled {
 		if c.MCTLSurfaceTelegramToken == "" || c.WorkItemTenant == "" {
 			return nil, fmt.Errorf("WORK_CONTEXT_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN and MCTL_WORK_ITEM_TENANT")
+		}
+	}
+	if c.HumanInputEnabled {
+		if !c.WorkContextEnabled {
+			return nil, fmt.Errorf("HUMAN_INPUT_ENABLED requires WORK_CONTEXT_ENABLED=true")
+		}
+		if c.HumanInputPollInterval < MinHumanInputPollInterval {
+			return nil, fmt.Errorf("HUMAN_INPUT_POLL_INTERVAL must be at least %s, got %s", MinHumanInputPollInterval, c.HumanInputPollInterval)
 		}
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")

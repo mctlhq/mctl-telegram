@@ -34,6 +34,8 @@ Relay refusals, which the bot must handle by offering the link flow or explainin
 - `403 relay_required` (header missing);
 - `400` when the header is sent on a route that is not a relay route.
 
+mctl-api writes these, and the other typed errors, as `{"error": "<message>", "code": "<code>"}` (`writeErrorCode`); `internal/workctx` reads `code` and falls back to `error` only when no `code` field is present.
+
 ## The only routes `surface:telegram` may call
 
 | Route | Body | Notes |
@@ -44,7 +46,7 @@ Relay refusals, which the bot must handle by offering the link flow or explainin
 | `POST /api/v1/work-items/{id}/execution-requests` | `{kind: start\|resume, expected_state_version, resumed_from_execution_id?, intent_id?, surface?, idempotency_key?}` | Asks the platform to run or continue the item. `engine`, `engine_ref` or `execution_id` in the body → `400 execution_identity_not_accepted`. |
 | `GET /api/v1/work-items/{id}/execution-requests[/{request_id}]` | – | Request state: `pending` → `claimed` → `fulfilled` (with `execution_id`) or `rejected` (with a typed `reason`). |
 | `POST /api/v1/work-items/{id}/surface-refs` | `{external_id, actor_external_id?}` | `surface` defaults to telegram. `actor_external_id` is correlation-only, never identity. |
-| `GET /api/v1/human-input`, `GET /api/v1/human-input/{request_id}`, `POST /api/v1/human-input/{request_id}/response` | – | Human-input relay. Owned by #571, not by #443. |
+| `GET /api/v1/human-input`, `GET /api/v1/human-input/{request_id}`, `POST /api/v1/human-input/{request_id}/response` | – | Human-input relay. Owned by #571, not by #443; pinned in [mctl-api-human-input.md](mctl-api-human-input.md). |
 
 **Not available to the bot:**
 - `GET /work-items` (list);

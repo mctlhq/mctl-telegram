@@ -27,6 +27,12 @@ type validatedEnvelope interface {
 	validate() error
 }
 
+// correlationSetter is implemented by response envelopes that record mctl-api's
+// X-Request-ID header so a caller can log it next to its own identifiers.
+type correlationSetter interface {
+	setCorrelationID(string)
+}
+
 // emptyBodyTolerant is implemented by response envelopes for which an empty
 // 2xx body (e.g. 204 No Content) is a legitimate success: a list read that
 // persists nothing, where "no body" honestly means "no entries". Every other

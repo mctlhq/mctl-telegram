@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // CommandType identifies a parsed /mctl subcommand.
@@ -29,6 +30,11 @@ const (
 	// CmdLink is /mctl link <code>, the one-time surface-identity redeem
 	// flow. Sub is always empty for this command.
 	CmdLink CommandType = "link"
+	// CmdInput is issue-571's /mctl input <code> <value> and
+	// /mctl input status [code]: an answer to an agent clarification
+	// request. It is routed ONLY to the human-input handler, never to the
+	// approval path.
+	CmdInput CommandType = "input"
 )
 
 // Sub values for a parsed CmdWork command — which /mctl work form the owner
@@ -41,6 +47,12 @@ const (
 	SubWorkResume = "resume"
 )
 
+// Sub values for a parsed CmdInput command.
+const (
+	SubInputAnswer = "answer"
+	SubInputStatus = "status"
+)
+
 // Command is a parsed owner instruction typed into Saved Messages. Sub is
 // populated only for CmdWork (one of the Sub* constants above); every other
 // CommandType leaves it empty.
@@ -48,6 +60,10 @@ type Command struct {
 	Type CommandType
 	Arg  string
 	Sub  string
+	// Value is the free-form remainder of /mctl input <code> <value> (Arg
+	// holds the code), with the owner's inner whitespace preserved. Empty for
+	// every other command.
+	Value string
 }
 
 // ErrNotACommand means the text does not start with /mctl at all. The
@@ -116,6 +132,8 @@ func ParseCommand(text string) (Command, error) {
 		return Command{Type: sub, Arg: fields[2]}, nil
 	case CmdWork:
 		return parseWorkCommand(fields)
+	case CmdInput:
+		return parseInputCommand(text, fields)
 	default:
 		return Command{}, fmt.Errorf("%w: %q", ErrUnknownCommand, fields[1])
 	}
@@ -146,4 +164,31 @@ func parseWorkCommand(fields []string) (Command, error) {
 		// here.
 		return Command{Type: CmdWork, Sub: SubWorkOpen, Arg: strings.Join(fields[2:], " ")}, nil
 	}
+}
+
+// parseInputCommand parses everything after "/mctl input". "status" is a
+// reserved subcommand (optionally followed by a code). Otherwise the first
+// token is the answer code and the rest of the ORIGINAL text, trimmed, is the
+// value — taken from the text rather than re-joined fields so a free-text
+// answer keeps its spacing and line breaks.
+func parseInputCommand(text string, fields []string) (Command, error) {
+	if len(fields) < 3 {
+		return Command{}, fmt.Errorf("%w: /mctl input <code> <answer>", ErrMissingArg)
+	}
+	if strings.EqualFold(fields[2], string(SubInputStatus)) {
+		cmd := Command{Type: CmdInput, Sub: SubInputStatus}
+		if len(fields) > 3 {
+			cmd.Arg = fields[3]
+		}
+		return cmd, nil
+	}
+	if len(fields) < 4 {
+		return Command{}, fmt.Errorf("%w: /mctl input <code> <answer>", ErrMissingArg)
+	}
+	rest := strings.TrimSpace(text)
+	for i := 0; i < 3; i++ {
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		rest = strings.TrimPrefix(rest, fields[i])
+	}
+	return Command{Type: CmdInput, Sub: SubInputAnswer, Arg: fields[2], Value: strings.TrimSpace(rest)}, nil
 }

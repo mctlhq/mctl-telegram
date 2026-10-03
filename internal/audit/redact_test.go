@@ -178,3 +178,16 @@ func TestRedactAttr_BroadcastContentKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactAttr_HumanInputContentKeys: the question an agent asked and the
+// answer the owner typed (issue-571) must never reach a log line.
+func TestRedactAttr_HumanInputContentKeys(t *testing.T) {
+	for _, k := range []string{"question", "why", "options", "answer", "value", "Question"} {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "private-content"))
+			if !strings.HasPrefix(got.Value.String(), "[redacted len=") || strings.Contains(got.Value.String(), "private-content") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+		})
+	}
+}

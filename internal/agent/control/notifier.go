@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // maxTelegramMessageLen matches this codebase's established Telegram
@@ -83,6 +84,8 @@ type Notifier struct {
 	// documented guarantee that the emergency switch silences every
 	// owner-facing message, not just new ones.
 	GlobalKill func() bool
+	// Metrics is optional (nil-safe); it counts human-input deliveries.
+	Metrics *metrics.Registry
 }
 
 // defaultClaimLease and defaultMaxPendingAge are NewNotifier's defaults,
@@ -208,9 +211,32 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		if merr := n.Store.MarkOwnerNotificationSent(ctx, notif.UserID, notif.ID, msgID); merr != nil {
 			slog.Warn("notifier: mark sent errored", "notification_id", notif.ID, "err", merr)
 		}
+		if notif.Kind == db.NotificationHumanInput {
+			n.recordHumanInputSent(ctx, notif, msgID)
+		}
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+// recordHumanInputSent writes the Telegram message id back onto the
+// human-input delivery row (queued -> sent) and counts the delivery. Failure
+// here never undoes the send: the message is already in Saved Messages and
+// the notification row is already marked sent. Follow-up notifications carry
+// no delivery row, so found=false is normal for them.
+func (n *Notifier) recordHumanInputSent(ctx context.Context, notif db.OwnerNotification, msgID int64) {
+	createdAt, found, err := n.Store.SetHumanInputDeliveryMessageID(ctx, notif.ID, msgID)
+	if err != nil {
+		slog.Warn("notifier: human input delivery write-back failed", "notification_id", notif.ID, "err", err)
+		n.Metrics.CountHumanInputEvent(metrics.HumanInputEventDelivered, "error")
+		return
+	}
+	if !found {
+		return
+	}
+	n.Metrics.CountHumanInputEvent(metrics.HumanInputEventDelivered, "ok")
+	n.Metrics.ObserveHumanInputDeliverLatency(time.Since(createdAt))
+	slog.Info("human input delivered", "notification_id", notif.ID, "tg_message_id", msgID)
 }
 
 // newSelfRandomID draws a fresh Telegram RPC random_id from crypto/rand.

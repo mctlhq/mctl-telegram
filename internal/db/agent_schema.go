@@ -552,6 +552,47 @@ func agentSchemaSQLite() []string {
 			ON work_item_bindings(user_id, chat_tg_id, root_tg_message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_work_item_bindings_item
 			ON work_item_bindings(user_id, work_item_id)`,
+		// issue-571 human-input delivery correlation. Content-free by
+		// construction: no question, reason, option or answer column exists.
+		// The rendered body lives only in the encrypted owner_notifications
+		// row. option_ids_json holds per-option digests, never option text.
+		// max_length is unused (mctl-api names no per-request maximum). Answer codes live
+		// here, in their own namespace, never in agent_actions.
+		`CREATE TABLE IF NOT EXISTS human_input_deliveries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			request_id TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			request_version INTEGER NOT NULL DEFAULT 0,
+			work_item_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			answer_code TEXT NOT NULL,
+			option_ids_json TEXT NOT NULL DEFAULT '[]',
+			max_length INTEGER NOT NULL DEFAULT 0,
+			notification_id INTEGER REFERENCES owner_notifications(id) ON DELETE SET NULL,
+			tg_message_id INTEGER,
+			state TEXT NOT NULL DEFAULT 'queued',
+			last_outcome TEXT NOT NULL DEFAULT '',
+			delivered_at DATETIME,
+			responded_at DATETIME,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_human_input_deliveries_request
+			ON human_input_deliveries(user_id, request_id, request_hash)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_human_input_deliveries_code
+			ON human_input_deliveries(user_id, answer_code)`,
+		`CREATE INDEX IF NOT EXISTS idx_human_input_deliveries_notification
+			ON human_input_deliveries(notification_id)`,
+		// A polling hint, not authorization: which users to ask mctl-api about.
+		`CREATE TABLE IF NOT EXISTS human_input_actors (
+			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			tg_id INTEGER NOT NULL,
+			dormant_until DATETIME,
+			fail_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL
+		)`,
 	}
 }
 
@@ -810,5 +851,40 @@ func agentSchemaPG() []string {
 			ON work_item_bindings(user_id, chat_tg_id, root_tg_message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_work_item_bindings_item
 			ON work_item_bindings(user_id, work_item_id)`,
+		// see the sqliteSchema comment on human_input_deliveries.
+		`CREATE TABLE IF NOT EXISTS human_input_deliveries (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			request_id TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			request_version BIGINT NOT NULL DEFAULT 0,
+			work_item_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			answer_code TEXT NOT NULL,
+			option_ids_json TEXT NOT NULL DEFAULT '[]',
+			max_length BIGINT NOT NULL DEFAULT 0,
+			notification_id BIGINT REFERENCES owner_notifications(id) ON DELETE SET NULL,
+			tg_message_id BIGINT,
+			state TEXT NOT NULL DEFAULT 'queued',
+			last_outcome TEXT NOT NULL DEFAULT '',
+			delivered_at TIMESTAMPTZ,
+			responded_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_human_input_deliveries_request
+			ON human_input_deliveries(user_id, request_id, request_hash)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_human_input_deliveries_code
+			ON human_input_deliveries(user_id, answer_code)`,
+		`CREATE INDEX IF NOT EXISTS idx_human_input_deliveries_notification
+			ON human_input_deliveries(notification_id)`,
+		`CREATE TABLE IF NOT EXISTS human_input_actors (
+			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			tg_id BIGINT NOT NULL,
+			dormant_until TIMESTAMPTZ,
+			fail_count BIGINT NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
 	}
 }

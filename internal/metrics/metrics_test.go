@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -572,4 +573,18 @@ func TestNew_MediaInflightStartsAtZero(t *testing.T) {
 	if got := testutil.ToFloat64(reg.MediaInflight); got != 0 {
 		t.Errorf("MediaInflight on a fresh registry = %v, want 0", got)
 	}
+}
+
+func TestHumanInputMetrics(t *testing.T) {
+	r := New()
+	r.CountHumanInputEvent(HumanInputEventDelivered, "ok")
+	r.ObserveHumanInputDeliverLatency(2 * time.Second)
+	r.ObserveHumanInputRespondLatency(time.Minute)
+	if got := testutil.ToFloat64(r.HumanInputTelegramEventsTotal.WithLabelValues(HumanInputEventDelivered, "ok")); got != 1 {
+		t.Fatalf("delivered ok = %v, want 1", got)
+	}
+	var nilReg *Registry
+	nilReg.CountHumanInputEvent(HumanInputEventDelivered, "ok") // nil-safe
+	nilReg.ObserveHumanInputDeliverLatency(time.Second)
+	nilReg.ObserveHumanInputRespondLatency(time.Second)
 }

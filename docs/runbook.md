@@ -2753,3 +2753,17 @@ this client". It arrives by one of two paths that share one business rule
   Until one of these happens, product updates stay off by default for that
   client (authentication is not consent). Surfacing the step on the OAuth
   success page is an open owner decision, not part of issue-679.
+
+## Human-input (agent clarification) adapter
+
+Flags: `HUMAN_INPUT_ENABLED` (default `false`; requires `WORK_CONTEXT_ENABLED=true`, refused at startup otherwise) and `HUMAN_INPUT_POLL_INTERVAL` (default `30s`, minimum `10s`). The startup log line `human input adapter` shows whether it is on. With it off there is no poller goroutine and `/mctl input` is an unknown command.
+
+Metrics (exported without the `mctl_` prefix, as named in issue-571): `human_input_telegram_events_total{event,outcome}` with events `delivery_attempt`, `delivered`, `response_received`, `response_submitted`, `response_rejected`; `human_input_telegram_deliver_latency_seconds` (delivery row queued to sent) and `human_input_telegram_respond_latency_seconds` (delivered to answer accepted). Outcomes on `response_rejected` are `superseded` and `not_active` (stale, expired or already answered questions), `answer_invalid`, `not_eligible` (answers from accounts the platform does not accept) and `link_*`. `response_submitted{outcome="unconfirmed"}` counts HTTP 202 `pending_delivery` answers the workflow has not confirmed yet. `delivery_attempt{outcome="undeliverable"}` counts pending requests this surface cannot render or answer (a `multi_choice` or `structured` type, no options, `can_respond: false`), logged once per request version with the reason as `outcome`.
+
+Dormant actors: a 403 `link_not_found`/`link_revoked`/`link_expired` on the poll sets `human_input_actors.dormant_until` with exponential backoff (1 min doubling to 1 h) and records the class in `last_error`. This only stops wasted polling; it is not an authorization decision. Running `/mctl link`, `/mctl work status` or `/mctl input status` clears it. To inspect: `SELECT user_id, dormant_until, fail_count, last_error FROM human_input_actors`.
+
+A request missing from one successful list is not closed on that basis: the poller reads `GET /api/v1/human-input/{request_id}` and closes the row only when mctl-api says it is no longer pending for that hash (or answers 404). A failed list or read, and the `unknown` state, change nothing.
+
+Logs carry only `request_id`, `work_item_id`, `delivery_id`, `tg_message_id`, `outcome` and `correlation_id` (a per-call id this side generates and sends as `X-Request-Id`; mctl-api does not log it, so join with mctl-api's logs on `request_id`); question text, option labels and answers are never logged (`question`, `why`, `options`, `answer`, `value` are also in the slog redaction list).
+
+Rollback: set `HUMAN_INPUT_ENABLED=false` and restart. Queued but unsent messages can be retired with `UPDATE owner_notifications SET status = 'failed' WHERE kind = 'human_input' AND status = 'pending'`. The `human_input_deliveries` and `human_input_actors` tables are additive and can stay.

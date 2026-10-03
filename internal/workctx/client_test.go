@@ -15,7 +15,10 @@ import (
 // forbiddenActorFields must never appear (by field name or json tag) on any
 // exported request struct in this package — see requirements.md's "SHALL
 // omit every actor-naming field" acceptance criterion.
-var forbiddenActorFields = []string{"actor", "actor_subject", "created_by", "principal", "on_behalf_of"}
+var forbiddenActorFields = []string{"actor", "actor_subject", "created_by", "principal", "on_behalf_of",
+	// mctl-api refuses these on every body (forbiddenIdentityFields) and
+	// derives a human-input respondent from authentication only.
+	"respondent", "user", "user_id", "subject", "acting_principal", "requested_by", "decided_by"}
 
 // forbiddenExecutionIdentityFields must never appear either: a surface
 // requests execution, it never declares execution identity.
@@ -30,6 +33,9 @@ func requestStructs() map[string]reflect.Type {
 		"IntentRequest":     reflect.TypeOf(IntentRequest{}),
 		"ExecutionRequest":  reflect.TypeOf(ExecutionRequest{}),
 		"SurfaceRefRequest": reflect.TypeOf(SurfaceRefRequest{}),
+		"ResponseRequest":   reflect.TypeOf(ResponseRequest{}),
+		// The exact human-input response body sent on the wire.
+		"humanInputResponseWire": reflect.TypeOf(humanInputResponseWire{}),
 	}
 }
 
@@ -95,6 +101,9 @@ func TestRouteAllowlist(t *testing.T) {
 		"/api/v1/work-items/" + id + "/execution-requests":          true,
 		"/api/v1/work-items/" + id + "/execution-requests/" + reqID: true,
 		"/api/v1/work-items/" + id + "/surface-refs":                true,
+		"/api/v1/human-input":                                       true,
+		"/api/v1/human-input/" + hiID:                               true,
+		"/api/v1/human-input/" + hiID + "/response":                 true,
 	}
 	forbiddenSubstrings := []string{"executions", "snapshot", "snapshots", "events", "approvals", "/resume"}
 
@@ -107,6 +116,17 @@ func TestRouteAllowlist(t *testing.T) {
 		gotPath = r.URL.Path
 		pathMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/human-input":
+			_, _ = w.Write([]byte(`{"items":[],"count":0}`))
+			return
+		case strings.HasSuffix(r.URL.Path, "/response"):
+			_, _ = w.Write([]byte(`{"request_id":"` + hiID + `","status":"accepted"}`))
+			return
+		case strings.HasPrefix(r.URL.Path, "/api/v1/human-input/"):
+			_, _ = w.Write([]byte(hiRequestJSON))
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/execution-requests") && r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","execution_requests":[]}`))
 			return
@@ -166,11 +186,20 @@ func TestRouteAllowlist(t *testing.T) {
 	err = c.AddSurfaceRef(ctx, 555, id, SurfaceRefRequest{ChatTGID: 100, RootTGMessageID: 200})
 	check("AddSurfaceRef", err)
 
-	// 8 distinct methods, exercising all 7 distinct allowed routes (POST
+	_, err = c.ListHumanInput(ctx, 555)
+	check("ListHumanInput", err)
+
+	_, err = c.GetHumanInput(ctx, 555, hiID)
+	check("GetHumanInput", err)
+
+	_, err = c.RespondHumanInput(ctx, 555, hiID, ResponseRequest{RequestHash: "h1", Value: "Alpha"}, "k")
+	check("RespondHumanInput", err)
+
+	// 11 distinct methods, exercising all 10 distinct allowed routes (POST
 	// .../execution-requests and GET .../execution-requests share one path,
 	// distinguished only by HTTP method — RequestExecution and
 	// ListExecutionRequests).
-	const wantMethods = 8
+	const wantMethods = 11
 	if len(observedMethods) != wantMethods {
 		t.Errorf("observed %d distinct client methods, want %d (observed: %v)", len(observedMethods), wantMethods, observedMethods)
 	}

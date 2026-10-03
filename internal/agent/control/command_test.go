@@ -53,3 +53,26 @@ func TestParseCommand_Table(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCommand_Input(t *testing.T) {
+	cmd, err := ParseCommand("/mctl Input k7qm3r  use  the\nsecond reading ")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cmd.Type != CmdInput || cmd.Sub != SubInputAnswer || cmd.Arg != "k7qm3r" || cmd.Value != "use  the\nsecond reading" {
+		t.Fatalf("cmd = %+v", cmd)
+	}
+	cmd, err = ParseCommand("/mctl input status")
+	if err != nil || cmd.Sub != SubInputStatus || cmd.Arg != "" {
+		t.Fatalf("status = %+v err=%v", cmd, err)
+	}
+	cmd, err = ParseCommand("/mctl input STATUS K7QM3R")
+	if err != nil || cmd.Sub != SubInputStatus || cmd.Arg != "K7QM3R" {
+		t.Fatalf("status code = %+v err=%v", cmd, err)
+	}
+	for _, in := range []string{"/mctl input", "/mctl input K7QM3R"} {
+		if _, err := ParseCommand(in); !errors.Is(err, ErrMissingArg) {
+			t.Errorf("%q err = %v, want ErrMissingArg", in, err)
+		}
+	}
+}
