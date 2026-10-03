@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.78.0](https://github.com/mctlhq/mctl-telegram/compare/0.77.0...0.78.0) (2026-10-03)
+
+
+### Features
+
+* **agents:** issue-718-follow-ups-from-717-tool-call-reason-and ([9895319](https://github.com/mctlhq/mctl-telegram/commit/989531989861bd8e8223b3cd82990cccfb5c4c35))
+* **agents:** issue-718-follow-ups-from-717-tool-call-reason-and ([7a7f88c](https://github.com/mctlhq/mctl-telegram/commit/7a7f88c848bac33bb5d1f5874321bee84a077d7e))
+* **agents:** issue-726-fix-agentapi-admin-profile-body-accepts ([bab8363](https://github.com/mctlhq/mctl-telegram/commit/bab8363b456b71d3d86e3ad34f7bbc0054fab512))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-718-follow-ups-from-717-tool-call-reason-and ([04d81fe](https://github.com/mctlhq/mctl-telegram/commit/04d81fed859bebb6380235162b397278389e7918))
+* **agents:** address P1/P2 codex findings on issue-718-follow-ups-from-717-tool-call-reason-and ([4db2345](https://github.com/mctlhq/mctl-telegram/commit/4db2345a54b100a41df275252f1e033f1507ee37))
+* **mcp:** pin the driver-failure branch's SLO effect and fix refusal docs ([99fd62d](https://github.com/mctlhq/mctl-telegram/commit/99fd62dc056fbf376718dc33d2d281a89e999ad2)), closes [#718](https://github.com/mctlhq/mctl-telegram/issues/718)
+* reject case-folded keys in admin agent-profile body ([0c44ee8](https://github.com/mctlhq/mctl-telegram/commit/0c44ee892e1f88a40ba660bd86b4e70d7b0f144a))
+
 ## [0.77.0](https://github.com/mctlhq/mctl-telegram/compare/0.76.0...0.77.0) (2026-10-01)
 
 
