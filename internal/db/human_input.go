@@ -12,19 +12,23 @@ import (
 // Human-input delivery states (issue-571). A row is created `queued` together
 // with its owner_notifications row, becomes `sent` when the notifier delivers
 // it, may become `submitted` when mctl-api recorded an answer without the
-// workflow confirming it yet (202 pending_delivery), and ends in one terminal
-// state. queued, sent and submitted are the open states.
+// workflow confirming it yet (202 pending_delivery), may become `unconfirmed`
+// when a submit's outcome is unknown (transport error, timeout or 5xx, and the
+// re-read did not settle it: the answer may or may not have been recorded),
+// and ends in one terminal state. queued, sent, submitted and unconfirmed are
+// the open states.
 const (
-	HumanInputQueued     = "queued"
-	HumanInputSent       = "sent"
-	HumanInputSubmitted  = "submitted"
-	HumanInputAnswered   = "answered"
-	HumanInputInactive   = "inactive"
-	HumanInputSuperseded = "superseded"
+	HumanInputQueued      = "queued"
+	HumanInputSent        = "sent"
+	HumanInputSubmitted   = "submitted"
+	HumanInputUnconfirmed = "unconfirmed"
+	HumanInputAnswered    = "answered"
+	HumanInputInactive    = "inactive"
+	HumanInputSuperseded  = "superseded"
 )
 
 // humanInputOpenStates is the SQL list of open states, for IN (...) clauses.
-const humanInputOpenStates = `'` + HumanInputQueued + `','` + HumanInputSent + `','` + HumanInputSubmitted + `'`
+const humanInputOpenStates = `'` + HumanInputQueued + `','` + HumanInputSent + `','` + HumanInputSubmitted + `','` + HumanInputUnconfirmed + `'`
 
 // ErrHumanInputCodeConflict means the generated answer code already exists for
 // the user; the caller retries with a fresh code.
@@ -49,8 +53,8 @@ type HumanInputDelivery struct {
 	// order shown (stored in option_ids_json). Never the option text: the
 	// handler maps an answer number to the canonical option string it reads
 	// back from mctl-api, and checks it against this digest.
-	OptionDigests []string
-	MaxLength     int
+	OptionDigests  []string
+	MaxLength      int
 	NotificationID int64
 	TGMessageID    int64
 	State          string
@@ -67,7 +71,11 @@ func (d HumanInputDelivery) Terminal() bool {
 }
 
 func humanInputOpen(state string) bool {
-	return state == HumanInputQueued || state == HumanInputSent || state == HumanInputSubmitted
+	switch state {
+	case HumanInputQueued, HumanInputSent, HumanInputSubmitted, HumanInputUnconfirmed:
+		return true
+	}
+	return false
 }
 
 const humanInputDeliveryCols = `id, user_id, request_id, request_hash, request_version, work_item_id, kind,
@@ -195,8 +203,8 @@ func (s *Store) GetHumanInputDeliveryByCode(ctx context.Context, userID int64, c
 	return d, nil
 }
 
-// ListOpenHumanInputDeliveries returns the user's open rows (queued, sent or
-// submitted), oldest first.
+// ListOpenHumanInputDeliveries returns the user's open rows (queued, sent,
+// submitted or unconfirmed), oldest first.
 func (s *Store) ListOpenHumanInputDeliveries(ctx context.Context, userID int64) ([]HumanInputDelivery, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT `+humanInputDeliveryCols+` FROM human_input_deliveries

@@ -59,6 +59,14 @@ func couldNotConfirm(code string) string {
 	return fmt.Sprintf("Could not confirm; check again with /mctl input status %s", code)
 }
 
+func unconfirmedWaiting(code string) string {
+	return fmt.Sprintf("Your answer to %s could not be confirmed, and the question is still waiting. Sending the same answer again is safe: /mctl input %s <answer>", code, code)
+}
+
+func resolvedUnconfirmed(code string) string {
+	return fmt.Sprintf("Question %s was answered. Whether it was your answer could not be confirmed; check /mctl work status.", code)
+}
+
 func submittedUnconfirmed(echo, code string) string {
 	return fmt.Sprintf("Submitted: %s. The platform has not confirmed it yet; check with /mctl input status %s", echo, code)
 }
@@ -299,6 +307,9 @@ func (h *Handler) canonicalText(ctx context.Context, actorTGID int64, row db.Hum
 	}
 	if err != nil {
 		slog.Warn("human input status read failed", "request_id", row.RequestID, "delivery_id", row.ID, "outcome", errClass(err))
+		if afterSubmit {
+			h.markUnconfirmed(ctx, row)
+		}
 		return couldNotConfirm(row.AnswerCode)
 	}
 	if v.RequestHash != row.RequestHash {
@@ -314,6 +325,10 @@ func (h *Handler) canonicalText(ctx context.Context, actorTGID int64, row db.Hum
 func (h *Handler) settle(ctx context.Context, row db.HumanInputDelivery, v *workctx.RequestView, afterSubmit bool) string {
 	switch v.State {
 	case workctx.HumanInputStateResolved:
+		if row.State == db.HumanInputUnconfirmed && !afterSubmit {
+			h.markTerminal(ctx, row, db.HumanInputInactive, "resolved_unconfirmed")
+			return resolvedUnconfirmed(row.AnswerCode)
+		}
 		if afterSubmit || row.State == db.HumanInputSubmitted {
 			h.markAnswered(ctx, row, "resolved")
 			if afterSubmit {
@@ -326,18 +341,38 @@ func (h *Handler) settle(ctx context.Context, row db.HumanInputDelivery, v *work
 		return "Answered."
 	case workctx.HumanInputStatePending:
 		if afterSubmit {
+			// The submit's outcome is unknown and mctl-api still shows the
+			// question waiting: the answer may sit in its ledger
+			// unconfirmed. Never "not answered" from here on.
+			h.markUnconfirmed(ctx, row)
 			return couldNotConfirm(row.AnswerCode)
 		}
-		if row.State == db.HumanInputSubmitted {
+		switch row.State {
+		case db.HumanInputSubmitted:
 			return "Submitted; waiting for the platform to confirm."
+		case db.HumanInputUnconfirmed:
+			return unconfirmedWaiting(row.AnswerCode)
 		}
 		return "Waiting for your answer."
 	case workctx.HumanInputStateExpired, workctx.HumanInputStateTimedOut, workctx.HumanInputStateNotPending:
 		h.markTerminal(ctx, row, db.HumanInputInactive, safeToken(v.State))
 		return NoLongerActive
 	default:
+		if afterSubmit {
+			h.markUnconfirmed(ctx, row)
+		}
 		return couldNotConfirm(row.AnswerCode)
 	}
+}
+
+// markUnconfirmed records that a submit's outcome is unknown. A row already
+// submitted (mctl-api confirmed it recorded an answer) keeps that stronger
+// state.
+func (h *Handler) markUnconfirmed(ctx context.Context, row db.HumanInputDelivery) {
+	if row.State == db.HumanInputSubmitted {
+		return
+	}
+	h.markTerminal(ctx, row, db.HumanInputUnconfirmed, "submit_unconfirmed")
 }
 
 // rejectionOutcome is the rejection state carried by a typed human-input

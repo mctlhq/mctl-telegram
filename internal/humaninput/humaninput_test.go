@@ -334,20 +334,22 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
+func yes() *bool { b := true; return &b }
+
 func choiceReq(id, hash string) workctx.RequestView {
 	return workctx.RequestView{
 		RequestID: id, RequestHash: hash, RequestVersion: 1, Round: 1, ResponseType: workctx.HumanInputTypeSingleChoice,
 		State: workctx.HumanInputStatePending, Question: "Which interpretation?", Reason: "Two readings exist.",
 		Options:    []string{"Alpha reading", "Bravo reading"},
 		ExpiresAt:  "2026-10-04T12:00:00Z",
-		WorkItemID: "wi_1", CanRespond: true,
+		WorkItemID: "wi_1", CanRespond: yes(),
 	}
 }
 
 func freeReq(id, hash, question string) workctx.RequestView {
 	return workctx.RequestView{
 		RequestID: id, RequestHash: hash, RequestVersion: 1, Round: 1, ResponseType: workctx.HumanInputTypeFreeText,
-		State: workctx.HumanInputStatePending, Question: question, ExpiresAt: "2026-10-04T12:00:00Z", CanRespond: true,
+		State: workctx.HumanInputStatePending, Question: question, ExpiresAt: "2026-10-04T12:00:00Z", CanRespond: yes(),
 	}
 }
 
@@ -415,7 +417,8 @@ func (e *env) row(t *testing.T, code string) db.HumanInputDelivery {
 func TestRenderSingleChoiceAndFreeText(t *testing.T) {
 	v := choiceReq(reqA, "h1")
 	v.WorkRef = "mctlhq/mctl-telegram#571"
-	v.ContextRefs = []string{"https://github.com/mctlhq/mctl-telegram/issues/571", "gitops:proposals/x", "http://insecure.example"}
+	v.ContextRefs = []string{"https://github.com/mctlhq/mctl-telegram/issues/571", "gitops:proposals/x", "http://insecure.example",
+		"https://good.example/#\u202Eelpmaxe.live", "https://good.example/\u200bpath"}
 	got := humaninput.Render(v, "K7QM3R")
 	want := "INPUT REQUEST (not an approval)\n" +
 		"Work: mctlhq/mctl-telegram#571\n" +
@@ -1251,5 +1254,58 @@ func TestLogsCarryNoContent(t *testing.T) {
 	}
 	if !strings.Contains(logs, "correlation_id=tg-") {
 		t.Fatalf("logs should carry a correlation id:\n%s", logs)
+	}
+}
+
+// P2 (round 2): a submit whose outcome is unknown (connection dropped, re-read
+// failed) marks the row unconfirmed. It is never reported as "Waiting for
+// your answer." afterwards, and when the request then resolves the follow-up
+// never says "no longer active".
+func TestUnknownSubmitOutcomeIsUnconfirmed(t *testing.T) {
+	e := newEnv(t)
+	code := deliveredCode(t, e, freeReq(reqA, "h1", "Name?"))
+	e.api.with(func() {
+		e.api.respond = func(int64, string, map[string]any) (int, any) { return 0, nil }
+		e.api.getFail = true
+	})
+	if reply := e.say(t, 300, "/mctl input "+code+" main"); reply != "Could not confirm; check again with /mctl input status "+code {
+		t.Fatalf("reply = %q", reply)
+	}
+	if r := e.row(t, code); r.State != db.HumanInputUnconfirmed || r.Terminal() {
+		t.Fatalf("state = %s terminal=%v, want unconfirmed and open", r.State, r.Terminal())
+	}
+	e.api.with(func() { e.api.getFail = false })
+	reply := e.say(t, 301, "/mctl input status "+code)
+	if reply == "Waiting for your answer." || !strings.Contains(reply, "could not be confirmed") {
+		t.Fatalf("status = %q", reply)
+	}
+	// The workflow resumes on that answer: the follow-up must not say the
+	// question is no longer active.
+	e.api.publish(aliceTGID)
+	e.api.setState(reqA, workctx.HumanInputStateResolved)
+	follow := e.deliver(t)
+	if len(follow) != 1 || strings.Contains(follow[0], humaninput.NoLongerActive) || !strings.Contains(follow[0], "was answered") {
+		t.Fatalf("follow-up = %q", follow)
+	}
+
+	// Same when the re-read succeeds but still shows the question pending.
+	code2 := deliveredCode(t, e, freeReq(reqB, "h2", "Other?"))
+	if reply := e.say(t, 302, "/mctl input "+code2+" main"); reply != "Could not confirm; check again with /mctl input status "+code2 {
+		t.Fatalf("reply = %q", reply)
+	}
+	if st := e.row(t, code2).State; st != db.HumanInputUnconfirmed {
+		t.Fatalf("state after pending re-read = %s", st)
+	}
+}
+
+// Options equal up to case or surrounding whitespace make a typed answer
+// ambiguous: the request is not delivered.
+func TestDuplicateOptionsAreUndeliverable(t *testing.T) {
+	e := newEnv(t)
+	v := choiceReq(reqA, "h1")
+	v.Options = []string{"Alpha", " alpha ", "Bravo"}
+	e.api.publish(aliceTGID, v)
+	if got := e.deliver(t); len(got) != 0 {
+		t.Fatalf("delivered %q", got)
 	}
 }

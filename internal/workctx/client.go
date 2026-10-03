@@ -133,7 +133,7 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	if len(respBody) > maxResponseBytes {
 		return fmt.Errorf("%w: response body exceeds %d bytes", ErrIncompatibleSchema, maxResponseBytes)
 	}
-	if rid := resp.Header.Get("X-Request-ID"); rid != "" {
+	if rid := boundedToken(resp.Header.Get("X-Request-ID")); rid != "" {
 		correlationID = rid
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -147,7 +147,9 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		_ = json.Unmarshal(respBody, &errBody)
 		// A human-input response rejection is a result object, not an
 		// error object: {"request_id", "status":"rejected", "state", ...}.
-		if errBody.Status == "rejected" && errBody.State != "" {
+		// Only the response route answers in that shape; no other route's
+		// body is read as one.
+		if route == routeRespondHumanInput && errBody.Status == "rejected" && errBody.State != "" {
 			return wrapHumanInputRejection(resp.StatusCode, errBody.State, correlationID)
 		}
 		// mctl-api's writeErrorCode shape is {"error": <message>, "code":
@@ -356,4 +358,21 @@ func newCorrelationID() string {
 		return ""
 	}
 	return "tg-" + hex.EncodeToString(b[:])
+}
+
+// boundedToken keeps an upstream-supplied header usable as a log value:
+// letters, digits, '.', '_' and '-' only, at most 64 bytes. Anything else
+// yields "" and the locally generated id is kept.
+func boundedToken(s string) string {
+	if s == "" || len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return ""
+		}
+	}
+	return s
 }

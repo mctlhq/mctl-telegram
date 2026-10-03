@@ -60,7 +60,7 @@ func TestHumanInputRouteAllowlist(t *testing.T) {
 	}
 	v := list[0]
 	if v.RequestID != hiID || v.RequestVersion != 2 || v.ResponseType != HumanInputTypeSingleChoice || v.Reason != "Two readings." ||
-		len(v.Options) != 2 || v.Options[1] != "Bravo" || v.ExpiresAt == "" || !v.CanRespond || len(v.ContextRefs) != 1 {
+		len(v.Options) != 2 || v.Options[1] != "Bravo" || v.ExpiresAt == "" || !v.Respondable() || len(v.ContextRefs) != 1 {
 		t.Fatalf("list item = %+v", v)
 	}
 	if !strings.HasPrefix(v.CorrelationID, "tg-") {
@@ -230,7 +230,7 @@ func TestHumanInputMalformedResponsesAreErrors(t *testing.T) {
 		path, body string
 		call       func(*Client) error
 	}{
-		"list without count": {"/api/v1/human-input", `{"items":[]}`, func(c *Client) error { _, err := c.ListHumanInput(context.Background(), 555); return err }},
+		"list without count":  {"/api/v1/human-input", `{"items":[]}`, func(c *Client) error { _, err := c.ListHumanInput(context.Background(), 555); return err }},
 		"list count mismatch": {"/api/v1/human-input", `{"items":[],"count":2}`, func(c *Client) error { _, err := c.ListHumanInput(context.Background(), 555); return err }},
 		"empty list body":     {"/api/v1/human-input", ``, func(c *Client) error { _, err := c.ListHumanInput(context.Background(), 555); return err }},
 		"bad request id": {"/api/v1/human-input", `{"items":[` + strings.Replace(hiRequestJSON, hiID, "hi_1", 1) + `],"count":1}`,
@@ -266,5 +266,36 @@ func TestHumanInputRefusesMalformedRequestID(t *testing.T) {
 	}
 	if _, err := c.RespondHumanInput(context.Background(), 555, "hir-x/../../approvals", ResponseRequest{}, ""); err == nil {
 		t.Fatal("malformed id must be refused before any call")
+	}
+}
+
+// An absent can_respond is a failed read, never an implicit false.
+func TestHumanInputMissingCanRespondIsIncompatible(t *testing.T) {
+	body := strings.Replace(hiRequestJSON, `"can_respond":true,`, "", 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[` + body + `],"count":1}`))
+	}))
+	defer srv.Close()
+	if _, err := NewClient(srv.URL, "tok", "tenant", nil).ListHumanInput(context.Background(), 555); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("err = %v, want ErrIncompatibleSchema", err)
+	}
+}
+
+// The rejection-object shape is read only on the response route: another
+// route's body that happens to carry status/state keeps its code mapping.
+func TestRejectionShapeScopedToResponseRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-ID", strings.Repeat("x", 500))
+		w.WriteHeader(409)
+		_, _ = w.Write([]byte(`{"error":"stale","code":"state_version_conflict","status":"rejected","state":"superseded"}`))
+	}))
+	defer srv.Close()
+	_, err := NewClient(srv.URL, "tok", "tenant", nil).GetWorkItem(context.Background(), 555, "wi_1")
+	if !errors.Is(err, ErrStateVersionConflict) || errors.Is(err, ErrRequestSuperseded) {
+		t.Fatalf("err = %v, want ErrStateVersionConflict only", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !strings.HasPrefix(apiErr.CorrelationID, "tg-") {
+		t.Fatalf("an oversized upstream X-Request-ID must not replace the local id: %+v", apiErr)
 	}
 }

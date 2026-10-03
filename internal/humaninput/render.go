@@ -87,7 +87,11 @@ func Render(v workctx.RequestView, code string) string {
 		if links >= maxLinks {
 			break
 		}
-		if u, err := url.Parse(l); err == nil && strings.EqualFold(u.Scheme, "https") && u.Host != "" && len([]rune(l)) <= maxLinkRunes && !strings.ContainsFunc(l, isBreakOrSpace) {
+		// A link is shown only if sanitizing would not change it: one
+		// carrying invisible, bidi-control or other format code points
+		// (which could make it read as another host) is dropped, not
+		// rewritten into a different URL.
+		if u, err := url.Parse(l); err == nil && strings.EqualFold(u.Scheme, "https") && u.Host != "" && len([]rune(l)) <= maxLinkRunes && !strings.ContainsFunc(l, isBreakOrSpace) && oneLine(l, maxLinkRunes) == l {
 			fmt.Fprintf(&head, "Link: %s\n", l)
 			links++
 		}

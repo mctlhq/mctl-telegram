@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/answercode"
@@ -48,10 +49,17 @@ type Poller struct {
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
 
+	// undeliverableMu guards undeliverableSeen. RunOnce is exported and
+	// otherwise reentrant, so the map must not rely on there being a single
+	// Run goroutine.
+	undeliverableMu sync.Mutex
 	// undeliverableSeen only rate-limits the log line and metric for a
-	// pending request this surface cannot render or answer, to once per
-	// (user, request_id, request_hash) per process. It decides nothing.
-	undeliverableSeen map[string]struct{}
+	// pending request this surface cannot render or answer: per user, the
+	// (request_id, request_hash) keys reported on that user's last successful
+	// poll. Each successful poll replaces the user's set, so a key that is no
+	// longer listed is dropped and the map stays bounded by what is pending.
+	// It decides nothing.
+	undeliverableSeen map[int64]map[string]struct{}
 }
 
 func (p *Poller) now() time.Time {
@@ -123,13 +131,15 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 	}
 
 	listed := make(map[string]struct{}, len(reqs))
+	undeliverableNow := map[string]struct{}{}
+	defer p.replaceUndeliverable(a.UserID, undeliverableNow)
 	for _, r := range reqs {
 		if r.State != workctx.HumanInputStatePending {
 			continue
 		}
 		listed[r.RequestID+"\x00"+r.RequestHash] = struct{}{}
 		if reason := undeliverable(r); reason != "" {
-			p.noteUndeliverable(a.UserID, r, reason)
+			p.noteUndeliverable(a.UserID, r, reason, undeliverableNow)
 			continue
 		}
 		if err := p.enqueue(ctx, a.UserID, r); err != nil {
@@ -177,10 +187,15 @@ func (p *Poller) settleAbsent(ctx context.Context, a db.HumanInputActor, d db.Hu
 			return
 		case workctx.HumanInputStateResolved:
 			state, outcome = db.HumanInputInactive, "resolved"
-			if d.State == db.HumanInputSubmitted {
+			switch d.State {
+			case db.HumanInputSubmitted:
 				// This human's own 202-recorded answer is the one that
 				// resolved it.
 				state = db.HumanInputAnswered
+			case db.HumanInputUnconfirmed:
+				// An answer whose submit outcome was unknown: it may be
+				// this human's. Never report it as "no longer active".
+				outcome = "resolved_unconfirmed"
 			}
 		case workctx.HumanInputStateExpired, workctx.HumanInputStateTimedOut, workctx.HumanInputStateNotPending:
 			state, outcome = db.HumanInputInactive, safeToken(v.State)
@@ -189,7 +204,7 @@ func (p *Poller) settleAbsent(ctx context.Context, a db.HumanInputActor, d db.Hu
 			return
 		}
 	}
-	wasDelivered := d.State == db.HumanInputSent || d.State == db.HumanInputSubmitted
+	wasDelivered := d.State == db.HumanInputSent || d.State == db.HumanInputSubmitted || d.State == db.HumanInputUnconfirmed
 	changed, err := p.Store.MarkHumanInputDelivery(ctx, a.UserID, d.ID, state, outcome)
 	if err != nil {
 		slog.Warn("human input mark delivery failed", append(logArgs, "outcome", errClass(err))...)
@@ -199,8 +214,11 @@ func (p *Poller) settleAbsent(ctx context.Context, a db.HumanInputActor, d db.Hu
 		return
 	}
 	body := fmt.Sprintf("%s (%s)", NoLongerActive, d.AnswerCode)
-	if state == db.HumanInputAnswered {
+	switch {
+	case state == db.HumanInputAnswered:
 		body = fmt.Sprintf("Your answer to %s was confirmed. Agent will resume.", d.AnswerCode)
+	case outcome == "resolved_unconfirmed":
+		body = resolvedUnconfirmed(d.AnswerCode)
 	}
 	if _, err := p.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: a.UserID,
@@ -218,7 +236,7 @@ func undeliverable(r workctx.RequestView) string {
 		return "malformed"
 	case strings.TrimSpace(r.Question) == "":
 		return "empty_question"
-	case !r.CanRespond:
+	case !r.Respondable():
 		return "cannot_respond"
 	}
 	switch r.ResponseType {
@@ -231,10 +249,18 @@ func undeliverable(r workctx.RequestView) string {
 		if len(r.Options) > maxOptions {
 			return "too_many_options"
 		}
+		digests := make(map[string]struct{}, len(r.Options))
 		for _, o := range r.Options {
 			if strings.TrimSpace(o) == "" {
 				return "empty_option"
 			}
+			// Two options equal up to case or surrounding whitespace would
+			// make a typed answer ambiguous (and their digests equal).
+			d := OptionDigest(o)
+			if _, dup := digests[d]; dup {
+				return "duplicate_options"
+			}
+			digests[d] = struct{}{}
 		}
 		return ""
 	default:
@@ -243,20 +269,36 @@ func undeliverable(r workctx.RequestView) string {
 }
 
 // noteUndeliverable makes a pending request this surface cannot deliver
-// visible (one log line and one metric per request version per process)
-// instead of skipping it silently while the agent stays parked.
-func (p *Poller) noteUndeliverable(userID int64, r workctx.RequestView, reason string) {
-	key := fmt.Sprintf("%d\x00%s\x00%s", userID, r.RequestID, r.RequestHash)
-	if p.undeliverableSeen == nil {
-		p.undeliverableSeen = map[string]struct{}{}
-	}
-	if _, seen := p.undeliverableSeen[key]; seen {
+// visible (one log line and one metric while it stays listed) instead of
+// skipping it silently while the agent stays parked. now collects this poll's
+// keys for replaceUndeliverable.
+func (p *Poller) noteUndeliverable(userID int64, r workctx.RequestView, reason string, now map[string]struct{}) {
+	key := r.RequestID + "\x00" + r.RequestHash
+	now[key] = struct{}{}
+	p.undeliverableMu.Lock()
+	_, seen := p.undeliverableSeen[userID][key]
+	p.undeliverableMu.Unlock()
+	if seen {
 		return
 	}
-	p.undeliverableSeen[key] = struct{}{}
 	slog.Info("human input request not deliverable on telegram", "user_id", userID, "request_id", r.RequestID,
 		"work_item_id", r.WorkItemID, "outcome", reason, "response_type", safeToken(r.ResponseType), "correlation_id", r.CorrelationID)
 	p.Metrics.CountHumanInputEvent(metrics.HumanInputEventDeliveryAttempt, "undeliverable")
+}
+
+// replaceUndeliverable makes now the user's reported set, dropping keys that
+// are no longer listed. Called only after a successful list.
+func (p *Poller) replaceUndeliverable(userID int64, now map[string]struct{}) {
+	p.undeliverableMu.Lock()
+	defer p.undeliverableMu.Unlock()
+	if len(now) == 0 {
+		delete(p.undeliverableSeen, userID)
+		return
+	}
+	if p.undeliverableSeen == nil {
+		p.undeliverableSeen = map[int64]map[string]struct{}{}
+	}
+	p.undeliverableSeen[userID] = now
 }
 
 // OptionDigest is the content-free digest stored per single_choice option:

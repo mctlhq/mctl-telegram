@@ -39,10 +39,10 @@ Listing and reading only show requests the caller may see. For a relayed human t
 | `workflow_id`, `agent`, `audience` | string | **Not decoded.** |
 | `question`, `reason` | string | Rendered (sanitized, capped, continuation lines indented). |
 | `response_type` | `free_text`, `single_choice`, `multi_choice`, `structured` | Only `single_choice` and `free_text` are delivered. The others are logged once and counted as `delivery_attempt{outcome="undeliverable"}`. |
-| `options` | `[]string`, `single_choice`/`multi_choice` only | Numbered `1.`..`N.` in order. The answer value is the **exact option string**. |
-| `context_refs` | `[]string` | Only `https://` entries are shown, as `Link:` lines. |
+| `options` | `[]string`, `single_choice`/`multi_choice` only | Numbered `1.`..`N.` in order. The answer value is the **exact option string**. A request with empty options, more than 10, or two equal up to case/whitespace is not delivered. |
+| `context_refs` | `[]string` | Only `https://` entries without spaces, line breaks or invisible/format code points are shown, as `Link:` lines; others are dropped, not rewritten. |
 | `eligible_actors` | `[]string` | Only for admins and the service principal; never sent to a relayed human. **Not decoded.** |
-| `can_respond` | bool | A request with `can_respond: false` is not delivered. |
+| `can_respond` | bool | Required: a view without it is a failed read (`ErrIncompatibleSchema`), never an implicit `false`. A request with `can_respond: false` is not delivered. |
 | `created_at`, `expires_at` | string (RFC 3339, or naive = UTC) | `expires_at` is shown as `Expires:`. |
 | `state` | see below | Required. |
 | `state_detail` | string | Decoded, never rendered or logged. |
@@ -88,7 +88,7 @@ Results are `{"request_id", "status", "state", "detail", "respondent", "received
 | `409` | `rejected` | `answered` | Another response holds the request (another eligible human, or a different value). | `This question is no longer active.` (the other actor is not named); row `inactive`. |
 | `403` | `rejected` | `not_eligible` | The linked human is not an eligible respondent. | Neutral wording, no policy detail, no retry; row unchanged. |
 | `404` | – | – | Not found, or not visible to this human. | `This question is no longer active.` |
-| `503` | `pending_delivery` / – | `unknown` / – | Workflow or ledger unavailable; an answer may be recorded. | Re-read `GET .../{request_id}` and render that; never success. |
+| `503` | `pending_delivery` / – | `unknown` / – | Workflow or ledger unavailable; an answer may be recorded. | Re-read `GET .../{request_id}` and render that; never success. If the re-read fails or still shows `pending`, the row becomes `unconfirmed` (open): status then says the answer could not be confirmed (never "waiting for your answer"), and if the request later resolves the follow-up says it was answered without claiming it was this human's (never "no longer active"). The same applies to a transport error or timeout. |
 
 `detail` can list the question's options and `respondent` is the human's GitHub login: the adapter never logs or renders either, and a rejection's `APIError.Message` is left empty for that reason.
 

@@ -41,6 +41,10 @@ const (
 	HumanInputStatusRejected        = "rejected"
 )
 
+// routeRespondHumanInput is the relay route name of the response call, the
+// only route whose rejections are {status: rejected, state} result objects.
+const routeRespondHumanInput = "respond_human_input"
+
 // humanInputIDPattern is mctl-api's request_id shape. A request_id is put
 // into a URL path, so anything else is refused as an incompatible response
 // rather than relayed.
@@ -69,11 +73,14 @@ type RequestView struct {
 	ResponseType   string   `json:"response_type"`
 	Options        []string `json:"options,omitempty"`
 	ContextRefs    []string `json:"context_refs"`
-	CanRespond     bool     `json:"can_respond"`
-	CreatedAt      string   `json:"created_at"`
-	ExpiresAt      string   `json:"expires_at"`
-	State          string   `json:"state"`
-	StateDetail    string   `json:"state_detail,omitempty"`
+	// CanRespond is a pointer so an absent field is a malformed read
+	// (validate refuses it), never an implicit false that would silently
+	// stop every delivery.
+	CanRespond  *bool  `json:"can_respond"`
+	CreatedAt   string `json:"created_at"`
+	ExpiresAt   string `json:"expires_at"`
+	State       string `json:"state"`
+	StateDetail string `json:"state_detail,omitempty"`
 
 	// WorkRef is a display ref ("owner/repo#n") the adapter derives from its
 	// own work_item_bindings row. Never decoded from mctl-api.
@@ -95,8 +102,16 @@ func (v *RequestView) validate() error {
 	if v.RequestHash == "" || v.State == "" {
 		return fmt.Errorf("%w: human-input request missing request_hash or state", ErrIncompatibleSchema)
 	}
+	if v.CanRespond == nil {
+		return fmt.Errorf("%w: human-input request missing can_respond", ErrIncompatibleSchema)
+	}
 	return nil
 }
+
+// Respondable reports can_respond; false when absent (validate refuses an
+// absent field on every decoded view, so this only matters for hand-built
+// values).
+func (v *RequestView) Respondable() bool { return v.CanRespond != nil && *v.CanRespond }
 
 // humanInputListEnvelope is the wire shape of GET /api/v1/human-input:
 // {"items": [...], "count": N}. It carries no schema_version. count is
@@ -228,7 +243,7 @@ func (c *Client) RespondHumanInput(ctx context.Context, actorTGID int64, request
 	var out ResponseView
 	wire := humanInputResponseWire{RequestHash: r.RequestHash, Value: r.Value, Surface: "telegram"}
 	path := "/api/v1/human-input/" + url.PathEscape(requestID) + "/response"
-	if err := c.relay(ctx, "respond_human_input", http.MethodPost, path, actorTGID, idemKey, wire, &out); err != nil {
+	if err := c.relay(ctx, routeRespondHumanInput, http.MethodPost, path, actorTGID, idemKey, wire, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
