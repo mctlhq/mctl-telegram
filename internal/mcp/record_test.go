@@ -1028,3 +1028,29 @@ func TestJSONRPCHook_UnregisteredLabelIsAllowlisted(t *testing.T) {
 		t.Fatalf("client-supplied name leaked into the label: %v", n)
 	}
 }
+
+// TestFlushRecordedCall_CallPathDoesNotSteerClassification: callPath is a
+// routing fact; bridge_error comes from an explicit hint (bridgeCall), not
+// from it.
+func TestFlushRecordedCall_CallPathDoesNotSteerClassification(t *testing.T) {
+	for i, cp := range []string{"local", ""} {
+		store := newToolsTestStore(t)
+		srv := &Server{Store: store, Metrics: metrics.New()}
+		uid := int64(4300 + i)
+		mcpSrv := mcpserver.NewMCPServer("record-test", "0",
+			mcpserver.WithToolCapabilities(true),
+			mcpserver.WithToolHandlerMiddleware(srv.recordToolCall),
+		)
+		mcpSrv.AddTool(mcplib.NewTool("cp_tool"), func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+			if cp != "" {
+				srv.audit(ctx, &auth.Identity{UserID: uid}, "cp_tool", "", errors.New("x"), time.Now(), cp)
+			}
+			return mcplib.NewToolResultError("query is required"), nil
+		})
+		ctx := auth.With(context.Background(), &auth.Identity{UserID: uid})
+		callTool(t, ctx, mcpSrv, "cp_tool", map[string]any{})
+		if r := latestAuditReason(t, store, uid); r != ReasonInvalidArgument {
+			t.Errorf("callPath %q: reason = %q, want %q", cp, r, ReasonInvalidArgument)
+		}
+	}
+}

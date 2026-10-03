@@ -103,17 +103,6 @@ func TestClassifyToolResultReason_NilResult(t *testing.T) {
 	}
 }
 
-// TestClassifyReason_CallPathDoesNotSteerClassification: callPath is a routing
-// fact; bridge_error comes from an explicit hint (bridgeCall), not from it.
-func TestClassifyReason_CallPathDoesNotSteerClassification(t *testing.T) {
-	res := errText("query is required")
-	for _, cp := range []string{"local", ""} {
-		if got := classifyReason(cp, res); got != ReasonInvalidArgument {
-			t.Errorf("classifyReason(%q, ...) = %q, want %q", cp, got, ReasonInvalidArgument)
-		}
-	}
-}
-
 // TestMTProtoCatalog_NoMessageIsAPrefixOfAnother guards the catalog prefix
 // loop in classifyToolResultReason against map-iteration-order dependence.
 func TestMTProtoCatalog_NoMessageIsAPrefixOfAnother(t *testing.T) {

@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // ownerToolFixture returns a store with one local account and one registered
@@ -210,4 +214,41 @@ func renderToolText(t *testing.T, res *mcplib.CallToolResult) string {
 		t.Fatalf("marshal tool content: %v", err)
 	}
 	return string(b)
+}
+
+// A driver failure on the ownership read is a server fault, not a refusal: it
+// must surface as a store error rather than the generic not-found message, so
+// outages keep feeding the tool SLO.
+func TestToolRevokeLocalBridgeDevice_GetDeviceDriverFailureIsNotARefusal(t *testing.T) {
+	store, uid, deviceID := ownerToolFixture(t, 700000307)
+	reg := metrics.New()
+	mcpSrv := (&Server{Store: store, Metrics: reg}).newMCPServer()
+	if err := store.DB.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	ctx := auth.With(context.Background(), &auth.Identity{
+		UserID: uid, TelegramID: 700000307, Scopes: []string{"account:manage"},
+	})
+	res := callTool(t, ctx, mcpSrv, "revoke_local_bridge_device", map[string]any{"device_id": deviceID})
+	if !res.IsError {
+		t.Fatal("a driver failure was reported as success")
+	}
+	text := renderToolText(t, res)
+	if strings.Contains(text, "no such device on your account") {
+		t.Fatalf("driver failure was collapsed into the not-found refusal: %q", text)
+	}
+	if !strings.Contains(text, "revoke_local_bridge_device:") {
+		t.Fatalf("expected a storeErr-formatted message, got %q", text)
+	}
+	// The point of the branch: a server fault must stay an SLO input and be
+	// classified as a store error. The audit row itself cannot be read here —
+	// with the pool closed LogToolCall gives up at BeginTx — but writeAuditRow
+	// still increments the metrics, so routing this through auditRefusal (the
+	// regression this guards) would leave the error sample at 0.
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("revoke_local_bridge_device", "error")); got != 1 {
+		t.Fatalf("ToolInvocationsTotal{revoke_local_bridge_device,error} = %v, want 1 (a driver failure must feed the availability SLO)", got)
+	}
+	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("revoke_local_bridge_device", ReasonStoreError)); got != 1 {
+		t.Fatalf("ToolCallErrorsTotal{revoke_local_bridge_device,store_error} = %v, want 1", got)
+	}
 }

@@ -204,7 +204,8 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 		}
 
 		if _, cerr := s.Confirms.Claim(confID, id.UserID, HashMediaPayload(peer, int64(messageID))); cerr != nil {
-			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt)
+			claimReason := claimFailureReason(cerr)
+			s.auditRefusal(ctx, id, "get_media", telegram.RedactPeer(peer), cerr, startedAt, claimReason)
 			if !errors.Is(cerr, ErrConfirmationInFlight) {
 				// Claim already dropped (or never held) the ConfirmStore entry
 				// for every other failure mode — drop the matching MediaStore
@@ -239,7 +240,7 @@ Output: {media_type, mime_type, file_name, size, data}.`),
 
 		ref := s.MediaStore.Get(confID)
 		if ref == nil {
-			s.audit(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt)
+			s.auditRefusal(ctx, id, "get_media", telegram.RedactPeer(peer), fmt.Errorf("media ref expired"), startedAt, ReasonNotFound)
 			return toolErr("media reference expired or missing — re-run prepare_get_media"), nil
 		}
 
@@ -514,4 +515,19 @@ func (s *Server) resolveSendMediaBytes(ctx context.Context, fileURL, fileB64 str
 		return nil, "", fmt.Errorf("file_url: %w", err)
 	}
 	return data, mimeType, nil
+}
+
+// claimFailureReason classifies a ConfirmStore.Claim failure. Case order is
+// load-bearing: Claim returns joined errors such as
+// errors.Join(ErrConfirmationWrongUser, ErrConfirmationInFlight), and the
+// mismatch/wrong-user checks must win so those read as confirmation_rejected.
+func claimFailureReason(cerr error) string {
+	switch {
+	case errors.Is(cerr, ErrConfirmationMismatch), errors.Is(cerr, ErrConfirmationWrongUser):
+		return ReasonConfirmationRejected
+	case errors.Is(cerr, ErrConfirmationInFlight):
+		return ReasonRefused
+	default:
+		return ReasonNotFound
+	}
 }

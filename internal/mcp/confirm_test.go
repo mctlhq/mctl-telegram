@@ -342,3 +342,23 @@ func TestConfirmStore_Consume_Unchanged(t *testing.T) {
 		t.Fatalf("second Consume must return ErrConfirmationNotFound, got %v", err2)
 	}
 }
+
+func TestClaimFailureReason(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"mismatch", ErrConfirmationMismatch, ReasonConfirmationRejected},
+		{"wrong user", ErrConfirmationWrongUser, ReasonConfirmationRejected},
+		{"in flight", ErrConfirmationInFlight, ReasonRefused},
+		{"joined wrong user in flight", errors.Join(ErrConfirmationWrongUser, ErrConfirmationInFlight), ReasonConfirmationRejected},
+		{"joined mismatch in flight", errors.Join(ErrConfirmationMismatch, ErrConfirmationInFlight), ReasonConfirmationRejected},
+		{"other", errors.New("expired"), ReasonNotFound},
+	}
+	for _, c := range cases {
+		if got := claimFailureReason(c.err); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}
