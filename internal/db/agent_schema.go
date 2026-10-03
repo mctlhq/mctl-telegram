@@ -553,9 +553,10 @@ func agentSchemaSQLite() []string {
 		`CREATE INDEX IF NOT EXISTS idx_work_item_bindings_item
 			ON work_item_bindings(user_id, work_item_id)`,
 		// issue-571 human-input delivery correlation. Content-free by
-		// construction: no question, why, label or answer column exists. The
-		// rendered body lives only in the encrypted owner_notifications row.
-		// option_ids_json holds option ids, never labels. Answer codes live
+		// construction: no question, reason, option or answer column exists.
+		// The rendered body lives only in the encrypted owner_notifications
+		// row. option_ids_json holds per-option digests, never option text.
+		// max_length is unused (mctl-api names no per-request maximum). Answer codes live
 		// here, in their own namespace, never in agent_actions.
 		`CREATE TABLE IF NOT EXISTS human_input_deliveries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

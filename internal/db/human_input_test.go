@@ -44,7 +44,7 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	base := HumanInputDelivery{
 		UserID: uid, RequestID: "hi_1", RequestHash: "h1", RequestVersion: 1,
 		WorkItemID: "wi_1", Kind: "single_choice", AnswerCode: "K7QM3R",
-		OptionIDs: []string{"a", "b"}, MaxLength: 0,
+		OptionDigests: []string{"0123456789abcdef", "fedcba9876543210"}, MaxLength: 0,
 	}
 
 	// Idempotent insert: the second call is a no-op and queues no second
@@ -76,7 +76,7 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatalf("get by code: %v", err)
 	}
-	if got.RequestID != "hi_1" || got.State != HumanInputQueued || len(got.OptionIDs) != 2 || got.NotificationID == 0 {
+	if got.RequestID != "hi_1" || got.State != HumanInputQueued || len(got.OptionDigests) != 2 || got.NotificationID == 0 {
 		t.Fatalf("delivery = %+v", got)
 	}
 	if _, err := s.GetHumanInputDeliveryByCode(ctx, uid+999, "K7QM3R"); !errors.Is(err, ErrHumanInputDeliveryNotFound) {
@@ -113,6 +113,35 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	open, err := s.ListOpenHumanInputDeliveries(ctx, uid)
 	if err != nil || len(open) != 1 || open[0].AnswerCode != "ZZ2222" {
 		t.Fatalf("open = %+v err=%v", open, err)
+	}
+
+	// submitted (a 202 pending_delivery answer) is an open state: listed as
+	// open, supersedable, and it does not retire anything.
+	v3 := base
+	v3.RequestID, v3.RequestHash, v3.AnswerCode = "hi_3", "h3", "SB3333"
+	if ins, err := s.UpsertHumanInputDeliveryTx(ctx, v3, "body three"); err != nil || !ins {
+		t.Fatalf("v3 upsert inserted=%v err=%v", ins, err)
+	}
+	sub, _ := s.GetHumanInputDeliveryByCode(ctx, uid, "SB3333")
+	if ch, err := s.MarkHumanInputDelivery(ctx, uid, sub.ID, HumanInputSubmitted, "pending_delivery"); err != nil || !ch {
+		t.Fatalf("mark submitted changed=%v err=%v", ch, err)
+	}
+	if ch, _ := s.MarkHumanInputDelivery(ctx, uid, sub.ID, HumanInputSubmitted, "pending_delivery"); ch {
+		t.Fatal("re-marking the same state must report no change")
+	}
+	sub, _ = s.GetHumanInputDeliveryByCode(ctx, uid, "SB3333")
+	if sub.State != HumanInputSubmitted || sub.Terminal() || sub.RespondedAt.IsZero() {
+		t.Fatalf("submitted = %+v", sub)
+	}
+	var subStatus string
+	if err := s.DB.QueryRowContext(ctx, `SELECT status FROM owner_notifications WHERE id=$1`, sub.NotificationID).Scan(&subStatus); err != nil || subStatus != NotificationPending {
+		t.Fatalf("submitted notification status = %q err=%v, want pending", subStatus, err)
+	}
+	if open, _ := s.ListOpenHumanInputDeliveries(ctx, uid); len(open) != 2 {
+		t.Fatalf("open with submitted = %d, want 2", len(open))
+	}
+	if ch, err := s.MarkHumanInputDelivery(ctx, uid, sub.ID, HumanInputAnswered, "resolved"); err != nil || !ch {
+		t.Fatalf("submitted -> answered changed=%v err=%v", ch, err)
 	}
 	if ch, err := s.MarkHumanInputDelivery(ctx, uid, open[0].ID, HumanInputInactive, "gone"); err != nil || !ch {
 		t.Fatalf("mark changed=%v err=%v", ch, err)
@@ -182,7 +211,8 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 }
 
 // TestHumanInputSchemaHasNoContentColumn is T15: human_input_deliveries holds
-// only ids, hash, code, kind, state, outcome, option ids and bookkeeping.
+// only ids, hash, code, kind, state, outcome, option digests (in
+// option_ids_json, never option text) and bookkeeping.
 func TestHumanInputSchemaHasNoContentColumn(t *testing.T) {
 	s := newTestStore(t)
 	rows, err := s.DB.Query(`SELECT name FROM pragma_table_info('human_input_deliveries')`)

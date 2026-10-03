@@ -48,23 +48,29 @@ var (
 	// transition — a terminal item, or a start on an item that already ran
 	// (409 invalid_transition).
 	ErrInvalidTransition = errors.New("workctx: work item cannot take that transition")
-	// ErrRequestNotActive means a human-input request is no longer open for
-	// an answer: expired, cancelled, or already resolved elsewhere (409/410).
+	// ErrRequestNotActive means a human-input request no longer takes an
+	// answer: mctl-api rejected the response with state expired, timed_out,
+	// not_pending or resolved, or with state answered (another response
+	// already holds the request — from another eligible human, or a
+	// different value). 409.
 	ErrRequestNotActive = errors.New("workctx: human-input request is no longer active")
-	// ErrRequestSuperseded means the request_hash the answer named is stale:
-	// a newer version of the request replaced it (409 request_superseded /
-	// request_hash_mismatch).
+	// ErrRequestSuperseded means the request_hash the answer named is not
+	// the current one (409, state superseded).
 	ErrRequestSuperseded = errors.New("workctx: human-input request was superseded")
-	// ErrAlreadyAnswered means the same actor already answered this request
-	// (409 already_answered).
-	ErrAlreadyAnswered = errors.New("workctx: human-input request already answered")
-	// ErrNotEligible means the platform refused the actor as an eligible
-	// responder (403 not_eligible). It is rendered neutrally: eligibility
-	// policy is mctl-api's and is never revealed to the surface user.
+	// ErrNotEligible means mctl-api refused the relayed human as a
+	// respondent (403, state not_eligible). It is rendered neutrally:
+	// eligibility policy is mctl-api's and is never revealed to the surface
+	// user.
 	ErrNotEligible = errors.New("workctx: actor is not eligible to answer")
-	// ErrAnswerInvalid means the platform rejected the shape of the answer
-	// (400/422).
+	// ErrAnswerInvalid means the answer was refused as a value: 422
+	// invalid_value (not one of the options, empty text), or 409 with state
+	// pending (the workflow refused this payload but still waits, so a
+	// corrected answer may be submitted).
 	ErrAnswerInvalid = errors.New("workctx: human-input answer was rejected as invalid")
+	// ErrHumanInputNotFound means GET /api/v1/human-input/{id} answered 404:
+	// the request does not exist, or the human may not see it. mctl-api
+	// reports both the same way, by design.
+	ErrHumanInputNotFound = errors.New("workctx: human-input request not found")
 )
 
 // codeToErr maps mctl-api's typed error codes (the JSON "error" field) onto
@@ -86,15 +92,24 @@ var codeToErr = map[string]error{
 	"execution_request_open": ErrExecutionRequestOpen,
 	"execution_active":       ErrExecutionActive,
 	"invalid_transition":     ErrInvalidTransition,
-	// Human-input relay (issue-571), docs/contracts/mctl-api-human-input.md.
-	"request_not_active":    ErrRequestNotActive,
-	"request_expired":       ErrRequestNotActive,
-	"request_cancelled":     ErrRequestNotActive,
-	"request_superseded":    ErrRequestSuperseded,
-	"request_hash_mismatch": ErrRequestSuperseded,
-	"already_answered":      ErrAlreadyAnswered,
-	"not_eligible":          ErrNotEligible,
-	"answer_invalid":        ErrAnswerInvalid,
+}
+
+// humanInputRejectionToErr maps the state of a human-input response
+// rejection ({"status":"rejected","state":...}, mctl-api
+// handlers_human_input_response.go) onto the sentinels above. It is applied
+// only to bodies carrying status "rejected", so these generic words can never
+// be confused with a work-item error code.
+var humanInputRejectionToErr = map[string]error{
+	"superseded":    ErrRequestSuperseded,
+	"invalid_value": ErrAnswerInvalid,
+	"not_eligible":  ErrNotEligible,
+	"answered":      ErrRequestNotActive,
+	"expired":       ErrRequestNotActive,
+	"timed_out":     ErrRequestNotActive,
+	"not_pending":   ErrRequestNotActive,
+	"resolved":      ErrRequestNotActive,
+	// The workflow refused this payload while still waiting on the request.
+	"pending": ErrAnswerInvalid,
 }
 
 // APIError is returned for any non-2xx response from mctl-api that this
@@ -107,8 +122,9 @@ type APIError struct {
 	StatusCode int
 	Code       string
 	Message    string
-	// CorrelationID is mctl-api's X-Request-ID response header, kept for
-	// log correlation only. Empty when the response carried none.
+	// CorrelationID identifies the relay call (see Client.relay): mctl-api's
+	// X-Request-ID response header when it sends one, otherwise the id this
+	// client sent as X-Request-Id. Kept for log correlation only.
 	CorrelationID string
 }
 
@@ -123,6 +139,23 @@ func (e *APIError) Error() string {
 func wrapAPIError(status int, code, message, correlationID string) error {
 	apiErr := &APIError{StatusCode: status, Code: code, Message: message, CorrelationID: correlationID}
 	if sentinel, ok := codeToErr[code]; ok {
+		// Two %w verbs: errors.Is matches the sentinel and errors.As still
+		// reaches the *APIError (status, code, correlation id). The rendered
+		// text is unchanged from the single-%w form.
+		return fmt.Errorf("%w: %w", sentinel, apiErr)
+	}
+	return apiErr
+}
+
+// wrapHumanInputRejection builds the error for a human-input response
+// rejection. Code is the rejection state; Message stays empty on purpose:
+// the body's detail can list the question's options and its respondent is
+// the human's GitHub login, and neither may reach a log line through
+// APIError.Error(). An unrecognised state is a bare *APIError, rendered
+// generically by the caller.
+func wrapHumanInputRejection(status int, state, correlationID string) error {
+	apiErr := &APIError{StatusCode: status, Code: state, CorrelationID: correlationID}
+	if sentinel, ok := humanInputRejectionToErr[state]; ok {
 		// Two %w verbs: errors.Is matches the sentinel and errors.As still
 		// reaches the *APIError (status, code, correlation id). The rendered
 		// text is unchanged from the single-%w form.

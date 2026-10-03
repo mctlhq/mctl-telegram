@@ -96,18 +96,22 @@ When an agent stops with a typed `needs_input` outcome, mctl-api records a human
 INPUT REQUEST (not an approval)
 Work: mctlhq/mctl-telegram#571
 Question: ...
+  | (further lines of a multi-line question are indented like this)
+Reason: ...
 Options:
-  1. ...
-  2. ...
-Deadline: 2026-10-04 12:00 UTC
+1. ...
+2. ...
+Expires: 2026-10-04 12:00 UTC
 Answer: /mctl input K7QM3R <number>
-Ref: request <request_id> v<version>
+Ref: request hir-<16 hex> v<request_version>
 ```
 
-- Answer a single-choice question with `/mctl input <code> <number>`, and a free-text question with `/mctl input <code> <your answer>`.
-- `/mctl input status [code]` shows the canonical state from mctl-api; local state is never authoritative.
-- The bot replies `Answered by you: <value>. Agent will resume.` only after mctl-api confirms the answer. `This question is no longer active.` means it expired, was cancelled, was superseded by a newer version (which arrives under a new code), or was answered elsewhere. `Already answered.` means the answer was recorded earlier. If the platform cannot be reached the bot says `Could not confirm; check again with /mctl input status <code>`, never success.
+Every line the bot itself writes starts at column 0; agent-written text never does, so a question cannot fake a second `Answer:` line or an extra option.
+
+- Answer a single-choice question with `/mctl input <code> <number>` (or the option's text), and a free-text question with `/mctl input <code> <your answer>` (up to 2000 characters).
+- `/mctl input status [code]` shows the canonical state from mctl-api; local state is never authoritative. Without a code it checks up to five open questions and lists the codes of the rest.
+- `Answered by you: <value>. Agent will resume.` appears only after mctl-api reports the answer `accepted`. `Submitted: <value>. The platform has not confirmed it yet...` means mctl-api recorded the answer but the workflow has not confirmed it (HTTP 202); the bot follows up once it is confirmed. `This question is no longer active.` means it expired, timed out, was superseded by a newer version (which arrives under a new code), or was answered elsewhere. `Already answered.` means your identical answer was already recorded. If the platform cannot be reached the bot says `Could not confirm; check again with /mctl input status <code>`, never success.
 - Authorization stays in mctl-api. The answer code is not an approval code: `/mctl approve` and `/mctl reject` are unchanged and never accept it.
 - Enrollment: an operator is polled once they have run `/mctl link`, a successful `/mctl work status`, or `/mctl input status`; existing work-item bindings are backfilled at startup.
-- The contract the adapter assumes is in [contracts/mctl-api-human-input.md](contracts/mctl-api-human-input.md); it is unverified against a deployed mctl-api until its revision is pinned there.
+- The contract is pinned, with the mctl-api revision it was read from, in [contracts/mctl-api-human-input.md](contracts/mctl-api-human-input.md).
 - Rollback: set `HUMAN_INPUT_ENABLED=false` and restart. The poller stops and `/mctl input` becomes an unknown command. Pending requests stay owned by mctl-api.

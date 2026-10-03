@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mctlhq/mctl-telegram/internal/sanitize"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
@@ -24,7 +25,7 @@ import (
 // Per-field caps applied to the allowlisted DTO fields before rendering.
 const (
 	maxQuestionRunes = 600
-	maxWhyRunes      = 400
+	maxReasonRunes   = 400
 	maxLabelRunes    = 120
 	maxOptions       = 10
 	maxLinks         = 3
@@ -42,10 +43,18 @@ const Header = "INPUT REQUEST (not an approval)"
 // take an answer.
 const NoLongerActive = "This question is no longer active."
 
+// continuationPrefix starts every line of a multi-line question or reason
+// after its first. Render's own frame lines (Work:, Question:, Reason:,
+// Options:, the numbered options, Expires:, Link:, Answer:, Ref:) all start
+// at column 0, and no agent-supplied text ever does: a question cannot forge
+// a second "Answer: /mctl input <other code> ..." line or a fake option.
+const continuationPrefix = "  | "
+
 // Render builds the delivered message for v and code. It reads only the
-// allowlisted RequestView fields (question, why, options, deadline, work/request
-// refs, safe links), runs each through sanitize with a cap, and caps the whole
-// message at 4096 runes while keeping the answer line intact.
+// allowlisted RequestView fields (question, reason, options, expires_at,
+// work/request refs, https context refs), runs each through sanitize with a
+// cap, and caps the whole message at 4096 runes while keeping the answer line
+// intact.
 func Render(v workctx.RequestView, code string) string {
 	var head strings.Builder
 	head.WriteString(Header)
@@ -57,40 +66,40 @@ func Render(v workctx.RequestView, code string) string {
 	if ref != "" {
 		fmt.Fprintf(&head, "Work: %s\n", oneLine(ref, maxRefRunes))
 	}
-	fmt.Fprintf(&head, "Question: %s\n", sanitize.UserContent(v.Question, maxQuestionRunes))
-	if strings.TrimSpace(v.Why) != "" {
-		fmt.Fprintf(&head, "Why: %s\n", sanitize.UserContent(v.Why, maxWhyRunes))
+	fmt.Fprintf(&head, "Question: %s\n", block(v.Question, maxQuestionRunes))
+	if strings.TrimSpace(v.Reason) != "" {
+		fmt.Fprintf(&head, "Reason: %s\n", block(v.Reason, maxReasonRunes))
 	}
-	if v.Kind == workctx.HumanInputKindSingleChoice {
+	if v.ResponseType == workctx.HumanInputTypeSingleChoice {
 		head.WriteString("Options:\n")
 		for i, o := range v.Options {
 			if i >= maxOptions {
 				break
 			}
-			fmt.Fprintf(&head, "  %d. %s\n", i+1, oneLine(o.Label, maxLabelRunes))
+			fmt.Fprintf(&head, "%d. %s\n", i+1, oneLine(o, maxLabelRunes))
 		}
 	}
-	if t, err := time.Parse(time.RFC3339, v.Deadline); err == nil {
-		fmt.Fprintf(&head, "Deadline: %s\n", t.UTC().Format("2006-01-02 15:04 UTC"))
+	if t, ok := parseExpiry(v.ExpiresAt); ok {
+		fmt.Fprintf(&head, "Expires: %s\n", t.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 	links := 0
-	for _, l := range v.Links {
+	for _, l := range v.ContextRefs {
 		if links >= maxLinks {
 			break
 		}
-		if u, err := url.Parse(l); err == nil && strings.EqualFold(u.Scheme, "https") && u.Host != "" && len([]rune(l)) <= maxLinkRunes && !strings.ContainsAny(l, " \n\t") {
+		if u, err := url.Parse(l); err == nil && strings.EqualFold(u.Scheme, "https") && u.Host != "" && len([]rune(l)) <= maxLinkRunes && !strings.ContainsFunc(l, isBreakOrSpace) {
 			fmt.Fprintf(&head, "Link: %s\n", l)
 			links++
 		}
 	}
 
 	var tail strings.Builder
-	if v.Kind == workctx.HumanInputKindSingleChoice {
+	if v.ResponseType == workctx.HumanInputTypeSingleChoice {
 		fmt.Fprintf(&tail, "Answer: /mctl input %s <number>\n", code)
 	} else {
 		fmt.Fprintf(&tail, "Answer: /mctl input %s <your answer>\n", code)
 	}
-	fmt.Fprintf(&tail, "Ref: request %s v%d", oneLine(v.RequestID, 64), v.Version)
+	fmt.Fprintf(&tail, "Ref: request %s v%d", oneLine(v.RequestID, 64), v.RequestVersion)
 
 	// The answer line is the point of the message: if the composed text is
 	// somehow over the cap, trim the head, never the tail.
@@ -98,13 +107,53 @@ func Render(v workctx.RequestView, code string) string {
 	h := []rune(head.String())
 	if len(h) > budget {
 		h = h[:budget]
+		// Never end a truncated head mid-line: the tail must start at
+		// column 0 on its own line.
+		h = append(h[:len(h)-1], '\n')
 	}
 	return string(h) + tail.String()
 }
 
-// oneLine sanitizes a short field into a single capped line.
+// oneLine sanitizes a short field into a single capped line. Unicode line and
+// paragraph separators, which sanitize keeps and Telegram renders as breaks,
+// become spaces too.
 func oneLine(s string, max int) string {
-	return sanitize.Name(s, max)
+	return strings.Map(func(r rune) rune {
+		if r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, sanitize.Name(s, max))
+}
+
+// block sanitizes a multi-line field and indents every line after the first
+// with continuationPrefix, so no line of agent text starts at column 0.
+func block(s string, max int) string {
+	clean := strings.Map(func(r rune) rune {
+		if r == '\u2028' || r == '\u2029' || r == '\r' {
+			return '\n'
+		}
+		return r
+	}, sanitize.UserContent(s, max))
+	lines := strings.Split(clean, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRightFunc(lines[i], unicode.IsSpace)
+	}
+	return strings.Join(lines, "\n"+continuationPrefix)
+}
+
+func isBreakOrSpace(r rune) bool { return unicode.IsSpace(r) || r == '\u2028' || r == '\u2029' }
+
+// parseExpiry accepts what mctl-api's sealed expires_at uses: RFC 3339 with
+// Z or an offset, or a naive timestamp read as UTC.
+func parseExpiry(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05.999999999", s, time.UTC); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // WorkRefFromExternalKey turns a binding's normalised issue URL into the

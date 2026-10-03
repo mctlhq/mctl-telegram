@@ -499,5 +499,5 @@ func isMissingInputArg(text string) bool {
 	if len(fields) < 2 || !strings.EqualFold(fields[0], "/mctl") || !strings.EqualFold(fields[1], "input") {
 		return false
 	}
-	return len(fields) < 4 && !(len(fields) == 3 && strings.EqualFold(fields[2], SubInputStatus))
+	return len(fields) < 4 && (len(fields) != 3 || !strings.EqualFold(fields[2], SubInputStatus))
 }

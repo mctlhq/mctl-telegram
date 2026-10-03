@@ -19,6 +19,8 @@ package workctx
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,11 +73,17 @@ func NewClient(baseURL, token, tenant string, hc *http.Client) *Client {
 }
 
 // relay performs one request as surface:telegram on behalf of actorTGID. It
-// sets exactly three headers: Authorization (the surface bearer token),
-// X-MCTL-Surface-Actor (digits-only, actorTGID) and, when idemKey is
-// non-empty, Idempotency-Key. No other header is ever set by this package —
-// in particular, nothing here can carry an actor subject, since the only
-// actor-identifying value it ever sends is this one numeric header.
+// sets Authorization (the surface bearer token), X-MCTL-Surface-Actor
+// (digits-only, actorTGID), X-Request-Id (a random per-call correlation id)
+// and, when idemKey is non-empty, Idempotency-Key, plus Content-Type on a
+// body. Nothing here can carry an actor subject: the only actor-identifying
+// value it ever sends is the one numeric header.
+//
+// X-Request-Id: mctl-api's chi RequestID middleware adopts an incoming
+// X-Request-Id as its request id, but at the pinned revision it neither
+// echoes it in a response header nor logs it. The id is therefore this
+// side's correlation id for the call (logged as correlation_id); when a
+// response does carry X-Request-ID, that value is used instead.
 func (c *Client) relay(ctx context.Context, route, method, path string, actorTGID int64, idemKey string, body, out any) (err error) {
 	defer func() {
 		outcome := "ok"
@@ -101,8 +109,12 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	if err != nil {
 		return fmt.Errorf("workctx: build request: %w", err)
 	}
+	correlationID := newCorrelationID()
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("X-MCTL-Surface-Actor", strconv.FormatInt(actorTGID, 10))
+	if correlationID != "" {
+		req.Header.Set("X-Request-Id", correlationID)
+	}
 	if idemKey != "" {
 		req.Header.Set("Idempotency-Key", idemKey)
 	}
@@ -121,18 +133,38 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 	if len(respBody) > maxResponseBytes {
 		return fmt.Errorf("%w: response body exceeds %d bytes", ErrIncompatibleSchema, maxResponseBytes)
 	}
+	if rid := resp.Header.Get("X-Request-ID"); rid != "" {
+		correlationID = rid
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody struct {
 			Error   string `json:"error"`
+			Code    string `json:"code"`
 			Message string `json:"message"`
+			Status  string `json:"status"`
+			State   string `json:"state"`
 		}
 		_ = json.Unmarshal(respBody, &errBody)
-		code := errBody.Error
-		msg := errBody.Message
+		// A human-input response rejection is a result object, not an
+		// error object: {"request_id", "status":"rejected", "state", ...}.
+		if errBody.Status == "rejected" && errBody.State != "" {
+			return wrapHumanInputRejection(resp.StatusCode, errBody.State, correlationID)
+		}
+		// mctl-api's writeErrorCode shape is {"error": <message>, "code":
+		// <code>}. The older {"error": <code>, "message": <detail>} shape is
+		// still read when no "code" field is present.
+		code, msg := errBody.Code, errBody.Message
+		if code != "" {
+			if msg == "" {
+				msg = errBody.Error
+			}
+		} else {
+			code = errBody.Error
+		}
 		if msg == "" {
 			msg = string(respBody)
 		}
-		return wrapAPIError(resp.StatusCode, code, msg, resp.Header.Get("X-Request-ID"))
+		return wrapAPIError(resp.StatusCode, code, msg, correlationID)
 	}
 	if out == nil {
 		return nil
@@ -151,7 +183,7 @@ func (c *Client) relay(ctx context.Context, route, method, path string, actorTGI
 		}
 	}
 	if cs, ok := out.(correlationSetter); ok {
-		cs.setCorrelationID(resp.Header.Get("X-Request-ID"))
+		cs.setCorrelationID(correlationID)
 	}
 	if env, ok := out.(versionedEnvelope); ok {
 		if env.schemaVersion() != SchemaVersion {
@@ -313,4 +345,15 @@ func (c *Client) AddSurfaceRef(ctx context.Context, actorTGID int64, id string, 
 	wireBody := map[string]any{"external_id": externalID}
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/surface-refs"
 	return c.relay(ctx, "add_surface_ref", http.MethodPost, path, actorTGID, "", wireBody, nil)
+}
+
+// newCorrelationID returns a random 16-hex-character id for X-Request-Id.
+// A crypto/rand failure degrades to an empty id (no header value is then
+// meaningful, but the call itself must not fail over a log field).
+func newCorrelationID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return "tg-" + hex.EncodeToString(b[:])
 }

@@ -11,15 +11,20 @@ import (
 
 // Human-input delivery states (issue-571). A row is created `queued` together
 // with its owner_notifications row, becomes `sent` when the notifier delivers
-// it, and ends in one terminal state.
+// it, may become `submitted` when mctl-api recorded an answer without the
+// workflow confirming it yet (202 pending_delivery), and ends in one terminal
+// state. queued, sent and submitted are the open states.
 const (
 	HumanInputQueued     = "queued"
 	HumanInputSent       = "sent"
+	HumanInputSubmitted  = "submitted"
 	HumanInputAnswered   = "answered"
 	HumanInputInactive   = "inactive"
 	HumanInputSuperseded = "superseded"
-	HumanInputRejected   = "rejected"
 )
+
+// humanInputOpenStates is the SQL list of open states, for IN (...) clauses.
+const humanInputOpenStates = `'` + HumanInputQueued + `','` + HumanInputSent + `','` + HumanInputSubmitted + `'`
 
 // ErrHumanInputCodeConflict means the generated answer code already exists for
 // the user; the caller retries with a fresh code.
@@ -30,7 +35,7 @@ var ErrHumanInputDeliveryNotFound = errors.New("human input delivery not found")
 
 // HumanInputDelivery correlates one (user, request_id, request_hash) with the
 // answer code shown to the owner. It carries ids, hashes and state only: no
-// question, why, option label or answer text.
+// question, reason, option text or answer text.
 type HumanInputDelivery struct {
 	ID             int64
 	UserID         int64
@@ -40,8 +45,12 @@ type HumanInputDelivery struct {
 	WorkItemID     string
 	Kind           string
 	AnswerCode     string
-	OptionIDs      []string
-	MaxLength      int
+	// OptionDigests holds one short digest per single_choice option, in the
+	// order shown (stored in option_ids_json). Never the option text: the
+	// handler maps an answer number to the canonical option string it reads
+	// back from mctl-api, and checks it against this digest.
+	OptionDigests []string
+	MaxLength     int
 	NotificationID int64
 	TGMessageID    int64
 	State          string
@@ -54,7 +63,11 @@ type HumanInputDelivery struct {
 
 // Terminal reports whether the row can no longer take an answer.
 func (d HumanInputDelivery) Terminal() bool {
-	return d.State != HumanInputQueued && d.State != HumanInputSent
+	return !humanInputOpen(d.State)
+}
+
+func humanInputOpen(state string) bool {
+	return state == HumanInputQueued || state == HumanInputSent || state == HumanInputSubmitted
 }
 
 const humanInputDeliveryCols = `id, user_id, request_id, request_hash, request_version, work_item_id, kind,
@@ -73,8 +86,8 @@ func scanHumanInputDelivery(sc interface{ Scan(...any) error }) (HumanInputDeliv
 		&deliveredAt, &respondedAt, &d.CreatedAt, &d.UpdatedAt); err != nil {
 		return HumanInputDelivery{}, err
 	}
-	if err := json.Unmarshal([]byte(optionsJSON), &d.OptionIDs); err != nil {
-		return HumanInputDelivery{}, fmt.Errorf("decode option ids: %w", err)
+	if err := json.Unmarshal([]byte(optionsJSON), &d.OptionDigests); err != nil {
+		return HumanInputDelivery{}, fmt.Errorf("decode option digests: %w", err)
 	}
 	d.NotificationID = notifID.Int64
 	d.TGMessageID = tgMsgID.Int64
@@ -108,9 +121,9 @@ func (s *Store) UpsertHumanInputDeliveryTx(ctx context.Context, d HumanInputDeli
 	case !errors.Is(qerr, sql.ErrNoRows):
 		return false, fmt.Errorf("check human input delivery: %w", qerr)
 	}
-	optionsJSON, err := json.Marshal(append([]string{}, d.OptionIDs...))
+	optionsJSON, err := json.Marshal(append([]string{}, d.OptionDigests...))
 	if err != nil {
-		return false, fmt.Errorf("encode option ids: %w", err)
+		return false, fmt.Errorf("encode option digests: %w", err)
 	}
 	sealed, err := s.Crypt.SealForUser([]byte(body), d.UserID)
 	if err != nil {
@@ -182,13 +195,13 @@ func (s *Store) GetHumanInputDeliveryByCode(ctx context.Context, userID int64, c
 	return d, nil
 }
 
-// ListOpenHumanInputDeliveries returns the user's non-terminal rows (queued or
-// sent), oldest first.
+// ListOpenHumanInputDeliveries returns the user's open rows (queued, sent or
+// submitted), oldest first.
 func (s *Store) ListOpenHumanInputDeliveries(ctx context.Context, userID int64) ([]HumanInputDelivery, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT `+humanInputDeliveryCols+` FROM human_input_deliveries
-		  WHERE user_id = $1 AND state IN ($2, $3) ORDER BY id`,
-		userID, HumanInputQueued, HumanInputSent)
+		  WHERE user_id = $1 AND state IN (`+humanInputOpenStates+`) ORDER BY id`,
+		userID)
 	if err != nil {
 		return nil, fmt.Errorf("list open human input deliveries: %w", err)
 	}
@@ -204,15 +217,16 @@ func (s *Store) ListOpenHumanInputDeliveries(ctx context.Context, userID int64) 
 	return out, rows.Err()
 }
 
-// MarkHumanInputDelivery moves a non-terminal row to state with outcome. It is
-// a compare-and-set from queued|sent, so a terminal row is never rewritten;
+// MarkHumanInputDelivery moves an open row to state with outcome. It is a
+// compare-and-set from the open states, so a terminal row is never rewritten;
 // changed reports whether this call made the transition. When the row was
-// still queued, its not-yet-sent notification is retired so a stale question
-// is never delivered.
+// still queued and the new state is terminal (other than answered), its
+// not-yet-sent notification is retired so a stale question is never
+// delivered.
 func (s *Store) MarkHumanInputDelivery(ctx context.Context, userID, id int64, state, outcome string) (changed bool, err error) {
 	now := time.Now().UTC()
 	var respondedAt any
-	if state == HumanInputAnswered || state == HumanInputRejected {
+	if state == HumanInputAnswered || state == HumanInputSubmitted {
 		respondedAt = now
 	}
 	var wasQueued bool
@@ -230,8 +244,8 @@ func (s *Store) MarkHumanInputDelivery(ctx context.Context, userID, id int64, st
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE human_input_deliveries
 		    SET state = $1, last_outcome = $2, responded_at = COALESCE($3, responded_at), updated_at = $4
-		  WHERE id = $5 AND user_id = $6 AND state IN ($7, $8)`,
-		state, outcome, respondedAt, now, id, userID, HumanInputQueued, HumanInputSent)
+		  WHERE id = $5 AND user_id = $6 AND state IN (`+humanInputOpenStates+`) AND state <> $1`,
+		state, outcome, respondedAt, now, id, userID)
 	if err != nil {
 		return false, fmt.Errorf("mark human input delivery: %w", err)
 	}
@@ -242,7 +256,7 @@ func (s *Store) MarkHumanInputDelivery(ctx context.Context, userID, id int64, st
 	if n == 0 {
 		return false, nil
 	}
-	if wasQueued && notifID.Valid && state != HumanInputAnswered {
+	if wasQueued && notifID.Valid && !humanInputOpen(state) && state != HumanInputAnswered {
 		if err := s.MarkOwnerNotificationFailed(ctx, userID, notifID.Int64); err != nil && !errors.Is(err, ErrOwnerNotificationNotFound) {
 			return true, fmt.Errorf("retire queued human input notification: %w", err)
 		}
@@ -255,8 +269,8 @@ func (s *Store) MarkHumanInputDelivery(ctx context.Context, userID, id int64, st
 func (s *Store) SupersedeHumanInputDeliveries(ctx context.Context, userID int64, requestID, keepHash string) (int, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id FROM human_input_deliveries
-		  WHERE user_id = $1 AND request_id = $2 AND request_hash <> $3 AND state IN ($4, $5)`,
-		userID, requestID, keepHash, HumanInputQueued, HumanInputSent)
+		  WHERE user_id = $1 AND request_id = $2 AND request_hash <> $3 AND state IN (`+humanInputOpenStates+`)`,
+		userID, requestID, keepHash)
 	if err != nil {
 		return 0, fmt.Errorf("find superseded human input deliveries: %w", err)
 	}

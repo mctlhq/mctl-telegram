@@ -34,6 +34,8 @@ Relay refusals, which the bot must handle by offering the link flow or explainin
 - `403 relay_required` (header missing);
 - `400` when the header is sent on a route that is not a relay route.
 
+mctl-api writes these, and the other typed errors, as `{"error": "<message>", "code": "<code>"}` (`writeErrorCode`); `internal/workctx` reads `code` and falls back to `error` only when no `code` field is present.
+
 ## The only routes `surface:telegram` may call
 
 | Route | Body | Notes |

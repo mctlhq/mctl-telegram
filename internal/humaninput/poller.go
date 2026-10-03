@@ -2,9 +2,12 @@ package humaninput
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/answercode"
@@ -33,8 +36,8 @@ const (
 
 // Poller discovers pending human-input requests per enrolled actor and queues
 // exactly one Saved Messages notification per (user, request_id,
-// request_hash). It holds no state of its own: the durable delivery rows are
-// the dedup, so a restart or a repeated poll never sends a second message.
+// request_hash). The durable delivery rows are the dedup, so a restart or a
+// repeated poll never sends a second message.
 type Poller struct {
 	Store   *db.Store
 	API     API
@@ -44,6 +47,11 @@ type Poller struct {
 	GlobalKill func() bool
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
+
+	// undeliverableSeen only rate-limits the log line and metric for a
+	// pending request this surface cannot render or answer, to once per
+	// (user, request_id, request_hash) per process. It decides nothing.
+	undeliverableSeen map[string]struct{}
 }
 
 func (p *Poller) now() time.Time {
@@ -59,7 +67,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 	defer ticker.Stop()
 	for {
 		if err := p.RunOnce(ctx); err != nil && ctx.Err() == nil {
-			slog.Warn("human input poll failed", "err", err)
+			slog.Warn("human input poll failed", "outcome", errClass(err))
 		}
 		select {
 		case <-ctx.Done():
@@ -108,22 +116,24 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 				return merr
 			}
 		}
-		// A failed list says nothing about the requests: never infer
-		// "no longer active" from it.
+		// A failed list (including mctl-api's 503 "state could not be
+		// determined") says nothing about the requests: never infer "no
+		// longer active" from it.
 		return err
 	}
 
 	listed := make(map[string]struct{}, len(reqs))
 	for _, r := range reqs {
-		if r.State != "" && r.State != workctx.HumanInputStatePending {
+		if r.State != workctx.HumanInputStatePending {
 			continue
 		}
 		listed[r.RequestID+"\x00"+r.RequestHash] = struct{}{}
-		if !deliverable(r) {
+		if reason := undeliverable(r); reason != "" {
+			p.noteUndeliverable(a.UserID, r, reason)
 			continue
 		}
 		if err := p.enqueue(ctx, a.UserID, r); err != nil {
-			slog.Warn("human input enqueue failed", "user_id", a.UserID, "request_id", r.RequestID, "outcome", errClass(err))
+			slog.Warn("human input enqueue failed", "user_id", a.UserID, "request_id", r.RequestID, "outcome", errClass(err), "correlation_id", r.CorrelationID)
 			p.Metrics.CountHumanInputEvent(metrics.HumanInputEventDeliveryAttempt, "error")
 		}
 	}
@@ -136,54 +146,137 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 		if _, still := listed[d.RequestID+"\x00"+d.RequestHash]; still {
 			continue
 		}
-		wasSent := d.State == db.HumanInputSent
-		changed, err := p.Store.MarkHumanInputDelivery(ctx, a.UserID, d.ID, db.HumanInputInactive, "left_pending_list")
-		if err != nil {
-			slog.Warn("human input mark inactive failed", "user_id", a.UserID, "delivery_id", d.ID, "outcome", errClass(err))
-			continue
-		}
-		if changed && wasSent {
-			if _, err := p.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
-				UserID: a.UserID,
-				Kind:   db.NotificationHumanInput,
-				Body:   fmt.Sprintf("%s (%s)", NoLongerActive, d.AnswerCode),
-			}); err != nil {
-				slog.Warn("human input follow-up enqueue failed", "user_id", a.UserID, "delivery_id", d.ID, "outcome", errClass(err))
-			}
-		}
+		p.settleAbsent(ctx, a, d)
 	}
 	return nil
 }
 
-// deliverable reports whether the adapter can render and answer r.
-func deliverable(r workctx.RequestView) bool {
-	if r.RequestID == "" || r.RequestHash == "" || r.Question == "" {
-		return false
-	}
-	switch r.Kind {
-	case workctx.HumanInputKindFreeText:
-		return true
-	case workctx.HumanInputKindSingleChoice:
-		return len(optionIDs(r)) > 0
+// settleAbsent decides what an open row's absence from one successful pending
+// list means. Absence alone proves nothing (a list can omit a request for
+// reasons that say nothing about it), so the row is only closed once the
+// canonical GET /api/v1/human-input/{request_id} says the request is no
+// longer pending for this hash, or answers 404 (gone, or no longer visible
+// to this human). A failed read, an "unknown" state or a still-pending
+// request leaves the row open and its code answerable.
+func (p *Poller) settleAbsent(ctx context.Context, a db.HumanInputActor, d db.HumanInputDelivery) {
+	logArgs := []any{"user_id", a.UserID, "delivery_id", d.ID, "request_id", d.RequestID}
+	v, err := p.API.GetHumanInput(ctx, a.TGID, d.RequestID)
+	var state, outcome string
+	switch {
+	case errors.Is(err, workctx.ErrHumanInputNotFound):
+		state, outcome = db.HumanInputInactive, "not_found"
+	case err != nil:
+		slog.Info("human input absent from list, canonical read failed; row kept", append(logArgs, "outcome", errClass(err))...)
+		return
+	case v.RequestHash != d.RequestHash:
+		state, outcome = db.HumanInputSuperseded, "superseded"
 	default:
-		return false
+		switch v.State {
+		case workctx.HumanInputStatePending, workctx.HumanInputStateUnknown:
+			slog.Info("human input absent from list but not settled; row kept", append(logArgs, "outcome", "state_"+safeToken(v.State), "correlation_id", v.CorrelationID)...)
+			return
+		case workctx.HumanInputStateResolved:
+			state, outcome = db.HumanInputInactive, "resolved"
+			if d.State == db.HumanInputSubmitted {
+				// This human's own 202-recorded answer is the one that
+				// resolved it.
+				state = db.HumanInputAnswered
+			}
+		case workctx.HumanInputStateExpired, workctx.HumanInputStateTimedOut, workctx.HumanInputStateNotPending:
+			state, outcome = db.HumanInputInactive, safeToken(v.State)
+		default:
+			slog.Info("human input absent from list with unrecognised state; row kept", append(logArgs, "outcome", "state_"+safeToken(v.State))...)
+			return
+		}
+	}
+	wasDelivered := d.State == db.HumanInputSent || d.State == db.HumanInputSubmitted
+	changed, err := p.Store.MarkHumanInputDelivery(ctx, a.UserID, d.ID, state, outcome)
+	if err != nil {
+		slog.Warn("human input mark delivery failed", append(logArgs, "outcome", errClass(err))...)
+		return
+	}
+	if !changed || !wasDelivered {
+		return
+	}
+	body := fmt.Sprintf("%s (%s)", NoLongerActive, d.AnswerCode)
+	if state == db.HumanInputAnswered {
+		body = fmt.Sprintf("Your answer to %s was confirmed. Agent will resume.", d.AnswerCode)
+	}
+	if _, err := p.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
+		UserID: a.UserID,
+		Kind:   db.NotificationHumanInput,
+		Body:   body,
+	}); err != nil {
+		slog.Warn("human input follow-up enqueue failed", append(logArgs, "outcome", errClass(err))...)
 	}
 }
 
-func optionIDs(r workctx.RequestView) []string {
-	var ids []string
-	for i, o := range r.Options {
-		if i >= maxOptions {
-			break
-		}
-		if o.ID == "" {
-			// An option without an id cannot be answered by number; the
-			// whole request is not deliverable rather than misnumbered.
-			return nil
-		}
-		ids = append(ids, o.ID)
+// undeliverable returns why the adapter cannot render and answer r, or "".
+func undeliverable(r workctx.RequestView) string {
+	switch {
+	case !workctx.ValidHumanInputRequestID(r.RequestID) || r.RequestHash == "":
+		return "malformed"
+	case strings.TrimSpace(r.Question) == "":
+		return "empty_question"
+	case !r.CanRespond:
+		return "cannot_respond"
 	}
-	return ids
+	switch r.ResponseType {
+	case workctx.HumanInputTypeFreeText:
+		return ""
+	case workctx.HumanInputTypeSingleChoice:
+		if len(r.Options) == 0 {
+			return "no_options"
+		}
+		if len(r.Options) > maxOptions {
+			return "too_many_options"
+		}
+		for _, o := range r.Options {
+			if strings.TrimSpace(o) == "" {
+				return "empty_option"
+			}
+		}
+		return ""
+	default:
+		return "unsupported_type"
+	}
+}
+
+// noteUndeliverable makes a pending request this surface cannot deliver
+// visible (one log line and one metric per request version per process)
+// instead of skipping it silently while the agent stays parked.
+func (p *Poller) noteUndeliverable(userID int64, r workctx.RequestView, reason string) {
+	key := fmt.Sprintf("%d\x00%s\x00%s", userID, r.RequestID, r.RequestHash)
+	if p.undeliverableSeen == nil {
+		p.undeliverableSeen = map[string]struct{}{}
+	}
+	if _, seen := p.undeliverableSeen[key]; seen {
+		return
+	}
+	p.undeliverableSeen[key] = struct{}{}
+	slog.Info("human input request not deliverable on telegram", "user_id", userID, "request_id", r.RequestID,
+		"work_item_id", r.WorkItemID, "outcome", reason, "response_type", safeToken(r.ResponseType), "correlation_id", r.CorrelationID)
+	p.Metrics.CountHumanInputEvent(metrics.HumanInputEventDeliveryAttempt, "undeliverable")
+}
+
+// OptionDigest is the content-free digest stored per single_choice option:
+// the first 16 hex characters of SHA-256 over the trimmed, lowercased option
+// text. It lets the handler resolve a typed option locally and check that the
+// canonical option it is about to submit is the one that was shown.
+func OptionDigest(option string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(option))))
+	return hex.EncodeToString(sum[:8])
+}
+
+func optionDigests(r workctx.RequestView) []string {
+	if r.ResponseType != workctx.HumanInputTypeSingleChoice {
+		return nil
+	}
+	out := make([]string, 0, len(r.Options))
+	for _, o := range r.Options {
+		out = append(out, OptionDigest(o))
+	}
+	return out
 }
 
 func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestView) error {
@@ -191,18 +284,23 @@ func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestVie
 		return err
 	}
 	if r.WorkItemID != "" {
-		if key, ok, err := p.Store.WorkItemExternalKey(ctx, userID, r.WorkItemID); err == nil && ok {
+		key, ok, err := p.Store.WorkItemExternalKey(ctx, userID, r.WorkItemID)
+		switch {
+		case err != nil:
+			// Best effort: the message falls back to the raw work_item_id.
+			slog.Warn("human input work ref lookup failed", "user_id", userID, "request_id", r.RequestID, "work_item_id", r.WorkItemID, "outcome", errClass(err))
+		case ok:
 			if ref := WorkRefFromExternalKey(key); ref != "" {
 				r.WorkRef = ref
 			}
 		}
 	}
 	d := db.HumanInputDelivery{
-		UserID: userID, RequestID: r.RequestID, RequestHash: r.RequestHash, RequestVersion: r.Version,
-		WorkItemID: r.WorkItemID, Kind: r.Kind, OptionIDs: optionIDs(r), MaxLength: r.MaxLength,
+		UserID: userID, RequestID: r.RequestID, RequestHash: r.RequestHash, RequestVersion: r.RequestVersion,
+		WorkItemID: r.WorkItemID, Kind: r.ResponseType, OptionDigests: optionDigests(r),
 	}
 	for attempt := 0; attempt < codeAttempts; attempt++ {
-		code, err := answercode.New()
+		code, err := newAnswerCode()
 		if err != nil {
 			return err
 		}
@@ -221,6 +319,23 @@ func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestVie
 		return nil
 	}
 	return errors.New("answer code collision retries exhausted")
+}
+
+// reservedCodes are words /mctl input parses as a subcommand. A generated
+// answer code equal to one would be unanswerable, so it is redrawn.
+var reservedCodes = map[string]struct{}{"STATUS": {}}
+
+// newAnswerCode draws an answer code that is not a reserved subcommand word.
+func newAnswerCode() (string, error) {
+	for {
+		code, err := answercode.New()
+		if err != nil {
+			return "", err
+		}
+		if _, reserved := reservedCodes[code]; !reserved {
+			return code, nil
+		}
+	}
 }
 
 // isLinkError reports a missing, revoked or expired surface link.
@@ -243,6 +358,14 @@ func errClass(err error) string {
 		return "link_expired"
 	case errors.Is(err, workctx.ErrNotEligible):
 		return "not_eligible"
+	case errors.Is(err, workctx.ErrRequestSuperseded):
+		return "superseded"
+	case errors.Is(err, workctx.ErrRequestNotActive):
+		return "not_active"
+	case errors.Is(err, workctx.ErrAnswerInvalid):
+		return "answer_invalid"
+	case errors.Is(err, workctx.ErrHumanInputNotFound):
+		return "not_found"
 	case errors.Is(err, workctx.ErrIncompatibleSchema):
 		return "incompatible_schema"
 	case errors.As(err, &apiErr):

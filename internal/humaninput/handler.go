@@ -32,26 +32,35 @@ type Meta struct {
 	TGMessageID int64
 }
 
-// defaultMaxAnswerRunes caps a free-text answer when the request names no
-// maximum of its own.
-const defaultMaxAnswerRunes = 2000
+// maxAnswerRunes caps a free-text answer. mctl-api names no per-request
+// maximum; its body limit (64 KiB) is far above this.
+const maxAnswerRunes = 2000
 
 // maxEchoRunes bounds how much of a free-text answer the confirmation echoes.
 const maxEchoRunes = 60
 
+// maxStatusRows bounds how many open requests /mctl input status (no code)
+// re-reads from mctl-api; the codes of the rest are still listed.
+const maxStatusRows = 5
+
 // Replies. Wording for eligibility failures is deliberately neutral: policy
 // belongs to mctl-api and is never explained to the surface user.
 const (
-	replyAlready     = "Already answered."
-	replyNotLinked   = "This Telegram account is not linked to a platform identity yet. An operator needs to resolve this before /mctl input can be used."
-	replyNeutral     = "This answer could not be accepted from this account."
-	replyInvalid     = "That answer was not accepted. Check the question and try again."
-	replyPlatformErr = "The platform did not accept that answer."
-	inputUsage       = "Usage: /mctl input <code> <answer>\nAlso: /mctl input status [code]"
+	replyAlready      = "Already answered."
+	replyNotLinked    = "This Telegram account is not linked to a platform identity yet. An operator needs to resolve this before /mctl input can be used."
+	replyNeutral      = "This answer could not be accepted from this account."
+	replyInvalid      = "That answer was not accepted. Check the question and try again."
+	replyPlatformErr  = "The platform did not accept that answer."
+	replyNotSubmitted = "Could not reach the platform; nothing was submitted. Try again."
+	inputUsage        = "Usage: /mctl input <code> <answer>\nAlso: /mctl input status [code]"
 )
 
 func couldNotConfirm(code string) string {
 	return fmt.Sprintf("Could not confirm; check again with /mctl input status %s", code)
+}
+
+func submittedUnconfirmed(echo, code string) string {
+	return fmt.Sprintf("Submitted: %s. The platform has not confirmed it yet; check with /mctl input status %s", echo, code)
 }
 
 // Handler implements /mctl input <code> <value> and /mctl input status [code].
@@ -93,40 +102,81 @@ func (h *Handler) Answer(ctx context.Context, meta Meta, code, value string) err
 		}
 		return h.reply(ctx, meta.UserID, NoLongerActive)
 	}
+	logArgs := []any{"request_id", row.RequestID, "work_item_id", row.WorkItemID, "delivery_id", row.ID, "tg_message_id", row.TGMessageID}
 
-	submit, echo, hint := h.shape(row, code, value)
-	if hint != "" {
-		// Shape errors never reach mctl-api.
-		return h.reply(ctx, meta.UserID, hint)
+	var submit, echo string
+	switch row.Kind {
+	case workctx.HumanInputTypeSingleChoice:
+		idx, hint := h.optionIndex(row, code, value)
+		if hint != "" {
+			// Shape errors never reach mctl-api.
+			return h.reply(ctx, meta.UserID, hint)
+		}
+		// The option text is not stored locally (content-free rows), so
+		// read the canonical request and take option idx from it. The same
+		// request_hash guarantees the same options as delivered; the digest
+		// check is defence in depth.
+		v, err := h.API.GetHumanInput(ctx, actorTGID, row.RequestID)
+		if err != nil {
+			if errors.Is(err, workctx.ErrHumanInputNotFound) {
+				h.markTerminal(ctx, row, db.HumanInputInactive, "not_found")
+				return h.reply(ctx, meta.UserID, NoLongerActive)
+			}
+			slog.Warn("human input pre-submit read failed", append(logArgs, "outcome", errClass(err))...)
+			return h.reply(ctx, meta.UserID, replyNotSubmitted)
+		}
+		if v.RequestHash != row.RequestHash {
+			h.markTerminal(ctx, row, db.HumanInputSuperseded, "superseded")
+			return h.reply(ctx, meta.UserID, NoLongerActive)
+		}
+		if v.State != workctx.HumanInputStatePending {
+			return h.reply(ctx, meta.UserID, h.settle(ctx, row, v, false))
+		}
+		if idx >= len(v.Options) || OptionDigest(v.Options[idx]) != row.OptionDigests[idx] {
+			slog.Warn("human input options differ from delivery", append(logArgs, "outcome", "option_mismatch")...)
+			return h.reply(ctx, meta.UserID, replyPlatformErr)
+		}
+		submit, echo = v.Options[idx], fmt.Sprintf("option %d", idx+1)
+	case workctx.HumanInputTypeFreeText:
+		var hint string
+		submit, echo, hint = freeText(code, value)
+		if hint != "" {
+			return h.reply(ctx, meta.UserID, hint)
+		}
+	default:
+		return h.reply(ctx, meta.UserID, NoLongerActive)
 	}
 
-	req := workctx.ResponseRequest{RequestHash: row.RequestHash, Kind: row.Kind, Value: submit}
+	req := workctx.ResponseRequest{RequestHash: row.RequestHash, Value: submit}
 	resp, err := h.API.RespondHumanInput(ctx, actorTGID, row.RequestID, req, idemKey(row.RequestID, row.RequestHash, meta.TGMessageID))
-	logArgs := []any{"request_id", row.RequestID, "work_item_id", row.WorkItemID, "delivery_id", row.ID, "tg_message_id", row.TGMessageID}
 	switch {
-	case err == nil:
-		if resp.State != workctx.HumanInputStateAnswered {
-			// Accepted without confirming the answered state: never claim
-			// the agent resumed.
-			slog.Info("human input response unconfirmed", append(logArgs, "outcome", "state_"+safeToken(resp.State), "correlation_id", resp.CorrelationID)...)
-			h.Metrics.CountHumanInputEvent(metrics.HumanInputEventResponseSubmitted, "unconfirmed")
-			return h.reply(ctx, meta.UserID, couldNotConfirm(code))
-		}
-		h.markAnswered(ctx, row, "answered")
+	case err == nil && resp.Status == workctx.HumanInputStatusAccepted:
+		h.markAnswered(ctx, row, "accepted")
 		h.Metrics.CountHumanInputEvent(metrics.HumanInputEventResponseSubmitted, "ok")
 		if !row.DeliveredAt.IsZero() {
 			h.Metrics.ObserveHumanInputRespondLatency(time.Since(row.DeliveredAt))
 		}
-		slog.Info("human input response submitted", append(logArgs, "outcome", "ok", "correlation_id", resp.CorrelationID)...)
+		slog.Info("human input response submitted", append(logArgs, "outcome", "accepted", "correlation_id", resp.CorrelationID)...)
+		if resp.Detail == workctx.DetailAlreadyAccepted {
+			// mctl-api's replay of this human's identical, already
+			// accepted answer.
+			return h.reply(ctx, meta.UserID, replyAlready)
+		}
 		return h.reply(ctx, meta.UserID, fmt.Sprintf("Answered by you: %s. Agent will resume.", echo))
-	case errors.Is(err, workctx.ErrAlreadyAnswered):
-		h.markAnswered(ctx, row, "already_answered")
-		return h.rejected(ctx, meta.UserID, logArgs, err, replyAlready)
+	case err == nil:
+		// 202 pending_delivery: recorded and signalled, not confirmed by
+		// the workflow. Never claim the agent resumed. The row stays open
+		// (submitted) so a status read or a resubmission of the same answer
+		// can settle it.
+		h.markTerminal(ctx, row, db.HumanInputSubmitted, "pending_delivery")
+		h.Metrics.CountHumanInputEvent(metrics.HumanInputEventResponseSubmitted, "unconfirmed")
+		slog.Info("human input response unconfirmed", append(logArgs, "outcome", "pending_delivery", "correlation_id", resp.CorrelationID)...)
+		return h.reply(ctx, meta.UserID, submittedUnconfirmed(echo, code))
 	case errors.Is(err, workctx.ErrRequestSuperseded):
 		h.markTerminal(ctx, row, db.HumanInputSuperseded, "superseded")
 		return h.rejected(ctx, meta.UserID, logArgs, err, NoLongerActive)
 	case errors.Is(err, workctx.ErrRequestNotActive):
-		h.markTerminal(ctx, row, db.HumanInputInactive, "not_active")
+		h.markTerminal(ctx, row, db.HumanInputInactive, rejectionOutcome(err))
 		return h.rejected(ctx, meta.UserID, logArgs, err, NoLongerActive)
 	case errors.Is(err, workctx.ErrNotEligible), isLinkError(err):
 		// 403: neutral wording, no retry, nothing about policy revealed.
@@ -138,8 +188,9 @@ func (h *Handler) Answer(ctx context.Context, meta Meta, code, value string) err
 	if errors.As(err, &apiErr) && apiErr.StatusCode < 500 {
 		return h.rejected(ctx, meta.UserID, logArgs, err, replyPlatformErr)
 	}
-	// Transport failure, timeout or 5xx: the answer may or may not have been
-	// accepted. Re-read the canonical state and render that, never "success".
+	// Transport failure, timeout or 5xx (including mctl-api's 503 "recorded,
+	// resubmit to retry delivery"): the answer may or may not have been
+	// taken. Re-read the canonical state and render that, never "success".
 	slog.Warn("human input submit failed, re-reading", append(logArgs, "outcome", errClass(err))...)
 	h.Metrics.CountHumanInputEvent(metrics.HumanInputEventResponseSubmitted, "error")
 	return h.reply(ctx, meta.UserID, h.canonicalText(ctx, actorTGID, row, true))
@@ -178,65 +229,74 @@ func (h *Handler) Status(ctx context.Context, meta Meta, code string) error {
 	}
 	var sb strings.Builder
 	for i, row := range open {
-		if i >= 5 {
+		if i >= maxStatusRows {
 			break
 		}
 		fmt.Fprintf(&sb, "%s: %s\n", row.AnswerCode, h.canonicalText(ctx, actorTGID, row, false))
 	}
+	if len(open) > maxStatusRows {
+		rest := make([]string, 0, len(open)-maxStatusRows)
+		for _, row := range open[maxStatusRows:] {
+			rest = append(rest, row.AnswerCode)
+		}
+		fmt.Fprintf(&sb, "%d more open, not checked here: %s. Use /mctl input status <code>.\n", len(rest), strings.Join(rest, ", "))
+	}
 	return h.reply(ctx, meta.UserID, strings.TrimRight(sb.String(), "\n"))
 }
 
-// shape validates the typed value against the delivered request's shape only
-// (an option within range, or non-empty text within the length cap). It
-// returns the value to submit, a short echo for the confirmation, and a usage
-// hint when the value is unusable.
-func (h *Handler) shape(row db.HumanInputDelivery, code, value string) (submit, echo, hint string) {
+// optionIndex resolves a single_choice answer to a 0-based option index
+// using only the delivered row: an option number in range, or the option's
+// text (case-insensitive), matched by digest. Anything else returns a usage
+// hint and never reaches mctl-api.
+func (h *Handler) optionIndex(row db.HumanInputDelivery, code, value string) (int, string) {
 	value = strings.TrimSpace(value)
-	switch row.Kind {
-	case workctx.HumanInputKindSingleChoice:
-		usage := fmt.Sprintf("Reply with an option number 1-%d: /mctl input %s <number>", len(row.OptionIDs), code)
-		if value == "" {
-			return "", "", usage
-		}
-		if n, err := strconv.Atoi(value); err == nil {
-			if n < 1 || n > len(row.OptionIDs) {
-				return "", "", usage
-			}
-			return row.OptionIDs[n-1], fmt.Sprintf("option %d", n), ""
-		}
-		for i, id := range row.OptionIDs {
-			if strings.EqualFold(id, value) {
-				return id, fmt.Sprintf("option %d", i+1), ""
-			}
-		}
-		return "", "", usage
-	case workctx.HumanInputKindFreeText:
-		if value == "" {
-			return "", "", fmt.Sprintf("Add your answer after the code: /mctl input %s <your answer>", code)
-		}
-		max := row.MaxLength
-		if max <= 0 {
-			max = defaultMaxAnswerRunes
-		}
-		r := []rune(value)
-		if len(r) > max {
-			r = r[:max]
-		}
-		echoRunes := r
-		if len(echoRunes) > maxEchoRunes {
-			echoRunes = append(append([]rune{}, echoRunes[:maxEchoRunes]...), []rune("...")...)
-		}
-		return string(r), string(echoRunes), ""
-	default:
-		return "", "", NoLongerActive
+	usage := fmt.Sprintf("Reply with an option number 1-%d: /mctl input %s <number>", len(row.OptionDigests), code)
+	if value == "" || len(row.OptionDigests) == 0 {
+		return 0, usage
 	}
+	if n, err := strconv.Atoi(value); err == nil {
+		if n < 1 || n > len(row.OptionDigests) {
+			return 0, usage
+		}
+		return n - 1, ""
+	}
+	want := OptionDigest(value)
+	for i, d := range row.OptionDigests {
+		if d == want {
+			return i, ""
+		}
+	}
+	return 0, usage
+}
+
+// freeText validates a free-text answer: non-empty after trimming, capped at
+// maxAnswerRunes. It returns the value to submit, a short echo for the
+// confirmation, and a usage hint when the value is unusable.
+func freeText(code, value string) (submit, echo, hint string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", fmt.Sprintf("Add your answer after the code: /mctl input %s <your answer>", code)
+	}
+	r := []rune(value)
+	if len(r) > maxAnswerRunes {
+		r = r[:maxAnswerRunes]
+	}
+	echoRunes := r
+	if len(echoRunes) > maxEchoRunes {
+		echoRunes = append(append([]rune{}, echoRunes[:maxEchoRunes]...), []rune("...")...)
+	}
+	return string(r), oneLine(string(echoRunes), maxEchoRunes+3), ""
 }
 
 // canonicalText re-reads the request from mctl-api and renders its state,
-// updating the local row to match terminal states. afterSubmit selects the
-// wording used when a submit's outcome is being resolved.
+// updating the local row to match. afterSubmit selects the wording used when
+// a submit's outcome is being resolved.
 func (h *Handler) canonicalText(ctx context.Context, actorTGID int64, row db.HumanInputDelivery, afterSubmit bool) string {
 	v, err := h.API.GetHumanInput(ctx, actorTGID, row.RequestID)
+	if errors.Is(err, workctx.ErrHumanInputNotFound) {
+		h.markTerminal(ctx, row, db.HumanInputInactive, "not_found")
+		return NoLongerActive
+	}
 	if err != nil {
 		slog.Warn("human input status read failed", "request_id", row.RequestID, "delivery_id", row.ID, "outcome", errClass(err))
 		return couldNotConfirm(row.AnswerCode)
@@ -245,22 +305,49 @@ func (h *Handler) canonicalText(ctx context.Context, actorTGID int64, row db.Hum
 		h.markTerminal(ctx, row, db.HumanInputSuperseded, "superseded")
 		return NoLongerActive
 	}
+	return h.settle(ctx, row, v, afterSubmit)
+}
+
+// settle maps a canonical view of the row's own request version onto a reply
+// and the row's state. Only mctl-api's states decide; "unknown" (the owning
+// workflow did not answer) changes nothing.
+func (h *Handler) settle(ctx context.Context, row db.HumanInputDelivery, v *workctx.RequestView, afterSubmit bool) string {
 	switch v.State {
-	case workctx.HumanInputStateAnswered:
-		h.markAnswered(ctx, row, "answered")
-		if afterSubmit {
-			return "Answered. Check /mctl work status for progress."
+	case workctx.HumanInputStateResolved:
+		if afterSubmit || row.State == db.HumanInputSubmitted {
+			h.markAnswered(ctx, row, "resolved")
+			if afterSubmit {
+				return "Answered. Check /mctl work status for progress."
+			}
+			return "Answered. Agent will resume."
 		}
+		// Resolved by an answer that is not known to be this human's.
+		h.markTerminal(ctx, row, db.HumanInputInactive, "resolved")
 		return "Answered."
-	case workctx.HumanInputStatePending, "":
+	case workctx.HumanInputStatePending:
 		if afterSubmit {
 			return couldNotConfirm(row.AnswerCode)
 		}
+		if row.State == db.HumanInputSubmitted {
+			return "Submitted; waiting for the platform to confirm."
+		}
 		return "Waiting for your answer."
-	default:
+	case workctx.HumanInputStateExpired, workctx.HumanInputStateTimedOut, workctx.HumanInputStateNotPending:
 		h.markTerminal(ctx, row, db.HumanInputInactive, safeToken(v.State))
 		return NoLongerActive
+	default:
+		return couldNotConfirm(row.AnswerCode)
 	}
+}
+
+// rejectionOutcome is the rejection state carried by a typed human-input
+// error, as a log/row outcome token.
+func rejectionOutcome(err error) string {
+	var apiErr *workctx.APIError
+	if errors.As(err, &apiErr) && apiErr.Code != "" {
+		return safeToken(apiErr.Code)
+	}
+	return errClass(err)
 }
 
 func (h *Handler) rejected(ctx context.Context, userID int64, logArgs []any, err error, text string) error {
