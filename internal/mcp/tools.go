@@ -2436,8 +2436,9 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 // and it is marked synthesized so a client tripping a policy limit does not
 // burn the availability SLO — the same treatment Rule 2 gives a scope or
 // argument refusal that never reached Server.audit. Call sites: rate-limit
-// refusals, write-gate blocks (pin_message:blocked), demo-reviewer account
-// guards, device-ownership refusals, get_media confirmation/ref refusals and
+// refusals, no-active-session refusals (set_account_send, set_send_consent),
+// write-gate blocks (pin_message:blocked), demo-reviewer account guards,
+// device-ownership refusals, get_media confirmation/ref refusals and
 // provision_local_account refusals.
 func (s *Server) auditRefusal(ctx context.Context, id *auth.Identity, tool, peer string, err error, startedAt time.Time, reason string) {
 	hintReason(ctx, reason)

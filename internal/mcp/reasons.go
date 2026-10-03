@@ -28,7 +28,10 @@ const (
 	ReasonModeUnsupported = "mode_unsupported"
 	// ReasonRefused is raised by policy refusals that are neither a scope
 	// nor an argument problem — the demo-reviewer account-management guard,
-	// a dry-run "blocked:" preview, a generic mint-policy rejection.
+	// a dry-run "blocked:" preview, a generic mint-policy rejection, a
+	// write-gate pin block, an already-active account in
+	// provision_local_account, and a get_media claim refused because the
+	// same confirmation is already being downloaded (ErrConfirmationInFlight).
 	ReasonRefused = "refused"
 	// ReasonRateLimited is raised when audit.RateLimiter blocks a
 	// destructive send/write action.
