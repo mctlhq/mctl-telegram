@@ -286,6 +286,11 @@ func TestErrorMapping(t *testing.T) {
 		{409, "execution_request_open", ErrExecutionRequestOpen},
 		{409, "execution_active", ErrExecutionActive},
 		{409, "invalid_transition", ErrInvalidTransition},
+		{403, "tenant_forbidden", ErrTenantForbidden},
+		{503, "work_items_unavailable", ErrWorkItemsUnavailable},
+		{404, "work_item_not_found", ErrWorkItemNotFound},
+		{409, "idempotency_key_reused", ErrIdempotencyKeyReused},
+		{400, "secret_in_text", ErrSecretInText},
 	}
 	for _, c := range cases {
 		t.Run(c.code, func(t *testing.T) {

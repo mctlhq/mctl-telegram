@@ -72,6 +72,10 @@ func NewClient(baseURL, token, tenant string, hc *http.Client) *Client {
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, tenant: tenant, http: hc}
 }
 
+// Tenant returns the configured work-item tenant (MCTL_WORK_ITEM_TENANT),
+// so an owner-facing reply can name it when mctl-api refuses access to it.
+func (c *Client) Tenant() string { return c.tenant }
+
 // relay performs one request as surface:telegram on behalf of actorTGID. It
 // sets Authorization (the surface bearer token), X-MCTL-Surface-Actor
 // (digits-only, actorTGID), X-Request-Id (a random per-call correlation id)
