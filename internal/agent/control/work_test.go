@@ -206,7 +206,7 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 	idemKey := r.Header.Get("Idempotency-Key")
 	f.createRequestIdemKeys = append(f.createRequestIdemKeys, idemKey)
 	if rid, ok := f.requestByIdemKey[idemKey]; ok && idemKey != "" {
-		writeJSON(w, http.StatusOK, *f.requests[rid])
+		writeJSON(w, http.StatusOK, executionRequestBody(*f.requests[rid]))
 		return
 	}
 	var body struct {
@@ -244,7 +244,13 @@ func (f *fakeMctlAPI) handleCreateRequest(w http.ResponseWriter, r *http.Request
 	if idemKey != "" {
 		f.requestByIdemKey[idemKey] = req.ID
 	}
-	writeJSON(w, http.StatusCreated, req)
+	writeJSON(w, http.StatusCreated, executionRequestBody(req))
+}
+
+// executionRequestBody wraps a request the way mctl-api's
+// writeExecutionRequest does for the single-request routes.
+func executionRequestBody(req any) map[string]any {
+	return map[string]any{"schema_version": workctx.SchemaVersion, "execution_request": req}
 }
 
 func (f *fakeMctlAPI) handleListRequests(w http.ResponseWriter, r *http.Request) {
@@ -276,10 +282,10 @@ func (f *fakeMctlAPI) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		var m map[string]any
 		_ = json.Unmarshal(b, &m)
 		m["message"] = freeTextMarker
-		writeJSON(w, http.StatusOK, m)
+		writeJSON(w, http.StatusOK, executionRequestBody(m))
 		return
 	}
-	writeJSON(w, http.StatusOK, *req)
+	writeJSON(w, http.StatusOK, executionRequestBody(*req))
 }
 
 // failingTransport makes every request fail the test — used by T9/T13 to
