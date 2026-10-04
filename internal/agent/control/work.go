@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/actor"
@@ -103,7 +104,7 @@ func (w *WorkHandler) handleLink(ctx context.Context, meta SavedMeta, code strin
 		return w.Notifier.Reply(ctx, meta.UserID, notLinkedReply)
 	}
 	if err := w.Client.RedeemLink(ctx, actorTGID, code); err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not link: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not link: "+w.errText(err))
 	}
 	if w.OnRelaySuccess != nil {
 		w.OnRelaySuccess(ctx, meta.UserID, actorTGID)
@@ -159,7 +160,7 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		if errors.Is(err, workctx.ErrExternalKeyInUse) {
 			return w.Notifier.Reply(ctx, meta.UserID, "That issue already has work you don't have access to.")
 		}
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not open work item: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not open work item: "+w.errText(err))
 	}
 
 	binding := db.WorkItemBinding{
@@ -188,7 +189,7 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 		ChatTGID: meta.ChatTGID, RootTGMessageID: meta.TGMessageID,
 	}); err != nil {
 		surfaceRefWarning = fmt.Sprintf(
-			"Work item %s created, but registering this thread failed: %s\n", item.WorkItem.ID, workctxErrText(err))
+			"Work item %s created, but registering this thread failed: %s\n", item.WorkItem.ID, w.errText(err))
 	}
 
 	startKey := workctx.IdempotencyKey(meta.ChatTGID, meta.TGMessageID, "start", 0)
@@ -197,7 +198,7 @@ func (w *WorkHandler) handleOpen(ctx context.Context, meta SavedMeta, arg string
 	})
 	if err != nil {
 		return w.Notifier.Reply(ctx, meta.UserID, surfaceRefWarning+fmt.Sprintf(
-			"Work item %s bound, but the start request failed: %s", item.WorkItem.ID, workctxErrText(err)))
+			"Work item %s bound, but the start request failed: %s", item.WorkItem.ID, w.errText(err)))
 	}
 	if err := w.Store.SetWorkItemBindingRequest(ctx, meta.UserID, meta.ChatTGID, meta.TGMessageID, req.ID); err != nil {
 		return fmt.Errorf("set work item binding request: %w", err)
@@ -232,7 +233,7 @@ func (w *WorkHandler) handleNote(ctx context.Context, meta SavedMeta, text strin
 	// on the same Idempotency-Key and be dropped as a duplicate.
 	idemKey := workctx.IdempotencyKey(meta.ChatTGID, meta.TGMessageID, "note", 0)
 	if err := w.Client.AppendIntent(ctx, actorTGID, binding.WorkItemID, workctx.IntentRequest{Text: text, IdempotencyKey: idemKey}); err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not record note: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not record note: "+w.errText(err))
 	}
 	return w.Notifier.Reply(ctx, meta.UserID, fmt.Sprintf("Noted on work item %s.", binding.WorkItemID))
 }
@@ -255,14 +256,14 @@ func (w *WorkHandler) handleResume(ctx context.Context, meta SavedMeta) error {
 
 	item, err := w.Client.GetWorkItem(ctx, actorTGID, binding.WorkItemID)
 	if err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+w.errText(err))
 	}
 	req, err := w.requestResumeWithRetry(ctx, actorTGID, binding, meta.TGMessageID, item.StateVersion)
 	if err != nil {
 		if errors.Is(err, workctx.ErrStateVersionConflict) {
 			return w.Notifier.Reply(ctx, meta.UserID, "The work item changed while resuming — please try /mctl work resume again.")
 		}
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not resume: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not resume: "+w.errText(err))
 	}
 	if err := w.Store.SetWorkItemBindingRequest(ctx, meta.UserID, binding.ChatTGID, binding.RootTGMessageID, req.ID); err != nil {
 		return fmt.Errorf("set work item binding request: %w", err)
@@ -353,7 +354,7 @@ func (w *WorkHandler) handleWorkStatus(ctx context.Context, meta SavedMeta) erro
 
 	item, err := w.Client.GetWorkItem(ctx, actorTGID, binding.WorkItemID)
 	if err != nil {
-		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+workctxErrText(err))
+		return w.Notifier.Reply(ctx, meta.UserID, "Could not read work item: "+w.errText(err))
 	}
 	if w.OnRelaySuccess != nil {
 		w.OnRelaySuccess(ctx, meta.UserID, actorTGID)
@@ -423,32 +424,94 @@ func formatRequestState(req workctx.ExecutionRequestView) string {
 	}
 }
 
+// errText renders a workctx error for an owner-facing reply via
+// workctxErrText, naming the configured work-item tenant, and logs any
+// platform error that has no fixed phrase together with its code, so an
+// unmapped refusal is diagnosable from the logs instead of looking like a
+// bot bug.
+func (w *WorkHandler) errText(err error) string {
+	tenant := ""
+	if w.Client != nil {
+		tenant = w.Client.Tenant()
+	}
+	text, mapped := workctxErrText(err, tenant)
+	if !mapped {
+		var apiErr *workctx.APIError
+		if errors.As(err, &apiErr) {
+			slog.Warn("work: unmapped platform error", "status", apiErr.StatusCode,
+				"code", apiErr.Code, "correlation_id", apiErr.CorrelationID)
+		} else {
+			slog.Warn("work: platform call failed", "err", err)
+		}
+	}
+	return text
+}
+
 // workctxErrText renders a workctx error as owner-facing text, following
 // the approverErrText precedent above — it never leaks mctl-api's free-text
-// message, only a fixed phrase per known sentinel.
-func workctxErrText(err error) string {
+// message, only a fixed phrase per known sentinel. mapped is false when no
+// fixed phrase applies: a typed code mctl-api returned that has no sentinel
+// is rendered with that code (a machine identifier, never free text), and
+// anything else as an internal error.
+func workctxErrText(err error, tenant string) (text string, mapped bool) {
 	switch {
 	case errors.Is(err, workctx.ErrLinkNotFound), errors.Is(err, workctx.ErrLinkRevoked), errors.Is(err, workctx.ErrLinkExpired), errors.Is(err, workctx.ErrRelayRequired):
-		return "your Telegram account is not linked — run /mctl link <code> (get a code from the platform first)"
+		return "your Telegram account is not linked — run /mctl link <code> (get a code from the platform first)", true
 	case errors.Is(err, workctx.ErrChallengeInvalid):
-		return "that link code is invalid or already used"
+		return "that link code is invalid or already used", true
 	case errors.Is(err, workctx.ErrLinkConflict):
-		return "this Telegram account is already linked"
+		return "this Telegram account is already linked", true
 	case errors.Is(err, workctx.ErrActorNotAccepted):
-		return "rejected by the platform"
+		return "rejected by the platform", true
 	case errors.Is(err, workctx.ErrStateVersionConflict):
-		return "the work item changed — try again"
+		return "the work item changed — try again", true
 	case errors.Is(err, workctx.ErrExternalKeyInUse):
-		return "that issue already has work you don't have access to"
+		return "that issue already has work you don't have access to", true
 	case errors.Is(err, workctx.ErrIncompatibleSchema):
-		return "the platform returned an incompatible response — try again later"
+		return "the platform returned an incompatible response — try again later", true
 	case errors.Is(err, workctx.ErrExecutionRequestOpen):
-		return "a request for this work item is already open — /mctl work status to check it"
+		return "a request for this work item is already open — /mctl work status to check it", true
 	case errors.Is(err, workctx.ErrExecutionActive):
-		return "an execution for this work item is already running — /mctl work status to check it"
+		return "an execution for this work item is already running — /mctl work status to check it", true
 	case errors.Is(err, workctx.ErrInvalidTransition):
-		return "the work item cannot take that request in its current state — /mctl work status to check it"
-	default:
-		return "an internal error occurred"
+		return "the work item cannot take that request in its current state — /mctl work status to check it", true
+	case errors.Is(err, workctx.ErrTenantForbidden):
+		return fmt.Sprintf("you have no access to the work-item tenant %q on the platform — ask an operator to grant it or to change MCTL_WORK_ITEM_TENANT", tenant), true
+	case errors.Is(err, workctx.ErrWorkItemsUnavailable):
+		return "work items are unavailable on the platform right now — try again later", true
+	case errors.Is(err, workctx.ErrWorkItemNotFound):
+		return "the work item was not found, or you no longer have access to it", true
+	case errors.Is(err, workctx.ErrIdempotencyKeyReused):
+		return "this command was already used for a different request — send it again as a new message", true
+	case errors.Is(err, workctx.ErrSecretInText):
+		return "the text looks like it contains a secret, so the platform refused it — remove it and try again", true
 	}
+	var apiErr *workctx.APIError
+	if errors.As(err, &apiErr) && isTypedErrorCode(apiErr.Code) {
+		return fmt.Sprintf("rejected by the platform (%d %s)", apiErr.StatusCode, apiErr.Code), false
+	}
+	return "an internal error occurred", false
+}
+
+// isTypedErrorCode reports whether code has the shape of one of mctl-api's
+// typed error codes (snake_case, bounded). The client falls back to the
+// body's "error" field when no "code" is present, and on mctl-api's
+// untyped writeError path that field is free text — which must never be
+// echoed to the owner.
+func isTypedErrorCode(code string) bool {
+	if code == "" || len(code) > 64 {
+		return false
+	}
+	for i, r := range code {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case (r >= '0' && r <= '9') || r == '_':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }

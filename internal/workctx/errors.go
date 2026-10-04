@@ -71,6 +71,25 @@ var (
 	// the request does not exist, or the human may not see it. mctl-api
 	// reports both the same way, by design.
 	ErrHumanInputNotFound = errors.New("workctx: human-input request not found")
+	// ErrTenantForbidden means the relayed human has no access to the
+	// configured work-item tenant (MCTL_WORK_ITEM_TENANT) — 403
+	// tenant_forbidden. It is a deployment or access problem, not a defect
+	// in this adapter, so it is rendered with the tenant name.
+	ErrTenantForbidden = errors.New("workctx: no access to the work-item tenant")
+	// ErrWorkItemsUnavailable means mctl-api's work-item store is not
+	// configured or not reachable (503 work_items_unavailable).
+	ErrWorkItemsUnavailable = errors.New("workctx: work items are unavailable on the platform")
+	// ErrWorkItemNotFound means the work item does not exist or the human
+	// may not see it (404 work_item_not_found). mctl-api reports both the
+	// same way.
+	ErrWorkItemNotFound = errors.New("workctx: work item not found")
+	// ErrIdempotencyKeyReused means the Idempotency-Key already names a
+	// different request, or work the human cannot see (409
+	// idempotency_key_reused).
+	ErrIdempotencyKeyReused = errors.New("workctx: idempotency key already used for a different request")
+	// ErrSecretInText means mctl-api refused text that looks like it
+	// carries a secret (400 secret_in_text).
+	ErrSecretInText = errors.New("workctx: text looks like it contains a secret")
 )
 
 // codeToErr maps mctl-api's typed error codes (the JSON "error" field) onto
@@ -92,6 +111,16 @@ var codeToErr = map[string]error{
 	"execution_request_open": ErrExecutionRequestOpen,
 	"execution_active":       ErrExecutionActive,
 	"invalid_transition":     ErrInvalidTransition,
+	"tenant_forbidden":       ErrTenantForbidden,
+	"work_items_unavailable": ErrWorkItemsUnavailable,
+	"work_item_not_found":    ErrWorkItemNotFound,
+	"idempotency_key_reused": ErrIdempotencyKeyReused,
+	"secret_in_text":         ErrSecretInText,
+	// Deliberately unmapped: "invalid_request" (400). Every request struct
+	// here is built to satisfy mctl-api's validation, so seeing it means a
+	// defect on one side, and the only actionable detail is mctl-api's
+	// free-text message, which must never reach the owner. It surfaces as
+	// a bare *APIError, which the caller logs and renders with its code.
 }
 
 // humanInputRejectionToErr maps the state of a human-input response

@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,12 @@ type fakeMctlAPI struct {
 	// refuseExternalKey, when set, makes CreateWorkItem for that key answer
 	// 409 external_key_in_use instead of the dedupe/create path.
 	refuseExternalKey string
+	// createErrStatus/createErrCode, when set, make every CreateWorkItem
+	// answer that status in mctl-api's writeErrorCode shape
+	// ({"error": <message>, "code": <code>}), the message carrying
+	// freeTextMarker.
+	createErrStatus int
+	createErrCode   string
 	// forcedRequestState overrides the state (and, for rejected, reason) of
 	// the NEXT execution request created — used by T14/T7.
 	forcedRequestState  string
@@ -138,6 +145,10 @@ func (f *fakeMctlAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	extKey, _ := body["external_key"].(string)
 
+	if f.createErrStatus != 0 {
+		writeJSON(w, f.createErrStatus, map[string]string{"error": freeTextMarker, "code": f.createErrCode})
+		return
+	}
 	if f.refuseExternalKey != "" && extKey == f.refuseExternalKey {
 		writeAPIErr(w, http.StatusConflict, "external_key_in_use")
 		return
@@ -1085,5 +1096,90 @@ func TestOpenRedeliveryAfterAcceptedButUnrecordedStart(t *testing.T) {
 	fake.locked(func() { nRequests = len(fake.requests) })
 	if nRequests != 1 {
 		t.Fatalf("execution requests = %d, want 1 (the redo must replay, not resubmit)", nRequests)
+	}
+}
+
+// TestOpenTenantForbiddenNamesTenant is #738: a 403 tenant_forbidden on
+// CreateWorkItem must name the configured tenant in an actionable reply,
+// not fall through to "an internal error occurred".
+func TestOpenTenantForbiddenNamesTenant(t *testing.T) {
+	fake := newFakeMctlAPI()
+	fake.createErrStatus = http.StatusForbidden
+	fake.createErrCode = "tenant_forbidden"
+	store, uid := newTestWorkStore(t)
+	srv := fake.server(t)
+	t.Cleanup(srv.Close)
+	sender := &fakeSelfSender{}
+	client := workctx.NewClient(srv.URL, "tok", "admins", nil)
+	router := NewRouter(store, &fakeApprover{}, NewNotifier(store, sender))
+	router.Work = newTestWorkHandler(t, store, sender, client)
+
+	if err := router.HandleSavedText(context.Background(), meta(uid, 15000), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	reply := sender.sent[len(sender.sent)-1]
+	want := `Could not open work item: you have no access to the work-item tenant "admins" on the platform`
+	if !strings.HasPrefix(reply, want) {
+		t.Fatalf("reply = %q, want prefix %q", reply, want)
+	}
+	if strings.Contains(reply, "internal error") || strings.Contains(reply, freeTextMarker) {
+		t.Fatalf("reply = %q leaks the fallback or mctl-api's free text", reply)
+	}
+}
+
+// TestOpenUnmappedCodeIsNamed: a typed code with no fixed phrase is shown
+// with its code (never mctl-api's free-text message), not as a bare
+// internal error.
+func TestOpenUnmappedCodeIsNamed(t *testing.T) {
+	fake := newFakeMctlAPI()
+	fake.createErrStatus = http.StatusBadRequest
+	fake.createErrCode = "invalid_request"
+	router, sender, _, uid := newEnabledRouter(t, fake)
+
+	if err := router.HandleSavedText(context.Background(), meta(uid, 15100), "/mctl work "+testIssueURL); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	reply := sender.sent[len(sender.sent)-1]
+	if want := "Could not open work item: rejected by the platform (400 invalid_request)"; reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+}
+
+// TestWorkctxErrTextMapping pins one owner-facing phrase per mctl-api
+// work-item code swept for #738, and the fallbacks for anything else.
+func TestWorkctxErrTextMapping(t *testing.T) {
+	apiErr := func(status int, code, msg string) error {
+		return &workctx.APIError{StatusCode: status, Code: code, Message: msg}
+	}
+	cases := []struct {
+		name       string
+		err        error
+		want       string
+		wantMapped bool
+	}{
+		{"tenant_forbidden", fmt.Errorf("%w: %w", workctx.ErrTenantForbidden, apiErr(403, "tenant_forbidden", "x")),
+			`you have no access to the work-item tenant "admins" on the platform — ask an operator to grant it or to change MCTL_WORK_ITEM_TENANT`, true},
+		{"work_items_unavailable", fmt.Errorf("%w: %w", workctx.ErrWorkItemsUnavailable, apiErr(503, "work_items_unavailable", "x")),
+			"work items are unavailable on the platform right now — try again later", true},
+		{"work_item_not_found", fmt.Errorf("%w: %w", workctx.ErrWorkItemNotFound, apiErr(404, "work_item_not_found", "x")),
+			"the work item was not found, or you no longer have access to it", true},
+		{"idempotency_key_reused", fmt.Errorf("%w: %w", workctx.ErrIdempotencyKeyReused, apiErr(409, "idempotency_key_reused", "x")),
+			"this command was already used for a different request — send it again as a new message", true},
+		{"secret_in_text", fmt.Errorf("%w: %w", workctx.ErrSecretInText, apiErr(400, "secret_in_text", "x")),
+			"the text looks like it contains a secret, so the platform refused it — remove it and try again", true},
+		{"unmapped typed code", apiErr(400, "invalid_request", freeTextMarker),
+			"rejected by the platform (400 invalid_request)", false},
+		{"untyped free-text error field", apiErr(500, "work-items store error", ""),
+			"an internal error occurred", false},
+		{"transport error", errors.New("workctx: do request: connection refused"),
+			"an internal error occurred", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, mapped := workctxErrText(c.err, "admins")
+			if got != c.want || mapped != c.wantMapped {
+				t.Fatalf("workctxErrText = (%q, %v), want (%q, %v)", got, mapped, c.want, c.wantMapped)
+			}
+		})
 	}
 }
