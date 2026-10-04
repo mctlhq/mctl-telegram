@@ -67,7 +67,7 @@ func Render(v workctx.RequestView, code string) string {
 		fmt.Fprintf(&head, "Work: %s\n", oneLine(ref, maxRefRunes))
 	}
 	fmt.Fprintf(&head, "Question: %s\n", block(v.Question, maxQuestionRunes))
-	if strings.TrimSpace(v.Reason) != "" {
+	if !rendersBlank(v.Reason) {
 		fmt.Fprintf(&head, "Reason: %s\n", block(v.Reason, maxReasonRunes))
 	}
 	if v.ResponseType == workctx.HumanInputTypeSingleChoice {
@@ -144,6 +144,16 @@ func block(s string, max int) string {
 		lines[i] = strings.TrimRightFunc(lines[i], unicode.IsSpace)
 	}
 	return strings.Join(lines, "\n"+continuationPrefix)
+}
+
+// rendersBlank reports whether s has nothing left to show once sanitized:
+// empty, whitespace, or only invisible and format code points (U+200B and
+// the like, which strings.TrimSpace keeps). It is the emptiness test the
+// renderer itself applies, so a field the poller accepts as non-empty can
+// never render as "[empty]". A maximum of one rune makes any visible text
+// come back as itself or truncated, never as the "[empty]" marker.
+func rendersBlank(s string) bool {
+	return sanitize.UserContent(s, 1) == "[empty]"
 }
 
 func isBreakOrSpace(r rune) bool { return unicode.IsSpace(r) || r == '\u2028' || r == '\u2029' }

@@ -54,7 +54,6 @@ type HumanInputDelivery struct {
 	// handler maps an answer number to the canonical option string it reads
 	// back from mctl-api, and checks it against this digest.
 	OptionDigests  []string
-	MaxLength      int
 	NotificationID int64
 	TGMessageID    int64
 	State          string
@@ -79,7 +78,7 @@ func humanInputOpen(state string) bool {
 }
 
 const humanInputDeliveryCols = `id, user_id, request_id, request_hash, request_version, work_item_id, kind,
-	answer_code, option_ids_json, max_length, notification_id, tg_message_id, state, last_outcome,
+	answer_code, option_ids_json, notification_id, tg_message_id, state, last_outcome,
 	delivered_at, responded_at, created_at, updated_at`
 
 func scanHumanInputDelivery(sc interface{ Scan(...any) error }) (HumanInputDelivery, error) {
@@ -90,7 +89,7 @@ func scanHumanInputDelivery(sc interface{ Scan(...any) error }) (HumanInputDeliv
 		deliveredAt, respondedAt sql.NullTime
 	)
 	if err := sc.Scan(&d.ID, &d.UserID, &d.RequestID, &d.RequestHash, &d.RequestVersion, &d.WorkItemID, &d.Kind,
-		&d.AnswerCode, &optionsJSON, &d.MaxLength, &notifID, &tgMsgID, &d.State, &d.LastOutcome,
+		&d.AnswerCode, &optionsJSON, &notifID, &tgMsgID, &d.State, &d.LastOutcome,
 		&deliveredAt, &respondedAt, &d.CreatedAt, &d.UpdatedAt); err != nil {
 		return HumanInputDelivery{}, err
 	}
@@ -111,64 +110,65 @@ func scanHumanInputDelivery(sc interface{ Scan(...any) error }) (HumanInputDeliv
 // UpsertHumanInputDeliveryTx inserts the delivery row for (user, request_id,
 // request_hash) and, in the same transaction, queues the owner_notifications
 // row of kind human_input carrying body. It is idempotent: when the triple
-// already has a row it changes nothing and returns inserted=false. A code
+// already has a row it changes nothing and returns inserted=false together
+// with that row's state, so the caller can tell an open row (the normal
+// repeat) from a terminal one, which no code can answer any more. A code
 // collision with another of the user's codes returns
 // ErrHumanInputCodeConflict (nothing written) so the caller can retry with a
 // fresh code. d.AnswerCode, d.Kind and the ids are required; body is the
 // pre-rendered message, sealed like every owner notification body.
-func (s *Store) UpsertHumanInputDeliveryTx(ctx context.Context, d HumanInputDelivery, body string) (inserted bool, err error) {
+func (s *Store) UpsertHumanInputDeliveryTx(ctx context.Context, d HumanInputDelivery, body string) (inserted bool, existingState string, err error) {
 	if d.UserID <= 0 || d.RequestID == "" || d.RequestHash == "" || d.Kind == "" || d.AnswerCode == "" {
-		return false, errors.New("user id, request id, request hash, kind and answer code are required")
+		return false, "", errors.New("user id, request id, request hash, kind and answer code are required")
 	}
-	var exists int
 	switch qerr := s.DB.QueryRowContext(ctx,
-		`SELECT 1 FROM human_input_deliveries WHERE user_id = $1 AND request_id = $2 AND request_hash = $3`,
-		d.UserID, d.RequestID, d.RequestHash).Scan(&exists); {
+		`SELECT state FROM human_input_deliveries WHERE user_id = $1 AND request_id = $2 AND request_hash = $3`,
+		d.UserID, d.RequestID, d.RequestHash).Scan(&existingState); {
 	case qerr == nil:
-		return false, nil
+		return false, existingState, nil
 	case !errors.Is(qerr, sql.ErrNoRows):
-		return false, fmt.Errorf("check human input delivery: %w", qerr)
+		return false, "", fmt.Errorf("check human input delivery: %w", qerr)
 	}
 	optionsJSON, err := json.Marshal(append([]string{}, d.OptionDigests...))
 	if err != nil {
-		return false, fmt.Errorf("encode option digests: %w", err)
+		return false, "", fmt.Errorf("encode option digests: %w", err)
 	}
 	sealed, err := s.Crypt.SealForUser([]byte(body), d.UserID)
 	if err != nil {
-		return false, fmt.Errorf("seal human input body: %w", err)
+		return false, "", fmt.Errorf("seal human input body: %w", err)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("begin human input delivery: %w", err)
+		return false, "", fmt.Errorf("begin human input delivery: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
 	var deliveryID int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO human_input_deliveries(user_id, request_id, request_hash, request_version, work_item_id,
-		     kind, answer_code, option_ids_json, max_length, state, created_at, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		     kind, answer_code, option_ids_json, state, created_at, updated_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		 ON CONFLICT DO NOTHING
 		 RETURNING id`,
 		d.UserID, d.RequestID, d.RequestHash, d.RequestVersion, d.WorkItemID,
-		d.Kind, d.AnswerCode, string(optionsJSON), d.MaxLength, HumanInputQueued, now, now,
+		d.Kind, d.AnswerCode, string(optionsJSON), HumanInputQueued, now, now,
 	).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Either a concurrent writer took the triple, or the code collided.
 		_ = tx.Rollback()
 		switch qerr := s.DB.QueryRowContext(ctx,
-			`SELECT 1 FROM human_input_deliveries WHERE user_id = $1 AND request_id = $2 AND request_hash = $3`,
-			d.UserID, d.RequestID, d.RequestHash).Scan(&exists); {
+			`SELECT state FROM human_input_deliveries WHERE user_id = $1 AND request_id = $2 AND request_hash = $3`,
+			d.UserID, d.RequestID, d.RequestHash).Scan(&existingState); {
 		case qerr == nil:
-			return false, nil
+			return false, existingState, nil
 		case errors.Is(qerr, sql.ErrNoRows):
-			return false, ErrHumanInputCodeConflict
+			return false, "", ErrHumanInputCodeConflict
 		default:
-			return false, fmt.Errorf("recheck human input delivery: %w", qerr)
+			return false, "", fmt.Errorf("recheck human input delivery: %w", qerr)
 		}
 	}
 	if err != nil {
-		return false, fmt.Errorf("insert human input delivery: %w", err)
+		return false, "", fmt.Errorf("insert human input delivery: %w", err)
 	}
 	var notifID int64
 	if err := tx.QueryRowContext(ctx,
@@ -176,16 +176,16 @@ func (s *Store) UpsertHumanInputDeliveryTx(ctx context.Context, d HumanInputDeli
 		 VALUES($1,$2,$3,$4) RETURNING id`,
 		d.UserID, NotificationHumanInput, sealed, NotificationPending,
 	).Scan(&notifID); err != nil {
-		return false, fmt.Errorf("queue human input notification: %w", err)
+		return false, "", fmt.Errorf("queue human input notification: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE human_input_deliveries SET notification_id = $1 WHERE id = $2`, notifID, deliveryID); err != nil {
-		return false, fmt.Errorf("link human input notification: %w", err)
+		return false, "", fmt.Errorf("link human input notification: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit human input delivery: %w", err)
+		return false, "", fmt.Errorf("commit human input delivery: %w", err)
 	}
-	return true, nil
+	return true, "", nil
 }
 
 // GetHumanInputDeliveryByCode looks up a delivery by (user_id, answer_code).
