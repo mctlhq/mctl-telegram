@@ -439,7 +439,7 @@ func (w *WorkHandler) errText(err error) string {
 		var apiErr *workctx.APIError
 		if errors.As(err, &apiErr) {
 			slog.Warn("work: unmapped platform error", "status", apiErr.StatusCode,
-				"code", apiErr.Code, "correlation_id", apiErr.CorrelationID)
+				"platform_code", apiErr.Code, "correlation_id", apiErr.CorrelationID)
 		} else {
 			slog.Warn("work: platform call failed", "err", err)
 		}
