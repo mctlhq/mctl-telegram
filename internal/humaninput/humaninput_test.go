@@ -61,6 +61,10 @@ type fakeMCTL struct {
 	lists, gets int
 	posts       []post
 	requests    atomic.Int64
+	// getHang makes GET /human-input/{id} hang until the client gives up;
+	// hungGets counts those calls.
+	getHang  atomic.Bool
+	hungGets atomic.Int64
 }
 
 type post struct {
@@ -96,6 +100,11 @@ func dropConn(w http.ResponseWriter) {
 
 func (f *fakeMCTL) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests.Add(1)
+	if f.getHang.Load() && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/human-input/") {
+		f.hungGets.Add(1)
+		<-r.Context().Done()
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	actor, _ := strconv.ParseInt(r.Header.Get("X-MCTL-Surface-Actor"), 10, 64)
@@ -1240,6 +1249,9 @@ func TestLogsCarryNoContent(t *testing.T) {
 	e := newEnv(t)
 	v := choiceReq(reqA, "h1")
 	v.Question = "ZQXQUESTIONTEXT"
+	// reason is not in the slog redaction list (internal/audit/redact.go
+	// explains why), so this test is what keeps it out of the logs.
+	v.Reason = "ZQXREASONTEXT"
 	v.Options = []string{"ZQXLABELONE", "ZQXLABELTWO"}
 	code := deliveredCode(t, e, v)
 	e.say(t, 170, "/mctl input "+code+" 2")
@@ -1318,5 +1330,156 @@ func TestDuplicateOptionsAreUndeliverable(t *testing.T) {
 	e.api.publish(aliceTGID, v)
 	if got := e.deliver(t); len(got) != 0 {
 		t.Fatalf("delivered %q", got)
+	}
+}
+
+// issue-735: canonical reads of open rows absent from the list are bounded per
+// actor and poll, by count and by time, so rows whose reads keep failing
+// cannot stall the whole poll. Rows left unread stay open.
+func TestSettleReadsAreCappedPerPoll(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	var reqs []workctx.RequestView
+	for i := 0; i < 8; i++ {
+		reqs = append(reqs, freeReq(fmt.Sprintf("hir-%016x", 0xd00+i), "h", fmt.Sprintf("Q%d?", i)))
+	}
+	e.api.publish(aliceTGID, reqs...)
+	if got := e.deliver(t); len(got) != 8 {
+		t.Fatalf("delivered %d, want 8", len(got))
+	}
+	// Absent from the list, and every canonical read says "unknown", so
+	// every row stays open and is due for a read on every poll. (Not
+	// getFail: the HTTP client retries a GET on a dropped connection, which
+	// would blur the count.)
+	e.api.with(func() { e.api.pending[aliceTGID] = nil })
+	for _, r := range reqs {
+		e.api.setState(r.RequestID, workctx.HumanInputStateUnknown)
+	}
+	before := e.api.getCount()
+	if err := e.poller.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// maxSettleReads in poller.go.
+	if n := e.api.getCount() - before; n != 5 {
+		t.Fatalf("canonical reads in one poll = %d, want 5", n)
+	}
+	if open, _ := e.store.ListOpenHumanInputDeliveries(ctx, e.uid); len(open) != 8 {
+		t.Fatalf("open rows = %d, want all 8 kept", len(open))
+	}
+}
+
+func TestSettleReadsShareOneTimeBudget(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.api.publish(aliceTGID, freeReq(reqA, "h1", "A?"), freeReq(reqB, "h2", "B?"), freeReq(reqC, "h3", "C?"))
+	if got := e.deliver(t); len(got) != 3 {
+		t.Fatalf("delivered %d, want 3", len(got))
+	}
+	e.api.with(func() { e.api.pending[aliceTGID] = nil })
+	e.api.getHang.Store(true)
+	e.poller.SettleBudget = 300 * time.Millisecond
+	start := time.Now()
+	if err := e.poller.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Without the shared budget each hung read waits out the 20s relay
+	// timeout, one after another.
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("poll took %v with hung canonical reads", took)
+	}
+	if e.api.hungGets.Load() == 0 {
+		t.Fatal("no canonical read was attempted; the test proves nothing")
+	}
+	if open, _ := e.store.ListOpenHumanInputDeliveries(ctx, e.uid); len(open) != 3 {
+		t.Fatalf("open rows = %d, want all 3 kept after failed reads", len(open))
+	}
+}
+
+// issue-735: a request mctl-api lists as pending whose (request_id,
+// request_hash) row here is already terminal (closed on a 404 that a later
+// visibility change reverted) is never re-sent, but it is reported once as
+// undeliverable instead of being skipped silently.
+func TestPendingRequestWithTerminalRowIsReported(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	e := newEnv(t)
+	v := choiceReq(reqA, "h1")
+	code := deliveredCode(t, e, v)
+	// Gone from the list and the canonical read answers 404: closed.
+	e.api.with(func() {
+		e.api.pending[aliceTGID] = nil
+		delete(e.api.views, reqA)
+	})
+	e.deliver(t)
+	if st := e.row(t, code).State; st != db.HumanInputInactive {
+		t.Fatalf("state = %s, want inactive", st)
+	}
+
+	// Visible and pending again, same hash.
+	e.api.publish(aliceTGID, v)
+	for i := 0; i < 3; i++ {
+		if got := e.deliver(t); len(got) != 0 {
+			t.Fatalf("terminal triple re-sent: %q", got)
+		}
+	}
+	if n := strings.Count(buf.String(), "not deliverable on telegram"); n != 1 {
+		t.Fatalf("undeliverable log lines = %d, want 1:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "outcome=closed_inactive") {
+		t.Fatalf("missing reason:\n%s", buf.String())
+	}
+}
+
+// issue-735: the poller's emptiness test is the renderer's. A question made
+// only of invisible code points renders as "[empty]", so it is routed to
+// empty_question rather than delivered; the same goes for an option.
+func TestInvisibleOnlyQuestionIsUndeliverable(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	e := newEnv(t)
+	e.api.publish(aliceTGID, freeReq(reqA, "h1", "\u200b\u200d\ufeff"))
+	if got := e.deliver(t); len(got) != 0 {
+		t.Fatalf("invisible-only question delivered: %q", got)
+	}
+	if !strings.Contains(buf.String(), "outcome=empty_question") {
+		t.Fatalf("missing empty_question:\n%s", buf.String())
+	}
+
+	choice := choiceReq(reqB, "h2")
+	choice.Options = []string{"Alpha", "\u200b"}
+	e.api.publish(aliceTGID, choice)
+	if got := e.deliver(t); len(got) != 0 {
+		t.Fatalf("invisible-only option delivered: %q", got)
+	}
+	if !strings.Contains(buf.String(), "outcome=empty_option") {
+		t.Fatalf("missing empty_option:\n%s", buf.String())
+	}
+}
+
+// Options that differ only in what the renderer strips read the same to the
+// owner, so they are as ambiguous as exact duplicates.
+func TestOptionsEqualOnceRenderedAreUndeliverable(t *testing.T) {
+	e := newEnv(t)
+	v := choiceReq(reqA, "h1")
+	v.Options = []string{"Alpha", "Al\u200bpha", "Bravo"}
+	e.api.publish(aliceTGID, v)
+	if got := e.deliver(t); len(got) != 0 {
+		t.Fatalf("delivered %q", got)
+	}
+}
+
+// A reason made only of invisible code points is omitted, not rendered as
+// "Reason: [empty]".
+func TestInvisibleOnlyReasonIsOmitted(t *testing.T) {
+	v := choiceReq(reqA, "h1")
+	v.Reason = "\u200b \u2060"
+	if out := humaninput.Render(v, "K7QM3R"); strings.Contains(out, "Reason:") {
+		t.Fatalf("rendered a blank reason:\n%s", out)
 	}
 }

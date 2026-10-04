@@ -48,8 +48,15 @@ var sensitiveKeys = map[string]struct{}{
 	"bearer":                      {},
 	// Human-input (agent clarification) content, issue-571: the question the
 	// agent asked and the answer the owner typed are private user content.
+	//
+	// "reason" — the field that carries the agent's explanation
+	// (RequestView.Reason, rendered like the question) — is DELIBERATELY
+	// absent: it is a non-sensitive key across the rest of the codebase
+	// (refusal reasons, execution-request reasons, audit failure classes),
+	// and redacting it would hide that operational detail. internal/humaninput
+	// never logs any request field under any key; TestLogsCarryNoContent
+	// carries that invariant for reason as for the others.
 	"question": {},
-	"why":      {},
 	"options":  {},
 	"answer":   {},
 	"value":    {},

@@ -44,18 +44,18 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	base := HumanInputDelivery{
 		UserID: uid, RequestID: "hi_1", RequestHash: "h1", RequestVersion: 1,
 		WorkItemID: "wi_1", Kind: "single_choice", AnswerCode: "K7QM3R",
-		OptionDigests: []string{"0123456789abcdef", "fedcba9876543210"}, MaxLength: 0,
+		OptionDigests: []string{"0123456789abcdef", "fedcba9876543210"},
 	}
 
 	// Idempotent insert: the second call is a no-op and queues no second
 	// notification.
-	ins, err := s.UpsertHumanInputDeliveryTx(ctx, base, "body one")
-	if err != nil || !ins {
-		t.Fatalf("first upsert inserted=%v err=%v", ins, err)
+	ins, existing, err := s.UpsertHumanInputDeliveryTx(ctx, base, "body one")
+	if err != nil || !ins || existing != "" {
+		t.Fatalf("first upsert inserted=%v existing=%q err=%v", ins, existing, err)
 	}
-	ins, err = s.UpsertHumanInputDeliveryTx(ctx, base, "body one")
-	if err != nil || ins {
-		t.Fatalf("second upsert inserted=%v err=%v", ins, err)
+	ins, existing, err = s.UpsertHumanInputDeliveryTx(ctx, base, "body one")
+	if err != nil || ins || existing != HumanInputQueued {
+		t.Fatalf("second upsert inserted=%v existing=%q err=%v, want the open row's state", ins, existing, err)
 	}
 	var n int
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM owner_notifications WHERE user_id=$1 AND kind=$2`, uid, NotificationHumanInput).Scan(&n); err != nil || n != 1 {
@@ -65,7 +65,7 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	// A different request reusing the code is a conflict, nothing written.
 	clash := base
 	clash.RequestID, clash.RequestHash = "hi_2", "h2"
-	if _, err := s.UpsertHumanInputDeliveryTx(ctx, clash, "x"); !errors.Is(err, ErrHumanInputCodeConflict) {
+	if _, _, err := s.UpsertHumanInputDeliveryTx(ctx, clash, "x"); !errors.Is(err, ErrHumanInputCodeConflict) {
 		t.Fatalf("clash err = %v, want ErrHumanInputCodeConflict", err)
 	}
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM owner_notifications WHERE user_id=$1`, uid).Scan(&n); err != nil || n != 1 {
@@ -98,7 +98,7 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	// New hash for the same request supersedes the old row.
 	v2 := base
 	v2.RequestHash, v2.AnswerCode = "h1b", "ZZ2222"
-	if ins, err := s.UpsertHumanInputDeliveryTx(ctx, v2, "body two"); err != nil || !ins {
+	if ins, _, err := s.UpsertHumanInputDeliveryTx(ctx, v2, "body two"); err != nil || !ins {
 		t.Fatalf("v2 upsert inserted=%v err=%v", ins, err)
 	}
 	if c, err := s.SupersedeHumanInputDeliveries(ctx, uid, "hi_1", "h1b"); err != nil || c != 1 {
@@ -107,6 +107,11 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	old, _ := s.GetHumanInputDeliveryByCode(ctx, uid, "K7QM3R")
 	if old.State != HumanInputSuperseded || !old.Terminal() {
 		t.Fatalf("old = %+v", old)
+	}
+	// Re-offering a triple whose row is terminal changes nothing but reports
+	// the terminal state, so the poller can make it visible (issue-735).
+	if ins, existing, err := s.UpsertHumanInputDeliveryTx(ctx, base, "body one again"); err != nil || ins || existing != HumanInputSuperseded {
+		t.Fatalf("terminal re-upsert inserted=%v existing=%q err=%v, want (false, %q)", ins, existing, err, HumanInputSuperseded)
 	}
 
 	// Marking a still-queued row terminal retires its pending notification.
@@ -119,7 +124,7 @@ func assertHumanInputStore(t *testing.T, s *Store) {
 	// open, supersedable, and it does not retire anything.
 	v3 := base
 	v3.RequestID, v3.RequestHash, v3.AnswerCode = "hi_3", "h3", "SB3333"
-	if ins, err := s.UpsertHumanInputDeliveryTx(ctx, v3, "body three"); err != nil || !ins {
+	if ins, _, err := s.UpsertHumanInputDeliveryTx(ctx, v3, "body three"); err != nil || !ins {
 		t.Fatalf("v3 upsert inserted=%v err=%v", ins, err)
 	}
 	sub, _ := s.GetHumanInputDeliveryByCode(ctx, uid, "SB3333")
@@ -229,7 +234,7 @@ func TestHumanInputSchemaHasNoContentColumn(t *testing.T) {
 		got = append(got, name)
 	}
 	want := []string{"id", "user_id", "request_id", "request_hash", "request_version", "work_item_id", "kind",
-		"answer_code", "option_ids_json", "max_length", "notification_id", "tg_message_id", "state",
+		"answer_code", "option_ids_json", "notification_id", "tg_message_id", "state",
 		"last_outcome", "delivered_at", "responded_at", "created_at", "updated_at"}
 	sort.Strings(got)
 	sort.Strings(want)

@@ -556,8 +556,8 @@ func agentSchemaSQLite() []string {
 		// construction: no question, reason, option or answer column exists.
 		// The rendered body lives only in the encrypted owner_notifications
 		// row. option_ids_json holds per-option digests, never option text.
-		// max_length is unused (mctl-api names no per-request maximum). Answer codes live
-		// here, in their own namespace, never in agent_actions.
+		// Answer codes live here, in their own namespace, never in
+		// agent_actions.
 		`CREATE TABLE IF NOT EXISTS human_input_deliveries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -568,7 +568,6 @@ func agentSchemaSQLite() []string {
 			kind TEXT NOT NULL,
 			answer_code TEXT NOT NULL,
 			option_ids_json TEXT NOT NULL DEFAULT '[]',
-			max_length INTEGER NOT NULL DEFAULT 0,
 			notification_id INTEGER REFERENCES owner_notifications(id) ON DELETE SET NULL,
 			tg_message_id INTEGER,
 			state TEXT NOT NULL DEFAULT 'queued',
@@ -862,7 +861,6 @@ func agentSchemaPG() []string {
 			kind TEXT NOT NULL,
 			answer_code TEXT NOT NULL,
 			option_ids_json TEXT NOT NULL DEFAULT '[]',
-			max_length BIGINT NOT NULL DEFAULT 0,
 			notification_id BIGINT REFERENCES owner_notifications(id) ON DELETE SET NULL,
 			tg_message_id BIGINT,
 			state TEXT NOT NULL DEFAULT 'queued',

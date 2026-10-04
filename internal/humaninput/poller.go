@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,15 @@ const (
 	// codeAttempts bounds retries on the (astronomically rare) answer-code
 	// collision.
 	codeAttempts = 5
+	// maxSettleReads and settleBudget bound the canonical reads one actor's
+	// poll spends on open rows absent from the pending list. Each read can
+	// take the full relay timeout, actors are polled one after another, and
+	// a row whose read keeps failing stays open and is re-read every poll —
+	// so without a bound a few such rows on one user would hold every other
+	// actor's poll back. Rows left unread wait for a later poll, which picks
+	// a fresh random subset.
+	maxSettleReads = 5
+	settleBudget   = 10 * time.Second
 )
 
 // Poller discovers pending human-input requests per enrolled actor and queues
@@ -48,6 +58,10 @@ type Poller struct {
 	GlobalKill func() bool
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
+	// SettleBudget bounds one actor's canonical reads of absent rows per
+	// poll (see maxSettleReads); 0 means the package default. Injectable
+	// for tests.
+	SettleBudget time.Duration
 
 	// undeliverableMu guards undeliverableSeen. RunOnce is exported and
 	// otherwise reentrant, so the map must not rely on there being a single
@@ -142,9 +156,20 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 			p.noteUndeliverable(a.UserID, r, reason, undeliverableNow)
 			continue
 		}
-		if err := p.enqueue(ctx, a.UserID, r); err != nil {
+		closedState, err := p.enqueue(ctx, a.UserID, r)
+		if err != nil {
 			slog.Warn("human input enqueue failed", "user_id", a.UserID, "request_id", r.RequestID, "outcome", errClass(err), "correlation_id", r.CorrelationID)
 			p.Metrics.CountHumanInputEvent(metrics.HumanInputEventDeliveryAttempt, "error")
+			continue
+		}
+		if closedState != "" {
+			// mctl-api lists the request as pending, but this exact
+			// (request_id, request_hash) already has a terminal row here —
+			// e.g. one closed on a 404 that a later visibility change
+			// reverted. No code can answer it from Telegram any more, so it
+			// is reported like any other undeliverable request rather than
+			// skipped silently while the agent stays parked.
+			p.noteUndeliverable(a.UserID, r, "closed_"+closedState, undeliverableNow)
 		}
 	}
 
@@ -152,11 +177,30 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 	if err != nil {
 		return err
 	}
+	var absent []db.HumanInputDelivery
 	for _, d := range open {
-		if _, still := listed[d.RequestID+"\x00"+d.RequestHash]; still {
-			continue
+		if _, still := listed[d.RequestID+"\x00"+d.RequestHash]; !still {
+			absent = append(absent, d)
 		}
-		p.settleAbsent(ctx, a, d)
+	}
+	if len(absent) > maxSettleReads {
+		rand.Shuffle(len(absent), func(i, j int) { absent[i], absent[j] = absent[j], absent[i] })
+		slog.Info("human input settle reads capped", "user_id", a.UserID, "absent", len(absent), "read", maxSettleReads)
+		absent = absent[:maxSettleReads]
+	}
+	budget := p.SettleBudget
+	if budget <= 0 {
+		budget = settleBudget
+	}
+	// One deadline for all of this actor's canonical reads; only the reads
+	// use it, so a row whose read did succeed is still marked in full.
+	readCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	for _, d := range absent {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		p.settleAbsent(ctx, readCtx, a, d)
 	}
 	return nil
 }
@@ -168,9 +212,12 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 // longer pending for this hash, or answers 404 (gone, or no longer visible
 // to this human). A failed read, an "unknown" state or a still-pending
 // request leaves the row open and its code answerable.
-func (p *Poller) settleAbsent(ctx context.Context, a db.HumanInputActor, d db.HumanInputDelivery) {
+//
+// readCtx bounds the canonical read only (see maxSettleReads); a read cut
+// off by it is a failed read and leaves the row open.
+func (p *Poller) settleAbsent(ctx, readCtx context.Context, a db.HumanInputActor, d db.HumanInputDelivery) {
 	logArgs := []any{"user_id", a.UserID, "delivery_id", d.ID, "request_id", d.RequestID}
-	v, err := p.API.GetHumanInput(ctx, a.TGID, d.RequestID)
+	v, err := p.API.GetHumanInput(readCtx, a.TGID, d.RequestID)
 	var state, outcome string
 	switch {
 	case errors.Is(err, workctx.ErrHumanInputNotFound):
@@ -234,7 +281,7 @@ func undeliverable(r workctx.RequestView) string {
 	switch {
 	case !workctx.ValidHumanInputRequestID(r.RequestID) || r.RequestHash == "":
 		return "malformed"
-	case strings.TrimSpace(r.Question) == "":
+	case rendersBlank(r.Question):
 		return "empty_question"
 	case !r.Respondable():
 		return "cannot_respond"
@@ -250,17 +297,25 @@ func undeliverable(r workctx.RequestView) string {
 			return "too_many_options"
 		}
 		digests := make(map[string]struct{}, len(r.Options))
+		shown := make(map[string]struct{}, len(r.Options))
 		for _, o := range r.Options {
-			if strings.TrimSpace(o) == "" {
+			if rendersBlank(o) {
 				return "empty_option"
 			}
 			// Two options equal up to case or surrounding whitespace would
-			// make a typed answer ambiguous (and their digests equal).
+			// make a typed answer ambiguous (and their digests equal). Two
+			// that differ only in what the renderer strips or truncates
+			// (invisible code points, text past maxLabelRunes) have distinct
+			// digests but read the same to the owner.
 			d := OptionDigest(o)
-			if _, dup := digests[d]; dup {
+			label := strings.ToLower(oneLine(o, maxLabelRunes))
+			_, dupDigest := digests[d]
+			_, dupLabel := shown[label]
+			if dupDigest || dupLabel {
 				return "duplicate_options"
 			}
 			digests[d] = struct{}{}
+			shown[label] = struct{}{}
 		}
 		return ""
 	default:
@@ -321,9 +376,12 @@ func optionDigests(r workctx.RequestView) []string {
 	return out
 }
 
-func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestView) error {
+// enqueue queues the delivery for r. closedState is the state of a terminal
+// row that already holds r's (request_id, request_hash), or "" when the row
+// was inserted now or is still open.
+func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestView) (closedState string, err error) {
 	if _, err := p.Store.SupersedeHumanInputDeliveries(ctx, userID, r.RequestID, r.RequestHash); err != nil {
-		return err
+		return "", err
 	}
 	if r.WorkItemID != "" {
 		key, ok, err := p.Store.WorkItemExternalKey(ctx, userID, r.WorkItemID)
@@ -344,23 +402,27 @@ func (p *Poller) enqueue(ctx context.Context, userID int64, r workctx.RequestVie
 	for attempt := 0; attempt < codeAttempts; attempt++ {
 		code, err := newAnswerCode()
 		if err != nil {
-			return err
+			return "", err
 		}
 		d.AnswerCode = code
-		inserted, err := p.Store.UpsertHumanInputDeliveryTx(ctx, d, Render(r, code))
+		inserted, existing, err := p.Store.UpsertHumanInputDeliveryTx(ctx, d, Render(r, code))
 		if errors.Is(err, db.ErrHumanInputCodeConflict) {
 			continue
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		if inserted {
 			p.Metrics.CountHumanInputEvent(metrics.HumanInputEventDeliveryAttempt, "ok")
 			slog.Info("human input queued", "user_id", userID, "request_id", r.RequestID, "work_item_id", r.WorkItemID, "correlation_id", r.CorrelationID)
+			return "", nil
 		}
-		return nil
+		if (db.HumanInputDelivery{State: existing}).Terminal() {
+			return safeToken(existing), nil
+		}
+		return "", nil
 	}
-	return errors.New("answer code collision retries exhausted")
+	return "", errors.New("answer code collision retries exhausted")
 }
 
 // reservedCodes are words /mctl input parses as a subcommand. A generated
