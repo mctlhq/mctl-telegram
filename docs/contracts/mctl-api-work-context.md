@@ -64,6 +64,8 @@ A design that needs any of these from the bot is wrong for this contract.
 ## `workitem/v1` envelope and semantics
 
 - Responses carry `"schema_version": "workitem/v1"`. The item view is `{schema_version, work_item, state_version, latest_execution, …}`.
+- The single execution-request routes (`POST .../execution-requests`, `GET .../execution-requests/{request_id}`) answer `{schema_version, execution_request: {id, kind, state, execution_id?, reason?, …}}`, the request nested under `execution_request` (mctl-api `writeExecutionRequest`). The list route answers `{schema_version, execution_requests: [...]}` with flat entries.
+- `intent_id` in an execution-request body is mctl-api's numeric intent id (a JSON number), not a string.
 - States: `active`, `waiting`, `completed`, `superseded`, `archived`.
 - `state_version` is optimistic concurrency: send `expected_state_version`, and a mismatch is 409.
 - Idempotency comes from the `Idempotency-Key` header or `idempotency_key`, bound to the acting (relayed) human.

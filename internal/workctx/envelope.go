@@ -97,8 +97,9 @@ type ItemView struct {
 
 func (v *ItemView) schemaVersion() string { return v.SchemaVersionField }
 
-// ExecutionRequestView is the mctl-api#368 execution-request view: what
-// GET .../execution-requests[/{id}] and the POST that creates one return.
+// ExecutionRequestView is the mctl-api#368 execution-request object: one
+// entry of GET .../execution-requests, and the "execution_request" member of
+// executionRequestEnvelope for the single-request routes.
 // ExecutionID and Reason are only ever read back, never sent — this package
 // has no field anywhere a caller can set either one.
 //
@@ -121,6 +122,30 @@ func (v *ExecutionRequestView) validate() error {
 		return fmt.Errorf("%w: response missing execution request id", ErrIncompatibleSchema)
 	}
 	return nil
+}
+
+// executionRequestEnvelope is the wire shape of the single-request routes,
+// POST .../execution-requests and GET .../execution-requests/{id}: mctl-api's
+// writeExecutionRequest nests the request under "execution_request" next to
+// schema_version. Decoding the body straight into an ExecutionRequestView
+// read an empty id from every real response, so a start the platform had
+// accepted was reported to the owner as an incompatible response.
+type executionRequestEnvelope struct {
+	SchemaVersionField string               `json:"schema_version"`
+	ExecutionRequest   ExecutionRequestView `json:"execution_request"`
+}
+
+func (e *executionRequestEnvelope) schemaVersion() string { return e.SchemaVersionField }
+
+// validate requires the nested request id, for the reason given on
+// ExecutionRequestView.validate.
+func (e *executionRequestEnvelope) validate() error { return e.ExecutionRequest.validate() }
+
+// view returns the nested request carrying the envelope's schema_version.
+func (e *executionRequestEnvelope) view() *ExecutionRequestView {
+	v := e.ExecutionRequest
+	v.SchemaVersionField = e.SchemaVersionField
+	return &v
 }
 
 // executionRequestListEnvelope is the wire shape of

@@ -132,8 +132,9 @@ func TestRouteAllowlist(t *testing.T) {
 			return
 		}
 		// Carries both an ItemView's work_item.id and an
-		// ExecutionRequestView's id, so every route's validate() passes.
-		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","id":"xr_1","work_item":{"id":"wi_1"},"state_version":1}`))
+		// executionRequestEnvelope's execution_request.id, so every route's
+		// validate() passes.
+		_, _ = w.Write([]byte(`{"schema_version":"workitem/v1","execution_request":{"id":"xr_1"},"work_item":{"id":"wi_1"},"state_version":1}`))
 	}))
 	defer srv.Close()
 
@@ -406,6 +407,51 @@ func TestExecutionRequestResponseValidation(t *testing.T) {
 	}
 	if _, err := client.GetExecutionRequest(context.Background(), 555, "wi_1", "xr_1"); !errors.Is(err, ErrIncompatibleSchema) {
 		t.Fatalf("GetExecutionRequest: err = %v, want ErrIncompatibleSchema", err)
+	}
+}
+
+// TestExecutionRequestEnvelopeDecode pins the single-request routes to the
+// body mctl-api actually sends (writeExecutionRequest nests the request under
+// "execution_request"). The response below is the live 2026-10-04 reply for
+// a start request, trimmed of fields this client does not read. A flat
+// decode reads an empty id from it and reports ErrIncompatibleSchema for a
+// start the platform has accepted.
+func TestExecutionRequestEnvelopeDecode(t *testing.T) {
+	const body = `{"schema_version":"workitem/v1","execution_request":{"id":"xr_100a3a81d0714b55a56bca3315a106d4","work_item_id":"wi_6c136ca9-ae65-4ef4-8868-74ad4b810a92","kind":"start","expected_state_version":1,"surface":"telegram","state":"fulfilled","execution_id":"we_d7f6a911-b98b-4d0d-9380-092ec123d091","schema_version":"workitem/v1"}}`
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(http.StatusCreated)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "tok", "tenant", nil)
+	want := ExecutionRequestView{
+		SchemaVersionField: SchemaVersion, ID: "xr_100a3a81d0714b55a56bca3315a106d4", Kind: "start",
+		State: "fulfilled", ExecutionID: "we_d7f6a911-b98b-4d0d-9380-092ec123d091",
+	}
+	got, err := client.RequestExecution(context.Background(), 555, "wi_6c136ca9-ae65-4ef4-8868-74ad4b810a92",
+		ExecutionRequest{Kind: ExecutionKindStart, ExpectedStateVersion: 1, IntentID: 42, IdempotencyKey: "k"})
+	if err != nil {
+		t.Fatalf("RequestExecution: %v", err)
+	}
+	if *got != want {
+		t.Fatalf("RequestExecution = %+v, want %+v", *got, want)
+	}
+	// intent_id is *int64 in mctl-api's executionRequestBody; a string is a
+	// 400 decode error there.
+	if id, ok := gotBody["intent_id"].(float64); !ok || id != 42 {
+		t.Fatalf("intent_id on the wire = %#v, want the number 42", gotBody["intent_id"])
+	}
+	got, err = client.GetExecutionRequest(context.Background(), 555, "wi_6c136ca9-ae65-4ef4-8868-74ad4b810a92", want.ID)
+	if err != nil {
+		t.Fatalf("GetExecutionRequest: %v", err)
+	}
+	if *got != want {
+		t.Fatalf("GetExecutionRequest = %+v, want %+v", *got, want)
 	}
 }
 

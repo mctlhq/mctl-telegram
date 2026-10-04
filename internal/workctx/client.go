@@ -278,8 +278,10 @@ type ExecutionRequest struct {
 	Kind                   string
 	ExpectedStateVersion   int64
 	ResumedFromExecutionID string
-	IntentID               string
-	IdempotencyKey         string
+	// IntentID is mctl-api's numeric intent id (intent_id is *int64 on the
+	// wire); zero means "no intent" and is omitted.
+	IntentID       int64
+	IdempotencyKey string
 }
 
 // RequestExecution calls POST /api/v1/work-items/{id}/execution-requests.
@@ -292,29 +294,29 @@ func (c *Client) RequestExecution(ctx context.Context, actorTGID int64, id strin
 	if r.ResumedFromExecutionID != "" {
 		wireBody["resumed_from_execution_id"] = r.ResumedFromExecutionID
 	}
-	if r.IntentID != "" {
+	if r.IntentID != 0 {
 		wireBody["intent_id"] = r.IntentID
 	}
 	if r.IdempotencyKey != "" {
 		wireBody["idempotency_key"] = r.IdempotencyKey
 	}
-	var out ExecutionRequestView
+	var out executionRequestEnvelope
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/execution-requests"
 	if err := c.relay(ctx, "request_execution", http.MethodPost, path, actorTGID, r.IdempotencyKey, wireBody, &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out.view(), nil
 }
 
 // GetExecutionRequest calls
 // GET /api/v1/work-items/{id}/execution-requests/{request_id}.
 func (c *Client) GetExecutionRequest(ctx context.Context, actorTGID int64, id, requestID string) (*ExecutionRequestView, error) {
-	var out ExecutionRequestView
+	var out executionRequestEnvelope
 	path := "/api/v1/work-items/" + url.PathEscape(id) + "/execution-requests/" + url.PathEscape(requestID)
 	if err := c.relay(ctx, "get_execution_request", http.MethodGet, path, actorTGID, "", nil, &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out.view(), nil
 }
 
 // ListExecutionRequests calls
