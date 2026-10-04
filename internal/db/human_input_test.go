@@ -234,7 +234,7 @@ func TestHumanInputSchemaHasNoContentColumn(t *testing.T) {
 		got = append(got, name)
 	}
 	want := []string{"id", "user_id", "request_id", "request_hash", "request_version", "work_item_id", "kind",
-		"answer_code", "option_ids_json", "notification_id", "tg_message_id", "state",
+		"answer_code", "option_ids_json", "max_length", "notification_id", "tg_message_id", "state",
 		"last_outcome", "delivered_at", "responded_at", "created_at", "updated_at"}
 	sort.Strings(got)
 	sort.Strings(want)
@@ -245,5 +245,40 @@ func TestHumanInputSchemaHasNoContentColumn(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("columns = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestHumanInputMaxLengthKeptButUnused (issue-735): the max_length column
+// stays in the schema so a rollback to 0.79.x, which selects and inserts it,
+// keeps working, while this code never sets or reads it. A row written and
+// read back through the store round-trips, and the column holds its default.
+func TestHumanInputMaxLengthKeptButUnused(t *testing.T) {
+	s := newTestStoreCrypted(t)
+	ctx := context.Background()
+	uid, err := s.EnsureUserByTelegramID(ctx, 700250, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	d := HumanInputDelivery{
+		UserID: uid, RequestID: "hi_ml", RequestHash: "hml", RequestVersion: 1,
+		Kind: "free_text", AnswerCode: "ML4444",
+	}
+	if ins, _, err := s.UpsertHumanInputDeliveryTx(ctx, d, "body"); err != nil || !ins {
+		t.Fatalf("upsert inserted=%v err=%v", ins, err)
+	}
+	got, err := s.GetHumanInputDeliveryByCode(ctx, uid, "ML4444")
+	if err != nil || got.RequestID != "hi_ml" || got.State != HumanInputQueued {
+		t.Fatalf("get = %+v err=%v", got, err)
+	}
+	if open, err := s.ListOpenHumanInputDeliveries(ctx, uid); err != nil || len(open) != 1 {
+		t.Fatalf("open = %+v err=%v", open, err)
+	}
+	var maxLength int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT max_length FROM human_input_deliveries WHERE id = $1`, got.ID).Scan(&maxLength); err != nil {
+		t.Fatalf("max_length must still exist for rollback safety: %v", err)
+	}
+	if maxLength != 0 {
+		t.Fatalf("max_length = %d, want the column default 0", maxLength)
 	}
 }

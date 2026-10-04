@@ -231,28 +231,3 @@ func TestDropColumnIfPresent_Postgres(t *testing.T) {
 		t.Fatalf("the steady-state call waited on a table lock instead of reading the catalog: %v", err)
 	}
 }
-
-// TestMigrate_DropsHumanInputMaxLength (issue-735): human_input_deliveries
-// shipped with an always-zero max_length column in 0.79.0. A database
-// migrated by that release still has it; Migrate removes it. Re-adding it by
-// hand reproduces that state.
-func TestMigrate_DropsHumanInputMaxLength(t *testing.T) {
-	ctx := context.Background()
-	conn := openMigrated(t, "file:"+t.Name()+"?mode=memory&cache=shared")
-	if columnPresent(t, conn, "human_input_deliveries", "max_length") {
-		t.Fatal("a fresh database must not have max_length")
-	}
-	if _, err := conn.ExecContext(ctx,
-		`ALTER TABLE human_input_deliveries ADD COLUMN max_length INTEGER NOT NULL DEFAULT 0`); err != nil {
-		t.Fatalf("recreate the legacy column: %v", err)
-	}
-	if !columnPresent(t, conn, "human_input_deliveries", "max_length") {
-		t.Fatal("the legacy column was not actually recreated; the test proves nothing")
-	}
-	if err := Migrate(ctx, conn); err != nil {
-		t.Fatalf("migrate over a legacy database: %v", err)
-	}
-	if columnPresent(t, conn, "human_input_deliveries", "max_length") {
-		t.Fatal("max_length survived Migrate")
-	}
-}

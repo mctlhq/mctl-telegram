@@ -558,6 +558,12 @@ func agentSchemaSQLite() []string {
 		// row. option_ids_json holds per-option digests, never option text.
 		// Answer codes live here, in their own namespace, never in
 		// agent_actions.
+		//
+		// max_length is unused: mctl-api names no per-request maximum, the
+		// handler enforces the constant maxAnswerRunes, and this code neither
+		// reads nor writes the column (DEFAULT 0 fills inserts). It is kept
+		// so a rollback to 0.79.x, which still selects and inserts it, keeps
+		// working; drop it once no deployable release reads it (issue-735).
 		`CREATE TABLE IF NOT EXISTS human_input_deliveries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -568,6 +574,7 @@ func agentSchemaSQLite() []string {
 			kind TEXT NOT NULL,
 			answer_code TEXT NOT NULL,
 			option_ids_json TEXT NOT NULL DEFAULT '[]',
+			max_length INTEGER NOT NULL DEFAULT 0,
 			notification_id INTEGER REFERENCES owner_notifications(id) ON DELETE SET NULL,
 			tg_message_id INTEGER,
 			state TEXT NOT NULL DEFAULT 'queued',
@@ -861,6 +868,7 @@ func agentSchemaPG() []string {
 			kind TEXT NOT NULL,
 			answer_code TEXT NOT NULL,
 			option_ids_json TEXT NOT NULL DEFAULT '[]',
+			max_length BIGINT NOT NULL DEFAULT 0,
 			notification_id BIGINT REFERENCES owner_notifications(id) ON DELETE SET NULL,
 			tg_message_id BIGINT,
 			state TEXT NOT NULL DEFAULT 'queued',

@@ -494,17 +494,8 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 // already answered, so it goes instead. Dropping rather than leaving it is the
 // point: DESIGN.md described it as load-bearing, which is a live trap for the
 // next reader.
-//
-// human_input_deliveries.max_length (issue-735): declared for a per-request
-// answer cap that mctl-api's pinned human-input contract does not name. No
-// code path ever set it, so it was always 0 while the handler enforced the
-// package constant maxAnswerRunes. Dropped while the table is new, so no
-// reader mistakes it for the cap actually enforced.
 func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
-	if err := dropColumnIfPresent(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash"); err != nil {
-		return err
-	}
-	return dropColumnIfPresent(ctx, dbConn, pg, "human_input_deliveries", "max_length")
+	return dropColumnIfPresent(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash")
 }
 
 // columnExists reports whether table already has column, in whichever dialect

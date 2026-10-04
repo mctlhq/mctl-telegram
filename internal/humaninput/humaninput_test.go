@@ -1369,6 +1369,11 @@ func TestSettleReadsAreCappedPerPoll(t *testing.T) {
 }
 
 func TestSettleReadsShareOneTimeBudget(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	e := newEnv(t)
 	ctx := context.Background()
 	e.api.publish(aliceTGID, freeReq(reqA, "h1", "A?"), freeReq(reqB, "h2", "B?"), freeReq(reqC, "h3", "C?"))
@@ -1389,6 +1394,9 @@ func TestSettleReadsShareOneTimeBudget(t *testing.T) {
 	}
 	if e.api.hungGets.Load() == 0 {
 		t.Fatal("no canonical read was attempted; the test proves nothing")
+	}
+	if !strings.Contains(buf.String(), "human input settle budget spent") {
+		t.Fatalf("a spent budget must be logged as such:\n%s", buf.String())
 	}
 	if open, _ := e.store.ListOpenHumanInputDeliveries(ctx, e.uid); len(open) != 3 {
 		t.Fatalf("open rows = %d, want all 3 kept after failed reads", len(open))
@@ -1481,5 +1489,26 @@ func TestInvisibleOnlyReasonIsOmitted(t *testing.T) {
 	v.Reason = "\u200b \u2060"
 	if out := humaninput.Render(v, "K7QM3R"); strings.Contains(out, "Reason:") {
 		t.Fatalf("rendered a blank reason:\n%s", out)
+	}
+}
+
+// Options that differ only past the label cap render identically, but they are
+// distinct text the owner can still answer by number: they are delivered.
+func TestOptionsDifferingPastLabelCapAreDelivered(t *testing.T) {
+	e := newEnv(t)
+	v := choiceReq(reqA, "h1")
+	prefix := strings.Repeat("shared preamble ", 10)
+	v.Options = []string{prefix + "using JWT", prefix + "using sessions"}
+	e.api.publish(aliceTGID, v)
+	if got := e.deliver(t); len(got) != 1 {
+		t.Fatalf("delivered %d messages, want 1", len(got))
+	}
+
+	// Truncated options that are the same text are still duplicates.
+	w := choiceReq(reqB, "h2")
+	w.Options = []string{prefix + "using JWT", " " + strings.ToUpper(prefix) + "USING JWT "}
+	e.api.publish(aliceTGID, w)
+	if got := e.deliver(t); len(got) != 0 {
+		t.Fatalf("duplicate truncated options delivered: %q", got)
 	}
 }

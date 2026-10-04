@@ -38,9 +38,11 @@ const (
 	// poll spends on open rows absent from the pending list. Each read can
 	// take the full relay timeout, actors are polled one after another, and
 	// a row whose read keeps failing stays open and is re-read every poll —
-	// so without a bound a few such rows on one user would hold every other
-	// actor's poll back. Rows left unread wait for a later poll, which picks
-	// a fresh random subset.
+	// so without a bound a few such rows on one user would multiply that
+	// actor's share of the cycle. This bounds one actor's settle cost only:
+	// RunOnce itself still walks actors serially with no overall deadline.
+	// Rows left unread wait for a later poll, which picks a fresh random
+	// subset.
 	maxSettleReads = 5
 	settleBudget   = 10 * time.Second
 )
@@ -192,13 +194,21 @@ func (p *Poller) pollActor(ctx context.Context, a db.HumanInputActor) error {
 	if budget <= 0 {
 		budget = settleBudget
 	}
-	// One deadline for all of this actor's canonical reads; only the reads
-	// use it, so a row whose read did succeed is still marked in full.
+	// One wall-clock deadline from here for all of this actor's canonical
+	// reads. Only the reads take readCtx, so a row whose read succeeded is
+	// still marked in full, but the time its DB writes take is spent from
+	// the same budget.
 	readCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	for _, d := range absent {
+	for i, d := range absent {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if readCtx.Err() != nil {
+			// Logged apart from a failed read, so an operator can tell a
+			// spent budget from mctl-api failing.
+			slog.Info("human input settle budget spent", "user_id", a.UserID, "unread", len(absent)-i)
+			break
 		}
 		p.settleAbsent(ctx, readCtx, a, d)
 	}
@@ -296,26 +306,28 @@ func undeliverable(r workctx.RequestView) string {
 		if len(r.Options) > maxOptions {
 			return "too_many_options"
 		}
-		digests := make(map[string]struct{}, len(r.Options))
-		shown := make(map[string]struct{}, len(r.Options))
+		seen := make(map[string]struct{}, len(r.Options))
 		for _, o := range r.Options {
 			if rendersBlank(o) {
 				return "empty_option"
 			}
-			// Two options equal up to case or surrounding whitespace would
-			// make a typed answer ambiguous (and their digests equal). Two
-			// that differ only in what the renderer strips or truncates
-			// (invisible code points, text past maxLabelRunes) have distinct
-			// digests but read the same to the owner.
-			d := OptionDigest(o)
-			label := strings.ToLower(oneLine(o, maxLabelRunes))
-			_, dupDigest := digests[d]
-			_, dupLabel := shown[label]
-			if dupDigest || dupLabel {
+			// Options that read the same to the owner once rendered — equal
+			// up to case, whitespace or stripped invisible code points — make
+			// a typed answer ambiguous. The rendered label subsumes
+			// OptionDigest's case-and-trim normalisation, so it is the only
+			// key needed. A label cut at maxLabelRunes is the exception: there
+			// our own cap, not the agent, erased the difference, and the owner
+			// can still answer by number (the handler resolves it against the
+			// stored digest), so truncated options count as duplicates only
+			// when their digests are equal.
+			key := strings.ToLower(oneLine(o, maxLabelRunes))
+			if strings.HasSuffix(key, " [truncated]") {
+				key = "digest:" + OptionDigest(o)
+			}
+			if _, dup := seen[key]; dup {
 				return "duplicate_options"
 			}
-			digests[d] = struct{}{}
-			shown[label] = struct{}{}
+			seen[key] = struct{}{}
 		}
 		return ""
 	default:
