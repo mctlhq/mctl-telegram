@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.79.1](https://github.com/mctlhq/mctl-telegram/compare/0.79.0...0.79.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **workctx:** decode the nested execution_request envelope ([bd84154](https://github.com/mctlhq/mctl-telegram/commit/bd84154aff929d2a80997b6eda5109b0242f1a13))
+* **workctx:** decode the nested execution_request envelope ([e107462](https://github.com/mctlhq/mctl-telegram/commit/e1074627dd0acce26beeed741ecc89088fbda05d))
+
 ## [0.79.0](https://github.com/mctlhq/mctl-telegram/compare/0.78.0...0.79.0) (2026-10-03)
 
 
