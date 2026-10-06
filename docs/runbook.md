@@ -1447,7 +1447,8 @@ means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
   and JWT failures (see [JwtFailures](#jwtfailures)).
 - **MctlTelegramSessionBorrowFastBurn/SlowBurn**: Session store errors, database
   connectivity failures, or session corruption. TTL expirations
-  (`expired_idle`, `expired_absolute`) are excluded from the SLI
+  (`expired_idle`, `expired_absolute`) and Telegram replies over a working
+  session (`flood_wait`, `call_error`) are excluded from the SLI
   denominator.
 
 ### Diagnostic queries
