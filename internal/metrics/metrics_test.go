@@ -101,11 +101,11 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 }
 
 // TestSessionsBorrowTotal_AllLabelValues verifies that SessionsBorrowTotal
-// accepts all four result label values without panicking and that each
+// accepts every result label value without panicking and that each
 // produces an independent series in the gathered output.
 func TestSessionsBorrowTotal_AllLabelValues(t *testing.T) {
 	reg := New()
-	results := []string{"ok", "expired_idle", "expired_absolute", "error"}
+	results := []string{"ok", "expired_idle", "expired_absolute", "flood_wait", "call_error", "error"}
 	for _, r := range results {
 		reg.SessionsBorrowTotal.WithLabelValues(r).Inc()
 	}

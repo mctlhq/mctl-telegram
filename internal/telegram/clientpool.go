@@ -279,7 +279,7 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 	}
 	if callErr != nil {
 		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+			p.metrics.SessionsBorrowTotal.WithLabelValues(borrowCallResult(callErr)).Inc()
 		}
 		return callErr
 	}
@@ -287,6 +287,46 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		p.metrics.SessionsBorrowTotal.WithLabelValues("ok").Inc()
 	}
 	return nil
+}
+
+// borrowCallResult picks the mctl_sessions_borrow_total result label for an
+// error returned by the caller's fn, i.e. after the pool had already handed
+// out a connected client.
+//
+// The counter feeds the session-borrow availability SLI, which is meant to
+// say whether the pool could give a caller a working session. Until this
+// classifier existed every fn error landed in "error", so the SLI also
+// counted two things that say nothing about the session:
+//
+//   - flood_wait: Telegram asked the caller to slow down (code 420, or
+//     PEER_FLOOD). borrowWithRetry sleeps and calls Borrow again, so one tool
+//     call that the user sees succeed left one "error" per retried attempt.
+//     On 2026-10-06 that was 41 of the 47 errors in 24 hours and fired
+//     MctlTelegramSessionBorrowSlowBurn while 99% of tool calls were ok.
+//   - call_error: Telegram answered the request and refused it as the
+//     caller's mistake (400 or 403: an unknown peer, a missing permission).
+//     A reply of that kind is proof the session works.
+//
+// Everything else stays "error", on purpose: a session-auth rejection, a
+// Telegram 5xx, a transport failure, a cancelled or timed-out context, and
+// any error that is not an MTProto reply at all. When the session cannot be
+// shown to be healthy, the SLI keeps counting the call against it.
+func borrowCallResult(err error) string {
+	if sessionErrorFor(err) != nil {
+		return "error"
+	}
+	var te *tgerr.Error
+	if !errors.As(err, &te) {
+		return "error"
+	}
+	switch {
+	case te.Code == 420, te.Message == "PEER_FLOOD":
+		return "flood_wait"
+	case te.Code == 400, te.Code == 403:
+		return "call_error"
+	default:
+		return "error"
+	}
 }
 
 // revokeRejected evicts the pool entry and revokes the DB session for a user

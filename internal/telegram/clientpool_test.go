@@ -566,3 +566,81 @@ func TestWithMaxSessions_ZeroMeansNoCap(t *testing.T) {
 		e.cancel()
 	}
 }
+
+// TestBorrow_FnErrorResultLabel pins which mctl_sessions_borrow_total label an
+// error returned by fn gets. The session-borrow SLI reads only ok and error,
+// so an fn error that Telegram returned over a working session must not land
+// in error: a retried FLOOD_WAIT used to, and fired the slow-burn alert on
+// 2026-10-06 while tool calls were succeeding.
+func TestBorrow_FnErrorResultLabel(t *testing.T) {
+	ctx := context.Background()
+	all := []string{"ok", "expired_idle", "expired_absolute", "flood_wait", "call_error", "error"}
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"flood_wait", tgerr.New(420, "FLOOD_WAIT_17"), "flood_wait"},
+		{"flood_premium_wait", tgerr.New(420, "FLOOD_PREMIUM_WAIT_3"), "flood_wait"},
+		{"flood_wait_wrapped", fmt.Errorf("history: %w", tgerr.New(420, "FLOOD_WAIT_5")), "flood_wait"},
+		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), "flood_wait"},
+		{"bad_request", tgerr.New(400, "CHANNEL_INVALID"), "call_error"},
+		{"forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), "call_error"},
+		// Everything below may mean the session itself is unhealthy, so it
+		// has to keep counting against the SLI.
+		{"session_revoked", tgerr.New(401, "SESSION_REVOKED"), "error"},
+		{"auth_key_unregistered", tgerr.New(401, "AUTH_KEY_UNREGISTERED"), "error"},
+		{"auth_key_duplicated", tgerr.New(406, "AUTH_KEY_DUPLICATED"), "error"},
+		{"telegram_internal", tgerr.New(500, "RPC_CALL_FAIL"), "error"},
+		{"transport", errors.New("connection reset by peer"), "error"},
+		{"canceled", context.Canceled, "error"},
+		{"deadline", context.DeadlineExceeded, "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			met := metrics.New()
+			// Store is nil, so Borrow skips the database preflight and the
+			// revoke path, and the injected ready entry stands in for a
+			// connected client.
+			p := NewClientPool(1, "hash", time.Minute, nil)
+			p.WithMetrics(met)
+			e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+			close(e.ready)
+			p.mu.Lock()
+			p.entries[7] = e
+			p.mu.Unlock()
+
+			got := p.Borrow(ctx, 7, func(context.Context, *telegram.Client) error { return tc.err })
+			if !errors.Is(got, tc.err) {
+				t.Fatalf("Borrow returned %v, want the fn error %v", got, tc.err)
+			}
+			for _, r := range all {
+				want := 0.0
+				if r == tc.want {
+					want = 1
+				}
+				if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); v != want {
+					t.Errorf("result=%q: got %v, want %v", r, v, want)
+				}
+			}
+		})
+	}
+
+	t.Run("ok", func(t *testing.T) {
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, nil)
+		p.WithMetrics(met)
+		e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+		close(e.ready)
+		p.mu.Lock()
+		p.entries[7] = e
+		p.mu.Unlock()
+		if err := p.Borrow(ctx, 7, func(context.Context, *telegram.Client) error { return nil }); err != nil {
+			t.Fatalf("Borrow: %v", err)
+		}
+		if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("ok")); v != 1 {
+			t.Errorf("ok counter = %v, want 1", v)
+		}
+	})
+}

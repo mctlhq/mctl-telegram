@@ -65,9 +65,13 @@ type Registry struct {
 	// SessionsActiveGauge is refreshed by a background sampler in main().
 	SessionsActiveGauge prometheus.Gauge
 	// SessionsBorrowTotal counts every Pool.Borrow() call exit, labeled by
-	// result: ok, expired_idle, expired_absolute, error.
-	// expired_idle and expired_absolute are expected user-side TTL expirations
-	// and are excluded from the session-borrow availability SLI denominator.
+	// result: ok, expired_idle, expired_absolute, flood_wait, call_error,
+	// error.
+	// expired_idle and expired_absolute are expected user-side TTL expirations.
+	// flood_wait and call_error are fn errors that Telegram returned over a
+	// working session (a rate limit, or a 400/403 for the caller's request).
+	// All four are excluded from the session-borrow availability SLI, whose
+	// denominator is ok|error.
 	SessionsBorrowTotal *prometheus.CounterVec
 
 	// OAuth server.
@@ -567,7 +571,9 @@ func New() *Registry {
 		Name: "mctl_sessions_borrow_total",
 		Help: "Total Pool.Borrow() calls, labeled by outcome. " +
 			"expired_idle and expired_absolute are expected user-side TTL expirations; " +
-			"exclude them from the availability SLI denominator.",
+			"flood_wait and call_error are Telegram replies over a working session " +
+			"(a rate limit, or a 400/403 for the caller's request). " +
+			"Exclude all four from the availability SLI denominator.",
 	}, []string{"result"})
 
 	r.BridgeActiveDaemons = prometheus.NewGauge(prometheus.GaugeOpts{

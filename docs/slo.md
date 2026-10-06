@@ -93,7 +93,7 @@ sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[28d]))
 ```
 
 Counter: `mctl_sessions_borrow_total{result}` — label values: ok,
-expired_idle, expired_absolute, error.
+expired_idle, expired_absolute, flood_wait, call_error, error.
 
 ---
 
@@ -208,6 +208,32 @@ over 30 days), not a service failure. The SLI denominator is:
 ```promql
 sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[28d]))
 ```
+
+### Telegram replies over a working session
+
+Once the pool has handed out a connected client, an error returned by the
+caller's function is labeled by what it says about the session:
+
+- `mctl_sessions_borrow_total{result="flood_wait"}`: Telegram rate-limited
+  the request (code 420, or `PEER_FLOOD`).
+- `mctl_sessions_borrow_total{result="call_error"}`: Telegram answered and
+  refused the request as the caller's mistake (code 400 or 403, such as an
+  unknown peer or a missing permission).
+
+Both are **excluded from the session-borrow SLI**. A reply from Telegram
+shows the session works, so neither is a failure to provide one.
+`borrowWithRetry()` calls `Pool.Borrow()` once per attempt, so a tool call
+that succeeds after two flood-wait retries records two `flood_wait` and one
+`ok`.
+
+Everything else returned by the function stays `error` and counts against
+the SLI: a session-auth rejection, a Telegram 5xx, a transport failure, a
+cancelled or timed-out context, and any error that is not an MTProto reply.
+
+Before 2026-10-06 all of these were `error`. Retried flood waits alone were
+41 of 47 errors in 24 hours and fired `MctlTelegramSessionBorrowSlowBurn`
+while 99% of tool calls succeeded. Sustained rate limiting is still visible
+in `mctl_telegram_flood_wait_events_total{tool}`.
 
 ### FLOOD_WAIT retries that ultimately succeed
 
