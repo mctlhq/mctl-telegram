@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.79.2](https://github.com/mctlhq/mctl-telegram/compare/0.79.1...0.79.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* address review findings ([52e01f0](https://github.com/mctlhq/mctl-telegram/commit/52e01f018cb746c80a020773b15435494587bcfd))
+* **humaninput:** address the deferred P3s from the [#733](https://github.com/mctlhq/mctl-telegram/issues/733) review ([1501879](https://github.com/mctlhq/mctl-telegram/commit/15018796daaee8ecd1d5654174f869faf51977ff))
+* **humaninput:** address the deferred P3s from the [#733](https://github.com/mctlhq/mctl-telegram/issues/733) review ([40e31f0](https://github.com/mctlhq/mctl-telegram/commit/40e31f032c73f4ae015490d1cde21525c126e219))
+* **humaninput:** keep max_length column for rollback safety ([bfae4b2](https://github.com/mctlhq/mctl-telegram/commit/bfae4b20ee3367cf3f7c11e902b4fffb3b0d95a6))
+* **metrics:** keep Telegram replies out of the session-borrow SLI ([afc6c53](https://github.com/mctlhq/mctl-telegram/commit/afc6c53d959192fb2a3e22b608738c8f7d00d392))
+* **metrics:** keep Telegram replies out of the session-borrow SLI ([b5a9e89](https://github.com/mctlhq/mctl-telegram/commit/b5a9e89641dd22ac9f433f0a79f757654b532da7)), closes [#746](https://github.com/mctlhq/mctl-telegram/issues/746)
+* **work:** map tenant_forbidden to an actionable message ([6169016](https://github.com/mctlhq/mctl-telegram/commit/61690167db746746aa67d85072a99bb92dfe3e76))
+* **work:** map tenant_forbidden to an actionable message ([f0d78c6](https://github.com/mctlhq/mctl-telegram/commit/f0d78c62ba6fadc473776054129f715f424ba6bc))
+
 ## [0.79.1](https://github.com/mctlhq/mctl-telegram/compare/0.79.0...0.79.1) (2026-10-04)
 
 
