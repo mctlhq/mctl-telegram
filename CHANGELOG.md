@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.79.3](https://github.com/mctlhq/mctl-telegram/compare/0.79.2...0.79.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** bump Go to 1.26.9 and x/net to v0.60.0 ([90e913d](https://github.com/mctlhq/mctl-telegram/commit/90e913d5418629bb732b058d35f6b0c159905b1a))
+* **deps:** bump Go to 1.26.9 and x/net to v0.60.0 ([ca5a2f7](https://github.com/mctlhq/mctl-telegram/commit/ca5a2f79db2b81928de6230d7a9a8e1da470664d))
+
 ## [0.79.2](https://github.com/mctlhq/mctl-telegram/compare/0.79.1...0.79.2) (2026-10-06)
 
 
