@@ -269,7 +269,7 @@ type Config struct {
 	// send and pin, so the tier could have granted itself exactly the
 	// capability it is described as not needing.
 	//
-	// This is the tier for a lookup-only consumer (e.g. an OpenClaw bot
+	// This is the tier for a lookup-only consumer (e.g. an operator bot
 	// answering "who is Telegram user X") that must never need a
 	// real/working MTProto session of its own with read/send/pin capability.
 	// Checked after AdminTelegramIDs and before the client tier, so
@@ -1087,7 +1087,7 @@ func cancelEnableFlow(e *enableSession) bool {
 //   - lookup-admins (TG_LOGIN_LOOKUP_ADMINS env) → admin-lookup:
 //     admin:users:read only — the two read-only admin lookups, no telegram:*
 //     messaging scopes and none of the admin write tools the flat
-//     admin:users scope gates. For a lookup-only consumer (e.g. an OpenClaw
+//     admin:users scope gates. For a lookup-only consumer (e.g. an operator
 //     bot answering "who is Telegram user X") that must never need a
 //     real/working MTProto session of its own. Checked after the full-admin
 //     tier, so an id listed in both always resolves via the full-admin
