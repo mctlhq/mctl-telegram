@@ -407,3 +407,47 @@ tests:
       - eval_time: 30m
         alertname: MctlToolHandlerFaults
         exp_alerts: []
+
+  # --- MctlToolAvailabilityFastBurn and caller_error (issue #757) ---
+  #
+  # Fires: 8 errors against 90 ok is 8.2% of the calls the SLI counts. The
+  # 100 caller_error calls are outside the ratio; with the old bare-counter
+  # denominator they diluted it to 4.0% and this burn went unseen.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="ok"}'
+        values: '0+90x70'
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="error"}'
+        values: '0+8x70'
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="caller_error"}'
+        values: '0+100x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: MctlToolAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: mctl-telegram
+            exp_annotations:
+              summary: "mctl-telegram MCP tool availability fast burn (14.4x, 1h)"
+              description: "The MCP tool error rate over the last 1h is 8.163%, which exceeds the 7.2% fast-burn threshold (14.4x the 99.5% SLO budget). The 30-day error budget is burning rapidly. Page the on-call engineer. See docs/slo.md for the error-budget policy and recovery criteria.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+  # Silent: callers sending bad peers at five times the healthy rate is not a
+  # failure of the service. 2 errors against 90 ok is 2.2%, under both burn
+  # thresholds, whatever the caller_error volume.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="ok"}'
+        values: '0+90x400'
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="error"}'
+        values: '0+2x400'
+      - series: 'mctl_tool_invocations_total{tool="get_messages",status="caller_error"}'
+        values: '0+500x400'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: MctlToolAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 6h5m
+        alertname: MctlToolAvailabilitySlowBurn
+        exp_alerts: []

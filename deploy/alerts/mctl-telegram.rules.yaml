@@ -514,10 +514,14 @@ spec:
           # 14.4x burn over 1h: error rate > 7.2% consumes the 0.5% budget
           # 14.4x faster than allowed. For: 0m — the 1h window is the
           # stabilization period. See docs/slo.md for the error-budget policy.
+          # The denominator is an allow-list: the `status` values of
+          # mctl_tool_invocations_total are a contract (ok, error,
+          # caller_error). A new value is outside the SLI until it is added
+          # here deliberately.
           expr: |
             sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
             /
-            sum(rate(mctl_tool_invocations_total[1h]))
+            sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[1h]))
             > 0.072
           for: 0m
           labels:
@@ -538,7 +542,7 @@ spec:
           expr: |
             sum(rate(mctl_tool_invocations_total{status="error"}[6h]))
             /
-            sum(rate(mctl_tool_invocations_total[6h]))
+            sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[6h]))
             > 0.030
           for: 0m
           labels:

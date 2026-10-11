@@ -34,13 +34,19 @@ That file is **not deployed by anything** — see the header comment in it.
 
 ### MCP tool availability
 
-Fraction of MCP tool invocations that complete with `status="ok"`.
+Fraction of MCP tool invocations that complete with `status="ok"`, excluding
+requests refused as the caller's mistake (see [Exclusions](#caller-errors)):
 
 ```promql
 sum(rate(mctl_tool_invocations_total{status="ok"}[28d]))
 /
-sum(rate(mctl_tool_invocations_total[28d]))
+sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[28d]))
 ```
+
+Counter: `mctl_tool_invocations_total{tool,status}` — label values for
+`status`: ok, error, caller_error. The SLI selects `ok|error` by name, so
+these values are a contract: a new one stays outside the SLI until it is
+added here and to the rules deliberately.
 
 ### MCP tool latency — read tools (p95 and p99)
 
@@ -187,6 +193,31 @@ exhausted):
    - The remaining error budget is at least 50% (the burn rate has been
      below 1x for long enough to recover half the window).
 
+### Error-budget alerts
+
+Each SLO with an error budget has an alert that fires once its
+rolling-28-day SLI is below the target, which is the point at which the
+policy above applies:
+
+| Alert | Fires when | `for:` | Severity |
+|-------|-----------|--------|----------|
+| `MctlTelegramToolAvailabilityErrorBudgetExhausted` | `mctl_telegram:tool_availability:ratio_rate28d < 0.995` | 1h | warning |
+| `MctlTelegramOAuthAvailabilityErrorBudgetExhausted` | `mctl_telegram:oauth_availability:ratio_rate28d < 0.999` | 1h | warning |
+| `MctlTelegramSessionBorrowErrorBudgetExhausted` | `mctl_telegram:session_borrow_success:ratio_rate28d < 0.99` | 1h | warning |
+
+They live in the `mctl-telegram-slo-budget` group of the same
+`mctl-gitops` file as the burn-rate alerts. `for: 1h` keeps a ratio sitting
+on the target from flapping at evaluation boundaries; a 28-day ratio moves
+slowly, so it delays the signal very little. They are not routed to the
+Telegram receiver: like the `SlowBurn` alerts they go to the default
+receiver, which opens a ticket rather than paging.
+
+The group is not merged before 2026-11-03. Until then the 28-day window
+still holds samples recorded before the `flood_wait`/`call_error` split
+(2026-10-06) and before `caller_error` existed, so the alerts would fire on
+deploy for a state that has already been fixed. Each 28-day ratio is checked
+against its target before the merge.
+
 ---
 
 ## Exclusions
@@ -234,6 +265,36 @@ Before 2026-10-06 all of these were `error`. Retried flood waits alone were
 41 of 47 errors in 24 hours and fired `MctlTelegramSessionBorrowSlowBurn`
 while 99% of tool calls succeeded. Sustained rate limiting is still visible
 in `mctl_telegram_flood_wait_events_total{tool}`.
+
+### Caller errors
+
+A tool call that fails because the caller asked for something that cannot
+be done is labeled
+`mctl_tool_invocations_total{status="caller_error"}` and is **excluded
+from both sides of the tool-availability SLI**. It covers:
+
+- a Telegram reply refusing the request as the caller's mistake (code 400
+  or 403, such as `CHANNEL_INVALID`, `PEER_ID_INVALID` or
+  `CHAT_WRITE_FORBIDDEN`), including a peer the caller has no access hash
+  for. This is the same definition as the session-borrow `call_error`
+  above: `telegram.IsCallerRefusal` decides both;
+- an argument or scope refusal that the failing code path itself named
+  (`invalid_argument`, `scope_denied`), or the `identity missing scope`
+  refusal. A reason guessed only from the error text is not trusted and
+  stays `error`.
+
+Everything else stays `error` and counts against the SLI: a session-auth
+rejection (even one Telegram sends as a 400), `PEER_FLOOD` and any rate
+limit that survives the retries, a Telegram 5xx, a transport failure, and a
+store or handler failure.
+
+Only the metric changes. The `audit_logs` row, the log line's `status` and
+the trace keep `error`; the log line gains `slo_status=caller_error`.
+
+Before this split every failing call was `error`. Over four days in October
+2026 all failed calls were caller refusals (unknown peers, missing
+arguments, missing scope) and none was a server fault, yet the 28-day ratio
+read 99.44%, under the 99.5% target.
 
 ### FLOOD_WAIT retries that ultimately succeed
 

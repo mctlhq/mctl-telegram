@@ -1054,3 +1054,73 @@ func TestFlushRecordedCall_CallPathDoesNotSteerClassification(t *testing.T) {
 		}
 	}
 }
+
+// TestToolInvocations_CallerErrorLeavesTheSLI (mctl-telegram#757): a staged
+// error that proves the service works — Telegram refusing the request as the
+// caller's mistake, or an argument/scope refusal the failing code path named
+// itself — is counted as status=caller_error, never as error. A server-side
+// failure, and a reason only guessed from the result text, stay error. The
+// audit_logs row keeps status=error either way.
+func TestToolInvocations_CallerErrorLeavesTheSLI(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		hint string
+		want string
+	}{
+		{"t_channel_invalid", fmt.Errorf("history: %w", tgerr.New(400, "CHANNEL_INVALID")), "", statusCallerError},
+		{"t_write_forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), "", statusCallerError},
+		{"t_peer_not_accessible", fmt.Errorf("get_messages: %w", telegram.ErrPeerNotAccessible), "", statusCallerError},
+		{"t_hint_invalid_argument", errors.New("limit must be positive"), ReasonInvalidArgument, statusCallerError},
+		{"t_hint_scope_denied", errors.New("not allowed for this identity"), ReasonScopeDenied, statusCallerError},
+		{"t_missing_scope", errors.New("identity missing scope telegram:messages:read"), "", statusCallerError},
+		// Must keep counting against the SLI.
+		{"t_rpc_call_fail", tgerr.New(500, "RPC_CALL_FAIL"), "", "error"},
+		{"t_peer_flood", tgerr.New(400, "PEER_FLOOD"), "", "error"},
+		{"t_password_needed", tgerr.New(400, "SESSION_PASSWORD_NEEDED"), "", "error"},
+		{"t_transport", errors.New("connection reset by peer"), "", "error"},
+		{"t_hint_store_error", errors.New("db is down"), ReasonStoreError, "error"},
+		// "peer is required" classifies as invalid_argument from its text
+		// alone; a guessed reason is not trusted to leave the SLI.
+		{"t_text_only_invalid", errors.New("peer is required"), "", "error"},
+	}
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := int64(4260 + i)
+			id := &auth.Identity{UserID: uid}
+			m := hintTestServer(t, srv, tc.name, func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				srv.audit(ctx, id, tc.name, "", tc.err, time.Now())
+				if tc.hint != "" {
+					hintReason(ctx, tc.hint)
+				}
+				return mcplib.NewToolResultError(tc.err.Error()), nil
+			})
+			buf := captureSlog(t)
+			callTool(t, auth.With(context.Background(), id), m, tc.name, map[string]any{})
+
+			// The log line keeps status=error and carries slo_status only
+			// for a caller error: that is how docs/slo.md says to find them.
+			if got, want := strings.Contains(buf.String(), `"slo_status":"caller_error"`), tc.want == statusCallerError; got != want {
+				t.Fatalf("slo_status=caller_error in log = %v, want %v: %s", got, want, buf.String())
+			}
+			for _, st := range []string{"ok", "error", statusCallerError} {
+				want := 0.0
+				if st == tc.want {
+					want = 1
+				}
+				if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st)); n != want {
+					t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want %v", tc.name, st, n, want)
+				}
+			}
+			if n := countAuditRows(t, store, uid); n != 1 {
+				t.Fatalf("audit rows = %d, want 1", n)
+			}
+			if _, status, _ := latestAudit(t, store, uid); status != "error" {
+				t.Fatalf("audit status = %q, want error (caller_error is metric-only)", status)
+			}
+		})
+	}
+}

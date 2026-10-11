@@ -612,8 +612,7 @@ func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, li
 			// A bare numeric "user:<id>"/"channel:<id>" carries no access_hash, so
 			// Telegram cannot identify the peer. Tell the caller how to recover
 			// instead of surfacing a raw RPC error that invites a retry loop.
-			return nil, nil, 0, fmt.Errorf("peer %q could not be accessed (%s): it is not in your dialog list; "+
-				"call list_dialogs and use an id exactly as returned there", peerSpec, rpcErr.Message)
+			return nil, nil, 0, &peerNotAccessibleError{peer: peerSpec, code: rpcErr.Message}
 		}
 		return nil, nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}

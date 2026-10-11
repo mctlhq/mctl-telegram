@@ -486,7 +486,7 @@ func New() *Registry {
 
 	r.ToolInvocationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_tool_invocations_total",
-		Help: "Total MCP tool invocations, labeled by tool name and status (ok or error).",
+		Help: "Total MCP tool invocations, labeled by tool name and status (ok, error, or caller_error; caller_error is a request Telegram or argument/scope validation refused as the caller's mistake and is excluded from the availability SLI).",
 	}, []string{"tool", "status"})
 
 	r.ToolInvocationDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
