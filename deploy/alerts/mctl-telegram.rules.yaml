@@ -517,7 +517,7 @@ spec:
           expr: |
             sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
             /
-            sum(rate(mctl_tool_invocations_total[1h]))
+            sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[1h]))
             > 0.072
           for: 0m
           labels:
@@ -538,7 +538,7 @@ spec:
           expr: |
             sum(rate(mctl_tool_invocations_total{status="error"}[6h]))
             /
-            sum(rate(mctl_tool_invocations_total[6h]))
+            sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[6h]))
             > 0.030
           for: 0m
           labels:

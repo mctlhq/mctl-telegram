@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,7 +41,28 @@ type callRecord struct {
 	// exactly what it was before #696. Server faults are surfaced by the
 	// MctlToolHandlerFaults alert and mctl_tool_call_errors_total instead.
 	synthesized bool
-	id          *auth.Identity
+	// sloStatus, when set, is the status label written to
+	// mctl_tool_invocations_total in place of status. It is set only to
+	// statusCallerError, for a failure that proves the service works: Telegram
+	// refused the request as the caller's mistake, or a handler-named
+	// argument/scope refusal (mctl-telegram#757). audit_logs, the slog
+	// "status" attribute and the span keep status ("error"), so user-visible
+	// audit output and the Loki dashboards are unchanged.
+	sloStatus string
+	id        *auth.Identity
+}
+
+// statusCallerError is the mctl_tool_invocations_total status for a failure
+// caused by the caller (see callRecord.sloStatus). The tool-availability SLI
+// excludes it from both sides of its ratio.
+const statusCallerError = "caller_error"
+
+// metricStatus is the status label for mctl_tool_invocations_total.
+func (r callRecord) metricStatus() string {
+	if r.sloStatus != "" {
+		return r.sloStatus
+	}
+	return r.status
 }
 
 // feedsSLO reports whether this record may sample the two series the
@@ -48,6 +70,20 @@ type callRecord struct {
 // (pre-#696 behaviour); a synthesized record never does, whatever its reason.
 func (r callRecord) feedsSLO() bool {
 	return !r.synthesized
+}
+
+// callerRefusalReason reports whether a staged error whose reason Rule 1 just
+// reconciled is the caller's fault for the tool-availability SLI: an
+// argument or scope refusal that the failing code path named itself (named),
+// or the deterministic "identity missing scope " refusal text. A reason that
+// only the text-based classifyToolResultReason fallback produced is never
+// trusted here, so a server fault whose message merely resembles a validation
+// error cannot leave the SLI.
+func callerRefusalReason(named bool, reason, errMsg string) bool {
+	if strings.HasPrefix(errMsg, "identity missing scope ") {
+		return true
+	}
+	return named && (reason == ReasonInvalidArgument || reason == ReasonScopeDenied)
 }
 
 // callRecorder buffers every callRecord staged during one tools/call
@@ -213,6 +249,9 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 		if reason == "" {
 			reason = rec.snapshotHint()
 		}
+		// named: the failing code path itself declared the reason, as opposed
+		// to classifyToolResultReason guessing it from the result text.
+		named := reason != ""
 		if reason == "" {
 			reason = classifyToolResultReason(final)
 		}
@@ -222,6 +261,9 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			last.reason = reason
 			if last.errMsg == "" {
 				last.errMsg = firstResultText(final)
+			}
+			if last.sloStatus == "" && callerRefusalReason(named, reason, last.errMsg) {
+				last.sloStatus = statusCallerError
 			}
 		} else {
 			// A staged success (e.g. send_message:sent) records an action that

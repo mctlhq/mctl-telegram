@@ -2419,6 +2419,9 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 		callPath: cp,
 		id:       id,
 	}
+	if telegram.IsCallerRefusal(err) {
+		rec.sloStatus = statusCallerError
+	}
 	if !startedAt.IsZero() {
 		rec.elapsed = time.Since(startedAt)
 		rec.hasElapsed = true
@@ -2476,7 +2479,7 @@ func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
 	s.Store.LogToolCall(ctx, uid, rec.tool, rec.peer, rec.status, rec.errMsg, rec.callPath, rec.reason)
 	if s.Metrics != nil && rec.hasElapsed && rec.feedsSLO() {
 		s.Metrics.ToolInvocationDuration.WithLabelValues(rec.tool).Observe(rec.elapsed.Seconds())
-		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.status).Inc()
+		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.metricStatus()).Inc()
 	}
 
 	// Mirror the outcome to slog so tool-call activity and failures are
@@ -2492,6 +2495,9 @@ func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
 	}
 	if rec.reason != "" {
 		attrs = append(attrs, "reason", rec.reason)
+	}
+	if rec.sloStatus != "" {
+		attrs = append(attrs, "slo_status", rec.sloStatus)
 	}
 	// Correlation facts, mirrored so a Loki line can be joined to the audit
 	// row and to the edge (mctl-telegram#617 Slice 2). The same facts are

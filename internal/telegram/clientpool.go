@@ -305,7 +305,8 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 //     MctlTelegramSessionBorrowSlowBurn while 99% of tool calls were ok.
 //   - call_error: Telegram answered the request and refused it as the
 //     caller's mistake (400 or 403: an unknown peer, a missing permission).
-//     A reply of that kind is proof the session works.
+//     A reply of that kind is proof the session works. IsCallerRefusal is
+//     the shared definition; the tool-availability SLI uses it too.
 //
 // Everything else stays "error", on purpose: a session-auth rejection, a
 // Telegram 5xx, a transport failure, a cancelled or timed-out context, and
@@ -316,17 +317,13 @@ func borrowCallResult(err error) string {
 		return "error"
 	}
 	var te *tgerr.Error
-	if !errors.As(err, &te) {
-		return "error"
-	}
-	switch {
-	case te.Code == 420, te.Message == "PEER_FLOOD":
+	if errors.As(err, &te) && (te.Code == 420 || te.Message == "PEER_FLOOD") {
 		return "flood_wait"
-	case te.Code == 400, te.Code == 403:
-		return "call_error"
-	default:
-		return "error"
 	}
+	if IsCallerRefusal(err) {
+		return "call_error"
+	}
+	return "error"
 }
 
 // revokeRejected evicts the pool entry and revokes the DB session for a user
