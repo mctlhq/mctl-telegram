@@ -31,6 +31,22 @@ func (e *peerNotAccessibleError) Is(target error) bool {
 	return target == ErrPeerNotAccessible
 }
 
+// deploymentFaultCodes are MTProto 400s that say this deployment, not the
+// caller, is broken: wrong or banned TG_API_ID/TG_API_HASH, or a connection
+// or layer the server failed to set up (for example after a gotd/td layer
+// bump). Every call would fail with one of them, and since caller_error
+// leaves both sides of the availability ratio, counting them as caller
+// refusals would erase the outage from the SLI instead of burning it.
+var deploymentFaultCodes = map[string]bool{
+	"API_ID_INVALID":            true,
+	"API_ID_PUBLISHED_FLOOD":    true,
+	"CONNECTION_NOT_INITED":     true,
+	"CONNECTION_LAYER_INVALID":  true,
+	"CONNECTION_API_ID_INVALID": true,
+	"INPUT_METHOD_INVALID":      true,
+	"INPUT_LAYER_INVALID":       true,
+}
+
 // IsCallerRefusal reports whether err is Telegram answering a request and
 // refusing it as the caller's mistake: an MTProto 400 or 403 reply (an
 // unknown peer, a missing permission), or ErrPeerNotAccessible. Such a reply
@@ -43,7 +59,8 @@ func (e *peerNotAccessibleError) Is(target error) bool {
 //
 // False for everything else, on purpose: a session-auth rejection (even one
 // Telegram sends as a 400, such as SESSION_PASSWORD_NEEDED), PEER_FLOOD and
-// any other rate limit, a Telegram 5xx, a transport failure, a cancelled or
+// any other rate limit, a 400 that means this deployment is broken
+// (deploymentFaultCodes), a Telegram 5xx, a transport failure, a cancelled or
 // timed-out context, ErrPoolFull, and any error that is not an MTProto reply.
 func IsCallerRefusal(err error) bool {
 	if err == nil || sessionErrorFor(err) != nil {
@@ -53,7 +70,7 @@ func IsCallerRefusal(err error) bool {
 		return true
 	}
 	var te *tgerr.Error
-	if !errors.As(err, &te) || te.Message == "PEER_FLOOD" {
+	if !errors.As(err, &te) || te.Message == "PEER_FLOOD" || deploymentFaultCodes[te.Message] {
 		return false
 	}
 	return te.Code == 400 || te.Code == 403

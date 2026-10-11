@@ -26,6 +26,9 @@ func TestIsCallerRefusal(t *testing.T) {
 		// A reply that proves nothing about the caller, or that says the
 		// session itself is unhealthy, must keep counting against the SLI.
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), false},
+		{"api_id_invalid", tgerr.New(400, "API_ID_INVALID"), false},
+		{"connection_not_inited_wrapped", fmt.Errorf("init: %w", tgerr.New(400, "CONNECTION_NOT_INITED")), false},
+		{"input_method_invalid", tgerr.New(400, "INPUT_METHOD_INVALID"), false},
 		{"flood_wait", tgerr.New(420, "FLOOD_WAIT_17"), false},
 		{"session_password_needed", tgerr.New(400, "SESSION_PASSWORD_NEEDED"), false},
 		{"session_revoked", tgerr.New(401, "SESSION_REVOKED"), false},

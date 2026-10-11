@@ -79,6 +79,15 @@ func (r callRecord) feedsSLO() bool {
 // only the text-based classifyToolResultReason fallback produced is never
 // trusted here, so a server fault whose message merely resembles a validation
 // error cannot leave the SLI.
+//
+// Not load-bearing for any handler today: every scope and argument refusal
+// in this package returns before Server.audit stages a record, so it is
+// flushed by Rule 2 as a synthesized record that never feeds the SLI at
+// all. It exists so that a refusal staged through Server.audit later is
+// classified the same way. The hint is call-wide and last-writer-wins, so
+// a handler must call hintReason(ReasonInvalidArgument|ReasonScopeDenied)
+// only on the refusal path it is about to return from; a hint set on a
+// branch that then carries on would let a later server fault leave the SLI.
 func callerRefusalReason(named bool, reason, errMsg string) bool {
 	if strings.HasPrefix(errMsg, "identity missing scope ") {
 		return true

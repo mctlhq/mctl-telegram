@@ -1453,12 +1453,21 @@ means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
 
 ### Diagnostic queries
 
-MCP tool availability error rate (1h window):
+MCP tool availability error rate (1h window), the same ratio the alert
+evaluates. `caller_error` calls are outside it (see `docs/slo.md`, "Caller
+errors"); dividing by the bare counter reads lower than the alert whenever
+callers are sending bad requests:
 
 ```promql
 sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
 /
-sum(rate(mctl_tool_invocations_total[1h]))
+sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[1h]))
+```
+
+Caller errors by tool, to tell a confused client from a broken service:
+
+```promql
+sum(rate(mctl_tool_invocations_total{status="caller_error"}[5m])) by (tool)
 ```
 
 Tool error rate broken down by tool:
@@ -1517,8 +1526,11 @@ occurrence.
 **Why the two families deliberately disagree.**
 `mctl_tool_call_errors_total` counts every `tools/call` failure, including
 client faults and the JSON-RPC rejections that never resolve a handler.
-`mctl_tool_invocations_total{status="error"}` (the availability SLO input)
-counts only records staged by a handler's own `Server.audit` call. Records
+`mctl_tool_invocations_total{status="error"}` (the availability SLO input;
+`status` is `ok`, `error` or `caller_error`, and only the first two enter the
+SLI) counts only records staged by a handler's own `Server.audit` call, and
+of those not the ones Telegram refused as the caller's mistake, which are
+`caller_error`. Records
 synthesized by `flushRecordedCall` — every Rule 1 appended error record, every
 Rule 2 record (a failure that never reached `Server.audit`) and every Rule 3
 record (an unaudited success) — never feed the SLO pair, whatever their

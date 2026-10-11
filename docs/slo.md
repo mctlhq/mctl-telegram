@@ -44,7 +44,9 @@ sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[28d]))
 ```
 
 Counter: `mctl_tool_invocations_total{tool,status}` — label values for
-`status`: ok, error, caller_error.
+`status`: ok, error, caller_error. The SLI selects `ok|error` by name, so
+these values are a contract: a new one stays outside the SLI until it is
+added here and to the rules deliberately.
 
 ### MCP tool latency — read tools (p95 and p99)
 

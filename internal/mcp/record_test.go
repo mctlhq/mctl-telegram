@@ -1098,8 +1098,14 @@ func TestToolInvocations_CallerErrorLeavesTheSLI(t *testing.T) {
 				}
 				return mcplib.NewToolResultError(tc.err.Error()), nil
 			})
+			buf := captureSlog(t)
 			callTool(t, auth.With(context.Background(), id), m, tc.name, map[string]any{})
 
+			// The log line keeps status=error and carries slo_status only
+			// for a caller error: that is how docs/slo.md says to find them.
+			if got, want := strings.Contains(buf.String(), `"slo_status":"caller_error"`), tc.want == statusCallerError; got != want {
+				t.Fatalf("slo_status=caller_error in log = %v, want %v: %s", got, want, buf.String())
+			}
 			for _, st := range []string{"ok", "error", statusCallerError} {
 				want := 0.0
 				if st == tc.want {

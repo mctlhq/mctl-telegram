@@ -589,6 +589,7 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 		{"forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), "call_error"},
 		{"peer_not_accessible", fmt.Errorf("get_messages: %w", &peerNotAccessibleError{peer: "@nobody", code: "PEER_ID_INVALID"}), "call_error"},
 		{"session_password_needed", tgerr.New(400, "SESSION_PASSWORD_NEEDED"), "error"},
+		{"api_id_invalid", tgerr.New(400, "API_ID_INVALID"), "error"},
 		// Everything below may mean the session itself is unhealthy, so it
 		// has to keep counting against the SLI.
 		{"session_revoked", tgerr.New(401, "SESSION_REVOKED"), "error"},
