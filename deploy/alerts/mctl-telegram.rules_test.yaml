@@ -432,6 +432,18 @@ tests:
               summary: "mctl-telegram MCP tool availability fast burn (14.4x, 1h)"
               description: "The MCP tool error rate over the last 1h is 8.163%, which exceeds the 7.2% fast-burn threshold (14.4x the 99.5% SLO budget). The 30-day error budget is burning rapidly. Page the on-call engineer. See docs/slo.md for the error-budget policy and recovery criteria.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+      # The same input is a 50.5% caller_error share on ~12k calls an hour,
+      # just over the #759 threshold, so the share alert fires here too.
+      - eval_time: 65m
+        alertname: MctlTelegramCallerErrorShareHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+            exp_annotations:
+              summary: "mctl-telegram: more than half of tool calls are caller errors"
+              description: "50.51% of the last hour's MCP tool calls were caller_error, which the availability SLI does not count. Either one client is looping on a bad request, or a server-side regression makes Telegram refuse every call and the SLI cannot see it.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramcallererrorsharehigh"
 
   # Silent: callers sending bad peers at five times the healthy rate is not a
   # failure of the service. 2 errors against 90 ok is 2.2%, under both burn
@@ -450,4 +462,53 @@ tests:
         exp_alerts: []
       - eval_time: 6h5m
         alertname: MctlToolAvailabilitySlowBurn
+        exp_alerts: []
+
+  # --- MctlTelegramCallerErrorShareHigh (issue #759) ---
+  #
+  # Fires: every call refused as a 400, the regression the ok|error SLI
+  # cannot see. Three replicas each serve 15 calls an hour: no pod reaches the
+  # 20-call floor alone, so this also pins the service-wide aggregation.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",pod="a",tool="get_messages",status="caller_error"}'
+        values: '0+0.25x90'
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",pod="b",tool="get_messages",status="caller_error"}'
+        values: '0+0.25x90'
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",pod="c",tool="get_messages",status="caller_error"}'
+        values: '0+0.25x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: MctlTelegramCallerErrorShareHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              job: mctl-telegram
+              namespace: labs
+            exp_annotations:
+              summary: "mctl-telegram: more than half of tool calls are caller errors"
+              description: "100% of the last hour's MCP tool calls were caller_error, which the availability SLI does not count. Either one client is looping on a bad request, or a server-side regression makes Telegram refuse every call and the SLI cannot see it.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramcallererrorsharehigh"
+
+  # Silent: a high but ordinary share, 1 caller_error in 10 calls.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",tool="get_messages",status="ok"}'
+        values: '0+9x90'
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",tool="get_messages",status="caller_error"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: MctlTelegramCallerErrorShareHigh
+        exp_alerts: []
+
+  # Silent: 100% caller_error, but 6 calls in the hour is under the floor.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_tool_invocations_total{job="mctl-telegram",namespace="labs",tool="get_messages",status="caller_error"}'
+        values: '0+0.1x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: MctlTelegramCallerErrorShareHigh
         exp_alerts: []
