@@ -30,6 +30,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
 - [SloBurnRate — SLO error-budget burn-rate alerts](#sloburnrate)
+- [MctlTelegramCallerErrorShareHigh — most tool calls are caller errors](#mctltelegramcallererrorsharehigh)
 - [MctlTelegramLoginSendCodeStalls — logins stalling at SendCode](#mctltelegramloginsendcodestalls)
 - [MctlTelegramLoginSlow — SendCode p95 above 30s](#mctltelegramloginslow)
 - [MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting](#mctlbridgedaemonsflapping)
@@ -1673,9 +1674,11 @@ red (see `docs/slo.md`, "Caller errors").
 
 ### Likely causes
 
-1. **One client looping on a bad request.** An agent retrying a call with
-   an unknown peer, a missing argument or a scope it does not hold. The
-   service is healthy; the client is not.
+1. **One client looping on a request Telegram refuses.** An agent retrying
+   a call with a peer that is unknown or inaccessible to its account, or a
+   chat the account may not write to. Only Telegram 400/403 refusals reach
+   this metric: argument and scope refusals are synthesized records that
+   never feed it. The service is healthy; the client is not.
 2. **A server-side regression that Telegram answers with 400s.** Lost or
    stale access hashes (`PEER_ID_INVALID` / `CHANNEL_INVALID` for peers that
    used to work), a peer-resolution bug, or a request built wrongly after a
