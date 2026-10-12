@@ -578,20 +578,23 @@ spec:
           # The blind spot of the ok|error allow-list (mctl-telegram#759): a
           # regression that turns every call into a Telegram 400 empties the
           # SLI instead of burning it. Deployed in mctl-gitops
-          # vm-rules/mctl-telegram-alerts.yaml, which also carries its tests.
+          # vm-rules/mctl-telegram-alerts.yaml. Aggregated by (job, namespace)
+          # like the deployed SLO rules: a share of the service's calls, not
+          # of one pod's. The denominator lists all three status values, the
+          # same contract as the burn-rate rules above.
           expr: |
             (
-              sum without(tool, status) (
+              sum by (job, namespace) (
                 increase(mctl_tool_invocations_total{status="caller_error"}[1h])
               )
               /
-              sum without(tool, status) (
-                increase(mctl_tool_invocations_total[1h])
+              sum by (job, namespace) (
+                increase(mctl_tool_invocations_total{status=~"ok|error|caller_error"}[1h])
               )
             ) > 0.5
             and
-            sum without(tool, status) (
-              increase(mctl_tool_invocations_total[1h])
+            sum by (job, namespace) (
+              increase(mctl_tool_invocations_total{status=~"ok|error|caller_error"}[1h])
             ) >= 20
           for: 15m
           labels:
@@ -599,6 +602,11 @@ spec:
             service: mctl-telegram
           annotations:
             summary: "mctl-telegram: more than half of tool calls are caller errors"
+            description: >
+              {{ $value | humanizePercentage }} of the last hour's MCP tool calls were
+              caller_error, which the availability SLI does not count. Either one
+              client is looping on a bad request, or a server-side regression makes
+              Telegram refuse every call and the SLI cannot see it.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramcallererrorsharehigh"
 
     - name: mctl-telegram-oauth-availability

@@ -97,6 +97,20 @@ func callerRefusalReason(named bool, reason, errMsg string) bool {
 	return named && (reason == ReasonInvalidArgument || reason == ReasonScopeDenied)
 }
 
+// serverFaultReason reports whether Rule 1's reconciled reason says the call
+// failed on our side, so a caller_error staged earlier in the call must not
+// stand: a fault the middleware observed (a recovered panic, a Go error from
+// the handler), or a store or encode failure. Unlike callerRefusalReason it
+// trusts a reason guessed from the result text too, because a wrong guess
+// here can only keep a call inside the SLI, never take one out of it.
+func serverFaultReason(reason string) bool {
+	switch reason {
+	case ReasonPanic, ReasonHandlerError, ReasonStoreError, ReasonEncodeFailed:
+		return true
+	}
+	return false
+}
+
 // callRecorder buffers every callRecord staged during one tools/call
 // dispatch, in the order Server.audit produced them. A real handler
 // invocation stages at most one record (every tool has at most one audited
@@ -278,10 +292,9 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			if last.feedsSLO() && last.sloStatus == "" && callerRefusalReason(named, reason, last.errMsg) {
 				last.sloStatus = statusCallerError
 			}
-			// A server fault the middleware itself observed (a recovered
-			// panic, a Go error from the handler) outranks a Telegram
-			// refusal staged before it: the call failed on our side.
-			if explicitReason == ReasonPanic || explicitReason == ReasonHandlerError {
+			// A server fault outranks a Telegram refusal staged before it:
+			// the call failed on our side.
+			if serverFaultReason(reason) {
 				last.sloStatus = ""
 			}
 		} else {

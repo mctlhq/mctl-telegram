@@ -1156,16 +1156,26 @@ func TestToolInvocations_SynthesizedRefusalCarriesNoSLOStatus(t *testing.T) {
 }
 
 // A handler that stages a Telegram refusal and then fails on our side — a
-// panic or a returned Go error — failed as a server, so the call must burn
+// panic, a returned Go error, or a store or encode failure it names itself —
+// failed as a server, so the call must burn
 // the SLI as error rather than leave it as caller_error (mctl-telegram#759).
 func TestToolInvocations_ServerFaultAfterStagedRefusalBurnsTheSLI(t *testing.T) {
 	refusal := tgerr.New(400, "CHANNEL_INVALID")
 	cases := []struct {
 		name string
-		fail func() (*mcplib.CallToolResult, error)
+		fail func(ctx context.Context) (*mcplib.CallToolResult, error)
 	}{
-		{"t_panic_after_refusal", func() (*mcplib.CallToolResult, error) { panic("boom") }},
-		{"t_goerr_after_refusal", func() (*mcplib.CallToolResult, error) { return nil, errors.New("encode: broken") }},
+		{"t_panic_after_refusal", func(context.Context) (*mcplib.CallToolResult, error) { panic("boom") }},
+		{"t_goerr_after_refusal", func(context.Context) (*mcplib.CallToolResult, error) { return nil, errors.New("encode: broken") }},
+		// A server fault the handler turns into an IsError result itself.
+		{"t_store_after_refusal", func(ctx context.Context) (*mcplib.CallToolResult, error) {
+			hintReason(ctx, ReasonStoreError)
+			return mcplib.NewToolResultError("store: unavailable"), nil
+		}},
+		{"t_encode_after_refusal", func(ctx context.Context) (*mcplib.CallToolResult, error) {
+			hintReason(ctx, ReasonEncodeFailed)
+			return mcplib.NewToolResultError("encode: broken"), nil
+		}},
 	}
 	store := newToolsTestStore(t)
 	reg := metrics.New()
@@ -1176,7 +1186,7 @@ func TestToolInvocations_ServerFaultAfterStagedRefusalBurnsTheSLI(t *testing.T) 
 			id := &auth.Identity{UserID: uid}
 			m := hintTestServer(t, srv, tc.name, func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 				srv.audit(ctx, id, tc.name, "", refusal, time.Now())
-				return tc.fail()
+				return tc.fail(ctx)
 			})
 			buf := captureSlog(t)
 			callTool(t, auth.With(context.Background(), id), m, tc.name, map[string]any{})
