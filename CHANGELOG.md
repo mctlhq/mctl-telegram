@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.79.4](https://github.com/mctlhq/mctl-telegram/compare/0.79.3...0.79.4) (2026-10-11)
+
+
+### Bug Fixes
+
+* **metrics:** address review on the caller_error SLI split ([3f50eaf](https://github.com/mctlhq/mctl-telegram/commit/3f50eaf2a1e5fe2e1e41dfaa2d58cdb10ca352cd)), closes [#757](https://github.com/mctlhq/mctl-telegram/issues/757)
+* **metrics:** classify caller errors out of the tool-availability SLI ([b3e9928](https://github.com/mctlhq/mctl-telegram/commit/b3e99280423006b41977c9cb973a3e1037f971a4))
+* **metrics:** classify caller errors out of the tool-availability SLI ([56a8f54](https://github.com/mctlhq/mctl-telegram/commit/56a8f542a318d78edc380bc45439b903ce13f6ef)), closes [#757](https://github.com/mctlhq/mctl-telegram/issues/757)
+
 ## [0.79.3](https://github.com/mctlhq/mctl-telegram/compare/0.79.2...0.79.3) (2026-10-10)
 
 
