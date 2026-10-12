@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.79.5](https://github.com/mctlhq/mctl-telegram/compare/0.79.4...0.79.5) (2026-10-12)
+
+
+### Bug Fixes
+
+* **metrics:** address review on the caller_error follow-ups ([cf14805](https://github.com/mctlhq/mctl-telegram/commit/cf1480547402fedf386e0901226829b08c3fe349)), closes [#759](https://github.com/mctlhq/mctl-telegram/issues/759)
+* **metrics:** close the caller_error follow-ups from [#758](https://github.com/mctlhq/mctl-telegram/issues/758) review ([8d0cddb](https://github.com/mctlhq/mctl-telegram/commit/8d0cddb597dfc2ba0229ecc173d5f3c5c9779853))
+* **metrics:** close the caller_error follow-ups from [#758](https://github.com/mctlhq/mctl-telegram/issues/758) review ([a6eac13](https://github.com/mctlhq/mctl-telegram/commit/a6eac13d4735d69ba620e948101678b4c358eeba)), closes [#759](https://github.com/mctlhq/mctl-telegram/issues/759)
+
 ## [0.79.4](https://github.com/mctlhq/mctl-telegram/compare/0.79.3...0.79.4) (2026-10-11)
 
 
