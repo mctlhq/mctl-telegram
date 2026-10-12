@@ -1665,9 +1665,11 @@ Over the last hour more than half of all MCP tool calls (at least 20 of
 them) were labeled `mctl_tool_invocations_total{status="caller_error"}`. In
 normal traffic the share is around 1%.
 
-The tool-availability SLI and `HighToolErrorRate` count only `ok|error`, so
-they cannot see this: if every call becomes a caller error, both ratios lose
-their input rather than going red (see `docs/slo.md`, "Caller errors").
+The tool-availability SLI, its burn-rate alerts
+(`MctlToolAvailabilityFastBurn` / `SlowBurn`) and mctl-gitops'
+`HighToolErrorRate` count only `ok|error`, so they cannot see this: if every
+call becomes a caller error, their ratios lose their input rather than going
+red (see `docs/slo.md`, "Caller errors").
 
 ### Likely causes
 
