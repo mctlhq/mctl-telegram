@@ -80,11 +80,13 @@ func (r callRecord) feedsSLO() bool {
 // trusted here, so a server fault whose message merely resembles a validation
 // error cannot leave the SLI.
 //
-// Not load-bearing for any handler today: every scope and argument refusal
-// in this package returns before Server.audit stages a record, so it is
-// flushed by Rule 2 as a synthesized record that never feeds the SLI at
-// all. It exists so that a refusal staged through Server.audit later is
-// classified the same way. The hint is call-wide and last-writer-wins, so
+// Not load-bearing for any handler today. Most scope and argument refusals
+// in this package return before anything is staged and are flushed by Rule 2;
+// the rest (provision_local_account) stage through Server.auditRefusal. Both
+// produce a synthesized record, which never feeds the SLI, and Rule 1 skips
+// those, so no caller_error is attached to a call the SLI never counted. It
+// exists so that a refusal staged through Server.audit later is classified
+// the same way. The hint is call-wide and last-writer-wins, so
 // a handler must call hintReason(ReasonInvalidArgument|ReasonScopeDenied)
 // only on the refusal path it is about to return from; a hint set on a
 // branch that then carries on would let a later server fault leave the SLI.
@@ -271,8 +273,16 @@ func (s *Server) flushRecordedCall(ctx context.Context, rec *callRecorder, req m
 			if last.errMsg == "" {
 				last.errMsg = firstResultText(final)
 			}
-			if last.sloStatus == "" && callerRefusalReason(named, reason, last.errMsg) {
+			// caller_error is a label of the SLI's own series, so only a
+			// record that feeds the SLI may carry it (mctl-telegram#759).
+			if last.feedsSLO() && last.sloStatus == "" && callerRefusalReason(named, reason, last.errMsg) {
 				last.sloStatus = statusCallerError
+			}
+			// A server fault the middleware itself observed (a recovered
+			// panic, a Go error from the handler) outranks a Telegram
+			// refusal staged before it: the call failed on our side.
+			if explicitReason == ReasonPanic || explicitReason == ReasonHandlerError {
+				last.sloStatus = ""
 			}
 		} else {
 			// A staged success (e.g. send_message:sent) records an action that

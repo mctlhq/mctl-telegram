@@ -291,6 +291,11 @@ store or handler failure.
 Only the metric changes. The `audit_logs` row, the log line's `status` and
 the trace keep `error`; the log line gains `slo_status=caller_error`.
 
+The exclusion has one blind spot: a regression that turns every call into
+a Telegram 400 would empty the SLI rather than burn it.
+`MctlTelegramCallerErrorShareHigh` covers it by alerting when more than half
+of an hour's tool calls (at least 20) are `caller_error`; see the runbook.
+
 Before this split every failing call was `error`. Over four days in October
 2026 all failed calls were caller refusals (unknown peers, missing
 arguments, missing scope) and none was a server fault, yet the 28-day ratio

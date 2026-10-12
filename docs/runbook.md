@@ -1656,6 +1656,65 @@ criteria.
 
 ---
 
+<a id="mctltelegramcallererrorsharehigh"></a>
+## MctlTelegramCallerErrorShareHigh — most tool calls are caller errors
+
+### Symptom
+
+Over the last hour more than half of all MCP tool calls (at least 20 of
+them) were labeled `mctl_tool_invocations_total{status="caller_error"}`. In
+normal traffic the share is around 1%.
+
+The tool-availability SLI and `HighToolErrorRate` count only `ok|error`, so
+they cannot see this: if every call becomes a caller error, both ratios lose
+their input rather than going red (see `docs/slo.md`, "Caller errors").
+
+### Likely causes
+
+1. **One client looping on a bad request.** An agent retrying a call with
+   an unknown peer, a missing argument or a scope it does not hold. The
+   service is healthy; the client is not.
+2. **A server-side regression that Telegram answers with 400s.** Lost or
+   stale access hashes (`PEER_ID_INVALID` / `CHANNEL_INVALID` for peers that
+   used to work), a peer-resolution bug, or a request built wrongly after a
+   `gotd/td` bump. This is an outage the SLI cannot see.
+
+### Triage
+
+Which tools, and how broad:
+
+```promql
+sum by (tool) (increase(mctl_tool_invocations_total{status="caller_error"}[1h]))
+```
+
+Then the log lines, which keep `status=error` and carry
+`slo_status=caller_error`:
+
+```bash
+kubectl -n mctl-telegram logs -l app=mctl-telegram --since=1h \
+  | grep '"slo_status":"caller_error"'
+```
+
+Group by `user_id` and `reason`, and read the error text:
+
+- **One `user_id`, one tool, the same error repeated**: cause 1. Nothing to
+  roll back. Contact the client owner if it persists; the per-user rate
+  limits bound the cost.
+- **Many users, many tools, a code that used to succeed** (often
+  `PEER_ID_INVALID` or `CHANNEL_INVALID` on peers from `list_dialogs`):
+  cause 2. Correlate the start with the last deploy (`image.tag` bump in
+  mctl-gitops) and roll back if it lines up.
+
+### Resolution
+
+Cause 1 resolves itself when the client stops. For cause 2, roll back the
+release, and file an issue with the error codes and the start time. If the
+code turns out to be a deployment fault rather than a caller mistake, add it
+to `isDeploymentFault` in `internal/telegram/callerror.go` so it counts as
+`error` from then on.
+
+---
+
 <a id="mctltelegramloginsendcodestalls"></a>
 ## MctlTelegramLoginSendCodeStalls — logins stalling at SendCode
 

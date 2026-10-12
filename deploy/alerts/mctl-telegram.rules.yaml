@@ -574,6 +574,33 @@ spec:
             summary: "mctl-telegram MCP tool handler fault ({{ $labels.reason }} on {{ $labels.tool }})"
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltoolhandlerfaults"
 
+        - alert: MctlTelegramCallerErrorShareHigh
+          # The blind spot of the ok|error allow-list (mctl-telegram#759): a
+          # regression that turns every call into a Telegram 400 empties the
+          # SLI instead of burning it. Deployed in mctl-gitops
+          # vm-rules/mctl-telegram-alerts.yaml, which also carries its tests.
+          expr: |
+            (
+              sum without(tool, status) (
+                increase(mctl_tool_invocations_total{status="caller_error"}[1h])
+              )
+              /
+              sum without(tool, status) (
+                increase(mctl_tool_invocations_total[1h])
+              )
+            ) > 0.5
+            and
+            sum without(tool, status) (
+              increase(mctl_tool_invocations_total[1h])
+            ) >= 20
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram: more than half of tool calls are caller errors"
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctltelegramcallererrorsharehigh"
+
     - name: mctl-telegram-oauth-availability
       rules:
         - alert: MctlOAuthAvailabilityFastBurn

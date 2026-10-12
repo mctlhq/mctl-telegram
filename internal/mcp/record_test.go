@@ -1124,3 +1124,72 @@ func TestToolInvocations_CallerErrorLeavesTheSLI(t *testing.T) {
 		})
 	}
 }
+
+// A refusal staged through Server.auditRefusal is synthesized and never feeds
+// the SLI, so its log line must not claim slo_status=caller_error for a call
+// the SLI never counted (mctl-telegram#759).
+func TestToolInvocations_SynthesizedRefusalCarriesNoSLOStatus(t *testing.T) {
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	const tool = "t_synth_refusal"
+	uid := int64(4290)
+	id := &auth.Identity{UserID: uid}
+	m := hintTestServer(t, srv, tool, func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		srv.auditRefusal(ctx, id, tool, "", errors.New("mode must be one of ..."), time.Now(), ReasonInvalidArgument)
+		return mcplib.NewToolResultError("mode must be one of ..."), nil
+	})
+	buf := captureSlog(t)
+	callTool(t, auth.With(context.Background(), id), m, tool, map[string]any{})
+
+	if strings.Contains(buf.String(), `"slo_status"`) {
+		t.Fatalf("synthesized refusal logged slo_status: %s", buf.String())
+	}
+	for _, st := range []string{"ok", "error", statusCallerError} {
+		if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, st)); n != 0 {
+			t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want 0", tool, st, n)
+		}
+	}
+	if _, status, _ := latestAudit(t, store, uid); status != "error" {
+		t.Fatalf("audit status = %q, want error", status)
+	}
+}
+
+// A handler that stages a Telegram refusal and then fails on our side — a
+// panic or a returned Go error — failed as a server, so the call must burn
+// the SLI as error rather than leave it as caller_error (mctl-telegram#759).
+func TestToolInvocations_ServerFaultAfterStagedRefusalBurnsTheSLI(t *testing.T) {
+	refusal := tgerr.New(400, "CHANNEL_INVALID")
+	cases := []struct {
+		name string
+		fail func() (*mcplib.CallToolResult, error)
+	}{
+		{"t_panic_after_refusal", func() (*mcplib.CallToolResult, error) { panic("boom") }},
+		{"t_goerr_after_refusal", func() (*mcplib.CallToolResult, error) { return nil, errors.New("encode: broken") }},
+	}
+	store := newToolsTestStore(t)
+	reg := metrics.New()
+	srv := &Server{Store: store, Metrics: reg}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := int64(4291 + i)
+			id := &auth.Identity{UserID: uid}
+			m := hintTestServer(t, srv, tc.name, func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+				srv.audit(ctx, id, tc.name, "", refusal, time.Now())
+				return tc.fail()
+			})
+			buf := captureSlog(t)
+			callTool(t, auth.With(context.Background(), id), m, tc.name, map[string]any{})
+
+			if strings.Contains(buf.String(), `"slo_status"`) {
+				t.Fatalf("server fault logged slo_status: %s", buf.String())
+			}
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, "error")); n != 1 {
+				t.Fatalf("ToolInvocationsTotal{%s,error} = %v, want 1", tc.name, n)
+			}
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, statusCallerError)); n != 0 {
+				t.Fatalf("ToolInvocationsTotal{%s,caller_error} = %v, want 0", tc.name, n)
+			}
+		})
+	}
+}
