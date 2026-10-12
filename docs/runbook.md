@@ -1715,8 +1715,9 @@ Group by `user_id` and `reason`, and read the error text:
 Cause 1 resolves itself when the client stops. For cause 2, roll back the
 release, and file an issue with the error codes and the start time. If the
 code turns out to be a deployment fault rather than a caller mistake, add it
-to `isDeploymentFault` in `internal/telegram/callerror.go` so it counts as
-`error` from then on.
+to the `deploymentFaultCodes` map in `internal/telegram/callerror.go` so it
+counts as `error` from then on. A `CONNECTION_*` code needs nothing: the
+prefix check in `isDeploymentFault` already covers that family.
 
 ---
 
