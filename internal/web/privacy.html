@@ -130,7 +130,7 @@
 
   <h2 id="website-analytics">Website analytics</h2>
   <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, Local Bridge docs and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami sets no cookies. For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
-  <p>The sign-in, consent, connect and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code> and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token or account identifier is ever sent to it. Page-view records are kept on our servers with no automatic expiry.</p>
+  <p>The sign-in, consent, connect and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code> and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token or account identifier is ever sent to it. Page-view records are deleted automatically 2 years after they were recorded.</p>
 
   <h2>Communication Agent controls</h2>
   <ul>
