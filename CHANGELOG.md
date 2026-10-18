@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.80.0](https://github.com/mctlhq/mctl-telegram/compare/0.79.5...0.80.0) (2026-10-18)
+
+
+### Features
+
+* count tg.mctl.ai visitors with self-hosted Umami ([dc1d630](https://github.com/mctlhq/mctl-telegram/commit/dc1d630c27a71ef9beaaf260d3c1ef63fab49c2f))
+* count tg.mctl.ai visitors with self-hosted Umami ([2d694b4](https://github.com/mctlhq/mctl-telegram/commit/2d694b447e42dba087cc21f7aa01df52c619d728))
+
 ## [0.79.5](https://github.com/mctlhq/mctl-telegram/compare/0.79.4...0.79.5) (2026-10-12)
 
 
