@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       # Uses mctl-agents, the backend-only automation App — deliberately
-      # NOT MCTL App (secrets.APP_ID). MCTL App is the App customers install
+      # NOT MCTL App (APP_CLIENT_ID). MCTL App is the App customers install
       # themselves from mctl.ai/#request-access, and it is being narrowed to
       # contents:read + metadata:read so its published least-privilege
       # description is actually true (mctlhq/mctl-gitops#761). A GitHub App's

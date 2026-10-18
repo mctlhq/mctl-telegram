@@ -43,7 +43,7 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       # Uses mctl-agents, the backend-only automation App — deliberately
-      # NOT MCTL App (secrets.APP_ID). MCTL App is the App customers install
+      # NOT MCTL App (APP_CLIENT_ID). MCTL App is the App customers install
       # themselves from mctl.ai/#request-access, and it is being narrowed to
       # contents:read + metadata:read so its published least-privilege
       # description is actually true (mctlhq/mctl-gitops#761). A GitHub App's
