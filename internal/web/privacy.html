@@ -128,6 +128,10 @@
   </ul>
   <p><strong>Important:</strong> when Communication Agent is enabled, message content is stored in encrypted agent tables as described above. The previous “message text is never written to disk” guarantee applies only to ordinary read-tool responses and audit/logging paths, not to the durable agent workflow.</p>
 
+  <h2 id="website-analytics">Website analytics</h2>
+  <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, Local Bridge docs and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami sets no cookies. For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
+  <p>The sign-in, consent, connect and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code> and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token or account identifier is ever sent to it. Page-view records are kept on our servers with no automatic expiry.</p>
+
   <h2>Communication Agent controls</h2>
   <ul>
     <li>The listener is active only for profiles explicitly marked as listener-enabled.</li>
@@ -162,7 +166,7 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <ul>
     <li><strong>Telegram</strong> (transport and identity) — the connected account uses Telegram MTProto, and sign-in uses Telegram OIDC.</li>
     <li><strong>Your MCP client provider</strong> — for example OpenAI or Anthropic — processes the conversation and tool traffic you send through that product.</li>
-    <li>No advertising or third-party analytics is injected by this service. OAuth/session-management pages use strict CSP; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
+    <li>No advertising or third-party analytics is injected by this service. Public content pages count visits with Umami, which we host ourselves (see <a href="#website-analytics">Website analytics</a>). OAuth/session-management pages use strict CSP and load no analytics; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 
   <h2>Contact</h2>

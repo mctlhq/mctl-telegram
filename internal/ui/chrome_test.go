@@ -37,6 +37,8 @@ func TestFullChrome(t *testing.T) {
 		`class="theme-toggle"`,
 		`aria-label="Toggle theme"`,
 		"#e25a3c",
+		// Self-hosted Umami page-view counter on public content pages.
+		AnalyticsScript,
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
@@ -78,7 +80,7 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
-	for _, bad := range []string{"mctl.css", "fonts.googleapis.com", "<script", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
+	for _, bad := range []string{"mctl.css", "fonts.googleapis.com", "<script", "stats.mctl.ai", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("lite (strict-CSP) page must not contain %q", bad)
 		}

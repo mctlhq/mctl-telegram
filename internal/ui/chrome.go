@@ -8,7 +8,8 @@
 //   - "full"  — content pages (landing, docs, security, privacy). Loads
 //     ui.mctl.ai/<version>/mctl.css + Google Fonts as progressive enhancement and runs
 //     the light/dark toggle JS (the choice persists in localStorage;
-//     it defaults to the OS preference until the user flips it).
+//     it defaults to the OS preference until the user flips it), plus the
+//     self-hosted Umami page-view counter (AnalyticsScript).
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
 //     No external CSS/JS: same palette via inlined tokens, theme follows the OS
@@ -49,6 +50,14 @@ type Data struct {
 // URL lives in one place. Those CSP pages must allow https://ui.mctl.ai on img-src.
 const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl.ai/brand/favicon-telegram.svg?v=9dc770313d10">`
 
+// AnalyticsScript is the self-hosted Umami tracker (stats.mctl.ai). It belongs
+// to the full chrome only, i.e. public content pages, which send no CSP. The
+// lite chrome used by OAuth, connect and manage pages must never carry it:
+// those pages show codes, tokens and account data, and their strict CSP
+// (default-src 'none') would block it anyway. data-domains keeps preview and
+// local runs out of the numbers; the website ID is public by design.
+const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" data-website-id="d4fa9d69-8b07-4d27-98e6-0b611eeaa707" data-domains="tg.mctl.ai"></script>`
+
 // Shared template defines. CSS/JS are concatenated in as literal template text
 // (they contain no {{ }} actions), so there is no escaping concern.
 var defs = `
@@ -74,6 +83,7 @@ var defs = `
 <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://ui.mctl.ai/0.5.0/mctl.css">
 <script>` + prepaintJS + `</script>
+` + AnalyticsScript + `
 <style>` + componentsCSS + `</style>{{end}}
 
 {{define "ui_topbar"}}<header class="topbar">
