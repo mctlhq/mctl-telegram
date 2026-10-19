@@ -84,8 +84,11 @@ const (
 	// and leave half the headroom (mctl-api#694).
 	hostPerMinute = 10
 	// knownTTL is how long a client_id whose document once validated keeps
-	// its claim on the reserved half of the host budget (see allowHost).
-	knownTTL      = maxTTL
+	// its claim on the reserved half of the host budget (see allowHost). It
+	// must outlast the longest cache entry (maxTTL): the refetch that the
+	// reserve exists for happens when that entry expires, and a claim that
+	// lapsed with it would leave the refetch to the unreserved budget.
+	knownTTL      = 2 * maxTTL
 	maxConcurrent = 8
 	fetchTimeout  = 10 * time.Second
 )
@@ -398,14 +401,14 @@ func (r *Resolver) markKnown(key string) {
 	defer r.mu.Unlock()
 	now := r.now()
 	if _, ok := r.known[key]; !ok && len(r.known) >= cacheEntries {
-		oldest, oldestAt := "", now
+		oldest, oldestAt, found := "", time.Time{}, false
 		for k, t := range r.known {
 			if now.Sub(t) >= knownTTL {
 				delete(r.known, k)
 				continue
 			}
-			if t.Before(oldestAt) {
-				oldest, oldestAt = k, t
+			if !found || t.Before(oldestAt) {
+				oldest, oldestAt, found = k, t, true
 			}
 		}
 		if len(r.known) >= cacheEntries {
@@ -635,10 +638,10 @@ func parseDocument(body []byte, clientID string) (Document, error) {
 	if utf8.RuneCountInString(name) > maxNameRunes {
 		name = string([]rune(name)[:maxNameRunes])
 	}
-	// Clipped so an append by a caller can never write into the backing array
-	// of a cached document shared by concurrent requests.
+	// Both slices are clipped so an append by a caller can never write into
+	// the backing array of a cached document shared by concurrent requests.
 	return Document{
-		ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: dropped,
+		ClientID: clientID, ClientName: name, RedirectURIs: slices.Clip(accepted), DroppedRedirectURIs: slices.Clip(dropped),
 		AuthMethod: method, SigningAlg: alg, JWKSURI: jwksURI,
 	}, nil
 }
