@@ -44,6 +44,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/netctx"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
+	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -971,6 +972,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
 		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		CIMD:                         cimdResolver(cfg),
 		DCRRedirectURIs:              cfg.OAUTHDCRRedirectURIs,
 		RegisterRatePerMin:           cfg.OAUTHRegisterRatePerMin,
 		TGAPIID:                      cfg.TGAPIID,
@@ -1050,6 +1052,8 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"client_count", len(clients),
 		"auto_approve_clients", cfg.AutoApproveClients,
 		"implicit_clients", cfg.OAUTHAllowImplicitClient,
+		"cimd_accept", cfg.OAUTHCIMDAccept,
+		"cimd_allowed_hosts", cfg.OAUTHCIMDAllowedHosts,
 		"preregistered_clients", len(cfg.OAUTHPreregisteredClients),
 		"dcr_redirect_uris", len(cfg.OAUTHDCRRedirectURIs),
 		"demo_reviewer", cfg.DemoReviewerEnabled,
@@ -1291,4 +1295,14 @@ func mountBotStartBridge(mux chi.Router, store *db.Store, m *metrics.Registry, a
 	mux.Method(http.MethodPost, bot.BotStartObservationPath, bot.BotStartObservationHandler(store, auth, bot.NewMetricsCounter(m)))
 	slog.Info("bot-start bridge enabled", "path", bot.BotStartObservationPath)
 	return true
+}
+
+// cimdResolver returns the Client ID Metadata Document resolver when
+// OAUTH_CIMD_ACCEPT is on, and nil (CIMD off) otherwise. config.Load has
+// already refused an accepting configuration without an allowlist.
+func cimdResolver(cfg *config.Config) oauth.CIMDResolver {
+	if !cfg.OAUTHCIMDAccept {
+		return nil
+	}
+	return cimd.NewResolver(cimd.Options{AllowedHosts: cfg.OAUTHCIMDAllowedHosts})
 }

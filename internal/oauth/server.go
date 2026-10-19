@@ -335,6 +335,15 @@ type Config struct {
 	// example) and whose callback host should not be trusted for anything
 	// but this one client.
 	PreregisteredClients []PreregisteredClient
+	// CIMD resolves an https URL client_id as an OAuth Client ID Metadata
+	// Document (mctl-telegram#773). Nil (the default) means CIMD is off and a
+	// URL client_id is handled like any other unregistered client_id. When
+	// set, every URL-shaped client_id is resolved through it at
+	// /oauth/authorize and at both token grants, so removing a host from its
+	// allowlist stops that client's refreshes too, within the cache lifetime
+	// of a refused document. Only token_endpoint_auth_method "none" is
+	// accepted for now; a private_key_jwt document is refused.
+	CIMD CIMDResolver
 	// DCRRedirectURIs is an exact-match allowlist of redirect URIs that an
 	// RFC 7591 registration may claim WITHOUT passing AllowedImplicitHosts.
 	// It exists for the Cloudflare MCP portal in automatic (DCR) mode
@@ -2081,6 +2090,13 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "code_verifier "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Re-resolve a CIMD client before the code is consumed: a document that
+	// stopped listing the client, or a host taken off the allowlist, ends
+	// the flow here rather than after the code is gone.
+	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_code"); isCIMD && err != nil {
+		writeTokenError(w, "invalid_client", err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	var entry *authCode
 	if s.useDB {
@@ -2312,6 +2328,14 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// mint a self-connect access token from it.
 	if clientID == ConnectClientID {
 		writeTokenError(w, "unauthorized_client", "this client cannot refresh", http.StatusBadRequest)
+		return
+	}
+	// A CIMD client is re-resolved on every refresh, so removing its host
+	// from OAUTH_CIMD_ALLOWED_HOSTS cuts off its existing refresh-token
+	// families without touching the database. Checked before the token is
+	// looked up, so a refused client cannot trigger reuse detection either.
+	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_refresh"); isCIMD && err != nil {
+		writeTokenError(w, "invalid_client", err.Error(), http.StatusBadRequest)
 		return
 	}
 	rt, err := s.store.LookupRefreshToken(r.Context(), refreshTok)
@@ -3112,6 +3136,12 @@ func isLoopbackHost(h string) bool {
 // cfg.PreregisteredClients entry. A miss yields "": the name is cosmetic and
 // must never fail a token exchange.
 func (s *Server) clientDisplayName(ctx context.Context, clientID string) string {
+	if doc, isCIMD, err := s.resolveCIMDClient(ctx, clientID, "display_name"); isCIMD {
+		if err != nil {
+			return ""
+		}
+		return doc.ClientName
+	}
 	if reg, err := s.store.GetClientReg(ctx, clientID); err == nil {
 		return reg.ClientName
 	}
@@ -3125,6 +3155,15 @@ func (s *Server) clientDisplayName(ctx context.Context, clientID string) string 
 }
 
 func (s *Server) validateClient(ctx context.Context, clientID, redirectURI string) error {
+	// A URL client_id is a Client ID Metadata Document when CIMD is on: its
+	// redirect URIs come from the document on the client's own host, never
+	// from a registration or the implicit-host allowlist.
+	if doc, isCIMD, err := s.resolveCIMDClient(ctx, clientID, "authorize"); isCIMD {
+		if err != nil {
+			return err
+		}
+		return validateCIMDRedirect(doc, redirectURI)
+	}
 	if s.useDB {
 		// Look up registration in the Postgres table.
 		dbReg, err := s.store.GetClientReg(ctx, clientID)

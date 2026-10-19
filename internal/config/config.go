@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 )
 
 // maxOAUTHAccessTokenTTL is the ceiling on OAUTH_ACCESS_TOKEN_TTL. 24h is
@@ -100,6 +102,17 @@ type Config struct {
 	OAUTHAccessTokenTTL      time.Duration
 	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
 	OAUTHAllowImplicitClient bool          // accept unregistered client_ids; default false (explicit opt-in)
+	// OAUTHCIMDAccept makes /oauth/authorize and /oauth/token resolve an
+	// https URL client_id as an OAuth Client ID Metadata Document
+	// (OAUTH_CIMD_ACCEPT, default false). It does not advertise CIMD in the
+	// authorization server metadata: a client that prefers CIMD switches to
+	// it as soon as it is advertised, so advertising waits until every CIMD
+	// client in use is supported (private_key_jwt for ChatGPT, mctl-telegram#773).
+	OAUTHCIMDAccept bool
+	// OAUTHCIMDAllowedHosts is the mandatory host allowlist for CIMD
+	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names or ".suffix"
+	// entries. Required and non-empty when OAUTHCIMDAccept is true.
+	OAUTHCIMDAllowedHosts []string
 	// AllowSharedHMACLegacy opts in to AUTH_MODE=shared-hmac-legacy. The
 	// alias is gated off by default: it is the audit-2026-08 leftover that
 	// still treated a shared api.mctl.ai secret as a first-class mode.
@@ -418,6 +431,7 @@ func Load() (*Config, error) {
 		OAUTHAccessTokenTTL:           envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
 		OAUTHRefreshTokenTTL:          envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
 		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
+		OAUTHCIMDAccept:               envBool("OAUTH_CIMD_ACCEPT", false),
 		AllowSharedHMACLegacy:         envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
 		OAUTHRegisterRatePerMin:       envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
@@ -489,6 +503,13 @@ func Load() (*Config, error) {
 		}
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
+	if c.OAUTHCIMDAccept {
+		hosts, err := cimd.ParseAllowedHosts(os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"))
+		if err != nil {
+			return nil, err
+		}
+		c.OAUTHCIMDAllowedHosts = hosts
+	}
 	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
 	}
