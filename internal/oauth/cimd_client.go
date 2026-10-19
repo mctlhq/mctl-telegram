@@ -139,6 +139,11 @@ func (s *Server) assertionAudiences() []string {
 	return []string{s.cfg.Issuer, s.cfg.Issuer + "/oauth/token"}
 }
 
+// maxInMemoryJTIs caps the single-process jti map. Each entry needs a verified
+// assertion from an allowlisted host and lives at most the assertion lifetime
+// (5 minutes plus skew), so the cap is far above legitimate use.
+const maxInMemoryJTIs = 10000
+
 // consumeJTI records a's jti for its remaining lifetime and refuses one
 // already recorded. With Postgres the record is shared by every replica;
 // without it the in-memory map serves the single process.
@@ -146,7 +151,7 @@ func (s *Server) consumeJTI(ctx context.Context, clientID string, a cimd.Asserti
 	ttl := max(a.RememberFor, time.Second)
 	now := s.clock()
 	if s.useDB {
-		fresh, err := s.store.RecordClientAssertionJTI(ctx, clientID, a.JTI, now.Add(ttl))
+		fresh, err := s.store.RecordClientAssertionJTI(ctx, clientID, a.JTI, ttl)
 		if err != nil {
 			return fmt.Errorf("%w: %v", errJTIStore, err)
 		}
@@ -160,6 +165,12 @@ func (s *Server) consumeJTI(ctx context.Context, clientID string, a cimd.Asserti
 	defer s.mu.Unlock()
 	if exp, ok := s.jtis[key]; ok && now.Before(exp) {
 		return fmt.Errorf("%w: client assertion jti was already used", errCIMDAuthFailed)
+	}
+	if len(s.jtis) >= maxInMemoryJTIs {
+		// Bounded like the other in-memory OAuth maps. A full map refuses
+		// with a retryable error rather than forgetting a live jti, which
+		// would reopen replay.
+		return fmt.Errorf("%w: in-memory jti store is full", errJTIStore)
 	}
 	s.jtis[key] = now.Add(ttl)
 	return nil

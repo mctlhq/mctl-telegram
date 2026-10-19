@@ -410,18 +410,23 @@ func (s *Store) CountOAuthPending(ctx context.Context, ttl time.Duration) (int64
 }
 
 // RecordClientAssertionJTI records the jti of a client assertion from
-// clientID until expiresAt and reports whether it was fresh. false means the
+// clientID for ttl and reports whether it was fresh. false means the
 // jti was already used by a live assertion: the caller must refuse the
 // request. A row whose expiry has passed is reused in place, so a jti is
 // never refused for a stale record. Any error is a failed read, never a
 // pass: the caller answers server_error.
-func (s *Store) RecordClientAssertionJTI(ctx context.Context, clientID, jti string, expiresAt time.Time) (bool, error) {
+//
+// The expiry is computed from the database clock, the same clock the
+// conflict check and the sweep compare against, so app/database clock skew
+// cannot make a fresh row look expired and let a replay through.
+func (s *Store) RecordClientAssertionJTI(ctx context.Context, clientID, jti string, ttl time.Duration) (bool, error) {
 	sum := sha256.Sum256([]byte(clientID + "\x00" + jti))
 	res, err := s.DB.ExecContext(ctx,
-		`INSERT INTO oauth_client_assertion_jtis (jti_hash, expires_at) VALUES ($1, $2)
+		`INSERT INTO oauth_client_assertion_jtis (jti_hash, expires_at)
+		 VALUES ($1, NOW() + $2 * INTERVAL '1 millisecond')
 		 ON CONFLICT (jti_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at
 		 WHERE oauth_client_assertion_jtis.expires_at < NOW()`,
-		sum[:], expiresAt.UTC(),
+		sum[:], ttl.Milliseconds(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("record client assertion jti: %w", err)

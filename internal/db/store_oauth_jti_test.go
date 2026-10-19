@@ -37,7 +37,7 @@ func TestRecordClientAssertionJTI_Postgres(t *testing.T) {
 		_, _ = conn.ExecContext(ctx, `DELETE FROM oauth_client_assertion_jtis WHERE jti_hash = $1`, key)
 	})
 
-	live := time.Now().Add(5 * time.Minute)
+	live := 5 * time.Minute
 	if fresh, err := s.RecordClientAssertionJTI(ctx, clientID, jti, live); err != nil || !fresh {
 		t.Fatalf("first use: fresh=%v err=%v, want true nil", fresh, err)
 	}

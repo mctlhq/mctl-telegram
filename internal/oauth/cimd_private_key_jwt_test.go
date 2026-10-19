@@ -6,7 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +20,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 )
 
@@ -278,5 +282,54 @@ func TestCIMD_JTIReplayAcrossReplicas_Postgres(t *testing.T) {
 	}
 	if err := b.consumeJTI(context.Background(), pkjwtClientID, as); err == nil {
 		t.Fatal("replay on replica B was accepted")
+	}
+}
+
+// TestCIMD_JTIStoreErrorIsRetryableNeverAPass pins the fail-closed half of the
+// replay store: a database that cannot record the jti refuses the request with
+// a retryable error and never treats the assertion as fresh.
+func TestCIMD_JTIStoreErrorIsRetryableNeverAPass(t *testing.T) {
+	conn, err := sql.Open("sqlite", "file::memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_ = conn.Close() // every statement now fails with "database is closed"
+	srv, err := New(context.Background(), Config{
+		Issuer: testIssuer, JWTSecret: testJWTSecret, TelegramOIDC: newFakeAuthenticator(),
+		AccessTokenTTL: time.Hour, CodeTTL: time.Minute, UseDBForOAuth: true,
+	}, &db.Store{DB: conn})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !srv.useDB {
+		t.Fatal("server is not using the database for OAuth state")
+	}
+	err = srv.consumeJTI(context.Background(), pkjwtClientID, cimd.Assertion{JTI: "store-down", RememberFor: time.Minute})
+	if !errors.Is(err, errJTIStore) {
+		t.Fatalf("consumeJTI with a failing store = %v, want errJTIStore", err)
+	}
+	rec := httptest.NewRecorder()
+	writeCIMDTokenError(rec, cimdFailure("test", pkjwtClientID, err))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("store error answered %d (Retry-After %q), want 503 with Retry-After", rec.Code, rec.Header().Get("Retry-After"))
+	}
+}
+
+// TestCIMD_InMemoryJTIMapIsBounded checks that a full in-memory jti map
+// refuses a new jti with a retryable error instead of growing or forgetting.
+func TestCIMD_InMemoryJTIMapIsBounded(t *testing.T) {
+	srv := newTestServer(t)
+	now := srv.clock()
+	srv.mu.Lock()
+	for i := 0; i < maxInMemoryJTIs; i++ {
+		srv.jtis[fmt.Sprintf("k%d", i)] = now.Add(time.Minute)
+	}
+	srv.mu.Unlock()
+	err := srv.consumeJTI(context.Background(), pkjwtClientID, cimd.Assertion{JTI: "one-more", RememberFor: time.Minute})
+	if !errors.Is(err, errJTIStore) {
+		t.Fatalf("consumeJTI on a full map = %v, want errJTIStore", err)
+	}
+	if len(srv.jtis) != maxInMemoryJTIs {
+		t.Fatalf("map grew to %d past the cap %d", len(srv.jtis), maxInMemoryJTIs)
 	}
 }

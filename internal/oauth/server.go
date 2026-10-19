@@ -2093,7 +2093,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	// may omit client_id, and the assertion names the client. This only picks
 	// the document to verify against; verification still requires
 	// iss == sub == that document's client_id.
-	if r.PostForm.Get("client_id") == "" && r.PostForm.Get("client_assertion") != "" && s.cimdEnabled() {
+	if r.Form.Get("client_id") == "" && r.PostForm.Get("client_assertion") != "" && s.cimdEnabled() {
 		if id := cimd.UnverifiedClientID(r.PostForm.Get("client_assertion")); cimd.IsCIMDURL(id) {
 			r.PostForm.Set("client_id", id)
 			r.Form.Set("client_id", id)
@@ -2389,8 +2389,14 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// families without touching the database. Turning OAUTH_CIMD_ACCEPT off
 	// does not: with no resolver nothing is consulted here, so the families
 	// rotate until their absolute lifetime (SECURITY.md says which lever to
-	// use). Checked before the token is
-	// looked up, so a refused client cannot trigger reuse detection either.
+	// use). Checked before the token is looked up, so a refused client
+	// cannot trigger reuse detection either.
+	//
+	// A private_key_jwt client's jti is spent here, before the grace-window
+	// recovery below. A retry that resends a byte-identical POST after a
+	// dropped response therefore replays its own assertion and is refused;
+	// RFC 7523 requires a fresh jti per assertion, and a conformant client
+	// that mints one per attempt still reaches the grace path.
 	if _, isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_refresh"); isCIMD && err != nil {
 		writeCIMDTokenError(w, err)
 		return
