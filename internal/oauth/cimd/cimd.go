@@ -22,9 +22,7 @@
 //
 // Ported from mctlhq/mctl-api internal/auth/cimd, which has served CIMD in
 // production since 2026-10-18; the mctl-api#NNN references below point to
-// that repository. The private_key_jwt key-set cache is not ported yet
-// (mctl-telegram#773): parseDocument still validates such a document, and
-// the OAuth server refuses it.
+// that repository.
 package cimd
 
 import (
@@ -44,6 +42,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/mctlhq/mctl-telegram/internal/netsafe"
@@ -238,6 +237,13 @@ type cacheEntry struct {
 	doc     Document
 	err     error
 	expires time.Time
+	// keys and fetched are set on a key set entry ("jwks\x00" + jwks_uri),
+	// which shares the LRU with the documents.
+	keys    []jose.JSONWebKey
+	fetched time.Time
+	// refetchErr is why the last refetch failed while keys were kept. It
+	// answers a kid the kept keys lack until the next refetch is allowed.
+	refetchErr error
 }
 
 // NewResolver builds a Resolver.

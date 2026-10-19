@@ -1098,6 +1098,17 @@ func pgSchema() []string {
 		`CREATE INDEX IF NOT EXISTS idx_oauth_pending_auth_created_at ON oauth_pending_auth(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_auth_codes_created_at ON oauth_auth_codes(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_client_regs_created_at ON oauth_client_registrations(created_at)`,
+		// Client assertion jtis already used (RFC 7523 section 3, item 7) by
+		// private_key_jwt CIMD clients (mctl-telegram#773), keyed by
+		// SHA-256(client_id NUL jti): both are client-chosen and a jti may
+		// carry bytes TEXT cannot hold. A row lives until
+		// its assertion would be refused as expired anyway; an expired row is
+		// reused in place and swept. Postgres only, like the tables above.
+		`CREATE TABLE IF NOT EXISTS oauth_client_assertion_jtis (
+			jti_hash    BYTEA PRIMARY KEY,
+			expires_at  TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_client_assertion_jtis_expires ON oauth_client_assertion_jtis(expires_at)`,
 		// Worker token revocations (jti denylist) — see the sqliteSchema
 		// comment on this table for the row-shape explanation.
 		`CREATE TABLE IF NOT EXISTS worker_token_revocations (

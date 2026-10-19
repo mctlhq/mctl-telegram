@@ -44,6 +44,13 @@ func (s *stubCIMD) Resolve(_ context.Context, clientID string) (cimd.Document, e
 	return s.doc, nil
 }
 
+// VerifyAssertion refuses every assertion: the stub serves only "none"
+// documents. private_key_jwt is exercised against the real resolver in
+// cimd_private_key_jwt_test.go.
+func (s *stubCIMD) VerifyAssertion(context.Context, cimd.Document, string, []string) (cimd.Assertion, error) {
+	return cimd.Assertion{}, cimd.ErrAssertion
+}
+
 func (s *stubCIMD) set(doc cimd.Document, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,8 +144,8 @@ func TestCIMD_FullFlowAndHostRemoval(t *testing.T) {
 // implicit-client path.
 func TestCIMD_AuthorizeRefusals(t *testing.T) {
 	ctx := context.Background()
-	pkjwt := platformDoc()
-	pkjwt.AuthMethod = cimd.AuthMethodPrivateKeyJWT
+	unknownMethod := platformDoc()
+	unknownMethod.AuthMethod = "client_secret_basic"
 
 	cases := []struct {
 		name     string
@@ -151,7 +158,7 @@ func TestCIMD_AuthorizeRefusals(t *testing.T) {
 		{"host not allowed", platformDoc(), cimd.ErrNotAllowed, cimdCallback},
 		{"fetch failed", platformDoc(), cimd.ErrFetch, cimdCallback},
 		{"invalid document", platformDoc(), cimd.ErrInvalidDocument, cimdCallback},
-		{"private_key_jwt not supported yet", pkjwt, nil, cimdCallback},
+		{"unsupported auth method", unknownMethod, nil, cimdCallback},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
