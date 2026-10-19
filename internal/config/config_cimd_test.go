@@ -63,3 +63,20 @@ func TestLoadOAuthCIMD(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadOAuthCIMDRefusesURLShapedPreregisteredClient pins the startup guard:
+// with CIMD on, a URL-shaped pre-registered client_id would be resolved as a
+// metadata document and silently stop working, so Load refuses it.
+func TestLoadOAuthCIMDRefusesURLShapedPreregisteredClient(t *testing.T) {
+	const prereg = `[{"client_id":"https://platform.example.test/oauth-client","redirect_uris":["https://platform.example.test/cb"]}]`
+	t.Setenv("OAUTH_PREREGISTERED_CLIENTS", prereg)
+	t.Setenv("OAUTH_CIMD_ALLOWED_HOSTS", "platform.example.test")
+	if _, err := Load(); err != nil {
+		t.Fatalf("CIMD off: Load() = %v, want the URL-shaped client accepted", err)
+	}
+	t.Setenv("OAUTH_CIMD_ACCEPT", "true")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "OAUTH_PREREGISTERED_CLIENTS") {
+		t.Fatalf("CIMD on: Load() = %v, want an OAUTH_PREREGISTERED_CLIENTS refusal", err)
+	}
+}

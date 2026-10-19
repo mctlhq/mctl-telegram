@@ -256,7 +256,9 @@ func (r *Resolver) fetchKeys(ctx context.Context, uri string) ([]jose.JSONWebKey
 	default:
 		return nil, 0, ErrRateLimited
 	}
-	if !r.allowHost(strings.ToLower(u.Hostname())) {
+	// A key set is fetched only for a document that validated, so it draws
+	// on the reserved part of the host budget.
+	if !r.allowHost(strings.ToLower(u.Hostname()), true) {
 		return nil, 0, ErrRateLimited
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)

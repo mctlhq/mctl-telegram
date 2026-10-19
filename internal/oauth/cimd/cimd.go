@@ -83,6 +83,9 @@ const (
 	// so a no-store document and key set together use twice the fetches
 	// and leave half the headroom (mctl-api#694).
 	hostPerMinute = 10
+	// knownTTL is how long a client_id whose document once validated keeps
+	// its claim on the reserved half of the host budget (see allowHost).
+	knownTTL      = maxTTL
 	maxConcurrent = 8
 	fetchTimeout  = 10 * time.Second
 )
@@ -219,6 +222,11 @@ type Resolver struct {
 	lru   *list.List
 	cache map[string]*list.Element
 	rate  map[string][]time.Time
+	// known holds the client_ids whose document validated, with the time
+	// of the last success. Their refetches (and their key sets) draw on the
+	// reserved half of the host budget, which a caller spraying unseen
+	// client_ids on the same host cannot spend.
+	known map[string]time.Time
 }
 
 type cacheEntry struct {
@@ -265,6 +273,7 @@ func NewResolver(o Options) *Resolver {
 		allowed: allowed, client: c, now: now, perHost: per, timeout: timeout,
 		sem: make(chan struct{}, conc), lru: list.New(),
 		cache: map[string]*list.Element{}, rate: map[string][]time.Time{},
+		known: map[string]time.Time{},
 	}
 }
 
@@ -356,6 +365,9 @@ func (r *Resolver) cachedEntry(key string) (cacheEntry, bool) {
 }
 
 func (r *Resolver) store(key string, doc Document, err error, ttl time.Duration) {
+	if err == nil {
+		r.markKnown(key)
+	}
 	switch {
 	case errors.Is(err, ErrFetch):
 		ttl = fetchErrTTL
@@ -379,7 +391,47 @@ func (r *Resolver) storeEntry(e *cacheEntry) {
 	}
 }
 
-func (r *Resolver) allowHost(host string) bool {
+// markKnown records that key's document validated. The set is bounded like
+// the cache: when full, entries past knownTTL go first, then the oldest.
+func (r *Resolver) markKnown(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if _, ok := r.known[key]; !ok && len(r.known) >= cacheEntries {
+		oldest, oldestAt := "", now
+		for k, t := range r.known {
+			if now.Sub(t) >= knownTTL {
+				delete(r.known, k)
+				continue
+			}
+			if t.Before(oldestAt) {
+				oldest, oldestAt = k, t
+			}
+		}
+		if len(r.known) >= cacheEntries {
+			delete(r.known, oldest)
+		}
+	}
+	r.known[key] = now
+}
+
+// isKnown reports whether key's document validated within knownTTL.
+func (r *Resolver) isKnown(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.known[key]
+	return ok && r.now().Sub(t) < knownTTL
+}
+
+// allowHost spends one fetch of host's per-minute budget. A fetch for a
+// client_id never seen to validate (reserved=false) may use only the
+// unreserved part of the budget: the host is public and the path is the
+// caller's choice, so without the reserve ~10 unauthenticated requests a
+// minute with fresh paths would hold the budget at zero and, once the real
+// document's cache entry expired, refuse its sign-ins and refreshes for as
+// long as they continued. A known document's refetch and its key set
+// (reserved=true) may use the whole budget.
+func (r *Resolver) allowHost(host string, reserved bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
@@ -394,7 +446,7 @@ func (r *Resolver) allowHost(host string) bool {
 			// Every slot was used within the minute: refuse the new host
 			// rather than grow past the bound. With a .suffix allowlist entry
 			// a caller picks the hosts and can fill the map, refusing other
-			// untracked hosts for a minute; that is why the README asks for
+			// untracked hosts for a minute; that is why SECURITY.md asks for
 			// exact hosts in production.
 			return false
 		}
@@ -405,7 +457,11 @@ func (r *Resolver) allowHost(host string) bool {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= r.perHost {
+	limit := r.perHost
+	if !reserved {
+		limit -= r.perHost / 2
+	}
+	if len(kept) >= limit {
 		r.rate[host] = kept
 		return false
 	}
@@ -420,7 +476,7 @@ func (r *Resolver) fetch(ctx context.Context, u *url.URL, clientID string) (Docu
 	default:
 		return Document{}, 0, ErrRateLimited
 	}
-	if !r.allowHost(strings.ToLower(u.Hostname())) {
+	if !r.allowHost(strings.ToLower(u.Hostname()), r.isKnown(clientID)) {
 		return Document{}, 0, ErrRateLimited
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)

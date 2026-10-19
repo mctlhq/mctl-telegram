@@ -23,6 +23,10 @@ type CIMDResolver interface {
 // section 2.2).
 const ClientAssertionTypeJWT = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
+// maxClientIDBytes caps a client_id at /oauth/authorize and on every CIMD
+// resolve.
+const maxClientIDBytes = 256
+
 // errCIMDRefused is the single answer a refused CIMD client gets. The reason
 // (host not allowed, invalid document) goes to the WARN log only: it
 // describes the client's own configuration and our allowlist, neither of
@@ -61,6 +65,12 @@ func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) 
 	if !s.cimdEnabled() || !cimd.IsCIMDURL(clientID) {
 		return cimd.Document{}, false, nil
 	}
+	if len(clientID) > maxClientIDBytes {
+		// The same cap /oauth/authorize applies, enforced here so the token
+		// grants cannot resolve a client_id no authorization could have used.
+		slog.Warn("oauth: cimd client refused", "where", where, "err", "client_id exceeds 256 bytes")
+		return cimd.Document{}, true, errCIMDRefused
+	}
 	doc, err = s.cfg.CIMD.Resolve(ctx, clientID)
 	if err == nil && doc.AuthMethod != cimd.AuthMethodNone && doc.AuthMethod != cimd.AuthMethodPrivateKeyJWT {
 		err = fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", cimd.ErrInvalidDocument, doc.AuthMethod)
@@ -91,35 +101,35 @@ func cimdFailure(where, clientID string, err error) error {
 // client assertion, private_key_jwt must send a valid one on every request,
 // with a jti not seen before. isCIMD=false leaves a non-CIMD client on its
 // unchanged public-client path.
-func (s *Server) authenticateCIMDClient(r *http.Request, clientID, where string) (isCIMD bool, err error) {
-	doc, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, where)
+func (s *Server) authenticateCIMDClient(r *http.Request, clientID, where string) (doc cimd.Document, isCIMD bool, err error) {
+	doc, isCIMD, err = s.resolveCIMDClient(r.Context(), clientID, where)
 	if !isCIMD || err != nil {
-		return isCIMD, err
+		return doc, isCIMD, err
 	}
 	assertionType := r.FormValue("client_assertion_type")
 	assertion := r.FormValue("client_assertion")
 	switch doc.AuthMethod {
 	case cimd.AuthMethodNone:
 		if assertionType != "" || assertion != "" {
-			return true, cimdFailure(where, clientID,
+			return doc, true, cimdFailure(where, clientID,
 				fmt.Errorf("%w: client declares none and must not send a client assertion", errCIMDAuthFailed))
 		}
-		return true, nil
+		return doc, true, nil
 	case cimd.AuthMethodPrivateKeyJWT:
 		if assertionType != ClientAssertionTypeJWT || assertion == "" {
-			return true, cimdFailure(where, clientID,
+			return doc, true, cimdFailure(where, clientID,
 				fmt.Errorf("%w: private_key_jwt client must send client_assertion_type %s and client_assertion", errCIMDAuthFailed, ClientAssertionTypeJWT))
 		}
 		a, err := s.cfg.CIMD.VerifyAssertion(r.Context(), doc, assertion, s.assertionAudiences())
 		if err != nil {
-			return true, cimdFailure(where, clientID, err)
+			return doc, true, cimdFailure(where, clientID, err)
 		}
 		if err := s.consumeJTI(r.Context(), clientID, a); err != nil {
-			return true, cimdFailure(where, clientID, err)
+			return doc, true, cimdFailure(where, clientID, err)
 		}
-		return true, nil
+		return doc, true, nil
 	}
-	return true, cimdFailure(where, clientID,
+	return doc, true, cimdFailure(where, clientID,
 		fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", errCIMDAuthFailed, doc.AuthMethod))
 }
 
@@ -173,9 +183,12 @@ func validateCIMDRedirect(doc cimd.Document, redirectURI string) error {
 	if cimd.RedirectAllowed(doc.RedirectURIs, redirectURI) {
 		return nil
 	}
+	// The detail goes to the log only: the caller gets the same refusal as
+	// for any other unusable document.
 	slog.Warn("oauth: cimd redirect_uri not in document",
-		"client_id", doc.ClientID, "dropped_redirect_uris", doc.DroppedRedirectURIs)
-	return fmt.Errorf("redirect_uri %q is not listed in the client metadata document for client_id %q", redirectURI, doc.ClientID)
+		"client_id", doc.ClientID, "redirect_uri", redirectURI,
+		"dropped_redirect_uris", doc.DroppedRedirectURIs)
+	return errCIMDRefused
 }
 
 // writeCIMDTokenError answers a token request whose CIMD client could not be

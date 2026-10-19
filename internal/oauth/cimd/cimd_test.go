@@ -547,7 +547,8 @@ func TestSingleflight(t *testing.T) {
 
 func TestRateLimitAndSemaphore(t *testing.T) {
 	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
-	r := NewResolver(Options{AllowedHosts: []string{"app.example.com"}, HTTPClient: f.cl, HostPerMinute: 2, Now: func() time.Time { return f.clock }})
+	// Unseen client_ids get the unreserved half of the budget: 2 of 4.
+	r := NewResolver(Options{AllowedHosts: []string{"app.example.com"}, HTTPClient: f.cl, HostPerMinute: 4, Now: func() time.Time { return f.clock }})
 	var limited int
 	for i := 0; i < 5; i++ {
 		_, err := r.Resolve(context.Background(), fmt.Sprintf("https://app.example.com/c%d", i))
@@ -562,6 +563,40 @@ func TestRateLimitAndSemaphore(t *testing.T) {
 	r2.sem <- struct{}{}
 	if _, err := r2.Resolve(context.Background(), f.url); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("full semaphore must refuse: %v", err)
+	}
+}
+
+// TestUnseenClientIDsCannotStarveAKnownDocument pins the reserve: a caller
+// spraying fresh paths on an allowlisted host spends only the unreserved half
+// of the budget, so the real document is still refetched once its cache entry
+// expires inside the same minute.
+func TestUnseenClientIDsCannotStarveAKnownDocument(t *testing.T) {
+	f := newFixture(t, nil)
+	f.h = func(w http.ResponseWriter, req *http.Request) {
+		if "https://app.example.com"+req.URL.Path != f.url {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = fmt.Fprint(w, doc(f.url, ""))
+	}
+	r := f.resolver()
+	if _, err := r.Resolve(context.Background(), f.url); err != nil {
+		t.Fatalf("first sign-in: %v", err)
+	}
+	var sprayHits int32
+	before := f.hits.Load()
+	for i := 0; i < 3*hostPerMinute; i++ {
+		_, _ = r.Resolve(context.Background(), fmt.Sprintf("https://app.example.com/spray/%d", i))
+	}
+	sprayHits = f.hits.Load() - before
+	if want := int32(hostPerMinute - hostPerMinute/2 - 1); sprayHits != want {
+		t.Fatalf("spray reached the network %d times, want %d (unreserved budget less the first fetch)", sprayHits, want)
+	}
+	f.advance(minTTL)
+	if _, err := r.Resolve(context.Background(), f.url); err != nil {
+		t.Fatalf("known document refused after its entry expired under a spray: %v", err)
 	}
 }
 

@@ -1375,7 +1375,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// stores each request in the in-memory pending map; without length limits an
 	// attacker can fill entries with near-header-limit strings and drive the
 	// process to OOM before TTL eviction fires.
-	if len(clientID) > 256 {
+	if len(clientID) > maxClientIDBytes {
 		s.writeAuthorizeError(w, "invalid_request", "client_id exceeds 256 bytes")
 		return
 	}
@@ -1397,11 +1397,14 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.validateClient(r.Context(), clientID, redirectURI); err != nil {
-		code := "invalid_client"
 		if errors.Is(err, errCIMDUnavailable) {
-			code = "temporarily_unavailable"
+			// Retryable, like the token endpoint's answer to the same
+			// condition: nothing about the client was observed.
+			w.Header().Set("Retry-After", "30")
+			s.writeAuthorizeErrorStatus(w, "temporarily_unavailable", err.Error(), http.StatusServiceUnavailable)
+			return
 		}
-		s.writeAuthorizeError(w, code, err.Error())
+		s.writeAuthorizeError(w, "invalid_client", err.Error())
 		return
 	}
 
@@ -1537,8 +1540,12 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeAuthorizeError(w http.ResponseWriter, code, desc string) {
+	s.writeAuthorizeErrorStatus(w, code, desc, http.StatusBadRequest)
+}
+
+func (s *Server) writeAuthorizeErrorStatus(w http.ResponseWriter, code, desc string, status int) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":             code,
 		"error_description": desc,
@@ -2130,12 +2137,19 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "code_verifier "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Re-resolve a CIMD client before the code is consumed: a document that
-	// stopped listing the client, or a host taken off the allowlist, ends
-	// the flow here rather than after the code is gone.
-	if isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_code"); isCIMD && err != nil {
-		writeCIMDTokenError(w, err)
-		return
+	// Re-resolve a CIMD client before the code is consumed: a host taken off
+	// the allowlist, a document that no longer resolves, or one that stopped
+	// listing this redirect_uri ends the flow here rather than after the
+	// code is gone. An omitted redirect_uri is left to the comparison with
+	// the code's own redirect_uri below.
+	if doc, isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_code"); isCIMD {
+		if err == nil && redirectURI != "" {
+			err = validateCIMDRedirect(doc, redirectURI)
+		}
+		if err != nil {
+			writeCIMDTokenError(w, err)
+			return
+		}
 	}
 
 	var entry *authCode
@@ -2372,9 +2386,12 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	// A CIMD client is re-resolved on every refresh, so removing its host
 	// from OAUTH_CIMD_ALLOWED_HOSTS cuts off its existing refresh-token
-	// families without touching the database. Checked before the token is
+	// families without touching the database. Turning OAUTH_CIMD_ACCEPT off
+	// does not: with no resolver nothing is consulted here, so the families
+	// rotate until their absolute lifetime (SECURITY.md says which lever to
+	// use). Checked before the token is
 	// looked up, so a refused client cannot trigger reuse detection either.
-	if isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_refresh"); isCIMD && err != nil {
+	if _, isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_refresh"); isCIMD && err != nil {
 		writeCIMDTokenError(w, err)
 		return
 	}

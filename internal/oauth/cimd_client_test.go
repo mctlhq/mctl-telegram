@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -219,6 +220,84 @@ func TestCIMD_TokenCodeRefusedBeforeConsume(t *testing.T) {
 // TestCIMD_OffLeavesURLClientsOnTheOldPath checks that with CIMD off a URL
 // client_id is an ordinary unregistered client_id, and that with CIMD on a
 // DCR-style client_id never reaches the resolver.
+// TestCIMD_AuthorizeHandlerAnswers pins what /oauth/authorize itself sends:
+// an unreachable document is a retryable 503 temporarily_unavailable, and a
+// redirect_uri the document does not list gets the same generic refusal as
+// any other unusable document, without echoing the detail.
+func TestCIMD_AuthorizeHandlerAnswers(t *testing.T) {
+	authorize := func(t *testing.T, stub *stubCIMD, redirect string) *httptest.ResponseRecorder {
+		t.Helper()
+		srv := newTestServer(t, withCIMD(stub))
+		mux := newMockRouter()
+		srv.Register(mux)
+		_, challenge := pkceVerifierAndChallenge()
+		q := url.Values{
+			"response_type": {"code"}, "client_id": {cimdClientID}, "redirect_uri": {redirect},
+			"state": {"s"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		}
+		rec := httptest.NewRecorder()
+		mux.serve("GET", "/oauth/authorize", rec, httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil))
+		return rec
+	}
+
+	stub := &stubCIMD{}
+	stub.set(platformDoc(), cimd.ErrFetch)
+	rec := authorize(t, stub, cimdCallback)
+	if rec.Code != http.StatusServiceUnavailable || tokenErrorCode(t, rec.Body.String()) != "temporarily_unavailable" || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("unreachable document: %d %s, want 503 temporarily_unavailable with Retry-After", rec.Code, rec.Body.String())
+	}
+
+	stub.set(platformDoc(), nil)
+	const unlisted = "https://platform.example.test/unlisted"
+	rec = authorize(t, stub, unlisted)
+	if rec.Code != http.StatusBadRequest || tokenErrorCode(t, rec.Body.String()) != "invalid_client" {
+		t.Fatalf("unlisted redirect: %d %s, want 400 invalid_client", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), unlisted) {
+		t.Fatalf("refusal echoed the redirect detail: %s", rec.Body.String())
+	}
+}
+
+// TestCIMD_TokenCodeRechecksRedirect checks that a document which stopped
+// listing the code's redirect_uri refuses the exchange before the code is
+// consumed, and that an over-long client_id is refused at the token endpoint
+// as it is at authorize, without reaching the resolver.
+func TestCIMD_TokenCodeRechecksRedirect(t *testing.T) {
+	stub := &stubCIMD{}
+	stub.set(platformDoc(), nil)
+	srv := newTestServer(t, withCIMD(stub))
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	verifier, challenge := pkceVerifierAndChallenge()
+	cs := obtainAuthorizationCodeFor(t, srv, mux, challenge, cimdClientID, cimdCallback)
+	form := url.Values{
+		"grant_type": {"authorization_code"}, "code": {cs.code}, "client_id": {cimdClientID},
+		"redirect_uri": {cimdCallback}, "code_verifier": {verifier},
+	}
+	edited := platformDoc()
+	edited.RedirectURIs = []string{"https://platform.example.test/new-callback"}
+	stub.set(edited, nil)
+	rec := doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusBadRequest || tokenErrorCode(t, rec.Body.String()) != "invalid_client" {
+		t.Fatalf("code exchange after the redirect left the document: %d %s", rec.Code, rec.Body.String())
+	}
+	stub.set(platformDoc(), nil)
+	if rec = doTokenRequest(t, mux, form); rec.Code != http.StatusOK {
+		t.Fatalf("code was consumed by the refused attempt: %d %s", rec.Code, rec.Body.String())
+	}
+
+	long := "https://platform.example.test/" + strings.Repeat("a", maxClientIDBytes)
+	calls := stub.calls
+	rec = doTokenRequest(t, mux, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"x"}, "client_id": {long}})
+	if rec.Code != http.StatusBadRequest || tokenErrorCode(t, rec.Body.String()) != "invalid_client" {
+		t.Fatalf("over-long client_id at refresh: %d %s, want 400 invalid_client", rec.Code, rec.Body.String())
+	}
+	if stub.calls != calls {
+		t.Fatal("an over-long client_id reached the resolver")
+	}
+}
+
 func TestCIMD_OffLeavesURLClientsOnTheOldPath(t *testing.T) {
 	ctx := context.Background()
 
