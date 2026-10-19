@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.80.1](https://github.com/mctlhq/mctl-telegram/compare/0.80.0...0.80.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* make public copy match production and default new accounts to read-only ([1514820](https://github.com/mctlhq/mctl-telegram/commit/151482092b277f86260145dc875dc775818fecdb))
+* make public copy match production and default new accounts to read-only ([953447d](https://github.com/mctlhq/mctl-telegram/commit/953447db382878c91d622f52c473b572a6033b75)), closes [#770](https://github.com/mctlhq/mctl-telegram/issues/770)
+* **web:** allow YouTube and Loom embeds in the content-page CSP ([0ae84ca](https://github.com/mctlhq/mctl-telegram/commit/0ae84cae6d0c5fc27cbed398268c39a9ca915ef0)), closes [#770](https://github.com/mctlhq/mctl-telegram/issues/770)
+
 ## [0.80.0](https://github.com/mctlhq/mctl-telegram/compare/0.79.5...0.80.0) (2026-10-18)
 
 
