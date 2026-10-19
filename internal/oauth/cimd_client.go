@@ -163,13 +163,18 @@ func (s *Server) consumeJTI(ctx context.Context, clientID string, a cimd.Asserti
 	key := clientID + "\x00" + a.JTI
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exp, ok := s.jtis[key]; ok && now.Before(exp) {
+	exp, seen := s.jtis[key]
+	if seen && now.Before(exp) {
 		return fmt.Errorf("%w: client assertion jti was already used", errCIMDAuthFailed)
 	}
-	if len(s.jtis) >= maxInMemoryJTIs {
+	if !seen && len(s.jtis) >= maxInMemoryJTIs {
 		// Bounded like the other in-memory OAuth maps. A full map refuses
 		// with a retryable error rather than forgetting a live jti, which
-		// would reopen replay.
+		// would reopen replay; rewriting an expired record does not grow
+		// it, so that is still allowed. The map is per process, not per
+		// client, so a client that fills it delays every private_key_jwt
+		// client until the next sweep. That needs a key on an allowlisted
+		// host, and production records jtis in Postgres instead.
 		return fmt.Errorf("%w: in-memory jti store is full", errJTIStore)
 	}
 	s.jtis[key] = now.Add(ttl)
