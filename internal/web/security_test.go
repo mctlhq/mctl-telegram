@@ -29,7 +29,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Saved Messages privacy",
 		"Human takeover",
 		"AGENT_RETENTION_DAYS",
-		"ALLOW_SEND=false",
+		"starts read-only",
 		"Tamper-evident audit log",
 		"Prompt-injection content boundary",
 		"Session TTL",
@@ -136,7 +136,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"Terms of",
 		"not affiliated with, endorsed by, or operated by Telegram or OpenAI",
 		"your own",
-		"gated and dry-run by default",
+		"read-only by default",
 		"spam",
 		"without warranties of any kind",
 		"support@mctl.ai",
@@ -160,7 +160,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"Your Telegram,",
 		"inside your AI assistant",
-		"Install in ChatGPT",
+		"Connect in ChatGPT",
 		"Copy MCP URL",
 		`id="chatgpt"`,
 		`id="support"`,
@@ -193,10 +193,10 @@ func TestDocs_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Available tools",
 		"https://tg.mctl.ai/mcp",
-		"Apps SDK readiness checklist",
+		"Deployment pre-flight checklist",
 		"chatgpt-setup",
 		"support@mctl.ai",
-		"ALLOW_SEND=false",
+		"send_enabled=false",
 		// mobile: wide tables must sit in horizontal-scroll wrappers
 		`class="table-scroll"`,
 	} {

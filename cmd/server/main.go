@@ -427,6 +427,7 @@ func main() {
 	mux.Use(m.HTTPMiddleware())
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
+	mux.Use(web.SecurityHeaders(cfg.PublicBaseURL))
 
 	// Authorization server URL — for the Telegram-native local-jwt path
 	// (default), this is the same as PublicBaseURL: mctl-telegram is its own

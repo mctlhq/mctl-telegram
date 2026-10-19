@@ -1,36 +1,37 @@
 # LLMS.md — mctl-telegram MCP Remote Server Overview
 
-> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for ChatGPT Apps, Claude.ai, and any MCP client.
+> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for ChatGPT, Claude.ai, and any MCP client.
 
-## Core Capabilities & Submission Package
+## Core Capabilities
 
-- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration).
-- **Submission Packages**:
-  - `chatgpt-submission-package.md`: Reviewer notes, privacy attestations, and submission form inputs for ChatGPT App Directory.
-  - `claude-connector-submission.md`: Metadata, tool annotations, and safety criteria for Anthropic Claude Remote MCP Directory.
-- **Data Minimization & Encryption**: Message bodies are fetched live for user-requested tool calls, never persisted in DB/logs. MTProto session blobs are encrypted at rest with AES-256-GCM.
+- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration). Connect from ChatGPT (Developer Mode custom connector; not an App Directory listing), Claude.ai, Cursor, or any MCP client.
+- **Read-only by default**: a newly connected account has `send_enabled=false`; write tools return previews until the owner opts in with `set_send_consent`.
+- **Data Minimization & Encryption**: Message bodies are fetched live for user-requested tool calls and are not persisted for ordinary MCP use (Communication Agent accounts store encrypted content, see `/privacy`). MTProto session blobs are encrypted at rest with AES-256-GCM under per-user HKDF keys.
+- **Archived submission packets** (historical): `docs/archive/chatgpt-submission-package.md`, `docs/archive/claude-connector-submission.md`.
 
-## Tool Surface (14 MCP Tools)
+## Tool Surface (37 MCP tools)
 
-### User Tools (10)
-- `list_dialogs`: List account dialogs with optional query filter.
-- `get_unread_messages`: Retrieve unread messages per peer.
-- `get_messages`: Retrieve recent message history.
-- `send_message`: Send message (**Preview-only dry-run by default** unless `send_enabled=true`).
-- `prepare_pin_message`: Generate one-shot confirmation ID for pin.
-- `pin_message`: Pin/unpin message using confirmation ID.
-- `get_my_audit_log`: Cryptographic tamper-evident hash-chain audit log for user actions.
-- `get_my_send_status`: Report whether sending is really enabled for this account, without sending anything.
-- `disconnect_telegram_account`: Soft-revoke session and stop MTProto client.
-- `delete_telegram_account`: Hard-delete per-user session blob.
+The authoritative, generated list with schemas and annotations is `docs/tool-descriptors.json`.
 
-### Admin Tools (5)
-- Operator controls guarded by `admin:users` scope (`admin_list_users`, `admin_get_user`, `admin_set_user_send_enabled`, etc.).
+### Read (10)
+`list_dialogs`, `get_unread_messages`, `get_messages`, `search_messages`, `prepare_get_media`, `get_media`, `get_my_identity`, `get_my_audit_log` (tamper-evident hash-chain), `get_my_send_status`, `get_my_notification_preferences`.
+
+### Write (9)
+`prepare_send_message`, `send_message`, `send_media`, `edit_message`, `delete_messages`, `forward_messages`, `set_reaction`, `prepare_pin_message`, `pin_message`. Sends and pins are gated: server `ALLOW_SEND`, the `telegram:messages:send` scope, and per-account `send_enabled`; otherwise a preview (`sent=false`, `dry_reason`) is returned.
+
+### Own account (5)
+`set_send_consent`, `set_my_notification_preferences`, `revoke_local_bridge_device`, `disconnect_telegram_account`, `delete_telegram_account`.
+
+### Admin, `admin:users` scope (9)
+`list_telegram_identities`, `get_user_audit_log`, `set_telegram_access`, `set_account_send`, `set_account_mode`, `revoke_telegram_session`, `provision_local_account`, `mint_worker_token`, `revoke_worker_token`.
+
+### Broadcast operators, `admin:broadcast` scope (4)
+`prepare_broadcast`, `list_broadcasts`, `get_broadcast`, `cancel_broadcast`. No tool can approve a broadcast; a human approves in the browser.
 
 ## Package Architecture
 
 - `cmd/server/`: Main server entrypoint serving `/mcp`, `/privacy`, `/terms`, `/docs`.
-- `internal/mcp/`: MCP server implementation, 14 tool definitions, and schema annotations.
+- `internal/mcp/`: MCP server implementation, tool definitions, and schema annotations (snapshot in `docs/tool-descriptors.json`).
 - `internal/telegram/`: `gotd/td` MTProto client lifecycle and session management.
 - `internal/auth/`: OAuth 2.1 server, PKCE verification, and token handlers.
 - `internal/crypto/`: Per-user AES-256-GCM session blob encryption.

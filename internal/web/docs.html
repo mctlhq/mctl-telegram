@@ -33,10 +33,10 @@
   <!-- ============ 01 Connector setup ============ -->
   <section id="setup">
     <div class="section-head">
-      <h2>Add as a custom connector (ChatGPT Apps or Claude)</h2>
+      <h2>Add as a custom connector (ChatGPT, Claude, or any MCP client)</h2>
     </div>
     <ol class="steps">
-      <li><strong>ChatGPT Apps:</strong> open <em>Settings &#8594; Apps</em>, choose your draft app, then set the MCP server URL to <code class="url">{{.MCPURL}}</code>. See <a href="/#chatgpt">landing &#8594; Install in ChatGPT</a> for the full flow.</li>
+      <li><strong>ChatGPT:</strong> open <em>Settings &#8594; Apps</em> with Developer Mode on, create an app, then set the MCP server URL to <code class="url">{{.MCPURL}}</code>. See <a href="/#chatgpt">landing &#8594; Connect in ChatGPT</a> for the full flow.</li>
       <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai &#8594; Customize &#8594; Connectors</a> and click <em>Add custom connector</em>.</li>
       <li>Authentication: <strong>OAuth</strong>. Clients discover this server as its own authorization server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
       <li>Complete the Telegram sign-in flow in your browser when prompted (phone &#8594; SMS code &#8594; 2FA if enabled).</li>
@@ -46,26 +46,26 @@
 
   <section id="chatgpt-setup">
     <div class="section-head">
-      <h2>ChatGPT Apps setup</h2>
+      <h2>ChatGPT Developer Mode setup</h2>
     </div>
     <ol class="steps">
-      <li>Verify identity in the <a href="https://platform.openai.com/settings/organization/general" target="_blank" rel="noopener">OpenAI Platform Dashboard</a> (individual or business verification required for directory submission).</li>
-      <li>Create or open a draft app under <em>Settings &#8594; Apps</em> in ChatGPT Developer Mode.</li>
+      <li>Enable Developer Mode: ChatGPT &#8594; <em>Settings &#8594; Apps &#8594; Advanced settings</em> (availability depends on your plan).</li>
+      <li>Create an app under <em>Settings &#8594; Apps</em>.</li>
       <li>Set MCP URL to <code class="url">{{.MCPURL}}</code> and auth to OAuth.</li>
-      <li>Run a read-only smoke test (<code>list_dialogs</code>) before submitting for review.</li>
-      <li>Prepare submission URLs: homepage <code>{{.PublicBaseURL}}/</code>, privacy <code>{{.PublicBaseURL}}/privacy</code>, support <code>support@mctl.ai</code>.</li>
+      <li>Run a read-only smoke test (<code>list_dialogs</code>) before enabling sending.</li>
+      <li>tg.mctl.ai is not listed in the ChatGPT App Directory; this by-URL path is the supported one.</li>
     </ol>
   </section>
 
-  <section id="apps-sdk-readiness">
+  <section id="preflight">
     <div class="section-head">
-      <h2>Apps SDK readiness checklist</h2>
+      <h2>Deployment pre-flight checklist</h2>
     </div>
     <ul class="ctrl">
       <li><strong>Public product pages:</strong> ensure <code>/</code>, <code>/docs</code>, <code>/security</code>, and <code>/privacy</code> are accessible over HTTPS.</li>
       <li><strong>OAuth discovery:</strong> fetch <code>/.well-known/oauth-protected-resource</code> on your host, then follow the <code>authorization_servers</code> URL it advertises and confirm that server's <code>/.well-known/oauth-authorization-server</code> resolves. In <code>local-jwt</code> mode that is your own host; in <code>shared-hmac</code> mode it is <code>api.mctl.ai</code>.</li>
       <li><strong>MCP protocol health:</strong> run <code>initialize</code>, list tools, and one read-only tool call with MCP Inspector or ChatGPT Developer Mode.</li>
-      <li><strong>Safety defaults:</strong> on tg.mctl.ai, <code>ALLOW_SEND=false</code> keeps all sends in dry-run until all opt-in gates are enabled.</li>
+      <li><strong>Safety defaults:</strong> new accounts start with <code>send_enabled=false</code>, so sends are previews until the owner opts in; keep <code>ALLOW_SEND=false</code> on deployments that should never deliver (tg.mctl.ai runs with it on).</li>
       <li><strong>User controls:</strong> verify account disconnect/delete and audit-log endpoints are reachable and documented.</li>
       <li><strong>Support contact:</strong> <code>support@mctl.ai</code> published on landing and privacy pages.</li>
       <li><strong>Verified org:</strong> complete individual or business verification in the OpenAI Platform Dashboard before submission.</li>
@@ -115,7 +115,7 @@
           <td><code>send_message</code></td>
           <td><span class="pill pill-write">write</span></td>
           <td><code>telegram:messages:send</code></td>
-          <td>No mode argument — the gate decides. On tg.mctl.ai, <code>ALLOW_SEND=false</code> blocks real sends and returns a dry-run preview (<code>sent=false</code>, with <code>dry_reason</code>). A real send additionally requires identity scope and per-account <code>send_enabled=true</code>.</td>
+          <td>No mode argument — the gate decides. A real send requires all of: server <code>ALLOW_SEND=true</code> (on for tg.mctl.ai), the <code>telegram:messages:send</code> scope, and per-account <code>send_enabled=true</code> (off for new accounts until the owner opts in). Otherwise it returns a dry-run preview (<code>sent=false</code>, with <code>dry_reason</code>).</td>
         </tr>
         <tr>
           <td><code>pin_message</code></td>
@@ -267,7 +267,7 @@ curl -s -X POST {{.MCPURL}} \
       <h2>First-time Telegram login</h2>
     </div>
     <p>
-      Sign-in via a ChatGPT App or Claude connector authenticates you with Telegram OIDC.
+      Sign-in via a ChatGPT, Claude, or other MCP connector authenticates you with Telegram OIDC.
       If the server has no MTProto session for your account yet, the connect flow continues
       straight into an in-browser <em style="color: var(--text)">"Enable message access"</em>
       step: enter your phone number, type the login code Telegram sends you, and — if your
