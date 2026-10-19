@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -20,6 +19,10 @@ type CIMDResolver interface {
 // (host not allowed, fetch failed, invalid document, unsupported auth method)
 // goes to the WARN log only: it describes the client's own configuration and
 // our allowlist, neither of which an anonymous caller needs.
+// maxClientIDBytes caps a client_id at /oauth/authorize and on every CIMD
+// resolve.
+const maxClientIDBytes = 256
+
 var errCIMDRefused = errors.New("client metadata document could not be used for this client_id")
 
 // errCIMDUnavailable is a document that could not be fetched, or whose fetch
@@ -44,6 +47,12 @@ func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) 
 	if s.cfg.CIMD == nil || !cimd.IsCIMDURL(clientID) {
 		return cimd.Document{}, false, nil
 	}
+	if len(clientID) > maxClientIDBytes {
+		// The same cap /oauth/authorize applies, enforced here so the token
+		// grants cannot resolve a client_id no authorization could have used.
+		slog.Warn("oauth: cimd client refused", "where", where, "err", "client_id exceeds 256 bytes")
+		return cimd.Document{}, true, errCIMDRefused
+	}
 	doc, err = s.cfg.CIMD.Resolve(ctx, clientID)
 	if err == nil && doc.AuthMethod != cimd.AuthMethodNone {
 		err = errCIMDAuthMethod
@@ -65,9 +74,12 @@ func validateCIMDRedirect(doc cimd.Document, redirectURI string) error {
 	if cimd.RedirectAllowed(doc.RedirectURIs, redirectURI) {
 		return nil
 	}
+	// The detail goes to the log only: the caller gets the same refusal as
+	// for any other unusable document.
 	slog.Warn("oauth: cimd redirect_uri not in document",
-		"client_id", doc.ClientID, "dropped_redirect_uris", doc.DroppedRedirectURIs)
-	return fmt.Errorf("redirect_uri %q is not listed in the client metadata document for client_id %q", redirectURI, doc.ClientID)
+		"client_id", doc.ClientID, "redirect_uri", redirectURI,
+		"dropped_redirect_uris", doc.DroppedRedirectURIs)
+	return errCIMDRefused
 }
 
 // writeCIMDTokenError answers a token request whose CIMD client could not be

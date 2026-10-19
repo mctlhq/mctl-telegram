@@ -575,6 +575,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: %w", err)
 	}
 	c.OAUTHPreregisteredClients = preregistered
+	if c.OAUTHCIMDAccept {
+		// With CIMD on, a URL-shaped client_id is resolved as a metadata
+		// document before any registration is consulted, so a pre-registered
+		// client of that shape would silently stop working.
+		for _, pc := range preregistered {
+			if cimd.IsCIMDURL(pc.ClientID) {
+				return nil, fmt.Errorf("OAUTH_PREREGISTERED_CLIENTS: client_id %q is URL-shaped and would be resolved as a CIMD document while OAUTH_CIMD_ACCEPT is on; give it a non-URL client_id", pc.ClientID)
+			}
+		}
+	}
 	c.OAUTHDCRRedirectURIs = parseStringCSV(os.Getenv("OAUTH_DCR_REDIRECT_URIS"))
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
