@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -405,5 +406,40 @@ func (s *Store) CountOAuthPending(ctx context.Context, ttl time.Duration) (int64
 	if err != nil {
 		return 0, fmt.Errorf("count oauth_pending_auth: %w", err)
 	}
+	return n, nil
+}
+
+// RecordClientAssertionJTI records the jti of a client assertion from
+// clientID until expiresAt and reports whether it was fresh. false means the
+// jti was already used by a live assertion: the caller must refuse the
+// request. A row whose expiry has passed is reused in place, so a jti is
+// never refused for a stale record. Any error is a failed read, never a
+// pass: the caller answers server_error.
+func (s *Store) RecordClientAssertionJTI(ctx context.Context, clientID, jti string, expiresAt time.Time) (bool, error) {
+	sum := sha256.Sum256([]byte(clientID + "\x00" + jti))
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO oauth_client_assertion_jtis (jti_hash, expires_at) VALUES ($1, $2)
+		 ON CONFLICT (jti_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at
+		 WHERE oauth_client_assertion_jtis.expires_at < NOW()`,
+		sum[:], expiresAt.UTC(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("record client assertion jti: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("record client assertion jti: rows affected: %w", err)
+	}
+	return n == 1, nil
+}
+
+// DeleteExpiredClientAssertionJTIs removes jti records whose assertion has
+// expired. Intended to run from the sweeper goroutine.
+func (s *Store) DeleteExpiredClientAssertionJTIs(ctx context.Context) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM oauth_client_assertion_jtis WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("sweep oauth_client_assertion_jtis: %w", err)
+	}
+	n, _ := res.RowsAffected()
 	return n, nil
 }

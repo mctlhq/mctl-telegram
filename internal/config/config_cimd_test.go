@@ -31,6 +31,22 @@ func TestLoadOAuthCIMD(t *testing.T) {
 			t.Fatalf("accept=%v hosts=%v, want true %v", cfg.OAUTHCIMDAccept, cfg.OAUTHCIMDAllowedHosts, want)
 		}
 	})
+	t.Run("advertise requires accept", func(t *testing.T) {
+		t.Setenv("OAUTH_CIMD_ADVERTISE", "true")
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "OAUTH_CIMD_ADVERTISE=true requires OAUTH_CIMD_ACCEPT=true") {
+			t.Fatalf("Load() = %v, want the advertise-without-accept refusal", err)
+		}
+	})
+	t.Run("advertise with accept", func(t *testing.T) {
+		t.Setenv("OAUTH_CIMD_ACCEPT", "true")
+		t.Setenv("OAUTH_CIMD_ADVERTISE", "true")
+		t.Setenv("OAUTH_CIMD_ALLOWED_HOSTS", "platform.example.test")
+		cfg, err := Load()
+		if err != nil || !cfg.OAUTHCIMDAdvertise {
+			t.Fatalf("Load() = advertise %v, err %v; want true, nil", cfg != nil && cfg.OAUTHCIMDAdvertise, err)
+		}
+	})
 	for name, hosts := range map[string]string{
 		"accept without hosts": "",
 		"empty entry":          "platform.example.test,,other.example.test",

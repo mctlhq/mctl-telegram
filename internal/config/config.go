@@ -105,10 +105,15 @@ type Config struct {
 	// OAUTHCIMDAccept makes /oauth/authorize and /oauth/token resolve an
 	// https URL client_id as an OAuth Client ID Metadata Document
 	// (OAUTH_CIMD_ACCEPT, default false). It does not advertise CIMD in the
-	// authorization server metadata: a client that prefers CIMD switches to
-	// it as soon as it is advertised, so advertising waits until every CIMD
-	// client in use is supported (private_key_jwt for ChatGPT, mctl-telegram#773).
+	// authorization server metadata; that is OAUTHCIMDAdvertise.
 	OAUTHCIMDAccept bool
+	// OAUTHCIMDAdvertise announces CIMD and private_key_jwt in discovery
+	// (OAUTH_CIMD_ADVERTISE, default false; requires OAUTH_CIMD_ACCEPT). A
+	// client that prefers CIMD switches to it as soon as it is advertised and
+	// gets a 400 with no DCR fallback if its host is off the allowlist, so
+	// turn it on only once the allowlist covers every CIMD client in use
+	// (mctl-telegram#773).
+	OAUTHCIMDAdvertise bool
 	// OAUTHCIMDAllowedHosts is the mandatory host allowlist for CIMD
 	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names or ".suffix"
 	// entries. Required and non-empty when OAUTHCIMDAccept is true.
@@ -432,6 +437,7 @@ func Load() (*Config, error) {
 		OAUTHRefreshTokenTTL:          envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
 		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
 		OAUTHCIMDAccept:               envBool("OAUTH_CIMD_ACCEPT", false),
+		OAUTHCIMDAdvertise:            envBool("OAUTH_CIMD_ADVERTISE", false),
 		AllowSharedHMACLegacy:         envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
 		OAUTHRegisterRatePerMin:       envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
@@ -503,6 +509,9 @@ func Load() (*Config, error) {
 		}
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
+	if c.OAUTHCIMDAdvertise && !c.OAUTHCIMDAccept {
+		return nil, fmt.Errorf("OAUTH_CIMD_ADVERTISE=true requires OAUTH_CIMD_ACCEPT=true: advertising documents the server would refuse leaves CIMD clients with no DCR fallback")
+	}
 	if c.OAUTHCIMDAccept {
 		hosts, err := cimd.ParseAllowedHosts(os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"))
 		if err != nil {

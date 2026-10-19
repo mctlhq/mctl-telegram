@@ -45,6 +45,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
@@ -73,6 +74,10 @@ type Server struct {
 	codes   map[string]*authCode      // keyed by the authorization_code value
 	clients map[string]*clientReg     // keyed by client_id
 	enables map[string]*enableSession // keyed by the "es" token of an enable_access flow
+	// jtis records client assertion jtis already used by private_key_jwt
+	// CIMD clients when Postgres is not in use, keyed by client_id NUL jti,
+	// with the time the record may be dropped.
+	jtis map[string]time.Time
 
 	// Local Bridge self-service device activation (issue #482). Three indexes
 	// over the same set of *localBridgeActivation values, mirroring the
@@ -341,9 +346,17 @@ type Config struct {
 	// set, every URL-shaped client_id is resolved through it at
 	// /oauth/authorize and at both token grants, so removing a host from its
 	// allowlist stops that client's refreshes too, within the cache lifetime
-	// of a refused document. Only token_endpoint_auth_method "none" is
-	// accepted for now; a private_key_jwt document is refused.
+	// of a refused document. A document may declare token_endpoint_auth_method
+	// none (PKCE alone) or private_key_jwt (RFC 7523; ChatGPT uses it), whose
+	// client must send a fresh signed assertion on every token request.
 	CIMD CIMDResolver
+	// CIMDAdvertise adds client_id_metadata_document_supported, private_key_jwt
+	// and its signing algorithms to the authorization server metadata. It is
+	// separate from accepting on purpose: a client that prefers CIMD switches
+	// to it as soon as it is advertised, and one whose host is off the
+	// allowlist then gets a 400 with no DCR fallback (mctl-api#693). Ignored
+	// while CIMD is nil.
+	CIMDAdvertise bool
 	// DCRRedirectURIs is an exact-match allowlist of redirect URIs that an
 	// RFC 7591 registration may claim WITHOUT passing AllowedImplicitHosts.
 	// It exists for the Cloudflare MCP portal in automatic (DCR) mode
@@ -716,6 +729,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		codes:                 map[string]*authCode{},
 		clients:               map[string]*clientReg{},
 		enables:               map[string]*enableSession{},
+		jtis:                  map[string]time.Time{},
 		activations:           map[string]*localBridgeActivation{},
 		activationsByState:    map[string]*localBridgeActivation{},
 		activationsByUserCode: map[string]*localBridgeActivation{},
@@ -944,6 +958,7 @@ func (s *Server) StartSweeper(stop <-chan struct{}, interval time.Duration) {
 				return
 			case now := <-t.C:
 				s.sweep(now)
+				s.sweepJTIs(now)
 				s.sweepDB(now)
 				s.samplePendingAuthGauge()
 			}
@@ -962,6 +977,9 @@ func (s *Server) sweepDB(_ time.Time) {
 	defer cancel()
 	if _, _, err := s.store.DeleteExpiredOAuthRows(ctx, s.cfg.CodeTTL); err != nil {
 		slog.Warn("oauth db sweep failed", "err", err)
+	}
+	if _, err := s.store.DeleteExpiredClientAssertionJTIs(ctx); err != nil {
+		slog.Warn("oauth db client assertion jti sweep failed", "err", err)
 	}
 	if s.cfg.ClientRegistrationTTL > 0 {
 		if _, err := s.store.DeleteExpiredClientRegs(ctx, s.cfg.ClientRegistrationTTL); err != nil {
@@ -1307,6 +1325,14 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		// JWT scopes claim; MCP per-tool gates check the claim, not this
 		// metadata field.
 		"scopes_supported": DCRNegotiableScopes,
+	}
+	// CIMD and private_key_jwt are announced together and only when
+	// advertising is on: announcing private_key_jwt alone could steer a DCR
+	// client toward a method /oauth/register never grants.
+	if s.cimdAdvertised() {
+		body["client_id_metadata_document_supported"] = true
+		body["token_endpoint_auth_methods_supported"] = []string{cimd.AuthMethodNone, cimd.AuthMethodPrivateKeyJWT}
+		body["token_endpoint_auth_signing_alg_values_supported"] = cimd.SigningAlgs()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
@@ -2056,6 +2082,16 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_request", "could not parse form", http.StatusBadRequest)
 		return
 	}
+	// RFC 7521 section 4.2: a request authenticated by a client assertion
+	// may omit client_id, and the assertion names the client. This only picks
+	// the document to verify against; verification still requires
+	// iss == sub == that document's client_id.
+	if r.PostForm.Get("client_id") == "" && r.PostForm.Get("client_assertion") != "" && s.cimdEnabled() {
+		if id := cimd.UnverifiedClientID(r.PostForm.Get("client_assertion")); cimd.IsCIMDURL(id) {
+			r.PostForm.Set("client_id", id)
+			r.Form.Set("client_id", id)
+		}
+	}
 	switch r.FormValue("grant_type") {
 	case "authorization_code":
 		s.handleTokenAuthCode(w, r)
@@ -2097,7 +2133,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// Re-resolve a CIMD client before the code is consumed: a document that
 	// stopped listing the client, or a host taken off the allowlist, ends
 	// the flow here rather than after the code is gone.
-	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_code"); isCIMD && err != nil {
+	if isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_code"); isCIMD && err != nil {
 		writeCIMDTokenError(w, err)
 		return
 	}
@@ -2338,7 +2374,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// from OAUTH_CIMD_ALLOWED_HOSTS cuts off its existing refresh-token
 	// families without touching the database. Checked before the token is
 	// looked up, so a refused client cannot trigger reuse detection either.
-	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_refresh"); isCIMD && err != nil {
+	if isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_refresh"); isCIMD && err != nil {
 		writeCIMDTokenError(w, err)
 		return
 	}
