@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.81.0](https://github.com/mctlhq/mctl-telegram/compare/0.80.1...0.81.0) (2026-10-19)
+
+
+### Features
+
+* **oauth:** accept Client ID Metadata Documents for public clients ([c30e725](https://github.com/mctlhq/mctl-telegram/commit/c30e725995593f7e1e494b8002e9cab73bac0a34))
+* **oauth:** accept Client ID Metadata Documents for public clients ([06169f8](https://github.com/mctlhq/mctl-telegram/commit/06169f8039386c56d01d0eb64b76efbe079328b2)), closes [#773](https://github.com/mctlhq/mctl-telegram/issues/773)
+* **oauth:** support private_key_jwt CIMD clients and advertising ([62870be](https://github.com/mctlhq/mctl-telegram/commit/62870be6d02b2e86bcca7b402c50240c43a6d9f6))
+* **oauth:** support private_key_jwt CIMD clients and advertising ([697a6bd](https://github.com/mctlhq/mctl-telegram/commit/697a6bdd362e59b23fefa8ee235da124befe917b)), closes [#773](https://github.com/mctlhq/mctl-telegram/issues/773)
+
+
+### Bug Fixes
+
+* **oauth:** answer an unreachable CIMD document as retryable ([bf80373](https://github.com/mctlhq/mctl-telegram/commit/bf80373b0a7863085a5520b0a3b4b6ebd029172c)), closes [#773](https://github.com/mctlhq/mctl-telegram/issues/773)
+* **oauth:** harden the client assertion jti store ([9687dc5](https://github.com/mctlhq/mctl-telegram/commit/9687dc5281c20859bfc4c81a1263e43b6c3d9331))
+* **oauth:** keep the CIMD reserve past the longest cache entry ([4d308e5](https://github.com/mctlhq/mctl-telegram/commit/4d308e5f9df506c68ea2a53f2e93174723a3cb94))
+* **oauth:** let an expired jti record be rewritten when the map is full ([81c0ff4](https://github.com/mctlhq/mctl-telegram/commit/81c0ff4aceebcae5230128d6388b5dca8be5f7be))
+* **oauth:** reserve CIMD fetch budget for known documents ([ae1e463](https://github.com/mctlhq/mctl-telegram/commit/ae1e463acbbdc43e08ccbe73424837e46f3f4258))
+
 ## [0.80.1](https://github.com/mctlhq/mctl-telegram/compare/0.80.0...0.80.1) (2026-10-19)
 
 
