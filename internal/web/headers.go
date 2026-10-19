@@ -36,13 +36,18 @@ func SecurityHeaders(publicBaseURL string) func(http.Handler) http.Handler {
 // and every page inlines its own <style>, hence 'unsafe-inline' on both
 // script-src and style-src; the rest is the exact set of origins the chrome
 // loads from: ui.mctl.ai (design CSS, favicon), Google Fonts, and the Umami
-// analytics script at stats.mctl.ai. frame-ancestors 'none' replaces
-// X-Frame-Options; these pages are never meant to be embedded.
+// analytics script at stats.mctl.ai. Two directives are deliberately wider
+// than that exact set, both for /demo: media-src admits any https origin
+// because the file-video branch plays whatever DEMO_VIDEO_URL the operator
+// configured, and frame-src admits the two embed hosts classifyDemoVideo can
+// produce (YouTube, Loom). frame-ancestors 'none' replaces X-Frame-Options;
+// these pages are never meant to be embedded.
 const chromeCSP = "default-src 'none'; " +
 	"script-src 'self' 'unsafe-inline' https://stats.mctl.ai; " +
 	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://ui.mctl.ai; " +
 	"font-src https://fonts.gstatic.com; " +
 	"img-src 'self' data: https://ui.mctl.ai; " +
 	"media-src 'self' https:; " +
+	"frame-src https://www.youtube.com https://www.loom.com; " +
 	"connect-src 'self' https://stats.mctl.ai; " +
 	"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"

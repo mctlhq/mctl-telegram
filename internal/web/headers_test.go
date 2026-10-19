@@ -50,6 +50,10 @@ func TestChromePages_CarryCSP(t *testing.T) {
 		"/privacy":  Privacy("https://tg.mctl.ai", true),
 		"/terms":    Terms("https://tg.mctl.ai", true),
 		"/demo":     Demo("https://tg.mctl.ai", "", true),
+		// The embed branches render third-party iframes; the CSP must admit them.
+		"/demo?yt":   Demo("https://tg.mctl.ai", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", true),
+		"/demo?loom": Demo("https://tg.mctl.ai", "https://www.loom.com/share/0123456789abcdef", true),
+		"/demo?file": Demo("https://tg.mctl.ai", "https://tg.mctl.ai/static/walkthrough.mp4", true),
 	}
 	for path, h := range pages {
 		rec := httptest.NewRecorder()
@@ -66,7 +70,37 @@ func TestChromePages_CarryCSP(t *testing.T) {
 				t.Errorf("%s references %s but chromeCSP does not allow it", path, origin)
 			}
 		}
+		// Every <iframe src="..."> origin in the page must be in frame-src.
+		for _, src := range iframeSrcs(body) {
+			origin := src[:strings.Index(src[len("https://"):], "/")+len("https://")]
+			if !strings.Contains(frameSrcDirective(chromeCSP), origin) {
+				t.Errorf("%s embeds %s but frame-src does not allow %s", path, src, origin)
+			}
+		}
 	}
+}
+
+func iframeSrcs(body string) []string {
+	var out []string
+	for rest := body; ; {
+		i := strings.Index(rest, `<iframe src="`)
+		if i < 0 {
+			return out
+		}
+		rest = rest[i+len(`<iframe src="`):]
+		j := strings.Index(rest, `"`)
+		out = append(out, rest[:j])
+		rest = rest[j:]
+	}
+}
+
+func frameSrcDirective(csp string) string {
+	for _, d := range strings.Split(csp, ";") {
+		if d = strings.TrimSpace(d); strings.HasPrefix(d, "frame-src ") {
+			return d
+		}
+	}
+	return ""
 }
 
 func TestLanding_CanonicalAndSingleDescription(t *testing.T) {
