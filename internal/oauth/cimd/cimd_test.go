@@ -569,34 +569,63 @@ func TestRateLimitAndSemaphore(t *testing.T) {
 // TestUnseenClientIDsCannotStarveAKnownDocument pins the reserve: a caller
 // spraying fresh paths on an allowlisted host spends only the unreserved half
 // of the budget, so the real document is still refetched once its cache entry
-// expires inside the same minute.
+// expires. It runs for the shortest and the longest cache lifetime: the
+// reserve must still hold when a maxTTL entry expires.
 func TestUnseenClientIDsCannotStarveAKnownDocument(t *testing.T) {
-	f := newFixture(t, nil)
-	f.h = func(w http.ResponseWriter, req *http.Request) {
-		if "https://app.example.com"+req.URL.Path != f.url {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = fmt.Fprint(w, doc(f.url, ""))
+	for _, tc := range []struct {
+		name, cacheControl string
+		lifetime           time.Duration
+	}{
+		{"no-store", "no-store", minTTL},
+		{"max-age clamped to maxTTL", "max-age=31536000", maxTTL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, nil)
+			f.h = func(w http.ResponseWriter, req *http.Request) {
+				if "https://app.example.com"+req.URL.Path != f.url {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", tc.cacheControl)
+				_, _ = fmt.Fprint(w, doc(f.url, ""))
+			}
+			r := f.resolver()
+			if _, err := r.Resolve(context.Background(), f.url); err != nil {
+				t.Fatalf("first sign-in: %v", err)
+			}
+			// Move to just before expiry, so the spray and the refetch share
+			// one rate-limit minute.
+			f.advance(tc.lifetime - time.Second)
+			before := f.hits.Load()
+			for i := 0; i < 3*hostPerMinute; i++ {
+				_, _ = r.Resolve(context.Background(), fmt.Sprintf("https://app.example.com/spray/%d", i))
+			}
+			sprayHits := f.hits.Load() - before
+			if max := int32(hostPerMinute - hostPerMinute/2); sprayHits > max {
+				t.Fatalf("spray reached the network %d times, want at most the unreserved %d", sprayHits, max)
+			}
+			f.advance(time.Second)
+			if _, err := r.Resolve(context.Background(), f.url); err != nil {
+				t.Fatalf("known document refused after its entry expired under a spray: %v", err)
+			}
+			if f.hits.Load()-before != sprayHits+1 {
+				t.Fatal("the known document was served without a refetch; the entry did not expire")
+			}
+		})
 	}
-	r := f.resolver()
-	if _, err := r.Resolve(context.Background(), f.url); err != nil {
-		t.Fatalf("first sign-in: %v", err)
+}
+
+// TestKnownSetIsHardBounded fills the known set under a frozen clock, where
+// every timestamp ties, and checks that eviction still keeps it at the bound.
+func TestKnownSetIsHardBounded(t *testing.T) {
+	frozen := time.Unix(1_700_000_000, 0)
+	r := NewResolver(Options{AllowedHosts: []string{"app.example.com"}, Now: func() time.Time { return frozen }})
+	for i := 0; i < cacheEntries+5; i++ {
+		r.markKnown(fmt.Sprintf("https://app.example.com/c%d", i))
 	}
-	var sprayHits int32
-	before := f.hits.Load()
-	for i := 0; i < 3*hostPerMinute; i++ {
-		_, _ = r.Resolve(context.Background(), fmt.Sprintf("https://app.example.com/spray/%d", i))
-	}
-	sprayHits = f.hits.Load() - before
-	if want := int32(hostPerMinute - hostPerMinute/2 - 1); sprayHits != want {
-		t.Fatalf("spray reached the network %d times, want %d (unreserved budget less the first fetch)", sprayHits, want)
-	}
-	f.advance(minTTL)
-	if _, err := r.Resolve(context.Background(), f.url); err != nil {
-		t.Fatalf("known document refused after its entry expired under a spray: %v", err)
+	if n := len(r.known); n != cacheEntries {
+		t.Fatalf("len(known) = %d, want %d", n, cacheEntries)
 	}
 }
 

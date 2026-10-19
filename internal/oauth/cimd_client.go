@@ -15,14 +15,14 @@ type CIMDResolver interface {
 	Resolve(ctx context.Context, clientID string) (cimd.Document, error)
 }
 
-// errCIMDRefused is the single answer a refused CIMD client gets. The reason
-// (host not allowed, fetch failed, invalid document, unsupported auth method)
-// goes to the WARN log only: it describes the client's own configuration and
-// our allowlist, neither of which an anonymous caller needs.
 // maxClientIDBytes caps a client_id at /oauth/authorize and on every CIMD
 // resolve.
 const maxClientIDBytes = 256
 
+// errCIMDRefused is the single answer a refused CIMD client gets. The reason
+// (host not allowed, fetch failed, invalid document, unsupported auth method)
+// goes to the WARN log only: it describes the client's own configuration and
+// our allowlist, neither of which an anonymous caller needs.
 var errCIMDRefused = errors.New("client metadata document could not be used for this client_id")
 
 // errCIMDUnavailable is a document that could not be fetched, or whose fetch
