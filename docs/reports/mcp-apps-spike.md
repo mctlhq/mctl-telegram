@@ -285,11 +285,11 @@ work. That is mctlhq/.github#41").
 
 ## 6. Submission-positioning note
 
-`claude-connector-submission.md:193` currently states this server has "**no**
+`docs/archive/claude-connector-submission.md:193` currently states this server has "**no**
 `ui/open-link` / interactive UI components / MCP-App widgets." That sentence
 becomes false the moment a deployment sets `MCP_APPS_ENABLED=true` — this PR
 makes that capability exist in the codebase, off by default, and nowhere
-turned on. Updating `claude-connector-submission.md` (and any other
+turned on. Updating `docs/archive/claude-connector-submission.md` (and any other
 submission-facing document) to reflect a *deployed* App is explicitly
 [mctlhq/mctl-telegram#650](https://github.com/mctlhq/mctl-telegram/issues/650)'s
 responsibility, not this PR's — this PR does not enable the flag anywhere,

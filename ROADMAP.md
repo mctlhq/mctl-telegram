@@ -4,7 +4,7 @@ This document describes the current direction for mctl-telegram. It is a living 
 
 ## Near term
 
-- Stabilize the seven MCP tools and lock their schemas for v1.0
+- Lock the MCP tool schemas (`docs/tool-descriptors.json`) for v1.0
 - In-browser Telegram connect flow (`/telegram/connect`) — replace the CLI-only login
 - Self-hosting guide (Docker Compose + standalone deployment without the mctlhq platform)
 - Expand test coverage for auth, tool handlers, and session lifecycle

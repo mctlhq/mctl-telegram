@@ -14,4 +14,4 @@ Email **dmitri+security@mctl.ai**. Do not open public issues for security report
 
 ## Questions and discussion
 
-Use [GitHub Discussions](https://github.com/mctlhq/mctl-telegram/discussions) for general questions, ideas, and usage help.
+GitHub Discussions are not enabled on this repository. Open a [GitHub Issue](https://github.com/mctlhq/mctl-telegram/issues) for questions and ideas, or email **support@mctl.ai** for usage help.

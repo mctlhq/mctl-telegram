@@ -98,6 +98,7 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.Ha
 			NavActive:     "home",
 			PublicBaseURL: base,
 			ShowManage:    showManage,
+			CanonicalPath: "/",
 		},
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",

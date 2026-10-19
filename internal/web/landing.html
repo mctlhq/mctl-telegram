@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
 {{template "ui_head" .}}
-<meta name="description" content="Manage your own Telegram account from ChatGPT, Claude, and other MCP clients after explicit authorization. OAuth-authenticated MCP server with encrypted sessions, read tools, and preview-only send controls.">
 <style>
   /* CTA buttons */
   .cta-btn {
@@ -217,17 +216,17 @@
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
       <span class="status-dot" aria-hidden="true"></span>
-      <span>ChatGPT App · MCP Server · tg.mctl.ai</span>
+      <span>Remote MCP Server · tg.mctl.ai</span>
     </div>
     <h1>Your authorized Telegram account,<br><span class="accent">inside your AI assistant</span></h1>
     <p class="lead">
-      Install from the ChatGPT App Directory or connect via Settings &#8594; Apps. Summarise chats, search messages, and draft replies from ChatGPT, Claude, or any MCP client — after OAuth sign-in to the Telegram account you own and control.
+      Add tg.mctl.ai as a custom connector in ChatGPT (Developer Mode), Claude, Cursor, or any MCP client. Summarise chats, search messages, and draft replies — after OAuth sign-in to the Telegram account you own and control. New accounts start read-only; you turn sending on yourself.
     </p>
     <div class="cta-row">
-      <a class="cta-btn" href="#chatgpt">Install in ChatGPT</a>
+      <a class="cta-btn" href="#chatgpt">Connect in ChatGPT</a>
       <a class="btn-secondary" href="https://claude.ai/customize/connectors">Add to Claude</a>
       <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
-      <a href="/docs#apps-sdk-readiness">See the docs</a>
+      <a href="/docs#preflight">See the docs</a>
     </div>
     <p class="muted">
       <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
@@ -306,14 +305,14 @@
   <!-- ============ ChatGPT Apps ============ -->
   <section id="chatgpt">
     <div class="section-head">
-      <h2>Install in ChatGPT</h2>
+      <h2>Connect in ChatGPT</h2>
     </div>
     <ol class="steps">
-      <li>Open ChatGPT &#8594; <strong>Settings &#8594; Apps</strong> and select your draft app (or install from the App Directory once published).</li>
+      <li>Open ChatGPT &#8594; <strong>Settings &#8594; Apps</strong>, enable <em>Developer Mode</em>, and create a new app (custom connector). This is not an App Directory listing; the connector is added by URL.</li>
       <li>Set the MCP server URL to <code class="url">{{.MCPURL}}</code>.</li>
       <li>Authentication: <strong>OAuth</strong>. ChatGPT discovers this server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
       <li>Complete the Telegram sign-in flow in your browser when prompted.</li>
-      <li>Test with a read-only tool (<code>list_dialogs</code> or <code>get_unread_messages</code>) before enabling real sends. On tg.mctl.ai, real sends stay blocked until all opt-in gates are enabled (see <a href="/security">send-gate</a>).</li>
+      <li>Test with a read-only tool (<code>list_dialogs</code> or <code>get_unread_messages</code>). Your account starts read-only; real sends need your explicit opt-in (see <a href="/security">send-gate</a>).</li>
       <li>Review our <a href="/privacy">privacy policy</a> and <a href="/security">security model</a> before connecting your account.</li>
     </ol>
   </section>
@@ -326,7 +325,7 @@
     <ol class="steps">
       <li><strong>Any client:</strong> copy the MCP URL <code class="url">{{.MCPURL}}</code> and add it as a custom connector. Authentication is <em>OAuth</em> — you sign in with Telegram once during setup.</li>
       <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors">Connectors settings</a>, choose <em>Add custom connector</em>, and paste the MCP URL.</li>
-      <li><strong>ChatGPT (outside the App Directory flow above):</strong> open <em>Settings &#8594; Connectors</em>, add a custom connector, and paste the MCP URL. Requires a plan with custom connectors enabled — see OpenAI's <a href="https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt" target="_blank" rel="noopener">Developer Mode &amp; MCP apps guide</a>.</li>
+      <li><strong>ChatGPT:</strong> the flow above, or <em>Settings &#8594; Connectors</em> on plans that expose it; both add a custom connector by MCP URL. Requires a plan with custom connectors enabled — see OpenAI's <a href="https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt" target="_blank" rel="noopener">Developer Mode &amp; MCP apps guide</a>.</li>
       <li><strong>Cursor, Windsurf, and others:</strong> paste the MCP URL into your client's remote MCP connector settings. See <a href="/docs#chatgpt-setup">/docs</a> for OAuth discovery URLs and a smoke-test command.</li>
     </ol>
   </section>
@@ -409,7 +408,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. On tg.mctl.ai the effective default is dry-run: <code>ALLOW_SEND=false</code> blocks real sends, so <code>send_message</code> returns a preview (<code>sent=false</code>) instead. Real sends additionally require your account <code>send_enabled</code> flag (you turn this on with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}) and the <code>telegram:messages:send</code> scope — there is no mode argument to bypass the gate.</dd>
+        <dd>Only if you explicitly opt in. A newly connected account has sending off (<code>send_enabled=false</code>), so <code>send_message</code> returns a preview (<code>sent=false</code>) instead of delivering. You turn sending on with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}; a real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does ChatGPT see?</dt>
@@ -429,7 +428,7 @@
       </div>
       <div class="faq-item">
         <dt>What is the Local Bridge?</dt>
-        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard ChatGPT App install path, and it needs a machine that stays on, but turning it on is self-service: <code>init</code>, <code>login</code>, <code>activate</code>, <code>daemon</code>. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code> (an operator step, not onboarding). Start at the <a href="/docs/local-bridge/quickstart">quick start</a>.</dd>
+        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard hosted connect path, and it needs a machine that stays on, but turning it on is self-service: <code>init</code>, <code>login</code>, <code>activate</code>, <code>daemon</code>. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code> (an operator step, not onboarding). Start at the <a href="/docs/local-bridge/quickstart">quick start</a>.</dd>
       </div>
     </dl>
   </section>

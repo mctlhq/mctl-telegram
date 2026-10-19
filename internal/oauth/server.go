@@ -1881,10 +1881,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		renderEnablePermissions(w, enablePermissionsPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
 	} else {
 		es.step = stepPhone
-		// SendOptIn defaults true so the send checkbox renders pre-checked:
-		// sending is opt-out, not opt-in. Unchecking it omits the field and
-		// the server falls back to read-only.
-		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, SendOptIn: true})
+		// SendOptIn defaults false so the send checkbox renders unchecked:
+		// sending is opt-in. A new account starts read-only, matching the
+		// published "preview by default" promise; the owner enables sending
+		// later with set_send_consent or on the manage page.
+		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok})
 	}
 }
 

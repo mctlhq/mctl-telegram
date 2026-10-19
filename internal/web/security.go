@@ -21,6 +21,7 @@ func chromePage(t *template.Template, name string, data any) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", chromeCSP)
 		_, _ = w.Write(buf.Bytes())
 	}
 }

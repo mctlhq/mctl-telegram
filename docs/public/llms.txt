@@ -1,6 +1,6 @@
 # mctl-telegram — Remote MCP Server for Telegram
 
-> `mctl-telegram` is a hosted Remote MCP connector for Telegram. It allows users to securely interact with their Telegram account via ChatGPT Apps, Claude.ai, or any MCP client with OAuth 2.1 authentication and preview-only safety controls.
+> `mctl-telegram` is a hosted Remote MCP connector for Telegram. It allows users to securely interact with their Telegram account via ChatGPT (Developer Mode), Claude.ai, or any MCP client with OAuth 2.1 authentication; new accounts are read-only until the owner opts in to sending.
 
 ## Key Resources & Submissions
 
@@ -8,14 +8,15 @@
 - [Troubleshooting](https://github.com/mctlhq/mctl-telegram/blob/main/docs/troubleshooting.md): Client-facing error families (peer id errors, get_media confirmation errors, session/auth failures, OAuth redirect rules) and what to do about each.
 - [Local Bridge](https://tg.mctl.ai/docs/local-bridge): Optional self-hosted session mode. Quick start at `/docs/local-bridge/quickstart`.
 - [Security & Trust Model](https://tg.mctl.ai/security): Data minimization and session encryption details.
-- [ChatGPT App Directory Submission](https://github.com/mctlhq/mctl-telegram/blob/main/chatgpt-submission-package.md): Reviewer notes and submission package.
-- [Claude Connector Submission](https://github.com/mctlhq/mctl-telegram/blob/main/claude-connector-submission.md): Anthropic Remote MCP directory submission metadata.
+- [Tool descriptors](https://github.com/mctlhq/mctl-telegram/blob/main/docs/tool-descriptors.json): the generated, authoritative list of every MCP tool with its schema and annotations.
 
-## Tools Summary (14 MCP Tools)
+## Tools Summary (37 MCP tools)
+
+The full list with schemas is `docs/tool-descriptors.json`. Highlights:
 
 - `list_dialogs`: Read-only list of dialogs.
 - `get_messages` & `get_unread_messages`: Read-only message history and unread items.
-- `send_message`: Write tool (Preview-only dry-run by default unless `send_enabled=true`).
+- `send_message`, `send_media`, `edit_message`, `delete_messages`, `forward_messages`, `set_reaction`: write tools; sends are previews until the account owner enables `send_enabled` with `set_send_consent`.
 - `prepare_pin_message` & `pin_message`: Confirmed pinning with dry-run protection.
 - `get_my_audit_log`: Cryptographic tamper-evident hash-chain audit log.
 - `disconnect_telegram_account` & `delete_telegram_account`: Account revocation and data deletion.

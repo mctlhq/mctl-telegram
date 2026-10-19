@@ -66,6 +66,7 @@ func Demo(publicBaseURL, demoVideoURL string, showManage bool) http.HandlerFunc 
 	data := demoData{
 		Data: ui.Data{
 			Title:         "MCTL Telegram Demo",
+			Description:   "Demo walkthrough for mctl-telegram, a remote MCP server for searching, summarizing, drafting, and sending Telegram messages with confirmation.",
 			NavActive:     "demo",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 			ShowManage:    showManage,

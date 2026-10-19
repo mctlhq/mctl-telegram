@@ -51,25 +51,33 @@ func TestRenderEnablePassword_NonceScopedScript(t *testing.T) {
 	}
 }
 
-// Sending is opt-out, not opt-in: the connect UI must default to send-enabled.
-// The wizard permissions screen pre-selects the "send" radio and the non-wizard
-// phone screen pre-checks the send_optin checkbox.
-func TestEnableUI_DefaultsToSendEnabled(t *testing.T) {
+// Sending is opt-in: a new account starts read-only, as the public pages
+// promise. The wizard permissions screen pre-selects the "readonly" radio and
+// the non-wizard phone screen leaves the send_optin checkbox unchecked unless
+// the user already chose sending.
+func TestEnableUI_DefaultsToReadOnly(t *testing.T) {
 	permRec := httptest.NewRecorder()
 	renderEnablePermissions(permRec, enablePermissionsPage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})
 	perm := permRec.Body.String()
-	if !strings.Contains(perm, `value="send" checked`) {
-		t.Errorf("permissions screen must default-select the send radio; body=%s", perm)
+	if !strings.Contains(perm, `value="readonly" checked`) {
+		t.Errorf("permissions screen must default-select the read-only radio; body=%s", perm)
 	}
-	if strings.Contains(perm, `value="readonly" checked`) {
-		t.Errorf("permissions screen must not default-select read-only")
+	if strings.Contains(perm, `value="send" checked`) {
+		t.Errorf("permissions screen must not default-select send")
 	}
 
 	phoneRec := httptest.NewRecorder()
-	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", SendOptIn: true})
+	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})
 	phone := phoneRec.Body.String()
-	if !strings.Contains(phone, `name="send_optin" value="on" checked`) {
-		t.Errorf("phone screen must pre-check the send_optin checkbox when SendOptIn=true; body=%s", phone)
+	if strings.Contains(phone, `name="send_optin" value="on" checked`) {
+		t.Errorf("phone screen must not pre-check the send_optin checkbox by default; body=%s", phone)
+	}
+
+	// The checkbox still reflects an explicit earlier choice.
+	phoneRec = httptest.NewRecorder()
+	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", SendOptIn: true})
+	if !strings.Contains(phoneRec.Body.String(), `name="send_optin" value="on" checked`) {
+		t.Errorf("phone screen must pre-check the send_optin checkbox when SendOptIn=true")
 	}
 }
 

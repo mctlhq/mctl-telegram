@@ -68,7 +68,7 @@ cryptographically verify their audit log has not been tampered with
 (GET /api/account/audit/verify).
 
 Additional reviewer data-handling package:
-https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
+https://github.com/mctlhq/mctl-telegram/blob/main/docs/archive/reviewer-data-handling.md
 ```
 
 ---
@@ -239,5 +239,5 @@ capabilities, but they are not part of the OpenAI reviewer pass/fail test matrix
 | Security model | `https://tg.mctl.ai/security` |
 | Terms of service | `https://tg.mctl.ai/terms` |
 | Public docs | `https://tg.mctl.ai/docs` |
-| Reviewer data-handling package | `https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md` |
+| Reviewer data-handling package | `https://github.com/mctlhq/mctl-telegram/blob/main/docs/archive/reviewer-data-handling.md` |
 | Support | support@mctl.ai |

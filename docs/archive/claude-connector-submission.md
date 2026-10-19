@@ -107,7 +107,7 @@ Each tool is read **XOR** write (no tool mixes safe + unsafe operations). Capabi
 ## Data handling
 
 Full package: `reviewer-data-handling.md` —
-https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
+https://github.com/mctlhq/mctl-telegram/blob/main/docs/archive/reviewer-data-handling.md
 
 ### Form field: Privacy / data handling
 ```
@@ -122,7 +122,7 @@ operators with privileged access to both the database and the master encryption 
 theoretically decrypt stored session blobs.
 
 Additional reviewer data-handling package:
-https://github.com/mctlhq/mctl-telegram/blob/main/reviewer-data-handling.md
+https://github.com/mctlhq/mctl-telegram/blob/main/docs/archive/reviewer-data-handling.md
 ```
 
 ### Form field: External services

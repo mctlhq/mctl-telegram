@@ -43,6 +43,7 @@ type Data struct {
 	NavActive     string // "home" | "docs" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
 	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
+	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
 }
 
 // FaviconLink is the shared tab icon pointing at the design-CDN terracotta T
@@ -65,7 +66,8 @@ var defs = `
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
-` + FaviconLink + `
+{{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
+{{end}}` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="mctl-telegram">
