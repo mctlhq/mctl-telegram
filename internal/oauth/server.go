@@ -1371,7 +1371,11 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.validateClient(r.Context(), clientID, redirectURI); err != nil {
-		s.writeAuthorizeError(w, "invalid_client", err.Error())
+		code := "invalid_client"
+		if errors.Is(err, errCIMDUnavailable) {
+			code = "temporarily_unavailable"
+		}
+		s.writeAuthorizeError(w, code, err.Error())
 		return
 	}
 
@@ -2094,7 +2098,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// stopped listing the client, or a host taken off the allowlist, ends
 	// the flow here rather than after the code is gone.
 	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_code"); isCIMD && err != nil {
-		writeTokenError(w, "invalid_client", err.Error(), http.StatusBadRequest)
+		writeCIMDTokenError(w, err)
 		return
 	}
 
@@ -2335,7 +2339,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// families without touching the database. Checked before the token is
 	// looked up, so a refused client cannot trigger reuse detection either.
 	if _, isCIMD, err := s.resolveCIMDClient(r.Context(), clientID, "token_refresh"); isCIMD && err != nil {
-		writeTokenError(w, "invalid_client", err.Error(), http.StatusBadRequest)
+		writeCIMDTokenError(w, err)
 		return
 	}
 	rt, err := s.store.LookupRefreshToken(r.Context(), refreshTok)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 )
@@ -21,6 +22,13 @@ type CIMDResolver interface {
 // our allowlist, neither of which an anonymous caller needs.
 var errCIMDRefused = errors.New("client metadata document could not be used for this client_id")
 
+// errCIMDUnavailable is a document that could not be fetched, or whose fetch
+// was refused by the per-host rate limit. That observed nothing about the
+// client, so it must never be answered as invalid_client, which tells a
+// client its configuration is wrong: the token endpoint answers it as a
+// retryable server error (mctl-api#694 reached the same rule).
+var errCIMDUnavailable = errors.New("client metadata document is temporarily unavailable; retry later")
+
 // errCIMDAuthMethod refuses a document whose client authenticates at the
 // token endpoint. Only public clients (PKCE alone) are supported until
 // private_key_jwt lands (mctl-telegram#773, stage 2).
@@ -30,7 +38,8 @@ var errCIMDAuthMethod = errors.New("cimd: token_endpoint_auth_method " + cimd.Au
 // if so, resolves it. isCIMD is false when CIMD is off or clientID is not
 // URL-shaped: the caller then takes its unchanged DCR/pre-registered path. A
 // CIMD client that cannot be used returns isCIMD=true and errCIMDRefused, and
-// never falls through to that path.
+// never falls through to that path. A fetch that failed or was rate-limited
+// returns errCIMDUnavailable instead.
 func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) (doc cimd.Document, isCIMD bool, err error) {
 	if s.cfg.CIMD == nil || !cimd.IsCIMDURL(clientID) {
 		return cimd.Document{}, false, nil
@@ -41,6 +50,9 @@ func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) 
 	}
 	if err != nil {
 		slog.Warn("oauth: cimd client refused", "where", where, "client_id", clientID, "err", err)
+		if errors.Is(err, cimd.ErrFetch) || errors.Is(err, cimd.ErrRateLimited) {
+			return cimd.Document{}, true, errCIMDUnavailable
+		}
 		return cimd.Document{}, true, errCIMDRefused
 	}
 	return doc, true, nil
@@ -56,4 +68,16 @@ func validateCIMDRedirect(doc cimd.Document, redirectURI string) error {
 	slog.Warn("oauth: cimd redirect_uri not in document",
 		"client_id", doc.ClientID, "dropped_redirect_uris", doc.DroppedRedirectURIs)
 	return fmt.Errorf("redirect_uri %q is not listed in the client metadata document for client_id %q", redirectURI, doc.ClientID)
+}
+
+// writeCIMDTokenError answers a token request whose CIMD client could not be
+// resolved: invalid_client for a refused document, a retryable 503
+// server_error when the document could not be observed.
+func writeCIMDTokenError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errCIMDUnavailable) {
+		w.Header().Set("Retry-After", "30")
+		writeTokenError(w, "server_error", err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeTokenError(w, "invalid_client", err.Error(), http.StatusBadRequest)
 }

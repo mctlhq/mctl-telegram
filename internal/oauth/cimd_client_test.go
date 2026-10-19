@@ -116,8 +116,15 @@ func TestCIMD_FullFlowAndHostRemoval(t *testing.T) {
 		t.Fatalf("refusal leaked the reason to the caller: %s", body)
 	}
 
-	// The refusal came before the token lookup, so rt2 was neither rotated nor
-	// treated as reused: once the host is back, it still works.
+	// A rate-limited fetch is retryable, not a verdict on the client.
+	stub.set(platformDoc(), cimd.ErrRateLimited)
+	code, body = refresh(rt2)
+	if code != http.StatusServiceUnavailable || tokenErrorCode(t, body) != "server_error" {
+		t.Fatalf("refresh while the document is rate-limited: %d %s, want 503 server_error", code, body)
+	}
+
+	// Neither refusal reached the token lookup, so rt2 was neither rotated
+	// nor treated as reused: once the host is back, it still works.
 	stub.set(platformDoc(), nil)
 	if code, body = refresh(rt2); code != http.StatusOK {
 		t.Fatalf("refresh after the host is restored: %d %s", code, body)
@@ -183,10 +190,17 @@ func TestCIMD_TokenCodeRefusedBeforeConsume(t *testing.T) {
 		"redirect_uri": {cimdCallback}, "code_verifier": {verifier},
 	}
 
-	stub.set(platformDoc(), cimd.ErrFetch)
+	stub.set(platformDoc(), cimd.ErrInvalidDocument)
 	rec := doTokenRequest(t, mux, form)
 	if rec.Code != http.StatusBadRequest || tokenErrorCode(t, rec.Body.String()) != "invalid_client" {
 		t.Fatalf("code exchange with a refused document: %d %s", rec.Code, rec.Body.String())
+	}
+	// A fetch that failed observed nothing about the client: a retryable
+	// server error, never invalid_client.
+	stub.set(platformDoc(), cimd.ErrFetch)
+	rec = doTokenRequest(t, mux, form)
+	if rec.Code != http.StatusServiceUnavailable || tokenErrorCode(t, rec.Body.String()) != "server_error" || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("code exchange with an unreachable document: %d %s, want 503 server_error with Retry-After", rec.Code, rec.Body.String())
 	}
 
 	stub.set(platformDoc(), nil)
