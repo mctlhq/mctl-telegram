@@ -90,15 +90,13 @@ const minReasonLen = 40
 // prevent. A tool named here is treated as gate-less and therefore still needs
 // its vouch below.
 var reportsGateTools = map[string]string{
-	"get_my_send_status":   "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
-	"prepare_send_message": "runs evaluateSendGate to compute will_really_send/dry_reason for its own output, the same way get_my_send_status does; the verdict is returned, never enforced. Currently listed disabled in docs/portal-allowlist.json, so no upstream_gates vouch is required, but the entry stays accurate if that ever changes.",
+	"get_my_send_status": "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
 }
 
 var selfOnlyTools = map[string]string{
 	"get_my_identity":             "returns the caller's own identity row",
 	"get_my_send_status":          "reports the caller's own send gate without acting on it (see reportsGateTools)",
 	"get_my_audit_log":            "reads the caller's own audit rows, peers redacted",
-	"prepare_pin_message":         "mints a confirmation id for the caller's own later pin_message; no Telegram action",
 	"disconnect_telegram_account": "revokes the caller's own session",
 	"delete_telegram_account":     "deletes the caller's own account row",
 }

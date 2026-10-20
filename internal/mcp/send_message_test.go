@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -227,7 +228,8 @@ func TestToolPinMessage_RevokedConsentAndServerGateBlockDispatch(t *testing.T) {
 // send_enabled flag is the reason. This is a regression guard for the hint
 // logic staying scoped to exactly the one cause it was written for.
 func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
-	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent. Call get_my_send_status to confirm this is the reason."
+	const manageURL = "https://tg.test/telegram/connect/manage"
 
 	cases := []struct {
 		name     string
@@ -269,10 +271,47 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 				store := newToolsTestStore(t)
 				uid := seedAccountWithSession(t, store, 424242, false)
 				srv := &Server{Store: store, AllowSend: true}
-				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send", "account:manage"}}
 				return srv, id
 			},
 			wantHint: wantHint,
+		},
+		{
+			name: "send_enabled=false, no manage page, connection without account:manage",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424243, false)
+				srv := &Server{Store: store, AllowSend: true}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this connection cannot change that. An operator of this server can enable them for the account with set_account_send. Call get_my_send_status to confirm this is the reason.",
+		},
+		{
+			// A narrowed OAuth connector can be re-authorised; it must not be
+			// pointed at set_send_consent, which it cannot see.
+			name: "send_enabled=false, OAuth connector without account:manage",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424244, false)
+				srv := &Server{Store: store, AllowSend: true, ManageURL: manageURL}
+				id := &auth.Identity{UserID: uid, ClientID: "dcr-client", Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
+		},
+		{
+			// A worker or device credential can never gain account:manage;
+			// re-authorising is not a remedy it has.
+			name: "send_enabled=false, worker or device credential",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424245, false)
+				srv := &Server{Store: store, AllowSend: true, ManageURL: manageURL}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send", "telegram:messages:pin"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this credential can never change that. The account owner can enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
 		},
 	}
 
@@ -317,6 +356,61 @@ func TestToolSendMessage_RealSendHasNoHint(t *testing.T) {
 	}
 	if hint := out["hint"]; hint != nil && hint != "" {
 		t.Fatalf("hint = %v, want empty on a real send", hint)
+	}
+}
+
+// TestSendDisabledHint_ReachesEveryWritePath: before reasonSendDisabled was
+// reduced to the cause, its text named set_send_consent on every write path.
+// The paths that report the gate as an error string or a dry_reason (rather
+// than through SendResult.Hint) must still carry a remedy, and the same
+// caller-specific one send_message gives.
+func TestSendDisabledHint_ReachesEveryWritePath(t *testing.T) {
+	const manageURL = "https://tg.example.test/telegram/connect/manage"
+	store := newToolsTestStore(t)
+	uid := seedAccountWithSession(t, store, 424246, false)
+	srv := &Server{Store: store, Confirms: NewConfirmStore(), AllowSend: true, ManageURL: manageURL}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+	want := reasonSendDisabled + ". " + srv.sendDisabledHint(id)
+
+	call := func(tool func() (mcplib.Tool, mcpserver.ToolHandlerFunc), name string, args map[string]any) *mcplib.CallToolResult {
+		t.Helper()
+		_, handler := tool()
+		res, err := handler(auth.With(context.Background(), id), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: name, Arguments: args}})
+		if err != nil {
+			t.Fatalf("%s: unexpected Go error: %v", name, err)
+		}
+		return res
+	}
+	errorPaths := []struct {
+		name, verb string
+		tool       func() (mcplib.Tool, mcpserver.ToolHandlerFunc)
+		args       map[string]any
+	}{
+		{"edit_message", "edit", srv.toolEditMessage, map[string]any{"peer": "@x", "message_id": 1, "text": "hi"}},
+		{"delete_messages", "delete", srv.toolDeleteMessages, map[string]any{"peer": "@x", "message_ids": []any{1}}},
+		{"forward_messages", "forward", srv.toolForwardMessages, map[string]any{"from_peer": "@x", "to_peer": "@y", "message_ids": []any{1}}},
+		{"set_reaction", "reaction", srv.toolSetReaction, map[string]any{"peer": "@x", "message_id": 1, "emoji": "x"}},
+	}
+	for _, tc := range errorPaths {
+		res := call(tc.tool, tc.name, tc.args)
+		if !res.IsError || contentText(res) != tc.verb+" blocked: "+want {
+			t.Errorf("%s: got IsError=%v %q, want error %q", tc.name, res.IsError, contentText(res), tc.verb+" blocked: "+want)
+		}
+	}
+
+	dryPaths := []struct {
+		name string
+		tool func() (mcplib.Tool, mcpserver.ToolHandlerFunc)
+		args map[string]any
+	}{
+		{"send_media", srv.toolSendMedia, map[string]any{"peer": "@x", "media_type": "photo", "file_base64": "aGk="}},
+		{"prepare_send_message", srv.toolPrepareSendMessage, map[string]any{"peer": "@x", "text": "hi"}},
+	}
+	for _, tc := range dryPaths {
+		out := parseSendResult(t, call(tc.tool, tc.name, tc.args))
+		if got := toStr(out["dry_reason"]); got != want {
+			t.Errorf("%s: dry_reason = %q, want %q", tc.name, got, want)
+		}
 	}
 }
 

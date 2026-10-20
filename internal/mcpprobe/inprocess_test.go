@@ -63,8 +63,11 @@ func newInProcessTarget(t *testing.T) (string, string) {
 	token, err := issuer.Mint(localjwt.Claims{
 		Subject:    "tg:500100101",
 		TelegramID: inProcessTGID,
-		Scopes:     []string{"telegram:messages:read"},
-		Audience:   []string{"mcp"},
+		// The send scope makes send_message visible: tools/list follows the
+		// caller's scopes (internal/mcp/toolscopes.go), and T7 checks how a
+		// mutating tool is reported. The probe itself calls only read tools.
+		Scopes:   []string{"telegram:messages:read", "telegram:messages:send"},
+		Audience: []string{"mcp"},
 	}, time.Hour)
 	if err != nil {
 		t.Fatalf("mint: %v", err)

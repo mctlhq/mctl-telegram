@@ -300,6 +300,17 @@ type mcpResult struct {
 
 func mcpCall(t *testing.T, base, bearer, tool string, args map[string]any) mcpResult {
 	t.Helper()
+	out, rpcErr := mcpCallRaw(t, base, bearer, tool, args)
+	if rpcErr != nil {
+		t.Fatalf("mcp %s: rpc error: %v", tool, rpcErr)
+	}
+	return out
+}
+
+// mcpCallRaw is mcpCall for a step that expects the JSON-RPC layer itself to
+// refuse the call: it returns the rpc error instead of failing on it.
+func mcpCallRaw(t *testing.T, base, bearer, tool string, args map[string]any) (mcpResult, any) {
+	t.Helper()
 	post := func(sessionID string, body any) (*http.Response, map[string]any) {
 		raw, _ := json.Marshal(body)
 		req, _ := http.NewRequest(http.MethodPost, base+"/mcp", bytes.NewReader(raw))
@@ -341,7 +352,7 @@ func mcpCall(t *testing.T, base, bearer, tool string, args map[string]any) mcpRe
 		},
 	})
 	if initResp.StatusCode != http.StatusOK {
-		return mcpResult{status: initResp.StatusCode}
+		return mcpResult{status: initResp.StatusCode}, nil
 	}
 	if initMsg["error"] != nil {
 		t.Fatalf("mcp initialize error: %v", initMsg["error"])
@@ -353,10 +364,10 @@ func mcpCall(t *testing.T, base, bearer, tool string, args map[string]any) mcpRe
 		"params": map[string]any{"name": tool, "arguments": args},
 	})
 	if callResp.StatusCode != http.StatusOK {
-		return mcpResult{status: callResp.StatusCode}
+		return mcpResult{status: callResp.StatusCode}, nil
 	}
 	if callMsg["error"] != nil {
-		t.Fatalf("mcp %s: rpc error: %v", tool, callMsg["error"])
+		return mcpResult{status: http.StatusOK}, callMsg["error"]
 	}
 	result, _ := callMsg["result"].(map[string]any)
 	out := mcpResult{status: http.StatusOK}
@@ -367,7 +378,7 @@ func mcpCall(t *testing.T, base, bearer, tool string, args map[string]any) mcpRe
 		}
 	}
 	out.structured, _ = result["structuredContent"].(map[string]any)
-	return out
+	return out, nil
 }
 
 func jwtClaims(t *testing.T, token string) localjwt.Claims {
@@ -640,15 +651,12 @@ func TestZeroAdminCLIDaemon_EndToEnd(t *testing.T) {
 	assertNoServerSideSession("after the first read")
 
 	// ---- send before consent: refused server-side, daemon never asked ----
-	res = mcpCall(t, srv.ts.URL, readToken, "send_message", map[string]any{"peer": "user:1", "text": "hello"})
-	if res.status != http.StatusOK || res.isError {
-		t.Fatalf("send_message before consent should be a dry-run, not an error: status=%d text=%q", res.status, res.text)
-	}
-	if sent, _ := res.structured["sent"].(bool); sent {
-		t.Fatalf("a read-only credential sent for real: %v", res.structured)
-	}
-	if reason, _ := res.structured["dry_reason"].(string); !strings.Contains(reason, "scope") {
-		t.Fatalf("dry_reason %q should name the missing scope", reason)
+	//
+	// The read-only credential is not offered send_message at all, and a
+	// direct call is refused by the tool filter before any handler runs
+	// (internal/mcp/toolscopes.go) -- not answered with a dry-run preview.
+	if _, rpcErr := mcpCallRaw(t, srv.ts.URL, readToken, "send_message", map[string]any{"peer": "user:1", "text": "hello"}); rpcErr == nil {
+		t.Fatal("send_message with a read-only credential should be refused, not answered")
 	}
 	if fake.count("send_message") != 0 {
 		t.Fatal("the daemon was contacted for a send the server had already refused")

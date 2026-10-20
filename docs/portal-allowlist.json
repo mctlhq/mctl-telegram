@@ -150,7 +150,7 @@
       "name": "prepare_pin_message",
       "enabled": true,
       "upstream_gates": [
-        "self-only"
+        "telegram:messages:pin"
       ],
       "reason": "Issues a confirmation id for a later pin_message on the caller's own dialog; performs no Telegram action by itself."
     },

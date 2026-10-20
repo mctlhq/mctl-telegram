@@ -23,6 +23,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"get_unread_messages", first(s.toolGetUnreadMessages()), true, false, true},
 		{"get_messages", first(s.toolGetMessages()), true, false, true},
 		{"prepare_pin_message", first(s.toolPreparePinMessage()), false, false, false},
+		{"prepare_send_message", first(s.toolPrepareSendMessage()), false, false, false},
 		{"prepare_get_media", first(s.toolPrepareGetMedia()), true, false, true},
 		{"get_media", first(s.toolGetMedia()), true, false, true},
 		{"list_telegram_identities", first(s.toolListIdentities()), true, false, false},
@@ -52,7 +53,24 @@ func TestToolAnnotations(t *testing.T) {
 		{"delete_messages", first(s.toolDeleteMessages()), false, true, true},
 		{"forward_messages", first(s.toolForwardMessages()), false, true, true},
 		{"search_messages", first(s.toolSearchMessages()), true, false, true},
-		{"set_reaction", first(s.toolSetReaction()), false, false, true},
+		{"set_reaction", first(s.toolSetReaction()), false, true, true},
+		{"get_my_notification_preferences", first(s.toolGetMyNotificationPreferences()), true, false, false},
+		{"set_my_notification_preferences", first(s.toolSetMyNotificationPreferences()), false, true, false},
+	}
+
+	// Every registered tool must have a row here: a tool without one would
+	// ship whatever hints it happens to carry, unreviewed.
+	covered := map[string]bool{}
+	for _, c := range cases {
+		covered[c.name] = true
+		if c.tool.Name != c.name {
+			t.Errorf("case %q builds tool %q", c.name, c.tool.Name)
+		}
+	}
+	for name := range fullSurfaceServer(&Server{}).ListTools() {
+		if !covered[name] {
+			t.Errorf("%s is registered but has no annotation case", name)
+		}
 	}
 
 	for _, c := range cases {

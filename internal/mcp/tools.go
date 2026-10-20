@@ -461,7 +461,7 @@ Inputs (optional):
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 			if dryReason == reasonSendDisabled {
-				result.Hint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+				result.Hint = s.sendDisabledHint(id)
 			}
 			return jsonResult(result)
 		}
@@ -648,7 +648,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		outputSchema[preparePinResult](),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
+Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step makes no Telegram call; it issues the confirmation and counts against the same per-peer limit as a pin.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
 Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
@@ -667,8 +667,8 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "telegram:messages:pin"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
@@ -859,7 +859,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[deleteResult](),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
-Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to reconnect, the operator must re-run the login CLI.
+Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
 For a softer alternative that keeps the row but disables it, use disconnect_telegram_account.
 
@@ -1292,7 +1292,7 @@ type setSendConsentResult struct {
 // carry it (T2b).
 func (s *Server) toolSetSendConsent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_send_consent",
-		mcplib.WithTitleAnnotation("Grant or revoke your own Local Bridge send consent"),
+		mcplib.WithTitleAnnotation("Grant or revoke your own send consent"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
@@ -1485,7 +1485,7 @@ func (s *Server) toolSetMyNotificationPreferences() (mcplib.Tool, mcpserver.Tool
 	tool := mcplib.NewTool("set_my_notification_preferences",
 		mcplib.WithTitleAnnotation("Change your notification preferences"),
 		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		outputSchema[notificationPrefsResult](),
 		mcplib.WithDescription(`Change one or more of YOUR OWN notification preferences. Requires the account:manage scope. Always acts on the caller's own account -- there is no telegram_id argument.
@@ -2009,7 +2009,55 @@ func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, demoRevie
 // send_enabled flag is off. It is a package-level constant (rather than an
 // inline literal) so toolSendMessage can compare a dry_reason value against
 // it to attach a targeted hint, without the two call sites risking drift.
-const reasonSendDisabled = "per-account send_enabled=false — enable real sends with set_send_consent"
+//
+// It states the cause only. The remedy depends on who is asking, so it lives
+// in sendDisabledHint, which get_my_send_status's reason (the same constant)
+// cannot contradict.
+const reasonSendDisabled = "per-account send_enabled=false — real sends are not enabled for this account"
+
+// sendDisabledHint is the nudge for a send blocked only by the per-account
+// flag. Each caller is pointed at a remedy it can actually use; naming
+// set_send_consent to a connection without account:manage would point at a
+// tool missing from its tool list (toolscopes.go), a dead end:
+//
+//   - a caller that can call set_send_consent is told to;
+//   - an OAuth connector narrowed below account:manage (it has a client_id)
+//     can be re-authorised with that permission, or the owner can use the
+//     manage page;
+//   - a worker or device credential (no client_id) can never gain the
+//     scope, so only the owner can act, on the manage page.
+//
+// Without a manage page (ManageURL == "", i.e. not local-jwt) there is no
+// self-service remedy to name: shared-hmac's default groups grant
+// account:manage to nobody. The fallback names the operator tool
+// set_account_send instead of a page or a scope the caller cannot reach.
+func (s *Server) sendDisabledHint(id *auth.Identity) string {
+	const prefix = "Your account has never opted into real sends"
+	const confirm = " Call get_my_send_status to confirm this is the reason."
+	if toolAllowed(id, "set_send_consent") {
+		return prefix + ". Enable them with set_send_consent." + confirm
+	}
+	if s.ManageURL == "" {
+		return prefix + ", and this connection cannot change that. An operator of this server can enable them for the account with set_account_send." + confirm
+	}
+	if id != nil && id.ClientID != "" {
+		return prefix + ", and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+	}
+	return prefix + ", and this credential can never change that. The account owner can enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+}
+
+// withSendDisabledHint appends sendDisabledHint to reason when the per-account
+// flag is what blocked the call, for the write paths that report the gate as
+// a dry_reason or an error string rather than through SendResult.Hint. Before
+// reasonSendDisabled was reduced to the cause, it named set_send_consent on
+// every one of those paths; this keeps a remedy there without changing any
+// output schema.
+func (s *Server) withSendDisabledHint(id *auth.Identity, reason string) string {
+	if reason != reasonSendDisabled {
+		return reason
+	}
+	return reason + ". " + s.sendDisabledHint(id)
+}
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
 // final verdict. Both callers go through it so the wording of the last
@@ -2672,7 +2720,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("edit blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("edit blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
@@ -2728,7 +2776,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("delete blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("delete blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
@@ -2785,7 +2833,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("forward blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("forward blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		// Rate-limit on the destination peer (outbound message target), costed
 		// by batch size — forwarding N messages spends N of the 20/hour budget,
@@ -2939,7 +2987,7 @@ func (s *Server) toolSetReaction() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_reaction",
 		mcplib.WithTitleAnnotation("Set Telegram Reaction"),
 		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
 		outputSchema[setReactionResult](),
 		mcplib.WithDescription(`Add or remove a reaction on a Telegram message.
@@ -2970,7 +3018,7 @@ Inputs (optional):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("reaction blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("reaction blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {

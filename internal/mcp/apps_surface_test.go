@@ -66,7 +66,9 @@ func initializeParams() map[string]any {
 // unavailable, and no registered tool carries a non-nil Meta.
 func TestAppsFlag_Off_SurfaceUnchanged(t *testing.T) {
 	srv := (&Server{}).newMCPServer()
-	ctx := context.Background()
+	// tools/list is scope-filtered (toolscopes.go); an identity holding every
+	// scope sees the whole registered set, which is what this test inspects.
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: allToolScopes()})
 
 	initEnv := callRPC(t, ctx, srv, string(mcp.MethodInitialize), initializeParams())
 	if initEnv.Error != nil {
