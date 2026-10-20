@@ -225,3 +225,29 @@ func TestToolsCall_AnonymousIsRejectedWithoutAudit(t *testing.T) {
 		t.Fatalf("audit rows changed from %d to %d for an anonymous call", before, after)
 	}
 }
+
+// TestToolsCall_ScopeDeniedRowSurvivesCancelledContext: the hook is the only
+// writer of a scope_denied row, so it must write detached, the way Rule 4's
+// flush does. A request whose context is already cancelled -- a client that
+// disconnected right after sending -- still leaves the row.
+func TestToolsCall_ScopeDeniedRowSurvivesCancelledContext(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := fullSurfaceServer(&Server{Store: store})
+
+	const uid int64 = 4302
+	ctx, cancel := context.WithCancel(auth.With(context.Background(), &auth.Identity{UserID: uid, Scopes: readOnlyScopes}))
+	cancel()
+	env := callRPC(t, ctx, srv, string(mcplib.MethodToolsCall), map[string]any{
+		"name":      "set_send_consent",
+		"arguments": map[string]any{"enabled": true},
+	})
+	if env.Error == nil {
+		t.Fatalf("set_send_consent succeeded for a read-only identity: %s", env.Result)
+	}
+	if n := countAuditRows(t, store, uid); n != 1 {
+		t.Fatalf("audit rows = %d, want 1: a cancelled request context dropped the refusal row", n)
+	}
+	if reason := latestAuditReason(t, store, uid); reason != ReasonScopeDenied {
+		t.Fatalf("reason = %q, want %q", reason, ReasonScopeDenied)
+	}
+}

@@ -461,7 +461,7 @@ Inputs (optional):
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 			if dryReason == reasonSendDisabled {
-				result.Hint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+				result.Hint = sendDisabledHint(id)
 			}
 			return jsonResult(result)
 		}
@@ -2010,6 +2010,17 @@ func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, demoRevie
 // inline literal) so toolSendMessage can compare a dry_reason value against
 // it to attach a targeted hint, without the two call sites risking drift.
 const reasonSendDisabled = "per-account send_enabled=false — enable real sends with set_send_consent"
+
+// sendDisabledHint is the nudge for a send blocked only by the per-account
+// flag. It names set_send_consent only to a caller that can see and call it
+// (toolscopes.go): pointing a connection without account:manage at a tool
+// missing from its tool list is a dead end with no explanation.
+func sendDisabledHint(id *auth.Identity) string {
+	if toolAllowed(id, "set_send_consent") {
+		return "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+	}
+	return "Your account has never opted into real sends, and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope; call get_my_send_status to confirm this is the reason."
+}
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
 // final verdict. Both callers go through it so the wording of the last

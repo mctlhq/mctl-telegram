@@ -483,11 +483,16 @@ func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *
 			s.Metrics.ToolCallErrorsTotal.WithLabelValues(labelTool, reason).Inc()
 		}
 		if scopeDenied && s.Store != nil {
-			s.writeAuditRow(ctx, callRecord{
+			// Detached like Rule 4's flush: this is the only writer of the
+			// row, so a client that disconnects after the rejection must not
+			// be able to drop it.
+			detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+			defer cancel()
+			s.writeAuditRow(detached, callRecord{
 				tool:        toolName,
 				status:      "error",
 				reason:      ReasonScopeDenied,
-				errMsg:      "identity missing scope for " + toolName,
+				errMsg:      "identity missing scope " + strings.Join(toolScopes[toolName], " or "),
 				id:          identity,
 				synthesized: true,
 			})

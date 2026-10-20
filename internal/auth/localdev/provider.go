@@ -34,7 +34,13 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
 			"telegram:messages:send",
+			"telegram:messages:pin",
 			"admin:users",
+			// The seed user owns its local account, so it gets the same
+			// self-service tools an admin gets from oauth.ResolveScopes.
+			// Without these, tools/list (which follows scopes) would hide
+			// the pin and consent tools on the documented dev path.
+			"account:manage",
 		},
 	}, nil
 }

@@ -269,10 +269,21 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 				store := newToolsTestStore(t)
 				uid := seedAccountWithSession(t, store, 424242, false)
 				srv := &Server{Store: store, AllowSend: true}
-				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send", "account:manage"}}
 				return srv, id
 			},
 			wantHint: wantHint,
+		},
+		{
+			name: "send_enabled=false, connection without account:manage",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424243, false)
+				srv := &Server{Store: store, AllowSend: true}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope; call get_my_send_status to confirm this is the reason.",
 		},
 	}
 

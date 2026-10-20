@@ -1,20 +1,23 @@
 schema: mctl-telegram.product-update/v1
 id: tool-list-follows-scopes
 kind: changed_behavior
-title: Your tool list now matches what your connection may do
+title: Your tool list now follows the permissions of your connection
 summary: >-
-  The tool list a client sees now depends on the permissions its connection
-  was granted. A connection granted only read access no longer lists the
-  sending, pinning, account-settings, operator or broadcast tools, and a
-  direct call to one of them is refused instead of returning a preview.
-  Connections with full access see the same tools as before. set_reaction and
-  set_my_notification_preferences are now marked as changing existing state,
-  set_send_consent has a clearer title, and the descriptions of
+  The tools a client is shown now depend on the permissions its connection was
+  granted, and a direct call to a tool that is not shown is refused. This
+  changes behavior for connections with narrowed permissions: a connection
+  without send permission used to receive a preview from send_message,
+  edit_message, delete_messages, forward_messages and set_reaction, and now
+  gets a "tool not found" error instead. Connections granted full access see
+  the same tools as before. One exception remains: disconnect_telegram_account
+  and delete_telegram_account are still available to read-only connections.
+  set_reaction and set_my_notification_preferences are now marked as changing
+  existing state, set_send_consent has a clearer title, and the descriptions of
   delete_telegram_account and prepare_pin_message were corrected.
 locale: en
 delivery: next_digest
 high_value: false
-tools: [set_reaction, set_my_notification_preferences, set_send_consent, delete_telegram_account, prepare_pin_message]
+tools: [send_message, edit_message, delete_messages, forward_messages, set_reaction, set_my_notification_preferences, set_send_consent, delete_telegram_account, prepare_pin_message]
 evidence:
   from: 0.81.0
   changes:
