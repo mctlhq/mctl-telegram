@@ -1,26 +1,169 @@
 # mctl-telegram
 
-Go remote MCP server exposing user-authorized Telegram account access (via `gotd/td` MTProto) as MCP tools — dialogs, messages, preview-gated sends, pin controls, audit logs, and account/admin controls — for ChatGPT Apps, Claude.ai, and any MCP-compatible client.
+[![build](https://github.com/mctlhq/mctl-telegram/actions/workflows/build.yml/badge.svg)](https://github.com/mctlhq/mctl-telegram/actions/workflows/build.yml)
+[![CodeQL](https://github.com/mctlhq/mctl-telegram/actions/workflows/codeql.yml/badge.svg)](https://github.com/mctlhq/mctl-telegram/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/mctlhq/mctl-telegram/badge)](https://securityscorecards.dev/viewer/?uri=github.com/mctlhq/mctl-telegram)
+[![Release](https://img.shields.io/github/v/release/mctlhq/mctl-telegram?display_name=tag)](https://github.com/mctlhq/mctl-telegram/releases)
+[![License](https://img.shields.io/github/license/mctlhq/mctl-telegram)](LICENSE)
 
-Status: v0.x, used in production at `https://tg.mctl.ai/mcp`. 37 MCP tools (generated list: [`docs/tool-descriptors.json`](docs/tool-descriptors.json)), OAuth 2.1 with Dynamic Client Registration, read-only by default for every new account until the owner opts in to sending. The Telegram session is per-user and persisted encrypted. Connect from ChatGPT (Developer Mode custom connector; the service is not in the ChatGPT App Directory), Claude, Cursor, or any MCP client. APIs and tool schemas may change before v1.0.
+A remote MCP server that gives AI assistants access to a user's own
+Telegram account: read dialogs and messages, search, and send only when
+the user has explicitly allowed it. It runs in production at
+`https://tg.mctl.ai/mcp` and works with ChatGPT, Claude, Cursor and any
+MCP client, including agent platforms that connect on behalf of their
+users.
 
-mctl-telegram is an independent project, not an official Telegram app or Telegram API partner. It operates only on the Telegram account that the user explicitly connects and controls; users remain responsible for complying with Telegram's terms.
+Written in Go on [`gotd/td`](https://github.com/gotd/td) (MTProto) and
+[`mcp-go`](https://github.com/mark3labs/mcp-go), with its own OAuth 2.1
+authorization server that signs users in with Telegram.
+
+mctl-telegram is an independent project, not an official Telegram app or
+Telegram API partner. It operates only on the Telegram account that the
+user explicitly connects and controls; users remain responsible for
+complying with Telegram's terms. Status: v0.x; tool schemas may change
+before v1.0.
+
+## What it does
+
+- **For a user:** connect the account once from a browser, then ask an
+  assistant to summarize unread chats, find a message, or draft and send a
+  reply. Accounts start read-only; sending is a separate opt-in, and every
+  call lands in an audit log the user can read and verify.
+- **For an agent platform:** a standard OAuth 2.1 server with Dynamic
+  Client Registration and Client ID Metadata Documents, so a platform can
+  connect many users without a per-platform setup on our side. Users who
+  will not leave their Telegram session on a server can run it on their
+  own machine with [Local Bridge](#local-bridge-daemon-cmdlocal-beta) and
+  keep the same endpoint.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C["MCP client<br/>ChatGPT, Claude, Cursor,<br/>agent platform"]
+    subgraph S["mctl-telegram (one Go service)"]
+        AS["OAuth 2.1 server<br/>DCR, CIMD, PKCE,<br/>refresh rotation"]
+        M["MCP endpoint /mcp<br/>37 tools"]
+        G["Send gate<br/>scope + server flag<br/>+ owner opt-in"]
+        P["MTProto session pool<br/>one client per user"]
+        R["Local Bridge relay"]
+        A[("Postgres<br/>sealed sessions,<br/>hash-chained audit")]
+    end
+    TO["Telegram OIDC<br/>oauth.telegram.org"]
+    T["Telegram<br/>MTProto"]
+    D["mctl-telegram-local<br/>on the user's machine"]
+
+    C -- "OAuth sign-in" --> AS
+    AS -- "identity" --> TO
+    C -- "tool calls (Bearer)" --> M
+    M --> G
+    G --> P
+    P --> T
+    M --> R
+    R -- "websocket" --> D
+    D --> T
+    M --> A
+    P --> A
+```
+
+- The client discovers the authorization server from
+  `/.well-known/oauth-protected-resource` (RFC 9728), registers, and sends
+  the user to sign in with Telegram. The service issues its own tokens.
+- A tool call is checked against the token's scopes, run on the user's
+  MTProto client from the pool, and recorded in the user's audit chain.
+  Writes also pass the send gate.
+- For a Local Bridge account the call goes down a websocket to the user's
+  own daemon instead, and the server only relays.
+
+| Path | Purpose |
+|---|---|
+| `/mcp` | MCP Streamable HTTP endpoint. Auth: `Authorization: Bearer <JWT>`. A 401 carries `WWW-Authenticate` pointing to `/.well-known/oauth-protected-resource/mcp`. |
+| `/.well-known/oauth-protected-resource` | RFC 9728 metadata naming the authorization server. |
+| `/.well-known/oauth-authorization-server` | RFC 8414 metadata: authorize, token, register, revoke. |
+| `/healthz`, `/readyz` | Probes, `ok` 200. |
+| `/`, `/docs`, `/security`, `/privacy`, `/terms` | Public pages. |
+
+## Design decisions
+
+The reasoning behind the architecture is recorded as
+[architecture decision records](docs/adr/README.md), each with the code
+that carries it and what it costs:
+
+| ADR | Decision |
+|---|---|
+| [0001](docs/adr/0001-per-user-session-keys.md) | Sessions sealed with per-user keys, and the hosted mode stated as not zero-knowledge |
+| [0002](docs/adr/0002-send-gate.md) | One send gate with three independent conditions; accounts start read-only |
+| [0003](docs/adr/0003-hash-chained-audit-log.md) | A per-user hash-chained audit log; logs redacted by a handler |
+| [0004](docs/adr/0004-own-authorization-server.md) | Its own OAuth 2.1 server, brokering Telegram's OpenID Connect sign-in |
+| [0005](docs/adr/0005-session-pool-and-sticky-routing.md) | A per-pod session pool, one replica, sticky routing built and tested |
+| [0006](docs/adr/0006-local-bridge-relay.md) | Local Bridge: the session stays on the user's machine |
+| [0007](docs/adr/0007-tool-surface-as-contract.md) | The tool surface as a reviewed contract with a release gate |
+
+## Engineering
+
+- About 68,000 lines of Go, and more test code than that (about 82,000
+  lines in 295 test files).
+- CI runs the whole module under `go test -race` against a real Postgres,
+  plus tests on macOS and Windows, `govulncheck`, CodeQL and OpenSSF
+  Scorecard. Actions are pinned by commit SHA.
+- A release cannot change the tool surface without an approved
+  product-update entry ([ADR 0007](docs/adr/0007-tool-surface-as-contract.md)).
+- Sticky routing for more than one replica is proven by an acceptance
+  workflow on kind, against ingress-nginx and Istio.
+- Service-level objectives with burn-rate alerts ([docs/slo.md](docs/slo.md))
+  and a synthetic canary that checks OAuth discovery and a read-only tool
+  call every ten minutes.
 
 ## Security and privacy model
 
-mctl-telegram holds a **server-side** Telegram MTProto session on your behalf. This means the server can technically read your Telegram data while processing your requests — it is the one making MTProto calls to Telegram. We minimize what is stored (encrypted session blob only) and what is logged (no message text, no phone numbers), but you are trusting both the operator of this deployment and the integrity of this code.
+mctl-telegram holds a **server-side** Telegram MTProto session on your
+behalf. The server can technically read your Telegram data while
+processing your requests, because it is the one making MTProto calls to
+Telegram. It stores only the session, sealed with a per-user key, and logs
+no message text and no phone numbers; but you are trusting both the
+operator of this deployment and the integrity of this code. Local Bridge
+exists for users who will not.
 
-See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic invariants, send-gate design, and reporting channel.
+See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic
+invariants, send-gate design, OAuth rules and reporting channel.
 
-**Do not expose this server publicly without OAuth, HTTPS, and a trusted deployment boundary.**
+**Do not expose this server publicly without OAuth, HTTPS, and a trusted
+deployment boundary.**
 
-## Endpoints
+## Connecting a client
 
-| Path                                       | Purpose                                                                                              |
-|--------------------------------------------|------------------------------------------------------------------------------------------------------|
-| `/healthz`, `/readyz`                      | Probes — `ok` 200.                                                                                   |
-| `/.well-known/oauth-protected-resource`    | RFC 9728 metadata declaring the authorization server for this deployment.                            |
-| `/mcp`                                     | MCP Streamable HTTP endpoint. Auth: `Authorization: Bearer <JWT>`. 401 responses include `WWW-Authenticate` pointing to `/.well-known/oauth-protected-resource/mcp` (RFC 9728 discovery). |
+### Hosted endpoint (`tg.mctl.ai`)
+
+- **Claude:** Settings → Connectors → Add custom connector, URL
+  `https://tg.mctl.ai/mcp`. Sign in with Telegram when the browser opens.
+- **ChatGPT:** enable Developer Mode, then add a custom connector with the
+  same URL and OAuth. The service is not in the ChatGPT App Directory.
+- **Cursor and other MCP clients:** use `https://tg.mctl.ai/mcp`; the client
+  discovers OAuth from the well-known metadata.
+- **Agent platforms:** register with Dynamic Client Registration from a
+  callback host on the allowlist, or publish a Client ID Metadata Document
+  on your own domain and ask for your host to be added. See
+  [SECURITY.md](SECURITY.md) for the exact redirect rules.
+
+The first connection asks which permissions to grant. "Read only" is the
+default; sending can be turned on later on the account page
+(`https://tg.mctl.ai/telegram/connect/manage`) or with the `set_send_consent` tool. If an error comes
+back, [docs/troubleshooting.md](docs/troubleshooting.md) explains the error
+families clients actually hit.
+
+### Your own deployment
+
+1. Confirm discovery is reachable:
+   `curl https://<your-host>/.well-known/oauth-protected-resource`, then
+   follow the `authorization_servers` URL it names and fetch its
+   `/.well-known/oauth-authorization-server`. In the default `local-jwt`
+   mode that is your own host; in the `shared-hmac` modes it is
+   `https://api.mctl.ai`.
+2. Add `https://<your-host>/mcp` as a custom connector in your client, with
+   OAuth.
+3. Run `initialize` and one read-only tool call (MCP Inspector works)
+   before relying on it. Real sends stay off until `ALLOW_SEND=true`, the
+   token has the send scope, and the account owner opts in.
 
 ## MCP tools
 
@@ -119,6 +262,9 @@ Key variables:
 | `OAUTH_REFRESH_TOKEN_TTL`     | optional, default `720h` (30 days)                                          |
 | `OAUTH_PREREGISTERED_CLIENTS` | optional; JSON array of `{"client_id","redirect_uris"}` seeded as static clients with byte-exact redirect matching. For a counterpart that cannot use dynamic registration; carries no secret. See [SECURITY.md](SECURITY.md) and [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
 | `OAUTH_DCR_REDIRECT_URIS`     | optional; comma-separated, byte-exact redirect URI allowlist for `POST /oauth/register`. A registration whose `redirect_uris` are all on it is accepted without the implicit-host allowlist; mixing in any other URI is refused. For an MCP gateway that registers itself (the Cloudflare MCP portal in automatic mode). Unset changes nothing. See [docs/cloudflare-portal-compat.md](docs/cloudflare-portal-compat.md) |
+| `OAUTH_CIMD_ACCEPT`           | optional, default off. Accept an https URL as a `client_id` and take its redirect URIs from the Client ID Metadata Document at that URL. Requires `OAUTH_CIMD_ALLOWED_HOSTS`. See [SECURITY.md](SECURITY.md) and [ADR 0004](docs/adr/0004-own-authorization-server.md) |
+| `OAUTH_CIMD_ALLOWED_HOSTS`    | comma-separated hosts whose documents may be fetched; use exact hosts in production. Removing a host also stops that client's refreshes |
+| `OAUTH_CIMD_ADVERTISE`        | optional, default off. Announce CIMD and `private_key_jwt` in discovery. Clients that prefer CIMD switch to it with no DCR fallback, so list every such client's host first |
 
 > `OAUTH_JWT_SECRET` is a deprecated alias of `OAUTH_JWT_SIGNING_KEY`. It is
 > still accepted as a fallback but logs a warning at startup. Use
@@ -169,48 +315,7 @@ Services started: `app` (mctl-telegram on port 8080) and `db` (Postgres 16).
 
 For Beta-tier service-level objectives, error-budget policy, and burn-rate alert definitions, see [docs/slo.md](docs/slo.md).
 
-If a tool call or the OAuth flow returned an error string and you need to know what it means and what to do next, see [docs/troubleshooting.md](docs/troubleshooting.md) — a client-facing page for the error families clients actually hit, distinct from the alert-driven [docs/runbook.md](docs/runbook.md).
-
-## Connecting to Claude.ai
-
-1. Start mctl-telegram and confirm the well-known is reachable:
-   ```bash
-   curl https://<your-host>/.well-known/oauth-protected-resource
-   ```
-2. In Claude.ai → Settings → Connectors → Add custom connector:
-   * Remote MCP URL: `https://<your-host>/mcp`
-   * Authentication: OAuth (the connector discovers the authorization server from the well-known metadata).
-3. Complete the Telegram login flow in the browser; the issued access token is used automatically on every MCP request.
-
-## Connecting to ChatGPT Apps (Draft → review-ready)
-
-> Note: mctl-telegram does **not** require an `OPENAI_API_KEY` server-side.
-> ChatGPT connects to your MCP endpoint using OAuth bearer tokens issued by
-> this service.
-
-1. In ChatGPT, open **Settings → Apps** and select your draft app (enable Developer Mode first if required).
-2. Set the MCP server URL to the public endpoint: `https://<your-host>/mcp` (OAuth auth).
-3. Ensure these public pages are reachable over HTTPS:
-   - Landing: `https://<your-host>/`
-   - Docs: `https://<your-host>/docs`
-   - Security: `https://<your-host>/security`
-   - Privacy: `https://<your-host>/privacy`
-4. Verify OAuth discovery:
-   - Fetch `https://<your-host>/.well-known/oauth-protected-resource` (always served on your host).
-   - Follow the `authorization_servers` URL it advertises and confirm that server's `/.well-known/oauth-authorization-server` resolves. In the default `local-jwt` mode this is your own host; in `shared-hmac`/`shared-hmac-legacy` mode discovery points at `https://api.mctl.ai`, so do **not** expect that document on `<your-host>`.
-5. Run a live handshake (`initialize`) and at least one read-only tool call with MCP Inspector or ChatGPT Developer Mode before submitting.
-
-### Quick connect to the hosted endpoint (`tg.mctl.ai`)
-
-If you are using the shared hosted deployment, configure:
-
-- Landing page: `https://tg.mctl.ai/`
-- MCP connector URL: `https://tg.mctl.ai/mcp`
-
-Submission notes:
-- Keep real sends gated (`ALLOW_SEND=false` on tg.mctl.ai blocks all real sends until opt-in gates are enabled).
-- If you enable real sends later, keep the per-account `send_enabled` gate and confirmation flow documented in `/security`.
-- Prepare the dashboard submission package with the privacy policy URL, MCP/tool information, screenshots, and test prompts/responses.
+For alert-driven operations, see [docs/runbook.md](docs/runbook.md); for errors as clients see them, [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Local Bridge daemon (`cmd/local`, beta)
 
@@ -273,8 +378,11 @@ production had already left behind — maintained in appearance, stale in fact.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, and the PR process.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev
+setup, code style, and the PR process. Larger design changes should add or
+supersede an [ADR](docs/adr/README.md).
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) — covers the send-gate invariants, session encryption, and the reporting channel.
+See [SECURITY.md](SECURITY.md) for the send-gate invariants, session
+encryption, and the reporting channel.
