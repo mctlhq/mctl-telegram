@@ -1,0 +1,27 @@
+schema: mctl-telegram.product-update/v1
+id: account-manage-for-delete-disconnect
+kind: changed_behavior
+title: Disconnecting or deleting your account now needs account management permission
+summary: >-
+  disconnect_telegram_account and delete_telegram_account now require the
+  account:manage permission, on MCP and on the matching account API calls
+  (POST /api/account/disconnect, DELETE /api/account). Read-only connections,
+  worker tokens and Local Bridge device credentials can no longer disconnect
+  or delete the account they were issued for: over MCP the two tools are no
+  longer listed and a direct call is refused, and the API calls answer 403.
+  Every refusal is recorded in your audit log. Connections granted full access
+  work as before, and you can always disconnect from the manage page after
+  signing in with Telegram in a browser, whatever a connection was narrowed to.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [disconnect_telegram_account, delete_telegram_account]
+evidence:
+  from: 0.81.0
+  changes:
+    - {tool: disconnect_telegram_account, change: text}
+status: draft
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+created_at: "2026-10-20"

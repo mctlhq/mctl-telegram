@@ -170,8 +170,9 @@ func TestHandleDisconnect_ClearsCookieAndRedirects(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	srv := NewManageServer(store, nil, "https://tg.test", "")
-	id := &auth.Identity{UserID: uid}
+	srv := NewManageServer(store, nil, "https://tg.test", "").WithConnectClient("mctl_self_connect")
+	// The browser sign-in token: what the connect-session cookie carries.
+	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"}
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil)
 	req = req.WithContext(auth.With(req.Context(), id))
 	rec := httptest.NewRecorder()

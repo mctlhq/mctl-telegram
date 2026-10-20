@@ -97,8 +97,6 @@ var selfOnlyTools = map[string]string{
 	"get_my_identity":             "returns the caller's own identity row",
 	"get_my_send_status":          "reports the caller's own send gate without acting on it (see reportsGateTools)",
 	"get_my_audit_log":            "reads the caller's own audit rows, peers redacted",
-	"disconnect_telegram_account": "revokes the caller's own session",
-	"delete_telegram_account":     "deletes the caller's own account row",
 }
 
 // gateSelfOnly and gateSend are the two non-scope tokens upstream_gates may

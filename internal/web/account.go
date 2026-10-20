@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -35,13 +36,65 @@ type AccountCloser interface {
 // same auth middleware as the MCP endpoint. Anonymous requests get 401.
 // Audit rows are written through the same Store.LogToolCall path used by MCP
 // tools so /api/account calls show up in get_my_auditLog too.
+//
+// Disconnect and delete additionally require canManageAccount; see there.
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
+	// ConnectClient is oauth.ConnectClientID, the client_id of the browser
+	// Telegram sign-in token. Empty means only account:manage is accepted.
+	ConnectClient string
 }
 
 func NewAccountHandlers(store *db.Store, pool AccountCloser) *AccountHandlers {
 	return &AccountHandlers{Store: store, Pool: pool}
+}
+
+// WithConnectClient sets ConnectClient and returns h.
+func (h *AccountHandlers) WithConnectClient(clientID string) *AccountHandlers {
+	h.ConnectClient = clientID
+	return h
+}
+
+// accountManageScope is the scope that lets a credential disconnect or delete
+// its own account. Worker and device credentials never carry it (see
+// internal/oauth/scopes.go).
+const accountManageScope = "account:manage"
+
+// reasonScopeDenied matches mcp.ReasonScopeDenied, so a refused web call and
+// a refused tool call read the same in the audit log and its metrics.
+const reasonScopeDenied = "scope_denied"
+
+// msgAccountManageRequired is the refusal for a credential that may not
+// disconnect or delete the account.
+const msgAccountManageRequired = "this connection cannot disconnect or delete the account: it needs the account:manage scope, or sign in to the manage page in a browser"
+
+// canManageAccount reports whether id may disconnect or delete its own
+// account. It holds for a credential granted account:manage, and for the
+// browser Telegram sign-in token (client_id == connectClient), which is how
+// the owner reaches the manage page whatever scopes a connector was
+// narrowed to. A read-only worker token or a Local Bridge device token has
+// neither, so it cannot end the session it was issued against.
+//
+// This revises the 2026-09-12 decision (mctlhq/.github#35) that left
+// disconnect and delete open to any authenticated credential.
+func canManageAccount(id *auth.Identity, connectClient string) bool {
+	if id == nil {
+		return false
+	}
+	if id.HasScope(accountManageScope) {
+		return true
+	}
+	return connectClient != "" && id.ClientID == connectClient
+}
+
+// auditScopeDenied records a refused disconnect or delete against the caller.
+// The write is detached from the request context, like the MCP refusal rows,
+// so a client that hangs up right after the request still leaves the row.
+func auditScopeDenied(r *http.Request, store *db.Store, id *auth.Identity, tool string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	store.LogToolCall(ctx, id.UserID, tool, "", "error", "identity missing scope "+accountManageScope, "", reasonScopeDenied)
 }
 
 // Register binds the account endpoints onto a router. Paths are
@@ -86,6 +139,11 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	if !canManageAccount(id, h.ConnectClient) {
+		auditScopeDenied(r, h.Store, id, "POST /api/account/disconnect")
+		writeAccountErr(w, http.StatusForbidden, msgAccountManageRequired)
+		return
+	}
 	// Pool eviction and DB revoke share the pool mutex via RemoveAtomic
 	// so a concurrent Borrow() cannot race between them. See
 	// telegram.ClientPool.RemoveAtomic for the full rationale.
@@ -116,6 +174,11 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !canManageAccount(id, h.ConnectClient) {
+		auditScopeDenied(r, h.Store, id, "DELETE /api/account")
+		writeAccountErr(w, http.StatusForbidden, msgAccountManageRequired)
 		return
 	}
 	var rows int64

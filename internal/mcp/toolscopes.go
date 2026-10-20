@@ -50,11 +50,6 @@ var toolScopes = map[string][]string{
 	"get_my_identity":    {},
 	"get_my_audit_log":   {},
 	"get_my_send_status": {},
-	// Ungated by a deliberate owner decision (2026-09-12, mctlhq/.github#35,
-	// recorded in docs/portal-allowlist.json): the blast radius is the
-	// caller's own row. Requiring account:manage here is a separate decision.
-	"disconnect_telegram_account": {},
-	"delete_telegram_account":     {},
 
 	// The caller's own account, changed. account:manage is granted by
 	// oauth.ResolveScopes (admin and client tiers) and by the local-dev
@@ -65,6 +60,16 @@ var toolScopes = map[string][]string{
 	// a worker or device credential (see internal/oauth/scopes.go), so none
 	// of these can be reached by one: a read-only credential cannot grant
 	// itself send consent or revoke its owner's devices.
+	//
+	// disconnect and delete were open to any authenticated credential by the
+	// 2026-09-12 decision (mctlhq/.github#35). Revised 2026-10-20: a read-only
+	// worker token or a device token could end the session it was issued
+	// against, so a read-only connection was not read-only. The owner keeps
+	// disconnect through the manage page, whose browser sign-in token
+	// internal/web.canManageAccount accepts as well, and deletes from any
+	// connection granted account:manage.
+	"disconnect_telegram_account":     {"account:manage"},
+	"delete_telegram_account":         {"account:manage"},
 	"get_my_notification_preferences": {"account:manage"},
 	"set_my_notification_preferences": {"account:manage"},
 	"set_send_consent":                {"account:manage"},

@@ -806,15 +806,15 @@ func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc
 
 Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
 
-This tool is part of self-service controls — you do not need an operator to disconnect.
+This tool is part of self-service controls — you do not need an operator to disconnect. It requires the account:manage scope; read-only and device credentials are refused, and the owner can always disconnect from the manage page after a browser sign-in.
 
 No inputs. Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		// Server-side guard: the demo/reviewer identity may not disconnect its
 		// own account. The session is shared review infrastructure and a reviewer
@@ -861,15 +861,15 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
-For a softer alternative that keeps the row but disables it, use disconnect_telegram_account.
+For a softer alternative that keeps the row but disables it, use disconnect_telegram_account. Requires the account:manage scope.
 
 No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		// Server-side guard: the demo/reviewer identity may not hard-delete its
 		// own account. This is the tool that bricked the demo session during a

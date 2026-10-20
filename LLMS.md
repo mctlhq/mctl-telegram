@@ -20,7 +20,7 @@ The authoritative, generated list with schemas and annotations is `docs/tool-des
 `prepare_send_message`, `send_message`, `send_media`, `edit_message`, `delete_messages`, `forward_messages`, `set_reaction`, `prepare_pin_message`, `pin_message`. Sends and pins are gated: server `ALLOW_SEND`, the `telegram:messages:send` scope, and per-account `send_enabled`; otherwise a preview (`sent=false`, `dry_reason`) is returned.
 
 ### Own account (5)
-`set_send_consent`, `set_my_notification_preferences`, `revoke_local_bridge_device`, `disconnect_telegram_account`, `delete_telegram_account`.
+`set_send_consent`, `set_my_notification_preferences`, `revoke_local_bridge_device`, `disconnect_telegram_account`, `delete_telegram_account`. All require the `account:manage` scope, which worker and device credentials never carry.
 
 ### Admin, `admin:users` scope (9)
 `list_telegram_identities`, `get_user_audit_log`, `set_telegram_access`, `set_account_send`, `set_account_mode`, `revoke_telegram_session`, `provision_local_account`, `mint_worker_token`, `revoke_worker_token`.

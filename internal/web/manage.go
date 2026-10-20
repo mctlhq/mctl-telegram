@@ -31,12 +31,21 @@ type ManageServer struct {
 	issuer string
 	// loginBotUsername is the validated login bot @username, or "".
 	loginBotUsername string
+	// connectClient is oauth.ConnectClientID; see canManageAccount.
+	connectClient string
 }
 
 // NewManageServer constructs a ManageServer. loginBotUsername is the validated
 // TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset.
 func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername string) *ManageServer {
 	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername}
+}
+
+// WithConnectClient sets the browser sign-in client_id that canManageAccount
+// accepts for disconnect, and returns s.
+func (s *ManageServer) WithConnectClient(clientID string) *ManageServer {
+	s.connectClient = clientID
+	return s
 }
 
 // loginBotStartURL is the one place the login bot start link is built, shared
@@ -172,6 +181,11 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
+		return
+	}
+	if !canManageAccount(id, s.connectClient) {
+		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/disconnect")
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: "This connection cannot disconnect the account. Sign in to this page in a browser to disconnect."})
 		return
 	}
 	var err error

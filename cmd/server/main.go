@@ -540,7 +540,7 @@ func main() {
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername)
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername).WithConnectClient(oauth.ConnectClientID)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
@@ -565,7 +565,7 @@ func main() {
 	// Account endpoints — self-service disconnect/delete + status.
 	// Mounted behind the same auth middleware as MCP so anon traffic gets 401.
 	accountMux := chi.NewRouter()
-	accountHandlers := web.NewAccountHandlers(store, pool)
+	accountHandlers := web.NewAccountHandlers(store, pool).WithConnectClient(oauth.ConnectClientID)
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
