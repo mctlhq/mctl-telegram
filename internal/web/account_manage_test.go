@@ -96,6 +96,26 @@ func (f *accountManageFixture) workerToken(purpose string) string {
 	return mt.Token
 }
 
+// deviceToken is a Local Bridge device credential from the real
+// MintForDevice, carrying the widest scope set a device can ever hold (a
+// refresh after the owner granted send consent).
+func (f *accountManageFixture) deviceToken() string {
+	f.t.Helper()
+	mt, err := f.minter.MintForDevice(workertoken.DeviceMintRequest{
+		TelegramID:       f.tgID,
+		DeviceID:         "dev_accountmanagetest",
+		Scopes:           deviceScopes,
+		Jti:              "jti-accountmanagetest",
+		OriginalIssuedAt: time.Now().Add(-time.Minute),
+	})
+	if err != nil {
+		f.t.Fatalf("MintForDevice: %v", err)
+	}
+	return mt.Token
+}
+
+var deviceScopes = []string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send", "telegram:messages:pin"}
+
 // accessToken signs an access token the way oauth.Server.mintAccessToken does.
 func (f *accountManageFixture) accessToken(clientID string, scopes ...string) string {
 	f.t.Helper()
@@ -182,6 +202,7 @@ func TestAccountEndpoints_RestrictedCredentialsCannotEndTheSession(t *testing.T)
 	}{
 		{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }},
 		{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }},
+		{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }},
 		{"connector token without account:manage", func(f *accountManageFixture) string {
 			return f.accessToken("dcr-client", "telegram:dialogs:read", "telegram:messages:read")
 		}},
@@ -268,6 +289,23 @@ func TestManageDisconnect_BrowserSignInAlwaysWorks(t *testing.T) {
 	}
 	if n := f.activeSessions(); n != 0 {
 		t.Fatalf("active sessions = %d after the owner disconnected, want 0", n)
+	}
+}
+
+// TestMintForDevice_NeverIssuesAccountManage: the refusal above rests on a
+// device credential never carrying account:manage. Asking MintForDevice for
+// it must fail, not mint a credential that would pass canManageAccount.
+func TestMintForDevice_NeverIssuesAccountManage(t *testing.T) {
+	f := newAccountManageFixture(t, 7700106)
+	_, err := f.minter.MintForDevice(workertoken.DeviceMintRequest{
+		TelegramID:       f.tgID,
+		DeviceID:         "dev_accountmanagetest",
+		Scopes:           append(append([]string{}, deviceScopes...), "account:manage"),
+		Jti:              "jti-accountmanagetest",
+		OriginalIssuedAt: time.Now().Add(-time.Minute),
+	})
+	if err == nil {
+		t.Fatal("MintForDevice issued a device credential carrying account:manage")
 	}
 }
 

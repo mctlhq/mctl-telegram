@@ -9,9 +9,10 @@ summary: >-
   worker tokens and Local Bridge device credentials can no longer disconnect
   or delete the account they were issued for: over MCP the two tools are no
   longer listed and a direct call is refused, and the API calls answer 403.
-  Every refusal is recorded in your audit log. Connections granted full access
-  work as before, and you can always disconnect from the manage page after
-  signing in with Telegram in a browser, whatever a connection was narrowed to.
+  Scope-denied attempts to call these operations are recorded in your audit
+  log. Connections with account:manage retain access to these operations. On
+  tg.mctl.ai, you can still disconnect from the manage page after signing in
+  with Telegram. Account deletion requires a connection with account:manage.
 locale: en
 delivery: next_digest
 high_value: false
