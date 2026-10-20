@@ -3,21 +3,19 @@ id: tool-list-follows-scopes
 kind: changed_behavior
 title: Your tool list now follows the permissions of your connection
 summary: >-
-  The tools a client is shown now depend on the permissions its connection was
-  granted, and a direct call to a tool that is not shown is refused. This
-  changes behavior for connections with narrowed permissions: a connection
-  without send permission used to receive a preview from send_message,
-  edit_message, delete_messages, forward_messages and set_reaction, and now
-  gets a "tool not found" error instead. Connections granted full access keep
-  every tool they could use before; tools they could never use, such as
-  operator tools, are no longer listed. One exception remains: disconnect_telegram_account
+  The tools a client is shown now follow the permissions its connection was
+  granted, and a direct call to a tool that is not shown is refused. A
+  connection without send permission used to get a preview from send_message,
+  edit_message, delete_messages, forward_messages and set_reaction; it now
+  gets a "tool not found" error. Connections granted full access keep every
+  tool they could use before; tools they could never use, such as operator
+  tools, are no longer listed. One exception remains: disconnect_telegram_account
   and delete_telegram_account are still available to read-only connections.
   set_reaction and set_my_notification_preferences are now marked as changing
-  existing state, set_send_consent has a clearer title, and the descriptions of
-  delete_telegram_account and prepare_pin_message were corrected. When real
-  sends are off for your account, the dry_reason of a preview no longer names
-  set_send_consent, and the hint names a remedy the connection can use: that
-  tool, reconnecting with account management, or the manage page.
+  existing state, set_send_consent has a clearer title, and two descriptions
+  were corrected. When real sends are off for your account, a preview's hint
+  now names a fix the connection can use instead of always naming
+  set_send_consent.
 locale: en
 delivery: next_digest
 high_value: false
