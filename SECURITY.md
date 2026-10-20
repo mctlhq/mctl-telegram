@@ -52,7 +52,9 @@ Unlike read-only MCP tool results, Communication Agent processing requires durab
 * The daily retention sweeper removes stored agent message content older than `AGENT_RETENTION_DAYS` (default **30 days**). Setting the value to `0` keeps rows indefinitely and should be treated as an explicit privacy trade-off.
 * Audit rows use their separate `AUDIT_RETENTION_DAYS` policy (default 90 days) and do not contain message bodies.
 
-## Telegram-native OAuth (`AUTH_MODE=local-jwt`, the default)
+## Telegram-native OAuth (`AUTH_MODE=local-jwt`)
+
+`local-jwt` is the mode for any real deployment, and the one tg.mctl.ai runs. It is not the code default: an unset `AUTH_MODE` means `local-dev`, which the boot guard below refuses outside local development.
 
 The connector authenticates via a self-hosted OAuth 2.1 authorization server. The user-facing identity provider is [Telegram's OpenID Connect provider](https://oauth.telegram.org): `/oauth/authorize` redirects the browser to `oauth.telegram.org` with an Authorization Code + PKCE request, and `/oauth/telegram/callback` exchanges the returned code for an `id_token` validated against Telegram's JWKS (signature, `iss`, `aud`, `nonce`, expiry). mctl-telegram is thus an OIDC federation broker — an OAuth 2.1 Authorization Server to the MCP client, and an OIDC Relying Party to Telegram. Once the `id_token` verifies, mctl-telegram mints its own HS256 JWT signed by `OAUTH_JWT_SIGNING_KEY` and returns it via the authorization-code grant.
 

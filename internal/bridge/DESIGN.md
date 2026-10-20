@@ -58,9 +58,11 @@ credential lifecycle".
   *device* — the granularity the question has — while a column on
   `telegram_accounts` is per account and cannot represent a user's second
   daemon at all.
-- **Audit column**: `audit_logs.call_path TEXT DEFAULT 'hosted'`
+- **Audit column**: `audit_logs.call_path TEXT`, with no default,
   distinguishes relay-forwarded calls (`'local'`) from server-side
-  hosted calls (`'hosted'`). Included in the hash-chain canonical input
+  hosted calls (`''`). Rows written before the column existed keep
+  `NULL`, so they stay distinguishable and their hashes stay valid
+  (`internal/db/db.go`). Included in the hash-chain canonical input
   after `errMsg`. This column is the only reliable evidence that a
   given call actually travelled through the user's machine.
 - **Protocol** (`protocol.go`): the JSON envelope the daemon and the
@@ -92,7 +94,7 @@ credential lifecycle".
   errors. `BridgeCallsTotal` is incremented with `{tool, status}`.
 - **Audit** (`internal/db/store.go`): `LogToolCall` takes a `callPath`;
   bridge-dispatched calls pass `"local"`, hosted calls pass `""`
-  (stored as `'hosted'`).
+  (stored as an empty string, never `NULL`).
 - **Metrics** (`internal/metrics/metrics.go`): `mctl_bridge_active_daemons`
   gauge (Register/Unregister) and `mctl_bridge_calls_total{tool,status}`.
 - **Alert**: `MctlBridgeDaemonsFlapping` fires when the gauge changes
@@ -409,4 +411,4 @@ removes or degrades the legacy path's own behavior.
   rather than hanging or losing authorization.
 - Rollback is the same UPDATE with `mode='hosted'` (via `set_account_mode`;
   there is no self-service equivalent), verified by a subsequent call
-  landing with `call_path='hosted'`.
+  landing with an empty `call_path` (no longer `'local'`).
