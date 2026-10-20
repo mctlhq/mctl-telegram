@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.82.0](https://github.com/mctlhq/mctl-telegram/compare/0.81.0...0.82.0) (2026-10-20)
+
+
+### Features
+
+* **auth:** require account:manage to disconnect or delete the account ([32aee22](https://github.com/mctlhq/mctl-telegram/commit/32aee22eb0d9bf9952db7513791e0508624e62e0))
+* **auth:** require account:manage to disconnect or delete the account ([6d6d026](https://github.com/mctlhq/mctl-telegram/commit/6d6d026be9ce7350ba78460d1dd679ec2eb5a7cb))
+* **mcp:** scope-aware tool discovery and call authorization ([24bc7a5](https://github.com/mctlhq/mctl-telegram/commit/24bc7a5e2612af01b8a42adead2230ace266c9a3))
+* **mcp:** scope-aware tool discovery and call authorization ([4f048db](https://github.com/mctlhq/mctl-telegram/commit/4f048db3b4a1b39fbf1c5a3da2a01a526a6e6bed))
+
+
+### Bug Fixes
+
+* align docs and AUTH_MODE diagnostics with the implementation ([b94c47d](https://github.com/mctlhq/mctl-telegram/commit/b94c47dd956d9b91abffcefaa4c07f9edad0135e))
+* align docs and AUTH_MODE diagnostics with the implementation ([baf2499](https://github.com/mctlhq/mctl-telegram/commit/baf2499b89cc7b672a4537700d6e57618d9ec8ba))
+* **mcp:** address review on the scope-aware tool surface ([ffb3d25](https://github.com/mctlhq/mctl-telegram/commit/ffb3d25d58481d38d1c70ed9357780564fccb9ff))
+* **mcp:** point the send-disabled hint at a remedy the caller can use ([6e039df](https://github.com/mctlhq/mctl-telegram/commit/6e039df1e7b6f0bbc637f78c11505ccd90005fa2))
+* **mcp:** reachable send hints in every auth mode and write path ([f22e08a](https://github.com/mctlhq/mctl-telegram/commit/f22e08a1eb68823b62fb869971f1fa065fb765cd))
+* **web:** account:manage for send consent and notification changes ([a8b2767](https://github.com/mctlhq/mctl-telegram/commit/a8b2767c7c82c55ed9540d966ed11852ae922386))
+* **web:** account:manage only on the API, exemption on the manage page ([1d0ca97](https://github.com/mctlhq/mctl-telegram/commit/1d0ca9767c2f335c439e30105cff0ff78ca4ae65))
+* **web:** let the browser sign-in only turn notifications off ([c9f7e52](https://github.com/mctlhq/mctl-telegram/commit/c9f7e52f09d91108228a82e64b67f4da218d36f5))
+
 ## [0.81.0](https://github.com/mctlhq/mctl-telegram/compare/0.80.1...0.81.0) (2026-10-19)
 
 
