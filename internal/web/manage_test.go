@@ -134,7 +134,7 @@ func TestManagePageShowsSession(t *testing.T) {
 
 	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
-	id := &auth.Identity{UserID: uid}
+	id := &auth.Identity{UserID: uid, Scopes: []string{accountManageScope}}
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
 	req = req.WithContext(auth.With(req.Context(), id))
 	rec := httptest.NewRecorder()
@@ -172,7 +172,7 @@ func TestHandleDisconnect_ClearsCookieAndRedirects(t *testing.T) {
 
 	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
 	// The browser sign-in token: what the connect-session cookie carries.
-	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"}
+	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect", Scopes: []string{accountManageScope}}
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil)
 	req = req.WithContext(auth.With(req.Context(), id))
 	rec := httptest.NewRecorder()
@@ -315,7 +315,7 @@ func TestManageMiddleware_AuthenticatedStillRendersDashboard(t *testing.T) {
 	}
 
 	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
-	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"}
+	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect", Scopes: []string{accountManageScope}}
 	h := manageThroughAuth(t, srv, stubManageProvider{id: id})
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)

@@ -384,7 +384,7 @@ func TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect(t *testing.T) {
 	srv.connectClient = "mctl_self_connect"
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
-	srv.HandleManage(w, req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"})))
+	srv.HandleManage(w, req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, ClientID: "mctl_self_connect", Scopes: []string{accountManageScope}})))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 -- a preferences failure must not error the page", w.Code)

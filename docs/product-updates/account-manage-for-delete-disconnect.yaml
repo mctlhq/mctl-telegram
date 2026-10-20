@@ -9,10 +9,14 @@ summary: >-
   worker tokens and Local Bridge device credentials can no longer disconnect
   or delete the account they were issued for: over MCP the two tools are no
   longer listed and a direct call is refused, and the API calls answer 403.
-  Scope-denied attempts to call these operations are recorded in your audit
-  log. Connections with account:manage retain access to these operations. On
-  tg.mctl.ai, you can still disconnect from the manage page after signing in
-  with Telegram. Account deletion requires a connection with account:manage.
+  Scope-denied attempts are recorded in your audit log. On tg.mctl.ai, you
+  can still disconnect from the manage page after signing in with Telegram.
+  Changing send consent or notification preferences on the manage page or
+  through PUT /api/account/notifications needs account:manage too, as it
+  already did over MCP. On shared-hmac deployments every default group now
+  carries account:manage, so read-only members can also set their own send
+  consent, notification preferences and Local Bridge devices; sending still
+  needs the send permission.
 locale: en
 delivery: next_digest
 high_value: false

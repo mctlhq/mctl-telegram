@@ -61,15 +61,20 @@ var toolScopes = map[string][]string{
 	// Who never holds it: worker and device credentials (their allowlists
 	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
 	// read-only credential cannot grant itself send consent, revoke its
-	// owner's devices, or end the session it was issued against.
+	// owner's devices, or end the session it was issued against. The HTTP
+	// twins hold the same line: /api/account and the manage page's send
+	// toggle and notification form require account:manage too
+	// (internal/web.canManageAccount).
 	//
 	// disconnect and delete were open to any authenticated credential by the
 	// 2026-09-12 decision (mctlhq/.github#35). Revised 2026-10-20: a read-only
 	// worker token or a device token could end the session it was issued
 	// against, so a read-only connection was not read-only. The owner keeps
-	// disconnect through the manage page, whose browser sign-in token
-	// internal/web.canManageAccount accepts as well, and deletes from any
-	// connection granted account:manage.
+	// disconnect through the manage page, whose disconnect alone also
+	// accepts the browser sign-in token
+	// (internal/web.canDisconnectFromManagePage); the /api/account endpoints
+	// and these tools take no such exception, so a delete always needs
+	// account:manage.
 	"disconnect_telegram_account":     {"account:manage"},
 	"delete_telegram_account":         {"account:manage"},
 	"get_my_notification_preferences": {"account:manage"},

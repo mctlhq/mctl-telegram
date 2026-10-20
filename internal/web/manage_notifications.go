@@ -11,10 +11,11 @@ package web
 // reason. The API and the MCP tools stay as they are; this is the
 // human-facing surface for the same store calls.
 //
-// Authorization and CSRF follow the existing manage handlers unchanged: the
-// route is wrapped in the same auth middleware, the identity comes from
-// auth.From(r.Context()), and cross-site submission is refused by the
-// SameSite=Lax connect-session cookie. No new token scheme is introduced,
+// Authorization and CSRF follow the existing manage handlers: the route is
+// wrapped in the same auth middleware, the identity comes from
+// auth.From(r.Context()) and must hold account:manage, like its MCP twin
+// set_my_notification_preferences, and cross-site submission is refused by
+// the SameSite=Lax connect-session cookie. No new token scheme is introduced,
 // because a second, different one on the same page would be the more likely
 // source of a mistake.
 //
@@ -59,6 +60,11 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
+		return
+	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/notifications")
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageNeedsManage})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, manageNotificationsFormLimit)
@@ -109,7 +115,7 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	// GET /api/account/audit, which privacy.html presents to users as the
 	// record of actions on their account -- and since the prefs row is
 	// overwritten in place, the earlier decision would leave no trace at all.
-	s.auditNotifications(r, id, err)
+	s.auditManage(r, id, "POST /telegram/connect/manage/notifications", err)
 	if err != nil {
 		slog.Warn("manage: set notification prefs", "err", err)
 		renderManageError(w, "Could not save your notification preferences. Please try again.")
@@ -118,17 +124,17 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	http.Redirect(w, r, s.issuer+"/telegram/connect/manage", http.StatusFound)
 }
 
-// auditNotifications writes the tamper-evident audit row for a manage-page
-// consent change, mirroring AccountHandlers.audit.
-func (s *ManageServer) auditNotifications(r *http.Request, id *auth.Identity, err error) {
+// auditManage writes the tamper-evident audit row for a manage-page change
+// (disconnect, send consent, notification preferences), mirroring
+// AccountHandlers.audit.
+func (s *ManageServer) auditManage(r *http.Request, id *auth.Identity, tool string, err error) {
 	status := "ok"
 	msg := ""
 	if err != nil {
 		status = "error"
 		msg = err.Error()
 	}
-	s.store.LogToolCall(r.Context(), id.UserID,
-		"POST /telegram/connect/manage/notifications", "", status, msg, "", "")
+	s.store.LogToolCall(r.Context(), id.UserID, tool, "", status, msg, "", "")
 }
 
 // notificationRow is one rendered checkbox on the dashboard.

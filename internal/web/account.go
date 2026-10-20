@@ -63,12 +63,18 @@ const reasonScopeDenied = "scope_denied"
 const (
 	msgDisconnectNeedsManage = "this connection cannot disconnect the account: it needs the account:manage scope"
 	msgDeleteNeedsManage     = "this connection cannot delete the account: it needs the account:manage scope"
+	// msgNotificationsNeedsManage refuses PUT /api/account/notifications,
+	// the API twin of set_my_notification_preferences.
+	msgNotificationsNeedsManage = "this connection cannot change notification preferences: it needs the account:manage scope"
 )
 
-// canManageAccount reports whether id may disconnect or delete its own
-// account through the API or MCP: only a credential granted account:manage.
-// A read-only worker token or a Local Bridge device token never holds it, so
-// it cannot end the session it was issued against.
+// canManageAccount reports whether id may change its own account: disconnect,
+// delete, send consent or notification preferences, through the API, MCP or
+// the manage page. Only a credential granted account:manage passes. A
+// read-only worker token or a Local Bridge device token never holds it, so it
+// can neither end the session it was issued against nor turn on the send
+// consent the owner left off. The one exception, the manage page's
+// disconnect, is canDisconnectFromManagePage.
 //
 // This revises the 2026-09-12 decision (mctlhq/.github#35) that left
 // disconnect and delete open to any authenticated credential.
@@ -89,7 +95,8 @@ func canDisconnectFromManagePage(id *auth.Identity, connectClient string) bool {
 	return id != nil && connectClient != "" && id.ClientID == connectClient
 }
 
-// auditScopeDenied records a refused disconnect or delete against the caller.
+// auditScopeDenied records a refused account:manage operation against the
+// caller.
 // The write is detached from the request context, like the MCP refusal rows,
 // so a client that hangs up right after the request still leaves the row.
 func auditScopeDenied(r *http.Request, store *db.Store, id *auth.Identity, tool string) {
@@ -310,6 +317,11 @@ func (h *AccountHandlers) putNotifications(w http.ResponseWriter, r *http.Reques
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "PUT /api/account/notifications")
+		writeAccountErr(w, http.StatusForbidden, msgNotificationsNeedsManage)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxNotificationsBodyBytes)

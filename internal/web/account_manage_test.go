@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -43,6 +44,8 @@ type accountManageFixture struct {
 	api        http.Handler
 	manage     http.Handler
 	managePage http.Handler
+	toggleSend http.Handler
+	setNotifs  http.Handler
 	minter     *workertoken.Minter
 	signer     *localjwt.Issuer
 	oauthSrv   *oauth.Server
@@ -109,6 +112,8 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 		api:        auth.Middleware(provider, true, nil, rm)(router),
 		manage:     withAuth(http.HandlerFunc(manageSrv.HandleDisconnect)),
 		managePage: withAuth(http.HandlerFunc(manageSrv.HandleManage)),
+		toggleSend: withAuth(http.HandlerFunc(manageSrv.HandleToggleSend)),
+		setNotifs:  withAuth(http.HandlerFunc(manageSrv.HandleSetNotifications)),
 		minter:     minter,
 		signer:     signer,
 		oauthSrv:   oauthSrv,
@@ -242,19 +247,34 @@ func (f *accountManageFixture) accessToken(clientID string, scopes ...string) st
 }
 
 // call sends method path to the account API (path under /api/account), for
-// path "manage" to the manage page's disconnect, and for "manage-page" to the
-// manage page itself. bearer and cookie are the
-// two ways a localjwt credential reaches the server.
+// path "manage" to the manage page's disconnect, for "manage-page" to the
+// manage page itself, and for "toggle-send" / "manage-notifications" to the
+// manage page's send toggle and notification form. bearer and cookie are the
+// two ways a localjwt credential reaches the server. The two write paths that
+// take a body get a valid one, so a refusal is the authorization and not the
+// input.
 func (f *accountManageFixture) call(method, path, bearer, cookie string) *httptest.ResponseRecorder {
 	f.t.Helper()
 	h, target := f.api, path
+	var body io.Reader
+	contentType := ""
 	switch path {
 	case "manage":
 		h, target = f.manage, "/telegram/connect/manage/disconnect"
 	case "manage-page":
 		h, target = f.managePage, "/telegram/connect/manage"
+	case "toggle-send":
+		h, target = f.toggleSend, "/telegram/connect/manage/toggle-send"
+	case "manage-notifications":
+		h, target = f.setNotifs, "/telegram/connect/manage/notifications"
+		body, contentType = strings.NewReader("submitted=notifications&product_updates=on"), "application/x-www-form-urlencoded"
+	case "/notifications":
+		body, contentType = strings.NewReader(`{"product_updates":"subscribed"}`), "application/json"
 	}
-	req := httptest.NewRequest(method, target, nil)
+	req := httptest.NewRequest(method, target, body)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -281,6 +301,14 @@ func (f *accountManageFixture) activeSessions() int {
 
 func (f *accountManageFixture) accountRows() int {
 	return f.count(`SELECT count(*) FROM telegram_accounts WHERE user_id = $1`)
+}
+
+func (f *accountManageFixture) sendEnabled() bool {
+	return f.count(`SELECT count(*) FROM telegram_accounts WHERE user_id = $1 AND send_enabled`) == 1
+}
+
+func (f *accountManageFixture) notificationPrefRows() int {
+	return f.count(`SELECT count(*) FROM client_notification_prefs WHERE user_id = $1`)
 }
 
 func (f *accountManageFixture) latestAudit() (tool, status, reason string) {
@@ -412,6 +440,11 @@ func TestManageDisconnect_BrowserSignInAlwaysWorks(t *testing.T) {
 	if n := f.activeSessions(); n != 0 {
 		t.Fatalf("active sessions = %d after the owner disconnected, want 0", n)
 	}
+	// The disconnect that ended the session is in the audit log, not only
+	// the refused ones.
+	if tool, status, _ := f.latestAudit(); tool != "POST /telegram/connect/manage/disconnect" || status != "ok" {
+		t.Fatalf("audit = (%q, %q), want the manage-page disconnect recorded as ok", tool, status)
+	}
 }
 
 // TestManagePage_DisconnectButtonFollowsTheServerCheck: the page offers the
@@ -480,5 +513,143 @@ func TestManageAccessChecks_FailClosed(t *testing.T) {
 	}
 	if canManageAccount(nil) || canDisconnectFromManagePage(nil, oauth.ConnectClientID) {
 		t.Fatal("a nil identity passed")
+	}
+}
+
+// settingsCredential is one credential in the send-consent and notification
+// matrix, and how a client would present it.
+type settingsCredential struct {
+	name     string
+	bearer   func(f *accountManageFixture) string
+	cookie   func(f *accountManageFixture) string
+	accepted bool
+}
+
+// settingsCredentials: send consent and notification preferences need
+// account:manage on every surface. Unlike the manage page's disconnect, they
+// take no browser sign-in exception, so the browser token is listed here
+// without account:manage and refused: if that exception spread to these
+// routes again, its row would flip.
+var settingsCredentials = []settingsCredential{
+	{"browser sign-in cookie without account:manage", nil, func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, false},
+	{"browser sign-in bearer without account:manage", func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, nil, false},
+	{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }, nil, false},
+	{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }, nil, false},
+	{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }, nil, false},
+	{"connector without account:manage", func(f *accountManageFixture) string {
+		return f.accessToken("dcr-client", "telegram:dialogs:read", "telegram:messages:read")
+	}, nil, false},
+	{"browser sign-in cookie with account:manage", nil, func(f *accountManageFixture) string { return f.browserToken("", true) }, true},
+	{"connector with account:manage", func(f *accountManageFixture) string {
+		return f.accessToken("dcr-client", "telegram:messages:read", "account:manage")
+	}, nil, true},
+}
+
+func (c settingsCredential) present(f *accountManageFixture) (bearer, cookie string) {
+	if c.bearer != nil {
+		bearer = c.bearer(f)
+	}
+	if c.cookie != nil {
+		cookie = c.cookie(f)
+	}
+	return bearer, cookie
+}
+
+// TestAccountSettings_RequireAccountManage: the manage page's send toggle and
+// notification form, and PUT /api/account/notifications, accept exactly the
+// credentials granted account:manage -- the HTTP twins of set_send_consent
+// and set_my_notification_preferences. A refusal is a 403 that changes
+// nothing and is audited as scope_denied; an accepted change is audited as
+// ok.
+func TestAccountSettings_RequireAccountManage(t *testing.T) {
+	type route struct {
+		method, path, audited, wantMsg string
+		okStatus                       int
+		changed                        func(f *accountManageFixture) bool
+	}
+	routes := []route{
+		{http.MethodPost, "toggle-send", "POST /telegram/connect/manage/toggle-send", msgManageNeedsManage, http.StatusFound,
+			func(f *accountManageFixture) bool { return f.sendEnabled() }},
+		{http.MethodPost, "manage-notifications", "POST /telegram/connect/manage/notifications", msgManageNeedsManage, http.StatusFound,
+			func(f *accountManageFixture) bool { return f.notificationPrefRows() > 0 }},
+		{http.MethodPut, "/notifications", "PUT /api/account/notifications", msgNotificationsNeedsManage, http.StatusOK,
+			func(f *accountManageFixture) bool { return f.notificationPrefRows() > 0 }},
+	}
+	for _, c := range settingsCredentials {
+		for _, rt := range routes {
+			// The API reads no cookie: a browser credential reaches it only
+			// as a bearer, which the cookie row's bearer twin covers.
+			if rt.path == "/notifications" && c.cookie != nil {
+				continue
+			}
+			t.Run(c.name+"/"+rt.audited, func(t *testing.T) {
+				f := newAccountManageFixture(t, 7700107)
+				if f.sendEnabled() || f.notificationPrefRows() != 0 {
+					t.Fatal("fixture does not start with send consent off and no saved preferences")
+				}
+				bearer, cookie := c.present(f)
+				rec := f.call(rt.method, rt.path, bearer, cookie)
+				tool, status, reason := f.latestAudit()
+				if !c.accepted {
+					if rec.Code != http.StatusForbidden {
+						t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+					}
+					if body := rec.Body.String(); !strings.Contains(body, rt.wantMsg) {
+						t.Fatalf("body = %s, want the refusal %q", body, rt.wantMsg)
+					}
+					if rt.changed(f) {
+						t.Fatal("a refused call changed the account")
+					}
+					if tool != rt.audited || status != "error" || reason != reasonScopeDenied {
+						t.Fatalf("audit = (%q, %q, %q), want (%q, error, %q)", tool, status, reason, rt.audited, reasonScopeDenied)
+					}
+					return
+				}
+				if rec.Code != rt.okStatus {
+					t.Fatalf("status = %d, want %d; body=%s", rec.Code, rt.okStatus, rec.Body.String())
+				}
+				if !rt.changed(f) {
+					t.Fatal("an accepted call did not change the account")
+				}
+				if tool != rt.audited || status != "ok" {
+					t.Fatalf("audit = (%q, %q), want (%q, ok)", tool, status, rt.audited)
+				}
+			})
+		}
+	}
+}
+
+// TestManagePage_SettingsControlsFollowTheServerCheck: the page offers the
+// send toggle and the notification form exactly when their handlers would
+// accept the caller, and otherwise says why in their place.
+func TestManagePage_SettingsControlsFollowTheServerCheck(t *testing.T) {
+	controls := []struct {
+		form, note, post string
+	}{
+		{`action="/telegram/connect/manage/toggle-send"`, `id="send-unavailable"`, "toggle-send"},
+		{`action="/telegram/connect/manage/notifications"`, `id="notifications-unavailable"`, "manage-notifications"},
+	}
+	for _, c := range settingsCredentials {
+		t.Run(c.name, func(t *testing.T) {
+			f := newAccountManageFixture(t, 7700108)
+			bearer, cookie := c.present(f)
+			rec := f.call(http.MethodGet, "manage-page", bearer, cookie)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			for _, ctl := range controls {
+				if got := strings.Contains(body, ctl.form); got != c.accepted {
+					t.Fatalf("%s shown = %v, want %v", ctl.form, got, c.accepted)
+				}
+				if got := strings.Contains(body, ctl.note); got == c.accepted {
+					t.Fatalf("%s shown = %v, want %v", ctl.note, got, !c.accepted)
+				}
+				post := f.call(http.MethodPost, ctl.post, bearer, cookie)
+				if accepted := post.Code == http.StatusFound; accepted != c.accepted {
+					t.Fatalf("%s status = %d; accepted = %v, want %v", ctl.post, post.Code, accepted, c.accepted)
+				}
+			}
+		})
 	}
 }

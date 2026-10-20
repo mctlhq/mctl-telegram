@@ -37,7 +37,7 @@ func newAccountTestRouter(t *testing.T, store *db.Store) *chi.Mux {
 }
 
 func withIdentity(req *http.Request, uid int64) *http.Request {
-	return req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid}))
+	return req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, Scopes: []string{accountManageScope}}))
 }
 
 // TestGetNotifications_Anonymous401 matches the existing AccountHandlers

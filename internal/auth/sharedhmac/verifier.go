@@ -93,6 +93,14 @@ func New(store *db.Store, cfg Config) (*Provider, error) {
 // disconnect or delete at all, since the manage page is mounted only under
 // local-jwt. A token with no recognised group -- such as a worker token
 // minted by an older build -- still derives no scopes and reaches none of it.
+//
+// The scope carries more than disconnect and delete: every group, the
+// read-only telegram-mcp-readers and admins included, also gets
+// set_send_consent, both notification-preference tools and
+// revoke_local_bridge_device. So a read-only member can turn on their own
+// per-account send consent, which is theirs to give, and still cannot send:
+// that needs telegram:messages:send as well. "Read-only" below is about the
+// send scope, not the per-account flag.
 func DefaultGroupScopes() map[string][]string {
 	return map[string][]string{
 		"telegram-mcp-readers": {
