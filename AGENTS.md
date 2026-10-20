@@ -16,7 +16,7 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - `cmd/server/main.go` — HTTP + MCP entrypoint
 - `cmd/login/main.go` — interactive Telegram login CLI (phone → SMS → 2FA)
 - `cmd/local/` — Local Bridge daemon CLI (M4)
-- `internal/auth/` — pluggable `auth.Provider` (local-jwt default prod OAuth, shared-hmac-legacy, local-dev; Telegram OIDC under `telegramoidc`)
+- `internal/auth/` — pluggable `auth.Provider` (local-jwt for production OAuth, shared-hmac-legacy, local-dev as the unset default; Telegram OIDC under `telegramoidc`)
 - `internal/telegram/` — `gotd/td` client pool, session store, message/peer handling
 - `internal/mcp/` — MCP tool wiring and message formatting
 - `internal/web/` — landing, security, privacy pages

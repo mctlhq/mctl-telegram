@@ -29,7 +29,7 @@ func TestSelectProviderUnknownModeErrorMessage(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown AUTH_MODE") {
 		t.Errorf("error message should mention unknown AUTH_MODE, got: %s", err.Error())
 	}
-	for _, want := range []string{"local-jwt", "shared-hmac", "local-dev"} {
+	for _, want := range []string{"local-jwt", "shared-hmac,", "shared-hmac-legacy", "local-dev"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error message should list valid modes including %q, got: %s", want, err.Error())
 		}
