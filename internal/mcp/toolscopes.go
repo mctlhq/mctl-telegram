@@ -56,15 +56,18 @@ var toolScopes = map[string][]string{
 	"disconnect_telegram_account": {},
 	"delete_telegram_account":     {},
 
-	// The caller's own account, changed. account:manage is granted by
-	// oauth.ResolveScopes (admin and client tiers) and by the local-dev
-	// provider. sharedhmac's default groups grant none, so in that mode these
-	// tools are not listed unless an operator maps a group to it; the send
-	// hint (sendDisabledHint) does not point at them there.
-	// account:manage is never carried by
-	// a worker or device credential (see internal/oauth/scopes.go), so none
-	// of these can be reached by one: a read-only credential cannot grant
-	// itself send consent or revoke its owner's devices.
+	// The caller's own account, changed. All require account:manage.
+	//
+	// Who grants it: oauth.ResolveScopes (admin and client tiers) and the
+	// local-dev provider. sharedhmac's default groups grant it to no group,
+	// so in that mode these tools are listed to nobody unless an operator
+	// maps a group to it; Server.sendDisabledHint does not point at them
+	// there.
+	//
+	// Who never holds it: worker and device credentials (their allowlists
+	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
+	// read-only credential cannot grant itself send consent or revoke its
+	// owner's devices.
 	"get_my_notification_preferences": {"account:manage"},
 	"set_my_notification_preferences": {"account:manage"},
 	"set_send_consent":                {"account:manage"},

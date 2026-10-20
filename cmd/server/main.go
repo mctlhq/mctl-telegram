@@ -573,6 +573,11 @@ func main() {
 	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
 	// Approval lives only on the web page registered with the manage routes.
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
+	// The manage page is mounted only in local-jwt mode (above); the send
+	// hint points at it only when it exists.
+	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
+		mcpSrv.WithManageURL(strings.TrimRight(cfg.PublicBaseURL, "/") + "/telegram/connect/manage")
+	}
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
 	mcpSrv.MediaUploadMaxBytes = cfg.MediaUploadMaxBytes
 	// issue #705: bound media response memory — the aggregate bulk-fetch raw

@@ -461,7 +461,7 @@ Inputs (optional):
 			s.audit(ctx, id, "send_message:draft", telegram.RedactPeer(peer), nil, startedAt)
 			result, _ := telegram.SendMessage(ctx, nil, peer, text, false, dryReason, nil, 0)
 			if dryReason == reasonSendDisabled {
-				result.Hint = sendDisabledHint(id)
+				result.Hint = s.sendDisabledHint(id)
 			}
 			return jsonResult(result)
 		}
@@ -2009,17 +2009,39 @@ func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, demoRevie
 // send_enabled flag is off. It is a package-level constant (rather than an
 // inline literal) so toolSendMessage can compare a dry_reason value against
 // it to attach a targeted hint, without the two call sites risking drift.
-const reasonSendDisabled = "per-account send_enabled=false — enable real sends with set_send_consent"
+//
+// It states the cause only. The remedy depends on who is asking, so it lives
+// in sendDisabledHint, which get_my_send_status's reason (the same constant)
+// cannot contradict.
+const reasonSendDisabled = "per-account send_enabled=false — real sends are not enabled for this account"
 
 // sendDisabledHint is the nudge for a send blocked only by the per-account
-// flag. It names set_send_consent only to a caller that can see and call it
-// (toolscopes.go): pointing a connection without account:manage at a tool
-// missing from its tool list is a dead end with no explanation.
-func sendDisabledHint(id *auth.Identity) string {
+// flag. Each caller is pointed at a remedy it can actually use; naming
+// set_send_consent to a connection without account:manage would point at a
+// tool missing from its tool list (toolscopes.go), a dead end:
+//
+//   - a caller that can call set_send_consent is told to;
+//   - an OAuth connector narrowed below account:manage (it has a client_id)
+//     can be re-authorised with that permission, or the owner can use the
+//     manage page;
+//   - a worker or device credential (no client_id) can never gain the
+//     scope, so only the owner can act, on the manage page.
+//
+// Without a manage page (ManageURL == "", i.e. not local-jwt) the fallback
+// names the scope instead of a page that does not exist.
+func (s *Server) sendDisabledHint(id *auth.Identity) string {
+	const prefix = "Your account has never opted into real sends"
+	const confirm = " Call get_my_send_status to confirm this is the reason."
 	if toolAllowed(id, "set_send_consent") {
-		return "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+		return prefix + ". Enable them with set_send_consent." + confirm
 	}
-	return "Your account has never opted into real sends, and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope; call get_my_send_status to confirm this is the reason."
+	if s.ManageURL == "" {
+		return prefix + ", and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope." + confirm
+	}
+	if id != nil && id.ClientID != "" {
+		return prefix + ", and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+	}
+	return prefix + ", and this credential can never change that. The account owner can enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 }
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the

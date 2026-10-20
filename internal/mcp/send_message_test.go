@@ -227,7 +227,8 @@ func TestToolPinMessage_RevokedConsentAndServerGateBlockDispatch(t *testing.T) {
 // send_enabled flag is the reason. This is a regression guard for the hint
 // logic staying scoped to exactly the one cause it was written for.
 func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
-	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent, or call get_my_send_status to confirm this is the reason."
+	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent. Call get_my_send_status to confirm this is the reason."
+	const manageURL = "https://tg.test/telegram/connect/manage"
 
 	cases := []struct {
 		name     string
@@ -275,7 +276,7 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 			wantHint: wantHint,
 		},
 		{
-			name: "send_enabled=false, connection without account:manage",
+			name: "send_enabled=false, no manage page, connection without account:manage",
 			build: func(t *testing.T) (*Server, *auth.Identity) {
 				store := newToolsTestStore(t)
 				uid := seedAccountWithSession(t, store, 424243, false)
@@ -283,7 +284,33 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
 				return srv, id
 			},
-			wantHint: "Your account has never opted into real sends, and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope; call get_my_send_status to confirm this is the reason.",
+			wantHint: "Your account has never opted into real sends, and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope. Call get_my_send_status to confirm this is the reason.",
+		},
+		{
+			// A narrowed OAuth connector can be re-authorised; it must not be
+			// pointed at set_send_consent, which it cannot see.
+			name: "send_enabled=false, OAuth connector without account:manage",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424244, false)
+				srv := &Server{Store: store, AllowSend: true, ManageURL: manageURL}
+				id := &auth.Identity{UserID: uid, ClientID: "dcr-client", Scopes: []string{"telegram:messages:send"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
+		},
+		{
+			// A worker or device credential can never gain account:manage;
+			// re-authorising is not a remedy it has.
+			name: "send_enabled=false, worker or device credential",
+			build: func(t *testing.T) (*Server, *auth.Identity) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, 424245, false)
+				srv := &Server{Store: store, AllowSend: true, ManageURL: manageURL}
+				id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send", "telegram:messages:pin"}}
+				return srv, id
+			},
+			wantHint: "Your account has never opted into real sends, and this credential can never change that. The account owner can enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
 		},
 	}
 
