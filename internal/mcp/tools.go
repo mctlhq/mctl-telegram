@@ -648,7 +648,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		outputSchema[preparePinResult](),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step is read-only.
+Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step makes no Telegram call; it issues the confirmation and counts against the same per-peer limit as a pin.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
 Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
@@ -667,8 +667,8 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "telegram:messages:pin"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
@@ -859,7 +859,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[deleteResult](),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
-Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to reconnect, the operator must re-run the login CLI.
+Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
 For a softer alternative that keeps the row but disables it, use disconnect_telegram_account.
 
@@ -1292,7 +1292,7 @@ type setSendConsentResult struct {
 // carry it (T2b).
 func (s *Server) toolSetSendConsent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_send_consent",
-		mcplib.WithTitleAnnotation("Grant or revoke your own Local Bridge send consent"),
+		mcplib.WithTitleAnnotation("Grant or revoke your own send consent"),
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
@@ -1485,7 +1485,7 @@ func (s *Server) toolSetMyNotificationPreferences() (mcplib.Tool, mcpserver.Tool
 	tool := mcplib.NewTool("set_my_notification_preferences",
 		mcplib.WithTitleAnnotation("Change your notification preferences"),
 		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		outputSchema[notificationPrefsResult](),
 		mcplib.WithDescription(`Change one or more of YOUR OWN notification preferences. Requires the account:manage scope. Always acts on the caller's own account -- there is no telegram_id argument.
@@ -2939,7 +2939,7 @@ func (s *Server) toolSetReaction() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_reaction",
 		mcplib.WithTitleAnnotation("Set Telegram Reaction"),
 		mcplib.WithReadOnlyHintAnnotation(false),
-		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
 		outputSchema[setReactionResult](),
 		mcplib.WithDescription(`Add or remove a reaction on a Telegram message.

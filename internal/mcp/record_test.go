@@ -123,11 +123,10 @@ func callTool(t *testing.T, ctx context.Context, srv *mcpserver.MCPServer, name 
 // TestRecordToolCall_ScopeDenied is T3: search_messages with an identity
 // missing telegram:messages:read must produce exactly one audit row
 // (status=error, reason=scope_denied), one WARN "mcp tool call" line, and
-// one ToolCallErrorsTotal{search_messages,scope_denied} sample — even
-// though requireScope's early return (tools.go) never reaches Server.audit.
-// This must fail if the middleware registration in newMCPServer is
-// reverted, because with no recorder in ctx and no staged record, nothing
-// would ever be written.
+// one ToolCallErrorsTotal{search_messages,scope_denied} sample. Since
+// toolscopes.go the call is refused by the tool filter before any handler
+// resolves, so the row comes from jsonrpcHooks rather than from
+// recordToolCall; the observable record must be the same either way.
 func TestRecordToolCall_ScopeDenied(t *testing.T) {
 	store := newToolsTestStore(t)
 	reg := metrics.New()
@@ -138,9 +137,12 @@ func TestRecordToolCall_ScopeDenied(t *testing.T) {
 	id := &auth.Identity{UserID: uid, Scopes: []string{}}
 	ctx := auth.With(context.Background(), id)
 
-	result := callTool(t, ctx, mcpSrv, "search_messages", map[string]any{"query": "hello"})
-	if !result.IsError {
-		t.Fatalf("expected an error result for a missing-scope identity, got %+v", result)
+	env := callRPC(t, ctx, mcpSrv, string(mcplib.MethodToolsCall), map[string]any{
+		"name":      "search_messages",
+		"arguments": map[string]any{"query": "hello"},
+	})
+	if env.Error == nil {
+		t.Fatalf("expected a refusal for a missing-scope identity, got %s", env.Result)
 	}
 
 	if n := countAuditRows(t, store, uid); n != 1 {
@@ -825,7 +827,7 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 
 	t.Run("rate limited", func(t *testing.T) {
 		const uid int64 = 4270
-		id := &auth.Identity{UserID: uid}
+		id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:pin"}}
 		const peer = "@limited_peer"
 		if !limiter.AllowPeerN(id, telegram.RedactPeer(peer), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
 			t.Fatal("could not drain the per-peer budget")

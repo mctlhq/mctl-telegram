@@ -108,15 +108,6 @@ func TestToolPrepareSendMessage_VerdictPerGateConjunct(t *testing.T) {
 			wantReasonSub: "ALLOW_SEND",
 		},
 		{
-			name: "missing telegram:messages:send scope",
-			build: func(t *testing.T) (*Server, *auth.Identity) {
-				srv := &Server{Store: newToolsTestStore(t), Confirms: NewConfirmStore(), AllowSend: true}
-				id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
-				return srv, id
-			},
-			wantReasonSub: "scope",
-		},
-		{
 			name: "send_enabled=false",
 			build: func(t *testing.T) (*Server, *auth.Identity) {
 				store := newToolsTestStore(t)
@@ -157,6 +148,19 @@ func TestToolPrepareSendMessage_RequiresAuth(t *testing.T) {
 	res := callPrepareSend(t, srv, nil, map[string]any{"peer": "@x", "text": "hi"})
 	if !res.IsError {
 		t.Fatal("expected an error without an authenticated identity")
+	}
+}
+
+// TestToolPrepareSendMessage_RequiresSendScope: a caller that could never
+// send gets no confirmation at all. Before toolscopes.go the handler answered
+// a read-only identity with a dry-run verdict and a confirmation_id, which
+// the send it was meant for could then never use.
+func TestToolPrepareSendMessage_RequiresSendScope(t *testing.T) {
+	srv := &Server{Store: newToolsTestStore(t), Confirms: NewConfirmStore(), AllowSend: true}
+	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
+	res := callPrepareSend(t, srv, id, map[string]any{"peer": "@x", "text": "hi"})
+	if !res.IsError {
+		t.Fatalf("expected a scope refusal for an identity without telegram:messages:send, got %+v", res)
 	}
 }
 

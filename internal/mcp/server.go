@@ -310,6 +310,12 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// record.go.
 		mcpserver.WithToolHandlerMiddleware(s.recordToolCall),
 		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
+		// Discovery and invocation follow the caller's scopes: mcp-go
+		// applies this filter on tools/list and again on tools/call, so a
+		// tool the identity may not use is neither shown nor callable. The
+		// unfiltered ListTools() below is what the descriptor snapshot and
+		// the portal allowlist test enumerate. See toolscopes.go.
+		mcpserver.WithToolFilter(scopeToolFilter),
 	}
 	if s.AppsEnabled {
 		opts = append(opts,

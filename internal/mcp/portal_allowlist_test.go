@@ -98,7 +98,6 @@ var selfOnlyTools = map[string]string{
 	"get_my_identity":             "returns the caller's own identity row",
 	"get_my_send_status":          "reports the caller's own send gate without acting on it (see reportsGateTools)",
 	"get_my_audit_log":            "reads the caller's own audit rows, peers redacted",
-	"prepare_pin_message":         "mints a confirmation id for the caller's own later pin_message; no Telegram action",
 	"disconnect_telegram_account": "revokes the caller's own session",
 	"delete_telegram_account":     "deletes the caller's own account row",
 }
