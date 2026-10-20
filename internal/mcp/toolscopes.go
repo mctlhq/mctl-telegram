@@ -60,9 +60,9 @@ var toolScopes = map[string][]string{
 	//
 	// Who grants it: oauth.ResolveScopes (admin and client tiers) and the
 	// local-dev provider. sharedhmac's default groups grant it to no group,
-	// so in that mode these tools are listed to nobody unless an operator
-	// maps a group to it; Server.sendDisabledHint does not point at them
-	// there.
+	// so in that mode these tools are listed to nobody, and
+	// Server.sendDisabledHint names the operator tool set_account_send there
+	// instead.
 	//
 	// Who never holds it: worker and device credentials (their allowlists
 	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a

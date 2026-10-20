@@ -128,7 +128,7 @@ Output: {confirmation_id, peer_redacted, text, text_sha256, will_really_send, dr
 			Text:           text,
 			TextSHA256:     textSHA256(text),
 			WillReallySend: willReallySend,
-			DryReason:      dryReason,
+			DryReason:      s.withSendDisabledHint(id, dryReason),
 			ExpiresAt:      c.ExpiresAt.UTC(),
 		})
 	}

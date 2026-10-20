@@ -575,7 +575,7 @@ func main() {
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
 	// The manage page is mounted only in local-jwt mode (above); the send
 	// hint points at it only when it exists.
-	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
+	if showManage {
 		mcpSrv.WithManageURL(strings.TrimRight(cfg.PublicBaseURL, "/") + "/telegram/connect/manage")
 	}
 	mcpSrv.MediaDownloadMaxBytes = cfg.MediaDownloadMaxBytes
