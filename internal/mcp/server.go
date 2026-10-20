@@ -68,6 +68,11 @@ type Server struct {
 	// page a human approves prepared campaigns on. See WithBroadcast.
 	Broadcast            *broadcast.Service
 	BroadcastApprovalURL string
+	// ManageURL is the absolute URL of the browser manage page, where the
+	// owner can turn real sends on after signing in with Telegram. Set only
+	// when that page is mounted (local-jwt mode); "" makes the send hint
+	// fall back to naming the account:manage scope.
+	ManageURL string
 	// MediaStore holds pending media download references keyed by confirmation_id.
 	MediaStore *MediaStore
 	// MediaDownloadMaxBytes is the maximum number of bytes allowed per get_media

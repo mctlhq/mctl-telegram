@@ -51,15 +51,18 @@ var toolScopes = map[string][]string{
 	"get_my_audit_log":   {},
 	"get_my_send_status": {},
 
-	// The caller's own account, changed. account:manage is granted by
-	// oauth.ResolveScopes (admin and client tiers) and by the local-dev
-	// provider. sharedhmac's default groups grant none, so in that mode these
-	// tools are not listed unless an operator maps a group to it; the send
-	// hint (sendDisabledHint) does not point at them there.
-	// account:manage is never carried by
-	// a worker or device credential (see internal/oauth/scopes.go), so none
-	// of these can be reached by one: a read-only credential cannot grant
-	// itself send consent or revoke its owner's devices.
+	// The caller's own account, changed. All require account:manage.
+	//
+	// Who grants it: oauth.ResolveScopes (admin and client tiers) and the
+	// local-dev provider. sharedhmac's default groups grant it to no group,
+	// so in that mode these tools are listed to nobody unless an operator
+	// maps a group to it; Server.sendDisabledHint does not point at them
+	// there.
+	//
+	// Who never holds it: worker and device credentials (their allowlists
+	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
+	// read-only credential cannot grant itself send consent, revoke its
+	// owner's devices, or end the session it was issued against.
 	//
 	// disconnect and delete were open to any authenticated credential by the
 	// 2026-09-12 decision (mctlhq/.github#35). Revised 2026-10-20: a read-only
