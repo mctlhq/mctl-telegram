@@ -30,8 +30,9 @@ before v1.0.
   reply. Accounts start read-only; sending is a separate opt-in, and every
   call lands in an audit log the user can read and verify.
 - **For an agent platform:** a standard OAuth 2.1 server with Dynamic
-  Client Registration and Client ID Metadata Documents, so a platform can
-  connect many users without a per-platform setup on our side. Users who
+  Client Registration and Client ID Metadata Documents. With CIMD a
+  platform describes its own redirect URIs, so one approved host covers
+  all of its users; the operator still has to allow that host once. Users who
   will not leave their Telegram session on a server can run it on their
   own machine with [Local Bridge](#local-bridge-daemon-cmdlocal-beta) and
   keep the same endpoint.
@@ -156,8 +157,8 @@ families clients actually hit.
 1. Confirm discovery is reachable:
    `curl https://<your-host>/.well-known/oauth-protected-resource`, then
    follow the `authorization_servers` URL it names and fetch its
-   `/.well-known/oauth-authorization-server`. In the default `local-jwt`
-   mode that is your own host; in the `shared-hmac` modes it is
+   `/.well-known/oauth-authorization-server`. In `local-jwt` mode that is
+   your own host; in the `shared-hmac` modes it is
    `https://api.mctl.ai`.
 2. Add `https://<your-host>/mcp` as a custom connector in your client, with
    OAuth.

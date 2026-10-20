@@ -51,9 +51,12 @@ secret, and `api.mctl.ai` has no notion of a Telegram user id.
   ([0005](0005-session-pool-and-sticky-routing.md)).
 - Access tokens are not individually revocable within their lifetime
   (default one hour); revocation acts on refresh tokens.
-- CIMD lets a platform vouch for its own callbacks instead of the operator
-  maintaining a host list per platform, which is what an agent platform
-  integrating many users needs.
+- CIMD moves the description of a platform's redirect URIs to the
+  platform: it publishes them in its own document, and the operator no
+  longer tracks individual callback URLs. It does not remove the operator's
+  decision. A platform's host must still be on `OAUTH_CIMD_ALLOWED_HOSTS`
+  before its document is fetched, so admitting a new platform is one
+  configuration change, made once per host rather than per callback.
 
 ## Alternatives
 
