@@ -873,7 +873,7 @@ func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localj
 	case "local-dev":
 		return localdev.New(store, cfg.OperatorLogin), nil
 	default:
-		return nil, fmt.Errorf("unknown AUTH_MODE %q: must be one of local-jwt, shared-hmac, local-dev", cfg.AuthMode)
+		return nil, fmt.Errorf("unknown AUTH_MODE %q: must be one of local-jwt, shared-hmac, shared-hmac-legacy, local-dev", cfg.AuthMode)
 	}
 }
 

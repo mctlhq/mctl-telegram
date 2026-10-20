@@ -199,14 +199,21 @@ capacity planning described above.
 Sticky routing operates at two independent layers, both of which must be active
 for multi-replica deployment to be safe:
 
-> **Status:** Layer 2 (replica-identity observability) ships in this repository.
-> Layer 1 (the ingress consistent-hash manifests) is **not** shipped here yet —
-> it is tracked separately in issue #126 with a controller-acceptance gate,
-> because the ingress Lua + Istio/Envoy config semantics are an error-prone area
-> that needs its own design + review cycle. The description below documents the
-> intended Layer-1 design.
+> **Status:** both layers are implemented and verified.
+> Layer 1 ships as reference manifests in `deploy/ingress/` (#141, closing
+> #126) for ingress-nginx and Istio, and the `sticky-ingress-acceptance`
+> workflow proves them on a kind cluster against the real controllers.
+> Layer 2 is built into the server.
+>
+> Sticky routing alone does not make the service ready for several replicas.
+> Rate limiters, pending confirmations, pending OAuth flows and the Local
+> Bridge hub are still held in process memory, so a second replica first
+> needs that state in a shared store, with the limiter failing closed when
+> the store is unavailable (see
+> [ADR 0005](adr/0005-session-pool-and-sticky-routing.md)). Production runs
+> one replica, and its ingress does not carry the Layer-1 configuration.
 
-**Layer 1 — Load-balancer consistent-hash routing** (tracked in issue #126):
+**Layer 1 — Load-balancer consistent-hash routing** (`deploy/ingress/`):
 An ingress-tier Lua snippet extracts the `sub` claim from the JWT payload
 (`tg:<telegram_id>`), sets it as the `X-Mctl-Route-Key` request header, and
 NGINX (or Envoy) performs ketama consistent-hash routing on that header value.
@@ -293,12 +300,17 @@ prevents further spurious notifications.
 Monitor `mctl_telegram_client_errors_total` for spikes after scale events as an
 indirect indicator of session churn.
 
-### Ingress manifests (deferred — issue #126)
+### Ingress manifests
 
-The Layer-1 ingress reference manifests (NGINX `access_by_lua_block` consistent-hash
-routing and the Istio EnvoyFilter equivalent) are **not** in this repository yet.
-They are tracked in issue #126, which requires a controller-acceptance gate before
-merge: the NGINX config must pass reload/admission, the EnvoyFilter must show up in
-`istioctl proxy-config` after `istioctl analyze`, and a bearer-token request must
-flow through without a Lua runtime error. Until that lands, run multi-replica
-deployments only with an externally provided, validated consistent-hash ingress.
+The Layer-1 reference manifests are `deploy/ingress/sticky-nginx.yaml` (NGINX
+`access_by_lua_block` with consistent-hash routing) and
+`deploy/ingress/sticky-envoy.yaml` (the Istio EnvoyFilter and DestinationRule
+equivalent). The `sticky-ingress-acceptance` workflow runs on every change to
+them: the NGINX config must pass the ingress-nginx admission webhook, the
+EnvoyFilter must show up in `istioctl proxy-config` after `istioctl analyze`,
+and a bearer-token request must flow through with `X-Mctl-Route-Key` set from
+the JWT `sub` and no Lua runtime error. A client-supplied `X-Mctl-Route-Key`
+must be replaced, not trusted.
+
+Other ingress controllers need an equivalent configuration of their own; the
+manifests here are not a drop-in for them.
