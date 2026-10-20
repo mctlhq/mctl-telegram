@@ -73,7 +73,7 @@
   <h3>Dynamic Client Registration</h3>
   <ul>
     <li><code>POST /oauth/register</code> (RFC 7591) with redirect URIs on an approved host. Redirects are https, or http on loopback only; custom URL schemes are refused.</li>
-    <li>Registration is limited to {{.RegisterRatePerMin}} attempts per minute per source IP. A registration is kept for 24 hours, so register when a user connects rather than once at install.</li>
+    <li>Registration is limited to {{.RegisterRatePerMin}} attempts per minute per source IP. A registration is kept for up to 24 hours, and the oldest ones are dropped sooner once the server reaches its cap on dynamic registrations, so register when a user connects rather than once at install.</li>
   </ul>
 
   <p>To have a host approved, write to <a href="mailto:support@mctl.ai">support@mctl.ai</a> with the host, whether you use CIMD or DCR, and your expected number of users.</p>
