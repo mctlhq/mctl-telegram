@@ -71,7 +71,7 @@ type Server struct {
 	// ManageURL is the absolute URL of the browser manage page, where the
 	// owner can turn real sends on after signing in with Telegram. Set only
 	// when that page is mounted (local-jwt mode); "" makes the send hint
-	// fall back to naming the account:manage scope.
+	// fall back to naming the operator tool set_account_send.
 	ManageURL string
 	// MediaStore holds pending media download references keyed by confirmation_id.
 	MediaStore *MediaStore
@@ -233,6 +233,12 @@ func (s *Server) WithMediaConcurrency(n int) *Server {
 		inFlight = s.Metrics.MediaInflight
 	}
 	s.mediaGate = newMediaGate(n, inFlight)
+	return s
+}
+
+// WithManageURL sets ManageURL and returns s.
+func (s *Server) WithManageURL(url string) *Server {
+	s.ManageURL = url
 	return s
 }
 

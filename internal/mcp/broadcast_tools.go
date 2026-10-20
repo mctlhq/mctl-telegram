@@ -37,12 +37,6 @@ func (s *Server) WithBroadcast(svc *broadcast.Service, approvalURL string) *Serv
 	return s
 }
 
-// WithManageURL sets ManageURL and returns s.
-func (s *Server) WithManageURL(url string) *Server {
-	s.ManageURL = url
-	return s
-}
-
 var errBroadcastDisabled = errors.New("broadcasts are not enabled on this server (no BROADCAST_OPERATORS configured)")
 
 // broadcastActor turns an identity that already passed the admin:broadcast

@@ -45,10 +45,21 @@ sending on for yourself.
   *before* the daemon is contacted. Real delivery also needs the
   `telegram:messages:send` scope and the per-peer rate limit.
 
-If a send comes back as a dry-run after you granted consent, check the
-`dry_reason` and `hint`. A typical reason is
-`per-account send_enabled=false` — enable sending with `set_send_consent`,
-then refresh the client credential. `get_my_send_status` reports the
+If your client shows no `send_message` tool after you granted consent,
+or a direct call fails with `tool 'send_message' not found`, the
+credential it presents still lacks `telegram:messages:send`. Every
+device credential starts that way: it is read-only when first issued,
+and it gains the send scope only on a refresh after consent is on.
+Refresh the credential your client authenticates with. A credential
+without the scope is not offered the send tools at all, so there is no
+dry-run and no `dry_reason` to read in that case.
+
+If a send does come back as a dry-run, the credential carries the send
+scope and something else stopped it: read `dry_reason` and `hint`. A
+typical reason is `per-account send_enabled=false`, meaning consent is
+off again. A device credential cannot turn it back on itself: use the
+manage page, or `set_send_consent` from a connection that has
+`account:manage`, as the `hint` says. `get_my_send_status` reports the
 same gate `send_message` uses.
 
 ## Revoke a device

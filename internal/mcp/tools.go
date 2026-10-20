@@ -2027,8 +2027,10 @@ const reasonSendDisabled = "per-account send_enabled=false — real sends are no
 //   - a worker or device credential (no client_id) can never gain the
 //     scope, so only the owner can act, on the manage page.
 //
-// Without a manage page (ManageURL == "", i.e. not local-jwt) the fallback
-// names the scope instead of a page that does not exist.
+// Without a manage page (ManageURL == "", i.e. not local-jwt) there is no
+// self-service remedy to name: shared-hmac's default groups grant
+// account:manage to nobody. The fallback names the operator tool
+// set_account_send instead of a page or a scope the caller cannot reach.
 func (s *Server) sendDisabledHint(id *auth.Identity) string {
 	const prefix = "Your account has never opted into real sends"
 	const confirm = " Call get_my_send_status to confirm this is the reason."
@@ -2036,12 +2038,25 @@ func (s *Server) sendDisabledHint(id *auth.Identity) string {
 		return prefix + ". Enable them with set_send_consent." + confirm
 	}
 	if s.ManageURL == "" {
-		return prefix + ", and this connection cannot change that. The account owner can enable them from a connection with the account:manage scope." + confirm
+		return prefix + ", and this connection cannot change that. An operator of this server can enable them for the account with set_account_send." + confirm
 	}
 	if id != nil && id.ClientID != "" {
 		return prefix + ", and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 	}
 	return prefix + ", and this credential can never change that. The account owner can enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+}
+
+// withSendDisabledHint appends sendDisabledHint to reason when the per-account
+// flag is what blocked the call, for the write paths that report the gate as
+// a dry_reason or an error string rather than through SendResult.Hint. Before
+// reasonSendDisabled was reduced to the cause, it named set_send_consent on
+// every one of those paths; this keeps a remedy there without changing any
+// output schema.
+func (s *Server) withSendDisabledHint(id *auth.Identity, reason string) string {
+	if reason != reasonSendDisabled {
+		return reason
+	}
+	return reason + ". " + s.sendDisabledHint(id)
 }
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
@@ -2705,7 +2720,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("edit blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("edit blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
@@ -2761,7 +2776,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("delete blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("delete blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
@@ -2818,7 +2833,7 @@ Inputs (required):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("forward blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("forward blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		// Rate-limit on the destination peer (outbound message target), costed
 		// by batch size — forwarding N messages spends N of the 20/hour budget,
@@ -3003,7 +3018,7 @@ Inputs (optional):
 		}
 		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
 		if !canSend {
-			return mcplib.NewToolResultError("reaction blocked: " + dryReason), nil
+			return mcplib.NewToolResultError("reaction blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
