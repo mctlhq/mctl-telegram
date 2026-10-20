@@ -24,6 +24,7 @@ func TestPublicPagesLoadUmami(t *testing.T) {
 		"security":        {Security(base, true), "/security"},
 		"privacy":         {Privacy(base, true), "/privacy"},
 		"terms":           {Terms(base, true), "/terms"},
+		"platforms":       {Platforms(base, "/mcp", base, true, testPlatformFacts()), "/platforms"},
 		"local-bridge":    {LocalBridge(base, true), "/docs/local-bridge"},
 		"product-updates": {ProductUpdates(nil, nil, base, true), "/docs/product-updates"},
 	}

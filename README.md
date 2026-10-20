@@ -143,7 +143,8 @@ deployment boundary.**
   discovers OAuth from the well-known metadata.
 - **Agent platforms:** register with Dynamic Client Registration from a
   callback host on the allowlist, or publish a Client ID Metadata Document
-  on your own domain and ask for your host to be added. See
+  on your own domain and ask for your host to be added. The integration
+  guide is at [tg.mctl.ai/platforms](https://tg.mctl.ai/platforms); see
   [SECURITY.md](SECURITY.md) for the exact redirect rules.
 
 The first connection asks which permissions to grant. "Read only" is the
