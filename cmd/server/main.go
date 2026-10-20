@@ -540,7 +540,7 @@ func main() {
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername)
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
@@ -859,12 +859,16 @@ func selectProvider(cfg *config.Config, store *db.Store, revocationCache *localj
 		// sides use cfg.OAUTHJWTSecret, and the minted aud already includes
 		// cfg.OAUTHJWTAudience — so such a token verifies fine here and
 		// resolves (via EnsureUser on the same synthetic subject) to the same
-		// users.id as the real account. It would carry no scopes, so
-		// requireScope-gated tools reject it, but the no-scope
-		// disconnect_telegram_account/delete_telegram_account tools would
-		// not. An already-minted token from an older build therefore remains
-		// unrevokable on this path; containment for it is to stop minting new
-		// ones and to move the deployment to AUTH_MODE=local-jwt.
+		// users.id as the real account. It carries no groups, so it derives
+		// no scopes, and requireScope-gated tools reject it. Since
+		// 2026-10-20 that includes disconnect_telegram_account,
+		// delete_telegram_account and their /api/account endpoints, which
+		// require account:manage: an unrevokable token from an older build
+		// can no longer end or delete the owner's account. Real users keep
+		// that way out because every default group grants account:manage
+		// (sharedhmac.DefaultGroupScopes). Containment for the token itself
+		// is still to stop minting new ones and to move the deployment to
+		// AUTH_MODE=local-jwt.
 		p, err := sharedhmac.New(store, sharedhmac.Config{
 			Secret:           []byte(cfg.OAUTHJWTSecret),
 			ExpectedIssuer:   "https://api.mctl.ai",

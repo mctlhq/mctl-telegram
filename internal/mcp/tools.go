@@ -806,15 +806,15 @@ func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc
 
 Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
 
-This tool is part of self-service controls — you do not need an operator to disconnect.
+This tool is part of self-service controls — you do not need an operator to disconnect. It requires the account:manage scope; read-only and device credentials are refused, and on deployments with the Telegram manage page enabled, the owner can also disconnect there after signing in with Telegram.
 
 No inputs. Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		// Server-side guard: the demo/reviewer identity may not disconnect its
 		// own account. The session is shared review infrastructure and a reviewer
@@ -861,15 +861,15 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
-For a softer alternative that keeps the row but disables it, use disconnect_telegram_account.
+For a softer alternative that keeps the row but disables it, use disconnect_telegram_account. Requires the account:manage scope.
 
 No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "account:manage"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		// Server-side guard: the demo/reviewer identity may not hard-delete its
 		// own account. This is the tool that bricked the demo session during a
@@ -2027,10 +2027,11 @@ const reasonSendDisabled = "per-account send_enabled=false — real sends are no
 //   - a worker or device credential (no client_id) can never gain the
 //     scope, so only the owner can act, on the manage page.
 //
-// Without a manage page (ManageURL == "", i.e. not local-jwt) there is no
-// self-service remedy to name: shared-hmac's default groups grant
-// account:manage to nobody. The fallback names the operator tool
-// set_account_send instead of a page or a scope the caller cannot reach.
+// Without a manage page (ManageURL == "", i.e. not local-jwt) a caller that
+// cannot call set_send_consent has no self-service remedy to name, so the
+// fallback names the operator tool set_account_send instead of a page or a
+// scope it cannot reach. Under shared-hmac every default group grants
+// account:manage, so a signed-in user lands in the first branch there.
 func (s *Server) sendDisabledHint(id *auth.Identity) string {
 	const prefix = "Your account has never opted into real sends"
 	const confirm = " Call get_my_send_status to confirm this is the reason."

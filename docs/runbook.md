@@ -367,7 +367,8 @@ not “delete immediately.”
    wait for its expiry or rotate the signing key in a separately reviewed,
    all-client migration. This limitation blocks a general shared-worker
    design.
-3. Call authenticated `DELETE /api/account`. It atomically removes Telegram
+3. Call authenticated `DELETE /api/account` with a credential granted
+   `account:manage` (a worker token is refused with `403`). It atomically removes Telegram
    sessions and all user-scoped agent profiles, events, messages,
    conversations, leads, actions, notifications, jobs, attempts, cursors,
    watermarks, and sent-message markers. The stable login identity and

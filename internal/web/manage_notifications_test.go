@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 func newManageNotifTestServer(t *testing.T) (*ManageServer, *db.Store) {
 	t.Helper()
 	store := newAccountTestStore(t)
-	return NewManageServer(store, nil, "https://tg.mctl.ai", ""), store
+	return NewManageServer(store, nil, "https://tg.mctl.ai", "", ""), store
 }
 
 // newIsolatedManageServer builds a server over a private in-memory database.
@@ -34,7 +35,7 @@ func newIsolatedManageServer(t *testing.T) (*ManageServer, *db.Store) {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)
-	return NewManageServer(store, nil, "https://tg.mctl.ai", ""), store
+	return NewManageServer(store, nil, "https://tg.mctl.ai", "", ""), store
 }
 
 // seedManageUser creates a user the manage handlers can act for.
@@ -378,8 +379,12 @@ func TestManagePage_PreferenceReadFailureDoesNotBlockDisconnect(t *testing.T) {
 		t.Fatalf("drop prefs table: %v", err)
 	}
 
+	// The owner signed in on this page in a browser, so the disconnect
+	// control is one the server would accept.
+	srv.connectClient = "mctl_self_connect"
 	w := httptest.NewRecorder()
-	srv.HandleManage(w, withIdentity(httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil), uid))
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
+	srv.HandleManage(w, req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, ClientID: "mctl_self_connect", Scopes: []string{accountManageScope}})))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 -- a preferences failure must not error the page", w.Code)

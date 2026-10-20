@@ -11,10 +11,12 @@ package web
 // reason. The API and the MCP tools stay as they are; this is the
 // human-facing surface for the same store calls.
 //
-// Authorization and CSRF follow the existing manage handlers unchanged: the
-// route is wrapped in the same auth middleware, the identity comes from
-// auth.From(r.Context()), and cross-site submission is refused by the
-// SameSite=Lax connect-session cookie. No new token scheme is introduced,
+// Authorization and CSRF follow the existing manage handlers: the route is
+// wrapped in the same auth middleware, the identity comes from
+// auth.From(r.Context()) and must hold account:manage, like its MCP twin
+// set_my_notification_preferences -- except that the browser sign-in token
+// may turn notifications off (see HandleSetNotifications) -- and cross-site
+// submission is refused by the SameSite=Lax connect-session cookie. No new token scheme is introduced,
 // because a second, different one on the same page would be the more likely
 // source of a mistake.
 //
@@ -26,8 +28,10 @@ package web
 // check there).
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -59,6 +63,17 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
+		return
+	}
+	// account:manage may change any category. Without it, only the browser
+	// sign-in token gets through, and only to turn notifications off: it is
+	// issued to the owner whatever tier they resolve to, including none, and
+	// withdrawing consent must not need an operator. Turning anything on
+	// grants the server a permission, so that stays behind the scope.
+	fullAccess := canManageAccount(id)
+	if !fullAccess && !isBrowserSignIn(id, s.connectClient) {
+		auditScopeDenied(r, s.store, id, manageNotificationsRoute)
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotChangeNotifications})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, manageNotificationsFormLimit)
@@ -101,6 +116,24 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 		changes[string(c)] = state
 	}
 
+	if !fullAccess {
+		// The new enabled set must be a subset of the current one. A
+		// submission that turns any category on is refused whole, even if it
+		// also turns another off. A failed read of the current set is not an
+		// empty set: nothing is written.
+		current, err := s.store.ResolveNotificationPrefs(r.Context(), id.UserID)
+		if err != nil {
+			slog.Warn("manage: resolve notification prefs for a reduce-only change", "err", err)
+			renderManageError(w, "Could not read your current notification preferences. Please try again.")
+			return
+		}
+		if enablesAny(current, changes) {
+			auditScopeDenied(r, s.store, id, manageNotificationsRoute)
+			renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageNotificationsReduceOnly})
+			return
+		}
+	}
+
 	err := s.store.SetNotificationPrefs(r.Context(), id.UserID, changes, "manage_page")
 	// Audited like the other two write paths (AccountHandlers.audit for
 	// PUT /api/account/notifications, and the MCP set_my_notification_
@@ -109,7 +142,7 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	// GET /api/account/audit, which privacy.html presents to users as the
 	// record of actions on their account -- and since the prefs row is
 	// overwritten in place, the earlier decision would leave no trace at all.
-	s.auditNotifications(r, id, err)
+	s.auditManage(r, id, manageNotificationsRoute, err)
 	if err != nil {
 		slog.Warn("manage: set notification prefs", "err", err)
 		renderManageError(w, "Could not save your notification preferences. Please try again.")
@@ -118,17 +151,39 @@ func (s *ManageServer) HandleSetNotifications(w http.ResponseWriter, r *http.Req
 	http.Redirect(w, r, s.issuer+"/telegram/connect/manage", http.StatusFound)
 }
 
-// auditNotifications writes the tamper-evident audit row for a manage-page
-// consent change, mirroring AccountHandlers.audit.
-func (s *ManageServer) auditNotifications(r *http.Request, id *auth.Identity, err error) {
+// manageNotificationsRoute names the notification form in audit rows.
+const manageNotificationsRoute = "POST /telegram/connect/manage/notifications"
+
+// enablesAny reports whether changes would turn on a category that current
+// does not have on. A category missing from current counts as off.
+func enablesAny(current []db.ResolvedPref, changes map[string]string) bool {
+	on := make(map[string]bool, len(current))
+	for _, p := range current {
+		on[p.Category] = p.State == db.PrefSubscribed
+	}
+	for cat, state := range changes {
+		if state == db.PrefSubscribed && !on[cat] {
+			return true
+		}
+	}
+	return false
+}
+
+// auditManage writes the tamper-evident audit row for a manage-page change
+// (disconnect, send consent, notification preferences), mirroring
+// AccountHandlers.audit. Like auditScopeDenied, the write is detached from
+// the request's cancellation but bounded, so a client that hangs up right
+// after a change that committed still leaves its row.
+func (s *ManageServer) auditManage(r *http.Request, id *auth.Identity, tool string, err error) {
 	status := "ok"
 	msg := ""
 	if err != nil {
 		status = "error"
 		msg = err.Error()
 	}
-	s.store.LogToolCall(r.Context(), id.UserID,
-		"POST /telegram/connect/manage/notifications", "", status, msg, "", "")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	s.store.LogToolCall(ctx, id.UserID, tool, "", status, msg, "", "")
 }
 
 // notificationRow is one rendered checkbox on the dashboard.

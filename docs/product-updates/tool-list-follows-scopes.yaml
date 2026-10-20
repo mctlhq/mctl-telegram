@@ -8,13 +8,12 @@ summary: >-
   connection without send permission used to get a preview from send_message,
   edit_message, delete_messages, forward_messages and set_reaction; it now
   gets a "tool not found" error. Tools outside a connection's granted
-  permissions, including operator tools, are no longer listed. One exception
-  remains: disconnect_telegram_account and delete_telegram_account are still
-  available to read-only connections. set_reaction and
-  set_my_notification_preferences are now marked as changing existing state,
-  set_send_consent has a clearer title, and two descriptions were corrected.
-  When real sends are off for your account, a preview's hint now names a fix
-  the connection can use instead of always naming set_send_consent.
+  permissions, including operator tools, are no longer listed. set_reaction
+  and set_my_notification_preferences are now marked as changing existing
+  state, set_send_consent has a clearer title, and two descriptions were
+  corrected. When real sends are off for your account, a preview's hint now
+  names a fix the connection can use instead of always naming
+  set_send_consent.
 locale: en
 delivery: next_digest
 high_value: false

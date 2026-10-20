@@ -31,12 +31,17 @@ type ManageServer struct {
 	issuer string
 	// loginBotUsername is the validated login bot @username, or "".
 	loginBotUsername string
+	// connectClient is oauth.ConnectClientID; see canDisconnectFromManagePage.
+	connectClient string
 }
 
 // NewManageServer constructs a ManageServer. loginBotUsername is the validated
-// TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset.
-func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername string) *ManageServer {
-	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername}
+// TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset. connectClient is the browser
+// sign-in client_id (oauth.ConnectClientID) that may disconnect here without
+// account:manage; it is a parameter rather than a builder step so that a
+// call site cannot silently drop the owner's way out.
+func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername, connectClient string) *ManageServer {
+	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername, connectClient: connectClient}
 }
 
 // loginBotStartURL is the one place the login bot start link is built, shared
@@ -154,12 +159,17 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		Username:      info.Username,
 		ConnectedAt:   info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
 		SendEnabled:   info.SendEnabled,
-		Issuer:        s.issuer,
-		Notifications: rows,
-		Bot:           botView,
-		NotChosen:     choice == choiceNotChosen,
-		Chosen:        choice == choiceChosen,
-		ChoiceUnknown: choice == choiceUnknown,
+		CanDisconnect: canDisconnectFromManagePage(id, s.connectClient),
+		CanManage:     canManageAccount(id),
+		// The browser sign-in token without account:manage may only turn
+		// notifications off; see HandleSetNotifications.
+		NotificationsReduceOnly: !canManageAccount(id) && isBrowserSignIn(id, s.connectClient),
+		Issuer:                  s.issuer,
+		Notifications:           rows,
+		Bot:                     botView,
+		NotChosen:               choice == choiceNotChosen,
+		Chosen:                  choice == choiceChosen,
+		ChoiceUnknown:           choice == choiceUnknown,
 		// ?onboarding=1 is where the connect success page sends a newly
 		// connected client: the explicit category choice is put first. It
 		// only changes presentation; consent is still written by the form.
@@ -167,11 +177,36 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// msgManageCannotDisconnect explains a refused manage-page disconnect, both on
+// the 403 page and in place of the button.
+const msgManageCannotDisconnect = "This connection cannot disconnect the account. Sign in to this page with Telegram in a browser to disconnect."
+
+// msgManageCannotChangeSend explains a refused send-consent change, both on
+// the 403 page and in place of the toggle. Send consent takes no browser
+// sign-in exception, and a fresh sign-in carries account:manage only for the
+// admin and client tiers, so the message names the scope and nothing else.
+const msgManageCannotChangeSend = "This connection cannot change send consent: it needs the account:manage scope."
+
+// msgManageCannotChangeNotifications refuses a credential that is neither
+// granted account:manage nor the browser sign-in token. The browser sign-in
+// can always turn notifications off, so naming it is a remedy that works.
+const msgManageCannotChangeNotifications = "This connection cannot change notification preferences. Sign in to this page with Telegram in a browser to turn notifications off."
+
+// msgManageNotificationsReduceOnly is shown to the browser sign-in token
+// without account:manage, beside the form and on the 403 page when a
+// submission would turn a notification on.
+const msgManageNotificationsReduceOnly = "This sign-in can turn notifications off but not on: turning one on needs the account:manage scope."
+
 // HandleDisconnect revokes the user's active session and redirects back.
 func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
+		return
+	}
+	if !canDisconnectFromManagePage(id, s.connectClient) {
+		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/disconnect")
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotDisconnect})
 		return
 	}
 	var err error
@@ -183,6 +218,10 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 	} else {
 		_, err = s.store.RevokeActiveSession(r.Context(), id.UserID, "disconnect")
 	}
+	// Audited on both outcomes, like POST /api/account/disconnect, so the
+	// audit log shows the disconnect that ended the session and not only
+	// the refused ones.
+	s.auditManage(r, id, "POST /telegram/connect/manage/disconnect", err)
 	if err != nil {
 		slog.Warn("manage: disconnect", "err", err)
 		renderManageError(w, "Disconnect failed. Please try again.")
@@ -202,14 +241,25 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, s.issuer+"/telegram/connect", http.StatusFound)
 }
 
-// HandleToggleSend flips the send_enabled flag and redirects back.
+// HandleToggleSend flips the send_enabled flag and redirects back. It is the
+// manage-page twin of set_send_consent and requires account:manage like it,
+// with no browser sign-in exception: send consent is the gate a connector
+// holding the send scope sends through, so a read-only credential must not
+// be able to open it.
 func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
-	if _, err := s.store.ToggleSendEnabled(r.Context(), id.UserID); err != nil {
+	if !canManageAccount(id) {
+		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/toggle-send")
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotChangeSend})
+		return
+	}
+	_, err := s.store.ToggleSendEnabled(r.Context(), id.UserID)
+	s.auditManage(r, id, "POST /telegram/connect/manage/toggle-send", err)
+	if err != nil {
 		slog.Warn("manage: toggle_send_enabled", "err", err)
 		renderManageError(w, "Could not update permission. Please try again.")
 		return
@@ -220,14 +270,23 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 // ----- HTML templates -----
 
 type managePageData struct {
-	Connected     bool
-	DisplayName   string
-	Username      string
-	ConnectedAt   string
-	SendEnabled   bool
-	Issuer        string
-	Notifications []notificationRow
-	Bot           *botReachabilityView
+	Connected   bool
+	DisplayName string
+	Username    string
+	ConnectedAt string
+	SendEnabled bool
+	// CanDisconnect and CanManage are the handlers' own checks
+	// (HandleDisconnect, and HandleToggleSend / HandleSetNotifications), so
+	// the page never offers a control the server would refuse.
+	CanDisconnect bool
+	CanManage     bool
+	// NotificationsReduceOnly shows the notification form to a browser
+	// sign-in without account:manage, with every currently-off category
+	// disabled, so it submits only what HandleSetNotifications accepts.
+	NotificationsReduceOnly bool
+	Issuer                  string
+	Notifications           []notificationRow
+	Bot                     *botReachabilityView
 	// Exactly one of NotChosen, Chosen and ChoiceUnknown is true.
 	NotChosen     bool
 	Chosen        bool
@@ -293,12 +352,12 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>
     <div class="field-row"><span class="field-label">Send messages</span><span class="field-value">{{if .SendEnabled}}Enabled{{else}}Disabled{{end}}</span></div>
-    <form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
+    {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
       <button type="submit" class="btn-secondary">{{if .SendEnabled}}Disable send{{else}}Enable send{{end}}</button>
-    </form>
-    <form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
+    </form>{{else}}<p class="meta" id="send-unavailable">` + msgManageCannotChangeSend + `</p>{{end}}
+    {{if .CanDisconnect}}<form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <button type="submit" class="btn-danger">Disconnect</button>
-    </form>
+    </form>{{else}}<p class="meta" id="disconnect-unavailable">` + msgManageCannotDisconnect + `</p>{{end}}
     {{else}}
     <p>No active Telegram session found.</p>
     {{end}}
@@ -313,12 +372,13 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <h2 class="notif-heading" id="notifications">Notifications</h2>
     {{if .NotChosen}}<p class="meta"><strong>You have not chosen yet.</strong> Product updates stay off until you save.</p>{{end}}
     <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
-    <form method="POST" action="/telegram/connect/manage/notifications">
+    {{if .NotificationsReduceOnly}}<p class="meta" id="notifications-reduce-only">` + msgManageNotificationsReduceOnly + `</p>{{end}}
+    {{if or .CanManage .NotificationsReduceOnly}}<form method="POST" action="/telegram/connect/manage/notifications">
       <input type="hidden" name="submitted" value="notifications">
       {{range .Notifications}}
       <div class="notif-row">
         <label class="notif-label">
-          <input type="checkbox" name="{{.Category}}"{{if .Subscribed}} checked{{end}}>
+          <input type="checkbox" name="{{.Category}}"{{if .Subscribed}} checked{{else if $.NotificationsReduceOnly}} disabled{{end}}>
           <span class="notif-name">{{.Label}}</span>
         </label>
         <div class="notif-desc">{{.Description}}
@@ -328,7 +388,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
       </div>
       {{end}}
       <button type="submit" class="btn-secondary">Save notification preferences</button>
-    </form>
+    </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageCannotChangeNotifications + `</p>{{end}}
     {{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
 ` + manageFoot))

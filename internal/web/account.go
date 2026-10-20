@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -35,6 +36,10 @@ type AccountCloser interface {
 // same auth middleware as the MCP endpoint. Anonymous requests get 401.
 // Audit rows are written through the same Store.LogToolCall path used by MCP
 // tools so /api/account calls show up in get_my_auditLog too.
+//
+// Disconnect and delete additionally require account:manage, with no
+// exception: the browser sign-in token's way out is the manage page
+// (canDisconnectFromManagePage), not this API.
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
@@ -42,6 +47,69 @@ type AccountHandlers struct {
 
 func NewAccountHandlers(store *db.Store, pool AccountCloser) *AccountHandlers {
 	return &AccountHandlers{Store: store, Pool: pool}
+}
+
+// accountManageScope is the scope that lets a credential disconnect or delete
+// its own account. Worker and device credentials never carry it (see
+// internal/oauth/scopes.go).
+const accountManageScope = "account:manage"
+
+// reasonScopeDenied matches mcp.ReasonScopeDenied, so a refused web call and
+// a refused tool call read the same in the audit log and its metrics.
+const reasonScopeDenied = "scope_denied"
+
+// The refusals for a credential without account:manage. Neither names the
+// manage page: it is not mounted in every auth mode, and it cannot delete.
+const (
+	msgDisconnectNeedsManage = "this connection cannot disconnect the account: it needs the account:manage scope"
+	msgDeleteNeedsManage     = "this connection cannot delete the account: it needs the account:manage scope"
+	// msgNotificationsNeedsManage refuses GET and PUT
+	// /api/account/notifications, the API twins of
+	// get_my_notification_preferences and set_my_notification_preferences.
+	msgNotificationsNeedsManage = "this connection cannot read or change notification preferences: it needs the account:manage scope"
+)
+
+// canManageAccount reports whether id may change its own account: disconnect,
+// delete, send consent or notification preferences, through the API, MCP or
+// the manage page. Only a credential granted account:manage passes. A
+// read-only worker token or a Local Bridge device token never holds it, so it
+// can neither end the session it was issued against nor turn on the send
+// consent the owner left off. The manage page's two narrow exceptions for the
+// browser sign-in token are canDisconnectFromManagePage and the reduce-only
+// notification form (HandleSetNotifications).
+//
+// This revises the 2026-09-12 decision (mctlhq/.github#35) that left
+// disconnect and delete open to any authenticated credential.
+func canManageAccount(id *auth.Identity) bool {
+	return id != nil && id.HasScope(accountManageScope)
+}
+
+// canDisconnectFromManagePage is canManageAccount plus the browser Telegram
+// sign-in token, which is how the owner reaches the manage page whatever
+// scopes a connector was narrowed to. It applies to the manage page's
+// disconnect only; that page cannot delete, and the API does not accept the
+// exception.
+func canDisconnectFromManagePage(id *auth.Identity, connectClient string) bool {
+	return canManageAccount(id) || isBrowserSignIn(id, connectClient)
+}
+
+// isBrowserSignIn reports whether id is the browser Telegram sign-in token
+// (client_id == connectClient). Only the Telegram login on this server mints
+// it, so its holder is the account owner -- but it is issued whatever tier
+// the owner resolves to, including none, so it carries no account:manage by
+// itself. An empty connectClient matches nothing.
+func isBrowserSignIn(id *auth.Identity, connectClient string) bool {
+	return id != nil && connectClient != "" && id.ClientID == connectClient
+}
+
+// auditScopeDenied records a refused account:manage operation against the
+// caller.
+// The write is detached from the request context, like the MCP refusal rows,
+// so a client that hangs up right after the request still leaves the row.
+func auditScopeDenied(r *http.Request, store *db.Store, id *auth.Identity, tool string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	store.LogToolCall(ctx, id.UserID, tool, "", "error", "identity missing scope "+accountManageScope, "", reasonScopeDenied)
 }
 
 // Register binds the account endpoints onto a router. Paths are
@@ -86,6 +154,11 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "POST /api/account/disconnect")
+		writeAccountErr(w, http.StatusForbidden, msgDisconnectNeedsManage)
+		return
+	}
 	// Pool eviction and DB revoke share the pool mutex via RemoveAtomic
 	// so a concurrent Borrow() cannot race between them. See
 	// telegram.ClientPool.RemoveAtomic for the full rationale.
@@ -116,6 +189,11 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "DELETE /api/account")
+		writeAccountErr(w, http.StatusForbidden, msgDeleteNeedsManage)
 		return
 	}
 	var rows int64
@@ -218,6 +296,11 @@ func (h *AccountHandlers) getNotifications(w http.ResponseWriter, r *http.Reques
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "GET /api/account/notifications")
+		writeAccountErr(w, http.StatusForbidden, msgNotificationsNeedsManage)
+		return
+	}
 	prefs, err := h.Store.ResolveNotificationPrefs(r.Context(), id.UserID)
 	if err != nil {
 		slog.Warn("account.get_notifications", "err", err)
@@ -246,6 +329,11 @@ func (h *AccountHandlers) putNotifications(w http.ResponseWriter, r *http.Reques
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "PUT /api/account/notifications")
+		writeAccountErr(w, http.StatusForbidden, msgNotificationsNeedsManage)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxNotificationsBodyBytes)

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // allToolScopes returns every scope toolScopes mentions, for tests that need
@@ -84,10 +86,10 @@ var (
 // The visible sets are spelled out rather than derived from toolScopes, so a
 // wrong entry in the table fails here instead of agreeing with itself.
 var (
-	selfTools     = []string{"delete_telegram_account", "disconnect_telegram_account", "get_my_audit_log", "get_my_identity", "get_my_send_status"}
+	selfTools     = []string{"get_my_audit_log", "get_my_identity", "get_my_send_status"}
 	readTools     = []string{"get_media", "get_messages", "get_unread_messages", "list_dialogs", "prepare_get_media", "search_messages"}
 	writeTools    = []string{"delete_messages", "edit_message", "forward_messages", "pin_message", "prepare_pin_message", "prepare_send_message", "send_media", "send_message", "set_reaction"}
-	accountTools  = []string{"get_my_notification_preferences", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent"}
+	accountTools  = []string{"delete_telegram_account", "disconnect_telegram_account", "get_my_notification_preferences", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent"}
 	lookupTools   = []string{"get_user_audit_log", "list_telegram_identities"}
 	adminWrites   = []string{"mint_worker_token", "provision_local_account", "revoke_telegram_session", "revoke_worker_token", "set_account_mode", "set_account_send", "set_telegram_access"}
 	broadcastOnly = []string{"cancel_broadcast", "get_broadcast", "list_broadcasts", "prepare_broadcast"}
@@ -205,6 +207,61 @@ func TestToolsCall_ReadOnlyCannotGrantItselfSend(t *testing.T) {
 	}
 	if enabled {
 		t.Fatal("a read-only identity turned send_enabled on for its account")
+	}
+}
+
+// TestToolsCall_ReadOnlyCannotEndItsSession: a read-only credential, and a
+// device credential (send and pin, never account:manage), may neither
+// disconnect nor delete the account they were issued against. Both the
+// filter and the handler refuse; the session row survives and the refusal is
+// audited as scope_denied. Until 2026-10-20 both tools were open to any
+// authenticated credential (mctlhq/.github#35).
+func TestToolsCall_ReadOnlyCannotEndItsSession(t *testing.T) {
+	deviceScopes := []string{"telegram:dialogs:read", "telegram:messages:read", "telegram:messages:send", "telegram:messages:pin"}
+	for _, cred := range []struct {
+		name   string
+		scopes []string
+	}{{"read-only", readOnlyScopes}, {"device", deviceScopes}} {
+		for i, name := range []string{"disconnect_telegram_account", "delete_telegram_account"} {
+			t.Run(cred.name+"/"+name, func(t *testing.T) {
+				store := newToolsTestStore(t)
+				uid := seedAccountWithSession(t, store, int64(424310+i), false)
+				srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store)}
+				ctx := auth.With(context.Background(), &auth.Identity{UserID: uid, Scopes: cred.scopes})
+
+				env := callRPC(t, ctx, fullSurfaceServer(srv), string(mcplib.MethodToolsCall), map[string]any{
+					"name": name, "arguments": map[string]any{},
+				})
+				if env.Error == nil {
+					t.Fatalf("tools/call %s succeeded for a %s credential: %s", name, cred.name, env.Result)
+				}
+				if reason := latestAuditReason(t, store, uid); reason != ReasonScopeDenied {
+					t.Fatalf("reason = %q, want %q", reason, ReasonScopeDenied)
+				}
+
+				// The handler refuses on its own too, should the filter ever
+				// be bypassed.
+				handler := srv.toolDisconnectAccount
+				if name == "delete_telegram_account" {
+					handler = srv.toolDeleteAccount
+				}
+				_, h := handler()
+				res, err := h(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: name}})
+				if err != nil {
+					t.Fatalf("unexpected Go error: %v", err)
+				}
+				if !res.IsError || !strings.Contains(contentText(res), "account:manage") {
+					t.Fatalf("handler did not refuse a %s credential: %s", cred.name, contentText(res))
+				}
+
+				if n := activeAccountCount(t, store, uid); n != 1 {
+					t.Fatalf("active sessions = %d after a refused %s, want 1", n, name)
+				}
+				if n := totalAccountCount(t, store, uid); n != 1 {
+					t.Fatalf("account rows = %d after a refused %s, want 1", n, name)
+				}
+			})
+		}
 	}
 }
 

@@ -50,24 +50,35 @@ var toolScopes = map[string][]string{
 	"get_my_identity":    {},
 	"get_my_audit_log":   {},
 	"get_my_send_status": {},
-	// Ungated by a deliberate owner decision (2026-09-12, mctlhq/.github#35,
-	// recorded in docs/portal-allowlist.json): the blast radius is the
-	// caller's own row. Requiring account:manage here is a separate decision.
-	"disconnect_telegram_account": {},
-	"delete_telegram_account":     {},
 
 	// The caller's own account, changed. All require account:manage.
 	//
-	// Who grants it: oauth.ResolveScopes (admin and client tiers) and the
-	// local-dev provider. sharedhmac's default groups grant it to no group,
-	// so in that mode these tools are listed to nobody, and
-	// Server.sendDisabledHint names the operator tool set_account_send there
-	// instead.
+	// Who grants it: oauth.ResolveScopes (admin and client tiers), every
+	// default group of sharedhmac (whose deployments have no manage page, so
+	// this is the owner's only self-service way out there), and the local-dev
+	// provider.
 	//
 	// Who never holds it: worker and device credentials (their allowlists
 	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
-	// read-only credential cannot grant itself send consent or revoke its
-	// owner's devices.
+	// read-only credential cannot grant itself send consent, revoke its
+	// owner's devices, or end the session it was issued against. The HTTP
+	// twins hold the same line (internal/web.canManageAccount): /api/account
+	// disconnect, delete and GET/PUT notifications, and the manage page's
+	// send toggle. The manage page's notification form also lets the
+	// browser sign-in token turn notifications off, never on, so an owner
+	// whose sign-in resolves to no scopes can still withdraw consent.
+	//
+	// disconnect and delete were open to any authenticated credential by the
+	// 2026-09-12 decision (mctlhq/.github#35). Revised 2026-10-20: a read-only
+	// worker token or a device token could end the session it was issued
+	// against, so a read-only connection was not read-only. The owner keeps
+	// disconnect through the manage page, whose disconnect alone also
+	// accepts the browser sign-in token
+	// (internal/web.canDisconnectFromManagePage); the /api/account endpoints
+	// and these tools take no such exception, so a delete always needs
+	// account:manage.
+	"disconnect_telegram_account":     {"account:manage"},
+	"delete_telegram_account":         {"account:manage"},
 	"get_my_notification_preferences": {"account:manage"},
 	"set_my_notification_preferences": {"account:manage"},
 	"set_send_consent":                {"account:manage"},
