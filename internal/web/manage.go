@@ -161,12 +161,15 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		SendEnabled:   info.SendEnabled,
 		CanDisconnect: canDisconnectFromManagePage(id, s.connectClient),
 		CanManage:     canManageAccount(id),
-		Issuer:        s.issuer,
-		Notifications: rows,
-		Bot:           botView,
-		NotChosen:     choice == choiceNotChosen,
-		Chosen:        choice == choiceChosen,
-		ChoiceUnknown: choice == choiceUnknown,
+		// The browser sign-in token without account:manage may only turn
+		// notifications off; see HandleSetNotifications.
+		NotificationsReduceOnly: !canManageAccount(id) && isBrowserSignIn(id, s.connectClient),
+		Issuer:                  s.issuer,
+		Notifications:           rows,
+		Bot:                     botView,
+		NotChosen:               choice == choiceNotChosen,
+		Chosen:                  choice == choiceChosen,
+		ChoiceUnknown:           choice == choiceUnknown,
 		// ?onboarding=1 is where the connect success page sends a newly
 		// connected client: the explicit category choice is put first. It
 		// only changes presentation; consent is still written by the form.
@@ -178,11 +181,21 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 // the 403 page and in place of the button.
 const msgManageCannotDisconnect = "This connection cannot disconnect the account. Sign in to this page with Telegram in a browser to disconnect."
 
-// msgManageNeedsManage explains a refused send-consent or notification
-// change, both on the 403 page and in place of the form. Unlike disconnect,
-// these take no browser sign-in exception: they need account:manage, which a
-// fresh Telegram sign-in on this page carries.
-const msgManageNeedsManage = "This connection cannot change this setting: it needs the account:manage scope. Sign in to this page with Telegram in a browser to change it."
+// msgManageCannotChangeSend explains a refused send-consent change, both on
+// the 403 page and in place of the toggle. Send consent takes no browser
+// sign-in exception, and a fresh sign-in carries account:manage only for the
+// admin and client tiers, so the message names the scope and nothing else.
+const msgManageCannotChangeSend = "This connection cannot change send consent: it needs the account:manage scope."
+
+// msgManageCannotChangeNotifications refuses a credential that is neither
+// granted account:manage nor the browser sign-in token. The browser sign-in
+// can always turn notifications off, so naming it is a remedy that works.
+const msgManageCannotChangeNotifications = "This connection cannot change notification preferences. Sign in to this page with Telegram in a browser to turn notifications off."
+
+// msgManageNotificationsReduceOnly is shown to the browser sign-in token
+// without account:manage, beside the form and on the 403 page when a
+// submission would turn a notification on.
+const msgManageNotificationsReduceOnly = "This sign-in can turn notifications off but not on: turning one on needs the account:manage scope."
 
 // HandleDisconnect revokes the user's active session and redirects back.
 func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +254,7 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 	}
 	if !canManageAccount(id) {
 		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/toggle-send")
-		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageNeedsManage})
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotChangeSend})
 		return
 	}
 	_, err := s.store.ToggleSendEnabled(r.Context(), id.UserID)
@@ -267,9 +280,13 @@ type managePageData struct {
 	// the page never offers a control the server would refuse.
 	CanDisconnect bool
 	CanManage     bool
-	Issuer        string
-	Notifications []notificationRow
-	Bot           *botReachabilityView
+	// NotificationsReduceOnly shows the notification form to a browser
+	// sign-in without account:manage, with every currently-off category
+	// disabled, so it submits only what HandleSetNotifications accepts.
+	NotificationsReduceOnly bool
+	Issuer                  string
+	Notifications           []notificationRow
+	Bot                     *botReachabilityView
 	// Exactly one of NotChosen, Chosen and ChoiceUnknown is true.
 	NotChosen     bool
 	Chosen        bool
@@ -337,7 +354,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <div class="field-row"><span class="field-label">Send messages</span><span class="field-value">{{if .SendEnabled}}Enabled{{else}}Disabled{{end}}</span></div>
     {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
       <button type="submit" class="btn-secondary">{{if .SendEnabled}}Disable send{{else}}Enable send{{end}}</button>
-    </form>{{else}}<p class="meta" id="send-unavailable">` + msgManageNeedsManage + `</p>{{end}}
+    </form>{{else}}<p class="meta" id="send-unavailable">` + msgManageCannotChangeSend + `</p>{{end}}
     {{if .CanDisconnect}}<form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <button type="submit" class="btn-danger">Disconnect</button>
     </form>{{else}}<p class="meta" id="disconnect-unavailable">` + msgManageCannotDisconnect + `</p>{{end}}
@@ -355,12 +372,13 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <h2 class="notif-heading" id="notifications">Notifications</h2>
     {{if .NotChosen}}<p class="meta"><strong>You have not chosen yet.</strong> Product updates stay off until you save.</p>{{end}}
     <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
-    {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/notifications">
+    {{if .NotificationsReduceOnly}}<p class="meta" id="notifications-reduce-only">` + msgManageNotificationsReduceOnly + `</p>{{end}}
+    {{if or .CanManage .NotificationsReduceOnly}}<form method="POST" action="/telegram/connect/manage/notifications">
       <input type="hidden" name="submitted" value="notifications">
       {{range .Notifications}}
       <div class="notif-row">
         <label class="notif-label">
-          <input type="checkbox" name="{{.Category}}"{{if .Subscribed}} checked{{end}}>
+          <input type="checkbox" name="{{.Category}}"{{if .Subscribed}} checked{{else if $.NotificationsReduceOnly}} disabled{{end}}>
           <span class="notif-name">{{.Label}}</span>
         </label>
         <div class="notif-desc">{{.Description}}
@@ -370,7 +388,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
       </div>
       {{end}}
       <button type="submit" class="btn-secondary">Save notification preferences</button>
-    </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageNeedsManage + `</p>{{end}}
+    </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageCannotChangeNotifications + `</p>{{end}}
     {{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
 ` + manageFoot))

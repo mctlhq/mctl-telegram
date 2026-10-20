@@ -311,6 +311,47 @@ func (f *accountManageFixture) notificationPrefRows() int {
 	return f.count(`SELECT count(*) FROM client_notification_prefs WHERE user_id = $1`)
 }
 
+// postNotifications submits the manage page's notification form with the
+// given checked categories, presenting cookie as the connect session.
+func (f *accountManageFixture) postNotifications(cookie, checked string) *httptest.ResponseRecorder {
+	f.t.Helper()
+	body := "submitted=notifications"
+	if checked != "" {
+		body += "&" + checked
+	}
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "mctl_connect_token", Value: cookie})
+	rec := httptest.NewRecorder()
+	f.setNotifs.ServeHTTP(rec, req)
+	return rec
+}
+
+// prefState is the resolved state of one category.
+func (f *accountManageFixture) prefState(cat db.NotificationCategory) string {
+	f.t.Helper()
+	prefs, err := f.store.ResolveNotificationPrefs(context.Background(), f.uid)
+	if err != nil {
+		f.t.Fatalf("resolve prefs: %v", err)
+	}
+	for _, p := range prefs {
+		if p.Category == string(cat) {
+			return p.State
+		}
+	}
+	f.t.Fatalf("category %s not resolved", cat)
+	return ""
+}
+
+// latestAuditOrNone is latestAudit for a test where no row may exist yet.
+func (f *accountManageFixture) latestAuditOrNone() (tool, status, reason string) {
+	f.t.Helper()
+	if f.count(`SELECT count(*) FROM audit_logs WHERE user_id = $1`) == 0 {
+		return "", "", ""
+	}
+	return f.latestAudit()
+}
+
 func (f *accountManageFixture) latestAudit() (tool, status, reason string) {
 	f.t.Helper()
 	var r *string
@@ -517,32 +558,36 @@ func TestManageAccessChecks_FailClosed(t *testing.T) {
 }
 
 // settingsCredential is one credential in the send-consent and notification
-// matrix, and how a client would present it.
+// matrix, and how a client would present it. browser marks the browser
+// sign-in token, the one credential the manage page's notification form lets
+// turn notifications off without account:manage.
 type settingsCredential struct {
 	name     string
 	bearer   func(f *accountManageFixture) string
 	cookie   func(f *accountManageFixture) string
 	accepted bool
+	browser  bool
 }
 
 // settingsCredentials: send consent and notification preferences need
-// account:manage on every surface. Unlike the manage page's disconnect, they
-// take no browser sign-in exception, so the browser token is listed here
-// without account:manage and refused: if that exception spread to these
-// routes again, its row would flip.
+// account:manage on every surface. The browser sign-in token is listed
+// without account:manage and refused on every row here, because every row
+// either is not the manage page's form or turns a notification on; its
+// reduce-only exception is TestManageNotifications_BrowserSignInCanOnlyTurnOff.
+// If an exception spread further, a row here would flip.
 var settingsCredentials = []settingsCredential{
-	{"browser sign-in cookie without account:manage", nil, func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, false},
-	{"browser sign-in bearer without account:manage", func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, nil, false},
-	{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }, nil, false},
-	{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }, nil, false},
-	{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }, nil, false},
+	{"browser sign-in cookie without account:manage", nil, func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, false, true},
+	{"browser sign-in bearer without account:manage", func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, nil, false, true},
+	{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }, nil, false, false},
+	{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }, nil, false, false},
+	{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }, nil, false, false},
 	{"connector without account:manage", func(f *accountManageFixture) string {
 		return f.accessToken("dcr-client", "telegram:dialogs:read", "telegram:messages:read")
-	}, nil, false},
-	{"browser sign-in cookie with account:manage", nil, func(f *accountManageFixture) string { return f.browserToken("", true) }, true},
+	}, nil, false, false},
+	{"browser sign-in cookie with account:manage", nil, func(f *accountManageFixture) string { return f.browserToken("", true) }, true, true},
 	{"connector with account:manage", func(f *accountManageFixture) string {
 		return f.accessToken("dcr-client", "telegram:messages:read", "account:manage")
-	}, nil, true},
+	}, nil, true, false},
 }
 
 func (c settingsCredential) present(f *accountManageFixture) (bearer, cookie string) {
@@ -555,25 +600,36 @@ func (c settingsCredential) present(f *accountManageFixture) (bearer, cookie str
 	return bearer, cookie
 }
 
-// TestAccountSettings_RequireAccountManage: the manage page's send toggle and
-// notification form, and PUT /api/account/notifications, accept exactly the
-// credentials granted account:manage -- the HTTP twins of set_send_consent
-// and set_my_notification_preferences. A refusal is a 403 that changes
-// nothing and is audited as scope_denied; an accepted change is audited as
-// ok.
+// TestAccountSettings_RequireAccountManage: the manage page's send toggle, its
+// notification form when a submission turns a notification on, and GET/PUT
+// /api/account/notifications accept exactly the credentials granted
+// account:manage -- the HTTP twins of set_send_consent,
+// set_my_notification_preferences and get_my_notification_preferences. A
+// refusal is a 403 that changes nothing and is audited as scope_denied; an
+// accepted change is audited as ok.
 func TestAccountSettings_RequireAccountManage(t *testing.T) {
 	type route struct {
-		method, path, audited, wantMsg string
-		okStatus                       int
-		changed                        func(f *accountManageFixture) bool
+		method, path, audited string
+		wantMsg               func(c settingsCredential) string
+		okStatus              int
+		// changed is nil for a read.
+		changed func(f *accountManageFixture) bool
 	}
+	msg := func(m string) func(settingsCredential) string { return func(settingsCredential) string { return m } }
 	routes := []route{
-		{http.MethodPost, "toggle-send", "POST /telegram/connect/manage/toggle-send", msgManageNeedsManage, http.StatusFound,
+		{http.MethodPost, "toggle-send", "POST /telegram/connect/manage/toggle-send", msg(msgManageCannotChangeSend), http.StatusFound,
 			func(f *accountManageFixture) bool { return f.sendEnabled() }},
-		{http.MethodPost, "manage-notifications", "POST /telegram/connect/manage/notifications", msgManageNeedsManage, http.StatusFound,
+		// The form body turns product_updates on, which starts off.
+		{http.MethodPost, "manage-notifications", manageNotificationsRoute, func(c settingsCredential) string {
+			if c.browser {
+				return msgManageNotificationsReduceOnly
+			}
+			return msgManageCannotChangeNotifications
+		}, http.StatusFound,
 			func(f *accountManageFixture) bool { return f.notificationPrefRows() > 0 }},
-		{http.MethodPut, "/notifications", "PUT /api/account/notifications", msgNotificationsNeedsManage, http.StatusOK,
+		{http.MethodPut, "/notifications", "PUT /api/account/notifications", msg(msgNotificationsNeedsManage), http.StatusOK,
 			func(f *accountManageFixture) bool { return f.notificationPrefRows() > 0 }},
+		{http.MethodGet, "/notifications", "GET /api/account/notifications", msg(msgNotificationsNeedsManage), http.StatusOK, nil},
 	}
 	for _, c := range settingsCredentials {
 		for _, rt := range routes {
@@ -589,16 +645,19 @@ func TestAccountSettings_RequireAccountManage(t *testing.T) {
 				}
 				bearer, cookie := c.present(f)
 				rec := f.call(rt.method, rt.path, bearer, cookie)
-				tool, status, reason := f.latestAudit()
+				tool, status, reason := f.latestAuditOrNone()
 				if !c.accepted {
 					if rec.Code != http.StatusForbidden {
 						t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 					}
-					if body := rec.Body.String(); !strings.Contains(body, rt.wantMsg) {
-						t.Fatalf("body = %s, want the refusal %q", body, rt.wantMsg)
+					if body, want := rec.Body.String(), rt.wantMsg(c); !strings.Contains(body, want) {
+						t.Fatalf("body = %s, want the refusal %q", body, want)
 					}
-					if rt.changed(f) {
+					if rt.changed != nil && rt.changed(f) {
 						t.Fatal("a refused call changed the account")
+					}
+					if strings.Contains(rec.Body.String(), `"categories"`) {
+						t.Fatal("a refused read returned the preferences")
 					}
 					if tool != rt.audited || status != "error" || reason != reasonScopeDenied {
 						t.Fatalf("audit = (%q, %q, %q), want (%q, error, %q)", tool, status, reason, rt.audited, reasonScopeDenied)
@@ -607,6 +666,12 @@ func TestAccountSettings_RequireAccountManage(t *testing.T) {
 				}
 				if rec.Code != rt.okStatus {
 					t.Fatalf("status = %d, want %d; body=%s", rec.Code, rt.okStatus, rec.Body.String())
+				}
+				if rt.changed == nil {
+					if !strings.Contains(rec.Body.String(), `"categories"`) {
+						t.Fatalf("an accepted read returned no preferences: %s", rec.Body.String())
+					}
+					return
 				}
 				if !rt.changed(f) {
 					t.Fatal("an accepted call did not change the account")
@@ -619,16 +684,117 @@ func TestAccountSettings_RequireAccountManage(t *testing.T) {
 	}
 }
 
-// TestManagePage_SettingsControlsFollowTheServerCheck: the page offers the
-// send toggle and the notification form exactly when their handlers would
-// accept the caller, and otherwise says why in their place.
-func TestManagePage_SettingsControlsFollowTheServerCheck(t *testing.T) {
-	controls := []struct {
-		form, note, post string
-	}{
-		{`action="/telegram/connect/manage/toggle-send"`, `id="send-unavailable"`, "toggle-send"},
-		{`action="/telegram/connect/manage/notifications"`, `id="notifications-unavailable"`, "manage-notifications"},
+// TestManageNotifications_BrowserSignInCanOnlyTurnOff: the browser sign-in
+// token without account:manage may submit the notification form only when the
+// new enabled set is a subset of the current one. Turning a category off, or
+// leaving everything as it is, is accepted; turning a category on is refused
+// whole, also when the same submission turns another one off.
+func TestManageNotifications_BrowserSignInCanOnlyTurnOff(t *testing.T) {
+	// Start from everything on: product_updates subscribed explicitly,
+	// maintenance and security on by default.
+	setup := func(t *testing.T) *accountManageFixture {
+		f := newAccountManageFixture(t, 7700109)
+		if err := f.store.SetNotificationPrefs(context.Background(), f.uid,
+			map[string]string{string(db.CategoryProductUpdates): db.PrefSubscribed}, "test"); err != nil {
+			t.Fatalf("seed prefs: %v", err)
+		}
+		return f
 	}
+	cases := []struct {
+		name string
+		// before turns these categories off first, through the same form.
+		before, form string
+		accepted     bool
+		want         map[db.NotificationCategory]string
+	}{
+		{"turn one off", "", "maintenance=on&security=on", true,
+			map[db.NotificationCategory]string{db.CategoryProductUpdates: db.PrefUnsubscribed, db.CategoryMaintenance: db.PrefSubscribed, db.CategorySecurity: db.PrefSubscribed}},
+		{"turn everything off", "", "", true,
+			map[db.NotificationCategory]string{db.CategoryProductUpdates: db.PrefUnsubscribed, db.CategoryMaintenance: db.PrefUnsubscribed, db.CategorySecurity: db.PrefUnsubscribed}},
+		{"leave everything as it is", "", "product_updates=on&maintenance=on&security=on", true,
+			map[db.NotificationCategory]string{db.CategoryProductUpdates: db.PrefSubscribed, db.CategoryMaintenance: db.PrefSubscribed, db.CategorySecurity: db.PrefSubscribed}},
+		{"turn a previously disabled one back on", "maintenance=on&security=on", "product_updates=on&maintenance=on&security=on", false,
+			map[db.NotificationCategory]string{db.CategoryProductUpdates: db.PrefUnsubscribed, db.CategoryMaintenance: db.PrefSubscribed, db.CategorySecurity: db.PrefSubscribed}},
+		{"turn one off and another on in one submission", "maintenance=on&security=on", "product_updates=on&security=on", false,
+			map[db.NotificationCategory]string{db.CategoryProductUpdates: db.PrefUnsubscribed, db.CategoryMaintenance: db.PrefSubscribed, db.CategorySecurity: db.PrefSubscribed}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			cookie := f.narrowedBrowserToken()
+			if tc.before != "" {
+				if rec := f.postNotifications(cookie, tc.before); rec.Code != http.StatusFound {
+					t.Fatalf("setup turn-off status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+				}
+			}
+			rec := f.postNotifications(cookie, tc.form)
+			tool, status, reason := f.latestAudit()
+			if tc.accepted {
+				if rec.Code != http.StatusFound {
+					t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+				}
+				if tool != manageNotificationsRoute || status != "ok" {
+					t.Fatalf("audit = (%q, %q), want (%q, ok)", tool, status, manageNotificationsRoute)
+				}
+			} else {
+				if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), msgManageNotificationsReduceOnly) {
+					t.Fatalf("status = %d, want 403 with the reduce-only refusal; body=%s", rec.Code, rec.Body.String())
+				}
+				if tool != manageNotificationsRoute || status != "error" || reason != reasonScopeDenied {
+					t.Fatalf("audit = (%q, %q, %q), want (%q, error, %q)", tool, status, reason, manageNotificationsRoute, reasonScopeDenied)
+				}
+			}
+			for cat, want := range tc.want {
+				if got := f.prefState(cat); got != want {
+					t.Errorf("%s = %s, want %s", cat, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestManageNotifications_ReduceOnlyFailsClosed: when the current preferences
+// cannot be read, a reduce-only submission writes nothing -- an unreadable
+// set is not an empty one.
+func TestManageNotifications_ReduceOnlyFailsClosed(t *testing.T) {
+	f := newAccountManageFixture(t, 7700110)
+	cookie := f.narrowedBrowserToken()
+	if _, err := f.store.DB.ExecContext(context.Background(), `DROP TABLE client_notification_prefs`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	rec := f.postNotifications(cookie, "")
+	if rec.Code == http.StatusFound {
+		t.Fatal("a reduce-only submission was accepted although the current preferences could not be read")
+	}
+	if tool, _, _ := f.latestAuditOrNone(); tool == manageNotificationsRoute {
+		t.Fatal("a write was audited although nothing could be checked")
+	}
+}
+
+// TestManageAudit_SuccessSurvivesClientHangup: the success row of a
+// manage-page change is written detached from the request, like the refusal.
+func TestManageAudit_SuccessSurvivesClientHangup(t *testing.T) {
+	f := newAccountManageFixture(t, 7700111)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv := NewManageServer(f.store, nil, accountManageIssuer, "", oauth.ConnectClientID)
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil).WithContext(ctx)
+	srv.auditManage(req, &auth.Identity{UserID: f.uid}, "POST /telegram/connect/manage/disconnect", nil)
+	if tool, status, _ := f.latestAudit(); tool != "POST /telegram/connect/manage/disconnect" || status != "ok" {
+		t.Fatalf("audit = (%q, %q), want the success row despite the cancelled request", tool, status)
+	}
+}
+
+// TestManagePage_SettingsControlsFollowTheServerCheck: the page offers the
+// send toggle exactly when HandleToggleSend would accept the caller, and the
+// notification form to account:manage and, reduce-only, to the browser
+// sign-in token, with every currently-off category disabled for the latter.
+func TestManagePage_SettingsControlsFollowTheServerCheck(t *testing.T) {
+	const (
+		toggleForm  = `action="/telegram/connect/manage/toggle-send"`
+		notifForm   = `action="/telegram/connect/manage/notifications"`
+		offDisabled = `name="product_updates" disabled`
+	)
 	for _, c := range settingsCredentials {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAccountManageFixture(t, 7700108)
@@ -638,17 +804,27 @@ func TestManagePage_SettingsControlsFollowTheServerCheck(t *testing.T) {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
 			body := rec.Body.String()
-			for _, ctl := range controls {
-				if got := strings.Contains(body, ctl.form); got != c.accepted {
-					t.Fatalf("%s shown = %v, want %v", ctl.form, got, c.accepted)
+			reduceOnly := c.browser && !c.accepted
+			checks := []struct {
+				what string
+				got  bool
+				want bool
+			}{
+				{"send toggle", strings.Contains(body, toggleForm), c.accepted},
+				{"send refusal note", strings.Contains(body, `id="send-unavailable"`), !c.accepted},
+				{"notification form", strings.Contains(body, notifForm), c.accepted || reduceOnly},
+				{"notification refusal note", strings.Contains(body, `id="notifications-unavailable"`), !c.accepted && !reduceOnly},
+				{"reduce-only note", strings.Contains(body, `id="notifications-reduce-only"`), reduceOnly},
+				{"off category disabled", strings.Contains(body, offDisabled), reduceOnly},
+			}
+			for _, ch := range checks {
+				if ch.got != ch.want {
+					t.Errorf("%s shown = %v, want %v", ch.what, ch.got, ch.want)
 				}
-				if got := strings.Contains(body, ctl.note); got == c.accepted {
-					t.Fatalf("%s shown = %v, want %v", ctl.note, got, !c.accepted)
-				}
-				post := f.call(http.MethodPost, ctl.post, bearer, cookie)
-				if accepted := post.Code == http.StatusFound; accepted != c.accepted {
-					t.Fatalf("%s status = %d; accepted = %v, want %v", ctl.post, post.Code, accepted, c.accepted)
-				}
+			}
+			post := f.call(http.MethodPost, "toggle-send", bearer, cookie)
+			if accepted := post.Code == http.StatusFound; accepted != c.accepted {
+				t.Fatalf("toggle-send status = %d; accepted = %v, want %v", post.Code, accepted, c.accepted)
 			}
 		})
 	}

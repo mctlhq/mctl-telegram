@@ -63,9 +63,10 @@ const reasonScopeDenied = "scope_denied"
 const (
 	msgDisconnectNeedsManage = "this connection cannot disconnect the account: it needs the account:manage scope"
 	msgDeleteNeedsManage     = "this connection cannot delete the account: it needs the account:manage scope"
-	// msgNotificationsNeedsManage refuses PUT /api/account/notifications,
-	// the API twin of set_my_notification_preferences.
-	msgNotificationsNeedsManage = "this connection cannot change notification preferences: it needs the account:manage scope"
+	// msgNotificationsNeedsManage refuses GET and PUT
+	// /api/account/notifications, the API twins of
+	// get_my_notification_preferences and set_my_notification_preferences.
+	msgNotificationsNeedsManage = "this connection cannot read or change notification preferences: it needs the account:manage scope"
 )
 
 // canManageAccount reports whether id may change its own account: disconnect,
@@ -73,8 +74,9 @@ const (
 // the manage page. Only a credential granted account:manage passes. A
 // read-only worker token or a Local Bridge device token never holds it, so it
 // can neither end the session it was issued against nor turn on the send
-// consent the owner left off. The one exception, the manage page's
-// disconnect, is canDisconnectFromManagePage.
+// consent the owner left off. The manage page's two narrow exceptions for the
+// browser sign-in token are canDisconnectFromManagePage and the reduce-only
+// notification form (HandleSetNotifications).
 //
 // This revises the 2026-09-12 decision (mctlhq/.github#35) that left
 // disconnect and delete open to any authenticated credential.
@@ -83,15 +85,20 @@ func canManageAccount(id *auth.Identity) bool {
 }
 
 // canDisconnectFromManagePage is canManageAccount plus the browser Telegram
-// sign-in token (client_id == connectClient), which is how the owner reaches
-// the manage page whatever scopes a connector was narrowed to. It applies to
-// the manage page's disconnect only; that page cannot delete, and the API
-// does not accept the exception. An empty connectClient accepts nothing
-// beyond canManageAccount.
+// sign-in token, which is how the owner reaches the manage page whatever
+// scopes a connector was narrowed to. It applies to the manage page's
+// disconnect only; that page cannot delete, and the API does not accept the
+// exception.
 func canDisconnectFromManagePage(id *auth.Identity, connectClient string) bool {
-	if canManageAccount(id) {
-		return true
-	}
+	return canManageAccount(id) || isBrowserSignIn(id, connectClient)
+}
+
+// isBrowserSignIn reports whether id is the browser Telegram sign-in token
+// (client_id == connectClient). Only the Telegram login on this server mints
+// it, so its holder is the account owner -- but it is issued whatever tier
+// the owner resolves to, including none, so it carries no account:manage by
+// itself. An empty connectClient matches nothing.
+func isBrowserSignIn(id *auth.Identity, connectClient string) bool {
 	return id != nil && connectClient != "" && id.ClientID == connectClient
 }
 
@@ -287,6 +294,11 @@ func (h *AccountHandlers) getNotifications(w http.ResponseWriter, r *http.Reques
 	id := auth.From(r.Context())
 	if id == nil {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !canManageAccount(id) {
+		auditScopeDenied(r, h.Store, id, "GET /api/account/notifications")
+		writeAccountErr(w, http.StatusForbidden, msgNotificationsNeedsManage)
 		return
 	}
 	prefs, err := h.Store.ResolveNotificationPrefs(r.Context(), id.UserID)

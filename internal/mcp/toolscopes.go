@@ -62,9 +62,11 @@ var toolScopes = map[string][]string{
 	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
 	// read-only credential cannot grant itself send consent, revoke its
 	// owner's devices, or end the session it was issued against. The HTTP
-	// twins hold the same line: /api/account and the manage page's send
-	// toggle and notification form require account:manage too
-	// (internal/web.canManageAccount).
+	// twins hold the same line (internal/web.canManageAccount): /api/account
+	// disconnect, delete and GET/PUT notifications, and the manage page's
+	// send toggle. The manage page's notification form also lets the
+	// browser sign-in token turn notifications off, never on, so an owner
+	// whose sign-in resolves to no scopes can still withdraw consent.
 	//
 	// disconnect and delete were open to any authenticated credential by the
 	// 2026-09-12 decision (mctlhq/.github#35). Revised 2026-10-20: a read-only
