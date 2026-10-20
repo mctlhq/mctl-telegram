@@ -31,21 +31,17 @@ type ManageServer struct {
 	issuer string
 	// loginBotUsername is the validated login bot @username, or "".
 	loginBotUsername string
-	// connectClient is oauth.ConnectClientID; see canManageAccount.
+	// connectClient is oauth.ConnectClientID; see canDisconnectFromManagePage.
 	connectClient string
 }
 
 // NewManageServer constructs a ManageServer. loginBotUsername is the validated
-// TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset.
-func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername string) *ManageServer {
-	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername}
-}
-
-// WithConnectClient sets the browser sign-in client_id that canManageAccount
-// accepts for disconnect, and returns s.
-func (s *ManageServer) WithConnectClient(clientID string) *ManageServer {
-	s.connectClient = clientID
-	return s
+// TELEGRAM_LOGIN_BOT_USERNAME, or "" when unset. connectClient is the browser
+// sign-in client_id (oauth.ConnectClientID) that may disconnect here without
+// account:manage; it is a parameter rather than a builder step so that a
+// call site cannot silently drop the owner's way out.
+func NewManageServer(store *db.Store, pool ManagePool, issuer, loginBotUsername, connectClient string) *ManageServer {
+	return &ManageServer{store: store, pool: pool, issuer: issuer, loginBotUsername: loginBotUsername, connectClient: connectClient}
 }
 
 // loginBotStartURL is the one place the login bot start link is built, shared
@@ -163,6 +159,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		Username:      info.Username,
 		ConnectedAt:   info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
 		SendEnabled:   info.SendEnabled,
+		CanDisconnect: canDisconnectFromManagePage(id, s.connectClient),
 		Issuer:        s.issuer,
 		Notifications: rows,
 		Bot:           botView,
@@ -176,6 +173,10 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// msgManageCannotDisconnect explains a refused manage-page disconnect, both on
+// the 403 page and in place of the button.
+const msgManageCannotDisconnect = "This connection cannot disconnect the account. Sign in to this page with Telegram in a browser to disconnect."
+
 // HandleDisconnect revokes the user's active session and redirects back.
 func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) {
 	id := auth.From(r.Context())
@@ -183,9 +184,9 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
-	if !canManageAccount(id, s.connectClient) {
+	if !canDisconnectFromManagePage(id, s.connectClient) {
 		auditScopeDenied(r, s.store, id, "POST /telegram/connect/manage/disconnect")
-		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: "This connection cannot disconnect the account. Sign in to this page in a browser to disconnect."})
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotDisconnect})
 		return
 	}
 	var err error
@@ -234,11 +235,14 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 // ----- HTML templates -----
 
 type managePageData struct {
-	Connected     bool
-	DisplayName   string
-	Username      string
-	ConnectedAt   string
-	SendEnabled   bool
+	Connected   bool
+	DisplayName string
+	Username    string
+	ConnectedAt string
+	SendEnabled bool
+	// CanDisconnect is HandleDisconnect's own check, so the page never
+	// offers a button the server would refuse.
+	CanDisconnect bool
 	Issuer        string
 	Notifications []notificationRow
 	Bot           *botReachabilityView
@@ -310,9 +314,9 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
       <button type="submit" class="btn-secondary">{{if .SendEnabled}}Disable send{{else}}Enable send{{end}}</button>
     </form>
-    <form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
+    {{if .CanDisconnect}}<form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <button type="submit" class="btn-danger">Disconnect</button>
-    </form>
+    </form>{{else}}<p class="meta" id="disconnect-unavailable">` + msgManageCannotDisconnect + `</p>{{end}}
     {{else}}
     <p>No active Telegram session found.</p>
     {{end}}

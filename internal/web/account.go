@@ -37,23 +37,16 @@ type AccountCloser interface {
 // Audit rows are written through the same Store.LogToolCall path used by MCP
 // tools so /api/account calls show up in get_my_auditLog too.
 //
-// Disconnect and delete additionally require canManageAccount; see there.
+// Disconnect and delete additionally require account:manage, with no
+// exception: the browser sign-in token's way out is the manage page
+// (canDisconnectFromManagePage), not this API.
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
-	// ConnectClient is oauth.ConnectClientID, the client_id of the browser
-	// Telegram sign-in token. Empty means only account:manage is accepted.
-	ConnectClient string
 }
 
 func NewAccountHandlers(store *db.Store, pool AccountCloser) *AccountHandlers {
 	return &AccountHandlers{Store: store, Pool: pool}
-}
-
-// WithConnectClient sets ConnectClient and returns h.
-func (h *AccountHandlers) WithConnectClient(clientID string) *AccountHandlers {
-	h.ConnectClient = clientID
-	return h
 }
 
 // accountManageScope is the scope that lets a credential disconnect or delete
@@ -65,27 +58,35 @@ const accountManageScope = "account:manage"
 // a refused tool call read the same in the audit log and its metrics.
 const reasonScopeDenied = "scope_denied"
 
-// msgAccountManageRequired is the refusal for a credential that may not
-// disconnect or delete the account.
-const msgAccountManageRequired = "this connection cannot disconnect or delete the account: it needs the account:manage scope, or sign in to the manage page in a browser"
+// The refusals for a credential without account:manage. Neither names the
+// manage page: it is not mounted in every auth mode, and it cannot delete.
+const (
+	msgDisconnectNeedsManage = "this connection cannot disconnect the account: it needs the account:manage scope"
+	msgDeleteNeedsManage     = "this connection cannot delete the account: it needs the account:manage scope"
+)
 
 // canManageAccount reports whether id may disconnect or delete its own
-// account. It holds for a credential granted account:manage, and for the
-// browser Telegram sign-in token (client_id == connectClient), which is how
-// the owner reaches the manage page whatever scopes a connector was
-// narrowed to. A read-only worker token or a Local Bridge device token has
-// neither, so it cannot end the session it was issued against.
+// account through the API or MCP: only a credential granted account:manage.
+// A read-only worker token or a Local Bridge device token never holds it, so
+// it cannot end the session it was issued against.
 //
 // This revises the 2026-09-12 decision (mctlhq/.github#35) that left
 // disconnect and delete open to any authenticated credential.
-func canManageAccount(id *auth.Identity, connectClient string) bool {
-	if id == nil {
-		return false
-	}
-	if id.HasScope(accountManageScope) {
+func canManageAccount(id *auth.Identity) bool {
+	return id != nil && id.HasScope(accountManageScope)
+}
+
+// canDisconnectFromManagePage is canManageAccount plus the browser Telegram
+// sign-in token (client_id == connectClient), which is how the owner reaches
+// the manage page whatever scopes a connector was narrowed to. It applies to
+// the manage page's disconnect only; that page cannot delete, and the API
+// does not accept the exception. An empty connectClient accepts nothing
+// beyond canManageAccount.
+func canDisconnectFromManagePage(id *auth.Identity, connectClient string) bool {
+	if canManageAccount(id) {
 		return true
 	}
-	return connectClient != "" && id.ClientID == connectClient
+	return id != nil && connectClient != "" && id.ClientID == connectClient
 }
 
 // auditScopeDenied records a refused disconnect or delete against the caller.
@@ -139,9 +140,9 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !canManageAccount(id, h.ConnectClient) {
+	if !canManageAccount(id) {
 		auditScopeDenied(r, h.Store, id, "POST /api/account/disconnect")
-		writeAccountErr(w, http.StatusForbidden, msgAccountManageRequired)
+		writeAccountErr(w, http.StatusForbidden, msgDisconnectNeedsManage)
 		return
 	}
 	// Pool eviction and DB revoke share the pool mutex via RemoveAtomic
@@ -176,9 +177,9 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !canManageAccount(id, h.ConnectClient) {
+	if !canManageAccount(id) {
 		auditScopeDenied(r, h.Store, id, "DELETE /api/account")
-		writeAccountErr(w, http.StatusForbidden, msgAccountManageRequired)
+		writeAccountErr(w, http.StatusForbidden, msgDeleteNeedsManage)
 		return
 	}
 	var rows int64

@@ -84,11 +84,21 @@ func New(store *db.Store, cfg Config) (*Provider, error) {
 // Users that need send/pin access must be added to "telegram-mcp-senders".
 // This prevents new connector users from sending messages before an operator
 // has explicitly opted them in.
+//
+// Every group carries account:manage, the owner's scope over their own
+// account (disconnect, delete, send consent, notification preferences,
+// device revocation), matching the client tier of local-jwt. A token here is
+// a signed-in user's, derived from group membership, so it is the owner
+// acting; without the scope, shared-hmac would leave no self-service way to
+// disconnect or delete at all, since the manage page is mounted only under
+// local-jwt. A token with no recognised group -- such as a worker token
+// minted by an older build -- still derives no scopes and reaches none of it.
 func DefaultGroupScopes() map[string][]string {
 	return map[string][]string{
 		"telegram-mcp-readers": {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
+			"account:manage",
 		},
 		// telegram-mcp-senders is the only group that grants write access by
 		// default. Operators must explicitly add users to this group.
@@ -97,6 +107,7 @@ func DefaultGroupScopes() map[string][]string {
 			"telegram:messages:read",
 			"telegram:messages:send",
 			"telegram:messages:pin",
+			"account:manage",
 		},
 		"platform-admins": {
 			"telegram:dialogs:read",
@@ -104,6 +115,7 @@ func DefaultGroupScopes() map[string][]string {
 			"telegram:messages:send",
 			"telegram:messages:pin",
 			"admin:users",
+			"account:manage",
 		},
 		// mctl-api issues "admins" for org admins (IsAdmin check in ResolveGroups).
 		// Read-only by design: prevents implicit send access for new connector
@@ -111,6 +123,7 @@ func DefaultGroupScopes() map[string][]string {
 		"admins": {
 			"telegram:dialogs:read",
 			"telegram:messages:read",
+			"account:manage",
 		},
 	}
 }

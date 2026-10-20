@@ -58,7 +58,7 @@ func newManageTestStore(t *testing.T) *db.Store {
 // connect wizard, with a Local Bridge alternative.
 func TestManagePageUnauthenticatedHTML(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
@@ -91,7 +91,7 @@ func TestManagePageUnauthenticatedHTML(t *testing.T) {
 
 func TestManagePageUnauthenticatedJSON(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
 	req.Header.Set("Accept", "application/json")
@@ -132,7 +132,7 @@ func TestManagePageShowsSession(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	id := &auth.Identity{UserID: uid}
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -170,7 +170,7 @@ func TestHandleDisconnect_ClearsCookieAndRedirects(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	srv := NewManageServer(store, nil, "https://tg.test", "").WithConnectClient("mctl_self_connect")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
 	// The browser sign-in token: what the connect-session cookie carries.
 	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"}
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil)
@@ -198,7 +198,7 @@ func TestHandleDisconnect_ClearsCookieAndRedirects(t *testing.T) {
 
 func TestManageMiddleware_BrowserNoTokenGetsHTML(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 	h := manageThroughAuth(t, srv, stubManageProvider{})
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -226,7 +226,7 @@ func TestManageMiddleware_BrowserNoTokenGetsHTML(t *testing.T) {
 
 func TestManageMiddleware_InvalidCookieBrowserGetsHTML(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 	h := manageThroughAuth(t, srv, stubManageProvider{err: errors.New("JWT expired")})
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -255,7 +255,7 @@ func TestManageMiddleware_InvalidCookieBrowserGetsHTML(t *testing.T) {
 
 func TestManageMiddleware_APIClientsKeepJSON(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 	h := manageThroughAuth(t, srv, stubManageProvider{err: errors.New("JWT expired")})
 
 	cases := []struct {
@@ -314,8 +314,8 @@ func TestManageMiddleware_AuthenticatedStillRendersDashboard(t *testing.T) {
 		t.Fatalf("seed session: %v", err)
 	}
 
-	srv := NewManageServer(store, nil, "https://tg.test", "")
-	id := &auth.Identity{UserID: uid}
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
+	id := &auth.Identity{UserID: uid, ClientID: "mctl_self_connect"}
 	h := manageThroughAuth(t, srv, stubManageProvider{id: id})
 
 	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -340,7 +340,7 @@ func TestManageMiddleware_AuthenticatedStillRendersDashboard(t *testing.T) {
 
 func TestManageDisconnectUnauthenticatedHTML(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/disconnect", nil)
 	req.Header.Set("Accept", "text/html")
@@ -357,7 +357,7 @@ func TestManageDisconnectUnauthenticatedHTML(t *testing.T) {
 
 func TestManageToggleSendUnauthenticatedHTML(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/toggle-send", nil)
 	req.Header.Set("Accept", "text/html")
@@ -379,7 +379,7 @@ func TestManageToggleSendUnauthenticatedHTML(t *testing.T) {
 // X-Requested-With, so both representations must be declared to caches.
 func TestManageUnauthorizedSetsNegotiationVary(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	for _, accept := range []string{"text/html", "application/json"} {
 		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -395,7 +395,7 @@ func TestManageUnauthorizedSetsNegotiationVary(t *testing.T) {
 // package passes, so the two 401 reasons must render different pages.
 func TestManageUnauthorizedReasonSelectsCopy(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	render := func(msg string) string {
 		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)
@@ -442,7 +442,7 @@ func wantExactNegotiationVary(t *testing.T, h http.Header, ctx string) {
 // reached directly from the handlers rather than through the middleware.
 func TestManageUnauthorizedIsNoStore(t *testing.T) {
 	store := newManageTestStore(t)
-	srv := NewManageServer(store, nil, "https://tg.test", "")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "")
 
 	for _, accept := range []string{"text/html", "application/json"} {
 		req := httptest.NewRequest(http.MethodGet, "/telegram/connect/manage", nil)

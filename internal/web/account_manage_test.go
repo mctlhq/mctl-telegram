@@ -2,24 +2,33 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
 // These tests run the real credentials through the real middleware: a worker
-// token from workertoken.Minter, an access token signed the way
+// token from workertoken.Minter, a browser sign-in token from
+// oauth.Server.ExchangeConnect, an access token signed the way
 // oauth.Server.mintAccessToken signs one, and localjwt.Provider verifying
-// both. A hand-built auth.Identity would prove the check, not that the
+// all of them. A hand-built auth.Identity would prove the check, not that the
 // credentials the server actually issues land on the right side of it.
 
 const (
@@ -28,14 +37,17 @@ const (
 )
 
 type accountManageFixture struct {
-	store  *db.Store
-	uid    int64
-	tgID   int64
-	api    http.Handler
-	manage http.Handler
-	minter *workertoken.Minter
-	signer *localjwt.Issuer
-	t      *testing.T
+	store      *db.Store
+	uid        int64
+	tgID       int64
+	api        http.Handler
+	manage     http.Handler
+	managePage http.Handler
+	minter     *workertoken.Minter
+	signer     *localjwt.Issuer
+	oauthSrv   *oauth.Server
+	oauthMux   http.Handler
+	t          *testing.T
 }
 
 func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
@@ -69,22 +81,120 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 	if err != nil {
 		t.Fatalf("NewIssuer: %v", err)
 	}
+	oauthSrv, err := oauth.New(ctx, oauth.Config{
+		Issuer:            accountManageIssuer,
+		JWTSecret:         []byte(accountManageSecret),
+		TelegramOIDC:      stubOIDC{tgID: tgID},
+		ClientTelegramIDs: map[int64]bool{tgID: true},
+		AccessTokenTTL:    time.Hour,
+		CodeTTL:           time.Minute,
+	}, store)
+	if err != nil {
+		t.Fatalf("oauth.New: %v", err)
+	}
+	oauthRouter := chi.NewRouter()
+	oauthSrv.Register(oauthRouter)
 	rm := auth.ResourceMetadata{BaseURL: accountManageIssuer}
 
+	// Wired exactly as cmd/server/main.go wires them.
 	router := chi.NewRouter()
-	NewAccountHandlers(store, nil).WithConnectClient(oauth.ConnectClientID).Register(router)
-	manageSrv := NewManageServer(store, nil, accountManageIssuer, "").WithConnectClient(oauth.ConnectClientID)
+	NewAccountHandlers(store, nil).Register(router)
+	manageSrv := NewManageServer(store, nil, accountManageIssuer, "", oauth.ConnectClientID)
+	withAuth := auth.MiddlewareWithHTML(provider, true, nil, rm, manageSrv.WriteUnauthorized)
 
 	return &accountManageFixture{
-		store:  store,
-		uid:    uid,
-		tgID:   tgID,
-		api:    auth.Middleware(provider, true, nil, rm)(router),
-		manage: auth.MiddlewareWithHTML(provider, true, nil, rm, manageSrv.WriteUnauthorized)(http.HandlerFunc(manageSrv.HandleDisconnect)),
-		minter: minter,
-		signer: signer,
-		t:      t,
+		store:      store,
+		uid:        uid,
+		tgID:       tgID,
+		api:        auth.Middleware(provider, true, nil, rm)(router),
+		manage:     withAuth(http.HandlerFunc(manageSrv.HandleDisconnect)),
+		managePage: withAuth(http.HandlerFunc(manageSrv.HandleManage)),
+		minter:     minter,
+		signer:     signer,
+		oauthSrv:   oauthSrv,
+		oauthMux:   oauthRouter,
+		t:          t,
 	}
+}
+
+// stubOIDC stands in for Telegram's OIDC leg: it reports the fixture's
+// account as the one that signed in. Everything after it -- the authorization
+// code, scope resolution and the token itself -- is the real oauth.Server.
+type stubOIDC struct{ tgID int64 }
+
+func (o stubOIDC) AuthCodeURL(state, _, _ string) string {
+	return "https://oauth.telegram.test/auth?" + url.Values{"state": {state}}.Encode()
+}
+func (o stubOIDC) Exchange(context.Context, string, string, string) (*telegramoidc.Identity, error) {
+	return &telegramoidc.Identity{TelegramID: o.tgID, Username: "dana_tg", FirstName: "Dana"}, nil
+}
+
+// browserToken is the browser Telegram sign-in token, minted the way
+// /telegram/connect mints it: a real /oauth/authorize and Telegram callback
+// for the built-in connect client, then oauth.Server.ExchangeConnect.
+// requested is the authorize request's scope parameter, which narrows the
+// grant; the token is checked to carry exactly what the
+// caller expects about account:manage, so a change in ResolveScopes cannot
+// quietly turn a refusal test into a pass.
+func (f *accountManageFixture) browserToken(requested string, wantManage bool) string {
+	f.t.Helper()
+	verifier := "browser-verifier-" + strings.Repeat("x", 40)
+	sum := sha256.Sum256([]byte(verifier))
+	redirect := accountManageIssuer + "/telegram/connect/done"
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {oauth.ConnectClientID},
+		"redirect_uri":          {redirect},
+		"state":                 {"connect-state"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(sum[:])},
+		"code_challenge_method": {"S256"},
+	}
+	if requested != "" {
+		q.Set("scope", requested)
+	}
+	rec := httptest.NewRecorder()
+	f.oauthMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil))
+	if rec.Code != http.StatusFound {
+		f.t.Fatalf("authorize status = %d: %s", rec.Code, rec.Body.String())
+	}
+	toTelegram, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		f.t.Fatalf("authorize redirect: %v", err)
+	}
+	cb := url.Values{"state": {toTelegram.Query().Get("state")}, "code": {"tg-auth-code"}}
+	rec = httptest.NewRecorder()
+	f.oauthMux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/oauth/telegram/callback?"+cb.Encode(), nil))
+	loc := rec.Header().Get("Location")
+	if rec.Code == http.StatusOK {
+		// The success interstitial carries the redirect as a link.
+		if m := regexp.MustCompile(`href="([^"]*code=[^"]*)"`).FindStringSubmatch(rec.Body.String()); m != nil {
+			loc = html.UnescapeString(m[1])
+		}
+	}
+	back, err := url.Parse(loc)
+	if err != nil || back.Query().Get("code") == "" {
+		f.t.Fatalf("callback status = %d gave no code (location %q): %s", rec.Code, loc, rec.Body.String())
+	}
+	tok, err := f.oauthSrv.ExchangeConnect(context.Background(), back.Query().Get("code"), verifier, oauth.ConnectClientID, redirect)
+	if err != nil {
+		f.t.Fatalf("ExchangeConnect: %v", err)
+	}
+	c, err := localjwt.Verify(tok, []byte(accountManageSecret), accountManageIssuer)
+	if err != nil {
+		f.t.Fatalf("verify browser token: %v", err)
+	}
+	if c.ClientID != oauth.ConnectClientID {
+		f.t.Fatalf("browser token client_id = %q, want %q", c.ClientID, oauth.ConnectClientID)
+	}
+	if got := slices.Contains(c.Scopes, "account:manage"); got != wantManage {
+		f.t.Fatalf("browser token scopes = %v; account:manage present = %v, want %v", c.Scopes, got, wantManage)
+	}
+	return tok
+}
+
+// narrowedBrowserToken is a browser sign-in token without account:manage.
+func (f *accountManageFixture) narrowedBrowserToken() string {
+	return f.browserToken("telegram:dialogs:read telegram:messages:read", false)
 }
 
 func (f *accountManageFixture) workerToken(purpose string) string {
@@ -131,14 +241,18 @@ func (f *accountManageFixture) accessToken(clientID string, scopes ...string) st
 	return tok
 }
 
-// call sends method path to the account API (path under /api/account) or, for
-// path "manage", to the manage page's disconnect. bearer and cookie are the
+// call sends method path to the account API (path under /api/account), for
+// path "manage" to the manage page's disconnect, and for "manage-page" to the
+// manage page itself. bearer and cookie are the
 // two ways a localjwt credential reaches the server.
 func (f *accountManageFixture) call(method, path, bearer, cookie string) *httptest.ResponseRecorder {
 	f.t.Helper()
 	h, target := f.api, path
-	if path == "manage" {
+	switch path {
+	case "manage":
 		h, target = f.manage, "/telegram/connect/manage/disconnect"
+	case "manage-page":
+		h, target = f.managePage, "/telegram/connect/manage"
 	}
 	req := httptest.NewRequest(method, target, nil)
 	if bearer != "" {
@@ -183,37 +297,45 @@ func (f *accountManageFixture) latestAudit() (tool, status, reason string) {
 	return tool, status, reason
 }
 
-// TestAccountEndpoints_RestrictedCredentialsCannotEndTheSession: a read-only
-// worker token and a Local Bridge device-style token can neither disconnect
-// nor delete through any HTTP path. Each refusal is a 403, leaves the session
-// active and the row in place, and is audited as scope_denied against the
-// account owner.
+// TestAccountEndpoints_RestrictedCredentialsCannotEndTheSession: a credential
+// without account:manage can neither disconnect nor delete through the API,
+// and only the browser sign-in token may disconnect on the manage page. Each
+// refusal is a 403, leaves the session active and the row in place, and is
+// audited as scope_denied against the account owner.
 func TestAccountEndpoints_RestrictedCredentialsCannotEndTheSession(t *testing.T) {
-	paths := []struct {
-		method, path, audited string
-	}{
-		{http.MethodPost, "/disconnect", "POST /api/account/disconnect"},
-		{http.MethodDelete, "/", "DELETE /api/account"},
-		{http.MethodPost, "manage", "POST /telegram/connect/manage/disconnect"},
+	type path struct {
+		method, path, audited, wantMsg string
 	}
+	disconnectAPI := path{http.MethodPost, "/disconnect", "POST /api/account/disconnect", msgDisconnectNeedsManage}
+	deleteAPI := path{http.MethodDelete, "/", "DELETE /api/account", msgDeleteNeedsManage}
+	managePage := path{http.MethodPost, "manage", "POST /telegram/connect/manage/disconnect", msgManageCannotDisconnect}
 	creds := []struct {
 		name  string
 		token func(f *accountManageFixture) string
+		paths []path
 	}{
-		{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }},
-		{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }},
-		{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }},
+		{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }, []path{disconnectAPI, deleteAPI, managePage}},
+		{"local-bridge worker token", func(f *accountManageFixture) string { return f.workerToken("local-bridge") }, []path{disconnectAPI, deleteAPI, managePage}},
+		{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }, []path{disconnectAPI, deleteAPI, managePage}},
 		{"connector token without account:manage", func(f *accountManageFixture) string {
 			return f.accessToken("dcr-client", "telegram:dialogs:read", "telegram:messages:read")
-		}},
+		}, []path{disconnectAPI, deleteAPI, managePage}},
+		// The browser sign-in token's exception is the manage page's
+		// disconnect only. Presented to the API as a bearer (the cookie's
+		// Path keeps a browser from sending it there, but that is not the
+		// authorization), it is refused like any other credential.
+		{"browser sign-in token without account:manage", func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, []path{disconnectAPI, deleteAPI}},
 	}
 	for _, c := range creds {
-		for _, p := range paths {
+		for _, p := range c.paths {
 			t.Run(c.name+"/"+p.audited, func(t *testing.T) {
 				f := newAccountManageFixture(t, 7700101)
 				rec := f.call(p.method, p.path, c.token(f), "")
 				if rec.Code != http.StatusForbidden {
 					t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+				}
+				if body := rec.Body.String(); !strings.Contains(body, p.wantMsg) {
+					t.Fatalf("body = %s, want the refusal %q", body, p.wantMsg)
 				}
 				if n := f.activeSessions(); n != 1 {
 					t.Fatalf("active sessions = %d after a refused call, want 1", n)
@@ -241,7 +363,7 @@ func TestAccountEndpoints_RefusalIsAuditedAfterClientHangsUp(t *testing.T) {
 		UserID: f.uid, TelegramID: f.tgID, Scopes: []string{"telegram:dialogs:read", "telegram:messages:read"},
 	}))
 	cancel()
-	h := NewAccountHandlers(f.store, nil).WithConnectClient(oauth.ConnectClientID)
+	h := NewAccountHandlers(f.store, nil)
 	rec := httptest.NewRecorder()
 	h.delete(rec, httptest.NewRequest(http.MethodDelete, "/", nil).WithContext(ctx))
 	if rec.Code != http.StatusForbidden {
@@ -278,12 +400,12 @@ func TestAccountEndpoints_AccountManageDeletes(t *testing.T) {
 }
 
 // TestManageDisconnect_BrowserSignInAlwaysWorks: the owner's way out does not
-// depend on the scopes a connector was narrowed to. The browser sign-in token
-// (client_id = oauth.ConnectClientID) reaches the manage page as the
-// connect-session cookie and disconnects even without account:manage.
+// depend on the scopes a connector was narrowed to. The real browser sign-in
+// token (client_id = oauth.ConnectClientID), narrowed below account:manage,
+// reaches the manage page as the connect-session cookie and disconnects.
 func TestManageDisconnect_BrowserSignInAlwaysWorks(t *testing.T) {
 	f := newAccountManageFixture(t, 7700105)
-	rec := f.call(http.MethodPost, "manage", "", f.accessToken(oauth.ConnectClientID, "telegram:messages:read"))
+	rec := f.call(http.MethodPost, "manage", "", f.narrowedBrowserToken())
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
 	}
@@ -292,31 +414,71 @@ func TestManageDisconnect_BrowserSignInAlwaysWorks(t *testing.T) {
 	}
 }
 
-// TestMintForDevice_NeverIssuesAccountManage: the refusal above rests on a
-// device credential never carrying account:manage. Asking MintForDevice for
-// it must fail, not mint a credential that would pass canManageAccount.
-func TestMintForDevice_NeverIssuesAccountManage(t *testing.T) {
-	f := newAccountManageFixture(t, 7700106)
-	_, err := f.minter.MintForDevice(workertoken.DeviceMintRequest{
-		TelegramID:       f.tgID,
-		DeviceID:         "dev_accountmanagetest",
-		Scopes:           append(append([]string{}, deviceScopes...), "account:manage"),
-		Jti:              "jti-accountmanagetest",
-		OriginalIssuedAt: time.Now().Add(-time.Minute),
-	})
-	if err == nil {
-		t.Fatal("MintForDevice issued a device credential carrying account:manage")
+// TestManagePage_DisconnectButtonFollowsTheServerCheck: the page offers the
+// Disconnect button exactly when HandleDisconnect would accept the caller, and
+// otherwise says why in its place.
+func TestManagePage_DisconnectButtonFollowsTheServerCheck(t *testing.T) {
+	const button = `action="/telegram/connect/manage/disconnect"`
+	cases := []struct {
+		name       string
+		bearer     func(f *accountManageFixture) string
+		cookie     func(f *accountManageFixture) string
+		wantButton bool
+	}{
+		{"browser sign-in cookie without account:manage", nil, func(f *accountManageFixture) string { return f.narrowedBrowserToken() }, true},
+		{"browser sign-in cookie with account:manage", nil, func(f *accountManageFixture) string { return f.browserToken("", true) }, true},
+		{"connector with account:manage", func(f *accountManageFixture) string {
+			return f.accessToken("dcr-client", "telegram:messages:read", "account:manage")
+		}, nil, true},
+		{"read-only worker token", func(f *accountManageFixture) string { return f.workerToken("") }, nil, false},
+		{"Local Bridge device credential", func(f *accountManageFixture) string { return f.deviceToken() }, nil, false},
+		{"connector without account:manage", func(f *accountManageFixture) string {
+			return f.accessToken("dcr-client", "telegram:messages:read")
+		}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAccountManageFixture(t, 7700106)
+			var bearer, cookie string
+			if tc.bearer != nil {
+				bearer = tc.bearer(f)
+			}
+			if tc.cookie != nil {
+				cookie = tc.cookie(f)
+			}
+			rec := f.call(http.MethodGet, "manage-page", bearer, cookie)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if got := strings.Contains(body, button); got != tc.wantButton {
+				t.Fatalf("Disconnect button shown = %v, want %v", got, tc.wantButton)
+			}
+			if got := strings.Contains(body, msgManageCannotDisconnect); got == tc.wantButton {
+				t.Fatalf("refusal note shown = %v, want %v", got, !tc.wantButton)
+			}
+			// The page and the handler must agree: where the button is
+			// shown, pressing it works; where it is not, it is refused.
+			post := f.call(http.MethodPost, "manage", bearer, cookie)
+			if accepted := post.Code == http.StatusFound; accepted != tc.wantButton {
+				t.Fatalf("disconnect status = %d; accepted = %v, want %v", post.Code, accepted, tc.wantButton)
+			}
+		})
 	}
 }
 
-// TestCanManageAccount_EmptyConnectClientFailsClosed: an unwired
-// ConnectClient must not make a token without a client_id pass the check.
-func TestCanManageAccount_EmptyConnectClientFailsClosed(t *testing.T) {
+// TestManageAccessChecks_FailClosed: an empty connectClient adds nothing to
+// account:manage, and a nil identity passes neither check.
+func TestManageAccessChecks_FailClosed(t *testing.T) {
 	id := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}}
-	if canManageAccount(id, "") {
+	if canDisconnectFromManagePage(id, "") {
 		t.Fatal("an identity with no client_id passed with an empty connectClient")
 	}
-	if canManageAccount(nil, oauth.ConnectClientID) {
+	browser := &auth.Identity{UserID: 1, ClientID: oauth.ConnectClientID, Scopes: []string{"telegram:messages:read"}}
+	if canManageAccount(browser) {
+		t.Fatal("canManageAccount accepted the browser sign-in token without account:manage")
+	}
+	if canManageAccount(nil) || canDisconnectFromManagePage(nil, oauth.ConnectClientID) {
 		t.Fatal("a nil identity passed")
 	}
 }

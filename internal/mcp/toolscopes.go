@@ -53,11 +53,10 @@ var toolScopes = map[string][]string{
 
 	// The caller's own account, changed. All require account:manage.
 	//
-	// Who grants it: oauth.ResolveScopes (admin and client tiers) and the
-	// local-dev provider. sharedhmac's default groups grant it to no group,
-	// so in that mode these tools are listed to nobody, and
-	// Server.sendDisabledHint names the operator tool set_account_send there
-	// instead.
+	// Who grants it: oauth.ResolveScopes (admin and client tiers), every
+	// default group of sharedhmac (whose deployments have no manage page, so
+	// this is the owner's only self-service way out there), and the local-dev
+	// provider.
 	//
 	// Who never holds it: worker and device credentials (their allowlists
 	// in internal/oauth/scopes.go and internal/workertoken exclude it). So a
