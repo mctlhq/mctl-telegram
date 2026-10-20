@@ -19,15 +19,18 @@ var platformsTmpl = ui.New("platforms", platformsHTML)
 // the running config rather than from the page text, so the page cannot
 // promise a limit or a CIMD status the deployment does not have.
 type PlatformFacts struct {
-	AllowSend        bool
-	CIMDAccept       bool
-	CIMDAdvertise    bool
-	RateLimitPerUser int
-	PeerSendCap      int
-	PeerWindow       time.Duration
-	AccessTokenTTL   time.Duration
-	RefreshTokenTTL  time.Duration
-	MediaMaxBytes    int64
+	AllowSend          bool
+	CIMDAccept         bool
+	CIMDAdvertise      bool
+	RateLimitPerUser   int
+	RegisterRatePerMin int
+	PeerSendCap        int
+	PeerWindow         time.Duration
+	AccessTokenTTL     time.Duration
+	RefreshTokenTTL    time.Duration
+	MediaMaxBytes      int64
+	MediaUploadBytes   int64
+	BulkMediaBytes     int64
 }
 
 type platformsData struct {
@@ -36,10 +39,12 @@ type platformsData struct {
 	WellKnownURL string
 	AuthServer   string
 	PlatformFacts
-	AccessTTL  string
-	RefreshTTL string
-	PeerWin    string
-	MediaMax   string
+	AccessTTL   string
+	RefreshTTL  string
+	PeerWin     string
+	MediaMax    string
+	MediaUpload string
+	BulkMedia   string
 }
 
 // Platforms renders /platforms, the integration guide for agent platforms
@@ -66,8 +71,10 @@ func Platforms(publicBaseURL, mcpPath, authServer string, showManage bool, f Pla
 		PlatformFacts: f,
 		AccessTTL:     humanDuration(f.AccessTokenTTL),
 		RefreshTTL:    humanDuration(f.RefreshTokenTTL),
-		PeerWin:       humanDuration(f.PeerWindow),
+		PeerWin:       perWindow(f.PeerWindow),
 		MediaMax:      humanBytes(f.MediaMaxBytes),
+		MediaUpload:   humanBytes(f.MediaUploadBytes),
+		BulkMedia:     humanBytes(f.BulkMediaBytes),
 	})
 }
 
@@ -91,6 +98,12 @@ func humanDuration(d time.Duration) string {
 		return plural(int64(d/time.Minute), "minute")
 	}
 	return d.String()
+}
+
+// perWindow renders a window after "per": "hour" rather than "1 hour",
+// "6 hours" when the count is not one.
+func perWindow(d time.Duration) string {
+	return strings.TrimPrefix(humanDuration(d), "1 ")
 }
 
 func humanBytes(n int64) string {

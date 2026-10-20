@@ -463,15 +463,18 @@ func main() {
 	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
 	mux.Get("/platforms", web.Platforms(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.PlatformFacts{
-		AllowSend:        cfg.AllowSend,
-		CIMDAccept:       cfg.OAUTHCIMDAccept,
-		CIMDAdvertise:    cfg.OAUTHCIMDAdvertise,
-		RateLimitPerUser: cfg.RateLimitPerUser,
-		PeerSendCap:      audit.PeerSendCap,
-		PeerWindow:       audit.PeerWindow,
-		AccessTokenTTL:   cfg.OAUTHAccessTokenTTL,
-		RefreshTokenTTL:  cfg.OAUTHRefreshTokenTTL,
-		MediaMaxBytes:    cfg.MediaDownloadMaxBytes,
+		AllowSend:          cfg.AllowSend,
+		CIMDAccept:         cfg.OAUTHCIMDAccept,
+		CIMDAdvertise:      cfg.OAUTHCIMDAdvertise,
+		RateLimitPerUser:   cfg.RateLimitPerUser,
+		RegisterRatePerMin: cfg.OAUTHRegisterRatePerMin,
+		PeerSendCap:        audit.PeerSendCap,
+		PeerWindow:         audit.PeerWindow,
+		AccessTokenTTL:     cfg.OAUTHAccessTokenTTL,
+		RefreshTokenTTL:    cfg.OAUTHRefreshTokenTTL,
+		MediaMaxBytes:      cfg.MediaDownloadMaxBytes,
+		MediaUploadBytes:   cfg.MediaUploadMaxBytes,
+		BulkMediaBytes:     cfg.BulkMediaByteCap,
 	}))
 	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL, showManage))
 	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())

@@ -73,7 +73,7 @@
   <h3>Dynamic Client Registration</h3>
   <ul>
     <li><code>POST /oauth/register</code> (RFC 7591) with redirect URIs on an approved host. Redirects are https, or http on loopback only; custom URL schemes are refused.</li>
-    <li>Registration is limited to 10 attempts per minute per source IP. Registrations are held in memory for up to 24 hours and do not survive a restart, so register when a user connects rather than once at install.</li>
+    <li>Registration is limited to {{.RegisterRatePerMin}} attempts per minute per source IP. A registration is kept for 24 hours, so register when a user connects rather than once at install.</li>
   </ul>
 
   <p>To have a host approved, write to <a href="mailto:support@mctl.ai">support@mctl.ai</a> with the host, whether you use CIMD or DCR, and your expected number of users.</p>
@@ -106,7 +106,7 @@
   </table>
   </div>
   <ul>
-    <li>Request only the scopes you need; a request that names scopes gets exactly those. Administrative scopes cannot be requested.</li>
+    <li>Always name your scopes. A request that names scopes gets only those the user is entitled to; a request that omits <code>scope</code> gets the user's full entitled set, including send, pin and <code>account:manage</code>. Read the <code>scope</code> in the token response rather than assuming you got what you asked for. Administrative scopes cannot be requested.</li>
     <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (on <code>/telegram/connect/manage</code> or with <code>set_send_consent</code>), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. Otherwise a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
     <li>Every tool call lands in the user's hash-chained audit log, which they can read and verify. See <a href="/security">/security</a>.</li>
   </ul>
@@ -121,6 +121,8 @@
       <tr><td>Access token lifetime</td><td>{{.AccessTTL}}</td></tr>
       <tr><td>Refresh token lifetime</td><td>{{.RefreshTTL}}, rotated on every use; reusing a rotated token revokes the whole family</td></tr>
       <tr><td>Media download</td><td>{{.MediaMax}} per file</td></tr>
+      <tr><td>Media upload (<code>send_media</code>)</td><td>{{.MediaUpload}} per file</td></tr>
+      <tr><td>Inline media in one read call (<code>fetch_media=true</code>)</td><td>{{.BulkMedia}} in total</td></tr>
       <tr><td>Read page size</td><td>50 items by default, up to 200 (search: 20, up to 100)</td></tr>
     </tbody>
   </table>

@@ -9,13 +9,16 @@ import (
 
 func testPlatformFacts() PlatformFacts {
 	return PlatformFacts{
-		AllowSend:        true,
-		RateLimitPerUser: 30,
-		PeerSendCap:      20,
-		PeerWindow:       time.Hour,
-		AccessTokenTTL:   time.Hour,
-		RefreshTokenTTL:  720 * time.Hour,
-		MediaMaxBytes:    20 << 20,
+		AllowSend:          true,
+		RateLimitPerUser:   30,
+		RegisterRatePerMin: 10,
+		MediaUploadBytes:   20 << 20,
+		BulkMediaBytes:     8 << 20,
+		PeerSendCap:        20,
+		PeerWindow:         time.Hour,
+		AccessTokenTTL:     time.Hour,
+		RefreshTokenTTL:    720 * time.Hour,
+		MediaMaxBytes:      20 << 20,
 	}
 }
 
@@ -47,6 +50,9 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"issues/781",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,
 		`<a href="/platforms" class="active">platforms</a>`,
+		// footer twin of the topbar entry
+		`<span class="sep">·</span>
+      <a href="/platforms">platforms</a>`,
 		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
@@ -62,10 +68,17 @@ func TestPlatforms_LimitsComeFromConfig(t *testing.T) {
 	f.AccessTokenTTL = 2 * time.Hour
 	f.RefreshTokenTTL = 7 * 24 * time.Hour
 	f.MediaMaxBytes = 5 << 20
+	f.RegisterRatePerMin = 7
+	f.MediaUploadBytes = 3 << 20
+	f.BulkMediaBytes = 6 << 20
 	body := renderPlatforms(t, f)
 	for _, must := range []string{
 		"45 per minute",
-		"20 per 1 hour",
+		"20 per hour",
+		"7 attempts per minute",
+		"3 MiB per file",
+		"6 MiB in total",
+		"omits <code>scope</code> gets the user's full entitled set",
 		"2 hours",
 		"7 days, rotated on every use",
 		"5 MiB per file",
@@ -112,6 +125,14 @@ func TestHumanDuration(t *testing.T) {
 	} {
 		if got := humanDuration(d); got != want {
 			t.Errorf("humanDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestPerWindow(t *testing.T) {
+	for d, want := range map[time.Duration]string{time.Hour: "hour", 6 * time.Hour: "6 hours", 24 * time.Hour: "day"} {
+		if got := perWindow(d); got != want {
+			t.Errorf("perWindow(%v) = %q, want %q", d, got, want)
 		}
 	}
 }
