@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.83.0](https://github.com/mctlhq/mctl-telegram/compare/0.82.0...0.83.0) (2026-10-21)
+
+
+### Features
+
+* **web:** add /platforms, the integration guide for agent platforms ([89c60db](https://github.com/mctlhq/mctl-telegram/commit/89c60dbacd16513c94c897ed0ef68a170478bc7d))
+
+
+### Bug Fixes
+
+* **deps:** bump Go to 1.26.10 for GO-2026-6809 ([893f341](https://github.com/mctlhq/mctl-telegram/commit/893f341a9394b7b4867beede2b0a088b6246dedc))
+* **deps:** bump Go to 1.26.10 for GO-2026-6809 ([7cd1759](https://github.com/mctlhq/mctl-telegram/commit/7cd1759c3430b29cd06890556a88854cf1e660b2))
+
 ## [0.82.0](https://github.com/mctlhq/mctl-telegram/compare/0.81.0...0.82.0) (2026-10-20)
 
 
