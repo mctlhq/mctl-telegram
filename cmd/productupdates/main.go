@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 const (
@@ -37,6 +38,13 @@ const (
 
 // snapshotPath is where every release commits its tool surface.
 const snapshotPath = "docs/tool-descriptors.json"
+
+// profileSnapshotPath is where a release commits one tool profile's surface.
+// It matches mcp.ProfileDescriptorsFile; this command does not import the MCP
+// server to learn a file name.
+func profileSnapshotPath(profile string) string {
+	return "docs/tool-descriptors." + profile + ".json"
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -131,7 +139,11 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		_, _ = fmt.Fprintf(stderr, "productupdates: %s: %v\n", snapshotPath, err)
 		return exitFailed
 	}
-	report, err := productupdate.Gate(feed, baseline, releases, previous, current)
+	profiles, code := loadProfiles(repo, baseline, stderr)
+	if code != exitOK {
+		return code
+	}
+	report, err := productupdate.GateProfiles(feed, baseline, releases, previous, current, profiles)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
 		return exitFailed
@@ -155,6 +167,62 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		return exitFailed
 	}
 	return exitOK
+}
+
+// loadProfiles reads every tool profile's snapshot at HEAD, which must exist,
+// and at the baseline, where it may not yet. A baseline file that exists but
+// cannot be read is a failure, never "the profile is new": only git's own
+// "no such path" answer means absent.
+func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profiles, int) {
+	var out productupdate.Profiles
+	for _, name := range toolprofile.Names() {
+		path := profileSnapshotPath(name)
+		raw, err := os.ReadFile(filepath.Join(repo, path))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %v (every tool profile commits its snapshot)\n", err)
+			return out, exitFailed
+		}
+		current, err := productupdate.ParseSnapshot(raw)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %s: %v\n", path, err)
+			return out, exitFailed
+		}
+		ps := productupdate.ProfileSurface{Name: name, Current: current}
+		if baseline != "" {
+			present, err := gitHasPath(repo, baseline, path)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+				return out, exitUsage
+			}
+			if present {
+				old, err := git(repo, "show", baseline+":"+path)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+					return out, exitUsage
+				}
+				prev, err := productupdate.ParseSnapshot([]byte(old))
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "productupdates: %s:%s: %v\n", baseline, path, err)
+					return out, exitFailed
+				}
+				ps.Previous = &prev
+				out.BaselineCarriesProfiles = true
+			}
+		}
+		out.Surfaces = append(out.Surfaces, ps)
+	}
+	return out, exitOK
+}
+
+// gitHasPath reports whether rev's tree has path. git ls-tree prints nothing
+// for a path the tree lacks and fails for a revision it cannot read, so the
+// two are not confused.
+func gitHasPath(repo, rev, path string) (bool, error) {
+	out, err := git(repo, "ls-tree", "--name-only", rev, "--", path)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == path, nil
 }
 
 func git(repo string, args ...string) (string, error) {

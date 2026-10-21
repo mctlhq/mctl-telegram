@@ -3,7 +3,8 @@
 The canonical feed of user-facing product updates (issue #440). One reviewed
 YAML file per update, named `<id>.yaml`. The database only records what has been
 published and in which digest. What an update says lives here, next to the
-tool snapshot it cites (`docs/tool-descriptors.json`).
+tool snapshots it cites (`docs/tool-descriptors.json` and one
+`docs/tool-descriptors.<profile>.json` per tool profile).
 
 ## The two approvals
 
@@ -51,6 +52,30 @@ unless it claims that tool's removal, and that no change is claimed twice. Such
 an entry is never held to a diff later, since it becomes history at the first
 snapshot release. A repository with no release tag at all cannot carry a
 product update yet.
+
+### Tool profile surfaces
+
+Each tool profile commits its own snapshot, `docs/tool-descriptors.<profile>.json`:
+the tools a connection bound to that profile is listed, with the profile's
+argument rules applied to their schemas. The gate holds each one to the feed
+like the full surface, with one difference: an item the full diff already
+shows for the same tool and change (a tool added for everyone, a schema
+changed for everyone) is covered by the entry that claims it there. A change
+only a profile shows -- a tool added to the profile, a profile rule that
+changes a schema -- is claimed with the profile named:
+
+```yaml
+evidence:
+  from: 0.86.1
+  changes:
+    - {tool: get_messages, change: schema, profile: core-readonly}
+```
+
+The profile must be one this build knows, and its snapshot must exist at HEAD.
+Until a release carries profile snapshots, every profile is in its own
+bootstrap window: nothing is required of it and a profile-scoped claim is
+reported as unverified. Once a release carries any, a profile missing from it
+is a new surface, and each of its tools needs an `added` claim on it.
 
 The gate needs the full history and tags. In a shallow clone it refuses
 (exit 2) rather than judging the feed against a baseline it cannot see.

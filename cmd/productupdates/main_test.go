@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 const (
@@ -76,7 +77,23 @@ func (r repo) write(path, body string) {
 	}
 }
 
+// snapshot writes the full surface, and the same tools as every profile's
+// surface, so a test that is not about profiles has nothing to say about them.
 func (r repo) snapshot(descriptors ...string) {
+	r.t.Helper()
+	r.surface(snapshotPath, "", descriptors...)
+	for _, name := range toolprofile.Names() {
+		r.surface(profileSnapshotPath(name), name, descriptors...)
+	}
+}
+
+// profile writes one profile's surface alone.
+func (r repo) profile(name string, descriptors ...string) {
+	r.t.Helper()
+	r.surface(profileSnapshotPath(name), name, descriptors...)
+}
+
+func (r repo) surface(path, profile string, descriptors ...string) {
 	r.t.Helper()
 	raw := map[string][]byte{}
 	for _, d := range descriptors {
@@ -88,7 +105,7 @@ func (r repo) snapshot(descriptors ...string) {
 		}
 		raw[head.Name] = []byte(d)
 	}
-	s, err := productupdate.NewSnapshot(productupdate.Surface{AppsEnabled: true, ToolFilter: "all"}, raw)
+	s, err := productupdate.NewSnapshot(productupdate.Surface{AppsEnabled: true, ToolFilter: "all", Profile: profile}, raw)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -96,7 +113,7 @@ func (r repo) snapshot(descriptors ...string) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	r.write(snapshotPath, string(encoded))
+	r.write(path, string(encoded))
 }
 
 func (r repo) commit(message string) {
@@ -148,6 +165,105 @@ func TestTheGateHoldsATagToTheFeed(t *testing.T) {
 	r.git("tag", "0.70.0")
 	if code, out := r.gate(); code != exitOK || !strings.Contains(out, `"baseline": "0.70.0"`) {
 		t.Fatalf("after release: exit %d\n%s", code, out)
+	}
+}
+
+const getMessages = `{"name":"get_messages","description":"Read messages.","inputSchema":{"type":"object","properties":{"peer":{"type":"string"}}},"annotations":{"readOnlyHint":true,"title":"Read"}}`
+
+// The profile entry is the sendMessageEntry shape for get_messages joining
+// core-readonly: a change only that profile's surface shows.
+const profileEntry = `schema: mctl-telegram.product-update/v1
+id: core-readonly-reads-messages
+kind: changed_behavior
+title: Read-only connections can read messages
+summary: Connections with the core-readonly profile can now read a chat's messages.
+locale: en
+delivery: docs_only
+tools: [get_messages]
+evidence:
+  from: 0.70.0
+  changes:
+    - {tool: get_messages, change: added, profile: core-readonly}
+status: approved
+provenance:
+  author: alice
+  reviewed_by: alice
+created_at: "2026-09-24"
+reviewed_at: "2026-09-24"
+`
+
+func TestTheGateHoldsEachProfileToTheFeed(t *testing.T) {
+	r := newRepo(t)
+	// 0.69.0 carries the full snapshot but no profile snapshot: every profile
+	// is in its bootstrap window, so a profile differing from the full
+	// surface requires nothing yet.
+	r.surface(snapshotPath, "", listDialogs, getMessages)
+	r.commit("full snapshot only")
+	r.git("tag", "0.69.0")
+	r.snapshot(listDialogs, getMessages)
+	r.profile(toolprofile.CoreReadonly, listDialogs)
+	r.commit("profile snapshots")
+	if code, out := r.gate(); code != exitOK {
+		t.Fatalf("profile bootstrap: exit %d\n%s", code, out)
+	}
+
+	// 0.70.0 carries profile snapshots. A tool added to one profile alone is
+	// that profile's change and needs a profile-scoped entry.
+	r.git("tag", "0.70.0")
+	r.profile(toolprofile.CoreReadonly, listDialogs, getMessages)
+	r.commit("get_messages joins core-readonly")
+	code, out := r.gate()
+	if code != exitFailed || !strings.Contains(out, "get_messages added (profile core-readonly) since 0.70.0 has no product update") {
+		t.Fatalf("uncovered profile addition: exit %d\n%s", code, out)
+	}
+	r.write(filepath.Join(productupdate.FeedDir, "core-readonly-reads-messages.yaml"), profileEntry)
+	r.commit("profile product update")
+	if code, out := r.gate(); code != exitOK {
+		t.Fatalf("covered profile addition: exit %d\n%s", code, out)
+	}
+
+	// A tool added to the full surface and to every profile at once needs
+	// only the full-surface entry.
+	r.git("tag", "0.71.0")
+	r.snapshot(listDialogs, getMessages, sendMessage)
+	r.write(filepath.Join(productupdate.FeedDir, "send-message.yaml"), strings.ReplaceAll(sendMessageEntry, "0.69.0", "0.71.0"))
+	r.commit("send_message everywhere")
+	if code, out := r.gate(); code != exitOK {
+		t.Fatalf("addition shown on the full surface: exit %d\n%s", code, out)
+	}
+}
+
+// Once a baseline carries profile snapshots, a profile missing from it is
+// observed absent, not unknown: it is a new surface and each of its tools
+// was added to it.
+func TestANewProfileIsANewSurface(t *testing.T) {
+	r := newRepo(t)
+	names := toolprofile.Names()
+	if len(names) < 2 {
+		t.Skip("needs two profiles")
+	}
+	r.surface(snapshotPath, "", listDialogs)
+	r.profile(names[0], listDialogs)
+	r.commit("one profile released")
+	r.git("tag", "0.70.0")
+	r.snapshot(listDialogs)
+	r.commit("second profile")
+	code, out := r.gate()
+	if code != exitFailed || !strings.Contains(out, "list_dialogs added (profile "+names[1]+") since 0.70.0 has no product update") {
+		t.Fatalf("new profile: exit %d\n%s", code, out)
+	}
+}
+
+func TestEveryProfileCommitsItsSnapshot(t *testing.T) {
+	r := newRepo(t)
+	r.snapshot(listDialogs)
+	if err := os.Remove(filepath.Join(r.dir, profileSnapshotPath(toolprofile.CoreReply))); err != nil {
+		t.Fatal(err)
+	}
+	r.commit("missing profile snapshot")
+	r.git("tag", "0.69.0")
+	if code, out := r.gate(); code != exitFailed || !strings.Contains(out, "every tool profile commits its snapshot") {
+		t.Fatalf("missing profile snapshot: exit %d\n%s", code, out)
 	}
 }
 

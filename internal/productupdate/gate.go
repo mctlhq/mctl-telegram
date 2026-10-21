@@ -1,6 +1,7 @@
 package productupdate
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -27,12 +28,43 @@ type GateReport struct {
 	// because no release carries a snapshot yet. They pass: nothing can be
 	// required or verified before the first baseline exists.
 	Unverified []string `json:"unverified"`
+	// ProfileDiffs is each tool profile's diff from the baseline, for the
+	// profiles the baseline could be compared against.
+	ProfileDiffs map[string]Diff `json:"profile_diffs,omitempty"`
+}
+
+// ProfileSurface is one tool profile's snapshot at HEAD and at the baseline.
+type ProfileSurface struct {
+	Name string
+	// Previous is the baseline release's snapshot of this profile, or nil
+	// when that release carries none.
+	Previous *Snapshot
+	Current  Snapshot
+}
+
+// Profiles is every tool profile surface the gate holds the feed to.
+type Profiles struct {
+	// BaselineCarriesProfiles reports that the baseline release carries
+	// profile snapshots at all. Without any, every profile is in its
+	// bootstrap window, as the full surface was before its first snapshot
+	// release: nothing can be required of it. With some, a profile missing
+	// from the baseline is observed absent -- a new surface -- and every one
+	// of its tools counts as added.
+	BaselineCarriesProfiles bool
+	Surfaces                []ProfileSurface
 }
 
 // Passed reports a gate with nothing to fix.
 func (r GateReport) Passed() bool { return len(r.Problems) == 0 }
 
-func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
+// claimKey names one diff item in keys and in problems: "tool change", plus
+// the profile for an item on a profile's surface.
+func claimKey(c Claim) string {
+	if c.Profile != "" {
+		return c.Tool + " " + string(c.Change) + " (profile " + c.Profile + ")"
+	}
+	return c.Tool + " " + string(c.Change)
+}
 
 // Gate holds the feed to the diff between the baseline release's snapshot and
 // the current one.
@@ -62,6 +94,23 @@ func claimKey(c Claim) string { return c.Tool + " " + string(c.Change) }
 // unless it claims that tool's removal, and no change may be claimed twice. A
 // repository with no release tag at all cannot carry a product update yet.
 func Gate(feed Feed, baseline string, releases []string, previous, current Snapshot) (GateReport, error) {
+	return GateProfiles(feed, baseline, releases, previous, current, Profiles{})
+}
+
+// GateProfiles is Gate over the full surface and every tool profile surface.
+// Each profile's diff from the baseline is required like the full one, with
+// one exception: an item the full diff already shows for the same tool and
+// change (a tool added everywhere, a schema changed for everyone) is covered
+// by the entry that claims it on the full surface. A profile-scoped claim
+// (Claim.Profile) is needed only for what the profile alone changed.
+func GateProfiles(feed Feed, baseline string, releases []string, previous, current Snapshot, profiles Profiles) (GateReport, error) {
+	atHead := map[string]bool{}
+	for _, ps := range profiles.Surfaces {
+		if ps.Current.Surface.Profile != ps.Name {
+			return GateReport{}, fmt.Errorf("the snapshot given for profile %s is labelled profile %q", ps.Name, ps.Current.Surface.Profile)
+		}
+		atHead[ps.Name] = true
+	}
 	report := GateReport{Baseline: baseline, Required: []Claim{}, Covered: map[string]string{}, Problems: []string{}, Unverified: []string{}}
 	if baseline == "" {
 		// The bootstrap window: no release carries a snapshot, so there is no
@@ -107,12 +156,16 @@ func Gate(feed Feed, baseline string, releases []string, previous, current Snaps
 			// change is claimed twice.
 			claimedRemoved := map[string]bool{}
 			for _, c := range e.Evidence.Changes {
-				if c.Change == ClaimRemoved {
+				if c.Profile != "" && !atHead[c.Profile] {
+					report.Problems = append(report.Problems, fmt.Sprintf(
+						"%s claims %s, but profile %s has no snapshot at HEAD", e.ID, claimKey(c), c.Profile))
+				}
+				if c.Change == ClaimRemoved && c.Profile == "" {
 					claimedRemoved[c.Tool] = true
 				}
 				if other, dup := bootstrapClaims[claimKey(c)]; dup {
 					report.Problems = append(report.Problems, fmt.Sprintf(
-						"%s and %s both claim %s %s; one change is one update", other, e.ID, c.Tool, c.Change))
+						"%s and %s both claim %s; one change is one update", other, e.ID, claimKey(c)))
 				} else {
 					bootstrapClaims[claimKey(c)] = e.ID
 				}
@@ -160,6 +213,55 @@ func Gate(feed Feed, baseline string, releases []string, previous, current Snaps
 		removed[tool] = true
 	}
 
+	// inFull is read before any profile item is marked shown, and profile
+	// keys never collide with full ones, so it sees the full diff only.
+	inFull := func(tool string, change ClaimChange) bool {
+		return shown[claimKey(Claim{Tool: tool, Change: change})]
+	}
+	bootstrapProfile := map[string]bool{}
+	for _, ps := range profiles.Surfaces {
+		prev := ps.Previous
+		if prev == nil {
+			if !profiles.BaselineCarriesProfiles {
+				bootstrapProfile[ps.Name] = true
+				continue
+			}
+			prev = &Snapshot{Schema: SnapshotSchema, Surface: ps.Current.Surface, Tools: map[string]json.RawMessage{}}
+		}
+		pd, err := Compare(*prev, ps.Current)
+		if err != nil {
+			return report, fmt.Errorf("profile %s: %w", ps.Name, err)
+		}
+		if report.ProfileDiffs == nil {
+			report.ProfileDiffs = map[string]Diff{}
+		}
+		report.ProfileDiffs[ps.Name] = pd
+		requireOnProfile := func(tool string, change ClaimChange) {
+			c := Claim{Tool: tool, Change: change, Profile: ps.Name}
+			full := inFull(tool, change)
+			shown[claimKey(c)] = true
+			if !full {
+				require(c)
+			}
+		}
+		for _, tool := range pd.Added {
+			requireOnProfile(tool, ClaimAdded)
+		}
+		for _, tool := range pd.Removed {
+			requireOnProfile(tool, ClaimRemoved)
+		}
+		for _, change := range pd.Changed {
+			for _, kind := range change.Kinds {
+				switch kind {
+				case ChangeSchema, ChangeAnnotations:
+					requireOnProfile(change.Tool, ClaimChange(kind))
+				case ChangeText:
+					shown[claimKey(Claim{Tool: change.Tool, Change: ClaimText, Profile: ps.Name})] = true
+				}
+			}
+		}
+	}
+
 	claimedBy := map[string]string{}
 	// staleClaim: an item an entry claims under an OLDER baseline -- usually a
 	// pull request opened before the latest release, whose evidence.from now
@@ -199,14 +301,26 @@ func Gate(feed Feed, baseline string, releases []string, previous, current Snaps
 		}
 		for _, c := range e.Evidence.Changes {
 			key := claimKey(c)
+			if c.Profile != "" && !atHead[c.Profile] {
+				report.Problems = append(report.Problems, fmt.Sprintf(
+					"%s claims %s, but profile %s has no snapshot at HEAD", e.ID, key, c.Profile))
+				continue
+			}
+			if bootstrapProfile[c.Profile] {
+				// Nothing is required of a profile before a release carries
+				// its snapshot, so the claim cannot be held to a diff yet.
+				report.Unverified = append(report.Unverified, fmt.Sprintf(
+					"%s claims %s (no release carries a snapshot of profile %s yet)", e.ID, key, c.Profile))
+				continue
+			}
 			if !shown[key] {
 				report.Problems = append(report.Problems, fmt.Sprintf(
-					"%s claims %s %s, which the tool diff from %s does not show", e.ID, c.Tool, c.Change, baseline))
+					"%s claims %s, which the tool diff from %s does not show", e.ID, key, baseline))
 				continue
 			}
 			if other, dup := claimedBy[key]; dup {
 				report.Problems = append(report.Problems, fmt.Sprintf(
-					"%s and %s both claim %s %s; one change is one update", other, e.ID, c.Tool, c.Change))
+					"%s and %s both claim %s; one change is one update", other, e.ID, key))
 				continue
 			}
 			claimedBy[key] = e.ID
@@ -222,18 +336,18 @@ func Gate(feed Feed, baseline string, releases []string, previous, current Snaps
 		}
 		if id, drafted := claimedBy[key]; drafted {
 			report.Problems = append(report.Problems, fmt.Sprintf(
-				"%s %s since %s is claimed only by draft %s; it needs review", c.Tool, c.Change, baseline, id))
+				"%s since %s is claimed only by draft %s; it needs review", key, baseline, id))
 			continue
 		}
 		if stale, ok := staleClaim[key]; ok {
 			report.Problems = append(report.Problems, fmt.Sprintf(
-				"%s %s since %s has no product update citing %s; %s claims it under an older baseline: if that entry comes from a pull request opened before %s was cut, bump its evidence.from to %s, otherwise add a new entry",
-				c.Tool, c.Change, baseline, baseline, stale, baseline, baseline))
+				"%s since %s has no product update citing %s; %s claims it under an older baseline: if that entry comes from a pull request opened before %s was cut, bump its evidence.from to %s, otherwise add a new entry",
+				key, baseline, baseline, stale, baseline, baseline))
 			continue
 		}
 		report.Problems = append(report.Problems, fmt.Sprintf(
-			"%s %s since %s has no product update: add docs/product-updates/<id>.yaml with evidence.from %s claiming it",
-			c.Tool, c.Change, baseline, baseline))
+			"%s since %s has no product update: add docs/product-updates/<id>.yaml with evidence.from %s claiming it",
+			key, baseline, baseline))
 	}
 	sort.Strings(report.Problems)
 	return report, nil
