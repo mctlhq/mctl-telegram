@@ -34,8 +34,9 @@ caller.
    refusal on every call, not the full surface. "Could not resolve the
    profile" is never "no profile".
 4. **Bound at mint, carried in the token.** The authorization server
-   resolves the profile from the client when it issues the code and stamps
-   it into the access token (claim `prf`), next to `client_id`. Refresh
+   resolves the profile from the client whenever it mints an access token,
+   on code exchange and on refresh, and stamps it into the token (claim
+   `prf`), next to `client_id`. Refresh
    re-resolves it, so a mapping change takes effect at the next refresh at
    the latest. The MCP layer reads `Identity.Profile` and never looks the
    client up per request. The profile is a property of the credential,
@@ -43,17 +44,24 @@ caller.
    `mctl_connect_token` cookie, so "arrived through the browser" proves
    nothing and must not select or skip a profile.
 5. **Binding table in config, owned by gitops.** `MCP_CLIENT_PROFILES` maps
-   a client key to a profile name:
-   - CIMD clients: the exact `client_id` URL (stable per product).
-   - DCR clients: the exact registered `redirect_uri` (DCR client ids are
-     random per registration, so they cannot be keys).
-   An entry that matches no client is harmless; a client that matches two
-   entries with different profiles is a startup error.
+   an exact `client_id` to a profile name: a CIMD `client_id` URL (stable
+   per product) or a preregistered client id. An entry that matches no
+   client is harmless. A malformed table, an unknown profile name or a
+   duplicate `client_id` is a startup error. Binding by `redirect_uri` is
+   **not supported** for now (revised 2026-10-21, see Decisions 5): a
+   record that uses it is a startup error, never silently ignored.
 6. **Enforced on both paths.** The filter applies on `tools/list` and
    `tools/call` through the existing `WithToolFilter` hook. Argument
    constraints are enforced in the handler, because a filter only changes
    what is listed. A refusal writes an audit row `profile_denied` with the
    profile name and the tool (detached context, as `scope_denied`).
+   A profiled credential is admitted **only on the MCP endpoint**: every
+   other authenticated HTTP route (`/api/account`, the worker-token and
+   bridge-token mints, `/telegram/connect/manage`) refuses it with 403,
+   because none of them applies the profile, and the account routes and
+   the token mints would otherwise give the restricted client its full
+   scopes or an unprofiled credential. Refusal is the default in
+   `auth.Middleware`; `/mcp` opts in.
 7. **Each profile is a reviewed contract (ADR 0007).** Every profile gets
    its own descriptor snapshot, `docs/tool-descriptors.<profile>.json`, and
    the product-updates gate covers it like the full surface.
@@ -141,8 +149,10 @@ What they do **not** do:
 2. `draft_reply` / `send_reply`, registered only for core-reply.
 3. Descriptor snapshots per profile, product-update entries.
 4. Gitops: bind Town's client to a profile once Town uses a URL
-   `client_id` (until then it is an implicit DCR host), and the Directory
-   connector once it exists.
+   `client_id` (until then it is an implicit DCR host and cannot be bound,
+   see Decisions 5), and the Directory connector once it exists.
+5. Later, separately: binding DCR and implicit clients by `redirect_uri`,
+   with the profile persisted in the refresh-token family.
 
 Each step is proven both ways: a test that passes with the profile
 applied and fails when the intersection is replaced by the scope check
@@ -158,3 +168,15 @@ alone.
    `@username` the user has never talked to.
 3. Pin is deferred to v2.
 4. `get_messages` returns at most 50 messages per call, 20 by default.
+5. **Revised: bind by exact `client_id` only.** The accepted text of
+   point 5 also bound DCR clients by their registered `redirect_uri`. That
+   cannot be honoured with point 4: the profile is re-resolved at every
+   refresh, but the refresh request carries only the `client_id`, and the
+   `redirect_uri` of an implicit or DCR client is not stored anywhere the
+   refresh path could re-read it. A `redirect_uri` binding would therefore
+   apply at code exchange and silently lapse at the first refresh, putting
+   the client back on its full scope surface. The first implementation
+   (#798) binds by exact `client_id` only and refuses `redirect_uri` records
+   at startup. Binding by `redirect_uri` comes back as its own change once
+   the refresh-token family persists the profile (or another stable client
+   identifier), which needs a schema migration the first step avoids.
