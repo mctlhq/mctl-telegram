@@ -164,7 +164,7 @@ Inputs (required):
 		}
 		if errors.Is(err, telegram.ErrCannotPost) {
 			s.auditRefusal(ctx, id, "draft_reply:cannot_post", peerRedacted, err, startedAt, ReasonRefused)
-			return mcplib.NewToolResultError("draft_reply blocked: this account may not post text messages in " + peer + " (a channel it does not administer, or a group that bans sending)"), nil
+			return mcplib.NewToolResultError("draft_reply blocked: this account may not post text messages in " + peer + "; pick a conversation it can write in"), nil
 		}
 		if err != nil {
 			s.audit(ctx, id, "draft_reply", peerRedacted, err, startedAt)

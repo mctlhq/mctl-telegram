@@ -100,8 +100,11 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
 - Membership is not the right to post, so `draft_reply` also refuses, with
   its own message, a conversation the account may not post text in: a
   broadcast channel without `post_messages` admin rights, a gigagroup it
-  does not administer, or a group whose default or personal banned rights
-  forbid sending (creators and admins are exempt from the default ban).
+  does not administer, or a group whose rights forbid sending. The
+  account's own banned rights, when present, are its effective rights (a
+  per-member exception overrides the defaults); otherwise the defaults
+  apply, and creators and admins are exempt from them. The refusal counts
+  as a caller error, not a session failure, in both SLIs.
   The rights come from the same `getPeerDialogs` response; otherwise the
   confirmation would be spent on a `CHAT_WRITE_FORBIDDEN` at send time.
 - The text limit is 4096 UTF-16 units, as Telegram counts them (most emoji

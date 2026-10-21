@@ -85,7 +85,7 @@ func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPee
 		if chat == nil {
 			return nil, ErrNoExistingDialog
 		}
-		if _, isAdmin := chat.GetAdminRights(); !chat.Creator && !isAdmin && bansText(chat.GetDefaultBannedRights()) {
+		if !chatAllowsPosting(chat) {
 			return nil, ErrCannotPost
 		}
 	case *tg.InputPeerChannel:
@@ -106,8 +106,7 @@ func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPee
 }
 
 // channelAllowsPosting reports whether the account may post a text message
-// in a channel it is a member of. It fails closed on bans: a banned-rights
-// entry is honoured even if its until_date may already have passed.
+// in a channel or supergroup it is a member of.
 func channelAllowsPosting(ch *tg.Channel) bool {
 	if ch.Creator {
 		return true
@@ -124,15 +123,30 @@ func channelAllowsPosting(ch *tg.Channel) bool {
 	if isAdmin {
 		return true
 	}
-	if own, ok := ch.GetBannedRights(); ok && (own.ViewMessages || bansText(own, true)) {
-		return false
+	// The account's own banned_rights are its effective rights: they are how
+	// Telegram stores a per-member exception, which overrides the group's
+	// defaults in either direction. Only without them do the defaults apply.
+	// A ban is honoured even if its until_date may already have passed.
+	if own, ok := ch.GetBannedRights(); ok {
+		return !own.ViewMessages && !bansText(own)
 	}
-	return !bansText(ch.GetDefaultBannedRights())
+	def, ok := ch.GetDefaultBannedRights()
+	return !ok || !bansText(def)
+}
+
+// chatAllowsPosting is channelAllowsPosting for a basic group, which has no
+// per-member rights: the creator and admins are exempt from the defaults.
+func chatAllowsPosting(chat *tg.Chat) bool {
+	if _, isAdmin := chat.GetAdminRights(); chat.Creator || isAdmin {
+		return true
+	}
+	def, ok := chat.GetDefaultBannedRights()
+	return !ok || !bansText(def)
 }
 
 // bansText reports whether rights forbid sending a plain text message.
-func bansText(r tg.ChatBannedRights, ok bool) bool {
-	return ok && (r.SendMessages || r.SendPlain)
+func bansText(r tg.ChatBannedRights) bool {
+	return r.SendMessages || r.SendPlain
 }
 
 func samePeer(in tg.InputPeerClass, p tg.PeerClass) bool {

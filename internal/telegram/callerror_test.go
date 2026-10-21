@@ -23,6 +23,10 @@ func TestIsCallerRefusal(t *testing.T) {
 		{"chat_write_forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), true},
 		{"peer_not_accessible", &peerNotAccessibleError{peer: "@nobody", code: "PEER_ID_INVALID"}, true},
 		{"peer_not_accessible_wrapped", fmt.Errorf("get_messages: %w", &peerNotAccessibleError{peer: "-100", code: "CHANNEL_INVALID"}), true},
+		// draft_reply's refusals are decided from a successful reply, so they
+		// must not count as session-borrow failures.
+		{"no_existing_dialog_wrapped", fmt.Errorf("draft: %w", ErrNoExistingDialog), true},
+		{"cannot_post", ErrCannotPost, true},
 		// A reply that proves nothing about the caller, or that says the
 		// session itself is unhealthy, must keep counting against the SLI.
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), false},
