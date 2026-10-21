@@ -78,13 +78,19 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		if !workerTokenLive(t, s, bobID, issued) {
 			t.Error("another user's worker token was revoked")
 		}
+		// A credential minted after the delete (a reconnect) still works.
+		for _, id := range []int64{aliceLogin, aliceSession} {
+			if !workerTokenLive(t, s, id, time.Now().UTC().Add(time.Minute)) {
+				t.Errorf("worker token for %d minted after the delete is revoked", id)
+			}
+		}
 
 		d, err := s.GetDevice(ctx, aliceDevice)
 		if err != nil {
 			t.Fatalf("get alice device: %v", err)
 		}
-		if d.RevokedAt == nil || d.RevokedReason != WorkerTokenRevokedAccountDeleted {
-			t.Errorf("alice device revoked_at=%v reason=%q, want revoked with %q", d.RevokedAt, d.RevokedReason, WorkerTokenRevokedAccountDeleted)
+		if d.RevokedAt == nil || d.RevokedReason != ReasonAccountDeleted {
+			t.Errorf("alice device revoked_at=%v reason=%q, want revoked with %q", d.RevokedAt, d.RevokedReason, ReasonAccountDeleted)
 		}
 		if claimed, err := s.ClaimDeviceCredentialLineage(ctx, aliceDevice, "after-delete", time.Now()); err != nil || claimed {
 			t.Errorf("revoked device claimed a credential lineage: claimed=%v err=%v", claimed, err)
@@ -183,6 +189,114 @@ func TestHardDeleteAccount_RevokesWorkerTokensForBoundLoginID(t *testing.T) {
 		}
 		if workerTokenLive(t, s, tgID, issued) {
 			t.Error("worker token for a bound telegram_login_id still live after the delete")
+		}
+	})
+}
+
+// Deleting is callable with nothing left to delete. A repeat must move the
+// revocation forward, not add rows to a table the revocation cache reads
+// whole.
+func TestHardDeleteAccount_RepeatDeleteKeepsOneRevocationPerTelegramID(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		tgID := base + 6
+		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+		if err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		seedAccountForTelegramID(t, s, uid, tgID, nil)
+		// An operator's blanket revocation for the same id is not ours to move.
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
+			 VALUES (NULL, $1, $2, 'operator', NULL)`, tgID, time.Now().UTC().Add(-time.Hour)); err != nil {
+			t.Fatalf("seed operator revocation: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+				t.Fatalf("delete %d: %v", i, err)
+			}
+		}
+		var ours, operator int
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM worker_token_revocations WHERE jti IS NULL AND telegram_id = $1 AND reason = $2`,
+			tgID, ReasonAccountDeleted).Scan(&ours); err != nil {
+			t.Fatalf("count delete revocations: %v", err)
+		}
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM worker_token_revocations WHERE jti IS NULL AND telegram_id = $1 AND reason = 'operator'`,
+			tgID).Scan(&operator); err != nil {
+			t.Fatalf("count operator revocations: %v", err)
+		}
+		if ours != 1 || operator != 1 {
+			t.Fatalf("revocation rows after three deletes: ours=%d operator=%d, want 1 and 1", ours, operator)
+		}
+		if workerTokenLive(t, s, tgID, time.Now().UTC().Add(-time.Second)) {
+			t.Error("a repeat delete stopped revoking tokens issued before it")
+		}
+	})
+}
+
+// github_login is nullable on Postgres; a user without one must still be
+// deletable.
+func TestHardDeleteAccount_NullGithubLogin(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+	tgID := 9500000000 + (time.Now().UnixNano()/1000)%100000000
+	uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET github_login = NULL WHERE id = $1`, uid); err != nil {
+		t.Fatalf("clear github_login: %v", err)
+	}
+	seedAccountForTelegramID(t, s, uid, tgID, nil)
+	if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+		t.Fatalf("delete a user with a NULL github_login: %v", err)
+	}
+	if workerTokenLive(t, s, tgID, time.Now().UTC().Add(-time.Hour)) {
+		t.Error("worker token still live after the delete")
+	}
+}
+
+// A device that already holds a credential lineage loses it with the account.
+func TestHardDeleteAccount_RevokesIssuedDeviceCredential(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		tgID := base + 7
+		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+		if err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		seedAccountForTelegramID(t, s, uid, tgID, nil)
+		device, err := s.RegisterDevice(ctx, uid, "laptop", "", nil)
+		if err != nil {
+			t.Fatalf("register device: %v", err)
+		}
+		issued := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+		jti := fmt.Sprintf("lineage-%d", tgID)
+		if claimed, err := s.ClaimDeviceCredentialLineage(ctx, device, jti, issued); err != nil || !claimed {
+			t.Fatalf("claim lineage: claimed=%v err=%v", claimed, err)
+		}
+		if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		d, err := s.GetDevice(ctx, device)
+		if err != nil {
+			t.Fatalf("get device: %v", err)
+		}
+		if d.CurrentJti != jti || d.CredentialIssuedAt == nil {
+			t.Fatalf("device lineage = (%q, %v), want (%q, set)", d.CurrentJti, d.CredentialIssuedAt, jti)
+		}
+		revoked, err := s.IsWorkerTokenRevoked(ctx, d.CurrentJti, tgID, *d.CredentialIssuedAt)
+		if err != nil {
+			t.Fatalf("revocation check: %v", err)
+		}
+		if !revoked {
+			t.Error("the device's issued credential still authenticates after the delete")
 		}
 	})
 }

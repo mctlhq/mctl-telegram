@@ -1041,7 +1041,7 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// Revoke every OAuth refresh-token family in the same transaction. The
 	// users row survives deletion, so the oauth_refresh_tokens ON DELETE
 	// CASCADE never fires; without this, connected clients keep rotating.
-	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, RefreshRevokedAccountDeleted, time.Now().UTC())
+	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
 	}
@@ -1052,12 +1052,30 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// token, device credential and bridge token issued before now (they
 	// all carry the original issue time), and revoking the device rows
 	// stops a device from claiming a fresh credential lineage.
+	//
+	// One row per Telegram id, moved forward on a repeat delete rather than
+	// added again: the delete is callable with nothing left to delete, and
+	// the revocation cache reads the whole table. Tokens carry their issue
+	// time in whole seconds, so one minted in the same second as the delete
+	// is revoked too; a reconnect takes far longer than that.
 	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE worker_token_revocations SET revoked_at = $1
+			 WHERE jti IS NULL AND telegram_id = $2 AND reason = $3`,
+			now, tgID, ReasonAccountDeleted)
+		if err != nil {
+			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
+		} else if n > 0 {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
 			 VALUES (NULL, $1, $2, $3, NULL)`,
-			tgID, now, WorkerTokenRevokedAccountDeleted,
+			tgID, now, ReasonAccountDeleted,
 		); err != nil {
 			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
 		}
@@ -1065,7 +1083,7 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	devices, err := tx.ExecContext(ctx,
 		`UPDATE local_bridge_devices SET revoked_at = $1, revoked_reason = $2
 		 WHERE user_id = $3 AND revoked_at IS NULL`,
-		now, WorkerTokenRevokedAccountDeleted, userID,
+		now, ReasonAccountDeleted, userID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke local bridge devices: %w", err)
@@ -1083,16 +1101,16 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	return rows, nil
 }
 
-// WorkerTokenRevokedAccountDeleted is the reason HardDeleteAccount records on
-// the worker-token revocations and Local Bridge devices it revokes.
-const WorkerTokenRevokedAccountDeleted = "account_deleted"
-
 // userTelegramIDs returns every Telegram id a worker token for userID can
 // carry. Authentication maps a token's Telegram id to the user through
 // users.telegram_login_id or the legacy "tg:<id>" github_login, and the
 // account rows record the session's telegram_user_id; all three are
 // collected so a blanket revocation reaches each of them. A user with none
 // has no Telegram identity a token could map to.
+//
+// telegram_user_id is not unique across users (see userIDByTelegramID), so a
+// Telegram id shared with another user is revoked for that user too. That
+// over-revocation is accepted: it fails safe, and the id is the same person.
 func userTelegramIDs(ctx context.Context, tx *sql.Tx, userID int64) ([]int64, error) {
 	seen := map[int64]bool{}
 	var out []int64
@@ -1103,14 +1121,14 @@ func userTelegramIDs(ctx context.Context, tx *sql.Tx, userID int64) ([]int64, er
 		}
 	}
 	var loginID sql.NullInt64
-	var githubLogin string
+	var githubLogin sql.NullString // nullable on Postgres
 	if err := tx.QueryRowContext(ctx,
 		`SELECT telegram_login_id, github_login FROM users WHERE id = $1`, userID,
 	).Scan(&loginID, &githubLogin); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("delete account: read user telegram id: %w", err)
 	}
 	add(loginID.Int64)
-	if rest, ok := strings.CutPrefix(githubLogin, "tg:"); ok {
+	if rest, ok := strings.CutPrefix(githubLogin.String, "tg:"); ok {
 		if id, err := strconv.ParseInt(rest, 10, 64); err == nil {
 			add(id)
 		}
