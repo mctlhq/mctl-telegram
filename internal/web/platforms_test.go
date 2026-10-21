@@ -146,3 +146,19 @@ func TestHumanBytes(t *testing.T) {
 		}
 	}
 }
+
+// The manage page is mounted only in local-jwt mode, so a deployment without
+// it must not send integrators there.
+func TestPlatforms_ManagePageOnlyWhenMounted(t *testing.T) {
+	render := func(showManage bool) string {
+		w := httptest.NewRecorder()
+		Platforms("https://tg.example.test/", "mcp", "", showManage, testPlatformFacts()).ServeHTTP(w, httptest.NewRequest("GET", "/platforms", nil))
+		return w.Body.String()
+	}
+	if body := render(true); !strings.Contains(body, "A user can disconnect their Telegram session on <code>/telegram/connect/manage</code>.") {
+		t.Fatal("with the manage page mounted, /platforms must point users at it")
+	}
+	if body := render(false); strings.Contains(body, "/telegram/connect/manage") {
+		t.Fatal("without the manage page, /platforms must not link to it")
+	}
+}
