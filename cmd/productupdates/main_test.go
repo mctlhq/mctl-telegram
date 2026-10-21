@@ -206,6 +206,17 @@ func TestTheGateHoldsEachProfileToTheFeed(t *testing.T) {
 	if code, out := r.gate(); code != exitOK {
 		t.Fatalf("profile bootstrap: exit %d\n%s", code, out)
 	}
+	// A claim on a profile in its bootstrap window passes unverified, and
+	// says so in the log although the full surface has a baseline.
+	early := filepath.Join(productupdate.FeedDir, "core-readonly-reads-messages.yaml")
+	r.write(early, strings.ReplaceAll(profileEntry, "from: 0.70.0", "from: 0.69.0"))
+	r.commit("early profile product update")
+	if code, out := r.gate(); code != exitOK ||
+		!strings.Contains(out, "productupdates: unverified until a release carries a snapshot: core-readonly-reads-messages claims get_messages added (profile core-readonly)") {
+		t.Fatalf("bootstrap profile claim: exit %d\n%s", code, out)
+	}
+	r.git("rm", "-q", early)
+	r.commit("drop early product update")
 
 	// 0.70.0 carries profile snapshots. A tool added to one profile alone is
 	// that profile's change and needs a profile-scoped entry.

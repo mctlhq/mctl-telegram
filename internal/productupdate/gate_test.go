@@ -330,6 +330,53 @@ func TestAProfileOnlyChangeNeedsAProfileClaim(t *testing.T) {
 	wantPass(t, runProfileGate(t, []Entry{profileClaim("narrow", "list_dialogs", ClaimSchema, "")}, full, fullAfter, profiles))
 }
 
+// A tool dropped from a profile shrinks a bound connection's surface under
+// its client, so it needs a profile claim just as an addition does; a tool
+// removed for everyone is covered by the full-surface claim.
+func TestAToolDroppedFromAProfileNeedsAProfileClaim(t *testing.T) {
+	full := snapshot(t, listDialogs, sendMessage)
+	before := profileSnapshot(t, "core-readonly", listDialogs, sendMessage)
+	after := profileSnapshot(t, "core-readonly", listDialogs)
+	profiles := Profiles{BaselineCarriesProfiles: true, Surfaces: []ProfileSurface{{Name: "core-readonly", Previous: &before, Current: after}}}
+
+	wantProblem(t, runProfileGate(t, nil, full, full, profiles),
+		"send_message removed (profile core-readonly) since 0.69.0 has no product update")
+	drop := profileClaim("drop-send", "send_message", ClaimRemoved, "core-readonly")
+	drop.Kind = KindDeprecation
+	wantPass(t, runProfileGate(t, []Entry{drop}, full, full, profiles))
+
+	// Removed for everyone: one full-surface claim covers the profile too.
+	gone := profileClaim("drop-send", "send_message", ClaimRemoved, "")
+	gone.Kind = KindDeprecation
+	wantPass(t, runProfileGate(t, []Entry{gone}, full, snapshot(t, listDialogs), profiles))
+}
+
+// A profile in its bootstrap window still holds "one change is one update".
+func TestABootstrapProfileClaimIsClaimedOnce(t *testing.T) {
+	full := snapshot(t, listDialogs)
+	boot := Profiles{Surfaces: []ProfileSurface{{Name: "core-readonly", Current: profileSnapshot(t, "core-readonly", listDialogs)}}}
+	r := runProfileGate(t, []Entry{
+		profileClaim("ro-claim", "list_dialogs", ClaimAdded, "core-readonly"),
+		profileClaim("ro-again", "list_dialogs", ClaimAdded, "core-readonly"),
+	}, full, full, boot)
+	wantProblem(t, r, "ro-claim and ro-again both claim list_dialogs added (profile core-readonly); one change is one update")
+}
+
+// In the full bootstrap window only a full-surface removal excuses a tool
+// missing at HEAD: dropping a tool from a profile does not remove it.
+func TestTheBootstrapWindowDoesNotTakeAProfileRemovalForARemoval(t *testing.T) {
+	head := snapshot(t, listDialogs)
+	boot := Profiles{Surfaces: []ProfileSurface{{Name: "core-readonly", Current: profileSnapshot(t, "core-readonly", listDialogs)}}}
+	e := profileClaim("drop-delete", "delete_messages", ClaimRemoved, "core-readonly")
+	e.Kind = KindDeprecation
+	e.Evidence.From = "0.68.0"
+	r, err := GateProfiles(Feed{Entries: []Entry{e}}, "", []string{"0.68.0"}, Snapshot{}, head, boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "names tool delete_messages, which does not exist at HEAD and is not claimed as removed")
+}
+
 func TestAProfileClaimNeedsItsSurface(t *testing.T) {
 	full := snapshot(t, listDialogs)
 	cur := profileSnapshot(t, "core-readonly", listDialogs)

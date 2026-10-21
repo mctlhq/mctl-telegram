@@ -309,6 +309,14 @@ func GateProfiles(feed Feed, baseline string, releases []string, previous, curre
 			if bootstrapProfile[c.Profile] {
 				// Nothing is required of a profile before a release carries
 				// its snapshot, so the claim cannot be held to a diff yet.
+				// One change is still one update, as in the full bootstrap
+				// window.
+				if other, dup := claimedBy[key]; dup {
+					report.Problems = append(report.Problems, fmt.Sprintf(
+						"%s and %s both claim %s; one change is one update", other, e.ID, key))
+					continue
+				}
+				claimedBy[key] = e.ID
 				report.Unverified = append(report.Unverified, fmt.Sprintf(
 					"%s claims %s (no release carries a snapshot of profile %s yet)", e.ID, key, c.Profile))
 				continue

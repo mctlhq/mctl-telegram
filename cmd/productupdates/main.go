@@ -156,9 +156,11 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 	_, _ = fmt.Fprintf(stdout, "%s\n", encoded)
 	if baseline == "" {
 		_, _ = fmt.Fprintln(stderr, "productupdates: no release carries "+snapshotPath+" yet; nothing to require")
-		for _, u := range report.Unverified {
-			_, _ = fmt.Fprintf(stderr, "productupdates: unverified until a release carries a snapshot: %s\n", u)
-		}
+	}
+	// A profile's bootstrap window runs while the full surface has a
+	// baseline, so its unverified claims are printed whatever the baseline.
+	for _, u := range report.Unverified {
+		_, _ = fmt.Fprintf(stderr, "productupdates: unverified until a release carries a snapshot: %s\n", u)
 	}
 	if !report.Passed() {
 		for _, p := range report.Problems {

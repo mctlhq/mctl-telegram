@@ -77,6 +77,14 @@ bootstrap window: nothing is required of it and a profile-scoped claim is
 reported as unverified. Once a release carries any, a profile missing from it
 is a new surface, and each of its tools needs an `added` claim on it.
 
+Deleting a whole profile is not gated. The gate enumerates the profiles this
+build defines, so a deleted profile's baseline snapshot is never diffed and
+no `removed` claim is required for its tools (`TestNoStrayProfileSnapshots`
+only forces its snapshot file out of the tree). A deletion also breaks every
+`MCP_CLIENT_PROFILES` record naming it, which stops the server at startup.
+It therefore has to be a deliberate change: write the product update for it
+by hand.
+
 The gate needs the full history and tags. In a shallow clone it refuses
 (exit 2) rather than judging the feed against a baseline it cannot see.
 
