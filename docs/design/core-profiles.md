@@ -91,10 +91,15 @@ caller.
 
 As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
 
-- "Exists in the dialog list" is read as "the account's history with the
-  peer has at least one message" (`messages.getHistory`, limit 1). An
-  empty history is refused; a history that could not be read is an error,
-  not a refusal.
+- "Exists in the dialog list" is checked with `messages.getPeerDialogs`:
+  the peer must be in the account's dialogs with at least one message,
+  and for a group or channel the account must be a member (not left, not
+  a min object). Readable is not enough: a public channel resolves by
+  `@username` and its history reads fine for a non-member. A response that
+  could not be read is an error, not a refusal.
+- The text limit is 4096 UTF-16 units, as Telegram counts them (most emoji
+  cost two), checked at draft time so it can never fail after the
+  confirmation is spent.
 - The draft stores the resolved peer itself, access hash included, and
   the exact text. `send_reply` sends to that peer and never re-resolves,
   so a username that changes hands after the draft cannot re-point it.
@@ -104,8 +109,10 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
 - `send_reply` evaluates the send gate (and the account mode) before it
   consumes the confirmation, so a refusal the user can fix, such as
   `send_enabled=false`, leaves the draft usable for the rest of its 10
-  minutes. The per-peer rate limit is checked after consuming; a
-  rate-limited draft is used up and the error says so.
+  minutes. The per-peer rate limit is checked the same way, on a peek of
+  the draft, before it is consumed.
+- `send_reply` returns its own result type (`sent`, `recipient`, `text`,
+  `message_id`), with no preview fields: it has no dry run.
 - `draft_reply` reports whether the gate is open (`send_gate_open`,
   `send_gate_reason`) so the user learns before approving, but does not
   enforce it.

@@ -91,6 +91,7 @@ const minReasonLen = 40
 // its vouch below.
 var reportsGateTools = map[string]string{
 	"get_my_send_status": "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
+	"draft_reply":        "runs evaluateSendGate to fill send_gate_open/send_gate_reason in the draft; send_reply enforces the gate, draft_reply only reports it",
 }
 
 var selfOnlyTools = map[string]string{

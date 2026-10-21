@@ -3,9 +3,10 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode/utf16"
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -25,8 +26,22 @@ import (
 // id and delivers what was drafted, to whom it was drafted, once. A closed
 // send gate is an error there, never a preview: the preview was the draft.
 
-// maxReplyText is Telegram's limit on one text message.
+// maxReplyText is Telegram's limit on one text message, in UTF-16 code
+// units as Telegram counts them (internal/broadcast.MaxTextUnits): most
+// emoji cost two. It is enforced at draft time because a text refused at
+// delivery would only fail after the one-shot confirmation was spent.
 const maxReplyText = 4096
+
+func replyTextUnits(text string) int { return len(utf16.Encode([]rune(text))) }
+
+// sendReplyResult is what send_reply returns. It is not telegram.SendResult:
+// send_reply has no dry run, so its schema carries no preview fields.
+type sendReplyResult struct {
+	Sent      bool   `json:"sent"`
+	Recipient string `json:"recipient"`
+	Text      string `json:"text"`
+	MessageID int    `json:"message_id,omitempty"`
+}
 
 type draftReplyResult struct {
 	ConfirmationID string    `json:"confirmation_id"`
@@ -105,9 +120,10 @@ tool cannot start a new conversation.
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>", as
          list_dialogs shows it.
-  text — the reply, plain text, at most 4096 characters.`),
+  text — the reply, plain text, at most 4096 UTF-16 units (most emoji
+         count as two).`),
 		mcplib.WithString("peer", mcplib.Required(), mcplib.Description("Existing conversation to reply in.")),
-		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Reply text, plain text, at most 4096 characters.")),
+		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Reply text, plain text, at most 4096 UTF-16 units.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -115,14 +131,19 @@ Inputs (required):
 		if id == nil {
 			return mcplib.NewToolResultError("authentication required"), nil
 		}
+		// The tool filter already hides draft_reply without the send scope;
+		// this keeps the check in the handler too, like every other tool.
+		if err := requireScope(id, "telegram:messages:send"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		args := req.GetArguments()
 		peer := strings.TrimSpace(stringArg(args, "peer", ""))
 		text := stringArg(args, "text", "")
 		if peer == "" || strings.TrimSpace(text) == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
-		if utf8.RuneCountInString(text) > maxReplyText {
-			return mcplib.NewToolResultError("text must be at most 4096 characters"), nil
+		if n := replyTextUnits(text); n > maxReplyText {
+			return mcplib.NewToolResultError(fmt.Sprintf("text must be at most %d UTF-16 units (it is %d; most emoji count as two)", maxReplyText, n)), nil
 		}
 		if s.Replies == nil {
 			return mcplib.NewToolResultError("draft_reply is not available on this server"), nil
@@ -172,7 +193,7 @@ func (s *Server) toolSendReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithReadOnlyHintAnnotation(false),
 		mcplib.WithDestructiveHintAnnotation(true),
 		mcplib.WithOpenWorldHintAnnotation(true),
-		outputSchema[telegram.SendResult](),
+		outputSchema[sendReplyResult](),
 		mcplib.WithDescription(`Send a reply prepared by draft_reply.
 
 Takes only the confirmation_id. The recipient and the text are the ones
@@ -211,22 +232,34 @@ Inputs (required):
 		if s.isLocalBridgeAccount(ctx, id.UserID) {
 			return mcplib.NewToolResultError("send_reply is not yet supported for local-bridge accounts"), nil
 		}
-		d, err := s.Replies.Consume(confID, id.UserID, id.Profile)
+		d, err := s.Replies.Peek(confID, id.UserID, id.Profile)
 		if err != nil {
 			s.auditRefusal(ctx, id, "send_reply:confirmation_rejected", "", err, startedAt, ReasonNotFound)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
+		// The rate limit is a refusal the user can wait out, so like the
+		// gate it runs before the draft is spent.
 		peerRedacted := telegram.RedactPeer(d.Target.Ref)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
 			s.auditRefusal(ctx, id, "send_reply:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
-			return mcplib.NewToolResultError(r + " — the draft was used up; call draft_reply again later"), nil
+			return mcplib.NewToolResultError(r), nil
+		}
+		// Consume is what makes the send single-shot: a concurrent
+		// send_reply with the same id that also passed Peek loses here.
+		if d, err = s.Replies.Consume(confID, id.UserID, id.Profile); err != nil {
+			s.auditRefusal(ctx, id, "send_reply:confirmation_rejected", peerRedacted, err, startedAt, ReasonNotFound)
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		result, err := s.deliverReply(ctx, id.UserID, d.Target, d.Text)
 		s.audit(ctx, id, "send_reply:sent", peerRedacted, err, startedAt)
 		if err != nil {
 			return borrowErrResult(ctx, "send_reply", err), nil
 		}
-		return jsonResult(result)
+		out := sendReplyResult{Sent: true, Recipient: d.Target.Ref, Text: d.Text}
+		if result != nil {
+			out.MessageID = result.MessageID
+		}
+		return jsonResult(out)
 	}
 	return tool, handler
 }

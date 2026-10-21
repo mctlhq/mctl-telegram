@@ -20,8 +20,10 @@ evidence:
   changes:
     - {tool: draft_reply, change: added}
     - {tool: send_reply, change: added}
-status: draft
+status: approved
 provenance:
   author: mashkovd
   assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
 created_at: "2026-10-21"
+reviewed_at: "2026-10-21"

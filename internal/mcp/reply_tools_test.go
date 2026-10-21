@@ -10,6 +10,7 @@ import (
 
 	"github.com/gotd/td/tg"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -134,6 +135,10 @@ func TestDraftReply_RejectsBadText(t *testing.T) {
 	for name, text := range map[string]string{
 		"blank":    "   ",
 		"too long": strings.Repeat("я", maxReplyText+1),
+		// 2049 emoji are 2049 runes but 4098 UTF-16 units, which is how
+		// Telegram counts; a rune count would let this through to fail at
+		// delivery, after the confirmation was spent.
+		"too many emoji": strings.Repeat("😀", maxReplyText/2+1),
 	} {
 		if res := draft(t, s, id, "@alice", text); !res.IsError {
 			t.Errorf("%s text accepted", name)
@@ -142,7 +147,10 @@ func TestDraftReply_RejectsBadText(t *testing.T) {
 		}
 	}
 	if res := draft(t, s, id, "@alice", strings.Repeat("я", maxReplyText)); res.IsError {
-		t.Fatalf("text of exactly %d characters refused: %s", maxReplyText, contentText(res))
+		t.Fatalf("text of exactly %d units refused: %s", maxReplyText, contentText(res))
+	}
+	if res := draft(t, s, id, "@alice", strings.Repeat("😀", maxReplyText/2)); res.IsError {
+		t.Fatalf("%d emoji (%d units) refused: %s", maxReplyText/2, maxReplyText, contentText(res))
 	}
 }
 
@@ -164,6 +172,51 @@ func TestSendReply_DeliversExactlyTheDraft(t *testing.T) {
 	}
 	if p, ok := got.target.Peer.(*tg.InputPeerUser); !ok || p.AccessHash != 11 {
 		t.Fatalf("delivered to %#v, want the InputPeer resolved at draft time", got.target.Peer)
+	}
+}
+
+// send_reply has no dry run, so its result carries no preview fields.
+func TestSendReply_ResultHasNoPreviewFields(t *testing.T) {
+	s, _, id := replyServer(t, 9312)
+	d := draftOK(t, s, id, "@alice", "hi")
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	var out map[string]any
+	if err := json.Unmarshal([]byte(contentText(res)), &out); err != nil {
+		t.Fatalf("result: %v (%s)", err, contentText(res))
+	}
+	if out["sent"] != true || out["recipient"] != "user:7001" || out["text"] != "hi" || out["message_id"] != float64(42) {
+		t.Fatalf("result = %v", out)
+	}
+	for _, k := range []string{"mode", "dry_reason", "notice", "hint", "truncated"} {
+		if _, ok := out[k]; ok {
+			t.Errorf("send_reply result carries preview field %q", k)
+		}
+	}
+	tool, _ := s.toolSendReply()
+	raw, _ := json.Marshal(tool.OutputSchema)
+	if strings.Contains(string(raw), "dry_reason") {
+		t.Fatalf("send_reply output schema advertises dry_reason: %s", raw)
+	}
+}
+
+// The per-peer rate limit can be waited out, so like the gate it must not
+// spend the draft.
+func TestSendReply_RateLimitKeepsTheDraft(t *testing.T) {
+	s, f, id := replyServer(t, 9313)
+	s.Limiter = audit.NewRateLimiter(1000)
+	d := draftOK(t, s, id, "@alice", "hi")
+	if !s.Limiter.AllowPeerN(id, telegram.RedactPeer("user:7001"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+		t.Fatal("could not exhaust the per-peer bucket")
+	}
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	if !res.IsError || classifyToolResultReason(res) != ReasonRateLimited {
+		t.Fatalf("rate-limited send: %s", contentText(res))
+	}
+	if len(f.delivered) != 0 {
+		t.Fatalf("delivered %d messages past the limit", len(f.delivered))
+	}
+	if _, err := s.Replies.Peek(d.ConfirmationID, id.UserID, id.Profile); err != nil {
+		t.Fatalf("rate limit spent the draft: %v", err)
 	}
 }
 
@@ -216,6 +269,13 @@ func TestSendReply_RefusesForeignOrStaleConfirmation(t *testing.T) {
 			}
 			if len(f.delivered) != 0 {
 				t.Fatalf("delivered %d messages", len(f.delivered))
+			}
+			if name == "expired" {
+				return
+			}
+			// Someone else's attempt must not spend the owner's draft.
+			if res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID}); res.IsError {
+				t.Fatalf("owner after a foreign attempt: %s", contentText(res))
 			}
 		})
 	}
@@ -337,5 +397,33 @@ func TestReplyTools_AreProfileOnly(t *testing.T) {
 	unprofiled := &auth.Identity{UserID: 1, Scopes: scopes}
 	if msg := profileDeniedMessage(unprofiled, "send_reply"); !strings.Contains(msg, "offered only to connections with a tool profile") {
 		t.Fatalf("refusal for an unprofiled caller: %q", msg)
+	}
+}
+
+// The store refuses on its own, not only behind send_reply's Peek: Consume
+// is the single-shot step and must hold the binding by itself.
+func TestReplyStore_ConsumeHoldsTheBinding(t *testing.T) {
+	target := &telegram.ReplyTarget{Peer: &tg.InputPeerUser{UserID: 7001}, Ref: "user:7001"}
+	for name, call := range map[string]func(st *ReplyStore, id string) error{
+		"other user": func(st *ReplyStore, id string) error { _, err := st.Consume(id, 2, toolprofile.CoreReply); return err },
+		"other profile": func(st *ReplyStore, id string) error {
+			_, err := st.Consume(id, 1, toolprofile.CoreReadonly)
+			return err
+		},
+		"no profile": func(st *ReplyStore, id string) error { _, err := st.Consume(id, 1, ""); return err },
+	} {
+		st := NewReplyStore()
+		d, err := st.Issue(1, toolprofile.CoreReply, target, "hi")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := call(st, d.ID); !errors.Is(err, errReplyDraftNotFound) {
+			t.Errorf("%s: Consume = %v, want not found", name, err)
+		}
+	}
+	st := NewReplyStore()
+	d, _ := st.Issue(1, toolprofile.CoreReply, target, "hi")
+	if got, err := st.Consume(d.ID, 1, toolprofile.CoreReply); err != nil || got.Text != "hi" {
+		t.Fatalf("owner Consume = %+v, %v", got, err)
 	}
 }

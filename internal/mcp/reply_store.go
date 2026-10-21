@@ -68,6 +68,27 @@ func (s *ReplyStore) Issue(userID int64, profile string, target *telegram.ReplyT
 	return d, nil
 }
 
+// Peek returns the draft without consuming it, under the same checks as
+// Consume. send_reply uses it to run pre-send checks that need the
+// recipient (the per-peer rate limit) before the draft is spent. An expired
+// draft is dropped; a draft that is someone else's is left alone.
+func (s *ReplyStore) Peek(id string, userID int64, profile string) (*replyDraft, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.m[id]
+	if !ok {
+		return nil, errReplyDraftNotFound
+	}
+	if s.now().After(d.ExpiresAt) {
+		delete(s.m, id)
+		return nil, errReplyDraftNotFound
+	}
+	if d.UserID != userID || d.Profile != profile {
+		return nil, errReplyDraftNotFound
+	}
+	return d, nil
+}
+
 // Consume removes the draft and returns it if it is live and belongs to the
 // same identity under the same profile. Any failure also removes it: a
 // draft is used once, or not at all.

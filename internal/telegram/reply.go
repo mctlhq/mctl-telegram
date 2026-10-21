@@ -29,50 +29,83 @@ type ReplyTarget struct {
 	Title string
 }
 
-// ResolveExistingDialog resolves peer and requires an existing conversation
-// with it: at least one message in the account's history. Any other outcome
-// (resolution failure, empty history) is an error; ErrNoExistingDialog marks
-// the empty-history case.
+// ResolveExistingDialog resolves peer and requires it to be a conversation
+// the account already has: the peer is in the account's dialog list with at
+// least one message, and for a group or channel the account is a member.
+// Being able to read a peer is not enough: a public channel or supergroup
+// resolves by @username with a usable access hash, and its history reads
+// fine, for an account that never joined it. Any other outcome is an error;
+// ErrNoExistingDialog marks the "not a conversation of this account" case.
 func ResolveExistingDialog(ctx context.Context, c *telegram.Client, peer string, cache *PeerCache, userID int64) (*ReplyTarget, error) {
 	inputPeer, err := ResolvePeerCached(ctx, c, peer, cache, userID)
 	if err != nil {
 		return nil, err
 	}
-	hist, err := c.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: inputPeer, Limit: 1})
+	res, err := c.API().MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: inputPeer}})
 	if err != nil {
-		return nil, fmt.Errorf("MessagesGetHistory: %w", err)
+		return nil, fmt.Errorf("MessagesGetPeerDialogs: %w", err)
 	}
-	return replyTargetFromHistory(inputPeer, hist)
+	return replyTargetFromPeerDialogs(inputPeer, res)
 }
 
-// replyTargetFromHistory is ResolveExistingDialog's decision, split out so
-// it can be tested without a Telegram connection.
-func replyTargetFromHistory(inputPeer tg.InputPeerClass, hist tg.MessagesMessagesClass) (*ReplyTarget, error) {
+// replyTargetFromPeerDialogs is ResolveExistingDialog's decision, split out
+// so it can be tested without a Telegram connection. It fails closed: a
+// group or channel whose membership the response does not show is refused.
+func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPeerDialogs) (*ReplyTarget, error) {
 	ref, err := canonicalPeerRef(inputPeer)
 	if err != nil {
 		return nil, err
 	}
-	var (
-		msgs  []tg.MessageClass
-		users []tg.UserClass
-		chats []tg.ChatClass
-	)
-	switch h := hist.(type) {
-	case *tg.MessagesMessages:
-		msgs, users, chats = h.Messages, h.Users, h.Chats
-	case *tg.MessagesMessagesSlice:
-		msgs, users, chats = h.Messages, h.Users, h.Chats
-	case *tg.MessagesChannelMessages:
-		msgs, users, chats = h.Messages, h.Users, h.Chats
-	default:
-		// MessagesMessagesNotModified or an unknown type: the history could
-		// not be observed, which is not the same as "no history".
-		return nil, fmt.Errorf("unexpected history response %T", hist)
+	if res == nil {
+		return nil, errors.New("empty peer dialogs response")
 	}
-	if len(msgs) == 0 {
+	var dialog *tg.Dialog
+	for _, d := range res.Dialogs {
+		if dd, ok := d.(*tg.Dialog); ok && samePeer(inputPeer, dd.Peer) {
+			dialog = dd
+		}
+	}
+	if dialog == nil || dialog.TopMessage == 0 {
 		return nil, ErrNoExistingDialog
 	}
-	return &ReplyTarget{Peer: inputPeer, Ref: ref, Title: peerTitle(inputPeer, users, chats)}, nil
+	switch v := inputPeer.(type) {
+	case *tg.InputPeerChat:
+		member := false
+		for _, c := range res.Chats {
+			if chat, ok := c.(*tg.Chat); ok && chat.ID == v.ChatID && !chat.Left && !chat.Deactivated {
+				member = true
+			}
+		}
+		if !member {
+			return nil, ErrNoExistingDialog
+		}
+	case *tg.InputPeerChannel:
+		member := false
+		for _, c := range res.Chats {
+			if ch, ok := c.(*tg.Channel); ok && ch.ID == v.ChannelID && !ch.Left && !ch.Min {
+				member = true
+			}
+		}
+		if !member {
+			return nil, ErrNoExistingDialog
+		}
+	}
+	return &ReplyTarget{Peer: inputPeer, Ref: ref, Title: peerTitle(inputPeer, res.Users, res.Chats)}, nil
+}
+
+func samePeer(in tg.InputPeerClass, p tg.PeerClass) bool {
+	switch v := in.(type) {
+	case *tg.InputPeerUser:
+		u, ok := p.(*tg.PeerUser)
+		return ok && u.UserID == v.UserID
+	case *tg.InputPeerChat:
+		c, ok := p.(*tg.PeerChat)
+		return ok && c.ChatID == v.ChatID
+	case *tg.InputPeerChannel:
+		c, ok := p.(*tg.PeerChannel)
+		return ok && c.ChannelID == v.ChannelID
+	}
+	return false
 }
 
 func canonicalPeerRef(p tg.InputPeerClass) (string, error) {
