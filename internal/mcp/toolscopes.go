@@ -105,10 +105,17 @@ var toolScopes = map[string][]string{
 	"cancel_broadcast":  {BroadcastScope},
 }
 
-// toolAllowed reports whether id may see and call the named tool. A nil
-// identity is allowed nothing: every handler refuses an anonymous caller
-// anyway, so listing tools to one would advertise a surface it cannot use.
+// toolAllowed reports whether id may see and call the named tool: its scopes
+// allow it AND its tool profile, if the credential carries one, lists it
+// (profiles.go). A profile can only remove tools from what the scopes allow.
 func toolAllowed(id *auth.Identity, name string) bool {
+	return scopeAllows(id, name) && profileAllows(id, name)
+}
+
+// scopeAllows is the scope half of toolAllowed. A nil identity is allowed
+// nothing: every handler refuses an anonymous caller anyway, so listing
+// tools to one would advertise a surface it cannot use.
+func scopeAllows(id *auth.Identity, name string) bool {
 	if id == nil {
 		return false
 	}
@@ -127,15 +134,23 @@ func toolAllowed(id *auth.Identity, name string) bool {
 	return false
 }
 
-// scopeToolFilter is the mcpserver.ToolFilterFunc that applies toolScopes to
-// the identity auth.Middleware put in ctx.
+// scopeToolFilter is the mcpserver.ToolFilterFunc that applies toolScopes and
+// the caller's tool profile to the identity auth.Middleware put in ctx. A
+// profiled caller is shown each remaining tool with the profile's argument
+// rules applied to its schema; mcp-go runs the same filter on tools/call,
+// where only the name matters.
 func scopeToolFilter(ctx context.Context, tools []mcplib.Tool) []mcplib.Tool {
 	id := auth.From(ctx)
+	p, restricted, _ := profileOf(id)
 	out := make([]mcplib.Tool, 0, len(tools))
 	for _, t := range tools {
-		if toolAllowed(id, t.Name) {
-			out = append(out, t)
+		if !toolAllowed(id, t.Name) {
+			continue
 		}
+		if restricted {
+			t = applyProfileSchema(t, p.Name, p.Tools[t.Name])
+		}
+		out = append(out, t)
 	}
 	return out
 }

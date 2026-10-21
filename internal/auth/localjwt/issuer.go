@@ -77,6 +77,13 @@ type Claims struct {
 	// or an assistant holding one. Absent on tokens minted before it
 	// existed, which therefore fail such a requirement closed.
 	ClientID string `json:"client_id,omitempty"`
+	// Profile is the restricted tool profile (internal/toolprofile) bound to
+	// ClientID when oauth.Server.mintAccessToken minted the token, resolved
+	// again on every refresh. Empty means the client has no binding and
+	// sees the surface its scopes allow, which is also what every token
+	// minted before the claim existed carries. A name the MCP layer does not
+	// know is not "no profile": it gets nothing (internal/mcp/profiles.go).
+	Profile string `json:"prf,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -343,6 +350,7 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		OriginalIssuedAt: c.OriginalIssuedAt,
 		DeviceID:         c.DeviceID,
 		ClientID:         c.ClientID,
+		Profile:          c.Profile,
 	}, nil
 }
 
