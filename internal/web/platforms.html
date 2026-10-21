@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<style>
+  /* Page-specific prose styling, built on the shared design tokens. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; color: var(--text);
+    margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
+  }
+  h3 { font-size: 16px; font-weight: 600; color: var(--text); margin: 22px 0 8px; }
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--mctl-radius-lg);
+    padding: 14px 18px; margin: 18px 0; color: var(--text-dim);
+  }
+  .note strong { color: var(--text); }
+  .pending {
+    border: 1px dashed var(--border);
+    border-radius: var(--mctl-radius-lg);
+    padding: 14px 18px; margin: 14px 0; color: var(--text-dim);
+  }
+  .pending strong { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text-dim); }
+  th { font-weight: 600; color: var(--text); }
+  ul, ol { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
+  li { margin-bottom: 8px; line-height: 1.6; }
+  li strong { color: var(--text); }
+  @media (max-width: 640px) {
+    h2 { font-size: 18px; }
+    table { font-size: 13px; }
+    td, th { padding: 7px 8px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  {{template "ui_topbar" .}}
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>For agent platforms</span>
+    </div>
+    <h1>Connect your users to <span class="accent">Telegram</span></h1>
+    <p class="lead">For agent platforms and MCP gateways that connect many users to <code class="url">{{.MCPURL}}</code>: how a client is admitted, what it may do, the limits it runs under, and how access ends. The limits and the CIMD status below are read from this deployment's running configuration.</p>
+  </section>
+
+  <h2>Who this is for</h2>
+  <p>A platform that lets its own users bring a Telegram account into an AI agent: one OAuth client on your side, one Telegram sign-in per user, each user's access confined to their own account. Individual users connecting ChatGPT, Claude or Cursor need none of this page; <a href="/docs">/docs</a> covers them.</p>
+
+  <h2>Admitting your client</h2>
+  <p>A platform's host is approved by the operator once. After that, every one of its users connects without further setup on either side. There are two ways in:</p>
+
+  <h3>Client ID Metadata Document (preferred)</h3>
+  <ul>
+    <li>Your <code>client_id</code> is an https URL on your own domain, and your redirect URIs come from the JSON document served there. You change callbacks by editing your document, not by asking us.</li>
+    <li>The document must name its own URL as <code>client_id</code>, carry no <code>client_secret</code>, list 1 to 20 https <code>redirect_uris</code>, and use <code>token_endpoint_auth_method</code> <code>none</code> or <code>private_key_jwt</code> (RS256 or ES256, with <code>jwks_uri</code> on the same host).</li>
+    <li>Fetches are bounded: 64 KiB body, 10 second timeout, and <code>Cache-Control</code> honoured between 30 seconds and 24 hours. A document that cannot be fetched gives a retryable <code>server_error</code>; a CIMD client is never silently downgraded to DCR.</li>
+    <li>For <code>private_key_jwt</code>, the assertion's <code>aud</code> is the issuer <code>{{.AuthServer}}</code> or <code>{{.AuthServer}}/oauth/token</code>, lifetime at most 5 minutes, <code>jti</code> single-use.</li>
+    <li><strong>On this deployment:</strong>
+      {{if .CIMDAccept}}CIMD is accepted for approved hosts.{{else}}CIMD is not enabled.{{end}}
+      {{if .CIMDAdvertise}}Discovery advertises it (<code>client_id_metadata_document_supported</code>).{{else}}Discovery does not advertise it yet, so a client that checks <code>client_id_metadata_document_supported</code> before using a URL <code>client_id</code> will register with DCR instead.{{end}}</li>
+  </ul>
+
+  <h3>Dynamic Client Registration</h3>
+  <ul>
+    <li><code>POST /oauth/register</code> (RFC 7591) with redirect URIs on an approved host. Redirects are https, or http on loopback only; custom URL schemes are refused.</li>
+    <li>Registration is limited to {{.RegisterRatePerMin}} attempts per minute per source IP. A registration is kept for up to 24 hours, and the oldest ones are dropped sooner once the server reaches its cap on dynamic registrations, so register when a user connects rather than once at install.</li>
+  </ul>
+
+  <p>To have a host approved, write to <a href="mailto:support@mctl.ai">support@mctl.ai</a> with the host, whether you use CIMD or DCR, and your expected number of users.</p>
+
+  <h2>Endpoints and discovery</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Purpose</th><th>Endpoint</th></tr></thead>
+    <tbody>
+      <tr><td>MCP (Streamable HTTP)</td><td><code>{{.MCPURL}}</code></td></tr>
+      <tr><td>Protected resource metadata (RFC 9728)</td><td><code>{{.WellKnownURL}}</code></td></tr>
+      <tr><td>Authorization server metadata (RFC 8414)</td><td><code>{{.AuthServer}}/.well-known/oauth-authorization-server</code></td></tr>
+      <tr><td>Authorize, token, revoke (RFC 7009), register</td><td><code>/oauth/authorize</code>, <code>/oauth/token</code>, <code>/oauth/revoke</code>, <code>/oauth/register</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Authorization code with PKCE <code>S256</code> only. Users sign in with Telegram's own OpenID Connect provider; your platform never sees a phone number or a login code.</p>
+
+  <h2>Scopes and consent</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Scope</th><th>Grants</th></tr></thead>
+    <tbody>
+      <tr><td><code>telegram:dialogs:read</code></td><td>List chats (<code>list_dialogs</code>)</td></tr>
+      <tr><td><code>telegram:messages:read</code></td><td>Read, search and fetch media (<code>get_messages</code>, <code>get_unread_messages</code>, <code>search_messages</code>, <code>get_media</code>)</td></tr>
+      <tr><td><code>telegram:messages:send</code></td><td>Send messages and media, subject to the user's own consent below</td></tr>
+      <tr><td><code>telegram:messages:pin</code></td><td>Pin messages, through a confirmation step</td></tr>
+      <tr><td><code>account:manage</code></td><td>The user's own account: send consent, notifications, Local Bridge devices, disconnecting and deleting the account</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <ul>
+    <li>Always name your scopes. A request that names scopes gets only those the user is entitled to; a request that omits <code>scope</code> gets the user's full entitled set, including send, pin and <code>account:manage</code>. Read the <code>scope</code> in the token response rather than assuming you got what you asked for. Administrative scopes cannot be requested.</li>
+    <li><strong>The tool list follows the grant.</strong> <code>tools/list</code> shows only the tools the token's scopes allow, and a call to any other tool is refused as an unknown tool, so a read-only connection never sees the send tools.</li>
+    <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (with <code>set_send_consent</code>{{if .ShowManage}} or on <code>/telegram/connect/manage</code>{{end}}), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. With the scope but without the user's consent, or on a deployment that does not allow sending, a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
+    <li>Every tool call lands in the user's hash-chained audit log, which they can read and verify. See <a href="/security">/security</a>.</li>
+  </ul>
+
+  <h2>Limits on this deployment</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Tool calls per user</td><td>{{.RateLimitPerUser}} per minute</td></tr>
+      <tr><td>Sends to one recipient</td><td>{{.PeerSendCap}} per {{.PeerWin}}</td></tr>
+      <tr><td>Access token lifetime</td><td>{{.AccessTTL}}</td></tr>
+      <tr><td>Refresh token lifetime</td><td>{{.RefreshTTL}}, rotated on every use; reusing a rotated token revokes the whole family</td></tr>
+      <tr><td>Media download</td><td>{{.MediaMax}} per file</td></tr>
+      <tr><td>Media upload (<code>send_media</code>)</td><td>{{.MediaUpload}} per file</td></tr>
+      <tr><td>Inline media in one read call (<code>fetch_media=true</code>)</td><td>{{.BulkMedia}} in total</td></tr>
+      <tr><td>Read page size</td><td>50 items by default, up to 200 (search: 20, up to 100)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Limits are per Telegram user, not per platform, so one busy user does not slow down the rest. Telegram's own flood limits apply on top and surface as errors with a retry delay.</p>
+
+  <h2>The tool surface is a contract</h2>
+  <ul>
+    <li>Every tool carries <code>readOnlyHint</code> and <code>destructiveHint</code> annotations. The full surface, schemas included, is committed as <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/tool-descriptors.json" target="_blank" rel="noopener">docs/tool-descriptors.json</a>.</li>
+    <li>A release cannot add, remove or change a tool without an approved entry in the change feed at <a href="/docs/product-updates">/docs/product-updates</a>; CI enforces it.</li>
+  </ul>
+
+  <h2>Reliability</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Objective (28-day window)</th><th>Target</th></tr></thead>
+    <tbody>
+      <tr><td>Tool call availability</td><td>99.5%</td></tr>
+      <tr><td>OAuth token endpoint availability</td><td>99.9%</td></tr>
+      <tr><td>Read tool latency</td><td>p95 under 2 s, p99 under 5 s</td></tr>
+      <tr><td>Send latency</td><td>p95 under 4 s</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>These are internal objectives with burn-rate alerting, not a contractual SLA. A canary checks OAuth discovery and a read-only tool call every ten minutes. The service runs as a single replica, so a deploy is a short interruption.</p>
+  <div class="pending"><strong>To be published:</strong> a public status page and the terms of a service-level agreement for platforms.</div>
+
+  <h2>Errors your client will see</h2>
+  <p><a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/troubleshooting.md" target="_blank" rel="noopener">docs/troubleshooting.md</a> lists the error families clients actually hit, with the fix for each: expired access tokens, a revoked Telegram session (<code>AUTH_KEY_UNREGISTERED</code>), Telegram flood limits, redirect URI refusals and transient Telegram failures.</p>
+
+  <h2>Revocation and offboarding</h2>
+  <ul>
+    <li>Your client revokes a user's grant with <code>POST /oauth/revoke</code>, which ends that refresh-token family. Access tokens already issued expire on their own lifetime ({{.AccessTTL}}).</li>
+    <li>{{if .ShowManage}}A user can disconnect their Telegram session on <code>/telegram/connect/manage</code>. {{end}}Disconnecting through a client (<code>disconnect_telegram_account</code>, <code>POST /api/account/disconnect</code>) and deleting the account (<code>delete_telegram_account</code>, <code>DELETE /api/account</code>) need <code>account:manage</code>, so request it if users should be able to leave from inside your platform.</li>
+    <li>If an approved CIMD host is removed, its users' refreshes stop at the next token request.</li>
+  </ul>
+  <div class="note"><strong>Known gap.</strong> Deleting an account does not yet revoke the OAuth clients connected to it; the fix is tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/781" target="_blank" rel="noopener">#781</a>. Until it ships, revoke with <code>/oauth/revoke</code> when a user leaves your platform.</div>
+
+  <h2>Bring your own session: Local Bridge</h2>
+  <p>For users or companies that will not leave a Telegram session on a hosted server, <a href="/docs/local-bridge">Local Bridge</a> keeps it on the user's machine. The user installs <code>mctl-telegram-local</code>, signs in to Telegram locally and activates the device in a browser; your platform keeps the same endpoint and the same OAuth client. The server then relays MCP calls to that machine and sees the payloads in transit, so it is not end-to-end encryption. Local Bridge is in beta: the daemon must be running, and editing, deleting, forwarding, searching and reactions are not yet available in this mode.</p>
+
+  <h2>Who runs this service</h2>
+  <p>mctl-telegram is an independent open-source project, not affiliated with Telegram, OpenAI or Anthropic. The source is at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
+  <div class="pending"><strong>To be published:</strong> the operating legal entity, its jurisdiction and governing law, data location, and the list of subprocessors.</div>
+
+  <h2>Contact</h2>
+  <ul>
+    <li>Integration and host approval: <a href="mailto:support@mctl.ai">support@mctl.ai</a></li>
+    <li>Security reports: see <a href="/security">/security</a></li>
+  </ul>
+
+  {{template "ui_footer" .}}
+
+</div>
+
+{{template "ui_script" .}}
+</body>
+</html>

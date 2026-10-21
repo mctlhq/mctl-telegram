@@ -44,12 +44,13 @@ func TestSecurityHeaders_NoHSTSOnHTTP(t *testing.T) {
 // exactly the third-party origins the chrome actually references.
 func TestChromePages_CarryCSP(t *testing.T) {
 	pages := map[string]http.Handler{
-		"/":         Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
-		"/docs":     Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
-		"/security": Security("https://tg.mctl.ai", true),
-		"/privacy":  Privacy("https://tg.mctl.ai", true),
-		"/terms":    Terms("https://tg.mctl.ai", true),
-		"/demo":     Demo("https://tg.mctl.ai", "", true),
+		"/":          Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
+		"/docs":      Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
+		"/security":  Security("https://tg.mctl.ai", true),
+		"/privacy":   Privacy("https://tg.mctl.ai", true),
+		"/terms":     Terms("https://tg.mctl.ai", true),
+		"/platforms": Platforms("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, testPlatformFacts()),
+		"/demo":      Demo("https://tg.mctl.ai", "", true),
 		// The embed branches render third-party iframes; the CSP must admit them.
 		"/demo?yt":   Demo("https://tg.mctl.ai", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", true),
 		"/demo?loom": Demo("https://tg.mctl.ai", "https://www.loom.com/share/0123456789abcdef", true),

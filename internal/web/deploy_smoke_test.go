@@ -41,7 +41,7 @@ func TestPublicPagesSmoke(t *testing.T) {
 
 	// Landing is checked separately below for content; the rest just need 200.
 	for _, p := range []string{
-		"/privacy", "/security", "/terms", "/demo", "/docs",
+		"/privacy", "/security", "/terms", "/demo", "/docs", "/platforms",
 		"/docs/local-bridge",
 		"/docs/local-bridge/quickstart",
 		"/docs/local-bridge/owner",

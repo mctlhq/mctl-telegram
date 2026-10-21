@@ -40,7 +40,7 @@ var toggleJS string
 type Data struct {
 	Title         string // <title> text
 	Description   string // social-share / meta description; falls back to a default when empty
-	NavActive     string // "home" | "docs" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
+	NavActive     string // "home" | "docs" | "platforms" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
 	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
 	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
@@ -96,6 +96,7 @@ var defs = `
     <nav class="meta">
       <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>home</a>
       <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>docs</a>
+      <a href="/platforms"{{if eq .NavActive "platforms"}} class="active"{{end}}>platforms</a>
       <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>demo</a>
       <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>security</a>
       <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>privacy</a>
@@ -116,6 +117,8 @@ var defs = `
       <a href="/">home</a>
       <span class="sep">·</span>
       <a href="/docs">docs</a>
+      <span class="sep">·</span>
+      <a href="/platforms">platforms</a>
       <span class="sep">·</span>
       <a href="/security">security</a>
       <span class="sep">·</span>
