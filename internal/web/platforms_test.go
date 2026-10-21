@@ -49,7 +49,8 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"The tool list follows the grant.",
 		"request it if users should be able to leave from inside your platform",
 		"Local Bridge",
-		"issues/781",
+		"revokes every client's refresh tokens for that user",
+		"only if your client calls <code>/oauth/revoke</code>",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,
 		`<a href="/platforms" class="active">platforms</a>`,
 		// footer twin of the topbar entry
@@ -59,6 +60,13 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/platforms missing %q", must)
+		}
+	}
+	// Account deletion revokes OAuth grants since #781; the page must not
+	// still describe that as a gap.
+	for _, gone := range []string{"Known gap", "issues/781"} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("/platforms still contains %q", gone)
 		}
 	}
 }
