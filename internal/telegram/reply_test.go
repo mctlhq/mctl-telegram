@@ -67,8 +67,12 @@ func TestReplyTargetFromPeerDialogs(t *testing.T) {
 	if _, err := replyTargetFromPeerDialogs(alice, &tg.MessagesPeerDialogs{
 		Dialogs: []tg.DialogClass{aliceDialog},
 		Users:   []tg.UserClass{&tg.User{ID: 7001, Deleted: true}, &tg.User{ID: 7002}},
-	}); !errors.Is(err, ErrCannotPost) {
-		t.Errorf("deleted account: err = %v, want ErrCannotPost", err)
+	}); !errors.Is(err, ErrPeerDeleted) {
+		t.Errorf("deleted account: err = %v, want ErrPeerDeleted", err)
+	}
+	// Without its user object a user peer is still proven by the dialog.
+	if _, err := replyTargetFromPeerDialogs(alice, &tg.MessagesPeerDialogs{Dialogs: []tg.DialogClass{aliceDialog}}); err != nil {
+		t.Errorf("user object missing: %v", err)
 	}
 	// Another user in the response being deleted does not refuse this one.
 	if _, err := replyTargetFromPeerDialogs(alice, &tg.MessagesPeerDialogs{

@@ -27,6 +27,7 @@ func TestIsCallerRefusal(t *testing.T) {
 		// must not count as session-borrow failures.
 		{"no_existing_dialog_wrapped", fmt.Errorf("draft: %w", ErrNoExistingDialog), true},
 		{"cannot_post", ErrCannotPost, true},
+		{"peer_deleted", ErrPeerDeleted, true},
 		// A reply that proves nothing about the caller, or that says the
 		// session itself is unhealthy, must keep counting against the SLI.
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), false},

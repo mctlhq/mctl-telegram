@@ -45,6 +45,9 @@ func (f *replyFake) install(s *Server) {
 		if peer == "@book_club_news" {
 			return nil, telegram.ErrCannotPost
 		}
+		if peer == "user:7003" {
+			return nil, telegram.ErrPeerDeleted
+		}
 		return nil, telegram.ErrNoExistingDialog
 	}
 	s.replyDeliver = func(_ context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error) {
@@ -141,6 +144,22 @@ func TestDraftReply_RefusesConversationItCannotPostIn(t *testing.T) {
 	res := draft(t, s, id, "@book_club_news", "hello")
 	if !res.IsError || !strings.Contains(contentText(res), "may not post") {
 		t.Fatalf("draft to a read-only channel: %s", contentText(res))
+	}
+	if got := classifyToolResultReason(res); got != ReasonRefused {
+		t.Fatalf("reason = %q, want %q", got, ReasonRefused)
+	}
+	if n := len(s.Replies.m); n != 0 || len(f.delivered) != 0 {
+		t.Fatalf("refused draft left %d confirmations, %d deliveries", n, len(f.delivered))
+	}
+}
+
+// A deleted account gets its own refusal: unlike a permissions problem, the
+// user cannot fix it, so the message must not suggest they can.
+func TestDraftReply_RefusesDeletedAccount(t *testing.T) {
+	s, f, id := replyServer(t, 9315)
+	res := draft(t, s, id, "user:7003", "hello")
+	if !res.IsError || !strings.Contains(contentText(res), "has been deleted") {
+		t.Fatalf("draft to a deleted account: %s", contentText(res))
 	}
 	if got := classifyToolResultReason(res); got != ReasonRefused {
 		t.Fatalf("reason = %q, want %q", got, ReasonRefused)

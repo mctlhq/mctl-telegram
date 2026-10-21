@@ -162,6 +162,10 @@ Inputs (required):
 			s.auditRefusal(ctx, id, "draft_reply:no_dialog", peerRedacted, err, startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("draft_reply blocked: " + peer + " is not an existing conversation of this account; draft_reply only replies in conversations that already exist"), nil
 		}
+		if errors.Is(err, telegram.ErrPeerDeleted) {
+			s.auditRefusal(ctx, id, "draft_reply:peer_deleted", peerRedacted, err, startedAt, ReasonRefused)
+			return mcplib.NewToolResultError("draft_reply blocked: the account behind " + peer + " has been deleted; there is no one to reply to"), nil
+		}
 		if errors.Is(err, telegram.ErrCannotPost) {
 			s.auditRefusal(ctx, id, "draft_reply:cannot_post", peerRedacted, err, startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("draft_reply blocked: this account may not post text messages in " + peer + "; pick a conversation it can write in"), nil

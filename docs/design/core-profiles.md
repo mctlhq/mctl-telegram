@@ -104,7 +104,8 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
   account's own banned rights, when present, are its effective rights (a
   per-member exception overrides the defaults); otherwise the defaults
   apply, and creators and admins are exempt from them. A deleted user
-  account is refused the same way. The refusal does not count against
+  account is refused with its own message, since nothing the user does
+  can make that reply possible. The refusal does not count against
   either SLI: the session-borrow counter labels it `call_error`, and the
   MCP record is synthesized, so it never feeds the tool-availability SLI.
   The rights come from the same `getPeerDialogs` response; otherwise the

@@ -22,6 +22,12 @@ var ErrNoExistingDialog = errors.New("peer is not an existing conversation of th
 // one-shot confirmation would otherwise be spent on a refusal at send time.
 var ErrCannotPost = errors.New("account may not post text messages in this conversation")
 
+// ErrPeerDeleted means the conversation exists but the other side is a
+// deleted account: the dialog and history remain, and Telegram refuses any
+// send to it (INPUT_USER_DEACTIVATED). Unlike ErrCannotPost there is nothing
+// the user can change to make the reply possible.
+var ErrPeerDeleted = errors.New("the other account in this conversation has been deleted")
+
 // ReplyTarget is a peer resolved for a reply: the InputPeer to send to,
 // including its access hash, so the later send cannot be re-pointed by a
 // username that changed hands between the draft and the send.
@@ -55,8 +61,10 @@ func ResolveExistingDialog(ctx context.Context, c *telegram.Client, peer string,
 }
 
 // replyTargetFromPeerDialogs is ResolveExistingDialog's decision, split out
-// so it can be tested without a Telegram connection. It fails closed: a
-// group or channel whose membership the response does not show is refused.
+// so it can be tested without a Telegram connection. It fails closed on
+// membership: a group or channel whose membership the response does not show
+// is refused. A user peer is proven by its dialog alone; its user object, when
+// present, can only refuse it (a deleted account).
 func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPeerDialogs) (*ReplyTarget, error) {
 	ref, err := canonicalPeerRef(inputPeer)
 	if err != nil {
@@ -76,11 +84,13 @@ func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPee
 	}
 	switch v := inputPeer.(type) {
 	case *tg.InputPeerUser:
-		// A deleted account keeps its dialog and history, but Telegram refuses
-		// sends to it (INPUT_USER_DEACTIVATED).
+		// For a user the dialog above is the proof of the conversation, and the
+		// user object can only add a refusal: a response without it is
+		// accepted. Groups and channels are the opposite, below: membership is
+		// the proof, so a missing object is refused.
 		for _, u := range res.Users {
 			if user, ok := u.(*tg.User); ok && user.ID == v.UserID && user.Deleted {
-				return nil, ErrCannotPost
+				return nil, ErrPeerDeleted
 			}
 		}
 	case *tg.InputPeerChat:
