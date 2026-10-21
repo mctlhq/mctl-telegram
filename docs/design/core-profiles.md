@@ -1,7 +1,8 @@
 # Restricted tool profiles: core-readonly and core-reply
 
 Status: Accepted (owner, 2026-10-21). Rollout step 1 (the mechanism and
-core-readonly) shipped in 0.85.0 (#798); steps 2-5 are open.
+core-readonly) shipped in 0.85.0 (#798); step 2 (core-reply) is
+implemented after 0.85.0; steps 3-5 are open.
 
 ## Problem
 
@@ -88,8 +89,37 @@ caller.
 | `draft_reply(peer, text)` | Sends nothing. Resolves `peer` to a chat that already exists in the user's dialog list (refuses any other), returns the exact text and recipient as the server will send them, plus a one-shot `confirmation_id` (10 min, bound to user, profile, resolved chat id and text hash). Annotated read-only. |
 | `send_reply(confirmation_id)` | Takes **only** the id. Recipient and text come from the server-side record, so the model cannot change them between draft and send. Without a valid, unexpired, unconsumed id it returns an error. When the send gate is closed it returns an error that names the condition, never a successful preview. Annotated destructive. |
 
-Confirmations live in process memory (`internal/mcp/confirm.go`) and are
-lost on restart or rollout. For `send_reply` that is acceptable only
+As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
+
+- "Exists in the dialog list" is read as "the account's history with the
+  peer has at least one message" (`messages.getHistory`, limit 1). An
+  empty history is refused; a history that could not be read is an error,
+  not a refusal.
+- The draft stores the resolved peer itself, access hash included, and
+  the exact text. `send_reply` sends to that peer and never re-resolves,
+  so a username that changes hands after the draft cannot re-point it.
+- The confirmation is bound to the user id and the profile name. Another
+  user, another profile, an expired, used or unknown id all get the same
+  answer: not found, draft again.
+- `send_reply` evaluates the send gate (and the account mode) before it
+  consumes the confirmation, so a refusal the user can fix, such as
+  `send_enabled=false`, leaves the draft usable for the rest of its 10
+  minutes. The per-peer rate limit is checked after consuming; a
+  rate-limited draft is used up and the error says so.
+- `draft_reply` reports whether the gate is open (`send_gate_open`,
+  `send_gate_reason`) so the user learns before approving, but does not
+  enforce it.
+- The reviewer/demo account is part of the gate: `send_reply` refuses it
+  with the preview-only reason, like any closed gate.
+- Local Bridge accounts are refused by both tools in v1 (no bridge-side
+  implementation).
+- Both tools need `telegram:messages:send` in addition to the profile.
+  Callers without a profile never see them
+  (`toolprofile.ProfileOnly`); they are disabled in
+  `docs/portal-allowlist.json` for the same reason.
+
+Confirmations live in process memory and are lost on restart or
+rollout. For `send_reply` that is acceptable only
 because the failure is loud: an unknown id is an error that tells the
 model to draft again, never a silent send or a preview. A pod that did not
 issue the id must answer the same way.

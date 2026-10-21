@@ -30,6 +30,11 @@
       "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach. Gated on the account:manage scope. REVISED 2026-10-20: ungated by the 2026-09-12 owner decision (mctlhq/.github#35) until a read-only or device credential was shown to be able to end its owner's session; the owner can still disconnect from the manage page after a browser sign-in."
     },
     {
+      "name": "draft_reply",
+      "enabled": false,
+      "reason": "core-reply profile only (docs/design/core-profiles.md): offered solely to a connection whose OAuth client is bound to the core-reply tool profile, never to an unprofiled caller, and the shared Cloudflare portal surface carries no profile. Disabled here because the portal could never reach it; upstream_gates is intentionally omitted while disabled."
+    },
+    {
       "name": "edit_message",
       "enabled": true,
       "upstream_gates": [
@@ -216,6 +221,11 @@
         "telegram:messages:send"
       ],
       "reason": "Sends a Telegram message as the caller. The upstream evaluateSendGate requires the server-wide ALLOW_SEND flag, the caller's telegram:messages:send scope (clients do not hold it) and the per-account send_enabled consent; when any is missing it dry-runs and reports why."
+    },
+    {
+      "name": "send_reply",
+      "enabled": false,
+      "reason": "core-reply profile only (docs/design/core-profiles.md): delivers a reply drafted by draft_reply, offered solely to a connection bound to the core-reply tool profile, never to an unprofiled caller; the shared Cloudflare portal surface carries no profile. Disabled here because the portal could never reach it; upstream_gates is intentionally omitted while disabled."
     },
     {
       "name": "set_account_mode",

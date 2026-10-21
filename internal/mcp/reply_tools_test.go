@@ -1,0 +1,341 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gotd/td/tg"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
+)
+
+// replyFake stands in for Telegram in the draft_reply / send_reply tests.
+// Peers listed in dialogs exist; anything else has no history.
+type replyFake struct {
+	dialogs   map[string]*telegram.ReplyTarget
+	delivered []delivered
+}
+
+type delivered struct {
+	userID int64
+	target *telegram.ReplyTarget
+	text   string
+}
+
+func newReplyFake() *replyFake {
+	return &replyFake{dialogs: map[string]*telegram.ReplyTarget{
+		"@alice": {Peer: &tg.InputPeerUser{UserID: 7001, AccessHash: 11}, Ref: "user:7001", Title: "Alice"},
+		"@bob":   {Peer: &tg.InputPeerUser{UserID: 7002, AccessHash: 22}, Ref: "user:7002", Title: "Bob"},
+	}}
+}
+
+func (f *replyFake) install(s *Server) {
+	s.replyResolve = func(_ context.Context, _ int64, peer string) (*telegram.ReplyTarget, error) {
+		if t, ok := f.dialogs[peer]; ok {
+			return t, nil
+		}
+		return nil, telegram.ErrNoExistingDialog
+	}
+	s.replyDeliver = func(_ context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error) {
+		f.delivered = append(f.delivered, delivered{userID, target, text})
+		return &telegram.SendResult{Sent: true, Mode: "send", PeerInput: target.Ref, Text: text, MessageID: 42}, nil
+	}
+}
+
+// replyServer is a server with the gate fully open for the returned identity:
+// ALLOW_SEND, the send scope, and send_enabled on a hosted account.
+func replyServer(t *testing.T, tgID int64) (*Server, *replyFake, *auth.Identity) {
+	t.Helper()
+	store := newToolsTestStore(t)
+	uid := seedHostedAccount(t, store, tgID, true)
+	s := &Server{Store: store, AllowSend: true, Replies: NewReplyStore()}
+	f := newReplyFake()
+	f.install(s)
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:read", "telegram:dialogs:read", "telegram:messages:send"}, Profile: toolprofile.CoreReply}
+	return s, f, id
+}
+
+func callReplyTool(t *testing.T, h func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error), name string, id *auth.Identity, args map[string]any) *mcplib.CallToolResult {
+	t.Helper()
+	res, err := h(auth.With(context.Background(), id), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: name, Arguments: args}})
+	if err != nil {
+		t.Fatalf("%s: unexpected Go error: %v", name, err)
+	}
+	return res
+}
+
+func draft(t *testing.T, s *Server, id *auth.Identity, peer, text string) *mcplib.CallToolResult {
+	t.Helper()
+	_, h := s.toolDraftReply()
+	return callReplyTool(t, h, "draft_reply", id, map[string]any{"peer": peer, "text": text})
+}
+
+func sendReply(t *testing.T, s *Server, id *auth.Identity, args map[string]any) *mcplib.CallToolResult {
+	t.Helper()
+	_, h := s.toolSendReply()
+	return callReplyTool(t, h, "send_reply", id, args)
+}
+
+func draftOK(t *testing.T, s *Server, id *auth.Identity, peer, text string) draftReplyResult {
+	t.Helper()
+	res := draft(t, s, id, peer, text)
+	if res.IsError {
+		t.Fatalf("draft_reply refused: %s", contentText(res))
+	}
+	var out draftReplyResult
+	if err := json.Unmarshal([]byte(contentText(res)), &out); err != nil {
+		t.Fatalf("draft_reply result: %v (%s)", err, contentText(res))
+	}
+	return out
+}
+
+func TestDraftReply_ReturnsRecipientTextAndConfirmation(t *testing.T) {
+	s, f, id := replyServer(t, 9301)
+	out := draftOK(t, s, id, "@alice", "See you at 5")
+	if out.Recipient != "user:7001" || out.RecipientTitle != "Alice" || out.Text != "See you at 5" {
+		t.Fatalf("draft = %+v", out)
+	}
+	if !strings.HasPrefix(out.ConfirmationID, "cr_") {
+		t.Fatalf("confirmation_id = %q", out.ConfirmationID)
+	}
+	if !out.SendGateOpen || out.SendGateReason != "" {
+		t.Fatalf("gate open, but draft reports %v %q", out.SendGateOpen, out.SendGateReason)
+	}
+	if len(f.delivered) != 0 {
+		t.Fatalf("draft_reply delivered %d messages", len(f.delivered))
+	}
+}
+
+// A peer with no history, such as a bare @username never talked to, is
+// refused and leaves no confirmation behind (owner decision 2026-10-21).
+func TestDraftReply_RefusesPeerWithoutConversation(t *testing.T) {
+	s, _, id := replyServer(t, 9302)
+	res := draft(t, s, id, "@carol", "hello")
+	if !res.IsError || !strings.Contains(contentText(res), "not an existing conversation") {
+		t.Fatalf("draft to a stranger: %s", contentText(res))
+	}
+	if got := classifyToolResultReason(res); got != ReasonRefused {
+		t.Fatalf("reason = %q, want %q", got, ReasonRefused)
+	}
+	if n := len(s.Replies.m); n != 0 {
+		t.Fatalf("%d confirmations issued for a refused draft", n)
+	}
+}
+
+func TestDraftReply_RejectsBadText(t *testing.T) {
+	s, _, id := replyServer(t, 9303)
+	for name, text := range map[string]string{
+		"blank":    "   ",
+		"too long": strings.Repeat("я", maxReplyText+1),
+	} {
+		if res := draft(t, s, id, "@alice", text); !res.IsError {
+			t.Errorf("%s text accepted", name)
+		} else if got := classifyToolResultReason(res); got != ReasonInvalidArgument {
+			t.Errorf("%s text: reason %q, want %q", name, got, ReasonInvalidArgument)
+		}
+	}
+	if res := draft(t, s, id, "@alice", strings.Repeat("я", maxReplyText)); res.IsError {
+		t.Fatalf("text of exactly %d characters refused: %s", maxReplyText, contentText(res))
+	}
+}
+
+// send_reply delivers what was drafted, to whom it was drafted. Any peer or
+// text passed at send time is ignored: the tool has no such arguments.
+func TestSendReply_DeliversExactlyTheDraft(t *testing.T) {
+	s, f, id := replyServer(t, 9304)
+	d := draftOK(t, s, id, "@alice", "See you at 5")
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID, "peer": "@bob", "text": "changed"})
+	if res.IsError {
+		t.Fatalf("send_reply: %s", contentText(res))
+	}
+	if len(f.delivered) != 1 {
+		t.Fatalf("delivered %d messages, want 1", len(f.delivered))
+	}
+	got := f.delivered[0]
+	if got.target.Ref != "user:7001" || got.text != "See you at 5" || got.userID != id.UserID {
+		t.Fatalf("delivered %+v to %s", got, got.target.Ref)
+	}
+	if p, ok := got.target.Peer.(*tg.InputPeerUser); !ok || p.AccessHash != 11 {
+		t.Fatalf("delivered to %#v, want the InputPeer resolved at draft time", got.target.Peer)
+	}
+}
+
+func TestSendReply_IsSingleShot(t *testing.T) {
+	s, f, id := replyServer(t, 9305)
+	d := draftOK(t, s, id, "@alice", "once")
+	if res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID}); res.IsError {
+		t.Fatalf("first send: %s", contentText(res))
+	}
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	if !res.IsError || !strings.Contains(contentText(res), "call draft_reply again") {
+		t.Fatalf("second send: %s", contentText(res))
+	}
+	if got := classifyToolResultReason(res); got != ReasonNotFound {
+		t.Fatalf("reason = %q, want %q", got, ReasonNotFound)
+	}
+	if len(f.delivered) != 1 {
+		t.Fatalf("delivered %d messages, want 1", len(f.delivered))
+	}
+}
+
+// A confirmation belongs to the identity and the profile that drafted it.
+// Another user, the same user under another profile, an expired draft and an
+// unknown id all get the same answer and send nothing.
+func TestSendReply_RefusesForeignOrStaleConfirmation(t *testing.T) {
+	cases := map[string]func(s *Server, id *auth.Identity) *auth.Identity{
+		"other user": func(s *Server, id *auth.Identity) *auth.Identity {
+			other := *id
+			other.UserID = seedHostedAccount(t, s.Store, 9399, true)
+			return &other
+		},
+		"other profile": func(_ *Server, id *auth.Identity) *auth.Identity {
+			other := *id
+			other.Profile = "core-reply-v0"
+			return &other
+		},
+		"expired": func(s *Server, id *auth.Identity) *auth.Identity {
+			s.Replies.now = func() time.Time { return time.Now().Add(ConfirmationTTL + time.Second) }
+			return id
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, f, id := replyServer(t, 9306)
+			d := draftOK(t, s, id, "@alice", "hi")
+			caller := mutate(s, id)
+			res := sendReply(t, s, caller, map[string]any{"confirmation_id": d.ConfirmationID})
+			if !res.IsError || contentText(res) != errReplyDraftNotFound.Error() {
+				t.Fatalf("send_reply: %s", contentText(res))
+			}
+			if len(f.delivered) != 0 {
+				t.Fatalf("delivered %d messages", len(f.delivered))
+			}
+		})
+	}
+	t.Run("unknown id", func(t *testing.T) {
+		s, f, id := replyServer(t, 9307)
+		res := sendReply(t, s, id, map[string]any{"confirmation_id": "cr_0000"})
+		if !res.IsError || len(f.delivered) != 0 {
+			t.Fatalf("unknown id: %s, delivered %d", contentText(res), len(f.delivered))
+		}
+	})
+}
+
+// A closed gate is an error that names the condition, never a preview, and it
+// leaves the draft usable: turning sends on and retrying delivers it.
+func TestSendReply_ClosedGateIsAnErrorAndKeepsTheDraft(t *testing.T) {
+	s, f, id := replyServer(t, 9308)
+	d := draftOK(t, s, id, "@alice", "hi")
+	s.AllowSend = false
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	if !res.IsError || !strings.Contains(contentText(res), "send_reply blocked: server flag ALLOW_SEND=false") {
+		t.Fatalf("closed gate: %s", contentText(res))
+	}
+	if strings.Contains(contentText(res), `"sent"`) {
+		t.Fatalf("closed gate returned a preview: %s", contentText(res))
+	}
+	if got := classifyToolResultReason(res); got != ReasonRefused {
+		t.Fatalf("reason = %q, want %q", got, ReasonRefused)
+	}
+	if len(f.delivered) != 0 {
+		t.Fatalf("delivered %d messages through a closed gate", len(f.delivered))
+	}
+	s.AllowSend = true
+	if res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID}); res.IsError {
+		t.Fatalf("after opening the gate: %s", contentText(res))
+	}
+	if len(f.delivered) != 1 {
+		t.Fatalf("delivered %d messages, want 1", len(f.delivered))
+	}
+}
+
+// The per-account flag is part of the gate, and the draft says so up front.
+func TestDraftReply_ReportsClosedGate(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedHostedAccount(t, store, 9309, false)
+	s := &Server{Store: store, AllowSend: true, Replies: NewReplyStore()}
+	f := newReplyFake()
+	f.install(s)
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}, Profile: toolprofile.CoreReply}
+	d := draftOK(t, s, id, "@alice", "hi")
+	if d.SendGateOpen || !strings.Contains(d.SendGateReason, "send_enabled=false") {
+		t.Fatalf("draft gate = %v %q", d.SendGateOpen, d.SendGateReason)
+	}
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	if !res.IsError || !strings.Contains(contentText(res), "send_reply blocked: ") || len(f.delivered) != 0 {
+		t.Fatalf("send with send_enabled=false: %s, delivered %d", contentText(res), len(f.delivered))
+	}
+}
+
+func TestReplyTools_RefuseLocalBridgeAccounts(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 9310)
+	s := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: true, Replies: NewReplyStore()}
+	f := newReplyFake()
+	f.install(s)
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}, Profile: toolprofile.CoreReply}
+	for _, res := range []*mcplib.CallToolResult{
+		draft(t, s, id, "@alice", "hi"),
+		sendReply(t, s, id, map[string]any{"confirmation_id": "cr_0000"}),
+	} {
+		if !res.IsError || classifyToolResultReason(res) != ReasonModeUnsupported {
+			t.Fatalf("local-bridge account: %s", contentText(res))
+		}
+	}
+	if len(f.delivered) != 0 {
+		t.Fatal("delivered through a local-bridge account")
+	}
+}
+
+func TestSendReply_DeliveryErrorIsReported(t *testing.T) {
+	s, _, id := replyServer(t, 9311)
+	d := draftOK(t, s, id, "@alice", "hi")
+	s.replyDeliver = func(context.Context, int64, *telegram.ReplyTarget, string) (*telegram.SendResult, error) {
+		return nil, errors.New("boom")
+	}
+	if res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID}); !res.IsError {
+		t.Fatalf("delivery error reported as success: %s", contentText(res))
+	}
+}
+
+// The two tools exist only under a profile that lists them. An unprofiled
+// caller holding every scope does not see them, so adding them changed
+// nothing for existing connections; core-readonly does not see them either.
+func TestReplyTools_AreProfileOnly(t *testing.T) {
+	tools := []mcplib.Tool{first((&Server{}).toolDraftReply()), first((&Server{}).toolSendReply()), first((&Server{}).toolSendMessage())}
+	scopes := []string{"telegram:messages:send", "telegram:messages:read", "telegram:dialogs:read"}
+	visible := func(profile string) map[string]bool {
+		id := &auth.Identity{UserID: 1, Scopes: scopes, Profile: profile}
+		out := map[string]bool{}
+		for _, tool := range scopeToolFilter(auth.With(context.Background(), id), tools) {
+			out[tool.Name] = true
+		}
+		return out
+	}
+	if v := visible(""); v["draft_reply"] || v["send_reply"] || !v["send_message"] {
+		t.Fatalf("unprofiled caller sees %v", v)
+	}
+	if v := visible(toolprofile.CoreReadonly); v["draft_reply"] || v["send_reply"] || v["send_message"] {
+		t.Fatalf("core-readonly sees %v", v)
+	}
+	if v := visible(toolprofile.CoreReply); !v["draft_reply"] || !v["send_reply"] || v["send_message"] {
+		t.Fatalf("core-reply sees %v", v)
+	}
+	// The send scope is still required under core-reply: a profile never
+	// grants a scope.
+	noSend := &auth.Identity{UserID: 1, Scopes: []string{"telegram:messages:read"}, Profile: toolprofile.CoreReply}
+	if toolAllowed(noSend, "draft_reply") || toolAllowed(noSend, "send_reply") {
+		t.Fatal("core-reply without the send scope may use the reply tools")
+	}
+	unprofiled := &auth.Identity{UserID: 1, Scopes: scopes}
+	if msg := profileDeniedMessage(unprofiled, "send_reply"); !strings.Contains(msg, "offered only to connections with a tool profile") {
+		t.Fatalf("refusal for an unprofiled caller: %q", msg)
+	}
+}

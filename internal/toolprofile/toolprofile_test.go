@@ -79,3 +79,57 @@ func TestCoreReadonly(t *testing.T) {
 		t.Fatal("Lookup accepted an unknown profile name")
 	}
 }
+
+// core-reply is core-readonly, rule for rule, plus the two reply tools and
+// nothing else: no send_message, no pin (owner decision 2026-10-21: v2).
+func TestCoreReply(t *testing.T) {
+	ro, _ := Lookup(CoreReadonly)
+	p, ok := Lookup(CoreReply)
+	if !ok {
+		t.Fatal("core-reply is not defined")
+	}
+	if len(p.Tools) != len(ro.Tools)+2 {
+		t.Fatalf("core-reply has %d tools, want core-readonly's %d plus 2: %v", len(p.Tools), len(ro.Tools), p.Tools)
+	}
+	for name, w := range ro.Tools {
+		g, listed := p.Tools[name]
+		if !listed {
+			t.Fatalf("%s is in core-readonly but not in core-reply", name)
+		}
+		if strings.Join(g.Required, ",") != strings.Join(w.Required, ",") ||
+			strings.Join(g.Forbidden, ",") != strings.Join(w.Forbidden, ",") ||
+			g.LimitDefault != w.LimitDefault || g.LimitMax != w.LimitMax {
+			t.Fatalf("%s: core-reply rule %+v differs from core-readonly %+v", name, g, w)
+		}
+	}
+	for _, name := range []string{"draft_reply", "send_reply"} {
+		if _, listed := p.Tools[name]; !listed {
+			t.Fatalf("%s missing from core-reply", name)
+		}
+		if _, listed := ro.Tools[name]; listed {
+			t.Fatalf("%s is in core-readonly", name)
+		}
+	}
+	if got, err := ParseBindings(`[{"client_id":"claude.ai","profile":"core-reply"}]`); err != nil || got["claude.ai"] != CoreReply {
+		t.Fatalf("core-reply binding = %v, %v", got, err)
+	}
+}
+
+// A profile-only tool that no profile lists would be registered and
+// reachable by nobody: dead surface in the descriptor snapshot.
+func TestProfileOnlyToolsAreListedByAProfile(t *testing.T) {
+	for name := range profileOnlyTools {
+		found := false
+		for _, p := range profiles {
+			if _, ok := p.Tools[name]; ok {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("profile-only tool %s is listed by no profile", name)
+		}
+	}
+	if ProfileOnly("send_message") || !ProfileOnly("send_reply") || !ProfileOnly("draft_reply") {
+		t.Fatal("ProfileOnly disagrees with the reply tools")
+	}
+}
