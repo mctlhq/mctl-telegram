@@ -48,6 +48,8 @@ func TestToolAnnotations(t *testing.T) {
 		{"provision_local_account", first(s.toolProvisionLocalAccount()), false, true, false},
 		{"send_message", first(s.toolSendMessage()), false, true, true},
 		{"send_media", first(s.toolSendMedia()), false, true, true},
+		{"draft_reply", first(s.toolDraftReply()), true, false, true},
+		{"send_reply", first(s.toolSendReply()), false, true, true},
 		{"pin_message", first(s.toolPinMessage()), false, true, true},
 		{"edit_message", first(s.toolEditMessage()), false, true, true},
 		{"delete_messages", first(s.toolDeleteMessages()), false, true, true},

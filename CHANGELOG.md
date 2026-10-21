@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.86.0](https://github.com/mctlhq/mctl-telegram/compare/0.85.0...0.86.0) (2026-10-21)
+
+
+### Features
+
+* **mcp:** core-reply profile with draft_reply and send_reply ([74dcb1c](https://github.com/mctlhq/mctl-telegram/commit/74dcb1c3025f05337695129e7b9de65c250fb1c9))
+* **mcp:** core-reply profile with draft_reply and send_reply ([f7fe147](https://github.com/mctlhq/mctl-telegram/commit/f7fe14709c984a4a0bf0a83434f81bc7aeef216e))
+
+
+### Bug Fixes
+
+* **mcp:** close the review gaps in draft_reply and send_reply ([07dae45](https://github.com/mctlhq/mctl-telegram/commit/07dae450933c1bdb73c57812461b20bc9079113c))
+* **mcp:** make ReplyStore.Consume a no-op for a foreign caller ([db51991](https://github.com/mctlhq/mctl-telegram/commit/db51991f38ac67cad2c349b31478a3a877d463db))
+* **mcp:** refuse drafts the account cannot post, drop Hub check ([9ecd3ab](https://github.com/mctlhq/mctl-telegram/commit/9ecd3abdd474fed6449e36174dfd4c0f5b0ff957))
+* **oauth:** harden the CIMD host allowlist and known set ([836eccd](https://github.com/mctlhq/mctl-telegram/commit/836eccd8d13bced2cf542629d6e734c423aa258b))
+* **oauth:** harden the CIMD host allowlist and known set ([8f539be](https://github.com/mctlhq/mctl-telegram/commit/8f539be52a004b7970fb6f493fa4753c0f6b1d90)), closes [#776](https://github.com/mctlhq/mctl-telegram/issues/776)
+* **telegram:** count draft refusals as caller errors ([321a85c](https://github.com/mctlhq/mctl-telegram/commit/321a85cf67d41d4df367e754b637514c2378540a))
+* **telegram:** give a deleted recipient its own refusal ([5901735](https://github.com/mctlhq/mctl-telegram/commit/5901735002ba22f219626b2ca23334d7bc186d9a))
+* **telegram:** refuse drafts to a deleted account ([1ca1d7d](https://github.com/mctlhq/mctl-telegram/commit/1ca1d7d3ec2a8f3f0f0ff30722534f580b6c0adf))
+* **toolprofile:** refuse binding the self-connect client ([06d56ba](https://github.com/mctlhq/mctl-telegram/commit/06d56babc525ba2f3227e327ff1e8dbd126cea12))
+* **toolprofile:** refuse binding the self-connect client ([a740bc3](https://github.com/mctlhq/mctl-telegram/commit/a740bc3cec7fc5df38e65165a402c43f708358a2)), closes [#800](https://github.com/mctlhq/mctl-telegram/issues/800)
+
 ## [0.85.0](https://github.com/mctlhq/mctl-telegram/compare/0.84.0...0.85.0) (2026-10-21)
 
 

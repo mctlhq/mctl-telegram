@@ -45,6 +45,11 @@ var toolScopes = map[string][]string{
 	"set_reaction":         {"telegram:messages:send"},
 	"prepare_pin_message":  {"telegram:messages:pin"},
 	"pin_message":          {"telegram:messages:pin"},
+	// core-reply only (toolprofile.ProfileOnly). draft_reply sends nothing
+	// but issues the confirmation send_reply consumes, so like
+	// prepare_send_message it needs the send scope.
+	"draft_reply": {"telegram:messages:send"},
+	"send_reply":  {"telegram:messages:send"},
 
 	// The caller's own state. Every credential may inspect itself.
 	"get_my_identity":    {},

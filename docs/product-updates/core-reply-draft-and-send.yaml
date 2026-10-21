@@ -1,0 +1,29 @@
+schema: mctl-telegram.product-update/v1
+id: core-reply-draft-and-send
+kind: new_tool
+title: Two-step replies for connections with the core-reply tool profile
+summary: >-
+  Connections bound to the core-reply tool profile get draft_reply and
+  send_reply. draft_reply sends nothing: it checks that the chat already
+  exists in your account, shows the exact recipient and text, and returns a
+  one-shot confirmation that expires after 10 minutes. send_reply takes only
+  that confirmation and sends exactly what was drafted, once. If real sends
+  are off for your account it returns an error that says why, not a preview.
+  Connections without a tool profile do not see either tool, and
+  send_message is unchanged.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [draft_reply, send_reply]
+evidence:
+  from: 0.85.0
+  changes:
+    - {tool: draft_reply, change: added}
+    - {tool: send_reply, change: added}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-10-21"
+reviewed_at: "2026-10-21"
