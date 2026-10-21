@@ -715,6 +715,8 @@ func main() {
 	// reconnect that eviction provokes cannot pass on a pre-revocation
 	// snapshot.
 	mcpSrv = mcpSrv.WithRevocationCache(workerTokenRevocationCache)
+	// DELETE /api/account ends the same live connections as the MCP delete.
+	accountHandlers.Evictor = mcpSrv
 
 	// Browser-GET to MCP_PATH is bounced to the landing page BEFORE auth
 	// runs, so unauthenticated humans still see instructions instead of

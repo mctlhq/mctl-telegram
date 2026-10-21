@@ -318,6 +318,39 @@ func TestToolDelete_NormalUserAllowed(t *testing.T) {
 	}
 }
 
+// TestToolDelete_EvictsConnectedDaemon: /bridge authorizes a daemon only at
+// connect, so the revoked credentials and device rows alone would leave a
+// connected daemon serving the deleted account. The delete refreshes the
+// denylist first, so the reconnect the eviction provokes is refused.
+func TestToolDelete_EvictsConnectedDaemon(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const tgID int64 = 500100102
+	uid := seedAccountWithSession(t, store, tgID, false)
+	hub := bridge.NewHub()
+	hub.Register(uid, "laptop")
+	cache := &fakeRevocationCache{}
+	cache.onRefresh = func() {
+		if !hub.HasDaemon(uid) {
+			t.Error("daemon evicted before the denylist refresh")
+		}
+	}
+	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), Hub: hub, RevocationCache: cache}
+	ctx = auth.With(ctx, &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: []string{"account:manage"}})
+
+	_, handler := srv.toolDeleteAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "delete_telegram_account"}})
+	if err != nil || res.IsError {
+		t.Fatalf("delete: err=%v result=%s", err, contentText(res))
+	}
+	if hub.HasDaemon(uid) {
+		t.Error("daemon still connected after the account was deleted")
+	}
+	if cache.refreshed != 1 {
+		t.Errorf("denylist refreshed %d times, want 1", cache.refreshed)
+	}
+}
+
 func TestDirectSendLimiter_AllowsWhenBudgetAvailable(t *testing.T) {
 	limiter := audit.NewRateLimiter(0)
 	id := &auth.Identity{UserID: 1}

@@ -50,7 +50,16 @@ type accountManageFixture struct {
 	signer     *localjwt.Issuer
 	oauthSrv   *oauth.Server
 	oauthMux   http.Handler
+	evictor    *recordingEvictor
 	t          *testing.T
+}
+
+// recordingEvictor records the users a delete asked to evict.
+type recordingEvictor struct{ users []int64 }
+
+func (e *recordingEvictor) EvictDeletedAccount(_ context.Context, userID int64) bool {
+	e.users = append(e.users, userID)
+	return true
 }
 
 func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
@@ -101,7 +110,10 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 
 	// Wired exactly as cmd/server/main.go wires them.
 	router := chi.NewRouter()
-	NewAccountHandlers(store, nil).Register(router)
+	evictor := &recordingEvictor{}
+	accountHandlers := NewAccountHandlers(store, nil)
+	accountHandlers.Evictor = evictor
+	accountHandlers.Register(router)
 	manageSrv := NewManageServer(store, nil, accountManageIssuer, "", oauth.ConnectClientID)
 	withAuth := auth.MiddlewareWithHTML(provider, true, nil, rm, manageSrv.WriteUnauthorized)
 
@@ -118,6 +130,7 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 		signer:     signer,
 		oauthSrv:   oauthSrv,
 		oauthMux:   oauthRouter,
+		evictor:    evictor,
 		t:          t,
 	}
 }
@@ -465,6 +478,11 @@ func TestAccountEndpoints_AccountManageDeletes(t *testing.T) {
 	}
 	if n := f.accountRows(); n != 0 {
 		t.Fatalf("account rows = %d after delete, want 0", n)
+	}
+	// A connected Local Bridge daemon is authorized only at connect, so the
+	// delete must evict it explicitly.
+	if len(f.evictor.users) != 1 || f.evictor.users[0] != f.uid {
+		t.Fatalf("evicted users = %v after delete, want [%d]", f.evictor.users, f.uid)
 	}
 }
 
