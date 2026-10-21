@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.85.0](https://github.com/mctlhq/mctl-telegram/compare/0.84.0...0.85.0) (2026-10-21)
+
+
+### Features
+
+* **mcp:** bind OAuth clients to restricted tool profiles ([947817a](https://github.com/mctlhq/mctl-telegram/commit/947817a33e90f06a945a2bc03bcf49afd6d5709e))
+* **mcp:** bind OAuth clients to restricted tool profiles ([b00d08e](https://github.com/mctlhq/mctl-telegram/commit/b00d08e0a792dc6beea1e2fcf21db31251d546f9))
+
+
+### Bug Fixes
+
+* **auth:** confine profiled credentials to the MCP endpoint ([3230e9d](https://github.com/mctlhq/mctl-telegram/commit/3230e9dd787b2e821865c2655ecff5cdb6b2cbbd))
+
 ## [0.84.0](https://github.com/mctlhq/mctl-telegram/compare/0.83.1...0.84.0) (2026-10-21)
 
 
