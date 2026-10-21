@@ -411,6 +411,14 @@ func TestReplyStore_ConsumeHoldsTheBinding(t *testing.T) {
 			return err
 		},
 		"no profile": func(st *ReplyStore, id string) error { _, err := st.Consume(id, 1, ""); return err },
+		"peek other user": func(st *ReplyStore, id string) error {
+			_, err := st.Peek(id, 2, toolprofile.CoreReply)
+			return err
+		},
+		"peek other profile": func(st *ReplyStore, id string) error {
+			_, err := st.Peek(id, 1, toolprofile.CoreReadonly)
+			return err
+		},
 	} {
 		st := NewReplyStore()
 		d, err := st.Issue(1, toolprofile.CoreReply, target, "hi")
@@ -420,6 +428,17 @@ func TestReplyStore_ConsumeHoldsTheBinding(t *testing.T) {
 		if err := call(st, d.ID); !errors.Is(err, errReplyDraftNotFound) {
 			t.Errorf("%s: Consume = %v, want not found", name, err)
 		}
+		// A mismatched call is a no-op for the owner's draft.
+		if got, err := st.Consume(d.ID, 1, toolprofile.CoreReply); err != nil || got.Text != "hi" {
+			t.Errorf("%s: owner after a mismatched Consume = %+v, %v", name, got, err)
+		}
+	}
+	// An expired draft is dropped, not kept for a later probe.
+	exp := NewReplyStore()
+	d0, _ := exp.Issue(1, toolprofile.CoreReply, target, "hi")
+	exp.now = func() time.Time { return time.Now().Add(ConfirmationTTL + time.Second) }
+	if _, err := exp.Consume(d0.ID, 1, toolprofile.CoreReply); !errors.Is(err, errReplyDraftNotFound) || len(exp.m) != 0 {
+		t.Fatalf("expired Consume = %v, %d entries left", err, len(exp.m))
 	}
 	st := NewReplyStore()
 	d, _ := st.Issue(1, toolprofile.CoreReply, target, "hi")

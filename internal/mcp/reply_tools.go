@@ -12,6 +12,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -27,10 +28,10 @@ import (
 // send gate is an error there, never a preview: the preview was the draft.
 
 // maxReplyText is Telegram's limit on one text message, in UTF-16 code
-// units as Telegram counts them (internal/broadcast.MaxTextUnits): most
+// units as Telegram counts them (the same constant broadcasts use): most
 // emoji cost two. It is enforced at draft time because a text refused at
 // delivery would only fail after the one-shot confirmation was spent.
-const maxReplyText = 4096
+const maxReplyText = broadcast.MaxTextUnits
 
 func replyTextUnits(text string) int { return len(utf16.Encode([]rune(text))) }
 

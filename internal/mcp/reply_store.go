@@ -90,8 +90,10 @@ func (s *ReplyStore) Peek(id string, userID int64, profile string) (*replyDraft,
 }
 
 // Consume removes the draft and returns it if it is live and belongs to the
-// same identity under the same profile. Any failure also removes it: a
-// draft is used once, or not at all.
+// same identity under the same profile. It validates before it deletes: a
+// call with the wrong identity or profile is a no-op for the owner's draft,
+// an expired draft is dropped, and a valid one is removed as it is returned,
+// so it is used once, or not at all.
 func (s *ReplyStore) Consume(id string, userID int64, profile string) (*replyDraft, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,9 +101,13 @@ func (s *ReplyStore) Consume(id string, userID int64, profile string) (*replyDra
 	if !ok {
 		return nil, errReplyDraftNotFound
 	}
-	delete(s.m, id)
-	if s.now().After(d.ExpiresAt) || d.UserID != userID || d.Profile != profile {
+	if s.now().After(d.ExpiresAt) {
+		delete(s.m, id)
 		return nil, errReplyDraftNotFound
 	}
+	if d.UserID != userID || d.Profile != profile {
+		return nil, errReplyDraftNotFound
+	}
+	delete(s.m, id)
 	return d, nil
 }
