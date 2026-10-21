@@ -58,7 +58,8 @@ func TestParseAllowedHosts(t *testing.T) {
 	if h, err := ParseAllowedHosts("a.example.com, .Example.org"); err != nil || len(h) != 2 || h[1] != ".example.org" {
 		t.Fatalf("%v %v", h, err)
 	}
-	for _, s := range []string{"", "  ", "a.com,,b.com", "1.2.3.4", "a.com/x", "*.a.com", "a.com:443"} {
+	for _, s := range []string{"", "  ", "a.com,,b.com", "1.2.3.4", "a.com/x", "*.a.com", "a.com:443",
+		".com", ".internal", ".co.uk", ".github.io"} {
 		if _, err := ParseAllowedHosts(s); err == nil {
 			t.Errorf("%q must be refused", s)
 		}
@@ -626,6 +627,32 @@ func TestKnownSetIsHardBounded(t *testing.T) {
 	}
 	if n := len(r.known); n != cacheEntries {
 		t.Fatalf("len(known) = %d, want %d", n, cacheEntries)
+	}
+}
+
+// TestKnownSetKeepsLiveClaims fills the known set behind one long-lived
+// client and checks that newcomers do not evict its claim: it re-stamps only
+// once per cache lifetime, so it is always the oldest live entry.
+func TestKnownSetKeepsLiveClaims(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	r := NewResolver(Options{AllowedHosts: []string{".example.com"}, Now: func() time.Time { return now }})
+	const longLived = "https://app.example.com/client.json"
+	r.markKnown(longLived)
+	now = now.Add(time.Minute)
+	for i := 0; i < cacheEntries+5; i++ {
+		r.markKnown(fmt.Sprintf("https://h%d.example.com/c.json", i))
+	}
+	if !r.isKnown(longLived) {
+		t.Fatal("a live claim was evicted by newcomers")
+	}
+	if n := len(r.known); n != cacheEntries {
+		t.Fatalf("len(known) = %d, want %d", n, cacheEntries)
+	}
+	// Once its claim lapses it makes room again.
+	now = now.Add(knownTTL)
+	r.markKnown("https://late.example.com/c.json")
+	if !r.isKnown("https://late.example.com/c.json") {
+		t.Fatal("a newcomer was refused although every claim had lapsed")
 	}
 }
 
