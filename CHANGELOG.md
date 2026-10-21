@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.86.1](https://github.com/mctlhq/mctl-telegram/compare/0.86.0...0.86.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **db:** revoke worker tokens and bridge devices on account deletion ([fe06a96](https://github.com/mctlhq/mctl-telegram/commit/fe06a96bad5504794728211e821f3a6103d7ba89))
+
 ## [0.86.0](https://github.com/mctlhq/mctl-telegram/compare/0.85.0...0.86.0) (2026-10-21)
 
 
