@@ -333,3 +333,23 @@ func TestCIMD_InMemoryJTIMapIsBounded(t *testing.T) {
 		t.Fatalf("map grew to %d past the cap %d", len(srv.jtis), maxInMemoryJTIs)
 	}
 }
+
+// TestCIMD_InMemoryJTIMapRewritesExpiredRecordWhenFull pins that a full map
+// still accepts the same client_id and jti once its earlier record expired:
+// the rewrite does not grow the map, so the cap must not refuse it.
+func TestCIMD_InMemoryJTIMapRewritesExpiredRecordWhenFull(t *testing.T) {
+	srv := newTestServer(t)
+	now := srv.clock()
+	srv.mu.Lock()
+	srv.jtis[pkjwtClientID+"\x00reused"] = now.Add(-time.Second)
+	for i := 1; i < maxInMemoryJTIs; i++ {
+		srv.jtis[fmt.Sprintf("k%d", i)] = now.Add(time.Minute)
+	}
+	srv.mu.Unlock()
+	if err := srv.consumeJTI(context.Background(), pkjwtClientID, cimd.Assertion{JTI: "reused", RememberFor: time.Minute}); err != nil {
+		t.Fatalf("rewriting an expired record on a full map: %v", err)
+	}
+	if len(srv.jtis) != maxInMemoryJTIs {
+		t.Fatalf("len(jtis) = %d, want %d", len(srv.jtis), maxInMemoryJTIs)
+	}
+}

@@ -43,6 +43,7 @@ import (
 	"unicode/utf8"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"golang.org/x/net/publicsuffix"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/mctlhq/mctl-telegram/internal/netsafe"
@@ -88,6 +89,11 @@ const (
 	// must outlast the longest cache entry (maxTTL): the refetch that the
 	// reserve exists for happens when that entry expires, and a claim that
 	// lapsed with it would leave the refetch to the unreserved budget.
+	//
+	// The claim tracks fetch activity, not age: every successful refetch
+	// re-stamps it, so a client_id that resolves at least once per knownTTL
+	// keeps its claim indefinitely. That is intended for a client in use;
+	// a client that stops signing users in loses it knownTTL later.
 	knownTTL      = 2 * maxTTL
 	maxConcurrent = 8
 	fetchTimeout  = 10 * time.Second
@@ -170,7 +176,10 @@ func parseCIMDURL(s string) (*url.URL, bool) {
 
 // ParseAllowedHosts parses OAUTH_CIMD_ALLOWED_HOSTS: a comma list of exact
 // host names or ".suffix" entries (matching subdomains). An empty list, an
-// empty entry, or an entry that is not a plain host name is an error.
+// empty entry, or an entry that is not a plain host name is an error. A
+// ".suffix" entry must name a registrable domain or something below it: a
+// single label (".com") or a public suffix (".co.uk", ".github.io") would
+// admit every site registered under it.
 func ParseAllowedHosts(raw string) ([]string, error) {
 	var out []string
 	for _, e := range strings.Split(raw, ",") {
@@ -188,12 +197,26 @@ func ParseAllowedHosts(raw string) ([]string, error) {
 		if net.ParseIP(h) != nil {
 			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is an IP literal", e)
 		}
+		if strings.HasPrefix(e, ".") && !belowPublicSuffix(h) {
+			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q covers a public suffix; name a registrable domain", e)
+		}
 		out = append(out, e)
 	}
 	if len(out) == 0 {
 		return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: required (and non-empty) when OAUTH_CIMD_ACCEPT=true")
 	}
 	return out, nil
+}
+
+// belowPublicSuffix reports whether h is a registrable domain or a name under
+// one, using the public suffix list (ICANN and private sections). A name
+// with no dot is never one, whatever the list says about unknown TLDs.
+func belowPublicSuffix(h string) bool {
+	if !strings.Contains(h, ".") {
+		return false
+	}
+	suffix, _ := publicsuffix.PublicSuffix(h)
+	return suffix != h
 }
 
 // Options configures a Resolver.
@@ -395,24 +418,24 @@ func (r *Resolver) storeEntry(e *cacheEntry) {
 }
 
 // markKnown records that key's document validated. The set is bounded like
-// the cache: when full, entries past knownTTL go first, then the oldest.
+// the cache: when full, claims past knownTTL are dropped, and if none has
+// lapsed the new key is not recorded. A live claim is never evicted for a
+// newcomer: a long-lived client re-stamps only once per cache lifetime, so
+// evicting the oldest stamp would let a caller who publishes enough valid
+// documents under a ".suffix" entry push it off the reserve. The newcomer
+// still resolves; it just draws on the unreserved budget until room frees up.
 func (r *Resolver) markKnown(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
 	if _, ok := r.known[key]; !ok && len(r.known) >= cacheEntries {
-		oldest, oldestAt, found := "", time.Time{}, false
 		for k, t := range r.known {
 			if now.Sub(t) >= knownTTL {
 				delete(r.known, k)
-				continue
-			}
-			if !found || t.Before(oldestAt) {
-				oldest, oldestAt, found = k, t, true
 			}
 		}
 		if len(r.known) >= cacheEntries {
-			delete(r.known, oldest)
+			return
 		}
 	}
 	r.known[key] = now
