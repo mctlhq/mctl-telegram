@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -987,6 +988,13 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, fmt.Errorf("delete account: count active: %w", err)
 	}
 
+	// Read the Telegram ids before the account rows go: worker tokens and
+	// device credentials are revoked by Telegram id, not by user id.
+	tgIDs, err := userTelegramIDs(ctx, tx, userID)
+	if err != nil {
+		return 0, err
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM telegram_accounts WHERE user_id = $1`,
 		userID,
@@ -1033,19 +1041,121 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// Revoke every OAuth refresh-token family in the same transaction. The
 	// users row survives deletion, so the oauth_refresh_tokens ON DELETE
 	// CASCADE never fires; without this, connected clients keep rotating.
-	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, RefreshRevokedAccountDeleted, time.Now().UTC())
+	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
 	}
 
+	// Worker tokens and Local Bridge devices are credentials the user issued
+	// earlier; like the refresh tokens they must stop working with the
+	// account. A blanket revocation per Telegram id covers every worker
+	// token, device credential and bridge token issued before now (they
+	// all carry the original issue time), and revoking the device rows
+	// stops a device from claiming a fresh credential lineage.
+	//
+	// One row per Telegram id, moved forward on a repeat delete rather than
+	// added again: the delete is callable with nothing left to delete, and
+	// the revocation cache reads the whole table. Tokens carry their issue
+	// time in whole seconds, so one minted in the same second as the delete
+	// is revoked too; a reconnect takes far longer than that. Two deletes
+	// racing for the same user can each insert once; later deletes update,
+	// and the cache keeps only the newest revocation per id.
+	now := time.Now().UTC()
+	for _, tgID := range tgIDs {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE worker_token_revocations SET revoked_at = $1
+			 WHERE jti IS NULL AND telegram_id = $2 AND reason = $3`,
+			now, tgID, ReasonAccountDeleted)
+		if err != nil {
+			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
+		} else if n > 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO worker_token_revocations (jti, telegram_id, revoked_at, reason, revoked_by)
+			 VALUES (NULL, $1, $2, $3, NULL)`,
+			tgID, now, ReasonAccountDeleted,
+		); err != nil {
+			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
+		}
+	}
+	// Device rows are kept as revoked tombstones rather than deleted: the
+	// revoked row is what makes IsActiveDeviceForUser and
+	// ClaimDeviceCredentialLineage refuse the device.
+	devices, err := tx.ExecContext(ctx,
+		`UPDATE local_bridge_devices SET revoked_at = $1, revoked_reason = $2
+		 WHERE user_id = $3 AND revoked_at IS NULL`,
+		now, ReasonAccountDeleted, userID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: revoke local bridge devices: %w", err)
+	}
+	revokedDevices, _ := devices.RowsAffected()
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delete account: commit: %w", err)
 	}
-	slog.Info("account deleted: oauth refresh tokens revoked", "user_id", userID, "tokens", revoked)
+	slog.Info("account deleted: credentials revoked", "user_id", userID, "oauth_tokens", revoked,
+		"worker_token_telegram_ids", len(tgIDs), "bridge_devices", revokedDevices)
 	if activeRows > 0 && s.metrics != nil {
 		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(activeRows))
 	}
 	return rows, nil
+}
+
+// userTelegramIDs returns every Telegram id a worker token for userID can
+// carry. Authentication maps a token's Telegram id to the user through
+// users.telegram_login_id or the legacy "tg:<id>" github_login, and the
+// account rows record the session's telegram_user_id; all three are
+// collected so a blanket revocation reaches each of them. A user with none
+// has no Telegram identity a token could map to.
+//
+// telegram_user_id is not unique across users (see userIDByTelegramID), so a
+// Telegram id shared with another user is revoked for that user too. That
+// over-revocation is accepted: it fails safe, and the id is the same person.
+func userTelegramIDs(ctx context.Context, tx *sql.Tx, userID int64) ([]int64, error) {
+	seen := map[int64]bool{}
+	var out []int64
+	add := func(id int64) {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	var loginID sql.NullInt64
+	var githubLogin sql.NullString // nullable on Postgres
+	if err := tx.QueryRowContext(ctx,
+		`SELECT telegram_login_id, github_login FROM users WHERE id = $1`, userID,
+	).Scan(&loginID, &githubLogin); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("delete account: read user telegram id: %w", err)
+	}
+	add(loginID.Int64)
+	if rest, ok := strings.CutPrefix(githubLogin.String, "tg:"); ok {
+		if id, err := strconv.ParseInt(rest, 10, 64); err == nil {
+			add(id)
+		}
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT telegram_user_id FROM telegram_accounts
+		 WHERE user_id = $1 AND telegram_user_id IS NOT NULL`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("delete account: read account telegram ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("delete account: scan account telegram id: %w", err)
+		}
+		add(id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delete account: read account telegram ids: %w", err)
+	}
+	return out, nil
 }
 
 // GetActiveAccount returns the active telegram account for a user, or

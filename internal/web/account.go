@@ -43,6 +43,15 @@ type AccountCloser interface {
 type AccountHandlers struct {
 	Store *db.Store
 	Pool  AccountCloser
+	// Evictor, when set, runs after a committed delete to cut what the
+	// delete transaction cannot reach (mcp.Server.EvictDeletedAccount). nil
+	// leaves a connected Local Bridge daemon up until it disconnects.
+	Evictor AccountEvictor
+}
+
+// AccountEvictor drops a deleted account's live connections.
+type AccountEvictor interface {
+	EvictDeletedAccount(ctx context.Context, userID int64) bool
 }
 
 func NewAccountHandlers(store *db.Store, pool AccountCloser) *AccountHandlers {
@@ -212,6 +221,9 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("account.delete", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "delete failed")
 		return
+	}
+	if h.Evictor != nil {
+		h.Evictor.EvictDeletedAccount(r.Context(), id.UserID)
 	}
 	writeAccountJSON(w, http.StatusOK, map[string]any{
 		"deleted":      true,

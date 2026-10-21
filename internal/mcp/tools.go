@@ -893,12 +893,35 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 		if err != nil {
 			return s.storeErr(ctx, "delete", err), nil
 		}
+		s.EvictDeletedAccount(ctx, id.UserID)
 		return jsonResult(deleteResult{
 			Deleted:     true,
 			RowsRemoved: rows,
 		})
 	}
 	return tool, handler
+}
+
+// EvictDeletedAccount finishes an account delete outside its transaction. It
+// forces the worker-token denylist forward, then drops a connected Local
+// Bridge daemon: /bridge authorizes a daemon only at connect, so the revoked
+// credentials and device rows alone would leave an open socket serving the
+// deleted account until it closes. The refresh comes first so the reconnect
+// the eviction provokes is refused, as in revoke_worker_token. Best-effort:
+// the revocations are already committed. Reports whether a daemon was evicted.
+func (s *Server) EvictDeletedAccount(ctx context.Context, userID int64) bool {
+	if s.RevocationCache != nil {
+		if err := s.RevocationCache.Refresh(ctx); err != nil {
+			slog.Warn("account delete: denylist refresh failed; revocation still takes effect within the cache TTL",
+				"user_id", userID, "err", err)
+		}
+	}
+	if s.Hub == nil || !s.Hub.HasDaemon(userID) {
+		return false
+	}
+	s.Hub.Unregister(userID)
+	slog.Info("account delete: local bridge daemon evicted", "user_id", userID)
+	return true
 }
 
 // sendStatusResult is the answer to "can I actually send?" — the question a

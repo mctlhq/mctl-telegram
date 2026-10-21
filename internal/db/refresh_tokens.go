@@ -297,8 +297,10 @@ func (s *Store) FamilyEverHeldScope(ctx context.Context, familyID string) (bool,
 	return exists, nil
 }
 
-// RefreshRevokedAccountDeleted is the revoked_reason HardDeleteAccount writes.
-const RefreshRevokedAccountDeleted = "account_deleted"
+// ReasonAccountDeleted is the reason HardDeleteAccount records on everything
+// it revokes: refresh tokens, worker-token revocations and Local Bridge
+// devices.
+const ReasonAccountDeleted = "account_deleted"
 
 // revokeUserRefreshTokens revokes every still-active refresh token of userID
 // inside tx. Rows already revoked keep their original reason.
