@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -962,6 +963,14 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Take the users row lock first (same order as RotateRefreshToken) so a
+	// concurrent refresh rotation cannot leave a live successor token.
+	if s.isPostgres(ctx) {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+			return 0, fmt.Errorf("delete account: lock user: %w", err)
+		}
+	}
+
 	// Count rows that are still active BEFORE the delete. Only those count as
 	// "revoked by delete" for the metric — rows already carrying a revoked_at
 	// were revoked earlier for another reason and must not inflate
@@ -1018,9 +1027,18 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}
 
+	// Revoke every OAuth refresh-token family in the same transaction. The
+	// users row survives deletion, so the oauth_refresh_tokens ON DELETE
+	// CASCADE never fires; without this, connected clients keep rotating.
+	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, RefreshRevokedAccountDeleted, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delete account: commit: %w", err)
 	}
+	slog.Info("account deleted: oauth refresh tokens revoked", "user_id", userID, "tokens", revoked)
 	if activeRows > 0 && s.metrics != nil {
 		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(activeRows))
 	}
