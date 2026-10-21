@@ -134,7 +134,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Terms of",
-		"not affiliated with, endorsed by, or operated by Telegram or OpenAI",
+		"not affiliated with, endorsed by, or operated by Telegram, OpenAI or Anthropic",
 		"your own",
 		"read-only by default",
 		"spam",
