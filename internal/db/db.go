@@ -271,6 +271,15 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// redirect_uri of the authorization a refresh-token family descends from,
+	// copied onto every rotation, so a tool-profile binding by redirect_uri
+	// is re-resolved at refresh (docs/design/core-profiles.md). NULL marks a
+	// family issued before the column existed: its redirect_uri is unknown,
+	// which the refresh path must not read as "unbound".
+	if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_refresh_tokens", "redirect_uri",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// Unique index on telegram_login_id (partial — NULLs ignored) so multiple
 	// pre-migration rows without telegram_login_id remain valid.
 	idxStmts := []string{
@@ -780,7 +789,8 @@ func sqliteSchema() []string {
 			expires_at DATETIME NOT NULL,
 			revoked_at DATETIME,
 			parent_token_hash BLOB,
-			revoked_reason TEXT
+			revoked_reason TEXT,
+			redirect_uri TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,
@@ -1054,7 +1064,8 @@ func pgSchema() []string {
 			expires_at TIMESTAMPTZ NOT NULL,
 			revoked_at TIMESTAMPTZ,
 			parent_token_hash BYTEA,
-			revoked_reason TEXT
+			revoked_reason TEXT,
+			redirect_uri TEXT
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_hash ON oauth_refresh_tokens(token_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_family ON oauth_refresh_tokens(family_id)`,

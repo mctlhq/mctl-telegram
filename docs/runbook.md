@@ -69,11 +69,31 @@ service outage unless new authorization-code flows also fail.
 (`docs/design/core-profiles.md`). It is a JSON array:
 
 ```json
-[{"client_id": "https://client.example/oauth/metadata.json", "profile": "core-readonly"}]
+[
+  {"client_id": "https://client.example/oauth/metadata.json", "profile": "core-readonly"},
+  {"redirect_uri": "https://app.example/oauth/callback", "profile": "core-reply"}
+]
 ```
 
-- `client_id` is matched byte for byte: a CIMD `client_id` URL or a
-  preregistered client id. Implicit and DCR clients cannot be bound yet.
+- Each record names exactly one of `client_id` and `redirect_uri`, matched
+  byte for byte. Bind by `client_id` when the client has a stable one (a
+  CIMD `client_id` URL, a preregistered id); bind by `redirect_uri` when it
+  does not (an implicit client, a dynamically registered one): every
+  registration of the product shares its callback. A `client_id` record
+  wins over a `redirect_uri` record that also matches.
+- A `redirect_uri` binding can only narrow what a client gets, so a client
+  that registers another product's callback restricts itself and nothing
+  else. The self-connect client's callback (`<issuer>/telegram/connect/done`)
+  cannot be bound: the server refuses to start.
+- **Refresh-token families issued before 0.87.0 have no stored
+  `redirect_uri`.** While at least one `redirect_uri` record is set, such a
+  family is refused at refresh (`invalid_grant`, "authorize again") unless a
+  `client_id` record decides it, because the server cannot tell whether
+  the restriction applies. The client signs in again once and is fine from
+  then on. Families live at most 30 days, so a `redirect_uri` record added
+  30 days or more after 0.87.0 is deployed refuses nobody. With no
+  `redirect_uri` record those families refresh exactly as before. The log
+  line is `oauth refresh refused: family predates redirect_uri storage`.
 - Known profiles: `core-readonly`, and `core-reply` (core-readonly plus
   `draft_reply` / `send_reply`). The two reply tools exist only under
   `core-reply`; no unprofiled connection sees them. Their drafts live in
@@ -81,8 +101,9 @@ service outage unless new authorization-code flows also fail.
   draft_reply again", which is expected, not an incident.
 - Unset or empty restricts no client.
 - A malformed table, an unknown key, an unknown profile, a duplicate
-  `client_id` or a record with `redirect_uri` **stops the server at
-  startup** (`MCP_CLIENT_PROFILES: record N: ...`). That is deliberate: the
+  `client_id` or `redirect_uri`, a record naming both or neither, or a
+  `redirect_uri` that is not an absolute URL without a fragment **stops the
+  server at startup** (`MCP_CLIENT_PROFILES: record N: ...`). That is deliberate: the
   operator who set the table relies on the restriction, and a server that
   skipped the bad record would leave the client on its full surface. Fix
   the value in gitops and redeploy.

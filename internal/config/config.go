@@ -260,12 +260,13 @@ type Config struct {
 	// "all" (default) registers every tool; "read-only" registers only tools
 	// annotated with ReadOnlyHint=true. Set via MCP_TOOL_FILTER.
 	ToolFilter string // MCP_TOOL_FILTER
-	// ClientProfiles binds exact OAuth client_ids to restricted tool
-	// profiles (docs/design/core-profiles.md), from MCP_CLIENT_PROFILES: a
-	// JSON array of {"client_id","profile"} records. Empty (the default)
-	// restricts no client. A malformed table, an unknown profile or a
-	// redirect_uri record aborts startup (toolprofile.ParseBindings).
-	ClientProfiles map[string]string
+	// ClientProfiles binds OAuth clients to restricted tool profiles
+	// (docs/design/core-profiles.md), from MCP_CLIENT_PROFILES: a JSON array
+	// of {"client_id","profile"} and {"redirect_uri","profile"} records,
+	// each matched exactly. Empty (the default) restricts no client. A
+	// malformed table or an unknown profile aborts startup
+	// (toolprofile.ParseBindings).
+	ClientProfiles toolprofile.Bindings
 	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
 	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
 	MediaDownloadMaxBytes int64 // MEDIA_DOWNLOAD_MAX_BYTES
@@ -606,7 +607,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("MCP_CLIENT_PROFILES: %w", err)
 	}
-	c.ClientProfiles = profiles
+	c.ClientProfiles = *profiles
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
