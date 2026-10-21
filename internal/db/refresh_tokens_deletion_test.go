@@ -83,6 +83,7 @@ func TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent(t *testing.T)
 	s := newPostgresTestStore(t, dsn)
 	ctx := context.Background()
 
+	run := time.Now().UnixNano()
 	for round := 0; round < 10; round++ {
 		tgID := int64(850000000 + round)
 		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
@@ -93,8 +94,18 @@ func TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent(t *testing.T)
 			return RefreshToken{FamilyID: fam, UserID: uid, ClientID: "claude.ai",
 				TelegramID: tgID, Scope: "telegram:dialogs:read", ExpiresAt: time.Now().Add(time.Hour)}
 		}
-		fam := fmt.Sprintf("race-fam-%d", round)
-		old := fmt.Sprintf("race-old-%d", round)
+		// Postgres keeps state between runs and token_hash is unique: clear
+		// prior rows and use per-run plaintexts so the test is re-runnable.
+		clear := func() {
+			if _, err := s.DB.ExecContext(ctx, `DELETE FROM oauth_refresh_tokens WHERE user_id = $1`, uid); err != nil {
+				t.Errorf("round %d clear rows: %v", round, err)
+			}
+		}
+		clear()
+		t.Cleanup(clear)
+		fam := fmt.Sprintf("race-fam-%d-%d", run, round)
+		old := fmt.Sprintf("race-old-%d-%d", run, round)
+		newPT := fmt.Sprintf("race-new-%d-%d", run, round)
 		if err := s.SaveRefreshToken(ctx, old, mk(fam)); err != nil {
 			t.Fatalf("round %d save: %v", round, err)
 		}
@@ -106,7 +117,7 @@ func TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent(t *testing.T)
 		go func() {
 			defer wg.Done()
 			<-start
-			rotErr = s.RotateRefreshToken(ctx, old, fmt.Sprintf("race-new-%d", round), mk(fam))
+			rotErr = s.RotateRefreshToken(ctx, old, newPT, mk(fam))
 		}()
 		go func() {
 			defer wg.Done()
