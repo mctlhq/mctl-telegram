@@ -1071,9 +1071,11 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// added again: the delete is callable with nothing left to delete, and
 	// the revocation cache reads the whole table. Tokens carry their issue
 	// time in whole seconds, so one minted in the same second as the delete
-	// is revoked too; a reconnect takes far longer than that. Two deletes
-	// racing for the same user can each insert once; later deletes update,
-	// and the cache keeps only the newest revocation per id.
+	// is revoked too; a reconnect takes far longer than that. Deletes of the
+	// same user are serialized by the users-row lock above (and by SQLite's
+	// single writer), so only deletes of two users that share a Telegram id
+	// can race to insert one row each; the cache keeps only the newest
+	// revocation per id.
 	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
 		res, err := tx.ExecContext(ctx,
