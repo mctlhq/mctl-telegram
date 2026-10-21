@@ -1057,7 +1057,9 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// added again: the delete is callable with nothing left to delete, and
 	// the revocation cache reads the whole table. Tokens carry their issue
 	// time in whole seconds, so one minted in the same second as the delete
-	// is revoked too; a reconnect takes far longer than that.
+	// is revoked too; a reconnect takes far longer than that. Two deletes
+	// racing for the same user can each insert once; later deletes update,
+	// and the cache keeps only the newest revocation per id.
 	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
 		res, err := tx.ExecContext(ctx,
@@ -1080,6 +1082,9 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 			return 0, fmt.Errorf("delete account: revoke worker tokens: %w", err)
 		}
 	}
+	// Device rows are kept as revoked tombstones rather than deleted: the
+	// revoked row is what makes IsActiveDeviceForUser and
+	// ClaimDeviceCredentialLineage refuse the device.
 	devices, err := tx.ExecContext(ctx,
 		`UPDATE local_bridge_devices SET revoked_at = $1, revoked_reason = $2
 		 WHERE user_id = $3 AND revoked_at IS NULL`,

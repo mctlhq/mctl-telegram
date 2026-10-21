@@ -920,6 +920,7 @@ func (s *Server) EvictDeletedAccount(ctx context.Context, userID int64) bool {
 		return false
 	}
 	s.Hub.Unregister(userID)
+	slog.Info("account delete: local bridge daemon evicted", "user_id", userID)
 	return true
 }
 
