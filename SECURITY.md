@@ -83,6 +83,7 @@ The `/oauth/token` endpoint supports `grant_type=refresh_token` so a client can 
 * **Reuse detection.** Replaying an already-rotated token revokes the entire token family.
 * **Bounded lifetime.** Absolute expiry is `OAUTH_REFRESH_TOKEN_TTL` (default 30 days); a background sweeper deletes expired rows.
 * **Explicitly revocable.** `POST /oauth/revoke` (RFC 7009, advertised as `revocation_endpoint` in `/.well-known/oauth-authorization-server`) lets a caller revoke a refresh token's whole family on demand — the same family-revoke mechanism reuse detection already uses internally, now reachable without waiting for a reuse event. This is how an operator cuts off a leaked *refresh* token without rotating `OAUTH_JWT_SIGNING_KEY` for every user; it does not affect any access token already issued from that family (see above).
+* **Revoked on account deletion.** `delete_telegram_account` and `DELETE /api/account` revoke every refresh-token family of the user in the delete transaction (`revoked_reason = account_deleted`); a failed revocation fails the delete. Disconnect does not revoke, by design: it ends the Telegram session but keeps the client's OAuth grant. Access tokens already issued live until their TTL, as for every revocation.
 
 ## Legacy mode: `AUTH_MODE=shared-hmac-legacy`
 

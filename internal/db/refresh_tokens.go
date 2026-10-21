@@ -183,11 +183,26 @@ func (s *Store) LookupRefreshTokenByHashPair(ctx context.Context, oldPlaintext, 
 // revoked (a lost race against a concurrent rotation): the caller must then
 // not hand out the new token.
 func (s *Store) RotateRefreshToken(ctx context.Context, oldPlaintext, newPlaintext string, newRT RefreshToken) error {
+	if newRT.UserID <= 0 {
+		return errors.New("rotate refresh token: missing user id")
+	}
+	// Resolve the dialect before BeginTx: the probe needs a second pooled
+	// connection and would deadlock on single-connection SQLite.
+	pg := s.isPostgres(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin rotate tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Lock order with HardDeleteAccount: users row first in both. The shared
+	// lock makes a concurrent account delete wait for this rotation (so it
+	// revokes the successor) or makes this rotation fail after the delete.
+	// SQLite's single-writer transactions serialize the two paths anyway.
+	if pg {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR SHARE`, newRT.UserID); err != nil {
+			return fmt.Errorf("lock user for rotate: %w", err)
+		}
+	}
 	oldHash := hashRefreshToken(oldPlaintext)
 	res, err := tx.ExecContext(ctx,
 		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = 'rotated'
@@ -280,4 +295,21 @@ func (s *Store) FamilyEverHeldScope(ctx context.Context, familyID string) (bool,
 		return false, fmt.Errorf("query family scope history: %w", err)
 	}
 	return exists, nil
+}
+
+// RefreshRevokedAccountDeleted is the revoked_reason HardDeleteAccount writes.
+const RefreshRevokedAccountDeleted = "account_deleted"
+
+// revokeUserRefreshTokens revokes every still-active refresh token of userID
+// inside tx. Rows already revoked keep their original reason.
+func revokeUserRefreshTokens(ctx context.Context, tx *sql.Tx, userID int64, reason string, now time.Time) (int64, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = $2
+		 WHERE user_id = $3 AND revoked_at IS NULL`,
+		now, reason, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user refresh tokens: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
