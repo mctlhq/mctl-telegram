@@ -859,7 +859,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[deleteResult](),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
-Removes the encrypted session blob and all per-account metadata. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
+Removes the encrypted session blob and all per-account metadata, and revokes every credential issued for the account: OAuth refresh tokens of every connected client, worker tokens and Local Bridge devices. Clients connected to this account have to be re-authorized after a reconnect. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
 For a softer alternative that keeps the row but disables it, use disconnect_telegram_account. Requires the account:manage scope.
 

@@ -36,6 +36,12 @@ type Store struct {
 	pgMu       sync.Mutex
 	pgResolved bool
 	pgFlag     bool
+	// probeFail, when set, makes the dialect probe fail as a dropped
+	// connection would. Tests only.
+	probeFail func() error
+	// grantSaveHook, when set, runs inside SaveRefreshTokenForGrant between
+	// the deletion check and the insert. Tests only.
+	grantSaveHook func()
 
 	// outbox, when set, derives an event_outbox row for each ingested event
 	// (see WithEventOutbox). nil disables the outbox entirely.
@@ -960,17 +966,22 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, error) {
 	// Resolve the dialect before opening the transaction: the probe uses a
 	// second pooled connection, which would deadlock on single-connection SQLite.
-	pg := s.isPostgres(ctx)
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: %w", err)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Take the users row lock first (same order as RotateRefreshToken) so a
-	// concurrent refresh rotation cannot leave a live successor token.
+	// Take the users row lock first (same order as RotateRefreshToken and the
+	// code exchange) so a concurrent refresh rotation or code exchange cannot
+	// leave a live token. FOR NO KEY UPDATE conflicts with their FOR SHARE
+	// but not with the FOR KEY SHARE that foreign-key checks take.
 	if pg {
-		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
 			return 0, fmt.Errorf("delete account: lock user: %w", err)
 		}
 	}
@@ -1031,9 +1042,12 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// identity_captured_at is reset to NULL so provenance reports "unknown"
 	// rather than "not_supplied" (which would falsely claim Telegram never
 	// sent these names).
+	//
+	// account_deleted_at marks the delete for the authorization-code
+	// exchange, which refuses a code issued before it.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL WHERE id = $1`,
-		userID,
+		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
+		userID, time.Now().UTC(),
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}

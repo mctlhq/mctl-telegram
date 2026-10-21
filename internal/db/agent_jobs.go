@@ -100,9 +100,14 @@ func (s *Store) isPostgres(ctx context.Context) bool {
 	if s.pgResolved {
 		return s.pgFlag
 	}
-	err := s.DB.QueryRowContext(ctx,
-		"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
-	).Scan(new(int))
+	var err error
+	if s.probeFail != nil {
+		err = s.probeFail()
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
+		).Scan(new(int))
+	}
 	switch {
 	case err == nil:
 		s.pgFlag, s.pgResolved = true, true
@@ -115,6 +120,21 @@ func (s *Store) isPostgres(ctx context.Context) bool {
 		s.pgFlag, s.pgResolved = false, true
 	}
 	return s.pgFlag
+}
+
+// postgresDialect is isPostgres for callers that decide on the answer
+// whether to take a lock. There an inconclusive probe must not read as "not
+// Postgres": that would silently drop the lock on a live Postgres, so it is
+// an error instead.
+func (s *Store) postgresDialect(ctx context.Context) (bool, error) {
+	pg := s.isPostgres(ctx)
+	s.pgMu.Lock()
+	resolved := s.pgResolved
+	s.pgMu.Unlock()
+	if !resolved {
+		return false, errors.New("database dialect probe was inconclusive")
+	}
+	return pg, nil
 }
 
 // EnqueueAgentJob inserts a pending job for an event. Idempotent on event_id:

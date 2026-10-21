@@ -2246,7 +2246,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientName := s.clientDisplayName(r.Context(), clientID)
-	refreshTok, err := s.issueRefreshToken(r.Context(), db.RefreshToken{
+	refreshTok, err := s.issueRefreshToken(r.Context(), entry.CreatedAt, db.RefreshToken{
 		FamilyID:         randomToken(16),
 		UserID:           uid,
 		ClientID:         clientID,
@@ -2255,6 +2255,12 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		TelegramUsername: entry.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
 	})
+	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
+		// The access token minted above is dropped unsent: the account was
+		// deleted after this code was issued, so the code grants nothing.
+		writeTokenError(w, "invalid_grant", "the account was deleted after this code was issued", http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		writeTokenError(w, "server_error", "could not issue refresh token", http.StatusInternalServerError)
 		return
@@ -2731,10 +2737,10 @@ func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string,
 // issueRefreshToken generates an opaque refresh token, persists it (hashed),
 // and returns the plaintext for the token response. ExpiresAt is stamped here
 // from RefreshTokenTTL so callers supply only identity fields.
-func (s *Server) issueRefreshToken(ctx context.Context, rt db.RefreshToken) (string, error) {
+func (s *Server) issueRefreshToken(ctx context.Context, grantIssuedAt time.Time, rt db.RefreshToken) (string, error) {
 	plaintext := randomToken(32)
 	rt.ExpiresAt = s.clock().Add(s.cfg.RefreshTokenTTL)
-	if err := s.store.SaveRefreshToken(ctx, plaintext, rt); err != nil {
+	if err := s.store.SaveRefreshTokenForGrant(ctx, plaintext, rt, grantIssuedAt); err != nil {
 		return "", err
 	}
 	return plaintext, nil
