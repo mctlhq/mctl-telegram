@@ -957,6 +957,9 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 // nullable) survive — they reference the user, not the account. Returns the
 // number of rows removed.
 func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, error) {
+	// Resolve the dialect before opening the transaction: the probe uses a
+	// second pooled connection, which would deadlock on single-connection SQLite.
+	pg := s.isPostgres(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: begin: %w", err)
@@ -965,7 +968,7 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 
 	// Take the users row lock first (same order as RotateRefreshToken) so a
 	// concurrent refresh rotation cannot leave a live successor token.
-	if s.isPostgres(ctx) {
+	if pg {
 		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
 			return 0, fmt.Errorf("delete account: lock user: %w", err)
 		}
