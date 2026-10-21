@@ -217,9 +217,6 @@ func TestCIMD_TokenCodeRefusedBeforeConsume(t *testing.T) {
 	}
 }
 
-// TestCIMD_OffLeavesURLClientsOnTheOldPath checks that with CIMD off a URL
-// client_id is an ordinary unregistered client_id, and that with CIMD on a
-// DCR-style client_id never reaches the resolver.
 // TestCIMD_AuthorizeHandlerAnswers pins what /oauth/authorize itself sends:
 // an unreachable document is a retryable 503 temporarily_unavailable, and a
 // redirect_uri the document does not list gets the same generic refusal as
@@ -298,6 +295,9 @@ func TestCIMD_TokenCodeRechecksRedirect(t *testing.T) {
 	}
 }
 
+// TestCIMD_OffLeavesURLClientsOnTheOldPath checks that with CIMD off a URL
+// client_id is an ordinary unregistered client_id, and that with CIMD on a
+// DCR-style client_id never reaches the resolver.
 func TestCIMD_OffLeavesURLClientsOnTheOldPath(t *testing.T) {
 	ctx := context.Background()
 
