@@ -58,6 +58,14 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		if err != nil {
 			t.Fatalf("register bob device: %v", err)
 		}
+		// A device revoked before the delete keeps no label either.
+		aliceOldDevice, err := s.RegisterDevice(ctx, alice, "old-laptop", "", nil)
+		if err != nil {
+			t.Fatalf("register alice old device: %v", err)
+		}
+		if err := s.RevokeDevice(ctx, aliceOldDevice, "user_revoked"); err != nil {
+			t.Fatalf("revoke alice old device: %v", err)
+		}
 
 		issued := time.Now().UTC().Add(-time.Hour)
 		for _, id := range []int64{aliceLogin, aliceSession, bobID} {
@@ -94,6 +102,16 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		if d.DeviceLabel != "" {
 			t.Errorf("alice device label = %q after the delete, want it cleared", d.DeviceLabel)
+		}
+		d, err = s.GetDevice(ctx, aliceOldDevice)
+		if err != nil {
+			t.Fatalf("get alice old device: %v", err)
+		}
+		if d.DeviceLabel != "" {
+			t.Errorf("alice earlier-revoked device label = %q after the delete, want it cleared", d.DeviceLabel)
+		}
+		if d.RevokedReason != "user_revoked" {
+			t.Errorf("alice earlier-revoked device reason = %q, want it left as %q", d.RevokedReason, "user_revoked")
 		}
 		if claimed, err := s.ClaimDeviceCredentialLineage(ctx, aliceDevice, "after-delete", time.Now()); err != nil || claimed {
 			t.Errorf("revoked device claimed a credential lineage: claimed=%v err=%v", claimed, err)
