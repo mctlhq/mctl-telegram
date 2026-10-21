@@ -103,6 +103,13 @@ type Server struct {
 	// default) reproduces today's tools-only surface byte-for-byte -- see
 	// WithAppsEnabled and newMCPServer.
 	AppsEnabled bool
+	// Replies holds draft_reply confirmations for send_reply (core-reply
+	// profile). nil makes both tools refuse.
+	Replies *ReplyStore
+	// replyResolve and replyDeliver replace the Telegram calls of
+	// draft_reply and send_reply in tests; nil means the client pool.
+	replyResolve func(ctx context.Context, userID int64, peer string) (*telegram.ReplyTarget, error)
+	replyDeliver func(ctx context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error)
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -112,6 +119,7 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 		AllowSend:  allowSend,
 		Confirms:   NewConfirmStore(),
 		MediaStore: NewMediaStore(),
+		Replies:    NewReplyStore(),
 	}
 }
 
@@ -384,6 +392,14 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSendMedia()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolDraftReply()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSendReply()
 		s.addTool(srv, t, h)
 	}
 	{

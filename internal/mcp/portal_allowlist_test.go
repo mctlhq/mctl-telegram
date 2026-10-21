@@ -91,6 +91,7 @@ const minReasonLen = 40
 // its vouch below.
 var reportsGateTools = map[string]string{
 	"get_my_send_status": "runs evaluateSendGateBeforeAccount to compute can_send/reason for its own output; the verdict is returned, never enforced",
+	"draft_reply":        "runs evaluateSendGate to fill send_gate_open/send_gate_reason in the draft; send_reply enforces the gate, draft_reply only reports it. Its requireScope(telegram:messages:send) IS enforced and is dropped with it only because the scan cannot separate the two; the tool filter (toolScopes) enforces the same scope",
 }
 
 var selfOnlyTools = map[string]string{
@@ -283,7 +284,7 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// could only be enabled via selfOnlyTools, but the honest failure is here.
 	// apps.go registers prepare_send_message (only reachable with
 	// AppsEnabled=true above), so it must be scanned too.
-	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go")
+	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go", "reply_tools.go")
 	fromSource, err := gatesFromSource(fset, parsed...)
 	if err != nil {
 		t.Fatal(err)
