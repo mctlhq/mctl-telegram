@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -65,5 +68,67 @@ func TestHardDeleteAccount_RevokesRefreshTokens(t *testing.T) {
 	}
 	if err := s.RotateRefreshToken(ctx, "a-1", "a-x", mk("fa", alice)); !errors.Is(err, ErrRefreshTokenNotFound) {
 		t.Errorf("rotate after delete: err = %v, want ErrRefreshTokenNotFound", err)
+	}
+}
+
+// TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent exercises the
+// users-row lock (FOR UPDATE in HardDeleteAccount, FOR SHARE in
+// RotateRefreshToken), which is compiled out on SQLite. Whichever ordering
+// wins, no refresh token for the deleted user may remain live.
+func TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+
+	for round := 0; round < 10; round++ {
+		tgID := int64(850000000 + round)
+		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+		if err != nil {
+			t.Fatalf("round %d ensure: %v", round, err)
+		}
+		mk := func(fam string) RefreshToken {
+			return RefreshToken{FamilyID: fam, UserID: uid, ClientID: "claude.ai",
+				TelegramID: tgID, Scope: "telegram:dialogs:read", ExpiresAt: time.Now().Add(time.Hour)}
+		}
+		fam := fmt.Sprintf("race-fam-%d", round)
+		old := fmt.Sprintf("race-old-%d", round)
+		if err := s.SaveRefreshToken(ctx, old, mk(fam)); err != nil {
+			t.Fatalf("round %d save: %v", round, err)
+		}
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var rotErr, delErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			rotErr = s.RotateRefreshToken(ctx, old, fmt.Sprintf("race-new-%d", round), mk(fam))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, delErr = s.HardDeleteAccount(ctx, uid)
+		}()
+		close(start)
+		wg.Wait()
+
+		if delErr != nil {
+			t.Fatalf("round %d delete: %v", round, delErr)
+		}
+		if rotErr != nil && !errors.Is(rotErr, ErrRefreshTokenNotFound) {
+			t.Fatalf("round %d rotate: %v", round, rotErr)
+		}
+		var live int
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM oauth_refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, uid).Scan(&live); err != nil {
+			t.Fatalf("round %d count: %v", round, err)
+		}
+		if live != 0 {
+			t.Fatalf("round %d: %d live refresh tokens left for a deleted account (rotErr=%v)", round, live, rotErr)
+		}
 	}
 }
