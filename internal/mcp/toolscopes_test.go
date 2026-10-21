@@ -308,3 +308,49 @@ func TestToolsCall_ScopeDeniedRowSurvivesCancelledContext(t *testing.T) {
 		t.Fatalf("reason = %q, want %q", reason, ReasonScopeDenied)
 	}
 }
+
+// TestToolsCall_ClientTierCannotReachAdminSurface is the call-level half of
+// the client/admin boundary. TestToolsList_FollowsCallerScopes proves a
+// client-tier identity is not LISTED the admin tools, and
+// TestToolsCall_HiddenToolIsRejected proves a read-only identity cannot CALL
+// them; this pins the same refusal for the full client scope set, the
+// identity an ordinary signed-in user actually holds, including that the
+// refusal is audited and that a refused set_telegram_access changes nothing.
+func TestToolsCall_ClientTierCannotReachAdminSurface(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := fullSurfaceServer(&Server{Store: store, Confirms: NewConfirmStore(), AllowSend: true})
+
+	const uid int64 = 4302
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: uid, Scopes: clientScopes})
+	for _, name := range union(lookupTools, adminWrites, broadcastOnly) {
+		t.Run(name, func(t *testing.T) {
+			before := countAuditRows(t, store, uid)
+			env := callRPC(t, ctx, srv, string(mcplib.MethodToolsCall), map[string]any{
+				"name":      name,
+				"arguments": map[string]any{"telegram_id": 424399, "tier": "client", "enabled": true},
+			})
+			if env.Error == nil {
+				t.Fatalf("tools/call %s succeeded for a client-tier identity: %s", name, env.Result)
+			}
+			if n := countAuditRows(t, store, uid) - before; n != 1 {
+				t.Fatalf("audit rows written = %d, want 1", n)
+			}
+			if reason := latestAuditReason(t, store, uid); reason != ReasonScopeDenied {
+				t.Fatalf("reason = %q, want %q", reason, ReasonScopeDenied)
+			}
+		})
+	}
+
+	// A refused set_telegram_access must leave the target's tier untouched.
+	const targetTG int64 = 424399
+	if _, err := store.EnsureUserByTelegramID(context.Background(), targetTG, "target", "Target User"); err != nil {
+		t.Fatalf("EnsureUserByTelegramID: %v", err)
+	}
+	tier, err := store.GetAccessTier(context.Background(), targetTG)
+	if err != nil {
+		t.Fatalf("GetAccessTier: %v", err)
+	}
+	if tier != "" {
+		t.Fatalf("a client-tier identity changed another user's access tier to %q", tier)
+	}
+}

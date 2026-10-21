@@ -348,3 +348,24 @@ func TestAuthenticate_GroupGate(t *testing.T) {
 		t.Fatal("expected group-gate rejection")
 	}
 }
+
+// A valid token whose groups map to nothing authenticates but holds no
+// scopes, so every requireScope-gated tool still refuses it. This is the
+// outcome that matters when AllowedGroups is empty (the default wiring in
+// cmd/server): the group gate is off, and the scope derivation is the only
+// thing between an arbitrary signed token and the tools.
+func TestAuthenticate_UnknownGroupDerivesNoScopes(t *testing.T) {
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{Secret: secret, ExpectedIssuer: "https://api.mctl.ai"})
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "x", []string{"some-other-tenant", "admin:users"}, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(req)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(id.Scopes) != 0 {
+		t.Fatalf("unknown groups derived scopes %v, want none", id.Scopes)
+	}
+}
