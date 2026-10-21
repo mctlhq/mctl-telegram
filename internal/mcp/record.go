@@ -431,9 +431,26 @@ func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *
 			toolName = req.Params.Name
 		}
 		reason := classifyJSONRPCReason(err)
+		identity := auth.From(ctx)
+		isRegistered := false
+		if registered != nil {
+			if names := registered.Load(); names != nil {
+				_, isRegistered = (*names)[toolName]
+			}
+		}
+		// A registered tool that scopeToolFilter withheld from an
+		// authenticated caller reaches the client as "not found" -- mcp-go
+		// rejects it before any handler, so recordToolCall never sees it.
+		// It is still a scope refusal by a known user, and it keeps the
+		// audit row and reason the handler's own requireScope used to write
+		// before the filter existed (toolscopes.go).
+		scopeDenied := isRegistered && identity != nil && !toolAllowed(identity, toolName)
+		if scopeDenied {
+			reason = ReasonScopeDenied
+		}
 
 		uid := int64(0)
-		if identity := auth.From(ctx); identity != nil {
+		if identity != nil {
 			uid = identity.UserID
 		}
 		attrs := []any{
@@ -460,14 +477,25 @@ func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *
 			// Only a name in the registered-tool set is emitted verbatim; a nil
 			// set (hook fired before construction finished) fails closed.
 			labelTool := "unregistered"
-			if registered != nil {
-				if names := registered.Load(); names != nil {
-					if _, ok := (*names)[toolName]; ok {
-						labelTool = toolName
-					}
-				}
+			if isRegistered {
+				labelTool = toolName
 			}
 			s.Metrics.ToolCallErrorsTotal.WithLabelValues(labelTool, reason).Inc()
+		}
+		if scopeDenied && s.Store != nil {
+			// Detached like Rule 4's flush: this is the only writer of the
+			// row, so a client that disconnects after the rejection must not
+			// be able to drop it.
+			detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+			defer cancel()
+			s.writeAuditRow(detached, callRecord{
+				tool:        toolName,
+				status:      "error",
+				reason:      ReasonScopeDenied,
+				errMsg:      "identity missing scope " + strings.Join(toolScopes[toolName], " or "),
+				id:          identity,
+				synthesized: true,
+			})
 		}
 	})
 	return hooks

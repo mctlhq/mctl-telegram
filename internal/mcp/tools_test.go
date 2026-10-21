@@ -204,7 +204,8 @@ func latestAudit(t *testing.T, store *db.Store, uid int64) (tool, status, errMsg
 const guardReviewerTGID int64 = 8745115872
 
 // TestToolDisconnect_DemoReviewerBlocked proves the demo/reviewer identity is
-// refused when it tries to disconnect its own account, the session row is left
+// refused when it tries to disconnect its own account even with
+// account:manage, the session row is left
 // untouched, and the blocked attempt is audited.
 func TestToolDisconnect_DemoReviewerBlocked(t *testing.T) {
 	ctx := context.Background()
@@ -213,7 +214,7 @@ func TestToolDisconnect_DemoReviewerBlocked(t *testing.T) {
 	// Pool is deliberately nil: the guard must short-circuit before any pool/DB
 	// mutation, so a nil pool also proves nothing destructive ran.
 	srv := &Server{Store: store, DemoReviewerTGID: guardReviewerTGID}
-	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read"}}
+	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read", "account:manage"}}
 	ctx = auth.With(ctx, id)
 
 	_, handler := srv.toolDisconnectAccount()
@@ -245,7 +246,7 @@ func TestToolDelete_DemoReviewerBlocked(t *testing.T) {
 	store := newToolsTestStore(t)
 	uid := seedAccountWithSession(t, store, guardReviewerTGID, false)
 	srv := &Server{Store: store, DemoReviewerTGID: guardReviewerTGID}
-	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read"}}
+	id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:read", "account:manage"}}
 	ctx = auth.With(ctx, id)
 
 	_, handler := srv.toolDeleteAccount()
@@ -277,7 +278,7 @@ func TestToolDisconnect_NormalUserAllowed(t *testing.T) {
 	const normalTGID int64 = 500100101
 	uid := seedAccountWithSession(t, store, normalTGID, false)
 	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
-	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}
+	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read", "account:manage"}}
 	ctx = auth.With(ctx, id)
 
 	_, handler := srv.toolDisconnectAccount()
@@ -301,7 +302,7 @@ func TestToolDelete_NormalUserAllowed(t *testing.T) {
 	const normalTGID int64 = 500100101
 	uid := seedAccountWithSession(t, store, normalTGID, false)
 	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
-	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read"}}
+	id := &auth.Identity{UserID: uid, TelegramID: normalTGID, Scopes: []string{"telegram:messages:read", "account:manage"}}
 	ctx = auth.With(ctx, id)
 
 	_, handler := srv.toolDeleteAccount()

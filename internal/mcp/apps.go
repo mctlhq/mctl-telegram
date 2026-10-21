@@ -98,8 +98,8 @@ Output: {confirmation_id, peer_redacted, text, text_sha256, will_really_send, dr
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
-		if id == nil {
-			return mcplib.NewToolResultError("authentication required"), nil
+		if err := requireScope(id, "telegram:messages:send"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
 		peer := stringArg(args, "peer", "")
@@ -128,7 +128,7 @@ Output: {confirmation_id, peer_redacted, text, text_sha256, will_really_send, dr
 			Text:           text,
 			TextSHA256:     textSHA256(text),
 			WillReallySend: willReallySend,
-			DryReason:      dryReason,
+			DryReason:      s.withSendDisabledHint(id, dryReason),
 			ExpiresAt:      c.ExpiresAt.UTC(),
 		})
 	}

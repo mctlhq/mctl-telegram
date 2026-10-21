@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -304,6 +305,31 @@ func TestDefaultGroupScopes_SendersHavePin(t *testing.T) {
 	}
 	if id.HasScope("admin:users") {
 		t.Error("telegram-mcp-senders must NOT have admin:users")
+	}
+}
+
+// TestDefaultGroupScopes_EveryGroupManagesItsOwnAccount: shared-hmac has no
+// manage page, so account:manage on every group is the owner's only
+// self-service way to disconnect or delete. A token with no recognised group
+// (a legacy worker token) must still derive no scopes at all.
+func TestDefaultGroupScopes_EveryGroupManagesItsOwnAccount(t *testing.T) {
+	for group, scopes := range DefaultGroupScopes() {
+		if !slices.Contains(scopes, "account:manage") {
+			t.Errorf("group %q lacks account:manage: %v", group, scopes)
+		}
+	}
+	store := newTestStore(t)
+	secret := []byte("test-secret-32bytes-aaaaaaaaaaaaa")
+	p, _ := New(store, Config{Secret: secret, ExpectedIssuer: "https://api.mctl.ai"})
+	tok, _ := IssueTestToken(secret, "https://api.mctl.ai", "legacy-worker", nil, time.Minute)
+	req := httptest.NewRequest("POST", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	id, err := p.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected the groupless token to verify, got %v", err)
+	}
+	if len(id.Scopes) != 0 {
+		t.Fatalf("a groupless token derived scopes %v, want none", id.Scopes)
 	}
 }
 

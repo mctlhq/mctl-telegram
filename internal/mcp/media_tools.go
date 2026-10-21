@@ -447,7 +447,7 @@ OGG/Opus; the server does not transcode.`),
 			// I/O. Resolving the byte source only happens in the real-send
 			// branch below.
 			s.audit(ctx, id, "send_media:draft", peerRedacted, nil, startedAt)
-			result, _ := telegram.SendMedia(ctx, nil, peer, mediaType, nil, fileName, "", caption, false, dryReason, nil, 0, durationSeconds)
+			result, _ := telegram.SendMedia(ctx, nil, peer, mediaType, nil, fileName, "", caption, false, s.withSendDisabledHint(id, dryReason), nil, 0, durationSeconds)
 			return jsonResult(result)
 		}
 

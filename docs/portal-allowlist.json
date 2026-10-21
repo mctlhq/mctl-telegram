@@ -17,17 +17,17 @@
       "name": "delete_telegram_account",
       "enabled": true,
       "upstream_gates": [
-        "self-only"
+        "account:manage"
       ],
-      "reason": "Self-service hard delete of the caller's own account row on this server (not the Telegram account). Irreversible for the caller only; no other account can be named. DELIBERATE DECISION 2026-09-12 (owner, mctlhq/.github#35): exposed on the shared surface with no scope gate, so a client holding only the read scopes can drop its own session blob, and recovery needs an operator to re-run the login CLI. Accepted because the blast radius is the caller's own row and the portal cannot widen it; revisit by requiring account:manage if a client ever does this by accident."
+      "reason": "Self-service hard delete of the caller's own account row on this server (not the Telegram account); no other account can be named. Gated on the account:manage scope. REVISED 2026-10-20: the 2026-09-12 owner decision (mctlhq/.github#35) left it ungated, so a read-only or device credential could drop the session it was issued against; it now requires account:manage, which worker and device credentials never carry. The owner deletes from a connection granted account:manage; a narrowed connection can still be cut off from the manage page, which disconnects."
     },
     {
       "name": "disconnect_telegram_account",
       "enabled": true,
       "upstream_gates": [
-        "self-only"
+        "account:manage"
       ],
-      "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach. DELIBERATE DECISION 2026-09-12 (owner, mctlhq/.github#35): same as delete_telegram_account \u2014 no scope gate, irreversible without an operator-run login CLI, accepted because it reaches the caller's own session and nothing else."
+      "reason": "Self-service: marks the caller's own session revoked and closes the MTProto client. Acts on the caller only; no admin reach. Gated on the account:manage scope. REVISED 2026-10-20: ungated by the 2026-09-12 owner decision (mctlhq/.github#35) until a read-only or device credential was shown to be able to end its owner's session; the owner can still disconnect from the manage page after a browser sign-in."
     },
     {
       "name": "edit_message",
@@ -150,7 +150,7 @@
       "name": "prepare_pin_message",
       "enabled": true,
       "upstream_gates": [
-        "self-only"
+        "telegram:messages:pin"
       ],
       "reason": "Issues a confirmation id for a later pin_message on the caller's own dialog; performs no Telegram action by itself."
     },

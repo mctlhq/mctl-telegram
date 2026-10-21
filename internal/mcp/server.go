@@ -68,6 +68,11 @@ type Server struct {
 	// page a human approves prepared campaigns on. See WithBroadcast.
 	Broadcast            *broadcast.Service
 	BroadcastApprovalURL string
+	// ManageURL is the absolute URL of the browser manage page, where the
+	// owner can turn real sends on after signing in with Telegram. Set only
+	// when that page is mounted (local-jwt mode); "" makes the send hint
+	// fall back to naming the operator tool set_account_send.
+	ManageURL string
 	// MediaStore holds pending media download references keyed by confirmation_id.
 	MediaStore *MediaStore
 	// MediaDownloadMaxBytes is the maximum number of bytes allowed per get_media
@@ -231,6 +236,12 @@ func (s *Server) WithMediaConcurrency(n int) *Server {
 	return s
 }
 
+// WithManageURL sets ManageURL and returns s.
+func (s *Server) WithManageURL(url string) *Server {
+	s.ManageURL = url
+	return s
+}
+
 // toolPassesFilter reports whether a tool should be registered given the
 // active filter mode. An unrecognised filter is treated as "all" (safe default).
 func toolPassesFilter(tool mcplib.Tool, filter string) bool {
@@ -310,6 +321,12 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// record.go.
 		mcpserver.WithToolHandlerMiddleware(s.recordToolCall),
 		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
+		// Discovery and invocation follow the caller's scopes: mcp-go
+		// applies this filter on tools/list and again on tools/call, so a
+		// tool the identity may not use is neither shown nor callable. The
+		// unfiltered ListTools() below is what the descriptor snapshot and
+		// the portal allowlist test enumerate. See toolscopes.go.
+		mcpserver.WithToolFilter(scopeToolFilter),
 	}
 	if s.AppsEnabled {
 		opts = append(opts,

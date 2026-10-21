@@ -24,7 +24,7 @@ func getManage(t *testing.T, srv *ManageServer, uid int64) string {
 func getManagePath(t *testing.T, srv *ManageServer, uid int64, path string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid}))
+	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, Scopes: []string{accountManageScope}}))
 	rec := httptest.NewRecorder()
 	srv.HandleManage(rec, req)
 	if rec.Code != http.StatusOK {
@@ -103,7 +103,7 @@ func TestManagePage_NotChosenPromptUntilSaved(t *testing.T) {
 	form := strings.NewReader("submitted=notifications")
 	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/notifications", form)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid}))
+	req = req.WithContext(auth.With(req.Context(), &auth.Identity{UserID: uid, Scopes: []string{accountManageScope}}))
 	srv.HandleSetNotifications(httptest.NewRecorder(), req)
 	if body := getManage(t, srv, uid); strings.Contains(body, "You have not chosen yet") {
 		t.Error("prompt still shown after save")
