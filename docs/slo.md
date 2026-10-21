@@ -278,9 +278,9 @@ from both sides of the tool-availability SLI**. It covers:
   `CHAT_WRITE_FORBIDDEN`), including a peer the caller has no access hash
   for. This is the same definition as the session-borrow `call_error`
   above: `telegram.IsCallerRefusal` decides both;
-- an argument or scope refusal that the failing code path itself named
-  (`invalid_argument`, `scope_denied`), or the `identity missing scope`
-  refusal. A reason guessed only from the error text is not trusted and
+- an argument, scope or tool-profile refusal that the failing code path
+  itself named (`invalid_argument`, `scope_denied`, `profile_denied`), or
+  the `identity missing scope` refusal. A reason guessed only from the error text is not trusted and
   stays `error`.
 
 Everything else stays `error` and counts against the SLI: a session-auth

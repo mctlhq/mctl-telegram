@@ -1148,6 +1148,12 @@ catch quickly.
   origin anchor) is on the revocation list — an operator's
   `revoke_worker_token` / device eviction doing its job. A daemon looping
   here has been evicted and needs a new credential, not a retry.
+- **`profile_denied`**: Not a failed verification. The token is valid but
+  carries a tool profile (`prf`), and profiled credentials are admitted
+  only on the MCP endpoint, so every other route answers 403 (see
+  [Client tool profiles](#client-tool-profiles)). A spike means a bound
+  client is calling `/api/*` or the manage page, which is the client's
+  bug, not ours.
 - **`other`**: Catch-all for unexpected validation errors; check pod logs.
 - **Provider context:** `provider` label values are `local-jwt`,
   `shared-hmac`, and `local-dev`.
@@ -1516,7 +1522,7 @@ sum(rate(mctl_tool_invocations_total{status="error"}[5m])) by (tool)
 `mctl_tool_invocations_total{tool,status="error"}` says *that* a tool
 failed; it does not say why. `mctl_tool_call_errors_total{tool,reason}`
 adds the classification — a closed, compile-time reason set (`auth_required`,
-`scope_denied`, `invalid_argument`, `mode_unsupported`, `refused`,
+`scope_denied`, `profile_denied`, `invalid_argument`, `mode_unsupported`, `refused`,
 `rate_limited`, `not_found`, `confirmation_rejected`, `telegram_error`,
 `bridge_error`, `store_error`, `encode_failed`, `handler_error`, `panic`,
 `media_capacity`,

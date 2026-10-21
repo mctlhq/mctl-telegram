@@ -31,6 +31,7 @@ func TestParseBindings(t *testing.T) {
 		"empty profile":        {`[{"client_id":"claude.ai"}]`, `unknown profile ""`},
 		"duplicate client_id":  {`[{"client_id":"claude.ai","profile":"core-readonly"},{"client_id":"claude.ai","profile":"core-readonly"}]`, "duplicate client_id"},
 		"trailing data":        {`[] []`, "trailing data"},
+		"reserved client_id":   {`[{"client_id":"mctl_self_connect","profile":"core-readonly"}]`, `client_id "mctl_self_connect" cannot be bound`},
 		"not an array":         {`{"client_id":"claude.ai","profile":"core-readonly"}`, "decode"},
 	} {
 		t.Run(name, func(t *testing.T) {
