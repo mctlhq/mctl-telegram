@@ -720,7 +720,10 @@ func main() {
 	// runs, so unauthenticated humans still see instructions instead of
 	// a 401. MCP clients (Accept: application/json, text/event-stream)
 	// fall through and hit the full auth+ratelimit+MCP chain.
-	mcpHandler := auth.Middleware(provider, cfg.AuthRequired, m, resourceMeta)(
+	// MCPMiddleware: the one route that admits a profiled credential,
+	// because internal/mcp enforces the profile on every tool. Every other
+	// auth.Middleware route refuses it.
+	mcpHandler := auth.MCPMiddleware(provider, cfg.AuthRequired, m, resourceMeta)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	// OriginGuard runs before auth: a present browser Origin must be on the
@@ -995,6 +998,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
 		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		ClientProfiles:               cfg.ClientProfiles,
 		CIMD:                         cimdResolver(cfg),
 		CIMDAdvertise:                cfg.OAUTHCIMDAdvertise,
 		DCRRedirectURIs:              cfg.OAUTHDCRRedirectURIs,

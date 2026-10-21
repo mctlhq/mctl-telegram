@@ -320,6 +320,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// (unknown tool, unparsable body, disabled capability). See
 		// record.go.
 		mcpserver.WithToolHandlerMiddleware(s.recordToolCall),
+		// Inside recordToolCall, so a call refused for breaking the
+		// caller's tool profile is recorded like any handler refusal
+		// (profiles.go).
+		mcpserver.WithToolHandlerMiddleware(s.profileArgGuard),
 		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
 		// Discovery and invocation follow the caller's scopes: mcp-go
 		// applies this filter on tools/list and again on tools/call, so a

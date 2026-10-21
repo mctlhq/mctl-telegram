@@ -65,6 +65,9 @@ const (
 	MsgInvalidCredentials = "invalid credentials"
 	// MsgAuthRequired is the 401 for a request that carried no credentials.
 	MsgAuthRequired = "authentication required"
+	// MsgProfileRestricted is the 403 for a valid credential whose tool
+	// profile confines it to the MCP endpoint (Identity.Profile).
+	MsgProfileRestricted = "this credential is restricted by its tool profile to the MCP endpoint"
 )
 
 // UnauthorizedRenderer writes a non-JSON 401 body for browser navigations.
@@ -78,8 +81,20 @@ type UnauthorizedRenderer func(w http.ResponseWriter, r *http.Request, status in
 //
 // m is optional (nil-safe): when non-nil, authentication failures are
 // classified and counted in mctl_auth_failures_total{reason, provider}.
+//
+// A credential that carries a tool profile (Identity.Profile) is refused
+// with 403: a profile is enforced by internal/mcp on the tool surface only,
+// so every other route would hand the restricted client its full scopes
+// (account deletion under /api/account, an unprofiled worker token from
+// /api/mcp/worker-token). Only MCPMiddleware admits such a credential.
 func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata) func(http.Handler) http.Handler {
-	return middleware(p, required, m, rm, nil)
+	return middleware(p, required, m, rm, nil, false)
+}
+
+// MCPMiddleware is Middleware for the MCP endpoint, the one route that
+// enforces tool profiles itself and therefore admits profiled credentials.
+func MCPMiddleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata) func(http.Handler) http.Handler {
+	return middleware(p, required, m, rm, nil, true)
 }
 
 // MiddlewareWithHTML is Middleware plus an HTML 401 renderer for browser
@@ -87,10 +102,10 @@ func Middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 // keep the JSON {"error":...} contract: Accept: application/json,
 // X-Requested-With: XMLHttpRequest, empty Accept, or */*.
 func MiddlewareWithHTML(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata, html UnauthorizedRenderer) func(http.Handler) http.Handler {
-	return middleware(p, required, m, rm, html)
+	return middleware(p, required, m, rm, html, false)
 }
 
-func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata, html UnauthorizedRenderer) func(http.Handler) http.Handler {
+func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetadata, html UnauthorizedRenderer, allowProfiled bool) func(http.Handler) http.Handler {
 	providerLabel := providerName(p)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +156,21 @@ func middleware(p Provider, required bool, m *metrics.Registry, rm ResourceMetad
 				}
 				w.Header().Set("WWW-Authenticate", rm.wwwAuthenticate(r.URL.Path))
 				writeUnauthorized(w, r, http.StatusUnauthorized, MsgAuthRequired, html)
+				return
+			}
+			if id != nil && id.Profile != "" && !allowProfiled {
+				slog.Warn("auth refused: profiled credential outside the MCP endpoint",
+					"provider", providerLabel,
+					"reason", "profile_denied",
+					"user_id", id.UserID,
+					"client_id", id.ClientID,
+					"profile", id.Profile,
+					"path", r.URL.Path,
+				)
+				if m != nil {
+					m.AuthFailuresTotal.WithLabelValues("profile_denied", providerLabel).Inc()
+				}
+				writeUnauthorized(w, r, http.StatusForbidden, MsgProfileRestricted, html)
 				return
 			}
 			if id != nil {

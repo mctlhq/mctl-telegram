@@ -19,6 +19,12 @@ const (
 	// ReasonScopeDenied is raised by requireScope / requireAnyScope when an
 	// identity is present but lacks the required OAuth scope.
 	ReasonScopeDenied = "scope_denied"
+	// ReasonProfileDenied is raised when the caller's scopes allow a tool
+	// call but the tool profile bound to its OAuth client does not: the tool
+	// is outside the profile, or an argument breaks the profile's rule for
+	// it (profiles.go). Kept apart from scope_denied so a refusal by the
+	// client's profile is never mistaken for a missing user permission.
+	ReasonProfileDenied = "profile_denied"
 	// ReasonInvalidArgument is raised by empty/malformed tool-argument
 	// checks (missing required field, wrong enum value, out-of-range
 	// number, mutually-exclusive fields both set, ...).
