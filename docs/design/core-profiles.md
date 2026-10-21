@@ -103,8 +103,10 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
   does not administer, or a group whose rights forbid sending. The
   account's own banned rights, when present, are its effective rights (a
   per-member exception overrides the defaults); otherwise the defaults
-  apply, and creators and admins are exempt from them. The refusal counts
-  as a caller error, not a session failure, in both SLIs.
+  apply, and creators and admins are exempt from them. A deleted user
+  account is refused the same way. The refusal does not count against
+  either SLI: the session-borrow counter labels it `call_error`, and the
+  MCP record is synthesized, so it never feeds the tool-availability SLI.
   The rights come from the same `getPeerDialogs` response; otherwise the
   confirmation would be spent on a `CHAT_WRITE_FORBIDDEN` at send time.
 - The text limit is 4096 UTF-16 units, as Telegram counts them (most emoji

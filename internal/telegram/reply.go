@@ -75,6 +75,14 @@ func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPee
 		return nil, ErrNoExistingDialog
 	}
 	switch v := inputPeer.(type) {
+	case *tg.InputPeerUser:
+		// A deleted account keeps its dialog and history, but Telegram refuses
+		// sends to it (INPUT_USER_DEACTIVATED).
+		for _, u := range res.Users {
+			if user, ok := u.(*tg.User); ok && user.ID == v.UserID && user.Deleted {
+				return nil, ErrCannotPost
+			}
+		}
 	case *tg.InputPeerChat:
 		var chat *tg.Chat
 		for _, c := range res.Chats {

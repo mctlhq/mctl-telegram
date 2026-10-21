@@ -63,6 +63,21 @@ func TestReplyTargetFromPeerDialogs(t *testing.T) {
 		t.Errorf("admin in muted group: %v", err)
 	}
 
+	// A deleted account keeps its dialog but cannot receive messages.
+	if _, err := replyTargetFromPeerDialogs(alice, &tg.MessagesPeerDialogs{
+		Dialogs: []tg.DialogClass{aliceDialog},
+		Users:   []tg.UserClass{&tg.User{ID: 7001, Deleted: true}, &tg.User{ID: 7002}},
+	}); !errors.Is(err, ErrCannotPost) {
+		t.Errorf("deleted account: err = %v, want ErrCannotPost", err)
+	}
+	// Another user in the response being deleted does not refuse this one.
+	if _, err := replyTargetFromPeerDialogs(alice, &tg.MessagesPeerDialogs{
+		Dialogs: []tg.DialogClass{aliceDialog},
+		Users:   []tg.UserClass{&tg.User{ID: 7001}, &tg.User{ID: 7002, Deleted: true}},
+	}); err != nil {
+		t.Errorf("another user deleted: %v", err)
+	}
+
 	// A member who may not post is refused with its own error.
 	ownBan := withOwnRights(&tg.Channel{ID: 8001, Megagroup: true}, tg.ChatBannedRights{SendMessages: true})
 	viewBan := withOwnRights(&tg.Channel{ID: 8001, Megagroup: true}, tg.ChatBannedRights{ViewMessages: true})
