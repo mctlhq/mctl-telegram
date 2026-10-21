@@ -92,6 +92,9 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		if d.RevokedAt == nil || d.RevokedReason != ReasonAccountDeleted {
 			t.Errorf("alice device revoked_at=%v reason=%q, want revoked with %q", d.RevokedAt, d.RevokedReason, ReasonAccountDeleted)
 		}
+		if d.DeviceLabel != "" {
+			t.Errorf("alice device label = %q after the delete, want it cleared", d.DeviceLabel)
+		}
 		if claimed, err := s.ClaimDeviceCredentialLineage(ctx, aliceDevice, "after-delete", time.Now()); err != nil || claimed {
 			t.Errorf("revoked device claimed a credential lineage: claimed=%v err=%v", claimed, err)
 		}
@@ -101,6 +104,9 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		if d.RevokedAt != nil {
 			t.Error("another user's device was revoked")
+		}
+		if d.DeviceLabel != "laptop" {
+			t.Errorf("another user's device label = %q, want it kept", d.DeviceLabel)
 		}
 	})
 }

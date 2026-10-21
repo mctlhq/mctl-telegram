@@ -1100,9 +1100,11 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	}
 	// Device rows are kept as revoked tombstones rather than deleted: the
 	// revoked row is what makes IsActiveDeviceForUser and
-	// ClaimDeviceCredentialLineage refuse the device.
+	// ClaimDeviceCredentialLineage refuse the device. The label is cleared:
+	// it defaults to the machine's hostname, which often carries the
+	// owner's name, and a tombstone needs only the revocation.
 	devices, err := tx.ExecContext(ctx,
-		`UPDATE local_bridge_devices SET revoked_at = $1, revoked_reason = $2
+		`UPDATE local_bridge_devices SET revoked_at = $1, revoked_reason = $2, device_label = NULL
 		 WHERE user_id = $3 AND revoked_at IS NULL`,
 		now, ReasonAccountDeleted, userID,
 	)
