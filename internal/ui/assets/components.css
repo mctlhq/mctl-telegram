@@ -130,6 +130,10 @@
     color: var(--text-dim);
     margin-bottom: 22px;
   }
+  /* The glow below bleeds 80px past .hero on each side; clip it at the
+     viewport so it cannot widen the page (phones scrolled sideways by up to
+     62px). clip, not hidden: it does not create a scroll container. */
+  html { overflow-x: clip; }
   /* Hero ambient depth + staggered entrance */
   .hero::before {
     content: "";
@@ -248,7 +252,11 @@
     border-radius: var(--mctl-radius-md);
     font-size: .85em;
     color: var(--code-fg);
-    overflow-wrap: anywhere;
+    /* break-word, not anywhere: a token that fits on a line moves to the next
+       line whole instead of splitting mid-word (scope names, URLs), and only a
+       token longer than the line is broken. anywhere also shrank table columns
+       to one character, since it lowers the min-content width. */
+    overflow-wrap: break-word;
   }
   a code { color: inherit; }
 
@@ -476,7 +484,7 @@
     display: inline-flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 8px 18px;
+    gap: 8px 10px;
   }
   footer a { color: var(--text-dim); border-bottom-color: transparent; }
   footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
@@ -484,7 +492,10 @@
   footer code { font-size: 11px; background: transparent; border: 0; padding: 0; color: var(--text-dim); }
 
   /* Inline helpers */
-  .url { word-break: break-all; }
+  /* A URL moves to the next line whole and is broken only when it is longer
+     than the line itself. break-all split it at whatever character met the
+     line end, e.g. "https://tg.mc" / "tl.ai/mcp". */
+  .url { overflow-wrap: anywhere; }
 
   /* Section anchor offset */
   section { scroll-margin-top: 24px; }
