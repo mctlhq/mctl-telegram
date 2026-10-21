@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // grantDialects runs body on SQLite and, when TEST_DATABASE_URL is set, on
@@ -133,6 +135,23 @@ func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 	if err := s.SaveRefreshTokenForGrant(ctx, "probe-grant", mk("probe-grant-fam"), time.Now()); err != nil {
 		t.Errorf("save after the probe recovered: %v", err)
 	}
+}
+
+// NewStore resolves the dialect from the driver, so the credential writes
+// never depend on the probe for a store opened by Open.
+func TestNewStore_ResolvesDialectFromDriver(t *testing.T) {
+	grantDialects(t, func(t *testing.T, s *Store, _ int64) {
+		fresh := NewStore(s.DB, nil)
+		fresh.probeFail = func() error { return errors.New("driver: bad connection") }
+		pg, err := fresh.postgresDialect(context.Background())
+		if err != nil {
+			t.Fatalf("dialect of a store opened by Open: %v", err)
+		}
+		_, isPg := s.DB.Driver().(*stdlib.Driver)
+		if pg != isPg {
+			t.Fatalf("postgresDialect = %v, want %v", pg, isPg)
+		}
+	})
 }
 
 // The code exchange and the delete race on Postgres: whichever commits first,

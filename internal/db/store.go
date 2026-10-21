@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
+	"modernc.org/sqlite"
+
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -29,10 +32,12 @@ type Store struct {
 	// idle TTL. Read-only after construction; see WithAbsoluteTTLExempt.
 	ttlExempt map[int64]bool
 
-	// Cached dialect probe (see isPostgres in agent_jobs.go). Only the job
-	// claim query needs the distinction (FOR UPDATE SKIP LOCKED). pgResolved
-	// is set only once the probe returns a definitive answer, so a transient
-	// probe failure does not permanently poison the cache.
+	// Cached dialect (see resolveDialect in agent_jobs.go), seeded by
+	// NewStore from the driver. The job claim query uses it for SKIP LOCKED,
+	// and the credential writes (HardDeleteAccount, RotateRefreshToken,
+	// SaveRefreshTokenForGrant) for their users-row lock, where an
+	// unresolved dialect is an error. pgResolved is set only on a definitive
+	// answer, so a transient probe failure does not poison the cache.
 	pgMu       sync.Mutex
 	pgResolved bool
 	pgFlag     bool
@@ -61,7 +66,18 @@ type AccountInfo struct {
 }
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
-	return &Store{DB: db, Crypt: c}
+	s := &Store{DB: db, Crypt: c}
+	// The driver Open chose names the dialect without I/O. Seeding the cache
+	// from it keeps the credential paths off the probe, whose "not Postgres"
+	// verdict rests on an error message; the probe stays the fallback for a
+	// *sql.DB opened with some other driver.
+	switch db.Driver().(type) {
+	case *stdlib.Driver:
+		s.pgFlag, s.pgResolved = true, true
+	case *sqlite.Driver:
+		s.pgFlag, s.pgResolved = false, true
+	}
+	return s
 }
 
 // WithAbsoluteTTLExempt marks Telegram ids whose sessions are not subject to
