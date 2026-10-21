@@ -114,3 +114,14 @@ func TestAccessToken_ProfileBindsOnlyItsClient(t *testing.T) {
 		t.Fatalf("claude.ai token carries prf %q bound to another client", got)
 	}
 }
+
+// TestConnectClientIDIsReservedFromProfiles: the self-connect client's token
+// is the manage page's cookie, and a profiled credential is refused outside
+// /mcp, so MCP_CLIENT_PROFILES must refuse to bind it. toolprofile cannot
+// import this package, so it keeps its own copy of the id; this pins the two
+// together.
+func TestConnectClientIDIsReservedFromProfiles(t *testing.T) {
+	if !toolprofile.Reserved(ConnectClientID) {
+		t.Fatalf("toolprofile does not reserve %q: a binding for it would lock users out of the manage page", ConnectClientID)
+	}
+}

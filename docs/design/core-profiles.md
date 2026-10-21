@@ -1,6 +1,7 @@
 # Restricted tool profiles: core-readonly and core-reply
 
-Status: Accepted (owner, 2026-10-21). Not implemented yet.
+Status: Accepted (owner, 2026-10-21). Rollout step 1 (the mechanism and
+core-readonly) shipped in 0.85.0 (#798); steps 2-5 are open.
 
 ## Problem
 

@@ -105,6 +105,22 @@ func Names() []string {
 	return out
 }
 
+// reservedClientIDs are client_ids the table must never bind. The
+// self-connect client (oauth.ConnectClientID) mints the browser's
+// mctl_connect_token cookie for /telegram/connect/manage; a profiled
+// credential is refused outside the MCP endpoint, so binding it would lock
+// every user out of their own manage page. internal/oauth pins that this
+// list names its constant.
+var reservedClientIDs = map[string]string{
+	"mctl_self_connect": "it is the built-in self-connect client behind the manage page, which a profiled credential cannot open",
+}
+
+// Reserved reports whether id is a client_id the table refuses to bind.
+func Reserved(id string) bool {
+	_, ok := reservedClientIDs[id]
+	return ok
+}
+
 // Binding is one record of the MCP_CLIENT_PROFILES table.
 type Binding struct {
 	// ClientID is matched byte-for-byte against the OAuth client_id the
@@ -125,8 +141,8 @@ type Binding struct {
 // is the behaviour before profiles existed.
 //
 // It fails closed on everything else that is not a valid table: unknown
-// keys, a redirect_uri record, a missing client_id, an unknown profile name,
-// a duplicate client_id, trailing data. The operator who set the variable is
+// keys, a redirect_uri record, a missing or reserved client_id, an unknown
+// profile name, a duplicate client_id, trailing data. The operator who set the variable is
 // relying on the restriction, so a typo must stop the server rather than
 // leave a client unrestricted.
 func ParseBindings(raw string) (map[string]string, error) {
@@ -154,6 +170,9 @@ func ParseBindings(raw string) (map[string]string, error) {
 		}
 		if id != b.ClientID {
 			return nil, fmt.Errorf("record %d: client_id %q has surrounding whitespace; it is matched byte-for-byte", i, b.ClientID)
+		}
+		if why, reserved := reservedClientIDs[id]; reserved {
+			return nil, fmt.Errorf("record %d: client_id %q cannot be bound: %s", i, id, why)
 		}
 		if _, ok := Lookup(b.Profile); !ok {
 			return nil, fmt.Errorf("record %d (%s): unknown profile %q (known: %s)", i, id, b.Profile, strings.Join(Names(), ", "))
