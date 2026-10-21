@@ -2258,6 +2258,8 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
 		// The access token minted above is dropped unsent: the account was
 		// deleted after this code was issued, so the code grants nothing.
+		slog.Warn("oauth: code exchange refused, account deleted since the grant",
+			"client_id", clientID, "user_id", uid)
 		writeTokenError(w, "invalid_grant", "the account was deleted after this code was issued", http.StatusBadRequest)
 		return
 	}

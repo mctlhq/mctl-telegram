@@ -69,6 +69,9 @@ func hashRefreshToken(plaintext string) []byte {
 
 // SaveRefreshToken inserts a new refresh-token row. plaintext is hashed before
 // storage; rt.ExpiresAt must already be set by the caller.
+//
+// Tests and backfills only: the code exchange must use
+// SaveRefreshTokenForGrant, so a delete that raced the grant is honoured.
 func (s *Store) SaveRefreshToken(ctx context.Context, plaintext string, rt RefreshToken) error {
 	return saveRefreshToken(ctx, s.DB, plaintext, rt)
 }
@@ -317,6 +320,12 @@ var ErrAccountDeletedSinceGrant = errors.New("account deleted since the grant wa
 // after it. On Postgres it takes the users-row lock in share mode, like
 // RotateRefreshToken, so a concurrent delete either waits for this insert
 // (and revokes the new family) or commits first (and is seen here).
+//
+// grantIssuedAt comes from the oauth server's clock and the marker from
+// HardDeleteAccount's wall clock. The service runs one replica, so the two
+// agree; a test that freezes or offsets the oauth clock must keep it near
+// real time or this comparison inverts. A missing users row is an error, not
+// "never deleted".
 func (s *Store) SaveRefreshTokenForGrant(ctx context.Context, plaintext string, rt RefreshToken, grantIssuedAt time.Time) error {
 	if rt.UserID <= 0 {
 		return errors.New("save refresh token: missing user id")
@@ -338,7 +347,7 @@ func (s *Store) SaveRefreshTokenForGrant(ctx context.Context, plaintext string, 
 	if err := tx.QueryRowContext(ctx,
 		`SELECT account_deleted_at FROM users WHERE id = $1`+lock, rt.UserID,
 	).Scan(&deletedAt); err != nil {
-		return fmt.Errorf("read account deletion: %w", err)
+		return fmt.Errorf("save refresh token: read account deletion: %w", err)
 	}
 	if deletedAt.Valid && !deletedAt.Time.Before(grantIssuedAt) {
 		return ErrAccountDeletedSinceGrant
