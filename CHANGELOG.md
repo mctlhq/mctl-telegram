@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.84.0](https://github.com/mctlhq/mctl-telegram/compare/0.83.1...0.84.0) (2026-10-21)
+
+
+### Features
+
+* **agents:** issue-781-account-deletion-leaves-the-user-s-oauth ([c264d1b](https://github.com/mctlhq/mctl-telegram/commit/c264d1bfda49a7a0a311d63662a203f496006b14))
+
 ## [0.83.1](https://github.com/mctlhq/mctl-telegram/compare/0.83.0...0.83.1) (2026-10-21)
 
 
