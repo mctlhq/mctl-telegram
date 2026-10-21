@@ -55,6 +55,13 @@ caller.
    constraints are enforced in the handler, because a filter only changes
    what is listed. A refusal writes an audit row `profile_denied` with the
    profile name and the tool (detached context, as `scope_denied`).
+   A profiled credential is admitted **only on the MCP endpoint**: every
+   other authenticated HTTP route (`/api/account`, the worker-token and
+   bridge-token mints, `/telegram/connect/manage`) refuses it with 403,
+   because none of them applies the profile, and the account routes and
+   the token mints would otherwise give the restricted client its full
+   scopes or an unprofiled credential. Refusal is the default in
+   `auth.Middleware`; `/mcp` opts in.
 7. **Each profile is a reviewed contract (ADR 0007).** Every profile gets
    its own descriptor snapshot, `docs/tool-descriptors.<profile>.json`, and
    the product-updates gate covers it like the full surface.
