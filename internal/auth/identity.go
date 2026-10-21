@@ -48,6 +48,11 @@ type Identity struct {
 	// a cookie, so "arrived as a cookie" proves nothing, while "was issued
 	// to the self-connect client" proves a browser Telegram login minted it.
 	ClientID string
+	// Profile is the restricted tool profile stamped into the token at mint
+	// (localjwt claim "prf"; empty for every other provider and for tokens
+	// of a client with no binding). It is a property of the credential, like
+	// ClientID: never derive it from how the request carried the token.
+	Profile string
 }
 
 func (i *Identity) HasScope(s string) bool {

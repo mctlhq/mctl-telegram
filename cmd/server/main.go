@@ -995,6 +995,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		AllowImplicitClient:          cfg.OAUTHAllowImplicitClient,
 		AllowedImplicitHosts:         cfg.OAUTHAllowedImplicitHosts,
 		PreregisteredClients:         preregisteredClients(cfg.OAUTHPreregisteredClients),
+		ClientProfiles:               cfg.ClientProfiles,
 		CIMD:                         cimdResolver(cfg),
 		CIMDAdvertise:                cfg.OAUTHCIMDAdvertise,
 		DCRRedirectURIs:              cfg.OAUTHDCRRedirectURIs,

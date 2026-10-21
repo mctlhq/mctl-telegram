@@ -340,6 +340,13 @@ type Config struct {
 	// example) and whose callback host should not be trusted for anything
 	// but this one client.
 	PreregisteredClients []PreregisteredClient
+	// ClientProfiles maps an exact client_id to the restricted tool profile
+	// (internal/toolprofile) stamped into every access token minted for it.
+	// A client without an entry gets no profile, which keeps the surface its
+	// scopes allow. The profile only narrows that surface; it is not a scope
+	// and grants nothing. In the server binary this comes from
+	// MCP_CLIENT_PROFILES, validated by toolprofile.ParseBindings.
+	ClientProfiles map[string]string
 	// CIMD resolves an https URL client_id as an OAuth Client ID Metadata
 	// Document (mctl-telegram#773). Nil (the default) means CIMD is off and a
 	// URL client_id is handled like any other unregistered client_id. When
@@ -2698,6 +2705,12 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // per RFC 7519). Binding aud to client_id like an earlier default would have
 // failed /mcp authentication whenever an operator set OAUTH_JWT_AUDIENCE — a
 // misconfiguration trap codex flagged.
+//
+// Profile policy: this is the only place an OAuth access token is minted, for
+// the authorization-code exchange and for every refresh alike. That is what
+// makes the client's tool profile (Config.ClientProfiles) follow the
+// binding table: a binding added or removed takes effect at the client's
+// next refresh, and no grant path can mint around it.
 func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
 	var audience []string
 	if s.cfg.JWTAudience != "" {
@@ -2711,6 +2724,7 @@ func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string,
 		Scopes:           scopes,
 		Audience:         audience,
 		ClientID:         clientID,
+		Profile:          s.cfg.ClientProfiles[clientID],
 	}, s.cfg.AccessTokenTTL)
 }
 

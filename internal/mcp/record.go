@@ -87,14 +87,14 @@ func (r callRecord) feedsSLO() bool {
 // those, so no caller_error is attached to a call the SLI never counted. It
 // exists so that a refusal staged through Server.audit later is classified
 // the same way. The hint is call-wide and last-writer-wins, so
-// a handler must call hintReason(ReasonInvalidArgument|ReasonScopeDenied)
+// a handler must call hintReason(ReasonInvalidArgument|ReasonScopeDenied|ReasonProfileDenied)
 // only on the refusal path it is about to return from; a hint set on a
 // branch that then carries on would let a later server fault leave the SLI.
 func callerRefusalReason(named bool, reason, errMsg string) bool {
 	if strings.HasPrefix(errMsg, "identity missing scope ") {
 		return true
 	}
-	return named && (reason == ReasonInvalidArgument || reason == ReasonScopeDenied)
+	return named && (reason == ReasonInvalidArgument || reason == ReasonScopeDenied || reason == ReasonProfileDenied)
 }
 
 // serverFaultReason reports whether Rule 1's reconciled reason says the call
@@ -444,9 +444,16 @@ func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *
 		// It is still a scope refusal by a known user, and it keeps the
 		// audit row and reason the handler's own requireScope used to write
 		// before the filter existed (toolscopes.go).
-		scopeDenied := isRegistered && identity != nil && !toolAllowed(identity, toolName)
-		if scopeDenied {
+		scopeDenied := isRegistered && identity != nil && !scopeAllows(identity, toolName)
+		// The scopes allow it but the client's tool profile hides it
+		// (profiles.go): the same "not found" to the client, a different
+		// policy in the audit trail.
+		profileDenied := isRegistered && identity != nil && !scopeDenied && !profileAllows(identity, toolName)
+		switch {
+		case scopeDenied:
 			reason = ReasonScopeDenied
+		case profileDenied:
+			reason = ReasonProfileDenied
 		}
 
 		uid := int64(0)
@@ -493,6 +500,18 @@ func (s *Server) jsonrpcHooks(registered *atomic.Pointer[map[string]struct{}]) *
 				status:      "error",
 				reason:      ReasonScopeDenied,
 				errMsg:      "identity missing scope " + strings.Join(toolScopes[toolName], " or "),
+				id:          identity,
+				synthesized: true,
+			})
+		}
+		if profileDenied && s.Store != nil {
+			detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+			defer cancel()
+			s.writeAuditRow(detached, callRecord{
+				tool:        toolName,
+				status:      "error",
+				reason:      ReasonProfileDenied,
+				errMsg:      profileDeniedMessage(identity, toolName),
 				id:          identity,
 				synthesized: true,
 			})
