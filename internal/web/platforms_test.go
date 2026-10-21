@@ -46,6 +46,8 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"telegram:messages:send",
 		"account:manage",
 		"Every account starts read-only.",
+		"The tool list follows the grant.",
+		"request it if users should be able to leave from inside your platform",
 		"Local Bridge",
 		"issues/781",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,

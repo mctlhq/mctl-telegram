@@ -101,13 +101,14 @@
       <tr><td><code>telegram:messages:read</code></td><td>Read, search and fetch media (<code>get_messages</code>, <code>get_unread_messages</code>, <code>search_messages</code>, <code>get_media</code>)</td></tr>
       <tr><td><code>telegram:messages:send</code></td><td>Send messages and media, subject to the user's own consent below</td></tr>
       <tr><td><code>telegram:messages:pin</code></td><td>Pin messages, through a confirmation step</td></tr>
-      <tr><td><code>account:manage</code></td><td>The user's own settings: send consent, notifications, Local Bridge devices</td></tr>
+      <tr><td><code>account:manage</code></td><td>The user's own account: send consent, notifications, Local Bridge devices, disconnecting and deleting the account</td></tr>
     </tbody>
   </table>
   </div>
   <ul>
     <li>Always name your scopes. A request that names scopes gets only those the user is entitled to; a request that omits <code>scope</code> gets the user's full entitled set, including send, pin and <code>account:manage</code>. Read the <code>scope</code> in the token response rather than assuming you got what you asked for. Administrative scopes cannot be requested.</li>
-    <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (on <code>/telegram/connect/manage</code> or with <code>set_send_consent</code>), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. Otherwise a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
+    <li><strong>The tool list follows the grant.</strong> <code>tools/list</code> shows only the tools the token's scopes allow, and a call to any other tool is refused as an unknown tool, so a read-only connection never sees the send tools.</li>
+    <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (on <code>/telegram/connect/manage</code> or with <code>set_send_consent</code>), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. With the scope but without the user's consent, or on a deployment that does not allow sending, a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
     <li>Every tool call lands in the user's hash-chained audit log, which they can read and verify. See <a href="/security">/security</a>.</li>
   </ul>
 
@@ -156,7 +157,7 @@
   <h2>Revocation and offboarding</h2>
   <ul>
     <li>Your client revokes a user's grant with <code>POST /oauth/revoke</code>, which ends that refresh-token family. Access tokens already issued expire on their own lifetime ({{.AccessTTL}}).</li>
-    <li>A user can disconnect their Telegram session on <code>/telegram/connect/manage</code> or with <code>disconnect_telegram_account</code>, and delete their account with <code>delete_telegram_account</code> or <code>DELETE /api/account</code>.</li>
+    <li>A user can disconnect their Telegram session on <code>/telegram/connect/manage</code>. Disconnecting through a client (<code>disconnect_telegram_account</code>, <code>POST /api/account/disconnect</code>) and deleting the account (<code>delete_telegram_account</code>, <code>DELETE /api/account</code>) need <code>account:manage</code>, so request it if users should be able to leave from inside your platform.</li>
     <li>If an approved CIMD host is removed, its users' refreshes stop at the next token request.</li>
   </ul>
   <div class="note"><strong>Known gap.</strong> Deleting an account does not yet revoke the OAuth clients connected to it; the fix is tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/781" target="_blank" rel="noopener">#781</a>. Until it ships, revoke with <code>/oauth/revoke</code> when a user leaves your platform.</div>
