@@ -1,6 +1,7 @@
 package productupdate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -250,11 +251,27 @@ func GateProfiles(feed Feed, baseline string, releases []string, previous, curre
 		for _, tool := range pd.Removed {
 			requireOnProfile(tool, ClaimRemoved)
 		}
+		// A changed tool's profile item is the full surface's item only when
+		// the profile shows the tool exactly as the full surface does, before
+		// and after. Where a profile rule shapes the tool, the same kind of
+		// change on both surfaces is two facts (a property added for
+		// everyone, a bound tightened for the profile), so the profile's
+		// needs its own claim.
+		mirrorsFull := func(tool string) bool {
+			return bytes.Equal(prev.Tools[tool], previous.Tools[tool]) &&
+				bytes.Equal(ps.Current.Tools[tool], current.Tools[tool])
+		}
 		for _, change := range pd.Changed {
 			for _, kind := range change.Kinds {
 				switch kind {
 				case ChangeSchema, ChangeAnnotations:
-					requireOnProfile(change.Tool, ClaimChange(kind))
+					c := Claim{Tool: change.Tool, Change: ClaimChange(kind), Profile: ps.Name}
+					if mirrorsFull(change.Tool) {
+						requireOnProfile(change.Tool, ClaimChange(kind))
+					} else {
+						shown[claimKey(c)] = true
+						require(c)
+					}
 				case ChangeText:
 					shown[claimKey(Claim{Tool: change.Tool, Change: ClaimText, Profile: ps.Name})] = true
 				}

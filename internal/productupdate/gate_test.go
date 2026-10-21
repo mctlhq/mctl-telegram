@@ -330,6 +330,24 @@ func TestAProfileOnlyChangeNeedsAProfileClaim(t *testing.T) {
 	wantPass(t, runProfileGate(t, []Entry{profileClaim("narrow", "list_dialogs", ClaimSchema, "")}, full, fullAfter, profiles))
 }
 
+// On a tool a profile rule shapes, a schema change for everyone and a rule
+// change for the profile share a kind but are two facts: the full-surface
+// claim does not cover the profile's.
+func TestAProfileRuleChangeIsNotHiddenByAFullChange(t *testing.T) {
+	ruled := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":50}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	fullAfter := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":100},"folder":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	ruledAfter := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":30},"folder":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	before := profileSnapshot(t, "core-readonly", ruled)
+	profiles := Profiles{BaselineCarriesProfiles: true, Surfaces: []ProfileSurface{{Name: "core-readonly", Previous: &before, Current: profileSnapshot(t, "core-readonly", ruledAfter)}}}
+	full, after := snapshot(t, listDialogs), snapshot(t, fullAfter)
+
+	everyone := profileClaim("folder", "list_dialogs", ClaimSchema, "")
+	wantProblem(t, runProfileGate(t, []Entry{everyone}, full, after, profiles),
+		"list_dialogs schema (profile core-readonly) since 0.69.0 has no product update")
+	tighter := profileClaim("tighter", "list_dialogs", ClaimSchema, "core-readonly")
+	wantPass(t, runProfileGate(t, []Entry{everyone, tighter}, full, after, profiles))
+}
+
 // A tool dropped from a profile shrinks a bound connection's surface under
 // its client, so it needs a profile claim just as an addition does; a tool
 // removed for everyone is covered by the full-surface claim.

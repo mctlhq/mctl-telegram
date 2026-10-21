@@ -177,6 +177,18 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 // "no such path" answer means absent.
 func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profiles, int) {
 	var out productupdate.Profiles
+	if baseline != "" {
+		// Whether the baseline carries profile snapshots is read from its
+		// tree, not from the profiles this build still defines: otherwise
+		// renaming or deleting every profile would put the survivors back
+		// into their bootstrap window and quiet the gate.
+		carries, err := baselineCarriesProfileSnapshots(repo, baseline)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+			return out, exitUsage
+		}
+		out.BaselineCarriesProfiles = carries
+	}
 	for _, name := range toolprofile.Names() {
 		path := profileSnapshotPath(name)
 		raw, err := os.ReadFile(filepath.Join(repo, path))
@@ -208,12 +220,26 @@ func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profil
 					return out, exitFailed
 				}
 				ps.Previous = &prev
-				out.BaselineCarriesProfiles = true
 			}
 		}
 		out.Surfaces = append(out.Surfaces, ps)
 	}
 	return out, exitOK
+}
+
+// baselineCarriesProfileSnapshots reports whether rev's tree holds any
+// profile snapshot, docs/tool-descriptors.<name>.json, whatever the name.
+func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
+	out, err := git(repo, "ls-tree", "--name-only", rev, "--", "docs/")
+	if err != nil {
+		return false, err
+	}
+	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
+		if path != snapshotPath && strings.HasPrefix(path, "docs/tool-descriptors.") && strings.HasSuffix(path, ".json") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // gitHasPath reports whether rev's tree has path. git ls-tree prints nothing

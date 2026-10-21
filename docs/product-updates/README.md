@@ -75,7 +75,16 @@ The profile must be one this build knows, and its snapshot must exist at HEAD.
 Until a release carries profile snapshots, every profile is in its own
 bootstrap window: nothing is required of it and a profile-scoped claim is
 reported as unverified. Once a release carries any, a profile missing from it
-is a new surface, and each of its tools needs an `added` claim on it.
+is a new surface, and each of its tools needs an `added` claim on it. "Carries
+any" is read from the baseline's tree, so renaming every profile does not put
+the new names back into a bootstrap window.
+
+A change the full surface shows covers the same change on a profile only where
+the profile shows that tool exactly as the full surface does, before and after.
+On a tool a profile rule shapes (a bound on `limit`, a forbidden argument), a
+schema change for everyone also changes the profile's view, and that needs its
+own `profile:` claim: the full-surface entry cannot tell whether the rule
+changed too.
 
 Deleting a whole profile is not gated. The gate enumerates the profiles this
 build defines, so a deleted profile's baseline snapshot is never diffed and

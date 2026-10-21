@@ -265,6 +265,24 @@ func TestANewProfileIsANewSurface(t *testing.T) {
 	}
 }
 
+// A baseline whose only profile snapshot belongs to a profile this build no
+// longer defines still carries profile snapshots: the renamed profile is a
+// new surface, not back in a bootstrap window.
+func TestARenamedProfileIsNotBackInBootstrap(t *testing.T) {
+	r := newRepo(t)
+	r.surface(snapshotPath, "", listDialogs)
+	r.surface("docs/tool-descriptors.core-legacy.json", "core-legacy", listDialogs)
+	r.commit("a profile that is later renamed")
+	r.git("tag", "0.70.0")
+	r.git("rm", "-q", "docs/tool-descriptors.core-legacy.json")
+	r.snapshot(listDialogs)
+	r.commit("renamed")
+	code, out := r.gate()
+	if code != exitFailed || !strings.Contains(out, "list_dialogs added (profile "+toolprofile.CoreReadonly+") since 0.70.0 has no product update") {
+		t.Fatalf("renamed profile: exit %d\n%s", code, out)
+	}
+}
+
 func TestEveryProfileCommitsItsSnapshot(t *testing.T) {
 	r := newRepo(t)
 	r.snapshot(listDialogs)
