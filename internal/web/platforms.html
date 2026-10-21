@@ -158,9 +158,10 @@
   <ul>
     <li>Your client revokes a user's grant with <code>POST /oauth/revoke</code>, which ends that refresh-token family. Access tokens already issued expire on their own lifetime ({{.AccessTTL}}).</li>
     <li>{{if .ShowManage}}A user can disconnect their Telegram session on <code>/telegram/connect/manage</code>. {{end}}Disconnecting through a client (<code>disconnect_telegram_account</code>, <code>POST /api/account/disconnect</code>) and deleting the account (<code>delete_telegram_account</code>, <code>DELETE /api/account</code>) need <code>account:manage</code>, so request it if users should be able to leave from inside your platform.</li>
+    <li>Deleting an account revokes every client's refresh tokens for that user, in the same transaction as the delete. Disconnecting ends the Telegram session but keeps the OAuth grant, so the user can reconnect without adding the connector again.</li>
+    <li>When a user removes your connector, the server learns of it only if your client calls <code>/oauth/revoke</code>; otherwise the grant stays valid until the refresh token expires or is revoked.</li>
     <li>If an approved CIMD host is removed, its users' refreshes stop at the next token request.</li>
   </ul>
-  <div class="note"><strong>Known gap.</strong> Deleting an account does not yet revoke the OAuth clients connected to it; the fix is tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/781" target="_blank" rel="noopener">#781</a>. Until it ships, revoke with <code>/oauth/revoke</code> when a user leaves your platform.</div>
 
   <h2>Bring your own session: Local Bridge</h2>
   <p>For users or companies that will not leave a Telegram session on a hosted server, <a href="/docs/local-bridge">Local Bridge</a> keeps it on the user's machine. The user installs <code>mctl-telegram-local</code>, signs in to Telegram locally and activates the device in a browser; your platform keeps the same endpoint and the same OAuth client. The server then relays MCP calls to that machine and sees the payloads in transit, so it is not end-to-end encryption. Local Bridge is in beta: the daemon must be running, and editing, deleting, forwarding, searching and reactions are not yet available in this mode.</p>
