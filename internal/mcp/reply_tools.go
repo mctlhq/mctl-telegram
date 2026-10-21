@@ -89,7 +89,11 @@ func (s *Server) deliverReply(ctx context.Context, userID int64, target *telegra
 // isLocalBridgeAccount reports a Local Bridge account. Neither reply tool
 // has a bridge-side implementation in v1.
 func (s *Server) isLocalBridgeAccount(ctx context.Context, userID int64) bool {
-	if s.Hub == nil || s.Store == nil {
+	// The mode lives in the store alone. The Hub matters only to a tool that
+	// relays to the daemon, so a deployment with the bridge disabled still
+	// refuses an account left in local mode instead of borrowing a session it
+	// does not hold.
+	if s.Store == nil {
 		return false
 	}
 	mode, err := s.Store.GetAccountMode(ctx, userID)
@@ -157,6 +161,10 @@ Inputs (required):
 		if errors.Is(err, telegram.ErrNoExistingDialog) {
 			s.auditRefusal(ctx, id, "draft_reply:no_dialog", peerRedacted, err, startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("draft_reply blocked: " + peer + " is not an existing conversation of this account; draft_reply only replies in conversations that already exist"), nil
+		}
+		if errors.Is(err, telegram.ErrCannotPost) {
+			s.auditRefusal(ctx, id, "draft_reply:cannot_post", peerRedacted, err, startedAt, ReasonRefused)
+			return mcplib.NewToolResultError("draft_reply blocked: this account may not post text messages in " + peer + " (a channel it does not administer, or a group that bans sending)"), nil
 		}
 		if err != nil {
 			s.audit(ctx, id, "draft_reply", peerRedacted, err, startedAt)

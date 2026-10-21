@@ -16,6 +16,12 @@ import (
 // talked to is refused rather than turned into a first contact.
 var ErrNoExistingDialog = errors.New("peer is not an existing conversation of this account")
 
+// ErrCannotPost means the account is in the conversation but may not post a
+// text message there: a broadcast channel it does not administer, or a group
+// whose rights ban sending. draft_reply refuses it up front, because the
+// one-shot confirmation would otherwise be spent on a refusal at send time.
+var ErrCannotPost = errors.New("account may not post text messages in this conversation")
+
 // ReplyTarget is a peer resolved for a reply: the InputPeer to send to,
 // including its access hash, so the later send cannot be re-pointed by a
 // username that changed hands between the draft and the send.
@@ -70,27 +76,63 @@ func replyTargetFromPeerDialogs(inputPeer tg.InputPeerClass, res *tg.MessagesPee
 	}
 	switch v := inputPeer.(type) {
 	case *tg.InputPeerChat:
-		member := false
+		var chat *tg.Chat
 		for _, c := range res.Chats {
-			if chat, ok := c.(*tg.Chat); ok && chat.ID == v.ChatID && !chat.Left && !chat.Deactivated {
-				member = true
+			if ch, ok := c.(*tg.Chat); ok && ch.ID == v.ChatID && !ch.Left && !ch.Deactivated {
+				chat = ch
 			}
 		}
-		if !member {
+		if chat == nil {
 			return nil, ErrNoExistingDialog
+		}
+		if _, isAdmin := chat.GetAdminRights(); !chat.Creator && !isAdmin && bansText(chat.GetDefaultBannedRights()) {
+			return nil, ErrCannotPost
 		}
 	case *tg.InputPeerChannel:
-		member := false
+		var channel *tg.Channel
 		for _, c := range res.Chats {
 			if ch, ok := c.(*tg.Channel); ok && ch.ID == v.ChannelID && !ch.Left && !ch.Min {
-				member = true
+				channel = ch
 			}
 		}
-		if !member {
+		if channel == nil {
 			return nil, ErrNoExistingDialog
+		}
+		if !channelAllowsPosting(channel) {
+			return nil, ErrCannotPost
 		}
 	}
 	return &ReplyTarget{Peer: inputPeer, Ref: ref, Title: peerTitle(inputPeer, res.Users, res.Chats)}, nil
+}
+
+// channelAllowsPosting reports whether the account may post a text message
+// in a channel it is a member of. It fails closed on bans: a banned-rights
+// entry is honoured even if its until_date may already have passed.
+func channelAllowsPosting(ch *tg.Channel) bool {
+	if ch.Creator {
+		return true
+	}
+	admin, isAdmin := ch.GetAdminRights()
+	// In a broadcast channel only admins with post_messages may post; in a
+	// gigagroup only admins may.
+	if ch.Broadcast {
+		return isAdmin && admin.PostMessages
+	}
+	if ch.Gigagroup {
+		return isAdmin
+	}
+	if isAdmin {
+		return true
+	}
+	if own, ok := ch.GetBannedRights(); ok && (own.ViewMessages || bansText(own, true)) {
+		return false
+	}
+	return !bansText(ch.GetDefaultBannedRights())
+}
+
+// bansText reports whether rights forbid sending a plain text message.
+func bansText(r tg.ChatBannedRights, ok bool) bool {
+	return ok && (r.SendMessages || r.SendPlain)
 }
 
 func samePeer(in tg.InputPeerClass, p tg.PeerClass) bool {

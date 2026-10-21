@@ -42,6 +42,9 @@ func (f *replyFake) install(s *Server) {
 		if t, ok := f.dialogs[peer]; ok {
 			return t, nil
 		}
+		if peer == "@book_club_news" {
+			return nil, telegram.ErrCannotPost
+		}
 		return nil, telegram.ErrNoExistingDialog
 	}
 	s.replyDeliver = func(_ context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error) {
@@ -127,6 +130,23 @@ func TestDraftReply_RefusesPeerWithoutConversation(t *testing.T) {
 	}
 	if n := len(s.Replies.m); n != 0 {
 		t.Fatalf("%d confirmations issued for a refused draft", n)
+	}
+}
+
+// A conversation the account is in but may not post to, such as a broadcast
+// channel it only subscribes to, is refused at draft time: otherwise the
+// one-shot confirmation would be spent on a Telegram refusal at send time.
+func TestDraftReply_RefusesConversationItCannotPostIn(t *testing.T) {
+	s, f, id := replyServer(t, 9314)
+	res := draft(t, s, id, "@book_club_news", "hello")
+	if !res.IsError || !strings.Contains(contentText(res), "may not post") {
+		t.Fatalf("draft to a read-only channel: %s", contentText(res))
+	}
+	if got := classifyToolResultReason(res); got != ReasonRefused {
+		t.Fatalf("reason = %q, want %q", got, ReasonRefused)
+	}
+	if n := len(s.Replies.m); n != 0 || len(f.delivered) != 0 {
+		t.Fatalf("refused draft left %d confirmations, %d deliveries", n, len(f.delivered))
 	}
 }
 
@@ -337,20 +357,25 @@ func TestDraftReply_ReportsClosedGate(t *testing.T) {
 func TestReplyTools_RefuseLocalBridgeAccounts(t *testing.T) {
 	store := newToolsTestStore(t)
 	uid := seedLocalAccount(t, store, 9310)
-	s := &Server{Store: store, Hub: bridge.NewHub(), AllowSend: true, Replies: NewReplyStore()}
-	f := newReplyFake()
-	f.install(s)
-	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}, Profile: toolprofile.CoreReply}
-	for _, res := range []*mcplib.CallToolResult{
-		draft(t, s, id, "@alice", "hi"),
-		sendReply(t, s, id, map[string]any{"confirmation_id": "cr_0000"}),
-	} {
-		if !res.IsError || classifyToolResultReason(res) != ReasonModeUnsupported {
-			t.Fatalf("local-bridge account: %s", contentText(res))
+	// The refusal must not depend on the bridge being wired up: a deployment
+	// with the bridge disabled can still hold an account left in local mode,
+	// and its MTProto session is not on this server.
+	for name, hub := range map[string]*bridge.Hub{"bridge enabled": bridge.NewHub(), "bridge disabled": nil} {
+		s := &Server{Store: store, Hub: hub, AllowSend: true, Replies: NewReplyStore()}
+		f := newReplyFake()
+		f.install(s)
+		id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}, Profile: toolprofile.CoreReply}
+		for _, res := range []*mcplib.CallToolResult{
+			draft(t, s, id, "@alice", "hi"),
+			sendReply(t, s, id, map[string]any{"confirmation_id": "cr_0000"}),
+		} {
+			if !res.IsError || classifyToolResultReason(res) != ReasonModeUnsupported {
+				t.Fatalf("%s: local-bridge account: %s", name, contentText(res))
+			}
 		}
-	}
-	if len(f.delivered) != 0 {
-		t.Fatal("delivered through a local-bridge account")
+		if len(f.delivered) != 0 || len(s.Replies.m) != 0 {
+			t.Fatalf("%s: a local-bridge account drafted or delivered", name)
+		}
 	}
 }
 

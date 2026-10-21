@@ -39,6 +39,49 @@ func TestReplyTargetFromPeerDialogs(t *testing.T) {
 		t.Fatalf("member group: %v", err)
 	}
 
+	// Posting rights: a member who may post is accepted.
+	for name, ch := range map[string]tg.ChatClass{
+		"own broadcast channel":     &tg.Channel{ID: 8001, Broadcast: true, Creator: true},
+		"broadcast channel poster":  withAdmin(&tg.Channel{ID: 8001, Broadcast: true}, tg.ChatAdminRights{PostMessages: true}),
+		"gigagroup admin":           withAdmin(&tg.Channel{ID: 8001, Megagroup: true, Gigagroup: true}, tg.ChatAdminRights{}),
+		"admin in muted supergroup": withAdmin(withDefaultBan(&tg.Channel{ID: 8001, Megagroup: true}, tg.ChatBannedRights{SendMessages: true}), tg.ChatAdminRights{}),
+		"supergroup member":         &tg.Channel{ID: 8001, Megagroup: true},
+	} {
+		if _, err := replyTargetFromPeerDialogs(club, &tg.MessagesPeerDialogs{Dialogs: []tg.DialogClass{clubDialog}, Chats: []tg.ChatClass{ch}}); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	mutedGroup := &tg.Chat{ID: 9001}
+	mutedGroup.SetDefaultBannedRights(tg.ChatBannedRights{SendPlain: true})
+	adminInMutedGroup := &tg.Chat{ID: 9001}
+	adminInMutedGroup.SetDefaultBannedRights(tg.ChatBannedRights{SendMessages: true})
+	adminInMutedGroup.SetAdminRights(tg.ChatAdminRights{})
+	if _, err := replyTargetFromPeerDialogs(group, &tg.MessagesPeerDialogs{Dialogs: []tg.DialogClass{groupDialog}, Chats: []tg.ChatClass{adminInMutedGroup}}); err != nil {
+		t.Errorf("admin in muted group: %v", err)
+	}
+
+	// A member who may not post is refused with its own error.
+	ownBan := &tg.Channel{ID: 8001, Megagroup: true}
+	ownBan.SetBannedRights(tg.ChatBannedRights{SendMessages: true})
+	for name, tc := range map[string]struct {
+		peer tg.InputPeerClass
+		chat tg.ChatClass
+		dlg  tg.DialogClass
+	}{
+		"broadcast channel subscriber": {club, &tg.Channel{ID: 8001, Broadcast: true}, clubDialog},
+		"broadcast admin without post": {club, withAdmin(&tg.Channel{ID: 8001, Broadcast: true}, tg.ChatAdminRights{EditMessages: true}), clubDialog},
+		"gigagroup member":             {club, &tg.Channel{ID: 8001, Megagroup: true, Gigagroup: true}, clubDialog},
+		"supergroup bans sending":      {club, withDefaultBan(&tg.Channel{ID: 8001, Megagroup: true}, tg.ChatBannedRights{SendMessages: true}), clubDialog},
+		"supergroup bans plain text":   {club, withDefaultBan(&tg.Channel{ID: 8001, Megagroup: true}, tg.ChatBannedRights{SendPlain: true}), clubDialog},
+		"member restricted personally": {club, ownBan, clubDialog},
+		"group bans plain text":        {group, mutedGroup, groupDialog},
+	} {
+		_, err := replyTargetFromPeerDialogs(tc.peer, &tg.MessagesPeerDialogs{Dialogs: []tg.DialogClass{tc.dlg}, Chats: []tg.ChatClass{tc.chat}})
+		if !errors.Is(err, ErrCannotPost) {
+			t.Errorf("%s: err = %v, want ErrCannotPost", name, err)
+		}
+	}
+
 	// Every case below is "not a conversation of this account".
 	for name, tc := range map[string]struct {
 		peer tg.InputPeerClass
@@ -77,4 +120,14 @@ func TestReplyTargetFromPeerDialogs(t *testing.T) {
 	if _, err := replyTargetFromPeerDialogs(&tg.InputPeerSelf{}, &tg.MessagesPeerDialogs{}); err == nil {
 		t.Fatal("InputPeerSelf accepted as a reply target")
 	}
+}
+
+func withAdmin(ch *tg.Channel, r tg.ChatAdminRights) *tg.Channel {
+	ch.SetAdminRights(r)
+	return ch
+}
+
+func withDefaultBan(ch *tg.Channel, r tg.ChatBannedRights) *tg.Channel {
+	ch.SetDefaultBannedRights(r)
+	return ch
 }

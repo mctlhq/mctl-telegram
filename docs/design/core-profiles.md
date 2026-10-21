@@ -97,6 +97,13 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
   a min object). Readable is not enough: a public channel resolves by
   `@username` and its history reads fine for a non-member. A response that
   could not be read is an error, not a refusal.
+- Membership is not the right to post, so `draft_reply` also refuses, with
+  its own message, a conversation the account may not post text in: a
+  broadcast channel without `post_messages` admin rights, a gigagroup it
+  does not administer, or a group whose default or personal banned rights
+  forbid sending (creators and admins are exempt from the default ban).
+  The rights come from the same `getPeerDialogs` response; otherwise the
+  confirmation would be spent on a `CHAT_WRITE_FORBIDDEN` at send time.
 - The text limit is 4096 UTF-16 units, as Telegram counts them (most emoji
   cost two), checked at draft time so it can never fail after the
   confirmation is spent.
@@ -119,7 +126,8 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
 - The reviewer/demo account is part of the gate: `send_reply` refuses it
   with the preview-only reason, like any closed gate.
 - Local Bridge accounts are refused by both tools in v1 (no bridge-side
-  implementation).
+  implementation). The check reads the account mode from the store only, so
+  it holds when the bridge is disabled on a deployment too.
 - Both tools need `telegram:messages:send` in addition to the profile.
   Callers without a profile never see them
   (`toolprofile.ProfileOnly`); they are disabled in
