@@ -954,3 +954,48 @@ func TestRefreshGrantStillValid_StorageErrorPropagates(t *testing.T) {
 		t.Fatal("want ok=false alongside the error, so a caller that ignores err still fails closed")
 	}
 }
+
+// TestToken_RefreshRefusedAfterAccountDeleted is the endpoint view of #781:
+// deleting the account must end every connected client's refresh grant, so
+// the next grant_type=refresh_token is invalid_grant.
+func TestToken_RefreshRefusedAfterAccountDeleted(t *testing.T) {
+	const tgID int64 = 777000444
+	srv := newTestServer(t, func(c *Config) { c.AutoApproveClients = true })
+	mux := newMockRouter()
+	srv.Register(mux)
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "dave", "Dave")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	refresh := func(token string) *httptest.ResponseRecorder {
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", token)
+		form.Set("client_id", "claude.ai")
+		return doTokenRequest(t, mux, form)
+	}
+	save := func(token, family string) {
+		if err := srv.store.SaveRefreshToken(ctx, token, db.RefreshToken{
+			FamilyID: family, UserID: uid, ClientID: "claude.ai", TelegramID: tgID,
+			Scope: clientBundleScope, ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("save refresh token: %v", err)
+		}
+	}
+
+	// Control: the same setup refreshes fine while the account exists.
+	save("deleted-acct-control", "deleted-acct-control-family")
+	if rec := refresh("deleted-acct-control"); rec.Code != http.StatusOK {
+		t.Fatalf("control refresh status = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+
+	save("deleted-acct-token", "deleted-acct-family")
+	if _, err := srv.store.HardDeleteAccount(ctx, uid); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	rec := refresh("deleted-acct-token")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_grant") {
+		t.Fatalf("refresh after delete = %d %s, want 400 invalid_grant", rec.Code, rec.Body.String())
+	}
+}

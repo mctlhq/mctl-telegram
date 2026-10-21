@@ -143,3 +143,47 @@ func TestHardDeleteAccount_RevokesRefreshTokens_PostgresConcurrent(t *testing.T)
 		}
 	}
 }
+
+// A delete whose refresh-token revocation fails must roll back as a whole:
+// the account row stays and the token stays live, so the caller never sees an
+// account reported deleted while its clients keep rotating.
+func TestHardDeleteAccount_RevocationFailureRollsBack(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	alice, err := s.EnsureUserByTelegramID(ctx, 4444, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure alice: %v", err)
+	}
+	seedAccount(t, s, alice, nil, nil, nil)
+	if err := s.SaveRefreshToken(ctx, "rb-1", RefreshToken{FamilyID: "frb", UserID: alice,
+		ClientID: "claude.ai", TelegramID: 1, Scope: "telegram:dialogs:read",
+		ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Make the revocation UPDATE fail inside the delete transaction.
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_refresh_revoke
+		BEFORE UPDATE ON oauth_refresh_tokens BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() { _, _ = s.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS fail_refresh_revoke`) })
+
+	if _, err := s.HardDeleteAccount(ctx, alice); err == nil {
+		t.Fatal("delete succeeded although revocation failed")
+	}
+
+	var accounts int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, alice).Scan(&accounts); err != nil {
+		t.Fatalf("count accounts: %v", err)
+	}
+	if accounts != 1 {
+		t.Errorf("telegram_accounts rows = %d after failed delete, want 1 (rolled back)", accounts)
+	}
+	rt, err := s.LookupRefreshToken(ctx, "rb-1")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if rt.Revoked() {
+		t.Errorf("token revoked (reason %q) by a delete that failed", rt.RevokedReason)
+	}
+}
