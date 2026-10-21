@@ -25,6 +25,11 @@ import (
 // bounded pages, plus the caller's own state.
 const CoreReadonly = "core-readonly"
 
+// CoreReply is core-readonly plus a two-step reply: draft_reply shows the
+// exact recipient and text and issues a one-shot confirmation, send_reply
+// delivers exactly that and nothing else.
+const CoreReply = "core-reply"
+
 // Rule is the argument policy a profile applies to one tool. The zero Rule
 // leaves the tool's arguments as they are.
 type Rule struct {
@@ -73,20 +78,43 @@ func noMedia(r Rule) Rule {
 	return r
 }
 
-var profiles = map[string]Profile{
-	CoreReadonly: {
-		Name: CoreReadonly,
-		Tools: map[string]Rule{
-			"list_dialogs":        {},
-			"get_messages":        noMedia(messagePage),
-			"get_unread_messages": withPeer(noMedia(messagePage)),
-			"search_messages":     withPeer(messagePage),
-			"get_my_identity":     {},
-			"get_my_send_status":  {},
-			"get_my_audit_log":    {},
-		},
-	},
+func coreReadonlyTools() map[string]Rule {
+	return map[string]Rule{
+		"list_dialogs":        {},
+		"get_messages":        noMedia(messagePage),
+		"get_unread_messages": withPeer(noMedia(messagePage)),
+		"search_messages":     withPeer(messagePage),
+		"get_my_identity":     {},
+		"get_my_send_status":  {},
+		"get_my_audit_log":    {},
+	}
 }
+
+func coreReplyTools() map[string]Rule {
+	t := coreReadonlyTools()
+	t["draft_reply"] = Rule{}
+	t["send_reply"] = Rule{}
+	return t
+}
+
+var profiles = map[string]Profile{
+	CoreReadonly: {Name: CoreReadonly, Tools: coreReadonlyTools()},
+	CoreReply:    {Name: CoreReply, Tools: coreReplyTools()},
+}
+
+// profileOnlyTools exist only inside a profile: a caller whose credential
+// carries no profile is never shown them and cannot call them, so adding
+// them leaves the unprofiled surface exactly as it was. draft_reply and
+// send_reply duplicate what send_message already offers everyone else, in
+// a stricter shape that only means something under core-reply.
+var profileOnlyTools = map[string]bool{
+	"draft_reply": true,
+	"send_reply":  true,
+}
+
+// ProfileOnly reports whether the named tool is offered only to a caller
+// whose profile lists it.
+func ProfileOnly(name string) bool { return profileOnlyTools[name] }
 
 // Lookup returns the named profile. ok is false for an unknown name; callers
 // must treat that as "nothing is allowed", never as "no profile".

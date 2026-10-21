@@ -74,7 +74,11 @@ service outage unless new authorization-code flows also fail.
 
 - `client_id` is matched byte for byte: a CIMD `client_id` URL or a
   preregistered client id. Implicit and DCR clients cannot be bound yet.
-- Known profiles: `core-readonly`.
+- Known profiles: `core-readonly`, and `core-reply` (core-readonly plus
+  `draft_reply` / `send_reply`). The two reply tools exist only under
+  `core-reply`; no unprofiled connection sees them. Their drafts live in
+  process memory: after a restart `send_reply` answers "not found, call
+  draft_reply again", which is expected, not an incident.
 - Unset or empty restricts no client.
 - A malformed table, an unknown key, an unknown profile, a duplicate
   `client_id` or a record with `redirect_uri` **stops the server at

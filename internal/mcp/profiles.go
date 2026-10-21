@@ -43,11 +43,13 @@ func profileOf(id *auth.Identity) (p toolprofile.Profile, restricted, ok bool) {
 }
 
 // profileAllows reports whether id's profile, if any, lets it see and call
-// the named tool. It says nothing about scopes; toolAllowed combines both.
+// the named tool. A caller without a profile is allowed everything except
+// the profile-only tools (toolprofile.ProfileOnly). It says nothing about
+// scopes; toolAllowed combines both.
 func profileAllows(id *auth.Identity, name string) bool {
 	p, restricted, ok := profileOf(id)
 	if !restricted {
-		return true
+		return !toolprofile.ProfileOnly(name)
 	}
 	if !ok {
 		return false
@@ -61,6 +63,9 @@ func profileAllows(id *auth.Identity, name string) bool {
 func profileDeniedMessage(id *auth.Identity, name string) string {
 	if id == nil {
 		return fmt.Sprintf("tool %s is not available", name)
+	}
+	if id.Profile == "" {
+		return fmt.Sprintf("tool %s is not available: it is offered only to connections with a tool profile that lists it", name)
 	}
 	if _, _, ok := profileOf(id); !ok {
 		return fmt.Sprintf("tool %s is not available: this connection's tool profile %q is not recognised by the server", name, id.Profile)
