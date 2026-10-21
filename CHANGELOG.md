@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.83.1](https://github.com/mctlhq/mctl-telegram/compare/0.83.0...0.83.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **web:** keep inline code tokens whole and fit the footer ([b3bba9a](https://github.com/mctlhq/mctl-telegram/commit/b3bba9a785d31fa9efc8ac3ba88162823ad6733a))
+* **web:** keep inline code tokens whole and fit the footer ([8b775c8](https://github.com/mctlhq/mctl-telegram/commit/8b775c8918a1c5391776ec244feb18114474d01c))
+
 ## [0.83.0](https://github.com/mctlhq/mctl-telegram/compare/0.82.0...0.83.0) (2026-10-21)
 
 
