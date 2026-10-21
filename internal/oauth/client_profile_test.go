@@ -245,7 +245,8 @@ func TestRefresh_UnknownRedirectURIIsNotUnbound(t *testing.T) {
 		srv := newTestServer(t)
 		mux := newMockRouter()
 		srv.Register(mux)
-		access, next := refreshFor(t, mux, seedLegacyFamily(t, srv), "claude.ai")
+		legacy := seedLegacyFamily(t, srv)
+		access, next := refreshFor(t, mux, legacy, "claude.ai")
 		if got := claimsOf(t, access).Profile; got != "" {
 			t.Fatalf("prf = %q, want none", got)
 		}
@@ -257,11 +258,16 @@ func TestRefresh_UnknownRedirectURIIsNotUnbound(t *testing.T) {
 			t.Fatalf("rotation turned an unknown redirect_uri into %q", rt.RedirectURI)
 		}
 		// The rotated successor is still unknown, so a binding added later
-		// refuses it too instead of reading "" as unbound.
+		// refuses it too instead of reading "" as unbound -- on a grace
+		// replay of its predecessor as on a plain refresh. Each answer is
+		// invalid_grant asking to authorize again, never a server_error
+		// the client would retry forever.
 		srv.cfg.ClientProfiles = redirectBound(toolprofile.CoreReadonly)
-		rec := doTokenRequest(t, mux, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {next}, "client_id": {"claude.ai"}})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("rotated legacy refresh after a binding = %d %s, want 400", rec.Code, rec.Body.String())
+		for name, tok := range map[string]string{"grace replay of the predecessor": legacy, "successor": next} {
+			rec := doTokenRequest(t, mux, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok}, "client_id": {"claude.ai"}})
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "authorize again") {
+				t.Fatalf("%s after a binding = %d %s, want invalid_grant asking to authorize again", name, rec.Code, rec.Body.String())
+			}
 		}
 	})
 }
@@ -314,5 +320,33 @@ func TestSelfConnectRedirectURIIsReservedFromProfiles(t *testing.T) {
 	}, newTestStore(t))
 	if err == nil || !strings.Contains(err.Error(), "self-connect") {
 		t.Fatalf("New = %v, want the self-connect refusal", err)
+	}
+}
+
+// TestUnacceptableRedirectURIBindingFailsStartup: a redirect_uri binding the
+// authorize endpoint could never accept would match nothing and leave the
+// client unrestricted, so New refuses it.
+func TestUnacceptableRedirectURIBindingFailsStartup(t *testing.T) {
+	for _, uri := range []string{
+		"ftp://town.example.test/cb",
+		"http://town.example.test/cb",
+		"https://user@town.example.test/cb",
+		`https://town.example.test\cb`,
+	} {
+		_, err := New(context.Background(), Config{
+			Issuer: testIssuer, JWTSecret: testJWTSecret, TelegramOIDC: newFakeAuthenticator(),
+			AccessTokenTTL: time.Hour, CodeTTL: time.Minute,
+			ClientProfiles: toolprofile.Bindings{ByRedirectURI: map[string]string{uri: toolprofile.CoreReadonly}},
+		}, newTestStore(t))
+		if err == nil || !strings.Contains(err.Error(), "can never match an authorization") {
+			t.Fatalf("%s: New = %v, want a startup refusal", uri, err)
+		}
+	}
+	if _, err := New(context.Background(), Config{
+		Issuer: testIssuer, JWTSecret: testJWTSecret, TelegramOIDC: newFakeAuthenticator(),
+		AccessTokenTTL: time.Hour, CodeTTL: time.Minute,
+		ClientProfiles: toolprofile.Bindings{ByRedirectURI: map[string]string{"http://127.0.0.1:8976/cb": toolprofile.CoreReadonly}},
+	}, newTestStore(t)); err != nil {
+		t.Fatalf("a loopback http binding was refused: %v", err)
 	}
 }

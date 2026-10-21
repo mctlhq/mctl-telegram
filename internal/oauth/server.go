@@ -758,7 +758,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	s.clients[ConnectClientID] = &clientReg{
 		ClientID:     ConnectClientID,
 		ClientName:   "mctl-telegram connect",
-		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
+		RedirectURIs: []string{connectRedirectURI(cfg.Issuer)},
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
 	// Operator-supplied static clients share the built-in client's
@@ -792,11 +792,23 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	// toolprofile; its redirect_uri is derived from the issuer, so only this
 	// package can refuse a redirect_uri binding that would catch it and lock
 	// every user out of the manage page.
-	if connect := s.clients[ConnectClientID].RedirectURIs[0]; cfg.ClientProfiles.ByRedirectURI[connect] != "" {
+	if connect := connectRedirectURI(cfg.Issuer); cfg.ClientProfiles.ByRedirectURI[connect] != "" {
 		return nil, fmt.Errorf("oauth: tool profile binding for redirect_uri %q: it is the built-in self-connect client's callback, behind the manage page, which a profiled credential cannot open", connect)
+	}
+	// A redirect_uri binding this server could never accept at
+	// /oauth/authorize (another scheme, http off loopback, userinfo, a
+	// backslash) would match no authorization and leave the client the
+	// operator meant to restrict unrestricted, so it fails startup too.
+	for uri := range cfg.ClientProfiles.ByRedirectURI {
+		if err := validateExactRedirectURI(uri); err != nil {
+			return nil, fmt.Errorf("oauth: tool profile binding for redirect_uri %q can never match an authorization: %w", uri, err)
+		}
 	}
 	return s, nil
 }
+
+// connectRedirectURI is the built-in self-connect client's one callback.
+func connectRedirectURI(issuer string) string { return issuer + "/telegram/connect/done" }
 
 // PreregisteredClient is a static public OAuth client seeded at construction.
 // See Config.PreregisteredClients.
@@ -2374,6 +2386,8 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	tok, mErr := s.mintAccessToken(tokenOrigin{ClientID: child.ClientID, RedirectURI: child.RedirectURI, RedirectURIKnown: child.RedirectURIKnown},
 		child.TelegramID, child.TelegramUsername, groups, scopes)
 	if errors.Is(mErr, errProfileUnresolvable) {
+		slog.Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
+			"family_id", familyID, "client_id", child.ClientID, "path", "grace_replay")
 		writeTokenError(w, "invalid_grant", profileUnresolvableDescription, http.StatusBadRequest)
 		return graceRejectedSoft
 	}

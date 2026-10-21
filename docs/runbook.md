@@ -83,7 +83,17 @@ service outage unless new authorization-code flows also fail.
   wins over a `redirect_uri` record that also matches.
 - A `redirect_uri` binding can only narrow what a client gets, so a client
   that registers another product's callback restricts itself and nothing
-  else. The self-connect client's callback (`<issuer>/telegram/connect/done`)
+  else. It is also only as tight as the callback is pinned. For a
+  preregistered client, or a registration on `OAUTH_DCR_REDIRECT_URIS`, the
+  `redirect_uri` is fixed byte for byte, and so is the binding. For an
+  implicit client, or a dynamic registration that is not on that list, the
+  server checks only the callback's host, so the same product could
+  authorize with another path or query on its host and get an unprofiled
+  token. There a binding restricts a cooperating client; it is not a
+  boundary the client cannot step around. A `client_id` binding of an
+  implicit client has the same property. A `redirect_uri` the authorize
+  endpoint could never accept (not `https`, `http` off loopback, userinfo,
+  a backslash) stops the server at startup. The self-connect client's callback (`<issuer>/telegram/connect/done`)
   cannot be bound: the server refuses to start.
 - **Refresh-token families issued before 0.87.0 have no stored
   `redirect_uri`.** While at least one `redirect_uri` record is set, such a
