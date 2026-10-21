@@ -29,7 +29,10 @@ const CoreReadonly = "core-readonly"
 // leaves the tool's arguments as they are.
 type Rule struct {
 	// Required lists arguments the profile makes mandatory even where the
-	// tool itself treats them as optional (peer on a cross-chat read).
+	// tool itself treats them as optional (peer on a cross-chat read). A
+	// required argument must be a non-blank string: every argument a core
+	// profile requires today is a peer reference. A rule requiring a
+	// numeric or boolean argument needs the check in internal/mcp widened.
 	Required []string
 	// Forbidden lists arguments the profile refuses when they are set to
 	// anything but their zero value (fetch_media=true). They are also
@@ -45,6 +48,12 @@ type Rule struct {
 
 // Profile is a named allowlist of tools with their argument rules. A tool
 // absent from Tools is hidden and refused.
+//
+// A profile must never list a tool that mints a credential
+// (mint_worker_token, or anything like it): the minted token carries
+// caller-chosen scopes and no profile, so it would escape the restriction.
+// auth.Middleware closes the HTTP minting routes to profiled credentials
+// for the same reason.
 type Profile struct {
 	Name  string
 	Tools map[string]Rule

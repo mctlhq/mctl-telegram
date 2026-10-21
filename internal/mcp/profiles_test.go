@@ -61,6 +61,38 @@ func TestCoreReadonly_ToolsAreRegistered(t *testing.T) {
 	}
 }
 
+// TestCoreReadonly_RuleArgumentsExist: every argument a rule names is a
+// property of the tool's registered schema. checkProfileArgs and
+// applyProfileSchema only act on the key they are given, so a typo in
+// Forbidden ("fetch_medai") would leave the real argument open, silently.
+func TestCoreReadonly_RuleArgumentsExist(t *testing.T) {
+	p, _ := toolprofile.Lookup(toolprofile.CoreReadonly)
+	env := callRPC(t, auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: allToolScopes()}), fullSurfaceServer(&Server{}), string(mcplib.MethodToolsList), map[string]any{})
+	var res mcplib.ListToolsResult
+	if err := json.Unmarshal(env.Result, &res); err != nil {
+		t.Fatalf("decode tools/list: %v", err)
+	}
+	schemas := map[string]map[string]any{}
+	for _, tool := range res.Tools {
+		schemas[tool.Name] = tool.InputSchema.Properties
+	}
+	for name, rule := range p.Tools {
+		props, ok := schemas[name]
+		if !ok {
+			t.Fatalf("profile tool %s is not registered", name)
+		}
+		args := append(slices.Clone(rule.Required), rule.Forbidden...)
+		if rule.LimitDefault > 0 || rule.LimitMax > 0 {
+			args = append(args, "limit")
+		}
+		for _, a := range args {
+			if _, ok := props[a]; !ok {
+				t.Errorf("%s: rule names argument %q, which is not in the tool's schema", name, a)
+			}
+		}
+	}
+}
+
 // TestToolsList_ProfileNarrowsTheScopeSurface: with every scope, a
 // core-readonly credential is shown exactly the profile's tools. With fewer
 // scopes it is shown the intersection, never a profile tool its scopes hide:
@@ -129,6 +161,20 @@ func TestToolsList_ProfileSchemaShowsTheRules(t *testing.T) {
 		}
 		if strings.HasPrefix(plain[name].Description, "Restricted") {
 			t.Errorf("%s: unprofiled description carries the profile note", name)
+		}
+	}
+	for _, name := range []string{"get_messages", "get_unread_messages", "search_messages"} {
+		limit, _ := profiled[name].InputSchema.Properties["limit"].(map[string]any)
+		if limit["maximum"] != float64(50) || limit["default"] != float64(20) {
+			t.Errorf("%s: limit schema = %v, want maximum 50 and default 20", name, limit)
+		}
+		own, _ := plain[name].InputSchema.Properties["limit"].(map[string]any)
+		noun, _, _ := strings.Cut(own["description"].(string), " (")
+		if d, _ := limit["description"].(string); d != noun+" (default 20, max 50)." {
+			t.Errorf("%s: limit description = %q, want the tool's own noun %q with the profile bound", name, d, noun)
+		}
+		if _, set := own["maximum"]; set {
+			t.Errorf("%s: maximum leaked into the unprofiled schema", name)
 		}
 	}
 	if profiled["list_dialogs"].Description != plain["list_dialogs"].Description {
@@ -254,6 +300,18 @@ func TestProfileArgGuard_PassesAndDefaults(t *testing.T) {
 	}
 	if _, set := noLimit["limit"]; set {
 		t.Fatal("guard wrote the default into the caller's argument map")
+	}
+
+	// A limit below 1 means "the handler's own default" to the handlers,
+	// which is larger than the profile's; under the profile it is the
+	// profile's default.
+	for _, v := range []any{float64(0), float64(-1), float64(0.4)} {
+		if res := call(profiled, "get_messages", map[string]any{"peer": "@x", "limit": v}); res.IsError {
+			t.Fatalf("limit %v refused: %s", v, contentText(res))
+		}
+		if seen["limit"] != float64(20) {
+			t.Fatalf("limit %v reached the handler as %v, want the profile default 20", v, seen["limit"])
+		}
 	}
 
 	in := map[string]any{"peer": "@x", "limit": float64(50), "fetch_media": false}

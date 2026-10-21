@@ -26,6 +26,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [Rejected dynamic client registrations (issue-668)](#oauthclientregistrations)
 - [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
 - [Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS](#lookup-admin-tier-and-tg_login_lookup_admins)
+- [Client tool profiles and MCP_CLIENT_PROFILES](#client-tool-profiles)
 - [JwtFailures — authentication failure spike](#jwtfailures)
 - [TelegramClientErrors — Telegram client error rate spike](#telegramclienterrors)
 - [RateLimitSpike — HTTP rate-limit event spike](#ratelimitspike)
@@ -58,6 +59,38 @@ scope set. Treat a coordinated wave of these responses as an expected
 re-authorization migration, announce it with the release, and monitor the
 authorization callback until clients have renewed. It is not an OAuth
 service outage unless new authorization-code flows also fail.
+
+---
+
+<a id="client-tool-profiles"></a>
+## Client tool profiles and MCP_CLIENT_PROFILES
+
+`MCP_CLIENT_PROFILES` binds an OAuth client to a restricted tool profile
+(`docs/design/core-profiles.md`). It is a JSON array:
+
+```json
+[{"client_id": "https://client.example/oauth/metadata.json", "profile": "core-readonly"}]
+```
+
+- `client_id` is matched byte for byte: a CIMD `client_id` URL or a
+  preregistered client id. Implicit and DCR clients cannot be bound yet.
+- Known profiles: `core-readonly`.
+- Unset or empty restricts no client.
+- A malformed table, an unknown key, an unknown profile, a duplicate
+  `client_id` or a record with `redirect_uri` **stops the server at
+  startup** (`MCP_CLIENT_PROFILES: record N: ...`). That is deliberate: the
+  operator who set the table relies on the restriction, and a server that
+  skipped the bad record would leave the client on its full surface. Fix
+  the value in gitops and redeploy.
+- The profile is stamped into each access token (`prf`) at code exchange
+  and at every refresh, so a binding change reaches existing connections at
+  their next refresh (access token lifetime at most).
+- A profiled token is admitted only on the MCP endpoint. Every other
+  authenticated route (`/api/account`, `/api/mcp/worker-token`,
+  `/api/bridge/token`, `/telegram/connect/manage`, ...) answers 403 and
+  counts `mctl_auth_failures_total{reason="profile_denied"}`.
+- Refusals on the MCP endpoint are audited with reason `profile_denied`,
+  distinct from `scope_denied`.
 
 ---
 

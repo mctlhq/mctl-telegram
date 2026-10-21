@@ -59,6 +59,9 @@ func profileAllows(id *auth.Identity, name string) bool {
 // profileDeniedMessage is the refusal text for a tool the caller's scopes
 // allow but its profile hides. It names the profile, never the client.
 func profileDeniedMessage(id *auth.Identity, name string) string {
+	if id == nil {
+		return fmt.Sprintf("tool %s is not available", name)
+	}
 	if _, _, ok := profileOf(id); !ok {
 		return fmt.Sprintf("tool %s is not available: this connection's tool profile %q is not recognised by the server", name, id.Profile)
 	}
@@ -89,7 +92,13 @@ func applyProfileSchema(t mcplib.Tool, profile string, r toolprofile.Rule) mcpli
 	if r.LimitMax > 0 || r.LimitDefault > 0 {
 		if prop, ok := out.InputSchema.Properties["limit"].(map[string]any); ok {
 			prop = maps.Clone(prop)
-			prop["description"] = limitText(r)
+			prop["description"] = limitText(prop["description"], r)
+			if r.LimitMax > 0 {
+				prop["maximum"] = r.LimitMax
+			}
+			if r.LimitDefault > 0 {
+				prop["default"] = r.LimitDefault
+			}
 			out.InputSchema.Properties["limit"] = prop
 		}
 	}
@@ -97,15 +106,31 @@ func applyProfileSchema(t mcplib.Tool, profile string, r toolprofile.Rule) mcpli
 	return out
 }
 
-func limitText(r toolprofile.Rule) string {
+// limitPhrase states the profile's limit bound, e.g. "default 20, max 50".
+func limitPhrase(r toolprofile.Rule) string {
 	switch {
 	case r.LimitDefault > 0 && r.LimitMax > 0:
-		return fmt.Sprintf("Max messages to return (default %d, max %d).", r.LimitDefault, r.LimitMax)
+		return fmt.Sprintf("default %d, max %d", r.LimitDefault, r.LimitMax)
 	case r.LimitMax > 0:
-		return fmt.Sprintf("Max messages to return (max %d).", r.LimitMax)
+		return fmt.Sprintf("max %d", r.LimitMax)
 	default:
-		return fmt.Sprintf("Max messages to return (default %d).", r.LimitDefault)
+		return fmt.Sprintf("default %d", r.LimitDefault)
 	}
+}
+
+// limitText rewrites a limit property's description for the profile. The
+// tool's own noun ("Max messages to return", "Maximum number of results")
+// is kept and its parenthesised default/max, if any, replaced.
+func limitText(orig any, r toolprofile.Rule) string {
+	noun, _ := orig.(string)
+	if i := strings.Index(noun, "("); i >= 0 {
+		noun = noun[:i]
+	}
+	noun = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(noun), "."))
+	if noun == "" {
+		noun = "Max results to return"
+	}
+	return fmt.Sprintf("%s (%s).", noun, limitPhrase(r))
 }
 
 // profileNote is the line a profiled caller reads first. The tool's own
@@ -117,7 +142,7 @@ func profileNote(profile string, r toolprofile.Rule) string {
 		parts = append(parts, strings.Join(r.Required, ", ")+" required")
 	}
 	if r.LimitMax > 0 || r.LimitDefault > 0 {
-		parts = append(parts, strings.TrimSuffix(strings.TrimPrefix(limitText(r), "Max messages to return ("), ")."))
+		parts = append(parts, "limit "+limitPhrase(r))
 	}
 	for _, a := range r.Forbidden {
 		parts = append(parts, a+" unavailable")
@@ -190,6 +215,17 @@ func checkProfileArgs(in map[string]any, r toolprofile.Rule) (map[string]any, er
 		// they cannot read, so an unreadable limit is refused here rather
 		// than passed through.
 		return nil, fmt.Errorf("limit must be a number")
+	}
+	if n < 1 {
+		// The handlers read a limit below 1 as "use my own default"
+		// (clampLimit), which is larger than the profile's and may exceed
+		// its max. Under a profile it means the profile's default instead,
+		// and without one it is refused.
+		if r.LimitDefault > 0 {
+			args["limit"] = float64(r.LimitDefault)
+			return args, nil
+		}
+		return nil, fmt.Errorf("limit must be at least 1")
 	}
 	if r.LimitMax > 0 && n > float64(r.LimitMax) {
 		return nil, fmt.Errorf("limit %v exceeds the maximum of %d", raw, r.LimitMax)
