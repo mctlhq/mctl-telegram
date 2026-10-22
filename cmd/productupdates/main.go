@@ -185,6 +185,9 @@ func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profil
 		carries, err := baselineCarriesProfileSnapshots(repo, baseline)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+			if errors.Is(err, errUnreadableProfileSnapshot) {
+				return out, exitFailed
+			}
 			return out, exitUsage
 		}
 		out.BaselineCarriesProfiles = carries
@@ -246,12 +249,33 @@ func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if snap, err := productupdate.ParseSnapshot([]byte(raw)); err == nil && snap.Surface.Profile != "" {
-			return true, nil
+		snap, err := productupdate.ParseSnapshot([]byte(raw))
+		if err == nil {
+			if snap.Surface.Profile != "" {
+				return true, nil
+			}
+			continue
+		}
+		// A file this build cannot parse is a lookalike only if it says so:
+		// one that names a profile, or is not JSON at all, may be a profile
+		// snapshot in a format this build rejects, and taking it for absent
+		// would put every profile back into its bootstrap window.
+		var probe struct {
+			Surface struct {
+				Profile string `json:"profile"`
+			} `json:"surface"`
+		}
+		if jerr := json.Unmarshal([]byte(raw), &probe); jerr != nil || probe.Surface.Profile != "" {
+			return false, fmt.Errorf("%w: %s:%s: %v", errUnreadableProfileSnapshot, rev, path, err)
 		}
 	}
 	return false, nil
 }
+
+// errUnreadableProfileSnapshot marks a baseline file that may be a profile
+// snapshot but does not parse: the gate cannot tell whether the baseline
+// carries profile snapshots, so it fails rather than guess.
+var errUnreadableProfileSnapshot = errors.New("baseline file may be a profile snapshot but does not parse")
 
 // gitHasPath reports whether rev's tree has path. git ls-tree prints nothing
 // for a path the tree lacks and fails for a revision it cannot read, so the

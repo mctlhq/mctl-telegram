@@ -298,6 +298,30 @@ func TestAStemLookalikeIsNotAProfileSnapshot(t *testing.T) {
 	}
 }
 
+// A baseline file that may be a profile snapshot but does not parse -- one
+// naming a profile in a format this build rejects, or not JSON at all -- is a
+// failure, never "the baseline carries no profile snapshots".
+func TestAnUnparseableBaselineProfileSnapshotFails(t *testing.T) {
+	for name, body := range map[string]string{
+		"labelled": `{"schema":"mctl-telegram.tool-descriptors/v0","surface":{"profile":"core-legacy"}}`,
+		"not json": `not a snapshot`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRepo(t)
+			r.surface(snapshotPath, "", listDialogs)
+			r.write("docs/tool-descriptors.core-legacy.json", body)
+			r.commit("a profile snapshot in an older format")
+			r.git("tag", "0.70.0")
+			r.git("rm", "-q", "docs/tool-descriptors.core-legacy.json")
+			r.snapshot(listDialogs)
+			r.commit("renamed")
+			if code, out := r.gate(); code != exitFailed || !strings.Contains(out, "may be a profile snapshot but does not parse") {
+				t.Fatalf("unparseable baseline profile snapshot: exit %d\n%s", code, out)
+			}
+		})
+	}
+}
+
 func TestEveryProfileCommitsItsSnapshot(t *testing.T) {
 	r := newRepo(t)
 	r.snapshot(listDialogs)

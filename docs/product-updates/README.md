@@ -59,8 +59,8 @@ Each tool profile commits its own snapshot, `docs/tool-descriptors.<profile>.jso
 the tools a connection bound to that profile is listed, with the profile's
 argument rules applied to their schemas. The gate holds each one to the feed
 like the full surface, with one difference: an item the full diff already
-shows for the same tool and change (a tool added for everyone, a schema
-changed for everyone) is covered by the entry that claims it there. A change
+shows for the same tool and change (a tool added or removed for everyone) is
+covered by the entry that claims it there. A change
 only a profile shows -- a tool added to the profile, a profile rule that
 changes a schema -- is claimed with the profile named:
 
@@ -95,9 +95,11 @@ the profile shows that tool exactly as the full surface does, before and after.
 On a tool a profile rule shapes (a bound on `limit`, a forbidden argument), a
 schema change for everyone also changes the profile's view, and that needs its
 own `profile:` claim: the full-surface entry cannot tell whether the rule
-changed too. An addition or a removal stays one fact whatever the rule: it
-has no "before" to compare, and the profile snapshot that shows the rule
-the new tool arrives with is in the same pull request as the entry.
+changed too. An addition or a removal stays one fact whatever the rule. An
+addition has no "before" to compare, and the profile snapshot that shows the
+rule the new tool arrives with is in the same pull request as the entry. A
+removal leaves no profile view to describe: the tool is gone from every
+surface.
 
 Deleting a whole profile is not gated. The gate enumerates the profiles this
 build defines, so a deleted profile's baseline snapshot is never diffed and
