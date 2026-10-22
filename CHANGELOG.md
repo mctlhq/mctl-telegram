@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.87.1](https://github.com/mctlhq/mctl-telegram/compare/0.87.0...0.87.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **db:** clear refresh-token usernames on account delete ([207acd6](https://github.com/mctlhq/mctl-telegram/commit/207acd62f8f292f7e973a610a7f2c6270269d80c)), closes [#813](https://github.com/mctlhq/mctl-telegram/issues/813)
+* **db:** clear the username on delete and stamp it with one clock ([1f9cd23](https://github.com/mctlhq/mctl-telegram/commit/1f9cd2300ca6bce6ac88d9c4a5efc2f01a0d881c))
+* **db:** clear the username on delete and stamp it with one clock ([5b0d864](https://github.com/mctlhq/mctl-telegram/commit/5b0d8649f554d341a8337dd6f1dab21f93bfa1b3)), closes [#813](https://github.com/mctlhq/mctl-telegram/issues/813)
+
 ## [0.87.0](https://github.com/mctlhq/mctl-telegram/compare/0.86.2...0.87.0) (2026-10-22)
 
 
