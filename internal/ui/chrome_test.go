@@ -103,3 +103,29 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 		}
 	}
 }
+
+// The app name is MCTL: Telegram API ToS §2.3 bars "Telegram" from an app's
+// name. Match delimited forms only, because the topbar and footer link to the
+// github.com/mctlhq/mctl-telegram repository on purpose.
+func TestChromeBrandIsMCTL(t *testing.T) {
+	pages := map[string]string{
+		"full": `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head>` +
+			`<body>{{template "ui_topbar" .}}{{template "ui_footer" .}}</body></html>`,
+		"lite": `<!doctype html><html lang="en"><head>{{template "ui_head_lite" .}}</head>` +
+			`<body>{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</body></html>`,
+	}
+	for name, page := range pages {
+		out := render(t, name, page, Data{Title: "T", PublicBaseURL: "https://tg.mctl.ai"})
+		if !strings.Contains(out, "<span>MCTL</span>") || !strings.Contains(out, `<span class="brand-mark">MCTL</span>`) {
+			t.Errorf("%s page: topbar and footer must carry the MCTL brand", name)
+		}
+		if name == "full" && !strings.Contains(out, `<meta property="og:site_name" content="MCTL">`) {
+			t.Errorf("%s page: og:site_name must be MCTL", name)
+		}
+		for _, bad := range []string{`content="mctl-telegram"`, ">mctl-telegram<", "MCTL Telegram", `<span class="mark">`} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%s page still has old brand %q", name, bad)
+			}
+		}
+	}
+}

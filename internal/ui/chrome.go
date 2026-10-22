@@ -90,7 +90,6 @@ var defs = `
 
 {{define "ui_topbar"}}<header class="topbar">
     <a class="brand" href="/">
-      <span class="mark">M</span>
       <span>MCTL</span>
     </a>
     <nav class="meta">
@@ -155,7 +154,6 @@ var defs = `
 // their HTML by string concatenation instead of the template defines.
 const topbarLiteHTML = `<header class="topbar">
     <a class="brand" href="/">
-      <span class="mark">M</span>
       <span>MCTL</span>
     </a>
   </header>`
