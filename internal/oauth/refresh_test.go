@@ -1112,4 +1112,5 @@ func testCallbackRefusesSignInStartedBeforeDelete(t *testing.T, tgID int64, useD
 	if !strings.Contains(rec.Body.String(), "deleted while the sign-in was in progress") {
 		t.Fatalf("callback body = %s, want the deleted-during-sign-in page", rec.Body.String())
 	}
+	assertDeniedReturn(t, rec.Body.String(), "client-state-abc")
 }

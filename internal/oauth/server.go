@@ -1988,8 +1988,49 @@ type oauthCtx struct {
 
 // renderAccountDeletedDuringSignIn is the page for a sign-in that started
 // before the account was deleted: it gets no code (#817).
-func renderAccountDeletedDuringSignIn(w http.ResponseWriter) {
-	renderEnableError(w, accountDeletedDuringSignInMsg)
+func (s *Server) renderAccountDeletedDuringSignIn(w http.ResponseWriter, oc oauthCtx) {
+	s.renderEnableDenied(w, oc, accountDeletedDuringSignInMsg, deniedDescription(db.ErrAccountDeletedSinceGrant))
+}
+
+// deniedReturn builds the error response of RFC 6749 section 4.1.2.1 for a
+// sign-in refused after authorize: the client's redirect_uri with
+// error=access_denied, error_description and the client's state echoed
+// verbatim. The redirect_uri is the one authorize already validated, the same
+// one issueAuthCode sends a code to. It returns "" for the self-hosted wizard's
+// same-host redirect, which has no client waiting on it, and for a
+// redirect_uri that no longer parses.
+func (s *Server) deniedReturn(oc oauthCtx, desc string) (returnURL, appName string) {
+	if oc.RedirectURI == "" {
+		return "", ""
+	}
+	u, err := url.Parse(oc.RedirectURI)
+	if err != nil || !s.isExternalRedirect(u) {
+		return "", ""
+	}
+	q := u.Query()
+	q.Set("error", "access_denied")
+	if desc != "" {
+		q.Set("error_description", desc)
+	}
+	if oc.ClientState != "" {
+		q.Set("state", oc.ClientState)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), connectAppName(u.Host)
+}
+
+// deniedDescription is the error_description sent to the client for a
+// refused sign-in. RFC 6749 limits it to printable ASCII without '"' and
+// '\', so it is a fixed string per cause rather than the page's wording.
+func deniedDescription(err error) string {
+	switch {
+	case errors.Is(err, db.ErrAccountModeConflict):
+		return "The account is in Local Bridge mode and cannot be connected here."
+	case errors.Is(err, db.ErrAccountDeletedSinceGrant):
+		return "The account was deleted while the sign-in was in progress."
+	default:
+		return "The sign-in was refused."
+	}
 }
 
 // accountDeletedDuringSignInMsg is shown, on the error page or the
@@ -2020,7 +2061,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 			CreatedAt:        now,
 		}, oc.UserID, oc.SignInStartedAt); err != nil {
 			if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
-				renderAccountDeletedDuringSignIn(w)
+				s.renderAccountDeletedDuringSignIn(w, oc)
 				return
 			}
 			slog.Error("oauth: persist auth_code failed", "err", err)
@@ -2035,7 +2076,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 			return
 		}
 		if deleted {
-			renderAccountDeletedDuringSignIn(w)
+			s.renderAccountDeletedDuringSignIn(w, oc)
 			return
 		}
 		s.mu.Lock()
