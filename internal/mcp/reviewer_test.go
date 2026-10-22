@@ -157,6 +157,23 @@ func TestReviewerWriteGuard_RefusesBeforeTheHandler(t *testing.T) {
 	}
 }
 
+// A reviewer refusal by the middleware is audited like any refusal: the
+// guard writes no row itself and relies on running inside recordToolCall,
+// which this pins.
+func TestReviewerWriteGuard_RefusalIsAudited(t *testing.T) {
+	s, _, id := reviewerServer(t, alicePeer)
+	srv := fullSurfaceServer(s)
+	if res := callToolAs(t, srv, id, "edit_message", map[string]any{"peer": alicePeer, "message_id": 1, "text": "hi"}); res.text() != reviewerRefusalText("edit_message") {
+		t.Fatalf("edit_message as the reviewer: %q", res.text())
+	}
+	if n := countAuditRows(t, s.Store, id.UserID); n != 1 {
+		t.Fatalf("audit rows = %d, want 1", n)
+	}
+	if reason := latestAuditReason(t, s.Store, id.UserID); reason != ReasonRefused {
+		t.Fatalf("audit reason = %q, want %q", reason, ReasonRefused)
+	}
+}
+
 // A tool that has no entry at all is refused to the reviewer: the table
 // fails closed for a write tool added without a decision.
 func TestReviewerWriteGuard_UnclassifiedToolIsRefused(t *testing.T) {

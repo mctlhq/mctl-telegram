@@ -957,8 +957,11 @@ func loginBotUsernameFromEnv() string {
 // parseReviewerWritePeers parses DEMO_REVIEWER_WRITE_PEERS. Blank is an empty
 // list. Every entry must be "user:<id>", "chat:<id>" or "channel:<id>" with a
 // positive decimal id written canonically (no sign, no leading zeros, no
-// spaces inside the entry), so the value compared at send time is exactly
-// the one an operator wrote. An empty entry ("a,,b", a trailing comma) is an
+// spaces inside the entry), so an entry names exactly one peer in one
+// spelling. At send time internal/mcp's canonicalPeerRef normalises
+// equivalent spellings of the requested id (user:+7001 is user:7001) before
+// comparing, which widens the accepted spelling but never the set of ids,
+// because telegram.ResolvePeer parses the id the same way. An empty entry ("a,,b", a trailing comma) is an
 // error too: a list that does not say what it means is refused, not guessed.
 func parseReviewerWritePeers(raw string) ([]string, error) {
 	if strings.TrimSpace(raw) == "" {

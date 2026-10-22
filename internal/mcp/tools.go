@@ -1008,7 +1008,13 @@ disable it for an authenticated user. It takes no inputs.`),
 		// otherwise the status answers with an infrastructure error while
 		// send_message answers with the real reason, which is the divergence
 		// this tool exists to rule out.
-		decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, reviewerGate{tgID: s.DemoReviewerTGID})
+		//
+		// One divergence remains, by design: this tool takes no peer, so for
+		// the reviewer/demo identity it answers can_send=false even though
+		// send_message and send_reply to a DEMO_REVIEWER_WRITE_PEERS chat
+		// really send. The reason names the allowlist, so the answer is not
+		// misleading (reviewer.go).
+		decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.reviewerGateFor("get_my_send_status", ""))
 
 		// The account row is read exactly once, and both the verdict and the
 		// booleans reported next to it come from that single snapshot. Reading
