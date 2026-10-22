@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.88.2](https://github.com/mctlhq/mctl-telegram/compare/0.88.1...0.88.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **audit:** scrub peer identifiers in audit_logs.error ([b4049c0](https://github.com/mctlhq/mctl-telegram/commit/b4049c03d8d445f22a4857895820bf3b50769ff2))
+* **audit:** scrub peer identifiers in audit_logs.error ([b9dc39f](https://github.com/mctlhq/mctl-telegram/commit/b9dc39ff273b6cdfaa0f353ce8f54a3158600a13))
+
 ## [0.88.1](https://github.com/mctlhq/mctl-telegram/compare/0.88.0...0.88.1) (2026-10-22)
 
 
