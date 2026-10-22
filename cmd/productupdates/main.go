@@ -241,6 +241,9 @@ func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// Every candidate is read before deciding, so the answer does not depend
+	// on how an unreadable file's name sorts against a readable snapshot's.
+	var unreadable error
 	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
 		if path == snapshotPath || !strings.HasPrefix(path, "docs/tool-descriptors.") || !strings.HasSuffix(path, ".json") {
 			continue
@@ -257,19 +260,20 @@ func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
 			continue
 		}
 		// A file this build cannot parse is a lookalike only if it says so:
-		// one that names a profile, or is not JSON at all, may be a profile
-		// snapshot in a format this build rejects, and taking it for absent
-		// would put every profile back into its bootstrap window.
+		// a JSON object with no surface.profile. One that names a profile, or
+		// is not a JSON object at all, may be a profile snapshot in a format
+		// this build rejects, and taking it for absent would put every
+		// profile back into its bootstrap window.
 		var probe struct {
 			Surface struct {
 				Profile string `json:"profile"`
 			} `json:"surface"`
 		}
-		if jerr := json.Unmarshal([]byte(raw), &probe); jerr != nil || probe.Surface.Profile != "" {
-			return false, fmt.Errorf("%w: %s:%s: %v", errUnreadableProfileSnapshot, rev, path, err)
+		if jerr := json.Unmarshal([]byte(raw), &probe); (jerr != nil || probe.Surface.Profile != "") && unreadable == nil {
+			unreadable = fmt.Errorf("%w: %s:%s: %v", errUnreadableProfileSnapshot, rev, path, err)
 		}
 	}
-	return false, nil
+	return false, unreadable
 }
 
 // errUnreadableProfileSnapshot marks a baseline file that may be a profile

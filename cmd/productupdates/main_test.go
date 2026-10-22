@@ -305,6 +305,7 @@ func TestAnUnparseableBaselineProfileSnapshotFails(t *testing.T) {
 	for name, body := range map[string]string{
 		"labelled": `{"schema":"mctl-telegram.tool-descriptors/v0","surface":{"profile":"core-legacy"}}`,
 		"not json": `not a snapshot`,
+		"array":    `["list_dialogs"]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRepo(t)
@@ -317,6 +318,28 @@ func TestAnUnparseableBaselineProfileSnapshotFails(t *testing.T) {
 			r.commit("renamed")
 			if code, out := r.gate(); code != exitFailed || !strings.Contains(out, "may be a profile snapshot but does not parse") {
 				t.Fatalf("unparseable baseline profile snapshot: exit %d\n%s", code, out)
+			}
+		})
+	}
+}
+
+// An unreadable candidate does not outweigh a readable profile snapshot,
+// whichever sorts first: the baseline carries profile snapshots.
+func TestAnUnreadableCandidateBesideAProfileSnapshotIsNotFatal(t *testing.T) {
+	for _, name := range []string{"docs/tool-descriptors.aaa.json", "docs/tool-descriptors.zzz.json"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRepo(t)
+			r.surface(snapshotPath, "", listDialogs)
+			r.surface("docs/tool-descriptors.core-legacy.json", "core-legacy", listDialogs)
+			r.write(name, `["list_dialogs"]`)
+			r.commit("a profile snapshot and an unreadable neighbour")
+			r.git("tag", "0.70.0")
+			r.git("rm", "-q", "docs/tool-descriptors.core-legacy.json", name)
+			r.snapshot(listDialogs)
+			r.commit("renamed")
+			code, out := r.gate()
+			if code != exitFailed || !strings.Contains(out, "list_dialogs added (profile "+toolprofile.CoreReadonly+") since 0.70.0 has no product update") {
+				t.Fatalf("unreadable neighbour: exit %d\n%s", code, out)
 			}
 		})
 	}
