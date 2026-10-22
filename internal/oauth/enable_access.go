@@ -87,6 +87,9 @@ type enableSession struct {
 	// state rather than replaying a cached message. If the operator has since
 	// switched the account back to hosted, that path lets the user through.
 	terminalMsg string
+	// terminalDesc is the error_description that goes with terminalMsg on
+	// the access_denied return to the client.
+	terminalDesc string
 }
 
 // loginFlow couples an HTTP handler to the background goroutine running
@@ -625,10 +628,25 @@ func (s *Server) renderModeCheckRetry(w http.ResponseWriter, es *enableSession, 
 // and renders the dead-end screen. The terminal counterpart to
 // renderEnablePhoneStep: it is for refusals a restart cannot clear, so unlike
 // that one it must not leave any route back that offers a retry.
-func renderEnableTerminalError(w http.ResponseWriter, es *enableSession, msg string) {
+func (s *Server) renderEnableTerminalError(w http.ResponseWriter, es *enableSession, err error) {
 	es.abandonFlow()
-	es.terminalMsg = msg
-	renderEnableError(w, msg)
+	es.terminalMsg = friendlyErr(err)
+	es.terminalDesc = deniedDescription(err)
+	s.renderEnableTerminal(w, es)
+}
+
+// renderEnableTerminal renders the dead-end screen recorded on es, with the
+// access_denied return to the client.
+func (s *Server) renderEnableTerminal(w http.ResponseWriter, es *enableSession) {
+	s.renderEnableDenied(w, es.oc, es.terminalMsg, es.terminalDesc)
+}
+
+// isTerminalLoginErr reports whether a login error is a refusal restarting
+// the flow cannot clear: an active Local Bridge account, or a delete that
+// committed after this sign-in started (signInStartedAt is fixed for the
+// session, so every retry is refused again).
+func isTerminalLoginErr(err error) bool {
+	return errors.Is(err, db.ErrAccountModeConflict) || errors.Is(err, db.ErrAccountDeletedSinceGrant)
 }
 
 // lookupEnable parses the form, resolves the "es" token to a live (un-expired)
@@ -745,7 +763,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// re-enters this gate and re-derives the refusal in one round-trip,
 	// whereas a stale refusal has no such exit, and that arm has just shown
 	// the user a retryable screen either way.
-	es.terminalMsg = ""
+	es.terminalMsg, es.terminalDesc = "", ""
 
 	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
 	// any MTProto login starts. telegram.Login persists the new session bytes
@@ -766,7 +784,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	} else if local {
 		observePhoneStep("mode_conflict")
 		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "", "")
-		renderEnableTerminalError(w, es, friendlyErr(db.ErrAccountModeConflict))
+		s.renderEnableTerminalError(w, es, db.ErrAccountModeConflict)
 		return
 	}
 
@@ -811,7 +829,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
 				observePhoneStep("mode_conflict")
 				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "", "")
-				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+				s.renderEnableTerminalError(w, es, lf.err)
 				return
 			}
 			// The re-check's other half. Same query, same non-Telegram cause
@@ -888,7 +906,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		// screen. "Please start again." below is a retry invitation, and this
 		// is the one condition restarting cannot clear.
 		if es.terminalMsg != "" {
-			renderEnableError(w, es.terminalMsg)
+			s.renderEnableTerminal(w, es)
 			return
 		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
@@ -936,11 +954,12 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "", "")
-			// A mode conflict is terminal, not a bad code: retrying the flow
-			// re-hits the same guard. Render the dead-end screen rather than
+			// A mode conflict or a delete since the sign-in started is
+			// terminal, not a bad code: retrying the flow re-hits the same
+			// guard. Render the dead-end screen rather than
 			// the phone step's "start again to get a fresh code" framing.
-			if errors.Is(lf.err, db.ErrAccountModeConflict) {
-				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+			if isTerminalLoginErr(lf.err) {
+				s.renderEnableTerminalError(w, es, lf.err)
 				return
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
@@ -985,7 +1004,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		// Same as handleEnableCode: a terminal refusal outranks the retry
 		// framing below.
 		if es.terminalMsg != "" {
-			renderEnableError(w, es.terminalMsg)
+			s.renderEnableTerminal(w, es)
 			return
 		}
 		renderEnablePhoneStep(w, es, enablePhonePage{
@@ -1024,10 +1043,10 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		if lf.err != nil {
 			reason := shortReason(lf.err)
 			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "", "")
-			// Terminal, same as in handleEnableCode: a mode conflict is not a
+			// Terminal, same as in handleEnableCode: neither refusal is a
 			// wrong password and restarting cannot clear it.
-			if errors.Is(lf.err, db.ErrAccountModeConflict) {
-				renderEnableTerminalError(w, es, friendlyErr(lf.err))
+			if isTerminalLoginErr(lf.err) {
+				s.renderEnableTerminalError(w, es, lf.err)
 				return
 			}
 			if reason == "bad_password" {
