@@ -2,8 +2,9 @@
 
 Status: Accepted (owner, 2026-10-21). Rollout step 1 (the mechanism and
 core-readonly) shipped in 0.85.0 (#798); step 2 (core-reply) shipped in
-0.86.0 (#804); step 3 (per-profile snapshots) is implemented after 0.86.1;
-steps 4-5 are open.
+0.86.0 (#804); step 3 (per-profile snapshots, #811) and step 5
+(`redirect_uri` binding, #812) are implemented after 0.86.2; step 4 is
+open.
 
 ## Problem
 
