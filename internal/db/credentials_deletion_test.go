@@ -122,16 +122,19 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		// The refresh row outlives the delete until it expires: it carries the
 		// same stamp and no copy of the username.
-		var refreshSame int
+		var deletedAt time.Time
+		if err := s.DB.QueryRowContext(ctx, `SELECT account_deleted_at FROM users WHERE id = $1`, alice).Scan(&deletedAt); err != nil {
+			t.Fatalf("read alice account_deleted_at: %v", err)
+		}
+		var refreshRevoked time.Time
 		var refreshName sql.NullString
 		if err := s.DB.QueryRowContext(ctx,
-			`SELECT COUNT(*), MAX(r.telegram_username) FROM users u JOIN oauth_refresh_tokens r
-			   ON r.user_id = u.id AND r.revoked_at = u.account_deleted_at
-			 WHERE u.id = $1`, alice).Scan(&refreshSame, &refreshName); err != nil {
+			`SELECT revoked_at, telegram_username FROM oauth_refresh_tokens WHERE user_id = $1`, alice,
+		).Scan(&refreshRevoked, &refreshName); err != nil {
 			t.Fatalf("read alice refresh token: %v", err)
 		}
-		if refreshSame != 1 {
-			t.Error("account_deleted_at and the refresh-token revocation carry different times")
+		if !refreshRevoked.Equal(deletedAt) {
+			t.Errorf("refresh token revoked_at = %v, want account_deleted_at %v", refreshRevoked, deletedAt)
 		}
 		if refreshName.Valid && refreshName.String != "" {
 			t.Errorf("alice refresh token username = %q after the delete, want it cleared", refreshName.String)
@@ -149,6 +152,9 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		if d.RevokedAt == nil || d.RevokedReason != ReasonAccountDeleted {
 			t.Errorf("alice device revoked_at=%v reason=%q, want revoked with %q", d.RevokedAt, d.RevokedReason, ReasonAccountDeleted)
+		}
+		if d.RevokedAt != nil && !d.RevokedAt.Equal(deletedAt) {
+			t.Errorf("alice device revoked_at = %v, want account_deleted_at %v", *d.RevokedAt, deletedAt)
 		}
 		if d.DeviceLabel != "" {
 			t.Errorf("alice device label = %q after the delete, want it cleared", d.DeviceLabel)

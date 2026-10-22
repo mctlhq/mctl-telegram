@@ -1061,7 +1061,8 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	//
 	// telegram_username is cleared for the same reason: when Telegram sends
 	// no username, sign-in stores the display name there (see
-	// EnsureUserByTelegramID). A later sign-in fills both in again.
+	// EnsureUserByTelegramID). A later sign-in that carries a name fills
+	// them in again.
 	// telegram_login_id stays: it is the key a later sign-in and the
 	// worker-token revocations below are matched on.
 	//
