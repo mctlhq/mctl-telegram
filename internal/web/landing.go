@@ -93,7 +93,7 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.Ha
 	}
 	data := landingData{
 		Data: ui.Data{
-			Title:         "mctl-telegram — Your Telegram, inside your AI assistant",
+			Title:         "MCTL — Your Telegram, inside your AI assistant",
 			Description:   "Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft and review replies, and search your full history — no extra apps, encrypted and revocable any time.",
 			NavActive:     "home",
 			PublicBaseURL: base,

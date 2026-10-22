@@ -36,6 +36,16 @@ func TestPublicPagesLoadUmami(t *testing.T) {
 				t.Fatalf("status %d", rec.Code)
 			}
 			body := rec.Body.String()
+			// The app name is MCTL (Telegram API ToS §2.3), in the title and
+			// in the description that feeds the meta, og and twitter tags.
+			if !strings.Contains(body, "<title>MCTL — ") {
+				t.Errorf("title must start with \"MCTL — \"")
+			}
+			for _, bad := range []string{"mctl-telegram —", "MCTL Telegram", `content="mctl-telegram`, `for mctl-telegram`, `How mctl-telegram`, `What mctl-telegram`, `to mctl-telegram:`} {
+				if strings.Contains(body, bad) {
+					t.Errorf("page still carries the old app name %q", bad)
+				}
+			}
 			if n := strings.Count(body, ui.AnalyticsScript); n != 1 {
 				t.Fatalf("want the Umami tag exactly once, found %d", n)
 			}

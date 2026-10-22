@@ -86,17 +86,6 @@
     color: var(--text);
     font-weight: 600;
   }
-  .topbar .brand .mark {
-    width: 22px; height: 22px;
-    border: 1px solid var(--accent);
-    display: inline-grid;
-    place-items: center;
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 700;
-    border-radius: var(--mctl-radius-md);
-    background: var(--accent-soft);
-  }
   .topbar .meta {
     display: inline-flex;
     align-items: center;
