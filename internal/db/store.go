@@ -50,6 +50,9 @@ type Store struct {
 	// deleteMarkerHook, when set, runs inside HardDeleteAccount after the
 	// deletion marker is written and before the commit. Tests only.
 	deleteMarkerHook func()
+	// sessionSaveHook, when set, runs inside SaveSessionForSignIn after the
+	// users-row lock and the deletion check. Tests only.
+	sessionSaveHook func()
 
 	// outbox, when set, derives an event_outbox row for each ingested event
 	// (see WithEventOutbox). nil disables the outbox entirely.
@@ -721,10 +724,20 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 // at or after that moment, and then deletes the active hosted rows the
 // login wrote: the gotd SessionStore persists the session bytes before this
 // call, so after a delete that committed first every such row was written
-// by this sign-in and must not outlive the delete (#821). Local rows are
-// left to the caller's stray-blob repair. On Postgres the users-row lock
-// is taken in share mode, as in InsertOAuthCode, so a delete either
-// commits first (and is seen here) or waits and then removes the new row.
+// by this sign-in and must not outlive the delete (#821). That holds per
+// sign-in, not per user: a second sign-in of the same user that started
+// after the delete and finalised first would lose its row too. Two enable
+// flows of one user in one process are serialised by uidLoginMutex, so
+// only a cross-replica race can reach that, and it costs the user a
+// reconnect, never a session the delete should have removed. Local rows
+// are left to the caller's stray-blob repair.
+//
+// On Postgres the users row is locked FOR NO KEY UPDATE, the mode
+// HardDeleteAccount takes, so a delete either commits first (and is seen
+// here) or waits for this commit and then removes the new row. It is the
+// mode the success path's own users update (stampOnboardingCompleted)
+// needs, so the transaction never upgrades a share lock with a delete
+// queued on the same row.
 // A zero signInStartedAt is an error, not "never deleted".
 func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
 	if signInStartedAt.IsZero() {
@@ -757,11 +770,14 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	if checkDeletion {
 		lock := ""
 		if pg {
-			lock = " FOR SHARE"
+			lock = " FOR NO KEY UPDATE"
 		}
 		deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
 		if err != nil {
 			return fmt.Errorf("save session: %w", err)
+		}
+		if s.sessionSaveHook != nil {
+			s.sessionSaveHook()
 		}
 		if deleted {
 			if _, err := tx.ExecContext(ctx,

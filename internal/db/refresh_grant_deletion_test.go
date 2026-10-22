@@ -616,3 +616,72 @@ func TestSaveSessionForSignIn_PostgresLoginDuringDelete(t *testing.T) {
 		t.Fatalf("save during the delete: err = %v, want ErrAccountDeletedSinceGrant", saveErr)
 	}
 }
+
+// TestSaveSessionForSignIn_PostgresDeleteDuringLogin is the mirror of
+// TestSaveSessionForSignIn_PostgresLoginDuringDelete: the save holds the
+// users-row lock first and a delete queues behind it while the save goes on
+// to insert its row and update the users row. Both must finish, and the
+// delete, committing second, must remove the row the save wrote.
+func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	withSessionCrypt(t, s)
+	ctx := context.Background()
+	tgID := int64(890000000)
+	uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL, onboarding_completed_at = NULL WHERE id = $1`, uid); err != nil {
+		t.Fatalf("reset user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM telegram_accounts WHERE user_id = $1`, uid); err != nil {
+		t.Fatalf("clear rows: %v", err)
+	}
+
+	signInStarted := time.Now().UTC().Add(-time.Second)
+	deleteDone := make(chan error, 1)
+	s.sessionSaveHook = func() {
+		go func() {
+			_, err := s.HardDeleteAccount(ctx, uid)
+			deleteDone <- err
+		}()
+		// Return once the delete is queued on the users-row lock.
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			var waiting int
+			if err := s.DB.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM pg_stat_activity
+				 WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+			).Scan(&waiting); err != nil {
+				t.Errorf("poll lock waiters: %v", err)
+				return
+			}
+			if waiting > 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Errorf("delete never queued on the users-row lock")
+	}
+	defer func() { s.sessionSaveHook = nil }()
+
+	saveErr := s.SaveSessionForSignIn(ctx, uid, []byte("mtproto-session"), tgID, "Alice", "alice", signInStarted)
+	deleteErr := <-deleteDone
+	if saveErr != nil {
+		t.Fatalf("save ahead of the delete: %v", saveErr)
+	}
+	if deleteErr != nil {
+		t.Fatalf("delete queued behind the save: %v", deleteErr)
+	}
+	var rows int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("%d telegram_accounts rows survive the delete that followed the save", rows)
+	}
+}

@@ -1216,6 +1216,9 @@ func shortReason(err error) string {
 	if errors.Is(err, db.ErrAccountModeConflict) {
 		return "local_mode_active"
 	}
+	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
+		return "account_deleted"
+	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
 		switch {
