@@ -215,9 +215,11 @@ What they do **not** do:
    shapes, needs a claim with `profile:`. A baseline with no profile snapshots at
    all leaves every profile in its bootstrap window; once one carries any,
    a profile missing from it is a new surface whose tools were all added.
-4. Gitops: bind Town's client to a profile once Town uses a URL
-   `client_id` (until then it is an implicit DCR host and cannot be bound,
-   see Decisions 5), and the Directory connector once it exists.
+4. Gitops: bind Town's client to a profile, and the Directory connector
+   once it exists. While Town is an implicit DCR host it is bound by
+   `redirect_uri` (step 5), which holds only at the host's strength unless
+   its callback is pinned in `OAUTH_DCR_REDIRECT_URIS` (see the runbook);
+   once it uses a URL `client_id`, by `client_id`.
 5. Binding DCR and implicit clients by `redirect_uri`, with the
    redirect_uri persisted in the refresh-token family.
 
