@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"modernc.org/sqlite"
 
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -1841,12 +1842,15 @@ func (s *Store) ListAuditFor(ctx context.Context, userID int64, limit int, befor
 			&edgeID, &edgeRoute, &mcpMethod, &mcpName, &protoVer); err != nil {
 			return nil, fmt.Errorf("scan audit: %w", err)
 		}
+		// Rows written before LogToolCall scrubbed the error column still
+		// hold the raw peer; scrub on the way out too so history does not
+		// keep leaking it. ScrubText is idempotent.
 		out = append(out, AuditEntry{
 			Ts:              ts,
 			ToolName:        tool,
 			PeerRedacted:    peer.String,
 			Status:          status,
-			ErrorRedacted:   errCol.String,
+			ErrorRedacted:   audit.ScrubText(errCol.String),
 			CallPath:        callPath.String,
 			EdgeRequestID:   edgeID.String,
 			EdgeRoute:       edgeRoute.String,
@@ -2047,6 +2051,15 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // VerifyAuditChain and to db.AuditEntry / ListAuditFor.
 func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath, reason string) {
 	createdAt := time.Now().UTC()
+	// The error column is free text, and peer-resolution failures format the
+	// caller's peer verbatim (`peer "channel:<id>" could not be accessed`,
+	// `peer "@handle" not found`). peer_redacted is masked by every caller,
+	// but this column was not, so the raw identifier landed in audit_logs and
+	// came back out through get_my_audit_log / get_user_audit_log. Scrubbing
+	// here, at the only INSERT, covers every caller at once -- the slog
+	// mirror in internal/mcp already scrubs the same string. It happens
+	// before hashing, so entry_hash covers the stored value.
+	errMsg = audit.ScrubText(errMsg)
 	// How the call arrived (mctl-telegram#617 Slice 2). Captured in
 	// internal/mcp.httpContext, which builds the context of every MCP tool
 	// call, and read from ctx here rather than taken as a parameter so the

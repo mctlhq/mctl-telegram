@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,5 +165,94 @@ func TestListAuditFor_BeforeFiltersOlderEntries(t *testing.T) {
 	}
 	if got[0].ToolName != "first" {
 		t.Fatalf("expected 'first', got %q", got[0].ToolName)
+	}
+}
+
+// The error column is free text that peer-resolution failures fill with the
+// caller's peer verbatim. peer_redacted was masked but error was not, so the
+// raw identifier came back out through get_my_audit_log. LogToolCall must
+// scrub it before the row is written -- and before it is hashed, so the
+// chain still verifies over the stored value.
+func TestLogToolCall_ScrubsPeerIdentifiersInError(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "carol", "", "test")
+
+	s.LogToolCall(ctx, uid, "get_messages", "channel:<id>", "error",
+		`peer "channel:9876543210" could not be accessed`, "", "")
+	s.LogToolCall(ctx, uid, "get_messages", "user:<id>", "error",
+		`peer "@alice_handle" not found`, "", "")
+
+	entries, err := s.ListAuditFor(ctx, uid, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("ListAuditFor: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		for _, raw := range []string{"9876543210", "@alice_handle"} {
+			if strings.Contains(e.ErrorRedacted, raw) {
+				t.Errorf("error column leaks %q: %q", raw, e.ErrorRedacted)
+			}
+		}
+		if !strings.Contains(e.ErrorRedacted, "[redacted]") {
+			t.Errorf("error column not scrubbed: %q", e.ErrorRedacted)
+		}
+	}
+
+	// The stored column itself, not just what ListAuditFor returns: the read
+	// path scrubs too, so only a raw query proves the write path does.
+	rows, err := s.DB.QueryContext(ctx, `SELECT error FROM audit_logs WHERE user_id = $1`, uid)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if strings.Contains(stored, "9876543210") || strings.Contains(stored, "@alice_handle") {
+			t.Errorf("stored error column leaks a peer: %q", stored)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	v, err := s.VerifyAuditChain(ctx, uid)
+	if err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+	if !v.OK {
+		t.Fatalf("audit chain broken after scrub: %+v", v)
+	}
+}
+
+// Rows written before the write-path scrub still hold the raw peer. The read
+// path must mask them so history stops leaking through get_my_audit_log.
+func TestListAuditFor_ScrubsLegacyUnmaskedError(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "dana", "", "test")
+
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO audit_logs(user_id, tool_name, status, error, created_at, call_path)
+		 VALUES($1, 'get_messages', 'error', $2, $3, '')`,
+		uid, `peer "channel:9876543210" could not be accessed`, time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	entries, err := s.ListAuditFor(ctx, uid, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("ListAuditFor: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if strings.Contains(entries[0].ErrorRedacted, "9876543210") {
+		t.Errorf("legacy error leaks the peer: %q", entries[0].ErrorRedacted)
 	}
 }
