@@ -1317,6 +1317,12 @@ func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
 	if !strings.Contains(body, "deleted while the sign-in was in progress") {
 		t.Errorf("body = %s, want the deleted-during-sign-in notice", body)
 	}
+	// Terminal: the sign-in start is fixed for the session, so a retry is
+	// refused again and the page must not offer one.
+	if rec.Code != http.StatusBadRequest || strings.Contains(body, "Start again") {
+		t.Errorf("delete during login rendered a retry (%d): %s", rec.Code, body)
+	}
+	assertDeniedReturn(t, body, "client-state-xyz")
 
 	ctx := context.Background()
 	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "", "")

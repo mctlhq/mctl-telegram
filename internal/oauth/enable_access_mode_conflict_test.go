@@ -68,6 +68,7 @@ func TestEnableAccess_LocalModeConflict_SurfacesSpecificMessage(t *testing.T) {
 	if strings.Contains(body, "save session:") {
 		t.Errorf("rendered the generic save-session error instead of the specific message: %s", body)
 	}
+	assertDeniedReturn(t, body, "client-state-xyz")
 
 	entries, err := srv.store.ListAuditFor(ctx, uid, 10, time.Time{})
 	if err != nil {
@@ -323,6 +324,8 @@ func TestEnableAccess_TerminalRefusalInPasswordStep_ResetsStep(t *testing.T) {
 		t.Errorf("password re-POST after a terminal refusal offered a retry; body=%s", body)
 	} else if !strings.Contains(body, "Local Bridge") {
 		t.Errorf("password re-POST did not re-render the terminal screen; body=%s", body)
+	} else {
+		assertDeniedReturn(t, body, "client-state-xyz")
 	}
 }
 
@@ -377,6 +380,8 @@ func TestEnableAccess_TerminalRefusalInCodeStep_ResetsStep(t *testing.T) {
 		t.Errorf("code re-POST after a terminal refusal offered a retry; body=%s", body)
 	} else if !strings.Contains(body, "Local Bridge") {
 		t.Errorf("code re-POST did not re-render the terminal screen; body=%s", body)
+	} else {
+		assertDeniedReturn(t, body, "client-state-xyz")
 	}
 }
 

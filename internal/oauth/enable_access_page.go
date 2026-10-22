@@ -55,6 +55,12 @@ type enablePermissionsPage struct {
 
 type enableErrorPage struct {
 	Message string
+	// ReturnURL, when set, is the client's redirect_uri carrying
+	// error=access_denied. The page offers it as a button, so the client
+	// learns the sign-in was refused instead of waiting on a flow that will
+	// never return to it.
+	ReturnURL string
+	AppName   string
 }
 
 // connectSuccessPage backs the interstitial shown after an authorization_code
@@ -236,8 +242,10 @@ var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(
 
 var enableErrorTemplate = template.Must(template.New("enableError").Parse(enableHead + `    <h1>Sign-in interrupted</h1>
     <div class="error">{{.Message}}</div>
-    <p class="meta">Return to your MCP client and start the connection again.</p>
-` + enableFoot))
+    {{if .ReturnURL}}<a class="btnlink" href="{{.ReturnURL}}">Return to {{.AppName}}</a>
+    <p class="meta">This tells {{.AppName}} the connection was not completed.</p>
+    {{else}}<p class="meta">Return to your MCP client and start the connection again.</p>
+    {{end}}` + enableFoot))
 
 var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(enableHead + `    <h1>&#10003; Telegram connected</h1>
     <p>Your Telegram account is now linked. Returning you to {{.AppName}}&#8230;</p>
@@ -314,6 +322,18 @@ func renderConnectSuccess(w http.ResponseWriter, p connectSuccessPage) {
 
 func renderEnableError(w http.ResponseWriter, msg string) {
 	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{Message: msg}, "")
+}
+
+// renderEnableDenied is renderEnableError for a sign-in refused after a valid
+// authorize request. For an external client it adds the button that returns
+// the browser to the client with error=access_denied; see deniedReturn.
+func (s *Server) renderEnableDenied(w http.ResponseWriter, oc oauthCtx, msg, desc string) {
+	returnURL, appName := s.deniedReturn(oc, desc)
+	renderEnable(w, http.StatusBadRequest, enableErrorTemplate, enableErrorPage{
+		Message:   msg,
+		ReturnURL: returnURL,
+		AppName:   appName,
+	}, "")
 }
 
 // renderEnableReused renders the same chrome as renderEnableError but at 200:
