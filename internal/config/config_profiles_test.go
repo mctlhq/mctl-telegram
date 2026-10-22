@@ -16,7 +16,7 @@ func TestLoadClientProfiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load() error: %v", err)
 		}
-		if len(cfg.ClientProfiles) != 0 {
+		if !cfg.ClientProfiles.Empty() {
 			t.Fatalf("ClientProfiles = %v, want empty", cfg.ClientProfiles)
 		}
 	})
@@ -26,15 +26,25 @@ func TestLoadClientProfiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load() error: %v", err)
 		}
-		if got := cfg.ClientProfiles["https://platform.example.test/oauth/client.json"]; got != toolprofile.CoreReadonly {
+		if got := cfg.ClientProfiles.ByClientID["https://platform.example.test/oauth/client.json"]; got != toolprofile.CoreReadonly {
 			t.Fatalf("ClientProfiles = %v", cfg.ClientProfiles)
 		}
 	})
-	t.Run("redirect_uri record fails fast", func(t *testing.T) {
+	t.Run("redirect_uri record", func(t *testing.T) {
+		t.Setenv("MCP_CLIENT_PROFILES", `[{"redirect_uri":"https://platform.example.test/cb","profile":"core-reply"}]`)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if got := cfg.ClientProfiles.ByRedirectURI["https://platform.example.test/cb"]; got != toolprofile.CoreReply {
+			t.Fatalf("ClientProfiles = %+v", cfg.ClientProfiles)
+		}
+	})
+	t.Run("malformed table fails fast", func(t *testing.T) {
 		t.Setenv("MCP_CLIENT_PROFILES", `[{"client_id":"x","redirect_uri":"https://platform.example.test/cb","profile":"core-readonly"}]`)
 		_, err := Load()
-		if err == nil || !strings.Contains(err.Error(), "MCP_CLIENT_PROFILES") || !strings.Contains(err.Error(), "redirect_uri is not supported") {
-			t.Fatalf("Load() = %v, want the redirect_uri refusal", err)
+		if err == nil || !strings.Contains(err.Error(), "MCP_CLIENT_PROFILES") || !strings.Contains(err.Error(), "names both client_id and redirect_uri") {
+			t.Fatalf("Load() = %v, want the table refusal", err)
 		}
 	})
 }

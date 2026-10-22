@@ -42,6 +42,13 @@ type RefreshToken struct {
 	// grace-window replay of the predecessor be verified against its live
 	// successor with one indexed lookup (see LookupRefreshTokenByHashPair).
 	ParentTokenHash []byte
+	// RedirectURI is the redirect_uri of the authorization the family
+	// descends from, carried onto every rotation so a tool-profile binding
+	// by redirect_uri can be re-resolved at refresh. RedirectURIKnown is
+	// false for a family issued before the column existed (NULL): its
+	// redirect_uri is unknown, which is not the same as unbound.
+	RedirectURI      string
+	RedirectURIKnown bool
 }
 
 // Revoked reports whether the token has been revoked — by rotation, by a
@@ -85,15 +92,25 @@ func saveRefreshToken(ctx context.Context, ex execer, plaintext string, rt Refre
 	}
 	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO oauth_refresh_tokens
-		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, client_name, expires_at, parent_token_hash)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		   (family_id, token_hash, user_id, client_id, telegram_id, telegram_username, scope, client_name, expires_at, parent_token_hash, redirect_uri)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		rt.FamilyID, hashRefreshToken(plaintext), rt.UserID, rt.ClientID,
 		rt.TelegramID, nullable(rt.TelegramUsername), nullable(rt.Scope), rt.ClientName, rt.ExpiresAt.UTC(),
-		nullableBytes(rt.ParentTokenHash),
+		nullableBytes(rt.ParentTokenHash), redirectURIValue(rt),
 	); err != nil {
 		return fmt.Errorf("insert refresh token: %w", err)
 	}
 	return nil
+}
+
+// redirectURIValue keeps an unknown redirect_uri unknown: a successor of a
+// pre-migration family is written NULL again rather than "", which would
+// read back as a known, empty redirect_uri.
+func redirectURIValue(rt RefreshToken) any {
+	if !rt.RedirectURIKnown {
+		return nil
+	}
+	return rt.RedirectURI
 }
 
 // nullableBytes converts a nil/empty byte slice to a driver NULL, since a
@@ -120,14 +137,15 @@ func (s *Store) LookupRefreshToken(ctx context.Context, plaintext string) (*Refr
 		scope    sql.NullString
 		revoked  sql.NullTime
 		reason   sql.NullString
+		redirect sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT family_id, user_id, client_id, telegram_id, telegram_username,
-		        scope, client_name, created_at, expires_at, revoked_at, revoked_reason
+		        scope, client_name, created_at, expires_at, revoked_at, revoked_reason, redirect_uri
 		   FROM oauth_refresh_tokens WHERE token_hash = $1`,
 		hashRefreshToken(plaintext),
 	).Scan(&rt.FamilyID, &rt.UserID, &rt.ClientID, &rt.TelegramID, &username,
-		&scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &revoked, &reason)
+		&scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &revoked, &reason, &redirect)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrRefreshTokenNotFound
 	}
@@ -140,6 +158,7 @@ func (s *Store) LookupRefreshToken(ctx context.Context, plaintext string) (*Refr
 		rt.RevokedAt = revoked.Time
 	}
 	rt.RevokedReason = reason.String
+	rt.RedirectURI, rt.RedirectURIKnown = redirect.String, redirect.Valid
 	return &rt, nil
 }
 
@@ -155,15 +174,16 @@ func (s *Store) LookupRefreshTokenByHashPair(ctx context.Context, oldPlaintext, 
 		rt       RefreshToken
 		username sql.NullString
 		scope    sql.NullString
+		redirect sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT user_id, telegram_id, telegram_username, scope, client_name, created_at, expires_at
+		`SELECT user_id, telegram_id, telegram_username, scope, client_name, created_at, expires_at, redirect_uri
 		   FROM oauth_refresh_tokens
 		  WHERE token_hash = $1 AND parent_token_hash = $2
 		    AND family_id = $3 AND client_id = $4
 		    AND revoked_at IS NULL`,
 		hashRefreshToken(newPlaintext), hashRefreshToken(oldPlaintext), familyID, clientID,
-	).Scan(&rt.UserID, &rt.TelegramID, &username, &scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt)
+	).Scan(&rt.UserID, &rt.TelegramID, &username, &scope, &rt.ClientName, &rt.CreatedAt, &rt.ExpiresAt, &redirect)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrRefreshTokenNotFound
 	}
@@ -174,6 +194,7 @@ func (s *Store) LookupRefreshTokenByHashPair(ctx context.Context, oldPlaintext, 
 	rt.ClientID = clientID
 	rt.TelegramUsername = username.String
 	rt.Scope = scope.String
+	rt.RedirectURI, rt.RedirectURIKnown = redirect.String, redirect.Valid
 	return &rt, nil
 }
 

@@ -47,6 +47,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
@@ -340,13 +341,14 @@ type Config struct {
 	// example) and whose callback host should not be trusted for anything
 	// but this one client.
 	PreregisteredClients []PreregisteredClient
-	// ClientProfiles maps an exact client_id to the restricted tool profile
-	// (internal/toolprofile) stamped into every access token minted for it.
-	// A client without an entry gets no profile, which keeps the surface its
-	// scopes allow. The profile only narrows that surface; it is not a scope
-	// and grants nothing. In the server binary this comes from
+	// ClientProfiles binds clients, by exact client_id or by the exact
+	// redirect_uri of their authorization, to the restricted tool profile
+	// (internal/toolprofile) stamped into every access token minted for
+	// them. A client matching no entry gets no profile, which keeps the
+	// surface its scopes allow. The profile only narrows that surface; it is
+	// not a scope and grants nothing. In the server binary this comes from
 	// MCP_CLIENT_PROFILES, validated by toolprofile.ParseBindings.
-	ClientProfiles map[string]string
+	ClientProfiles toolprofile.Bindings
 	// CIMD resolves an https URL client_id as an OAuth Client ID Metadata
 	// Document (mctl-telegram#773). Nil (the default) means CIMD is off and a
 	// URL client_id is handled like any other unregistered client_id. When
@@ -756,7 +758,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	s.clients[ConnectClientID] = &clientReg{
 		ClientID:     ConnectClientID,
 		ClientName:   "mctl-telegram connect",
-		RedirectURIs: []string{cfg.Issuer + "/telegram/connect/done"},
+		RedirectURIs: []string{connectRedirectURI(cfg.Issuer)},
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
 	// Operator-supplied static clients share the built-in client's
@@ -786,8 +788,27 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		}
 		s.dcrRedirectURIs[raw] = struct{}{}
 	}
+	// The self-connect client is reserved from client_id bindings by
+	// toolprofile; its redirect_uri is derived from the issuer, so only this
+	// package can refuse a redirect_uri binding that would catch it and lock
+	// every user out of the manage page.
+	if connect := connectRedirectURI(cfg.Issuer); cfg.ClientProfiles.ByRedirectURI[connect] != "" {
+		return nil, fmt.Errorf("oauth: tool profile binding for redirect_uri %q: it is the built-in self-connect client's callback, behind the manage page, which a profiled credential cannot open", connect)
+	}
+	// A redirect_uri binding this server could never accept at
+	// /oauth/authorize (another scheme, http off loopback, userinfo, a
+	// backslash) would match no authorization and leave the client the
+	// operator meant to restrict unrestricted, so it fails startup too.
+	for uri := range cfg.ClientProfiles.ByRedirectURI {
+		if err := validateExactRedirectURI(uri); err != nil {
+			return nil, fmt.Errorf("oauth: tool profile binding for redirect_uri %q can never match an authorization: %w", uri, err)
+		}
+	}
 	return s, nil
 }
+
+// connectRedirectURI is the built-in self-connect client's one callback.
+func connectRedirectURI(issuer string) string { return issuer + "/telegram/connect/done" }
 
 // PreregisteredClient is a static public OAuth client seeded at construction.
 // See Config.PreregisteredClients.
@@ -942,7 +963,8 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// Same bound as handleTokenAuthCode, so the two exchange paths mint the
 	// same token for the same code even though this one is discarded.
 	scopes = narrowGrant(scopes, entry.Scope)
-	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
+		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		return "", fmt.Errorf("server_error: could not mint token: %w", err)
 	}
@@ -2230,7 +2252,8 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
 	)
-	tok, err := s.mintAccessToken(clientID, entry.TelegramID, entry.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
+		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2254,6 +2277,8 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		TelegramID:       entry.TelegramID,
 		TelegramUsername: entry.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
+		RedirectURI:      entry.RedirectURI,
+		RedirectURIKnown: true,
 	})
 	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
 		// The access token minted above is dropped unsent: the account was
@@ -2366,7 +2391,14 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return graceRejectedSoft
 	}
-	tok, mErr := s.mintAccessToken(child.ClientID, child.TelegramID, child.TelegramUsername, groups, scopes)
+	tok, mErr := s.mintAccessToken(tokenOrigin{ClientID: child.ClientID, RedirectURI: child.RedirectURI, RedirectURIKnown: child.RedirectURIKnown},
+		child.TelegramID, child.TelegramUsername, groups, scopes)
+	if errors.Is(mErr, errProfileUnresolvable) {
+		slog.Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
+			"family_id", familyID, "client_id", child.ClientID, "path", "grace_replay")
+		writeTokenError(w, "invalid_grant", profileUnresolvableDescription, http.StatusBadRequest)
+		return graceRejectedSoft
+	}
 	if mErr != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return graceServerError
@@ -2487,7 +2519,14 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_grant", "refresh authorization no longer available", http.StatusBadRequest)
 		return
 	}
-	tok, err := s.mintAccessToken(rt.ClientID, rt.TelegramID, rt.TelegramUsername, groups, scopes)
+	tok, err := s.mintAccessToken(tokenOrigin{ClientID: rt.ClientID, RedirectURI: rt.RedirectURI, RedirectURIKnown: rt.RedirectURIKnown},
+		rt.TelegramID, rt.TelegramUsername, groups, scopes)
+	if errors.Is(err, errProfileUnresolvable) {
+		slog.Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
+			"family_id", rt.FamilyID, "client_id", rt.ClientID)
+		writeTokenError(w, "invalid_grant", profileUnresolvableDescription, http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
@@ -2501,6 +2540,8 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		TelegramID:       rt.TelegramID,
 		TelegramUsername: rt.TelegramUsername,
 		Scope:            strings.Join(scopes, " "),
+		RedirectURI:      rt.RedirectURI,
+		RedirectURIKnown: rt.RedirectURIKnown,
 		// Carry the original expiry forward — RefreshTokenTTL is an *absolute*
 		// lifetime, not a sliding window. Re-stamping now+TTL on every
 		// rotation would let a client that refreshes hourly hold a token that
@@ -2718,8 +2759,14 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // the authorization-code exchange and for every refresh alike. That is what
 // makes the client's tool profile (Config.ClientProfiles) follow the
 // binding table: a binding added or removed takes effect at the client's
-// next refresh, and no grant path can mint around it.
-func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+// next refresh, and no grant path can mint around it. It returns
+// errProfileUnresolvable, and mints nothing, when the profile cannot be
+// determined (see profileFor).
+func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+	profile, err := s.profileFor(origin)
+	if err != nil {
+		return "", err
+	}
 	var audience []string
 	if s.cfg.JWTAudience != "" {
 		audience = []string{s.cfg.JWTAudience}
@@ -2731,9 +2778,48 @@ func (s *Server) mintAccessToken(clientID string, tgID int64, tgUsername string,
 		Groups:           groups,
 		Scopes:           scopes,
 		Audience:         audience,
-		ClientID:         clientID,
-		Profile:          s.cfg.ClientProfiles[clientID],
+		ClientID:         origin.ClientID,
+		Profile:          profile,
 	}, s.cfg.AccessTokenTTL)
+}
+
+// tokenOrigin is what a token's tool profile is resolved from: the client it
+// is minted for and the redirect_uri of the authorization it descends from.
+// RedirectURIKnown is false for a refresh-token family issued before the
+// redirect_uri was stored.
+type tokenOrigin struct {
+	ClientID         string
+	RedirectURI      string
+	RedirectURIKnown bool
+}
+
+// errProfileUnresolvable: the redirect_uri a binding would be matched
+// against is unknown, so whether the token must carry a profile is unknown.
+var errProfileUnresolvable = errors.New("tool profile cannot be resolved: the grant's redirect_uri is unknown")
+
+// profileUnresolvableDescription is the token-endpoint error a client gets
+// for errProfileUnresolvable. A fresh authorization stores the redirect_uri.
+const profileUnresolvableDescription = "this grant predates redirect_uri tool-profile binding; authorize again"
+
+// profileFor resolves origin against the binding table. A client_id binding
+// decides on its own. Otherwise a family whose redirect_uri is unknown is
+// refused while any redirect_uri binding exists: "could not read the
+// redirect_uri" must not become "matched no binding", which would mint an
+// unprofiled token for a client the operator restricted. With no
+// redirect_uri bindings an unknown redirect_uri cannot matter, so such
+// families keep refreshing exactly as before.
+func (s *Server) profileFor(origin tokenOrigin) (string, error) {
+	b := s.cfg.ClientProfiles
+	if p, ok := b.ByClientID[origin.ClientID]; ok {
+		return p, nil
+	}
+	if !origin.RedirectURIKnown {
+		if len(b.ByRedirectURI) > 0 {
+			return "", errProfileUnresolvable
+		}
+		return "", nil
+	}
+	return b.Resolve(origin.ClientID, origin.RedirectURI), nil
 }
 
 // issueRefreshToken generates an opaque refresh token, persists it (hashed),

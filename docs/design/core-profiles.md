@@ -2,8 +2,9 @@
 
 Status: Accepted (owner, 2026-10-21). Rollout step 1 (the mechanism and
 core-readonly) shipped in 0.85.0 (#798); step 2 (core-reply) shipped in
-0.86.0 (#804); step 3 (per-profile snapshots) is implemented after 0.86.1;
-steps 4-5 are open.
+0.86.0 (#804); step 3 (per-profile snapshots, #811) and step 5
+(`redirect_uri` binding, #812) are implemented after 0.86.2; step 4 is
+open.
 
 ## Problem
 
@@ -47,12 +48,14 @@ caller.
    `mctl_connect_token` cookie, so "arrived through the browser" proves
    nothing and must not select or skip a profile.
 5. **Binding table in config, owned by gitops.** `MCP_CLIENT_PROFILES` maps
-   an exact `client_id` to a profile name: a CIMD `client_id` URL (stable
-   per product) or a preregistered client id. An entry that matches no
-   client is harmless. A malformed table, an unknown profile name or a
-   duplicate `client_id` is a startup error. Binding by `redirect_uri` is
-   **not supported** for now (revised 2026-10-21, see Decisions 5): a
-   record that uses it is a startup error, never silently ignored.
+   an exact `client_id` (a CIMD `client_id` URL, stable per product, or a
+   preregistered client id) or an exact `redirect_uri` (for implicit and
+   DCR clients, whose `client_id` is not stable) to a profile name. A
+   `client_id` record wins over a matching `redirect_uri` record. An entry
+   that matches no client is harmless. A malformed table, an unknown
+   profile name or a duplicate key is a startup error. `redirect_uri`
+   binding was deferred on 2026-10-21 and added in step 5 (see Decisions
+   5).
 6. **Enforced on both paths.** The filter applies on `tools/list` and
    `tools/call` through the existing `WithToolFilter` hook. Argument
    constraints are enforced in the handler, because a filter only changes
@@ -212,11 +215,26 @@ What they do **not** do:
    shapes, needs a claim with `profile:`. A baseline with no profile snapshots at
    all leaves every profile in its bootstrap window; once one carries any,
    a profile missing from it is a new surface whose tools were all added.
-4. Gitops: bind Town's client to a profile once Town uses a URL
-   `client_id` (until then it is an implicit DCR host and cannot be bound,
-   see Decisions 5), and the Directory connector once it exists.
-5. Later, separately: binding DCR and implicit clients by `redirect_uri`,
-   with the profile persisted in the refresh-token family.
+4. Gitops: bind Town's client to a profile, and the Directory connector
+   once it exists. While Town is an implicit DCR host it is bound by
+   `redirect_uri` (step 5), which holds only at the host's strength unless
+   its callback is pinned in `OAUTH_DCR_REDIRECT_URIS` (see the runbook);
+   once it uses a URL `client_id`, by `client_id`.
+5. Binding DCR and implicit clients by `redirect_uri`, with the
+   redirect_uri persisted in the refresh-token family.
+
+   As implemented: `oauth_refresh_tokens` gained a nullable `redirect_uri`
+   column. The code exchange stores the authorization's `redirect_uri` on
+   the family's first row and every rotation copies it, so the profile is
+   still re-resolved at each refresh (decision 1) rather than frozen into
+   the family: a binding added or removed reaches a connection at its next
+   refresh, for `redirect_uri` records exactly as for `client_id` ones.
+   NULL marks a family issued before the column existed. Its
+   `redirect_uri` is unknown, not unbound: while any `redirect_uri` record
+   exists, such a family is refused at refresh with `invalid_grant` unless a
+   `client_id` record decides it, and the client authorizes again. Rotation
+   keeps NULL as NULL, never `""`. The self-connect client's callback is
+   refused as a `redirect_uri` binding at startup, as its `client_id` is.
 
 Each step is proven both ways: a test that passes with the profile
 applied and fails when the intersection is replaced by the scope check
@@ -244,3 +262,5 @@ alone.
    at startup. Binding by `redirect_uri` comes back as its own change once
    the refresh-token family persists the profile (or another stable client
    identifier), which needs a schema migration the first step avoids.
+   Step 5 did that by persisting the `redirect_uri` itself, so the profile
+   stays re-resolved at every refresh.

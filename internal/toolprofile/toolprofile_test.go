@@ -8,31 +8,40 @@ import (
 func TestParseBindings(t *testing.T) {
 	for _, raw := range []string{"", "   ", "[]"} {
 		got, err := ParseBindings(raw)
-		if err != nil || len(got) != 0 {
+		if err != nil || !got.Empty() {
 			t.Fatalf("ParseBindings(%q) = %v, %v; want empty, nil", raw, got, err)
 		}
 	}
 
-	got, err := ParseBindings(`[{"client_id":"claude.ai","profile":"core-readonly"},{"client_id":"https://platform.example.test/c.json","profile":"core-readonly"}]`)
+	got, err := ParseBindings(`[{"client_id":"claude.ai","profile":"core-readonly"},` +
+		`{"client_id":"https://platform.example.test/c.json","profile":"core-readonly"},` +
+		`{"redirect_uri":"https://town.example.test/oauth/callback","profile":"core-reply"}]`)
 	if err != nil {
 		t.Fatalf("valid table: %v", err)
 	}
-	if len(got) != 2 || got["claude.ai"] != CoreReadonly || got["https://platform.example.test/c.json"] != CoreReadonly {
-		t.Fatalf("valid table = %v", got)
+	if len(got.ByClientID) != 2 || got.ByClientID["claude.ai"] != CoreReadonly || got.ByClientID["https://platform.example.test/c.json"] != CoreReadonly {
+		t.Fatalf("valid table client_ids = %v", got.ByClientID)
+	}
+	if len(got.ByRedirectURI) != 1 || got.ByRedirectURI["https://town.example.test/oauth/callback"] != CoreReply {
+		t.Fatalf("valid table redirect_uris = %v", got.ByRedirectURI)
 	}
 
 	for name, tc := range map[string]struct{ raw, want string }{
-		"redirect_uri record":  {`[{"client_id":"claude.ai","redirect_uri":"https://claude.ai/cb","profile":"core-readonly"}]`, "redirect_uri is not supported"},
-		"redirect_uri only":    {`[{"redirect_uri":"https://claude.ai/cb","profile":"core-readonly"}]`, "redirect_uri is not supported"},
-		"unknown key":          {`[{"client_id":"claude.ai","profile":"core-readonly","scope":"x"}]`, "unknown field"},
-		"missing client_id":    {`[{"profile":"core-readonly"}]`, "client_id is required"},
-		"whitespace client_id": {`[{"client_id":" claude.ai","profile":"core-readonly"}]`, "surrounding whitespace"},
-		"unknown profile":      {`[{"client_id":"claude.ai","profile":"core-readnoly"}]`, `unknown profile "core-readnoly"`},
-		"empty profile":        {`[{"client_id":"claude.ai"}]`, `unknown profile ""`},
-		"duplicate client_id":  {`[{"client_id":"claude.ai","profile":"core-readonly"},{"client_id":"claude.ai","profile":"core-readonly"}]`, "duplicate client_id"},
-		"trailing data":        {`[] []`, "trailing data"},
-		"reserved client_id":   {`[{"client_id":"mctl_self_connect","profile":"core-readonly"}]`, `client_id "mctl_self_connect" cannot be bound`},
-		"not an array":         {`{"client_id":"claude.ai","profile":"core-readonly"}`, "decode"},
+		"both keys":               {`[{"client_id":"claude.ai","redirect_uri":"https://claude.ai/cb","profile":"core-readonly"}]`, "names both client_id and redirect_uri"},
+		"unknown key":             {`[{"client_id":"claude.ai","profile":"core-readonly","scope":"x"}]`, "unknown field"},
+		"neither key":             {`[{"profile":"core-readonly"}]`, "client_id or redirect_uri is required"},
+		"whitespace client_id":    {`[{"client_id":" claude.ai","profile":"core-readonly"}]`, "surrounding whitespace"},
+		"unknown profile":         {`[{"client_id":"claude.ai","profile":"core-readnoly"}]`, `unknown profile "core-readnoly"`},
+		"empty profile":           {`[{"client_id":"claude.ai"}]`, `unknown profile ""`},
+		"duplicate client_id":     {`[{"client_id":"claude.ai","profile":"core-readonly"},{"client_id":"claude.ai","profile":"core-readonly"}]`, "duplicate client_id"},
+		"trailing data":           {`[] []`, "trailing data"},
+		"reserved client_id":      {`[{"client_id":"mctl_self_connect","profile":"core-readonly"}]`, `client_id "mctl_self_connect" cannot be bound`},
+		"not an array":            {`{"client_id":"claude.ai","profile":"core-readonly"}`, "decode"},
+		"whitespace redirect_uri": {`[{"redirect_uri":"https://town.example.test/cb ","profile":"core-readonly"}]`, "surrounding whitespace"},
+		"relative redirect_uri":   {`[{"redirect_uri":"/oauth/callback","profile":"core-readonly"}]`, "not an absolute URL"},
+		"fragment redirect_uri":   {`[{"redirect_uri":"https://town.example.test/cb#x","profile":"core-readonly"}]`, "not an absolute URL"},
+		"redirect unknown prof":   {`[{"redirect_uri":"https://town.example.test/cb","profile":"core-readnoly"}]`, `unknown profile "core-readnoly"`},
+		"duplicate redirect_uri":  {`[{"redirect_uri":"https://town.example.test/cb","profile":"core-readonly"},{"redirect_uri":"https://town.example.test/cb","profile":"core-reply"}]`, "duplicate redirect_uri"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ParseBindings(tc.raw)
@@ -40,9 +49,36 @@ func TestParseBindings(t *testing.T) {
 				t.Fatalf("ParseBindings = %v, %v; want error containing %q", got, err, tc.want)
 			}
 			if got != nil {
-				t.Fatalf("a refused table must return no map, got %v", got)
+				t.Fatalf("a refused table must return no table, got %v", got)
 			}
 		})
+	}
+}
+
+// TestBindingsResolve: a client_id binding wins over a redirect_uri one, a
+// redirect_uri binds whatever client_id carries it, and an unknown (empty)
+// redirect_uri matches no redirect_uri binding.
+func TestBindingsResolve(t *testing.T) {
+	b := Bindings{
+		ByClientID:    map[string]string{"claude.ai": CoreReadonly},
+		ByRedirectURI: map[string]string{"https://town.example.test/cb": CoreReply},
+	}
+	for _, tc := range []struct{ client, redirect, want string }{
+		{"claude.ai", "", CoreReadonly},
+		{"claude.ai", "https://town.example.test/cb", CoreReadonly},
+		{"dcr-client-1", "https://town.example.test/cb", CoreReply},
+		{"dcr-client-2", "https://town.example.test/cb", CoreReply},
+		{"dcr-client-1", "https://town.example.test/cb/", ""},
+		{"dcr-client-1", "", ""},
+		{"other", "https://other.example.test/cb", ""},
+	} {
+		if got := b.Resolve(tc.client, tc.redirect); got != tc.want {
+			t.Errorf("Resolve(%q, %q) = %q, want %q", tc.client, tc.redirect, got, tc.want)
+		}
+	}
+	var zero Bindings
+	if !zero.Empty() || zero.Resolve("claude.ai", "https://town.example.test/cb") != "" {
+		t.Fatal("the zero table restricts a client")
 	}
 }
 
@@ -110,7 +146,7 @@ func TestCoreReply(t *testing.T) {
 			t.Fatalf("%s is in core-readonly", name)
 		}
 	}
-	if got, err := ParseBindings(`[{"client_id":"claude.ai","profile":"core-reply"}]`); err != nil || got["claude.ai"] != CoreReply {
+	if got, err := ParseBindings(`[{"client_id":"claude.ai","profile":"core-reply"}]`); err != nil || got.ByClientID["claude.ai"] != CoreReply {
 		t.Fatalf("core-reply binding = %v, %v", got, err)
 	}
 }
