@@ -1,8 +1,9 @@
 # Restricted tool profiles: core-readonly and core-reply
 
 Status: Accepted (owner, 2026-10-21). Rollout step 1 (the mechanism and
-core-readonly) shipped in 0.85.0 (#798); step 2 (core-reply) is
-implemented after 0.85.0; steps 3-5 are open.
+core-readonly) shipped in 0.85.0 (#798); step 2 (core-reply) shipped in
+0.86.0 (#804); step 3 (per-profile snapshots) is implemented after 0.86.1;
+steps 4-5 are open.
 
 ## Problem
 
@@ -199,7 +200,18 @@ What they do **not** do:
    constraints, `profile_denied` audit. Binding table empty: no behaviour
    change.
 2. `draft_reply` / `send_reply`, registered only for core-reply.
-3. Descriptor snapshots per profile, product-update entries.
+3. Descriptor snapshots per profile, product-update entries. As
+   implemented: `docs/tool-descriptors.<profile>.json` is the registry
+   passed through the request path's `scopeToolFilter` for an identity with
+   the profile and every scope, held byte for byte by
+   `TestProfileDescriptorSnapshotsMatchRegistry`. The gate diffs each one
+   against the baseline. An addition or removal the full diff already shows
+   is covered by the full-surface entry, and so is a schema or annotations
+   change on a tool the profile shows exactly as the full surface does.
+   Anything else, including any schema change on a tool a profile rule
+   shapes, needs a claim with `profile:`. A baseline with no profile snapshots at
+   all leaves every profile in its bootstrap window; once one carries any,
+   a profile missing from it is a new surface whose tools were all added.
 4. Gitops: bind Town's client to a profile once Town uses a URL
    `client_id` (until then it is an implicit DCR host and cannot be bound,
    see Decisions 5), and the Directory connector once it exists.

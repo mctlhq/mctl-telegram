@@ -283,3 +283,148 @@ func TestAnEntryCitingAnOlderBaselineIsToldToBump(t *testing.T) {
 	old.Evidence.From = "0.68.0"
 	wantProblem(t, runGate(t, []Entry{old}, before, after), "bump its evidence.from to 0.69.0, otherwise add a new entry")
 }
+
+func profileSnapshot(t *testing.T, profile string, tools ...string) Snapshot {
+	t.Helper()
+	s := snapshot(t, tools...)
+	s.Surface.Profile = profile
+	return s
+}
+
+func runProfileGate(t *testing.T, entries []Entry, previous, current Snapshot, profiles Profiles) GateReport {
+	t.Helper()
+	r, err := GateProfiles(Feed{Entries: entries}, "0.69.0", []string{"0.69.0"}, previous, current, profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func profileClaim(id, tool string, change ClaimChange, profile string) Entry {
+	e := approved(id)
+	e.Kind = KindChangedBehavior
+	e.Tools = []string{tool}
+	e.Evidence.Changes = []Claim{{Tool: tool, Change: change, Profile: profile}}
+	return e
+}
+
+// A profile rule that changes a tool's schema only on that profile is the
+// profile's change; the same schema change made for everyone is covered by
+// the full-surface entry alone.
+func TestAProfileOnlyChangeNeedsAProfileClaim(t *testing.T) {
+	full := snapshot(t, listDialogs, sendMessage)
+	before := profileSnapshot(t, "core-readonly", listDialogs)
+	listNarrowed := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":20}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	after := profileSnapshot(t, "core-readonly", listNarrowed)
+	profiles := Profiles{BaselineCarriesProfiles: true, Surfaces: []ProfileSurface{{Name: "core-readonly", Previous: &before, Current: after}}}
+
+	wantProblem(t, runProfileGate(t, nil, full, full, profiles),
+		"list_dialogs schema (profile core-readonly) since 0.69.0 has no product update")
+	wantPass(t, runProfileGate(t, []Entry{profileClaim("narrow", "list_dialogs", ClaimSchema, "core-readonly")}, full, full, profiles))
+	// The same claim without the profile is a change the full diff does not show.
+	wantProblem(t, runProfileGate(t, []Entry{profileClaim("narrow", "list_dialogs", ClaimSchema, "")}, full, full, profiles),
+		"narrow claims list_dialogs schema, which the tool diff from 0.69.0 does not show")
+
+	// Narrowed for everyone: one full-surface claim covers the profile too.
+	fullAfter := snapshot(t, listNarrowed, sendMessage)
+	wantPass(t, runProfileGate(t, []Entry{profileClaim("narrow", "list_dialogs", ClaimSchema, "")}, full, fullAfter, profiles))
+}
+
+// On a tool a profile rule shapes, a schema change for everyone and a rule
+// change for the profile share a kind but are two facts: the full-surface
+// claim does not cover the profile's.
+func TestAProfileRuleChangeIsNotHiddenByAFullChange(t *testing.T) {
+	ruled := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":50}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	fullAfter := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":100},"folder":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	ruledAfter := `{"name":"list_dialogs","description":"List dialogs.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","maximum":30},"folder":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"title":"List dialogs"}}`
+	before := profileSnapshot(t, "core-readonly", ruled)
+	profiles := Profiles{BaselineCarriesProfiles: true, Surfaces: []ProfileSurface{{Name: "core-readonly", Previous: &before, Current: profileSnapshot(t, "core-readonly", ruledAfter)}}}
+	full, after := snapshot(t, listDialogs), snapshot(t, fullAfter)
+
+	everyone := profileClaim("folder", "list_dialogs", ClaimSchema, "")
+	wantProblem(t, runProfileGate(t, []Entry{everyone}, full, after, profiles),
+		"list_dialogs schema (profile core-readonly) since 0.69.0 has no product update")
+	tighter := profileClaim("tighter", "list_dialogs", ClaimSchema, "core-readonly")
+	wantPass(t, runProfileGate(t, []Entry{everyone, tighter}, full, after, profiles))
+}
+
+// A tool dropped from a profile shrinks a bound connection's surface under
+// its client, so it needs a profile claim just as an addition does; a tool
+// removed for everyone is covered by the full-surface claim.
+func TestAToolDroppedFromAProfileNeedsAProfileClaim(t *testing.T) {
+	full := snapshot(t, listDialogs, sendMessage)
+	before := profileSnapshot(t, "core-readonly", listDialogs, sendMessage)
+	after := profileSnapshot(t, "core-readonly", listDialogs)
+	profiles := Profiles{BaselineCarriesProfiles: true, Surfaces: []ProfileSurface{{Name: "core-readonly", Previous: &before, Current: after}}}
+
+	wantProblem(t, runProfileGate(t, nil, full, full, profiles),
+		"send_message removed (profile core-readonly) since 0.69.0 has no product update")
+	drop := profileClaim("drop-send", "send_message", ClaimRemoved, "core-readonly")
+	drop.Kind = KindDeprecation
+	wantPass(t, runProfileGate(t, []Entry{drop}, full, full, profiles))
+
+	// Removed for everyone: one full-surface claim covers the profile too.
+	gone := profileClaim("drop-send", "send_message", ClaimRemoved, "")
+	gone.Kind = KindDeprecation
+	wantPass(t, runProfileGate(t, []Entry{gone}, full, snapshot(t, listDialogs), profiles))
+}
+
+// A profile in its bootstrap window still holds "one change is one update".
+func TestABootstrapProfileClaimIsClaimedOnce(t *testing.T) {
+	full := snapshot(t, listDialogs)
+	boot := Profiles{Surfaces: []ProfileSurface{{Name: "core-readonly", Current: profileSnapshot(t, "core-readonly", listDialogs)}}}
+	r := runProfileGate(t, []Entry{
+		profileClaim("ro-claim", "list_dialogs", ClaimAdded, "core-readonly"),
+		profileClaim("ro-again", "list_dialogs", ClaimAdded, "core-readonly"),
+	}, full, full, boot)
+	wantProblem(t, r, "ro-claim and ro-again both claim list_dialogs added (profile core-readonly); one change is one update")
+}
+
+// In the full bootstrap window only a full-surface removal excuses a tool
+// missing at HEAD: dropping a tool from a profile does not remove it.
+func TestTheBootstrapWindowDoesNotTakeAProfileRemovalForARemoval(t *testing.T) {
+	head := snapshot(t, listDialogs)
+	boot := Profiles{Surfaces: []ProfileSurface{{Name: "core-readonly", Current: profileSnapshot(t, "core-readonly", listDialogs)}}}
+	e := profileClaim("drop-delete", "delete_messages", ClaimRemoved, "core-readonly")
+	e.Kind = KindDeprecation
+	e.Evidence.From = "0.68.0"
+	r, err := GateProfiles(Feed{Entries: []Entry{e}}, "", []string{"0.68.0"}, Snapshot{}, head, boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProblem(t, r, "names tool delete_messages, which does not exist at HEAD and is not claimed as removed")
+}
+
+func TestAProfileClaimNeedsItsSurface(t *testing.T) {
+	full := snapshot(t, listDialogs)
+	cur := profileSnapshot(t, "core-readonly", listDialogs)
+
+	// Bootstrap: the baseline carries no profile snapshot, so the claim is
+	// recorded as unverified, not held to a diff and not refused.
+	boot := Profiles{Surfaces: []ProfileSurface{{Name: "core-readonly", Current: cur}}}
+	r := runProfileGate(t, []Entry{profileClaim("ro-claim", "list_dialogs", ClaimAdded, "core-readonly")}, full, full, boot)
+	wantPass(t, r)
+	if len(r.Unverified) != 1 || !strings.Contains(r.Unverified[0], "no release carries a snapshot of profile core-readonly") {
+		t.Fatalf("unverified %q", r.Unverified)
+	}
+
+	// No snapshot of that profile at HEAD at all.
+	wantProblem(t, runProfileGate(t, []Entry{profileClaim("ro-claim", "list_dialogs", ClaimAdded, "core-reply")}, full, full, boot),
+		"ro-claim claims list_dialogs added (profile core-reply), but profile core-reply has no snapshot at HEAD")
+
+	// A snapshot handed in under the wrong label is refused outright.
+	if _, err := GateProfiles(Feed{}, "0.69.0", []string{"0.69.0"}, full, full,
+		Profiles{Surfaces: []ProfileSurface{{Name: "core-reply", Current: cur}}}); err == nil {
+		t.Fatal("a core-readonly snapshot was accepted as core-reply")
+	}
+}
+
+func TestAClaimNamesAKnownProfile(t *testing.T) {
+	e := profileClaim("profile-x", "send_message", ClaimAdded, "no-such-profile")
+	e.Kind = KindNewTool
+	wantInvalid(t, e, `names profile "no-such-profile", which is not a tool profile`)
+	e.Evidence.Changes[0].Profile = "core-reply"
+	if err := e.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -3,7 +3,8 @@
 The canonical feed of user-facing product updates (issue #440). One reviewed
 YAML file per update, named `<id>.yaml`. The database only records what has been
 published and in which digest. What an update says lives here, next to the
-tool snapshot it cites (`docs/tool-descriptors.json`).
+tool snapshots it cites (`docs/tool-descriptors.json` and one
+`docs/tool-descriptors.<profile>.json` per tool profile).
 
 ## The two approvals
 
@@ -51,6 +52,62 @@ unless it claims that tool's removal, and that no change is claimed twice. Such
 an entry is never held to a diff later, since it becomes history at the first
 snapshot release. A repository with no release tag at all cannot carry a
 product update yet.
+
+### Tool profile surfaces
+
+Each tool profile commits its own snapshot, `docs/tool-descriptors.<profile>.json`:
+the tools a connection bound to that profile is listed, with the profile's
+argument rules applied to their schemas. The gate holds each one to the feed
+like the full surface, with one difference: an item the full diff already
+shows for the same tool and change (a tool added or removed for everyone) is
+covered by the entry that claims it there. A change
+only a profile shows -- a tool added to the profile, a profile rule that
+changes a schema -- is claimed with the profile named:
+
+```yaml
+evidence:
+  from: 0.86.1
+  changes:
+    - {tool: get_messages, change: schema, profile: core-readonly}
+```
+
+On a tool every profile rules, such as `get_messages` (both core profiles
+bound its `limit`), a schema change for everyone therefore takes one claim
+per surface in the same entry:
+
+```yaml
+  changes:
+    - {tool: get_messages, change: schema}
+    - {tool: get_messages, change: schema, profile: core-readonly}
+    - {tool: get_messages, change: schema, profile: core-reply}
+```
+
+The profile must be one this build knows, and its snapshot must exist at HEAD.
+Until a release carries profile snapshots, every profile is in its own
+bootstrap window: nothing is required of it and a profile-scoped claim is
+reported as unverified. Once a release carries any, a profile missing from it
+is a new surface, and each of its tools needs an `added` claim on it. "Carries
+any" is read from the baseline's tree, so renaming every profile does not put
+the new names back into a bootstrap window.
+
+A change the full surface shows covers the same change on a profile only where
+the profile shows that tool exactly as the full surface does, before and after.
+On a tool a profile rule shapes (a bound on `limit`, a forbidden argument), a
+schema change for everyone also changes the profile's view, and that needs its
+own `profile:` claim: the full-surface entry cannot tell whether the rule
+changed too. An addition or a removal stays one fact whatever the rule. An
+addition has no "before" to compare, and the profile snapshot that shows the
+rule the new tool arrives with is in the same pull request as the entry. A
+removal leaves no profile view to describe: the tool is gone from every
+surface.
+
+Deleting a whole profile is not gated. The gate enumerates the profiles this
+build defines, so a deleted profile's baseline snapshot is never diffed and
+no `removed` claim is required for its tools (`TestNoStrayProfileSnapshots`
+only forces its snapshot file out of the tree). A deletion also breaks every
+`MCP_CLIENT_PROFILES` record naming it, which stops the server at startup.
+It therefore has to be a deliberate change: write the product update for it
+by hand.
 
 The gate needs the full history and tags. In a shallow clone it refuses
 (exit 2) rather than judging the feed against a baseline it cannot see.

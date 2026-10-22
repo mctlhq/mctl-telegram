@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 const (
@@ -37,6 +38,13 @@ const (
 
 // snapshotPath is where every release commits its tool surface.
 const snapshotPath = "docs/tool-descriptors.json"
+
+// profileSnapshotPath is where a release commits one tool profile's surface.
+// It matches mcp.ProfileDescriptorsFile; this command does not import the MCP
+// server to learn a file name.
+func profileSnapshotPath(profile string) string {
+	return "docs/tool-descriptors." + profile + ".json"
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -131,7 +139,11 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		_, _ = fmt.Fprintf(stderr, "productupdates: %s: %v\n", snapshotPath, err)
 		return exitFailed
 	}
-	report, err := productupdate.Gate(feed, baseline, releases, previous, current)
+	profiles, code := loadProfiles(repo, baseline, stderr)
+	if code != exitOK {
+		return code
+	}
+	report, err := productupdate.GateProfiles(feed, baseline, releases, previous, current, profiles)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
 		return exitFailed
@@ -144,9 +156,11 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 	_, _ = fmt.Fprintf(stdout, "%s\n", encoded)
 	if baseline == "" {
 		_, _ = fmt.Fprintln(stderr, "productupdates: no release carries "+snapshotPath+" yet; nothing to require")
-		for _, u := range report.Unverified {
-			_, _ = fmt.Fprintf(stderr, "productupdates: unverified until a release carries a snapshot: %s\n", u)
-		}
+	}
+	// A profile's bootstrap window runs while the full surface has a
+	// baseline, so its unverified claims are printed whatever the baseline.
+	for _, u := range report.Unverified {
+		_, _ = fmt.Fprintf(stderr, "productupdates: unverified until a release carries a snapshot: %s\n", u)
 	}
 	if !report.Passed() {
 		for _, p := range report.Problems {
@@ -155,6 +169,127 @@ func gate(repo, baseline string, feed productupdate.Feed, stdout, stderr io.Writ
 		return exitFailed
 	}
 	return exitOK
+}
+
+// loadProfiles reads every tool profile's snapshot at HEAD, which must exist,
+// and at the baseline, where it may not yet. A baseline file that exists but
+// cannot be read is a failure, never "the profile is new": only git's own
+// "no such path" answer means absent.
+func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profiles, int) {
+	var out productupdate.Profiles
+	if baseline != "" {
+		// Whether the baseline carries profile snapshots is read from its
+		// tree, not from the profiles this build still defines: otherwise
+		// renaming or deleting every profile would put the survivors back
+		// into their bootstrap window and quiet the gate.
+		carries, err := baselineCarriesProfileSnapshots(repo, baseline)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+			if errors.Is(err, errUnreadableProfileSnapshot) {
+				return out, exitFailed
+			}
+			return out, exitUsage
+		}
+		out.BaselineCarriesProfiles = carries
+	}
+	for _, name := range toolprofile.Names() {
+		path := profileSnapshotPath(name)
+		raw, err := os.ReadFile(filepath.Join(repo, path))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %v (every tool profile commits its snapshot)\n", err)
+			return out, exitFailed
+		}
+		current, err := productupdate.ParseSnapshot(raw)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "productupdates: %s: %v\n", path, err)
+			return out, exitFailed
+		}
+		ps := productupdate.ProfileSurface{Name: name, Current: current}
+		if baseline != "" {
+			present, err := gitHasPath(repo, baseline, path)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+				return out, exitUsage
+			}
+			if present {
+				old, err := git(repo, "show", baseline+":"+path)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "productupdates: %v\n", err)
+					return out, exitUsage
+				}
+				prev, err := productupdate.ParseSnapshot([]byte(old))
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "productupdates: %s:%s: %v\n", baseline, path, err)
+					return out, exitFailed
+				}
+				ps.Previous = &prev
+			}
+		}
+		out.Surfaces = append(out.Surfaces, ps)
+	}
+	return out, exitOK
+}
+
+// baselineCarriesProfileSnapshots reports whether rev's tree holds any
+// profile snapshot, whatever the profile's name: a
+// docs/tool-descriptors.<name>.json that parses as a snapshot labelled with a
+// profile. The label decides, as it does at HEAD, so another file sharing
+// the stem (a JSON Schema for the format, say) is not taken for one. ls-tree
+// is not recursive, so only docs/ itself is listed, never docs/design/.
+func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
+	out, err := git(repo, "ls-tree", "--name-only", rev, "--", "docs/")
+	if err != nil {
+		return false, err
+	}
+	// Every candidate is read before deciding, so the answer does not depend
+	// on how an unreadable file's name sorts against a readable snapshot's.
+	var unreadable error
+	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
+		if path == snapshotPath || !strings.HasPrefix(path, "docs/tool-descriptors.") || !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		raw, err := git(repo, "show", rev+":"+path)
+		if err != nil {
+			return false, err
+		}
+		snap, err := productupdate.ParseSnapshot([]byte(raw))
+		if err == nil {
+			if snap.Surface.Profile != "" {
+				return true, nil
+			}
+			continue
+		}
+		// A file this build cannot parse is a lookalike only if it says so:
+		// a JSON object with no surface.profile. One that names a profile, or
+		// is not a JSON object at all, may be a profile snapshot in a format
+		// this build rejects, and taking it for absent would put every
+		// profile back into its bootstrap window.
+		var probe struct {
+			Surface struct {
+				Profile string `json:"profile"`
+			} `json:"surface"`
+		}
+		if jerr := json.Unmarshal([]byte(raw), &probe); (jerr != nil || probe.Surface.Profile != "") && unreadable == nil {
+			unreadable = fmt.Errorf("%w: %s:%s: %v", errUnreadableProfileSnapshot, rev, path, err)
+		}
+	}
+	return false, unreadable
+}
+
+// errUnreadableProfileSnapshot marks a baseline file that may be a profile
+// snapshot but does not parse: the gate cannot tell whether the baseline
+// carries profile snapshots, so it fails rather than guess.
+var errUnreadableProfileSnapshot = errors.New("baseline file may be a profile snapshot but does not parse")
+
+// gitHasPath reports whether rev's tree has path. git ls-tree prints nothing
+// for a path the tree lacks and fails for a revision it cannot read, so the
+// two are not confused.
+func gitHasPath(repo, rev, path string) (bool, error) {
+	out, err := git(repo, "ls-tree", "--name-only", rev, "--", path)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == path, nil
 }
 
 func git(repo string, args ...string) (string, error) {

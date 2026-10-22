@@ -1,10 +1,16 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
+	mcplib "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 // DescriptorSurface is the configuration docs/tool-descriptors.json
@@ -44,4 +50,56 @@ func (s *Server) descriptors() (productupdate.Snapshot, error) {
 	}
 	return productupdate.NewSnapshot(
 		productupdate.Surface{AppsEnabled: s.AppsEnabled, ToolFilter: filter}, descriptors)
+}
+
+// ProfileDescriptorsFile is where the snapshot of one tool profile's surface
+// is committed, next to the full docs/tool-descriptors.json.
+func ProfileDescriptorsFile(profile string) string {
+	return "docs/tool-descriptors." + profile + ".json"
+}
+
+// ProfileToolDescriptors snapshots the surface a caller bound to the named
+// tool profile is shown by tools/list: the full registry passed through the
+// same scopeToolFilter a request runs, for an identity carrying the profile
+// and every scope any tool needs. So the snapshot is the profile's view, not
+// a narrower view some scope set happens to give.
+func ProfileToolDescriptors(profile string) (productupdate.Snapshot, error) {
+	if _, ok := toolprofile.Lookup(profile); !ok {
+		return productupdate.Snapshot{}, fmt.Errorf("unknown tool profile %q", profile)
+	}
+	s := &Server{ToolFilter: DescriptorSurface.ToolFilter, AppsEnabled: DescriptorSurface.AppsEnabled}
+	registered := s.newMCPServer().ListTools()
+	tools := make([]mcplib.Tool, 0, len(registered))
+	for _, st := range registered {
+		tools = append(tools, st.Tool)
+	}
+	id := &auth.Identity{UserID: 1, Profile: profile, Scopes: everyToolScope()}
+	listed := scopeToolFilter(auth.With(context.Background(), id), tools)
+	descriptors := make(map[string][]byte, len(listed))
+	for _, t := range listed {
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return productupdate.Snapshot{}, fmt.Errorf("marshal tool %s: %w", t.Name, err)
+		}
+		descriptors[t.Name] = raw
+	}
+	return productupdate.NewSnapshot(productupdate.Surface{
+		AppsEnabled: DescriptorSurface.AppsEnabled,
+		ToolFilter:  DescriptorSurface.ToolFilter,
+		Profile:     profile,
+	}, descriptors)
+}
+
+// everyToolScope is the union of the scopes toolScopes names.
+func everyToolScope() []string {
+	var all []string
+	for _, scopes := range toolScopes {
+		for _, sc := range scopes {
+			if !slices.Contains(all, sc) {
+				all = append(all, sc)
+			}
+		}
+	}
+	slices.Sort(all)
+	return all
 }
