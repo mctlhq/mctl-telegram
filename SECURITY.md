@@ -6,7 +6,7 @@ Only the latest release and the `main` branch receive security fixes. Older tagg
 
 ## Reporting a vulnerability
 
-Email **dmitri+security@mctl.ai** with vulnerability reports. Please **do not** open public GitHub issues for security vulnerabilities. We respond within 72 hours and disclose fixes in the CHANGELOG once a release ships.
+Email **security@mctl.ai** with vulnerability reports. Please **do not** open public GitHub issues for security vulnerabilities. We respond within 72 hours and disclose fixes in the CHANGELOG once a release ships.
 
 When reporting, please **do not include** Telegram session strings, OAuth tokens, API credentials, phone numbers, chat IDs, or private message content in your report.
 
@@ -109,7 +109,9 @@ Real Telegram sends through `send_message` or `send_media` require **all** of:
 1. Server flag `ALLOW_SEND=true`.
 2. Identity has `telegram:messages:send` scope.
 3. `telegram_accounts.send_enabled = true` for that account (owner sets this via `set_send_consent` or `/telegram/connect/manage`).
-4. Per-peer send rate limit not exhausted.
+4. Per-peer send rate limit not exhausted (20 per hour to one peer), checked after the first three.
+
+The account configured as the demo/reviewer account (`DEMO_REVIEWER_*`) is always dry-run, ahead of every other condition, so a directory reviewer can never deliver a message.
 
 The tool exposes no trusted client-controlled bypass for these gates. Any condition false returns a dry-run result (`sent=false`) with a `dry_reason`; no send RPC reaches Telegram. Media dry-runs do not fetch a URL or decode base64 content.
 
@@ -122,4 +124,6 @@ The tool exposes no trusted client-controlled bypass for these gates. Any condit
 
 ## Rate limiting
 
-The default per-identity token bucket is 30 requests/minute with the same burst. Write paths also apply per-peer limits. Anonymous health, readiness, public content, and well-known endpoints are limited at the ingress layer.
+The default per-identity token bucket is 30 requests/minute with the same burst; it applies to authenticated requests. Write paths also apply per-peer limits.
+
+Unauthenticated endpoints are limited per source IP only where the service does it itself: `POST /oauth/register` (`OAUTH_REGISTER_RATE_PER_MIN`, default 10/minute), the demo-reviewer sign-in, and Local Bridge activation. `/oauth/authorize`, `/oauth/token`, health, readiness, public pages and well-known documents have no per-IP limit, in the service or in the deployment's ingress configuration.
