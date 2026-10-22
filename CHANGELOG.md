@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.88.1](https://github.com/mctlhq/mctl-telegram/compare/0.88.0...0.88.1) (2026-10-22)
+
+
+### Miscellaneous Chores
+
+* release 0.88.1 ([75020ba](https://github.com/mctlhq/mctl-telegram/commit/75020baacc79f0da21fa5be8df73bf3466495ef8))
+
 ## [0.88.0](https://github.com/mctlhq/mctl-telegram/compare/0.87.3...0.88.0) (2026-10-22)
 
 
