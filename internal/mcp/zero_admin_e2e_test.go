@@ -160,7 +160,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	}
 
 	readID := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: cred.Scopes}
-	if real, _ := evaluateSendGate(ctx, store, readID, true, 0); real {
+	if real, _ := evaluateSendGate(ctx, store, readID, true, reviewerGate{}); real {
 		t.Fatal("a send would have been real before the owner granted consent")
 	}
 	assertNoServerSideSession("after the first credential")
@@ -186,7 +186,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	// without contacting the daemon at all. That is why there is no daemon-side
 	// mechanism to shortcut it: a daemon never sees this refusal. The scope
 	// arrives on the credential's next refresh, which is the step below.
-	if real, reason := evaluateSendGate(ctx, store, readID, true, 0); real {
+	if real, reason := evaluateSendGate(ctx, store, readID, true, reviewerGate{}); real {
 		t.Fatal("a read-only credential was allowed to send")
 	} else if !strings.Contains(reason, "scope") {
 		t.Fatalf("refusal reason was %q, expected it to name the missing scope", reason)
@@ -201,7 +201,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	// ...and now the send is real, which is the step the Definition of Done
 	// names. Nothing was restarted and no operator was involved.
 	sendID := &auth.Identity{UserID: uid, TelegramID: tgID, Scopes: refreshed.Scopes}
-	if real, reason := evaluateSendGate(ctx, store, sendID, true, 0); !real {
+	if real, reason := evaluateSendGate(ctx, store, sendID, true, reviewerGate{}); !real {
 		t.Fatalf("send still refused after consent and refresh: %s", reason)
 	}
 	assertNoServerSideSession("after the grant, refresh and send decision")
@@ -211,7 +211,7 @@ func TestZeroAdminOnboarding_EndToEnd(t *testing.T) {
 	if _, err := store.SetSendEnabled(ctx, uid, false); err != nil {
 		t.Fatalf("revoke send consent: %v", err)
 	}
-	if real, _ := evaluateSendGate(ctx, store, sendID, true, 0); real {
+	if real, _ := evaluateSendGate(ctx, store, sendID, true, reviewerGate{}); real {
 		t.Fatal("a send was still real after the owner revoked consent, with the same credential in hand")
 	}
 	if _, err := store.SetSendEnabled(ctx, uid, true); err != nil {

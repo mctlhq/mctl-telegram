@@ -50,7 +50,7 @@ func (g *agentSendGate) Allow(ctx context.Context, userID, peerTGID int64) error
 		return fmt.Errorf("%w: owner has no active Telegram identity", errAgentSendGateDenied)
 	}
 	if g.demoReviewerTGID != 0 && tgID == g.demoReviewerTGID {
-		return fmt.Errorf("%w: reviewer account is preview-only", errAgentSendGateDenied)
+		return fmt.Errorf("%w: reviewer account cannot send from the background executor", errAgentSendGateDenied)
 	}
 	hasScope, err := g.hasSendScope(ctx, tgID)
 	if err != nil {

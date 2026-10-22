@@ -52,13 +52,19 @@ type Server struct {
 	// PeerCache is an optional in-memory cache for resolved Telegram peers.
 	// When nil (default), every call resolves the peer fresh via the Telegram API.
 	PeerCache *telegram.PeerCache
-	// DemoReviewerTGID, when non-zero, forces every send from that Telegram
-	// identity to a dry-run preview regardless of the per-account send_enabled
-	// flag (set by WithDemoReviewer only when reviewer mode is enabled). This is
-	// the authoritative barrier for the ChatGPT App Directory reviewer account:
-	// the connect flow re-enables send_enabled and ChatGPT may auto-execute the
-	// send tool, so neither is a dependable preview-only guarantee on its own.
+	// DemoReviewerTGID, when non-zero, pins the reviewer/demo identity whose
+	// writes are refused regardless of the per-account send_enabled flag
+	// (set by WithDemoReviewer only when reviewer mode is enabled), except
+	// send_message and send_reply to a peer in DemoReviewerWritePeers. This
+	// is the authoritative barrier for the directory reviewer account: the
+	// connect flow re-enables send_enabled and the client may auto-execute
+	// the send tool, so neither is a dependable guarantee on its own. See
+	// reviewer.go.
 	DemoReviewerTGID int64
+	// DemoReviewerWritePeers is the reviewer's write allowlist, keyed by
+	// canonical "user:<id>" / "chat:<id>" / "channel:<id>". Empty or nil
+	// allows nothing.
+	DemoReviewerWritePeers map[string]bool
 	// ToolFilter controls which MCP tools are registered. "all" (default)
 	// registers every tool; "read-only" registers only tools with
 	// ReadOnlyHint=true (set via WithToolFilter).
@@ -193,11 +199,14 @@ func (s *Server) WithPeerCache(pc *telegram.PeerCache) *Server {
 	return s
 }
 
-// WithDemoReviewer pins the demo/reviewer Telegram id whose sends are forced to
-// dry-run previews. Pass 0 (the default) to disable. Returns the receiver for
+// WithDemoReviewer pins the demo/reviewer Telegram id whose writes are
+// refused except send_message and send_reply to one of writePeers
+// (DEMO_REVIEWER_WRITE_PEERS). Pass 0 (the default) to disable; an empty
+// writePeers lets the reviewer write nowhere. Returns the receiver for
 // chaining.
-func (s *Server) WithDemoReviewer(tgID int64) *Server {
+func (s *Server) WithDemoReviewer(tgID int64, writePeers []string) *Server {
 	s.DemoReviewerTGID = tgID
+	s.DemoReviewerWritePeers = reviewerWritePeerSet(writePeers)
 	return s
 }
 
@@ -332,6 +341,9 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// caller's tool profile is recorded like any handler refusal
 		// (profiles.go).
 		mcpserver.WithToolHandlerMiddleware(s.profileArgGuard),
+		// Also inside recordToolCall: the reviewer identity's refused
+		// writes are recorded like any other refusal (reviewer.go).
+		mcpserver.WithToolHandlerMiddleware(s.reviewerWriteGuard),
 		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
 		// Discovery and invocation follow the caller's scopes: mcp-go
 		// applies this filter on tools/list and again on tools/call, so a

@@ -242,13 +242,24 @@ type Config struct {
 	// password-gated "reviewer access" path that authenticates as a single
 	// pre-provisioned demo Telegram identity, bypassing the live Telegram
 	// OIDC login (no phone/SMS). The demo account is expected to be a
-	// throwaway with a pre-seeded MTProto session and send_enabled=false so
-	// every send stays a dry-run preview. Off by default; enabled only during
-	// review and disabled again after approval. See internal/oauth.
+	// throwaway with a pre-seeded MTProto session. Its writes are refused
+	// except to DemoReviewerWritePeers (internal/mcp/reviewer.go). Off by
+	// default; enabled only during review and disabled again after approval.
+	// See internal/oauth.
 	DemoReviewerEnabled  bool   // DEMO_REVIEWER_ENABLED
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
 	DemoReviewerTGID     int64  // DEMO_REVIEWER_TG_ID; numeric Telegram id of the demo account
+	// DemoReviewerWritePeers is DEMO_REVIEWER_WRITE_PEERS: the test chats the
+	// reviewer identity may really write to, as a comma-separated list of
+	// "user:<id>", "chat:<id>" or "channel:<id>" (canonical form, positive
+	// ids). Only send_message and send_reply honour it; every other write
+	// stays refused for the reviewer (internal/mcp/reviewer.go). It fails
+	// closed: empty or unset means the reviewer can write nowhere. A
+	// malformed value is a startup error while reviewer mode is on, and is
+	// dropped (deny) while it is off, so a leftover value cannot block a
+	// deployment that does not use it.
+	DemoReviewerWritePeers []string
 
 	// SessionTTLExemptTGIDs lists Telegram ids whose MTProto session is not
 	// subject to the 90-day absolute TTL or the 30-day idle TTL — long-lived
@@ -487,6 +498,13 @@ func Load() (*Config, error) {
 		if c.DemoReviewerUsername == "" || c.DemoReviewerPassword == "" || c.DemoReviewerTGID == 0 {
 			return nil, fmt.Errorf("DEMO_REVIEWER_ENABLED requires DEMO_REVIEWER_USERNAME, DEMO_REVIEWER_PASSWORD and DEMO_REVIEWER_TG_ID")
 		}
+	}
+	if peers, err := parseReviewerWritePeers(os.Getenv("DEMO_REVIEWER_WRITE_PEERS")); err != nil {
+		if c.DemoReviewerEnabled {
+			return nil, fmt.Errorf("DEMO_REVIEWER_WRITE_PEERS: %w", err)
+		}
+	} else if c.DemoReviewerEnabled {
+		c.DemoReviewerWritePeers = peers
 	}
 	// AgentProfileOwnerTGID's doc comment documents it as required whenever
 	// AgentProfilePath is set — a missing or malformed value silently
@@ -934,4 +952,36 @@ func loginBotUsernameFromEnv() string {
 		return ""
 	}
 	return v
+}
+
+// parseReviewerWritePeers parses DEMO_REVIEWER_WRITE_PEERS. Blank is an empty
+// list. Every entry must be "user:<id>", "chat:<id>" or "channel:<id>" with a
+// positive decimal id written canonically (no sign, no leading zeros, no
+// spaces inside the entry), so an entry names exactly one peer in one
+// spelling. At send time internal/mcp's canonicalPeerRef normalises
+// equivalent spellings of the requested id (user:+7001 is user:7001) before
+// comparing, which widens the accepted spelling but never the set of ids,
+// because telegram.ResolvePeer parses the id the same way. An empty
+// entry ("a,,b", a trailing comma) is an error too: a list that does
+// not say what it means is refused, not guessed.
+func parseReviewerWritePeers(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		entry := strings.TrimSpace(part)
+		kind, num, ok := strings.Cut(entry, ":")
+		switch kind {
+		case "user", "chat", "channel":
+		default:
+			ok = false
+		}
+		n, err := strconv.ParseInt(num, 10, 64)
+		if !ok || err != nil || n <= 0 || strconv.FormatInt(n, 10) != num {
+			return nil, fmt.Errorf("entry %q is not user:<id>, chat:<id> or channel:<id> with a positive id", entry)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }

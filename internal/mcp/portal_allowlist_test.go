@@ -452,7 +452,7 @@ func TestGatesFromSource(t *testing.T) {
 			"admin:users:read"); err != nil {
 			return
 		}
-		_, _ = evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID,
+		_, _ = evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("b", ""),
 			"telegram:messages:pin")
 	}
 	_, _ = tool, h
@@ -463,7 +463,7 @@ func TestGatesFromSource(t *testing.T) {
 			name: "evaluateSendGate implies the send scope",
 			src: `func (s *Server) toolC() {
 	tool := mcplib.NewTool("c")
-	_, _ = evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+	_, _ = evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("c", ""))
 	_ = tool
 }`,
 			want: map[string][]string{"c": {"send-gate", "telegram:messages:send"}},
@@ -541,7 +541,7 @@ func TestSendScopeMatchesSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tools.go: %v", err)
 	}
-	want := `return evaluateWriteGate(ctx, store, id, allowSend, demoReviewerTGID, "` + sendScopeFromSource + `")`
+	want := `return evaluateWriteGate(ctx, store, id, allowSend, reviewer, "` + sendScopeFromSource + `")`
 	if !strings.Contains(string(src), want) {
 		t.Errorf("evaluateSendGate no longer binds %q; update sendScopeFromSource to the scope it binds now", sendScopeFromSource)
 	}

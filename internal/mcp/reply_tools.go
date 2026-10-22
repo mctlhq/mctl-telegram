@@ -179,7 +179,7 @@ Inputs (required):
 			s.audit(ctx, id, "draft_reply", peerRedacted, err, startedAt)
 			return mcplib.NewToolResultError("could not issue a confirmation: " + err.Error()), nil
 		}
-		open, reason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		open, reason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("send_reply", target.Ref))
 		s.audit(ctx, id, "draft_reply", peerRedacted, nil, startedAt)
 		out := draftReplyResult{
 			ConfirmationID: d.ID,
@@ -234,25 +234,28 @@ Inputs (required):
 		if s.Replies == nil {
 			return mcplib.NewToolResultError("send_reply is not available on this server"), nil
 		}
-		// The gate and the account mode are read before the draft is
-		// consumed, so a refusal the user can fix (turning sends on) keeps
-		// the draft usable for the rest of its window.
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
-		if !canSend {
-			s.auditRefusal(ctx, id, "send_reply:blocked", "", errors.New(dryReason), startedAt, ReasonRefused)
-			return mcplib.NewToolResultError("send_reply blocked: " + s.withSendDisabledHint(id, dryReason)), nil
-		}
 		if s.isLocalBridgeAccount(ctx, id.UserID) {
 			return mcplib.NewToolResultError("send_reply is not yet supported for local-bridge accounts"), nil
 		}
+		// The draft is peeked, not consumed, before the gate: the reviewer
+		// check needs the drafted recipient, and the recipient must be the
+		// one Consume hands to delivery, not anything the caller passes.
 		d, err := s.Replies.Peek(confID, id.UserID, id.Profile)
 		if err != nil {
 			s.auditRefusal(ctx, id, "send_reply:confirmation_rejected", "", err, startedAt, ReasonNotFound)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
+		peerRedacted := telegram.RedactPeer(d.Target.Ref)
+		// The gate is read before the draft is consumed, so a refusal the
+		// user can fix (turning sends on) keeps the draft usable for the
+		// rest of its window.
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("send_reply", d.Target.Ref))
+		if !canSend {
+			s.auditRefusal(ctx, id, "send_reply:blocked", peerRedacted, errors.New(dryReason), startedAt, ReasonRefused)
+			return mcplib.NewToolResultError("send_reply blocked: " + s.withSendDisabledHint(id, dryReason)), nil
+		}
 		// The rate limit is a refusal the user can wait out, so like the
 		// gate it runs before the draft is spent.
-		peerRedacted := telegram.RedactPeer(d.Target.Ref)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
 			s.auditRefusal(ctx, id, "send_reply:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil

@@ -433,7 +433,12 @@ OGG/Opus; the server does not transcode.`),
 		}
 
 		peerRedacted := telegram.RedactPeer(peer)
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("send_media", peer))
+		if dryReason == reasonReviewerWriteRefused {
+			// The reviewer's refusal is an error, never a preview.
+			s.auditRefusal(ctx, id, "send_media:blocked", peerRedacted, errors.New(dryReason), startedAt, ReasonRefused)
+			return mcplib.NewToolResultError(reviewerRefusalText("send_media")), nil
+		}
 		if canSend {
 			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
 				canSend = false

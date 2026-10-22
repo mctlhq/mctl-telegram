@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -488,5 +491,132 @@ func TestReplyStore_ConsumeHoldsTheBinding(t *testing.T) {
 	d, _ := st.Issue(1, toolprofile.CoreReply, target, "hi")
 	if got, err := st.Consume(d.ID, 1, toolprofile.CoreReply); err != nil || got.Text != "hi" {
 		t.Fatalf("owner Consume = %+v, %v", got, err)
+	}
+}
+
+// N concurrent send_reply calls with one confirmation_id deliver exactly
+// once: Peek lets them all through, Consume lets one.
+func TestSendReply_ConcurrentCallsDeliverOnce(t *testing.T) {
+	s, _, id := replyServer(t, 9314)
+	d := draftOK(t, s, id, "@alice", "once")
+	var deliveries atomic.Int32
+	s.replyDeliver = func(_ context.Context, _ int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error) {
+		deliveries.Add(1)
+		return &telegram.SendResult{Sent: true, Mode: "send", PeerInput: target.Ref, Text: text, MessageID: 42}, nil
+	}
+	_, h := s.toolSendReply()
+	const n = 32
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+		ok    atomic.Int32
+		gone  atomic.Int32
+	)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res, err := h(auth.With(context.Background(), id), mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "send_reply", Arguments: map[string]any{"confirmation_id": d.ConfirmationID}}})
+			switch {
+			case err != nil:
+				t.Errorf("Go error: %v", err)
+			case !res.IsError:
+				ok.Add(1)
+			case contentText(res) == errReplyDraftNotFound.Error():
+				gone.Add(1)
+			default:
+				t.Errorf("unexpected refusal: %s", contentText(res))
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if deliveries.Load() != 1 || ok.Load() != 1 || gone.Load() != n-1 {
+		t.Fatalf("deliveries=%d successes=%d refusals=%d, want 1, 1, %d", deliveries.Load(), ok.Load(), gone.Load(), n-1)
+	}
+}
+
+// A delivery whose outcome is lost (a timeout after the draft was consumed)
+// is not retried by the same id: the message may well have gone out, so a
+// retry is refused with "draft again" and delivery ran once.
+func TestSendReply_RetryAfterLostResponseIsRefused(t *testing.T) {
+	s, _, id := replyServer(t, 9315)
+	d := draftOK(t, s, id, "@alice", "hi")
+	calls := 0
+	s.replyDeliver = func(context.Context, int64, *telegram.ReplyTarget, string) (*telegram.SendResult, error) {
+		calls++
+		return nil, fmt.Errorf("messages.sendMessage: %w", context.DeadlineExceeded)
+	}
+	if res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID}); !res.IsError {
+		t.Fatalf("timed-out delivery reported as success: %s", contentText(res))
+	}
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+	if !res.IsError || !strings.Contains(contentText(res), "call draft_reply again") {
+		t.Fatalf("retry after a lost response: %s", contentText(res))
+	}
+	if calls != 1 {
+		t.Fatalf("delivery called %d times, want 1", calls)
+	}
+}
+
+// The confirmation is bound to the drafted recipient and the exact drafted
+// text: arguments passed to send_reply change neither, and two drafts do not
+// leak into each other.
+func TestSendReply_BoundToRecipientAndExactText(t *testing.T) {
+	s, f, id := replyServer(t, 9316)
+	const aliceText = "  see you at 10 \U0001F44B\n"
+	a := draftOK(t, s, id, "@alice", aliceText)
+	b := draftOK(t, s, id, "@bob", "for bob")
+	res := sendReply(t, s, id, map[string]any{"confirmation_id": a.ConfirmationID, "peer": "@bob", "recipient": "user:7002", "text": "changed"})
+	if res.IsError {
+		t.Fatalf("send_reply: %s", contentText(res))
+	}
+	var out sendReplyResult
+	if err := json.Unmarshal([]byte(contentText(res)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Recipient != "user:7001" || out.Text != aliceText {
+		t.Fatalf("result = %+v, want Alice and the drafted text", out)
+	}
+	if res := sendReply(t, s, id, map[string]any{"confirmation_id": b.ConfirmationID}); res.IsError {
+		t.Fatalf("second draft: %s", contentText(res))
+	}
+	want := []delivered{{id.UserID, &telegram.ReplyTarget{Ref: "user:7001"}, aliceText}, {id.UserID, &telegram.ReplyTarget{Ref: "user:7002"}, "for bob"}}
+	if len(f.delivered) != len(want) {
+		t.Fatalf("delivered %d, want %d", len(f.delivered), len(want))
+	}
+	for i, w := range want {
+		g := f.delivered[i]
+		if g.userID != w.userID || g.target.Ref != w.target.Ref || g.text != w.text {
+			t.Errorf("delivery %d = {%d %s %q}, want {%d %s %q}", i, g.userID, g.target.Ref, g.text, w.userID, w.target.Ref, w.text)
+		}
+	}
+}
+
+// The draft lives for ConfirmationTTL: a second before the end it still
+// delivers, a second after it is gone.
+func TestSendReply_TTLBoundary(t *testing.T) {
+	for name, tc := range map[string]struct {
+		offset  time.Duration
+		deliver bool
+	}{
+		"just before expiry": {ConfirmationTTL - time.Second, true},
+		"just after expiry":  {ConfirmationTTL + time.Second, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, f, id := replyServer(t, 9317)
+			issued := time.Now()
+			s.Replies.now = func() time.Time { return issued }
+			d := draftOK(t, s, id, "@alice", "hi")
+			s.Replies.now = func() time.Time { return issued.Add(tc.offset) }
+			res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})
+			if got := !res.IsError; got != tc.deliver || len(f.delivered) != map[bool]int{true: 1, false: 0}[tc.deliver] {
+				t.Fatalf("delivered=%v (%d) %s, want %v", got, len(f.delivered), contentText(res), tc.deliver)
+			}
+			if !tc.deliver && contentText(res) != errReplyDraftNotFound.Error() {
+				t.Fatalf("expired draft: %s", contentText(res))
+			}
+		})
 	}
 }

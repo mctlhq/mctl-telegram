@@ -165,11 +165,12 @@ func TestGetMySendStatus_RequiresAuthentication(t *testing.T) {
 	}
 }
 
-// The reviewer/demo identity is forced to preview-only ahead of every other
-// check. The status must say so — and must still report the account flag
+// The reviewer/demo identity is refused ahead of every other check, except
+// sends to its allowlisted test chats, which get_my_send_status cannot know
+// in advance. The status must say so — and must still report the account flag
 // truthfully, since a true send_enabled next to can_send=false is not a
 // contradiction here: a different condition is what blocks the send.
-func TestGetMySendStatus_DemoReviewerIsPreviewOnly(t *testing.T) {
+func TestGetMySendStatus_DemoReviewerIsRefused(t *testing.T) {
 	store := newToolsTestStore(t)
 	uid := seedHostedAccount(t, store, 4848, true)
 	srv := &Server{AllowSend: true, Store: store, DemoReviewerTGID: 4848}
@@ -179,8 +180,8 @@ func TestGetMySendStatus_DemoReviewerIsPreviewOnly(t *testing.T) {
 	if out["can_send"] != false {
 		t.Errorf("can_send = %v, want false for the reviewer identity", out["can_send"])
 	}
-	if r, _ := out["reason"].(string); !strings.Contains(r, "preview-only") {
-		t.Errorf("reason = %q, want the reviewer preview-only reason", r)
+	if r, _ := out["reason"].(string); r != reasonReviewerWriteRefused {
+		t.Errorf("reason = %q, want the reviewer reason", r)
 	}
 	if out["send_enabled"] != true {
 		t.Errorf("send_enabled = %v, want true — the flag is on; the reviewer rule is what blocks", out["send_enabled"])

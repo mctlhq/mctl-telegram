@@ -222,11 +222,13 @@ func TestToolPinMessage_RevokedConsentAndServerGateBlockDispatch(t *testing.T) {
 	}
 }
 
-// TestToolSendMessage_HintOnlyForSendDisabled covers all four dry-run causes
-// and asserts SendResult.Hint is a presentation-only add-on: empty for three
-// of them, and equal to the expected nudge only when the per-account
-// send_enabled flag is the reason. This is a regression guard for the hint
-// logic staying scoped to exactly the one cause it was written for.
+// TestToolSendMessage_HintOnlyForSendDisabled covers the dry-run causes and
+// asserts SendResult.Hint is a presentation-only add-on: empty for the
+// others, and equal to the expected nudge only when the per-account
+// send_enabled flag is the reason. (The reviewer/demo account is refused
+// with an error, not a dry run: reviewer_test.go.) This is a regression
+// guard for the hint logic staying scoped to exactly the one cause it was
+// written for.
 func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 	const wantHint = "Your account has never opted into real sends. Enable them with set_send_consent. Call get_my_send_status to confirm this is the reason."
 	const manageURL = "https://tg.test/telegram/connect/manage"
@@ -236,17 +238,6 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 		build    func(t *testing.T) (*Server, *auth.Identity)
 		wantHint string
 	}{
-		{
-			name: "reviewer/demo account",
-			build: func(t *testing.T) (*Server, *auth.Identity) {
-				store := newToolsTestStore(t)
-				uid := seedAccountWithSession(t, store, guardReviewerTGID, true)
-				srv := &Server{Store: store, AllowSend: true, DemoReviewerTGID: guardReviewerTGID}
-				id := &auth.Identity{UserID: uid, TelegramID: guardReviewerTGID, Scopes: []string{"telegram:messages:send"}}
-				return srv, id
-			},
-			wantHint: "",
-		},
 		{
 			name: "ALLOW_SEND=false",
 			build: func(t *testing.T) (*Server, *auth.Identity) {

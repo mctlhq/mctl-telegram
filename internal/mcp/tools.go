@@ -447,7 +447,13 @@ Inputs (optional):
 		// per-peer rate limit all pass. A confirmation_id above only binds the
 		// call to an exact (peer, text) snapshot; it never widens or replaces
 		// this gate.
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("send_message", peer))
+		if dryReason == reasonReviewerWriteRefused {
+			// Unlike every other gate reason, the reviewer's is an error:
+			// a preview would read as a send the reviewer could retry.
+			s.auditRefusal(ctx, id, "send_message:blocked", telegram.RedactPeer(peer), errors.New(dryReason), startedAt, ReasonRefused)
+			return mcplib.NewToolResultError(reviewerRefusalText("send_message")), nil
+		}
 		if canSend {
 			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
 				canSend = false
@@ -754,7 +760,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("confirmation_id required — call prepare_pin_message first"), nil
 		}
-		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID, "telegram:messages:pin")
+		canPin, blockReason := evaluateWriteGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("pin_message", peer), "telegram:messages:pin")
 		if !canPin {
 			s.auditRefusal(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("pin blocked: " + blockReason), nil
@@ -1002,7 +1008,13 @@ disable it for an authenticated user. It takes no inputs.`),
 		// otherwise the status answers with an infrastructure error while
 		// send_message answers with the real reason, which is the divergence
 		// this tool exists to rule out.
-		decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.DemoReviewerTGID)
+		//
+		// One divergence remains, by design: this tool takes no peer, so for
+		// the reviewer/demo identity it answers can_send=false even though
+		// send_message and send_reply to a DEMO_REVIEWER_WRITE_PEERS chat
+		// really send. The reason names the allowlist, so the answer is not
+		// misleading (reviewer.go).
+		decided, canSend, reason := evaluateSendGateBeforeAccount(id, s.AllowSend, s.reviewerGateFor("get_my_send_status", ""))
 
 		// The account row is read exactly once, and both the verdict and the
 		// booleans reported next to it come from that single snapshot. Reading
@@ -1973,12 +1985,12 @@ func isDemoReviewer(id *auth.Identity, demoReviewerTGID int64) bool {
 	return id != nil && demoReviewerTGID != 0 && id.TelegramID == demoReviewerTGID
 }
 
-func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64) (real bool, reason string) {
-	return evaluateWriteGate(ctx, store, id, allowSend, demoReviewerTGID, "telegram:messages:send")
+func evaluateSendGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, reviewer reviewerGate) (real bool, reason string) {
+	return evaluateWriteGate(ctx, store, id, allowSend, reviewer, "telegram:messages:send")
 }
 
-func evaluateWriteGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, demoReviewerTGID int64, requiredScope string) (real bool, reason string) {
-	if decided, r, reason := evaluateWriteGateBeforeAccount(id, allowSend, demoReviewerTGID, requiredScope); decided {
+func evaluateWriteGate(ctx context.Context, store *db.Store, id *auth.Identity, allowSend bool, reviewer reviewerGate, requiredScope string) (real bool, reason string) {
+	if decided, r, reason := evaluateWriteGateBeforeAccount(id, allowSend, reviewer, requiredScope); decided {
 		return r, reason
 	}
 	if store == nil {
@@ -2000,24 +2012,26 @@ func evaluateWriteGate(ctx context.Context, store *db.Store, id *auth.Identity, 
 //
 // decided=false means the identity-level conditions all passed and only the
 // per-account flag is left to check.
-func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, demoReviewerTGID int64) (decided, real bool, reason string) {
-	return evaluateWriteGateBeforeAccount(id, allowSend, demoReviewerTGID, "telegram:messages:send")
+func evaluateSendGateBeforeAccount(id *auth.Identity, allowSend bool, reviewer reviewerGate) (decided, real bool, reason string) {
+	return evaluateWriteGateBeforeAccount(id, allowSend, reviewer, "telegram:messages:send")
 }
 
-func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, demoReviewerTGID int64, requiredScope string) (decided, real bool, reason string) {
+func evaluateWriteGateBeforeAccount(id *auth.Identity, allowSend bool, reviewer reviewerGate, requiredScope string) (decided, real bool, reason string) {
 	if id == nil {
 		return true, false, "no authenticated identity (write requires auth)"
 	}
-	// Reviewer/demo account: force a dry-run preview unconditionally, ahead of
-	// every other check, so the reviewer always sees the preview-only reason
-	// (not a generic ALLOW_SEND/scope message). This is independent of the
-	// per-account send_enabled flag, which the in-browser connect flow re-enables
-	// on every reconnect, and of the MCP client's own write-confirmation UI,
-	// which ChatGPT may auto-resolve. Tying the guarantee to the reviewer
-	// identity is the only dependable way to keep the App Directory reviewer's
-	// sends preview-only.
-	if isDemoReviewer(id, demoReviewerTGID) {
-		return true, false, "reviewer/demo account — sending is preview-only; no message is delivered"
+	// Reviewer/demo account: refused unconditionally, ahead of every other
+	// check, unless reviewerGateFor cleared this exact call (send_message or
+	// send_reply to an allowlisted test chat), so the reviewer always sees
+	// the reviewer reason rather than a generic ALLOW_SEND/scope message. This
+	// is independent of the per-account send_enabled flag, which the
+	// in-browser connect flow re-enables on every reconnect, and of the MCP
+	// client's own write-confirmation UI, which a client may auto-resolve.
+	// Tying the guarantee to the reviewer identity is the only dependable way
+	// to bound what the directory reviewer can change. A cleared call still
+	// meets every check below.
+	if isDemoReviewer(id, reviewer.tgID) && !reviewer.cleared {
+		return true, false, reasonReviewerWriteRefused
 	}
 	if !allowSend {
 		return true, false, "server flag ALLOW_SEND=false — flip in deployment env to allow real sends"
@@ -2742,7 +2756,7 @@ Inputs (required):
 		if peer == "" || messageID == 0 || text == "" {
 			return mcplib.NewToolResultError("peer, message_id, and text are required"), nil
 		}
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("edit_message", peer))
 		if !canSend {
 			return mcplib.NewToolResultError("edit blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
@@ -2798,7 +2812,7 @@ Inputs (required):
 		if peer == "" || !ok || len(messageIDs) == 0 {
 			return mcplib.NewToolResultError("peer and non-empty message_ids are required"), nil
 		}
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("delete_messages", peer))
 		if !canSend {
 			return mcplib.NewToolResultError("delete blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
@@ -2855,7 +2869,7 @@ Inputs (required):
 		if fromPeer == "" || toPeer == "" || !ok || len(messageIDs) == 0 {
 			return mcplib.NewToolResultError("from_peer, to_peer, and non-empty message_ids are required"), nil
 		}
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("forward_messages", toPeer))
 		if !canSend {
 			return mcplib.NewToolResultError("forward blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
@@ -3040,7 +3054,7 @@ Inputs (optional):
 		if peer == "" || messageID == 0 {
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
 		}
-		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		canSend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("set_reaction", peer))
 		if !canSend {
 			return mcplib.NewToolResultError("reaction blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}

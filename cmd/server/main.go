@@ -607,11 +607,12 @@ func main() {
 	// docs/reports/mcp-apps-spike.md. Logged at startup like AGENT_ENABLED so
 	// the resolved value is visible in the deployment logs, not just in env.
 	slog.Info("mcp apps prototype surface", "enabled", cfg.AppsEnabled)
-	// Force the reviewer/demo account's sends to dry-run previews. Only armed
-	// when reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
+	// Refuse the reviewer/demo account's writes, except send_message and
+	// send_reply to a DEMO_REVIEWER_WRITE_PEERS test chat. Only armed when
+	// reviewer mode is enabled, so a leftover DEMO_REVIEWER_TG_ID cannot
 	// silently gag a real account once the review feature is turned off.
 	if cfg.DemoReviewerEnabled {
-		mcpSrv = mcpSrv.WithDemoReviewer(cfg.DemoReviewerTGID)
+		mcpSrv = mcpSrv.WithDemoReviewer(cfg.DemoReviewerTGID, cfg.DemoReviewerWritePeers)
 	}
 
 	// Bridge token endpoint: authenticated users exchange their MCP JWT for
@@ -1091,7 +1092,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	)
 	if cfg.DemoReviewerEnabled {
 		slog.Warn("DEMO_REVIEWER_ENABLED is on — /oauth/authorize exposes a password-gated reviewer login; disable after the review",
-			"demo_tg_id", cfg.DemoReviewerTGID)
+			"demo_tg_id", cfg.DemoReviewerTGID, "demo_write_peers", len(cfg.DemoReviewerWritePeers))
 	}
 	return srv, nil
 }
