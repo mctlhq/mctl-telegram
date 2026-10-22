@@ -1276,3 +1276,59 @@ func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
 		t.Fatalf("tier after raced finishEnable = %q, want %q (admin none must survive)", tier, db.TierNone)
 	}
 }
+
+// TestEnableAccess_AccountDeletedDuringLogin is #821: the account is deleted
+// while the user is still entering the login code. The session the login
+// then writes must not outlive the delete, and no code is issued. The happy
+// path above is the control.
+func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
+	login := func(ctx context.Context, apiID int, apiHash string, store *db.Store,
+		uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
+	) (int64, string, string, error) {
+		if _, err := askCode(ctx); err != nil {
+			return 0, "", "", err
+		}
+		if _, err := store.HardDeleteAccount(ctx, uid); err != nil {
+			return 0, "", "", err
+		}
+		// gotd persists the session bytes after the delete committed.
+		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+			return 0, "", "", err
+		}
+		return 500100101, "Dana", "dana_tg", nil
+	}
+	srv, mux := newEnableTestServer(t, login)
+	es := driveToPhone(t, mux)
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+	body := rec.Body.String()
+	if rec.Code == http.StatusFound || strings.Contains(body, "code=") {
+		t.Fatalf("a login that raced the delete issued a code: %d %s", rec.Code, body)
+	}
+	if !strings.Contains(body, "deleted while the sign-in was in progress") {
+		t.Errorf("body = %s, want the deleted-during-sign-in notice", body)
+	}
+
+	ctx := context.Background()
+	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "", "")
+	if err != nil {
+		t.Fatalf("resolve user: %v", err)
+	}
+	var rows int
+	if err := srv.store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("%d telegram_accounts rows survive a delete that the login raced", rows)
+	}
+}

@@ -142,7 +142,7 @@ func isAbandonment(err error) bool {
 // when a /start re-submission supersedes it. wantTgID is the OIDC-proven
 // Telegram id — the goroutine rejects the flow if the phone login resolves to
 // a different account.
-func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn bool) *loginFlow {
+func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn bool, signInStartedAt time.Time) *loginFlow {
 	lf := &loginFlow{
 		codeCh:   make(chan string),
 		pwCh:     make(chan string),
@@ -395,7 +395,11 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			lf.err = errors.New("login completed but no session bytes were persisted")
 			return
 		}
-		if serr := s.store.SaveSession(bgCtx, uid, pt, tgID, displayName, username); serr != nil {
+		// SaveSessionForSignIn, not SaveSession: a delete that committed
+		// while this sign-in was in progress must not leave the new session
+		// behind (#821). On that refusal it has already dropped the hosted
+		// rows; the deferred repair handles a local row's blob.
+		if serr := s.store.SaveSessionForSignIn(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt); serr != nil {
 			// The deferred repair above covers this: SaveSession's own guard
 			// is gated on account state rather than on ErrAccountModeConflict
 			// precisely because it can fail with the CodeTTL deadline instead
@@ -773,7 +777,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 	es.phone = phone
 	es.sendOptIn = sendOptIn
-	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn)
+	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn, es.oc.SignInStartedAt)
 	es.step = stepCode
 	lf := es.flow
 
@@ -1147,6 +1151,9 @@ func friendlyErr(err error) string {
 	if errors.Is(err, db.ErrAccountModeConflict) {
 		return localModeConnectMsg
 	}
+	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
+		return accountDeletedDuringSignInMsg
+	}
 	// Map well-known MTProto error codes to human-readable messages.
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
@@ -1208,6 +1215,9 @@ func shortReason(err error) string {
 	}
 	if errors.Is(err, db.ErrAccountModeConflict) {
 		return "local_mode_active"
+	}
+	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
+		return "account_deleted"
 	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
