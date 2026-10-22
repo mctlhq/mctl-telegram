@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.87.2](https://github.com/mctlhq/mctl-telegram/compare/0.87.1...0.87.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **oauth:** refuse a sign-in that raced an account delete ([19b65d2](https://github.com/mctlhq/mctl-telegram/commit/19b65d2a8d8b0d6a201cce8e53d358236f4e2593))
+* **oauth:** refuse a sign-in that raced an account delete ([6808634](https://github.com/mctlhq/mctl-telegram/commit/68086349dd68bb5ad7cedb9f2939bc3074807aca)), closes [#817](https://github.com/mctlhq/mctl-telegram/issues/817)
+
 ## [0.87.1](https://github.com/mctlhq/mctl-telegram/compare/0.87.0...0.87.1) (2026-10-22)
 
 
