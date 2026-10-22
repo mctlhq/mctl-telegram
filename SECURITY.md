@@ -113,7 +113,7 @@ Real Telegram sends through `send_message` or `send_media` require **all** of:
 
 The account configured as the demo/reviewer account (`DEMO_REVIEWER_*`) is checked ahead of every other condition. Its writes are refused with an error, never a preview, except `send_message` and `send_reply` to a test chat listed in `DEMO_REVIEWER_WRITE_PEERS`, and those still need every condition above. The list fails closed: when it is empty or unset, the reviewer can deliver nothing. Every other write tool (`send_media`, `edit_message`, `delete_messages`, `forward_messages`, `set_reaction`, `pin_message`, and the account, operator and broadcast tools) stays refused for that account. A tool added without an explicit decision is refused too (`internal/mcp/reviewer.go`).
 
-The tool exposes no trusted client-controlled bypass for these gates. Any condition false returns a dry-run result (`sent=false`) with a `dry_reason`; no send RPC reaches Telegram. Media dry-runs do not fetch a URL or decode base64 content.
+The tool exposes no trusted client-controlled bypass for these gates. Apart from the reviewer refusal above, which is an error, any condition false returns a dry-run result (`sent=false`) with a `dry_reason`; no send RPC reaches Telegram. Media dry-runs do not fetch a URL or decode base64 content.
 
 ## Authentication-required mode
 
