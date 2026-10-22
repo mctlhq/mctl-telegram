@@ -1059,11 +1059,26 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// rather than "not_supplied" (which would falsely claim Telegram never
 	// sent these names).
 	//
+	// telegram_username is cleared for the same reason: when Telegram sends
+	// no username, sign-in stores the display name there (see
+	// EnsureUserByTelegramID). A later sign-in that carries a name fills
+	// them in again.
+	// telegram_login_id stays: it is the key a later sign-in and the
+	// worker-token revocations below are matched on.
+	//
 	// account_deleted_at marks the delete for the authorization-code
-	// exchange, which refuses a code issued before it.
+	// exchange, which refuses a code issued before it. Every revocation in
+	// this delete is stamped with this one now, taken after the users-row
+	// lock. Known gap: a code issued between this read and the commit
+	// post-dates the marker, so its exchange (which waits on the users-row
+	// lock) succeeds after the commit and mints a family this delete never
+	// saw. The Telegram session is gone, so that family can act only after
+	// the user signs in again. Closing it needs the code issue path to take
+	// the users-row lock too; the window is this transaction's duration.
+	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
-		userID, time.Now().UTC(),
+		`UPDATE users SET telegram_username = NULL, telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
+		userID, now,
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}
@@ -1071,9 +1086,16 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// Revoke every OAuth refresh-token family in the same transaction. The
 	// users row survives deletion, so the oauth_refresh_tokens ON DELETE
 	// CASCADE never fires; without this, connected clients keep rotating.
-	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, time.Now().UTC())
+	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, now)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
+	}
+	// Refresh rows outlive the delete until they expire, and each carries a
+	// copy of the username taken from the authorization code.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE oauth_refresh_tokens SET telegram_username = NULL WHERE user_id = $1`, userID,
+	); err != nil {
+		return 0, fmt.Errorf("delete account: clear refresh-token usernames: %w", err)
 	}
 
 	// Worker tokens and Local Bridge devices are credentials the user issued
@@ -1092,7 +1114,6 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// single writer), so only deletes of two users that share a Telegram id
 	// can race to insert one row each; the cache keeps only the newest
 	// revocation per id.
-	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE worker_token_revocations SET revoked_at = $1

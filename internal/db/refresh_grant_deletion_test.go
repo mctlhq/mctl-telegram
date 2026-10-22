@@ -5,26 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/stdlib"
 )
-
-// grantDialects runs body on SQLite and, when TEST_DATABASE_URL is set, on
-// Postgres. base offsets the Telegram ids per run, because the Postgres
-// database is reused across runs.
-func grantDialects(t *testing.T, body func(t *testing.T, s *Store, base int64)) {
-	t.Run("sqlite", func(t *testing.T) { body(t, newTestStore(t), 9300000) })
-	t.Run("postgres", func(t *testing.T) {
-		dsn := os.Getenv("TEST_DATABASE_URL")
-		if dsn == "" {
-			t.Skip("TEST_DATABASE_URL not set")
-		}
-		body(t, newPostgresTestStore(t, dsn), 9400000000+(time.Now().UnixNano()/1000)%100000000)
-	})
-}
 
 func liveRefreshTokens(t *testing.T, s *Store, uid int64) int {
 	t.Helper()
@@ -40,7 +25,7 @@ func liveRefreshTokens(t *testing.T, s *Store, uid int64) int {
 // family after it (#796); one issued after the delete, by a user who signed
 // in again, still may.
 func TestSaveRefreshTokenForGrant_RefusesGrantIssuedBeforeDelete(t *testing.T) {
-	grantDialects(t, func(t *testing.T, s *Store, base int64) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
 		ctx := context.Background()
 		tgID := base + 1
 		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice", "Alice")
@@ -140,16 +125,18 @@ func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 // NewStore resolves the dialect from the driver, so the credential writes
 // never depend on the probe for a store opened by Open.
 func TestNewStore_ResolvesDialectFromDriver(t *testing.T) {
-	grantDialects(t, func(t *testing.T, s *Store, _ int64) {
+	deletionDialects(t, func(t *testing.T, s *Store, _ int64) {
 		fresh := NewStore(s.DB, nil)
 		fresh.probeFail = func() error { return errors.New("driver: bad connection") }
 		pg, err := fresh.postgresDialect(context.Background())
 		if err != nil {
 			t.Fatalf("dialect of a store opened by Open: %v", err)
 		}
-		_, isPg := s.DB.Driver().(*stdlib.Driver)
-		if pg != isPg {
-			t.Fatalf("postgresDialect = %v, want %v", pg, isPg)
+		// The subtest, not the driver, says which database this is: deriving
+		// it from the driver type would repeat NewStore's own assertion.
+		wantPg := strings.HasSuffix(t.Name(), "/postgres")
+		if pg != wantPg {
+			t.Fatalf("postgresDialect = %v, want %v", pg, wantPg)
 		}
 	})
 }
