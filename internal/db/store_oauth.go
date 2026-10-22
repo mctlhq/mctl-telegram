@@ -289,9 +289,10 @@ func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode, userID int64, 
 }
 
 // AccountDeletedSince reports whether userID's account was deleted at or
-// after at. It is the unlocked check for the in-memory code store, which
-// runs only against single-process SQLite; the database-backed path checks
-// inside InsertOAuthCode under the users-row lock instead.
+// after at. It is the unlocked check for the in-memory code store, used only
+// with SQLite; the database-backed path checks inside InsertOAuthCode under
+// the users-row lock instead. Without the lock it cannot see a delete that
+// has written its marker but not yet committed (see HardDeleteAccount).
 func (s *Store) AccountDeletedSince(ctx context.Context, userID int64, at time.Time) (bool, error) {
 	if userID <= 0 {
 		return false, errors.New("account deleted since: missing user id")

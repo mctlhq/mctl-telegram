@@ -376,8 +376,10 @@ func TestInsertOAuthCode_PostgresCodeIssuedDuringDelete(t *testing.T) {
 	}
 	insErr := <-insDone
 	if insErr == nil {
-		// The code was stored: its exchange is what must not leave a live
-		// family behind.
+		// The contract is that no code is stored (asserted below). This
+		// block only localises a failure: when the insert slipped through,
+		// it shows whether the code also mints a live family, which is the
+		// #817 hole itself, instead of a bare error mismatch.
 		run := time.Now().UnixNano()
 		rt := RefreshToken{FamilyID: fmt.Sprintf("code-gap-fam-%d", run), UserID: uid, ClientID: "claude.ai",
 			TelegramID: tgID, Scope: "telegram:dialogs:read", ExpiresAt: time.Now().Add(time.Hour)}

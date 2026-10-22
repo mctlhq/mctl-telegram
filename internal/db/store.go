@@ -1072,10 +1072,14 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// account_deleted_at marks the delete for the authorization-code
 	// exchange, which refuses a code issued before it. Every revocation in
 	// this delete is stamped with this one now, taken after the users-row
-	// lock. Issuing a code takes the same lock (InsertOAuthCode), so no
-	// code can be stored between this read and the commit: one stored
-	// earlier is refused at its exchange, and a sign-in that started before
-	// this moment is refused when it stores its code after the commit.
+	// lock. On Postgres, issuing a code takes the same lock
+	// (InsertOAuthCode), so no code can be stored between this read and the
+	// commit: one stored earlier is refused at its exchange, and a sign-in
+	// that started before this moment is refused when it stores its code
+	// after the commit. On SQLite the code store is in memory and its check
+	// (AccountDeletedSince) takes no lock, so a code stamped between this
+	// read and the commit can still mint a family; the window is this
+	// transaction's duration.
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET telegram_username = NULL, telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,

@@ -364,13 +364,11 @@ func (s *Store) SaveRefreshTokenForGrant(ctx context.Context, plaintext string, 
 	if pg {
 		lock = " FOR SHARE"
 	}
-	var deletedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx,
-		`SELECT account_deleted_at FROM users WHERE id = $1`+lock, rt.UserID,
-	).Scan(&deletedAt); err != nil {
-		return fmt.Errorf("save refresh token: read account deletion: %w", err)
+	deleted, err := accountDeletedSince(ctx, tx, rt.UserID, grantIssuedAt, lock)
+	if err != nil {
+		return fmt.Errorf("save refresh token: %w", err)
 	}
-	if deletedAt.Valid && !deletedAt.Time.Before(grantIssuedAt) {
+	if deleted {
 		return ErrAccountDeletedSinceGrant
 	}
 	if s.grantSaveHook != nil {
