@@ -757,7 +757,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 	// with a positive TTL). No /oauth/register call is needed for this client.
 	s.clients[ConnectClientID] = &clientReg{
 		ClientID:     ConnectClientID,
-		ClientName:   "mctl-telegram connect",
+		ClientName:   "MCTL connect",
 		RedirectURIs: []string{connectRedirectURI(cfg.Issuer)},
 		CreatedAt:    time.Time{}, // zero — never swept
 	}
