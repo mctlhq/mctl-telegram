@@ -286,7 +286,7 @@
       </div>
       <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <div class="flow-node">
-        <span class="node-name">mctl-telegram</span>
+        <span class="node-name">MCTL</span>
         <span class="node-label">MCP server</span>
       </div>
       <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -296,9 +296,9 @@
       </div>
     </div>
     <ol class="steps">
-      <li>You authorise with Telegram sign-in. mctl-telegram stores an encrypted MTProto session on your behalf.</li>
+      <li>You authorise with Telegram sign-in. MCTL stores an encrypted MTProto session on your behalf.</li>
       <li>When you prompt your assistant, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
-      <li>mctl-telegram makes MTProto calls to Telegram, formats the result, and returns it to your assistant.</li>
+      <li>MCTL makes MTProto calls to Telegram, formats the result, and returns it to your assistant.</li>
     </ol>
   </section>
 
@@ -351,7 +351,7 @@
       <h2>Our trust model</h2>
     </div>
     <div class="trust-card">
-      <p>mctl-telegram holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
+      <p>MCTL holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
       <ul>
         <li><strong>Sessions are AES-256-GCM encrypted at rest</strong> with per-user keys derived via HKDF-SHA256.</li>
         <li><strong>No message text, phone numbers, or 2FA passwords are ever logged or persisted</strong> — enforced by the slog redaction handler.</li>
@@ -404,7 +404,7 @@
       </div>
       <div class="faq-item">
         <dt>Is this an official Telegram app?</dt>
-        <dd>No. mctl-telegram is an independent project, not affiliated with or endorsed by Telegram, OpenAI or Anthropic. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
+        <dd>No. MCTL is an independent project, not affiliated with or endorsed by Telegram, OpenAI or Anthropic. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
@@ -415,7 +415,7 @@
         <dd>Your conversation prompts, the tool arguments ChatGPT sends (e.g. peer, message text for drafts), and the tool results this server returns. That traffic is handled by ChatGPT under OpenAI's policies. This server stores only an encrypted session blob and audit metadata — see <a href="/privacy">/privacy</a>.</dd>
       </div>
       <div class="faq-item">
-        <dt>What data does mctl-telegram store?</dt>
+        <dt>What data does MCTL store?</dt>
         <dd>Only an encrypted session blob per account. No message text is ever stored or logged. The audit log records tool names and redacted peer references only.</dd>
       </div>
       <div class="faq-item">
