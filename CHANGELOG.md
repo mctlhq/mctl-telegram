@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.86.2](https://github.com/mctlhq/mctl-telegram/compare/0.86.1...0.86.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **oauth:** refuse a code exchange for an account deleted after the code ([148d7fc](https://github.com/mctlhq/mctl-telegram/commit/148d7fc2c52c50cdfb5d7db63d3a474c903718ce))
+
 ## [0.86.1](https://github.com/mctlhq/mctl-telegram/compare/0.86.0...0.86.1) (2026-10-21)
 
 
