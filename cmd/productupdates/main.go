@@ -228,14 +228,25 @@ func loadProfiles(repo, baseline string, stderr io.Writer) (productupdate.Profil
 }
 
 // baselineCarriesProfileSnapshots reports whether rev's tree holds any
-// profile snapshot, docs/tool-descriptors.<name>.json, whatever the name.
+// profile snapshot, whatever the profile's name: a
+// docs/tool-descriptors.<name>.json that parses as a snapshot labelled with a
+// profile. The label decides, as it does at HEAD, so another file sharing
+// the stem (a JSON Schema for the format, say) is not taken for one. ls-tree
+// is not recursive, so only docs/ itself is listed, never docs/design/.
 func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
 	out, err := git(repo, "ls-tree", "--name-only", rev, "--", "docs/")
 	if err != nil {
 		return false, err
 	}
 	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
-		if path != snapshotPath && strings.HasPrefix(path, "docs/tool-descriptors.") && strings.HasSuffix(path, ".json") {
+		if path == snapshotPath || !strings.HasPrefix(path, "docs/tool-descriptors.") || !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		raw, err := git(repo, "show", rev+":"+path)
+		if err != nil {
+			return false, err
+		}
+		if snap, err := productupdate.ParseSnapshot([]byte(raw)); err == nil && snap.Surface.Profile != "" {
 			return true, nil
 		}
 	}

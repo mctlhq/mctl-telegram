@@ -100,10 +100,12 @@ func Gate(feed Feed, baseline string, releases []string, previous, current Snaps
 
 // GateProfiles is Gate over the full surface and every tool profile surface.
 // Each profile's diff from the baseline is required like the full one, with
-// one exception: an item the full diff already shows for the same tool and
-// change (a tool added everywhere, a schema changed for everyone) is covered
-// by the entry that claims it on the full surface. A profile-scoped claim
-// (Claim.Profile) is needed only for what the profile alone changed.
+// one exception: an item the full diff already shows is covered by the entry
+// that claims it on the full surface. For an addition or a removal that is
+// the same tool and change. For a schema or annotations change it holds only
+// where the profile shows the tool exactly as the full surface does, before
+// and after; on a tool a profile rule shapes, the profile's change needs its
+// own profile-scoped claim (Claim.Profile).
 func GateProfiles(feed Feed, baseline string, releases []string, previous, current Snapshot, profiles Profiles) (GateReport, error) {
 	atHead := map[string]bool{}
 	for _, ps := range profiles.Surfaces {

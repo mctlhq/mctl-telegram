@@ -205,9 +205,11 @@ What they do **not** do:
    passed through the request path's `scopeToolFilter` for an identity with
    the profile and every scope, held byte for byte by
    `TestProfileDescriptorSnapshotsMatchRegistry`. The gate diffs each one
-   against the baseline. An item the full diff already shows for the same
-   tool and change is covered by the full-surface entry. Anything else
-   needs a claim with `profile:`. A baseline with no profile snapshots at
+   against the baseline. An addition or removal the full diff already shows
+   is covered by the full-surface entry, and so is a schema or annotations
+   change on a tool the profile shows exactly as the full surface does.
+   Anything else, including any schema change on a tool a profile rule
+   shapes, needs a claim with `profile:`. A baseline with no profile snapshots at
    all leaves every profile in its bootstrap window; once one carries any,
    a profile missing from it is a new surface whose tools were all added.
 4. Gitops: bind Town's client to a profile once Town uses a URL

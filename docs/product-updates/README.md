@@ -71,6 +71,17 @@ evidence:
     - {tool: get_messages, change: schema, profile: core-readonly}
 ```
 
+On a tool every profile rules, such as `get_messages` (both core profiles
+bound its `limit`), a schema change for everyone therefore takes one claim
+per surface in the same entry:
+
+```yaml
+  changes:
+    - {tool: get_messages, change: schema}
+    - {tool: get_messages, change: schema, profile: core-readonly}
+    - {tool: get_messages, change: schema, profile: core-reply}
+```
+
 The profile must be one this build knows, and its snapshot must exist at HEAD.
 Until a release carries profile snapshots, every profile is in its own
 bootstrap window: nothing is required of it and a profile-scoped claim is
@@ -84,7 +95,9 @@ the profile shows that tool exactly as the full surface does, before and after.
 On a tool a profile rule shapes (a bound on `limit`, a forbidden argument), a
 schema change for everyone also changes the profile's view, and that needs its
 own `profile:` claim: the full-surface entry cannot tell whether the rule
-changed too.
+changed too. An addition or a removal stays one fact whatever the rule: it
+has no "before" to compare, and the profile snapshot that shows the rule
+the new tool arrives with is in the same pull request as the entry.
 
 Deleting a whole profile is not gated. The gate enumerates the profiles this
 build defines, so a deleted profile's baseline snapshot is never diffed and

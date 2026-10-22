@@ -283,6 +283,21 @@ func TestARenamedProfileIsNotBackInBootstrap(t *testing.T) {
 	}
 }
 
+// A file that only shares the snapshot stem is not a profile snapshot: the
+// profiles stay in their bootstrap window.
+func TestAStemLookalikeIsNotAProfileSnapshot(t *testing.T) {
+	r := newRepo(t)
+	r.surface(snapshotPath, "", listDialogs)
+	r.write("docs/tool-descriptors.schema.json", `{"$schema":"https://json-schema.org/draft/2020-12/schema"}`)
+	r.commit("a schema for the snapshot format")
+	r.git("tag", "0.70.0")
+	r.snapshot(listDialogs)
+	r.commit("profile snapshots")
+	if code, out := r.gate(); code != exitOK {
+		t.Fatalf("lookalike file closed the bootstrap window: exit %d\n%s", code, out)
+	}
+}
+
 func TestEveryProfileCommitsItsSnapshot(t *testing.T) {
 	r := newRepo(t)
 	r.snapshot(listDialogs)
