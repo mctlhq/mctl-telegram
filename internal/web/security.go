@@ -49,7 +49,7 @@ var (
 func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(securityTmpl, "security", ui.Data{
 		Title:         "MCTL — security model",
-		Description:   "How mctl-telegram protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
+		Description:   "How MCTL protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
 		NavActive:     "security",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
@@ -61,7 +61,7 @@ func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 func Privacy(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(privacyTmpl, "privacy", ui.Data{
 		Title:         "MCTL — privacy",
-		Description:   "What mctl-telegram stores and for how long: only an encrypted session blob per account, no message text, and one-click disconnect or full deletion any time.",
+		Description:   "What MCTL stores and for how long: only an encrypted session blob per account, no message text, and one-click disconnect or full deletion any time.",
 		NavActive:     "privacy",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,

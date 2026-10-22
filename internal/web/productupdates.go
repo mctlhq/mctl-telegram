@@ -49,7 +49,7 @@ func ProductUpdates(groups []productupdate.ReleaseGroup, loadErr error, publicBa
 	data := productUpdatesData{
 		Data: ui.Data{
 			Title:         "MCTL — product updates",
-			Description:   "Reviewed product updates for mctl-telegram, grouped by release: new tools, changed behavior and deprecations.",
+			Description:   "Reviewed product updates for MCTL, grouped by release: new tools, changed behavior and deprecations.",
 			NavActive:     "docs",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 			ShowManage:    showManage,
