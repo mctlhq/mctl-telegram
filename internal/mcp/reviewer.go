@@ -73,7 +73,6 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	// caller's own state on this server. set_send_consent cannot widen the
 	// reviewer: the reviewer rules apply whatever send_enabled says.
 	"prepare_send_message":            reviewerNoTelegramWrite,
-	"prepare_pin_message":             reviewerNoTelegramWrite,
 	"set_send_consent":                reviewerNoTelegramWrite,
 	"set_my_notification_preferences": reviewerNoTelegramWrite,
 
@@ -88,6 +87,9 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	"forward_messages": reviewerRefused,
 	"set_reaction":     reviewerRefused,
 	"pin_message":      reviewerRefused,
+	// The reviewer may prepare only what it may confirm. prepare_pin_message
+	// also debits the per-peer send budget the allowlisted send needs.
+	"prepare_pin_message": reviewerRefused,
 
 	// Device, operator and broadcast tools: none is part of a review.
 	"revoke_local_bridge_device": reviewerRefused,
