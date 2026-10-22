@@ -93,8 +93,9 @@ service outage unless new authorization-code flows also fail.
   boundary the client cannot step around. A `client_id` binding of an
   implicit client has the same property. A `redirect_uri` the authorize
   endpoint could never accept (not `https`, `http` off loopback, userinfo,
-  a backslash) stops the server at startup. The self-connect client's callback (`<issuer>/telegram/connect/done`)
-  cannot be bound: the server refuses to start.
+  a backslash) stops the server at startup. The self-connect client's
+  callback (`<issuer>/telegram/connect/done`) cannot be bound: the server
+  refuses to start.
 - **Refresh-token families issued before 0.87.0 have no stored
   `redirect_uri`.** While at least one `redirect_uri` record is set, such a
   family is refused at refresh (`invalid_grant`, "authorize again") unless a
