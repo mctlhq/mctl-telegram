@@ -48,8 +48,8 @@ var (
 // nothing user-specific here, only the deployment-wide security policy.
 func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(securityTmpl, "security", ui.Data{
-		Title:         "mctl-telegram — security model",
-		Description:   "How mctl-telegram protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
+		Title:         "MCTL — security model",
+		Description:   "How MCTL protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
 		NavActive:     "security",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
@@ -60,8 +60,8 @@ func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 // rationale as Security() above.
 func Privacy(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(privacyTmpl, "privacy", ui.Data{
-		Title:         "mctl-telegram — privacy",
-		Description:   "What mctl-telegram stores and for how long: only an encrypted session blob per account, no message text, and one-click disconnect or full deletion any time.",
+		Title:         "MCTL — privacy",
+		Description:   "What MCTL stores and for how long: only an encrypted session blob per account, no message text, and one-click disconnect or full deletion any time.",
 		NavActive:     "privacy",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
@@ -72,7 +72,7 @@ func Privacy(publicBaseURL string, showManage bool) http.HandlerFunc {
 // above — a hand-authored static page, anonymous-accessible.
 func Terms(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(termsTmpl, "terms", ui.Data{
-		Title:         "mctl-telegram — terms of service",
+		Title:         "MCTL — terms of service",
 		NavActive:     "terms",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,

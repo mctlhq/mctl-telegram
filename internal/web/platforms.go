@@ -58,8 +58,8 @@ func Platforms(publicBaseURL, mcpPath, authServer string, showManage bool, f Pla
 	}
 	return chromePage(platformsTmpl, "platforms", platformsData{
 		Data: ui.Data{
-			Title:         "mctl-telegram — for agent platforms",
-			Description:   "How an agent platform or MCP gateway connects its users to mctl-telegram: OAuth with DCR or Client ID Metadata Documents, scopes, limits, reliability targets and revocation.",
+			Title:         "MCTL — for agent platforms",
+			Description:   "How an agent platform or MCP gateway connects its users to MCTL: OAuth with DCR or Client ID Metadata Documents, scopes, limits, reliability targets and revocation.",
 			NavActive:     "platforms",
 			PublicBaseURL: base,
 			ShowManage:    showManage,

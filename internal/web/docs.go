@@ -23,7 +23,7 @@ func Docs(publicBaseURL, mcpPath, authServer string, showManage bool) http.Handl
 		authServer = base
 	}
 	data := landingData{
-		Data:         ui.Data{Title: "mctl-telegram — Developer reference", Description: "Developer reference for mctl-telegram: MCP tool definitions, OAuth setup, and the database schema for the Telegram MCP server.", NavActive: "docs", PublicBaseURL: base, ShowManage: showManage},
+		Data:         ui.Data{Title: "MCTL — Developer reference", Description: "Developer reference for MCTL: MCP tool definitions, OAuth setup, and the database schema for the Telegram MCP server.", NavActive: "docs", PublicBaseURL: base, ShowManage: showManage},
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,

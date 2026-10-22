@@ -70,7 +70,7 @@ var defs = `
 {{end}}` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="mctl-telegram">
+<meta property="og:site_name" content="MCTL">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">
@@ -90,8 +90,7 @@ var defs = `
 
 {{define "ui_topbar"}}<header class="topbar">
     <a class="brand" href="/">
-      <span class="mark">M</span>
-      <span>mctl-telegram</span>
+      <span>MCTL</span>
     </a>
     <nav class="meta">
       <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>home</a>
@@ -112,7 +111,7 @@ var defs = `
 
 {{define "ui_footer"}}<footer>
     <div class="links">
-      <span class="brand-mark">mctl-telegram</span>
+      <span class="brand-mark">MCTL</span>
       <span class="sep">·</span>
       <a href="/">home</a>
       <span class="sep">·</span>
@@ -155,14 +154,13 @@ var defs = `
 // their HTML by string concatenation instead of the template defines.
 const topbarLiteHTML = `<header class="topbar">
     <a class="brand" href="/">
-      <span class="mark">M</span>
-      <span>mctl-telegram</span>
+      <span>MCTL</span>
     </a>
   </header>`
 
 const footerLiteHTML = `<footer>
     <div class="links">
-      <span class="brand-mark">mctl-telegram</span>
+      <span class="brand-mark">MCTL</span>
       <span class="sep">·</span>
       <a href="/">home</a>
       <span class="sep">·</span>
