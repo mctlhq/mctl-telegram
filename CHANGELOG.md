@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.87.0](https://github.com/mctlhq/mctl-telegram/compare/0.86.2...0.87.0) (2026-10-22)
+
+
+### Features
+
+* **oauth:** bind tool profiles by redirect_uri ([4669217](https://github.com/mctlhq/mctl-telegram/commit/4669217c3ef9ce78ba91ee548c4f5b25d4bd6b93))
+* **productupdate:** commit and gate a snapshot per tool profile ([cd66fa2](https://github.com/mctlhq/mctl-telegram/commit/cd66fa24a42e15cc9a9f19e4cb10e6e806fe141f))
+
+
+### Bug Fixes
+
+* **productupdates:** fail on an unparseable baseline profile snapshot ([4785913](https://github.com/mctlhq/mctl-telegram/commit/47859136ca2d70dc50989233a1bbf5a0eb4414e0))
+* **productupdates:** read every baseline candidate before deciding ([0f944d1](https://github.com/mctlhq/mctl-telegram/commit/0f944d1fe5fd142068e2b6444cc2c4a39ee2eb3a))
+
 ## [0.86.2](https://github.com/mctlhq/mctl-telegram/compare/0.86.1...0.86.2) (2026-10-22)
 
 
