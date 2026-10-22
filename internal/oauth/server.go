@@ -2801,25 +2801,27 @@ var errProfileUnresolvable = errors.New("tool profile cannot be resolved: the gr
 // for errProfileUnresolvable. A fresh authorization stores the redirect_uri.
 const profileUnresolvableDescription = "this grant predates redirect_uri tool-profile binding; authorize again"
 
-// profileFor resolves origin against the binding table. A client_id binding
-// decides on its own. Otherwise a family whose redirect_uri is unknown is
-// refused while any redirect_uri binding exists: "could not read the
-// redirect_uri" must not become "matched no binding", which would mint an
-// unprofiled token for a client the operator restricted. With no
-// redirect_uri bindings an unknown redirect_uri cannot matter, so such
-// families keep refreshing exactly as before.
+// profileFor resolves origin against the binding table. With the
+// redirect_uri known, Bindings.Resolve decides, and it alone holds the
+// precedence (a client_id binding wins). With it unknown, only a client_id
+// binding can decide; otherwise the family is refused while any
+// redirect_uri binding exists: "could not read the redirect_uri" must not
+// become "matched no binding", which would mint an unprofiled token for a
+// client the operator restricted. With no redirect_uri bindings an unknown
+// redirect_uri cannot matter, so such families keep refreshing exactly as
+// before.
 func (s *Server) profileFor(origin tokenOrigin) (string, error) {
 	b := s.cfg.ClientProfiles
+	if origin.RedirectURIKnown {
+		return b.Resolve(origin.ClientID, origin.RedirectURI), nil
+	}
 	if p, ok := b.ByClientID[origin.ClientID]; ok {
 		return p, nil
 	}
-	if !origin.RedirectURIKnown {
-		if len(b.ByRedirectURI) > 0 {
-			return "", errProfileUnresolvable
-		}
-		return "", nil
+	if len(b.ByRedirectURI) > 0 {
+		return "", errProfileUnresolvable
 	}
-	return b.Resolve(origin.ClientID, origin.RedirectURI), nil
+	return "", nil
 }
 
 // issueRefreshToken generates an opaque refresh token, persists it (hashed),

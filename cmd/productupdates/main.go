@@ -241,8 +241,10 @@ func baselineCarriesProfileSnapshots(repo, rev string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// Every candidate is read before deciding, so the answer does not depend
-	// on how an unreadable file's name sorts against a readable snapshot's.
+	// A readable profile snapshot decides at once, since no unreadable
+	// candidate could change that answer. An unreadable one is only recorded
+	// and reported after the loop, so the answer does not depend on how its
+	// name sorts against a readable snapshot's.
 	var unreadable error
 	for _, path := range strings.Split(strings.TrimSpace(out), "\n") {
 		if path == snapshotPath || !strings.HasPrefix(path, "docs/tool-descriptors.") || !strings.HasSuffix(path, ".json") {

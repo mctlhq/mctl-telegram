@@ -99,21 +99,23 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
   the peer must be in the account's dialogs with at least one message,
   and for a group or channel the account must be a member (not left, not
   a min object). Readable is not enough: a public channel resolves by
-  `@username` and its history reads fine for a non-member. A response that
-  could not be read is an error, not a refusal.
+  `@username` and its history reads fine for a non-member. Any other peer
+  is refused with `ErrNoExistingDialog`. A response that could not be read
+  is an error, not a refusal.
 - Membership is not the right to post, so `draft_reply` also refuses, with
-  its own message, a conversation the account may not post text in: a
+  `ErrCannotPost`, a conversation the account may not post text in: a
   broadcast channel without `post_messages` admin rights, a gigagroup it
   does not administer, or a group whose rights forbid sending. The
   account's own banned rights, when present, are its effective rights (a
   per-member exception overrides the defaults); otherwise the defaults
-  apply, and creators and admins are exempt from them. A deleted user
-  account is refused with its own message, since nothing the user does
-  can make that reply possible. The refusal does not count against
-  either SLI: the session-borrow counter labels it `call_error`, and the
-  MCP record is synthesized, so it never feeds the tool-availability SLI.
-  The rights come from the same `getPeerDialogs` response; otherwise the
-  confirmation would be spent on a `CHAT_WRITE_FORBIDDEN` at send time.
+  apply, and creators and admins are exempt from them. The rights come
+  from the same `getPeerDialogs` response; otherwise the confirmation
+  would be spent on a `CHAT_WRITE_FORBIDDEN` at send time.
+- A deleted user account is refused with `ErrPeerDeleted`, since nothing
+  the user does can make that reply possible.
+- None of the three refusals counts against either SLI: the
+  session-borrow counter labels them `call_error`, and the MCP record is
+  synthesized, so they never feed the tool-availability SLI.
 - The text limit is 4096 UTF-16 units, as Telegram counts them (most emoji
   cost two), checked at draft time so it can never fail after the
   confirmation is spent.
