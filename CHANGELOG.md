@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.87.3](https://github.com/mctlhq/mctl-telegram/compare/0.87.2...0.87.3) (2026-10-22)
+
+
+### Bug Fixes
+
+* **db:** lock users row FOR NO KEY UPDATE in SaveSessionForSignIn ([49555cd](https://github.com/mctlhq/mctl-telegram/commit/49555cdd9e3dc7659893f4b34ae0106dc4df3266)), closes [#821](https://github.com/mctlhq/mctl-telegram/issues/821)
+* **oauth:** drop a session whose login raced an account delete ([3e9ffac](https://github.com/mctlhq/mctl-telegram/commit/3e9fface89ea72ca4092c3cee6b3aa7f69ce0b47))
+* **oauth:** drop a session whose login raced an account delete ([4167e68](https://github.com/mctlhq/mctl-telegram/commit/4167e689da8c915060b81fa79c673980c7d76445)), closes [#821](https://github.com/mctlhq/mctl-telegram/issues/821)
+
 ## [0.87.2](https://github.com/mctlhq/mctl-telegram/compare/0.87.1...0.87.2) (2026-10-22)
 
 
