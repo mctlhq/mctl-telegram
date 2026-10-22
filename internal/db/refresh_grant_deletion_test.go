@@ -651,7 +651,8 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL, onboarding_completed_at = NULL WHERE id = $1`, uid); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL, onboarding_completed_at = NULL,
+		 identity_source = COALESCE(identity_source, 'test') WHERE id = $1`, uid); err != nil {
 		t.Fatalf("reset user: %v", err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM telegram_accounts WHERE user_id = $1`, uid); err != nil {
@@ -692,7 +693,9 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 // waitBlockedBy returns once some backend waits on a lock held by tx. It
 // matches waiters through pg_blocking_pids of tx's own backend rather than
 // any lock wait in the database: internal/oauth shares TEST_DATABASE_URL and
-// runs in parallel, so one of its waiters must not end the poll early.
+// runs in parallel, so one of its waiters must not end the poll early. The
+// only unscoped users writer there is Migrate's identity_source backfill, so
+// callers set identity_source on their row to keep it out of that UPDATE.
 func waitBlockedBy(ctx context.Context, s *Store, tx *sql.Tx) error {
 	var holder int
 	if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
@@ -733,7 +736,9 @@ func TestSaveSession_PostgresLockOrderAgreesWithSignIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL WHERE id = $1`, uid); err != nil {
+	// identity_source set: see waitBlockedBy.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET account_deleted_at = NULL, identity_source = COALESCE(identity_source, 'test') WHERE id = $1`, uid); err != nil {
 		t.Fatalf("reset marker: %v", err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM telegram_accounts WHERE user_id = $1`, uid); err != nil {
