@@ -136,7 +136,10 @@ As implemented (`internal/mcp/reply_tools.go`, `reply_store.go`):
   `send_gate_reason`) so the user learns before approving, but does not
   enforce it.
 - The reviewer/demo account is part of the gate: `send_reply` refuses it
-  with the preview-only reason, like any closed gate.
+  unless the drafted recipient is a test chat listed in
+  `DEMO_REVIEWER_WRITE_PEERS` (`internal/mcp/reviewer.go`). The check reads
+  the recipient from the draft, after `Peek` and before `Consume`, so a
+  refusal keeps the draft.
 - Local Bridge accounts are refused by both tools in v1 (no bridge-side
   implementation). The check reads the account mode from the store only, so
   it holds when the bridge is disabled on a deployment too.

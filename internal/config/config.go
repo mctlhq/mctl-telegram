@@ -242,9 +242,10 @@ type Config struct {
 	// password-gated "reviewer access" path that authenticates as a single
 	// pre-provisioned demo Telegram identity, bypassing the live Telegram
 	// OIDC login (no phone/SMS). The demo account is expected to be a
-	// throwaway with a pre-seeded MTProto session and send_enabled=false so
-	// every send stays a dry-run preview. Off by default; enabled only during
-	// review and disabled again after approval. See internal/oauth.
+	// throwaway with a pre-seeded MTProto session. Its writes are refused
+	// except to DemoReviewerWritePeers (internal/mcp/reviewer.go). Off by
+	// default; enabled only during review and disabled again after approval.
+	// See internal/oauth.
 	DemoReviewerEnabled  bool   // DEMO_REVIEWER_ENABLED
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
