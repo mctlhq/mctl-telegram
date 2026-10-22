@@ -1056,7 +1056,7 @@ func TestCallback_RefusesSignInStartedBeforeAccountDeleted(t *testing.T) {
 
 func testCallbackRefusesSignInStartedBeforeDelete(t *testing.T, tgID int64, useDB bool) {
 	callback := func(t *testing.T, deleteFirst bool) *httptest.ResponseRecorder {
-		srv := newTestServer(t)
+		var srv *Server
 		if useDB {
 			// The DB-backed code store needs the Postgres OAuth tables; see
 			// newPostgresOAuthStore.
@@ -1077,6 +1077,8 @@ func testCallbackRefusesSignInStartedBeforeDelete(t *testing.T, tgID int64, useD
 			if !srv.useDB {
 				t.Fatal("server is not on the DB path")
 			}
+		} else {
+			srv = newTestServer(t)
 		}
 		mux := newMockRouter()
 		srv.Register(mux)

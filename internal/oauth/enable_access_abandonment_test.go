@@ -64,7 +64,7 @@ func TestStartLoginFlow_FloodWaitStillLogsError(t *testing.T) {
 	floodErr := errors.New("FLOOD_WAIT_300")
 	srv.loginFn = stubLogin(false, floodErr)
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
 	// Feed the code so loginFn proceeds past askCode to the failure return.
 	select {
 	case <-lf.needCode:
@@ -96,7 +96,7 @@ func TestStartLoginFlow_CodeTTLDeadlineLogsAbandonment(t *testing.T) {
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 60 * time.Millisecond })
 	srv.loginFn = stubLoginParksAtCode()
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
 	select {
 	case <-lf.needCode:
 	case <-time.After(2 * time.Second):
@@ -145,7 +145,7 @@ func TestStartLoginFlow_DeadlineDuringLoginFnStaysError(t *testing.T) {
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 60 * time.Millisecond })
 	srv.loginFn = stubLoginHangsInSendCode()
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
 	waitForFlowDone(t, lf, 2*time.Second)
 
 	line := buf.String()
@@ -171,7 +171,7 @@ func TestStartLoginFlow_SupersededWithRealErrorStaysError(t *testing.T) {
 	floodErr := errors.New("FLOOD_WAIT_300")
 	srv.loginFn = stubLogin(false, floodErr)
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
 	// Mark the flow superseded before the code is consumed, so the store
 	// is guaranteed to land before the deferred logger runs.
 	lf.superseded.Store(true)
@@ -208,7 +208,7 @@ func TestStartLoginFlow_SupersededLogsInfoNotError(t *testing.T) {
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 10 * time.Second })
 	srv.loginFn = stubLoginParksAtCode()
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false)
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
 	select {
 	case <-lf.needCode:
 	case <-time.After(2 * time.Second):

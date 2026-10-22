@@ -712,15 +712,70 @@ var ErrAccountModeConflict = errors.New("account is in local mode; switch to hos
 // mctl-telegram issue-492 proposal. A revoked local row (or no active row at
 // all) does not block this call; only an active local row does.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
+	return s.saveSession(ctx, userID, plaintext, telegramUserID, displayName, username, time.Time{})
+}
+
+// SaveSessionForSignIn is SaveSession for the in-browser enable_access
+// flow, whose sign-in started at signInStartedAt (the authorize request).
+// It refuses with ErrAccountDeletedSinceGrant when the account was deleted
+// at or after that moment, and then deletes the active hosted rows the
+// login wrote: the gotd SessionStore persists the session bytes before this
+// call, so after a delete that committed first every such row was written
+// by this sign-in and must not outlive the delete (#821). Local rows are
+// left to the caller's stray-blob repair. On Postgres the users-row lock
+// is taken in share mode, as in InsertOAuthCode, so a delete either
+// commits first (and is seen here) or waits and then removes the new row.
+// A zero signInStartedAt is an error, not "never deleted".
+func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
+	if signInStartedAt.IsZero() {
+		return errors.New("save session: missing sign-in start")
+	}
+	return s.saveSession(ctx, userID, plaintext, telegramUserID, displayName, username, signInStartedAt)
+}
+
+// saveSession implements SaveSession; a non-zero signInStartedAt adds the
+// deletion check of SaveSessionForSignIn.
+func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
 		return fmt.Errorf("encrypt session: %w", err)
+	}
+	checkDeletion := !signInStartedAt.IsZero()
+	pg := false
+	if checkDeletion {
+		// Resolve the dialect before BeginTx: the probe needs a second
+		// pooled connection and would deadlock on single-connection SQLite.
+		if pg, err = s.postgresDialect(ctx); err != nil {
+			return fmt.Errorf("save session: %w", err)
+		}
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if checkDeletion {
+		lock := ""
+		if pg {
+			lock = " FOR SHARE"
+		}
+		deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
+		if err != nil {
+			return fmt.Errorf("save session: %w", err)
+		}
+		if deleted {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL AND mode <> $2`,
+				userID, ModeLocal,
+			); err != nil {
+				return fmt.Errorf("save session: drop rows of a deleted account: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("save session: commit drop: %w", err)
+			}
+			return ErrAccountDeletedSinceGrant
+		}
+	}
 	// The mode check IS the revoke: one statement, RETURNING the mode of every
 	// row it touched. A separate `SELECT EXISTS` first would leave a window --
 	// under READ COMMITTED a ProvisionLocalAccount committing between the two

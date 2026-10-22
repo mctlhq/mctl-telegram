@@ -1989,8 +1989,12 @@ type oauthCtx struct {
 // renderAccountDeletedDuringSignIn is the page for a sign-in that started
 // before the account was deleted: it gets no code (#817).
 func renderAccountDeletedDuringSignIn(w http.ResponseWriter) {
-	renderEnableError(w, "This account was deleted while the sign-in was in progress. Close this page and start connecting again from your MCP client.")
+	renderEnableError(w, accountDeletedDuringSignInMsg)
 }
+
+// accountDeletedDuringSignInMsg is shown, on the error page or the
+// enable_access step, to a sign-in that raced an account delete.
+const accountDeletedDuringSignInMsg = "This account was deleted while the sign-in was in progress. Close this page and start connecting again from your MCP client."
 
 // issueAuthCode mints an authorization_code for oc and 302-redirects the
 // browser to the client's redirect_uri with ?code=&state=. Shared by the
