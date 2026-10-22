@@ -126,6 +126,16 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		if err := s.DB.QueryRowContext(ctx, `SELECT account_deleted_at FROM users WHERE id = $1`, alice).Scan(&deletedAt); err != nil {
 			t.Fatalf("read alice account_deleted_at: %v", err)
 		}
+		// The scan below reads one row: pin that alice has exactly the one
+		// seeded above, so a growing seed fails here instead of reading an
+		// arbitrary row.
+		var refreshRows int
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth_refresh_tokens WHERE user_id = $1`, alice).Scan(&refreshRows); err != nil {
+			t.Fatalf("count alice refresh tokens: %v", err)
+		}
+		if refreshRows != 1 {
+			t.Fatalf("alice has %d refresh-token rows, want the 1 seeded", refreshRows)
+		}
 		var refreshRevoked time.Time
 		var refreshName sql.NullString
 		if err := s.DB.QueryRowContext(ctx,

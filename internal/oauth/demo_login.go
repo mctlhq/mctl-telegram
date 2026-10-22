@@ -174,6 +174,9 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 		ClientState:   pending.State,
 		Scope:         pending.Scope,
 		TelegramID:    s.cfg.DemoReviewerTGID,
+
+		UserID:          uid,
+		SignInStartedAt: pending.CreatedAt,
 	})
 }
 

@@ -1867,6 +1867,9 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		Scope:         pending.Scope,
 		TelegramID:    identity.TelegramID,
 		Username:      identity.Username,
+
+		UserID:          uid,
+		SignInStartedAt: pending.CreatedAt,
 	}
 
 	// If the user already has a usable MTProto session, hand back the
@@ -1976,6 +1979,17 @@ type oauthCtx struct {
 	Scope         string
 	TelegramID    int64
 	Username      string
+	// UserID and SignInStartedAt (the authorize request's time) let the
+	// code store refuse a sign-in that raced an account delete. Both are
+	// required on the database-backed path.
+	UserID          int64
+	SignInStartedAt time.Time
+}
+
+// renderAccountDeletedDuringSignIn is the page for a sign-in that started
+// before the account was deleted: it gets no code (#817).
+func renderAccountDeletedDuringSignIn(w http.ResponseWriter) {
+	renderEnableError(w, "This account was deleted while the sign-in was in progress. Close this page and start connecting again from your MCP client.")
 }
 
 // issueAuthCode mints an authorization_code for oc and 302-redirects the
@@ -2000,12 +2014,26 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 			TelegramUsername: oc.Username,
 			Scope:            oc.Scope,
 			CreatedAt:        now,
-		}); err != nil {
+		}, oc.UserID, oc.SignInStartedAt); err != nil {
+			if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
+				renderAccountDeletedDuringSignIn(w)
+				return
+			}
 			slog.Error("oauth: persist auth_code failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 	} else {
+		deleted, err := s.store.AccountDeletedSince(r.Context(), oc.UserID, oc.SignInStartedAt)
+		if err != nil {
+			slog.Error("oauth: read account deletion failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if deleted {
+			renderAccountDeletedDuringSignIn(w)
+			return
+		}
 		s.mu.Lock()
 		// Cap the authorization-code map. Oldest-evict on insert mirrors the
 		// pending/clients pattern and keeps the sweeper as a backstop.

@@ -224,9 +224,50 @@ func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.
 // but the caller should treat it as an internal error and abort.
 var ErrOAuthCodeConflict = errors.New("oauth: auth code already exists")
 
-// InsertOAuthCode persists an issued authorization code to oauth_auth_codes.
-func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode) error {
-	res, err := s.DB.ExecContext(ctx,
+// InsertOAuthCode persists an issued authorization code to oauth_auth_codes
+// for the sign-in of userID that started at signInStartedAt (the authorize
+// request). It refuses with ErrAccountDeletedSinceGrant when the account was
+// deleted at or after that moment, so a sign-in that raced a delete gets no
+// code at all. On Postgres it takes the users-row lock in share mode, like
+// SaveRefreshTokenForGrant: HardDeleteAccount holds that row for its whole
+// transaction, so a code is either stored before the delete (and the
+// exchange refuses it against the marker) or after the delete committed (and
+// is refused here). Without the lock a code stamped between the delete's
+// marker and its commit post-dates the marker and would mint a family the
+// delete never saw (#817). A sign-in that starts after the marker is
+// written counts as one made after the delete, like signing in again.
+//
+// signInStartedAt comes from the oauth server's clock; see
+// SaveRefreshTokenForGrant for why it must stay near real time. A zero
+// signInStartedAt or a missing users row is an error, not "never deleted".
+func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode, userID int64, signInStartedAt time.Time) error {
+	if userID <= 0 {
+		return errors.New("insert oauth_auth_codes: missing user id")
+	}
+	if signInStartedAt.IsZero() {
+		return errors.New("insert oauth_auth_codes: missing sign-in start")
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return fmt.Errorf("insert oauth_auth_codes: %w", err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("insert oauth_auth_codes: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	lock := ""
+	if pg {
+		lock = " FOR SHARE"
+	}
+	deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
+	if err != nil {
+		return fmt.Errorf("insert oauth_auth_codes: %w", err)
+	}
+	if deleted {
+		return ErrAccountDeletedSinceGrant
+	}
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO oauth_auth_codes
 			(code, client_id, redirect_uri, code_challenge, challenge_method,
 			 telegram_id, telegram_username, scope, created_at)
@@ -241,7 +282,39 @@ func (s *Store) InsertOAuthCode(ctx context.Context, c OAuthCode) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrOAuthCodeConflict
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("insert oauth_auth_codes: commit: %w", err)
+	}
 	return nil
+}
+
+// AccountDeletedSince reports whether userID's account was deleted at or
+// after at. It is the unlocked check for the in-memory code store, which
+// runs only against single-process SQLite; the database-backed path checks
+// inside InsertOAuthCode under the users-row lock instead.
+func (s *Store) AccountDeletedSince(ctx context.Context, userID int64, at time.Time) (bool, error) {
+	if userID <= 0 {
+		return false, errors.New("account deleted since: missing user id")
+	}
+	if at.IsZero() {
+		return false, errors.New("account deleted since: missing time")
+	}
+	return accountDeletedSince(ctx, s.DB, userID, at, "")
+}
+
+// accountDeletedSince reads userID's deletion marker through q, appending
+// lock (empty or a row-lock clause) to the read. A missing users row is an
+// error, not "never deleted".
+func accountDeletedSince(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, userID int64, at time.Time, lock string) (bool, error) {
+	var deletedAt sql.NullTime
+	if err := q.QueryRowContext(ctx,
+		`SELECT account_deleted_at FROM users WHERE id = $1`+lock, userID,
+	).Scan(&deletedAt); err != nil {
+		return false, fmt.Errorf("read account deletion: %w", err)
+	}
+	return deletedAt.Valid && !deletedAt.Time.Before(at), nil
 }
 
 // ConsumeOAuthCode atomically deletes and returns the authorization code
