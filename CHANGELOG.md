@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.88.0](https://github.com/mctlhq/mctl-telegram/compare/0.87.3...0.88.0) (2026-10-22)
+
+
+### Features
+
+* brand public pages and serverInfo as MCTL ([9b174b5](https://github.com/mctlhq/mctl-telegram/commit/9b174b5ef89b4a547512bd381b3f51b5543510ae))
+* **mcp:** report serverInfo.name as MCTL ([baf80a5](https://github.com/mctlhq/mctl-telegram/commit/baf80a54eb9aef7f1e9120b07d786ce26be78135))
+* **mcp:** reviewer write allowlist (DEMO_REVIEWER_WRITE_PEERS) ([b3a0c5f](https://github.com/mctlhq/mctl-telegram/commit/b3a0c5f02b109f3103ad783ef4160b71b5df72f3))
+* **mcp:** reviewer write allowlist (DEMO_REVIEWER_WRITE_PEERS) ([ce6d9a2](https://github.com/mctlhq/mctl-telegram/commit/ce6d9a234f00e97b58bcfc8dd08c490137ad962e))
+* **oauth:** return refused sign-ins to the client as access_denied ([c46aa69](https://github.com/mctlhq/mctl-telegram/commit/c46aa69de93bfe577d396da1b014522f690e7bfc))
+* **oauth:** return refused sign-ins to the client as access_denied ([0e1581f](https://github.com/mctlhq/mctl-telegram/commit/0e1581f3d423efa2f002a8932914612325dee98b))
+* **web:** brand public pages as MCTL ([a5b0fae](https://github.com/mctlhq/mctl-telegram/commit/a5b0faeae62cc55df27f538e8a45b02b2f6bc2fb))
+
+
+### Bug Fixes
+
+* **db:** lock users first on every SaveSession path ([acbf50b](https://github.com/mctlhq/mctl-telegram/commit/acbf50b43541e03d01344fd92629be51e31afe10))
+* **db:** lock users first on every SaveSession path ([7e3653f](https://github.com/mctlhq/mctl-telegram/commit/7e3653fb9b56274973bae0a371556ecfbcfe3c28)), closes [#824](https://github.com/mctlhq/mctl-telegram/issues/824)
+* **mcp:** refuse prepare_pin_message to the reviewer ([c4ccafd](https://github.com/mctlhq/mctl-telegram/commit/c4ccafd5829cc39fca6afdfe21e8a10765deb22a))
+* **web:** finish MCTL branding on /demo, favicon and topbar ([457369b](https://github.com/mctlhq/mctl-telegram/commit/457369bb15e1a57a9064f552edac72297769df2f))
+* **web:** rebrand page descriptions and pin page titles ([2d94d08](https://github.com/mctlhq/mctl-telegram/commit/2d94d08348c9214dd6125bbf146732aacfb71e27))
+
 ## [0.87.3](https://github.com/mctlhq/mctl-telegram/compare/0.87.2...0.87.3) (2026-10-22)
 
 
