@@ -60,9 +60,8 @@ func isDeploymentFault(msg string) bool {
 // refusing it as the caller's mistake: an MTProto 400 or 403 reply (an
 // unknown peer, a missing permission), ErrPeerNotAccessible, or one of the
 // draft_reply refusals ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted.
-// Such a reply
-// proves the session and the service work, so availability SLIs must not
-// count it as a failure.
+// Such a reply proves the session and the service work, so availability SLIs
+// must not count it as a failure.
 //
 // It is the single definition both SLIs use — borrowCallResult for the
 // session-borrow SLI and the MCP layer for the tool-availability SLI — so the
@@ -77,9 +76,10 @@ func IsCallerRefusal(err error) bool {
 	if err == nil || sessionErrorFor(err) != nil {
 		return false
 	}
-	// ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted are this server's own policy
-	// refusals, read off a getPeerDialogs reply that succeeded: the session
-	// worked, and the caller picked a conversation draft_reply will not use.
+	// ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted are this
+	// server's own policy refusals, read off a getPeerDialogs reply that
+	// succeeded: the session worked, and the caller picked a conversation
+	// draft_reply will not use.
 	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) {
 		return true
 	}
