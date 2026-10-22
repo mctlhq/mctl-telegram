@@ -116,7 +116,7 @@ Output: {confirmation_id, peer_redacted, text, text_sha256, will_really_send, dr
 		// re-prepares on every Prepare click while a draft is being edited, so
 		// a debit here would also let pure drafting exhaust a peer's send
 		// budget with nothing sent. This call makes no Telegram API call.
-		willReallySend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.DemoReviewerTGID)
+		willReallySend, dryReason := evaluateSendGate(ctx, s.Store, id, s.AllowSend, s.reviewerGateFor("send_message", peer))
 		c, err := s.Confirms.Issue(id.UserID, "send", HashSendPayload(peer, text))
 		if err != nil {
 			return toolErr("prepare_send_message: %v", err), nil
