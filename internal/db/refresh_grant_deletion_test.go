@@ -696,6 +696,8 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 // runs in parallel, so one of its waiters must not end the poll early. The
 // only unscoped users writer there is Migrate's identity_source backfill, so
 // callers set identity_source on their row to keep it out of that UPDATE.
+// Only row-level waits count: a first-ever Migrate's ALTER TABLE users waits
+// on the relation lock the holder's FOR NO KEY UPDATE takes.
 func waitBlockedBy(ctx context.Context, s *Store, tx *sql.Tx) error {
 	var holder int
 	if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
@@ -705,7 +707,9 @@ func waitBlockedBy(ctx context.Context, s *Store, tx *sql.Tx) error {
 	for time.Now().Before(deadline) {
 		var waiting int
 		if err := s.DB.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, holder,
+			`SELECT COUNT(*) FROM pg_stat_activity
+			  WHERE $1 = ANY(pg_blocking_pids(pid))
+			    AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')`, holder,
 		).Scan(&waiting); err != nil {
 			return fmt.Errorf("poll lock waiters: %w", err)
 		}
