@@ -72,6 +72,7 @@ func TestSaveRefreshTokenForGrant_RefusesGrantIssuedBeforeDelete(t *testing.T) {
 func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
+	withSessionCrypt(t, s)
 	uid, err := s.EnsureUserByTelegramID(ctx, 4646, "alice", "Alice")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
@@ -96,6 +97,21 @@ func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 	}
 	if _, err := s.HardDeleteAccount(ctx, uid); err == nil {
 		t.Error("HardDeleteAccount succeeded on an inconclusive dialect probe")
+	}
+	// Both session saves lock the users row first on Postgres, so the plain
+	// CLI-login save and the enable-flow save cannot deadlock (#824).
+	if err := s.SaveSession(ctx, uid, []byte("mtproto-session"), 4646, "Alice", "alice"); err == nil {
+		t.Error("SaveSession succeeded on an inconclusive dialect probe")
+	}
+	if err := s.SaveSessionForSignIn(ctx, uid, []byte("mtproto-session"), 4646, "Alice", "alice", time.Now()); err == nil {
+		t.Error("SaveSessionForSignIn succeeded on an inconclusive dialect probe")
+	}
+	var sessions int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 0 {
+		t.Errorf("%d telegram_accounts rows after refused session saves", sessions)
 	}
 
 	var total, live int

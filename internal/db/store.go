@@ -772,11 +772,9 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// On Postgres every path locks the users row before it touches
-	// telegram_accounts. stampOnboardingCompleted updates users after the
-	// revoke below, so without this a plain save would lock telegram_accounts
-	// then users while a SaveSessionForSignIn of the same user locks users
-	// then telegram_accounts, and the two would deadlock.
+	// On Postgres both paths through saveSession lock the users row before
+	// they touch telegram_accounts: the sign-in path in accountDeletedSince,
+	// the plain path in the else branch below.
 	if checkDeletion {
 		deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
 		if err != nil {
@@ -798,6 +796,10 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 			return ErrAccountDeletedSinceGrant
 		}
 	} else if pg {
+		// stampOnboardingCompleted updates users after the revoke below, so
+		// without this lock a plain save would lock telegram_accounts then
+		// users while a SaveSessionForSignIn of the same user locks users
+		// then telegram_accounts, and the two would deadlock (40P01).
 		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1`+lock, userID); err != nil {
 			return fmt.Errorf("save session: lock user: %w", err)
 		}
