@@ -243,7 +243,7 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
    legacy route is retained on purpose, for pre-#484 accounts and
    operator-driven recovery -- see "Legacy worker-token path" below.
 5. **Closed by #484.** Enablement used to be an admin MCP tool call, full
-   stop: `set_account_mode` (`internal/mcp/tools.go:1011-1094`) flips an
+   stop: `set_account_mode` (`toolSetAccountMode` in `internal/mcp/tools.go`) flips an
    existing hosted row, and `provision_local_account`
    (`internal/mcp/tools.go`, added for issue #468) creates a fresh
    local-only row for a Telegram id that has never completed a hosted
@@ -260,9 +260,11 @@ The daemon implements eight tools (`daemon.go:394-630`): `list_dialogs`,
 6. **Five tools are unsupported in local mode** and return an explicit
    error rather than routing to the bridge: `edit_message`,
    `delete_messages`, `forward_messages`, `search_messages`,
-   `set_reaction` (`internal/mcp/tools.go:1532,1588,1648,1707,1778`).
+   `set_reaction` (`toolEditMessage`, `toolDeleteMessages`,
+   `toolForwardMessages`, `toolSearchMessages`, `toolSetReaction` in
+   `internal/mcp/tools.go`).
    Separately, `fetch_media=true` is refused on `get_unread_messages` and
-   `get_messages` (`tools.go:279,496`) with a pointer to
+   `get_messages` (`toolGetUnreadMessages`, `toolGetMessages`) with a pointer to
    `prepare_get_media` + `get_media`, which the daemon does implement.
 7. **No hosted listener.** The Communication Agent's always-on listener
    needs a server-side Telegram client, which a local-mode account does
@@ -407,7 +409,7 @@ removes or degrades the legacy path's own behavior.
   with `set_account_mode mode="local"`. Either way, the websocket
   registration ties the daemon to that row, and between the flip (self- or
   operator-driven) and a running daemon the user's connector returns
-  "local-bridge daemon not connected" (`internal/mcp/tools.go:111-113`)
+  "local-bridge daemon not connected" (`bridgeCall` in `internal/mcp/tools.go`)
   rather than hanging or losing authorization.
 - Rollback is the same UPDATE with `mode='hosted'` (via `set_account_mode`;
   there is no self-service equivalent), verified by a subsequent call
