@@ -33,8 +33,9 @@ type RefreshToken struct {
 	RevokedAt        time.Time // zero value ⇒ still active
 	// RevokedReason distinguishes why RevokedAt was set: "rotated" (normal
 	// rotation superseded this row — the only case eligible for grace-window
-	// replay recovery), "reuse_detected", or "explicit_revoke". Empty when
-	// the row is still active.
+	// replay recovery), "reuse_detected", "explicit_revoke", or
+	// "account_deleted" (HardDeleteAccount). Empty when the row is still
+	// active.
 	RevokedReason string
 	// ParentTokenHash is the SHA-256 hash of the predecessor token this row
 	// was rotated from, or nil for a family's first-issued token. Lets a
@@ -75,6 +76,9 @@ func hashRefreshToken(plaintext string) []byte {
 
 // SaveRefreshToken inserts a new refresh-token row. plaintext is hashed before
 // storage; rt.ExpiresAt must already be set by the caller.
+//
+// Tests and backfills only: the code exchange must use
+// SaveRefreshTokenForGrant, so a delete that raced the grant is honoured.
 func (s *Store) SaveRefreshToken(ctx context.Context, plaintext string, rt RefreshToken) error {
 	return saveRefreshToken(ctx, s.DB, plaintext, rt)
 }
@@ -209,7 +213,10 @@ func (s *Store) RotateRefreshToken(ctx context.Context, oldPlaintext, newPlainte
 	}
 	// Resolve the dialect before BeginTx: the probe needs a second pooled
 	// connection and would deadlock on single-connection SQLite.
-	pg := s.isPostgres(ctx)
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return fmt.Errorf("rotate refresh token: %w", err)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin rotate tx: %w", err)
@@ -322,6 +329,61 @@ func (s *Store) FamilyEverHeldScope(ctx context.Context, familyID string) (bool,
 // it revokes: refresh tokens, worker-token revocations and Local Bridge
 // devices.
 const ReasonAccountDeleted = "account_deleted"
+
+// ErrAccountDeletedSinceGrant is returned by SaveRefreshTokenForGrant when the
+// account was deleted at or after the grant it would issue a token for.
+var ErrAccountDeletedSinceGrant = errors.New("account deleted since the grant was issued")
+
+// SaveRefreshTokenForGrant saves the first refresh token of a new family, for
+// a grant (an authorization code) issued at grantIssuedAt. It refuses with
+// ErrAccountDeletedSinceGrant when the account was deleted at or after that
+// moment: a code issued just before a delete must not mint a live family just
+// after it. On Postgres it takes the users-row lock in share mode, like
+// RotateRefreshToken, so a concurrent delete either waits for this insert
+// (and revokes the new family) or commits first (and is seen here).
+//
+// grantIssuedAt comes from the oauth server's clock and the marker from
+// HardDeleteAccount's wall clock. The service runs one replica, so the two
+// agree; a test that freezes or offsets the oauth clock must keep it near
+// real time or this comparison inverts. A missing users row is an error, not
+// "never deleted".
+func (s *Store) SaveRefreshTokenForGrant(ctx context.Context, plaintext string, rt RefreshToken, grantIssuedAt time.Time) error {
+	if rt.UserID <= 0 {
+		return errors.New("save refresh token: missing user id")
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return fmt.Errorf("save refresh token: %w", err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save refresh token tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	lock := ""
+	if pg {
+		lock = " FOR SHARE"
+	}
+	var deletedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx,
+		`SELECT account_deleted_at FROM users WHERE id = $1`+lock, rt.UserID,
+	).Scan(&deletedAt); err != nil {
+		return fmt.Errorf("save refresh token: read account deletion: %w", err)
+	}
+	if deletedAt.Valid && !deletedAt.Time.Before(grantIssuedAt) {
+		return ErrAccountDeletedSinceGrant
+	}
+	if s.grantSaveHook != nil {
+		s.grantSaveHook()
+	}
+	if err := saveRefreshToken(ctx, tx, plaintext, rt); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save refresh token tx: %w", err)
+	}
+	return nil
+}
 
 // revokeUserRefreshTokens revokes every still-active refresh token of userID
 // inside tx. Rows already revoked keep their original reason.

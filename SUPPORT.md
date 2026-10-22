@@ -10,7 +10,7 @@ Before opening an issue, search existing issues to avoid duplicates. Use the pro
 
 ## Security vulnerabilities
 
-Email **dmitri+security@mctl.ai**. Do not open public issues for security reports. See [SECURITY.md](SECURITY.md).
+Email **security@mctl.ai**. Do not open public issues for security reports. See [SECURITY.md](SECURITY.md).
 
 ## Questions and discussion
 

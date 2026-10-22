@@ -23,8 +23,10 @@ Releases are managed by [release-please](https://github.com/googleapis/release-p
 `docs/tool-descriptors.json` is the canonical descriptor of every MCP tool the server registers (full surface: all tools, MCP Apps on). `TestToolDescriptorsSnapshotMatchesRegistry` holds it to the registry byte for byte, so any change to a tool's name, schema, annotations or text must regenerate it in the same pull request:
 
 ```bash
-go test ./internal/mcp -run TestToolDescriptorsSnapshotMatchesRegistry -update-descriptors
+go test ./internal/mcp -run 'TestToolDescriptorsSnapshotMatchesRegistry|TestProfileDescriptorSnapshotsMatchRegistry' -update-descriptors
 ```
+
+Each tool profile also has `docs/tool-descriptors.<profile>.json`, the surface a connection bound to it is listed (only its tools, with its argument rules applied). `TestProfileDescriptorSnapshotsMatchRegistry` holds those the same way, and the same flag regenerates them. `tooldiff` diffs a profile snapshot like the full one: pass both sides with `-old` and `-new`.
 
 While reviewing the release PR, diff the surface against the previous release. This is the deterministic source a product update may cite (issue-440): added, removed, schema-changed, annotation-changed (with each changed hint named) and text-changed tools, each kept separate. A rename shows up as one removal plus one addition.
 

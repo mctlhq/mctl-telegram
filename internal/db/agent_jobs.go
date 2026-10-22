@@ -95,14 +95,26 @@ func AgentJobBackoff(attempts int) time.Duration {
 // returns false, which is safe (ClaimAgentJobs guards the outer UPDATE on
 // status) but slower; the next call re-probes.
 func (s *Store) isPostgres(ctx context.Context) bool {
+	pg, _ := s.resolveDialect(ctx)
+	return pg
+}
+
+// resolveDialect probes (or reads the cached answer for) the dialect in a
+// single pgMu critical section and reports whether the answer is conclusive.
+func (s *Store) resolveDialect(ctx context.Context) (pg, resolved bool) {
 	s.pgMu.Lock()
 	defer s.pgMu.Unlock()
 	if s.pgResolved {
-		return s.pgFlag
+		return s.pgFlag, true
 	}
-	err := s.DB.QueryRowContext(ctx,
-		"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
-	).Scan(new(int))
+	var err error
+	if s.probeFail != nil {
+		err = s.probeFail()
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			"SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()",
+		).Scan(new(int))
+	}
 	switch {
 	case err == nil:
 		s.pgFlag, s.pgResolved = true, true
@@ -114,7 +126,19 @@ func (s *Store) isPostgres(ctx context.Context) bool {
 		// otherwise be stuck on the non-SKIP-LOCKED claim path forever.
 		s.pgFlag, s.pgResolved = false, true
 	}
-	return s.pgFlag
+	return s.pgFlag, s.pgResolved
+}
+
+// postgresDialect is isPostgres for callers that decide on the answer
+// whether to take a lock. There an inconclusive probe must not read as "not
+// Postgres": that would silently drop the lock on a live Postgres, so it is
+// an error instead.
+func (s *Store) postgresDialect(ctx context.Context) (bool, error) {
+	pg, resolved := s.resolveDialect(ctx)
+	if !resolved {
+		return false, errors.New("database dialect probe was inconclusive")
+	}
+	return pg, nil
 }
 
 // EnqueueAgentJob inserts a pending job for an event. Idempotent on event_id:

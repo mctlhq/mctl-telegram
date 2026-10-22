@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 // EntrySchema names the entry format. A file of any other schema is refused
@@ -104,6 +105,11 @@ var SupportedLocales = []string{"en"}
 type Claim struct {
 	Tool   string      `yaml:"tool" json:"tool"`
 	Change ClaimChange `yaml:"change" json:"change"`
+	// Profile, when set, places the change on that tool profile's surface
+	// (docs/tool-descriptors.<profile>.json) instead of the full one. Only a
+	// change the full surface does not also show needs it: a tool added to a
+	// profile, or a profile rule that changes a tool's schema.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
 }
 
 // Evidence ties an entry to the deterministic source it may cite.
@@ -282,8 +288,13 @@ func (e Entry) validateEvidence() []string {
 		if !contains(e.Tools, c.Tool) {
 			add("evidence names %s, which tools does not list", c.Tool)
 		}
+		if c.Profile != "" {
+			if _, ok := toolprofile.Lookup(c.Profile); !ok {
+				add("evidence change on %s names profile %q, which is not a tool profile", c.Tool, c.Profile)
+			}
+		}
 		if seen[c] {
-			add("evidence claims %s %s twice", c.Tool, c.Change)
+			add("evidence claims %s twice", claimKey(c))
 		}
 		seen[c] = true
 	}

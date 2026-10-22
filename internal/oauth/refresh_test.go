@@ -999,3 +999,43 @@ func TestToken_RefreshRefusedAfterAccountDeleted(t *testing.T) {
 		t.Fatalf("refresh after delete = %d %s, want 400 invalid_grant", rec.Code, rec.Body.String())
 	}
 }
+
+// TestToken_CodeExchangeRefusedAfterAccountDeleted is the endpoint view of
+// #796: a code issued before the account was deleted must not mint a refresh
+// family after it, so its exchange is invalid_grant.
+func TestToken_CodeExchangeRefusedAfterAccountDeleted(t *testing.T) {
+	const tgID int64 = 500100101 // the admin obtainAuthorizationCode signs in
+	exchange := func(t *testing.T, deleteFirst bool) *httptest.ResponseRecorder {
+		srv := newTestServer(t)
+		mux := newMockRouter()
+		srv.Register(mux)
+		verifier, challenge := pkceVerifierAndChallenge()
+		cs := obtainAuthorizationCode(t, srv, mux, challenge)
+		if deleteFirst {
+			ctx := context.Background()
+			uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "", "")
+			if err != nil {
+				t.Fatalf("resolve user: %v", err)
+			}
+			if _, err := srv.store.HardDeleteAccount(ctx, uid); err != nil {
+				t.Fatalf("delete account: %v", err)
+			}
+		}
+		return doTokenRequest(t, mux, url.Values{
+			"grant_type": {"authorization_code"}, "code": {cs.code}, "client_id": {"claude.ai"},
+			"redirect_uri": {"https://claude.ai/cb"}, "code_verifier": {verifier},
+		})
+	}
+
+	// Control: the same code exchanges fine while the account exists.
+	if rec := exchange(t, false); rec.Code != http.StatusOK {
+		t.Fatalf("control exchange = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	rec := exchange(t, true)
+	if rec.Code != http.StatusBadRequest || jsonField(t, rec.Body.Bytes(), "error") != "invalid_grant" {
+		t.Fatalf("exchange after delete = %d %s, want 400 invalid_grant", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "access_token") {
+		t.Fatalf("refused exchange still returned an access token: %s", rec.Body.String())
+	}
+}

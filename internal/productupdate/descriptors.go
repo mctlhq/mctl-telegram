@@ -32,6 +32,11 @@ const SnapshotSchema = "mctl-telegram.tool-descriptors/v1"
 type Surface struct {
 	AppsEnabled bool   `json:"appsEnabled"`
 	ToolFilter  string `json:"toolFilter"`
+	// Profile is the tool profile the snapshot is taken under, as a caller
+	// bound to it sees tools/list: only the profile's tools, with its
+	// argument rules applied to their schemas. Empty is the unprofiled
+	// surface; omitted from JSON then, so the full snapshot keeps its bytes.
+	Profile string `json:"profile,omitempty"`
 }
 
 // Snapshot is every registered tool's descriptor, keyed by tool name, exactly

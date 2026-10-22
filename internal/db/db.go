@@ -206,6 +206,13 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// account_deleted_at: when HardDeleteAccount last ran for this user. The
+	// users row survives a delete, so the authorization-code exchange reads
+	// this to refuse a code issued before the delete (#796).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "users", "account_deleted_at",
+		"TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	// access_tier: DB-backed client allowlist. NULL/'none' = unprivileged,
 	// 'client' = telegram:* scopes for the user's own account. Admins stay on
 	// the TG_LOGIN_ADMINS env allowlist; this column only governs the client
