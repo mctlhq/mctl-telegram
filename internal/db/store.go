@@ -47,6 +47,9 @@ type Store struct {
 	// grantSaveHook, when set, runs inside SaveRefreshTokenForGrant between
 	// the deletion check and the insert. Tests only.
 	grantSaveHook func()
+	// deleteMarkerHook, when set, runs inside HardDeleteAccount after the
+	// deletion marker is written and before the commit. Tests only.
+	deleteMarkerHook func()
 
 	// outbox, when set, derives an event_outbox row for each ingested event
 	// (see WithEventOutbox). nil disables the outbox entirely.
@@ -1069,18 +1072,23 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// account_deleted_at marks the delete for the authorization-code
 	// exchange, which refuses a code issued before it. Every revocation in
 	// this delete is stamped with this one now, taken after the users-row
-	// lock. Known gap: a code issued between this read and the commit
-	// post-dates the marker, so its exchange (which waits on the users-row
-	// lock) succeeds after the commit and mints a family this delete never
-	// saw. The Telegram session is gone, so that family can act only after
-	// the user signs in again. Closing it needs the code issue path to take
-	// the users-row lock too; the window is this transaction's duration.
+	// lock. On Postgres, issuing a code takes the same lock
+	// (InsertOAuthCode), so no code can be stored between this read and the
+	// commit: one stored earlier is refused at its exchange, and a sign-in
+	// that started before this moment is refused when it stores its code
+	// after the commit. On SQLite the code store is in memory and its check
+	// (AccountDeletedSince) takes no lock, so a code stamped between this
+	// read and the commit can still mint a family; the window is this
+	// transaction's duration.
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET telegram_username = NULL, telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
 		userID, now,
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
+	}
+	if s.deleteMarkerHook != nil {
+		s.deleteMarkerHook()
 	}
 
 	// Revoke every OAuth refresh-token family in the same transaction. The

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1037,5 +1038,76 @@ func TestToken_CodeExchangeRefusedAfterAccountDeleted(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "access_token") {
 		t.Fatalf("refused exchange still returned an access token: %s", rec.Body.String())
+	}
+}
+
+// TestCallback_RefusesSignInStartedBeforeAccountDeleted is the endpoint view
+// of #817: a sign-in that began before the account was deleted gets no code,
+// even when the callback finds a session again, so nothing is left for a
+// later exchange to mint a family from.
+func TestCallback_RefusesSignInStartedBeforeAccountDeleted(t *testing.T) {
+	const tgID int64 = 500100101 // the admin the mock OIDC callback signs in
+	for _, useDB := range []bool{false, true} {
+		t.Run("useDB="+strconv.FormatBool(useDB), func(t *testing.T) {
+			testCallbackRefusesSignInStartedBeforeDelete(t, tgID, useDB)
+		})
+	}
+}
+
+func testCallbackRefusesSignInStartedBeforeDelete(t *testing.T, tgID int64, useDB bool) {
+	callback := func(t *testing.T, deleteFirst bool) *httptest.ResponseRecorder {
+		srv := newTestServer(t)
+		if useDB {
+			// The DB-backed code store needs the Postgres OAuth tables; see
+			// newPostgresOAuthStore.
+			var err error
+			srv, err = New(context.Background(), Config{
+				Issuer:              testIssuer,
+				JWTSecret:           testJWTSecret,
+				TelegramOIDC:        newFakeAuthenticator(),
+				AdminTelegramIDs:    map[int64]bool{tgID: true},
+				AccessTokenTTL:      time.Hour,
+				CodeTTL:             time.Minute,
+				AllowImplicitClient: true,
+				UseDBForOAuth:       true,
+			}, newPostgresOAuthStore(t))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if !srv.useDB {
+				t.Fatal("server is not on the DB path")
+			}
+		}
+		mux := newMockRouter()
+		srv.Register(mux)
+		_, challenge := pkceVerifierAndChallenge()
+		seedSession(t, srv, tgID)
+		state := stateFromAuthorizeFor(t, mux, challenge, "claude.ai", "https://claude.ai/cb")
+		if deleteFirst {
+			ctx := context.Background()
+			uid, err := srv.store.EnsureUserByTelegramID(ctx, tgID, "", "")
+			if err != nil {
+				t.Fatalf("resolve user: %v", err)
+			}
+			if _, err := srv.store.HardDeleteAccount(ctx, uid); err != nil {
+				t.Fatalf("delete account: %v", err)
+			}
+			// A session again, so the callback takes the direct code path
+			// instead of the enable_access detour.
+			seedSession(t, srv, tgID)
+		}
+		return callbackWithState(t, mux, state)
+	}
+
+	// Control: the same sign-in gets its code while the account exists.
+	if loc := authCodeRedirect(t, callback(t, false)); loc.Query().Get("code") == "" {
+		t.Fatalf("control callback carried no code: %s", loc)
+	}
+	rec := callback(t, true)
+	if rec.Code == http.StatusFound || strings.Contains(rec.Body.String(), "code=") {
+		t.Fatalf("callback for a sign-in started before the delete issued a code: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "deleted while the sign-in was in progress") {
+		t.Fatalf("callback body = %s, want the deleted-during-sign-in page", rec.Body.String())
 	}
 }

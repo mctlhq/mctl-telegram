@@ -1000,6 +1000,9 @@ func TestFinishEnable_WritesClientTierForNonAdmin(t *testing.T) {
 			RedirectURI: "https://claude.ai/cb",
 			TelegramID:  tgID,
 			Username:    "bob",
+
+			UserID:          uid,
+			SignInStartedAt: time.Now(),
 		},
 	}, "es-tok")
 	tier, err := srv.store.GetAccessTier(ctx, tgID)
@@ -1034,6 +1037,9 @@ func TestFinishEnable_PreservesExplicitNone(t *testing.T) {
 			RedirectURI: "https://claude.ai/cb",
 			TelegramID:  tgID,
 			Username:    "banned",
+
+			UserID:          uid,
+			SignInStartedAt: time.Now(),
 		},
 	}, "es-none")
 	tier, err := srv.store.GetAccessTier(ctx, tgID)
@@ -1066,6 +1072,9 @@ func TestFinishEnable_EnvListedClientStaysRevocable(t *testing.T) {
 			RedirectURI: "https://claude.ai/cb",
 			TelegramID:  tgID,
 			Username:    "envclient",
+
+			UserID:          uid,
+			SignInStartedAt: time.Now(),
 		},
 	}, "es-env")
 	tier, err := srv.store.GetAccessTier(ctx, tgID)
@@ -1134,6 +1143,9 @@ func TestFinishEnable_SkipsAdminAndLookupAdmin(t *testing.T) {
 				ClientID:    "claude.ai",
 				RedirectURI: "https://claude.ai/cb",
 				TelegramID:  tc.tgID,
+
+				UserID:          tc.uid,
+				SignInStartedAt: time.Now(),
 			},
 		}, "es-"+tc.name)
 		tier, err := srv.store.GetAccessTier(ctx, tc.tgID)
@@ -1150,16 +1162,25 @@ func TestFinishEnable_SetAccessTierErrorIsNonFatal(t *testing.T) {
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) {
 		c.AutoApproveClients = true
 	})
+	// The code is stored against a real users row (the sign-in made one),
+	// but the tier grant targets a Telegram id with no row, so
+	// GrantClientTierIfUnset fails. The auth-code redirect must still happen.
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), 424245, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
-	// No users row: GrantClientTierIfUnset fails. The auth-code redirect must still happen.
 	srv.finishEnable(rec, req, &enableSession{
-		uid:  1,
+		uid:  uid,
 		tgID: 999001,
 		oc: oauthCtx{
 			ClientID:    "claude.ai",
 			RedirectURI: "https://claude.ai/cb",
 			TelegramID:  999001,
+
+			UserID:          uid,
+			SignInStartedAt: time.Now(),
 		},
 	}, "es-missing")
 	if rec.Code != http.StatusFound && rec.Code != http.StatusOK {
@@ -1229,6 +1250,9 @@ func TestFinishEnable_ConcurrentNoneIsNotOverwritten(t *testing.T) {
 				RedirectURI: "https://claude.ai/cb",
 				TelegramID:  tgID,
 				Username:    "racer",
+
+				UserID:          uid,
+				SignInStartedAt: time.Now(),
 			},
 		}, "es-race")
 	}()
