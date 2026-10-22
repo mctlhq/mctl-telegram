@@ -13,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
+	"modernc.org/sqlite"
+
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -29,13 +32,21 @@ type Store struct {
 	// idle TTL. Read-only after construction; see WithAbsoluteTTLExempt.
 	ttlExempt map[int64]bool
 
-	// Cached dialect probe (see isPostgres in agent_jobs.go). Only the job
-	// claim query needs the distinction (FOR UPDATE SKIP LOCKED). pgResolved
-	// is set only once the probe returns a definitive answer, so a transient
-	// probe failure does not permanently poison the cache.
+	// Cached dialect (see resolveDialect in agent_jobs.go), seeded by
+	// NewStore from the driver. The job claim query uses it for SKIP LOCKED,
+	// and the credential writes (HardDeleteAccount, RotateRefreshToken,
+	// SaveRefreshTokenForGrant) for their users-row lock, where an
+	// unresolved dialect is an error. pgResolved is set only on a definitive
+	// answer, so a transient probe failure does not poison the cache.
 	pgMu       sync.Mutex
 	pgResolved bool
 	pgFlag     bool
+	// probeFail, when set, makes the dialect probe fail as a dropped
+	// connection would. Tests only.
+	probeFail func() error
+	// grantSaveHook, when set, runs inside SaveRefreshTokenForGrant between
+	// the deletion check and the insert. Tests only.
+	grantSaveHook func()
 
 	// outbox, when set, derives an event_outbox row for each ingested event
 	// (see WithEventOutbox). nil disables the outbox entirely.
@@ -55,7 +66,18 @@ type AccountInfo struct {
 }
 
 func NewStore(db *sql.DB, c *crypto.AESGCM) *Store {
-	return &Store{DB: db, Crypt: c}
+	s := &Store{DB: db, Crypt: c}
+	// The driver Open chose names the dialect without I/O. Seeding the cache
+	// from it keeps the credential paths off the probe, whose "not Postgres"
+	// verdict rests on an error message; the probe stays the fallback for a
+	// *sql.DB opened with some other driver.
+	switch db.Driver().(type) {
+	case *stdlib.Driver:
+		s.pgFlag, s.pgResolved = true, true
+	case *sqlite.Driver:
+		s.pgFlag, s.pgResolved = false, true
+	}
+	return s
 }
 
 // WithAbsoluteTTLExempt marks Telegram ids whose sessions are not subject to
@@ -960,17 +982,22 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, error) {
 	// Resolve the dialect before opening the transaction: the probe uses a
 	// second pooled connection, which would deadlock on single-connection SQLite.
-	pg := s.isPostgres(ctx)
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: %w", err)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Take the users row lock first (same order as RotateRefreshToken) so a
-	// concurrent refresh rotation cannot leave a live successor token.
+	// Take the users row lock first (same order as RotateRefreshToken and the
+	// code exchange) so a concurrent refresh rotation or code exchange cannot
+	// leave a live token. FOR NO KEY UPDATE conflicts with their FOR SHARE
+	// but not with the FOR KEY SHARE that foreign-key checks take.
 	if pg {
-		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
 			return 0, fmt.Errorf("delete account: lock user: %w", err)
 		}
 	}
@@ -1031,9 +1058,12 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// identity_captured_at is reset to NULL so provenance reports "unknown"
 	// rather than "not_supplied" (which would falsely claim Telegram never
 	// sent these names).
+	//
+	// account_deleted_at marks the delete for the authorization-code
+	// exchange, which refuses a code issued before it.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL WHERE id = $1`,
-		userID,
+		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
+		userID, time.Now().UTC(),
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}
@@ -1057,9 +1087,11 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// added again: the delete is callable with nothing left to delete, and
 	// the revocation cache reads the whole table. Tokens carry their issue
 	// time in whole seconds, so one minted in the same second as the delete
-	// is revoked too; a reconnect takes far longer than that. Two deletes
-	// racing for the same user can each insert once; later deletes update,
-	// and the cache keeps only the newest revocation per id.
+	// is revoked too; a reconnect takes far longer than that. Deletes of the
+	// same user are serialized by the users-row lock above (and by SQLite's
+	// single writer), so only deletes of two users that share a Telegram id
+	// can race to insert one row each; the cache keeps only the newest
+	// revocation per id.
 	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
 		res, err := tx.ExecContext(ctx,
@@ -1094,6 +1126,17 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, fmt.Errorf("delete account: revoke local bridge devices: %w", err)
 	}
 	revokedDevices, _ := devices.RowsAffected()
+	// The label is cleared on every device, including ones revoked earlier:
+	// it defaults to the machine's hostname, which often carries the
+	// owner's name, and a tombstone needs only the revocation. A separate
+	// statement, not a wider WHERE above, keeps revokedDevices counting only
+	// the devices this delete revoked.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE local_bridge_devices SET device_label = NULL WHERE user_id = $1`,
+		userID,
+	); err != nil {
+		return 0, fmt.Errorf("delete account: clear device labels: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delete account: commit: %w", err)
