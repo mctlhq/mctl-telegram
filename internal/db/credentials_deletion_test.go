@@ -68,6 +68,14 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 			t.Fatalf("revoke alice old device: %v", err)
 		}
 
+		if err := s.SaveRefreshToken(ctx, fmt.Sprintf("alice-refresh-%d", base), RefreshToken{
+			FamilyID: fmt.Sprintf("alice-family-%d", base), UserID: alice, ClientID: "claude.ai",
+			TelegramID: aliceLogin, TelegramUsername: "alice", Scope: "telegram:dialogs:read",
+			ExpiresAt: time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("seed alice refresh token: %v", err)
+		}
+
 		issued := time.Now().UTC().Add(-time.Hour)
 		for _, id := range []int64{aliceLogin, aliceSession, bobID} {
 			if !workerTokenLive(t, s, id, issued) {
@@ -111,6 +119,22 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		if sameMoment != 1 {
 			t.Error("account_deleted_at and the worker-token revocation carry different times")
+		}
+		// The refresh row outlives the delete until it expires: it carries the
+		// same stamp and no copy of the username.
+		var refreshSame int
+		var refreshName sql.NullString
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*), MAX(r.telegram_username) FROM users u JOIN oauth_refresh_tokens r
+			   ON r.user_id = u.id AND r.revoked_at = u.account_deleted_at
+			 WHERE u.id = $1`, alice).Scan(&refreshSame, &refreshName); err != nil {
+			t.Fatalf("read alice refresh token: %v", err)
+		}
+		if refreshSame != 1 {
+			t.Error("account_deleted_at and the refresh-token revocation carry different times")
+		}
+		if refreshName.Valid && refreshName.String != "" {
+			t.Errorf("alice refresh token username = %q after the delete, want it cleared", refreshName.String)
 		}
 		// A credential minted after the delete (a reconnect) still works.
 		for _, id := range []int64{aliceLogin, aliceSession} {

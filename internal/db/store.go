@@ -1068,9 +1068,12 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// account_deleted_at marks the delete for the authorization-code
 	// exchange, which refuses a code issued before it. Every revocation in
 	// this delete is stamped with this one now, taken after the users-row
-	// lock. A code issued between this read and the commit still post-dates
-	// the marker and can be exchanged; it was issued while the account
-	// existed, and the session it would act on is gone with the commit.
+	// lock. Known gap: a code issued between this read and the commit
+	// post-dates the marker, so its exchange (which waits on the users-row
+	// lock) succeeds after the commit and mints a family this delete never
+	// saw. The Telegram session is gone, so that family can act only after
+	// the user signs in again. Closing it needs the code issue path to take
+	// the users-row lock too; the window is this transaction's duration.
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET telegram_username = NULL, telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
@@ -1085,6 +1088,13 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, now)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
+	}
+	// Refresh rows outlive the delete until they expire, and each carries a
+	// copy of the username taken from the authorization code.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE oauth_refresh_tokens SET telegram_username = NULL WHERE user_id = $1`, userID,
+	); err != nil {
+		return 0, fmt.Errorf("delete account: clear refresh-token usernames: %w", err)
 	}
 
 	// Worker tokens and Local Bridge devices are credentials the user issued
