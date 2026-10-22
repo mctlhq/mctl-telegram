@@ -72,6 +72,7 @@ func TestSaveRefreshTokenForGrant_RefusesGrantIssuedBeforeDelete(t *testing.T) {
 func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
+	withSessionCrypt(t, s)
 	uid, err := s.EnsureUserByTelegramID(ctx, 4646, "alice", "Alice")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
@@ -96,6 +97,21 @@ func TestCredentialWrites_FailOnInconclusiveDialectProbe(t *testing.T) {
 	}
 	if _, err := s.HardDeleteAccount(ctx, uid); err == nil {
 		t.Error("HardDeleteAccount succeeded on an inconclusive dialect probe")
+	}
+	// Both session saves lock the users row first on Postgres, so the plain
+	// CLI-login save and the enable-flow save cannot deadlock (#824).
+	if err := s.SaveSession(ctx, uid, []byte("mtproto-session"), 4646, "Alice", "alice"); err == nil {
+		t.Error("SaveSession succeeded on an inconclusive dialect probe")
+	}
+	if err := s.SaveSessionForSignIn(ctx, uid, []byte("mtproto-session"), 4646, "Alice", "alice", time.Now()); err == nil {
+		t.Error("SaveSessionForSignIn succeeded on an inconclusive dialect probe")
+	}
+	var sessions int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 0 {
+		t.Errorf("%d telegram_accounts rows after refused session saves", sessions)
 	}
 
 	var total, live int
@@ -635,7 +651,8 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL, onboarding_completed_at = NULL WHERE id = $1`, uid); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET account_deleted_at = NULL, onboarding_completed_at = NULL,
+		 identity_source = COALESCE(identity_source, 'test') WHERE id = $1`, uid); err != nil {
 		t.Fatalf("reset user: %v", err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM telegram_accounts WHERE user_id = $1`, uid); err != nil {
@@ -644,28 +661,15 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 
 	signInStarted := time.Now().UTC().Add(-time.Second)
 	deleteDone := make(chan error, 1)
-	s.sessionSaveHook = func() {
+	s.sessionSaveHook = func(tx *sql.Tx) {
 		go func() {
 			_, err := s.HardDeleteAccount(ctx, uid)
 			deleteDone <- err
 		}()
 		// Return once the delete is queued on the users-row lock.
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			var waiting int
-			if err := s.DB.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM pg_stat_activity
-				 WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-			).Scan(&waiting); err != nil {
-				t.Errorf("poll lock waiters: %v", err)
-				return
-			}
-			if waiting > 0 {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+		if err := waitBlockedBy(ctx, s, tx); err != nil {
+			t.Errorf("delete never queued on the users-row lock: %v", err)
 		}
-		t.Errorf("delete never queued on the users-row lock")
 	}
 	defer func() { s.sessionSaveHook = nil }()
 
@@ -683,5 +687,100 @@ func TestSaveSessionForSignIn_PostgresDeleteDuringLogin(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Fatalf("%d telegram_accounts rows survive the delete that followed the save", rows)
+	}
+}
+
+// waitBlockedBy returns once some backend waits on a lock held by tx. It
+// matches waiters through pg_blocking_pids of tx's own backend rather than
+// any lock wait in the database: internal/oauth shares TEST_DATABASE_URL and
+// runs in parallel, so one of its waiters must not end the poll early. The
+// only unscoped users writer there is Migrate's identity_source backfill, so
+// callers set identity_source on their row to keep it out of that UPDATE.
+// Only row-level waits count: a first-ever Migrate's ALTER TABLE users waits
+// on the relation lock the holder's FOR NO KEY UPDATE takes.
+func waitBlockedBy(ctx context.Context, s *Store, tx *sql.Tx) error {
+	var holder int
+	if err := tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&holder); err != nil {
+		return fmt.Errorf("read holder pid: %w", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pg_stat_activity
+			  WHERE $1 = ANY(pg_blocking_pids(pid))
+			    AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')`, holder,
+		).Scan(&waiting); err != nil {
+			return fmt.Errorf("poll lock waiters: %w", err)
+		}
+		if waiting > 0 {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("timed out")
+}
+
+// TestSaveSession_PostgresLockOrderAgreesWithSignIn runs a plain SaveSession
+// (the CLI login) while a SaveSessionForSignIn of the same user holds the
+// users-row lock. Both must lock users before telegram_accounts: if the plain
+// save revoked the active row first and only then updated users, the sign-in
+// would wait on that row while the plain save waits on users, and Postgres
+// would abort one of them with a deadlock (40P01).
+func TestSaveSession_PostgresLockOrderAgreesWithSignIn(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	withSessionCrypt(t, s)
+	ctx := context.Background()
+	tgID := int64(890000001)
+	uid, err := s.EnsureUserByTelegramID(ctx, tgID, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	// identity_source set: see waitBlockedBy.
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET account_deleted_at = NULL, identity_source = COALESCE(identity_source, 'test') WHERE id = $1`, uid); err != nil {
+		t.Fatalf("reset marker: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM telegram_accounts WHERE user_id = $1`, uid); err != nil {
+		t.Fatalf("clear rows: %v", err)
+	}
+	// An active row for the plain save's revoke to lock.
+	if err := s.SaveSession(ctx, uid, []byte("mtproto-session"), tgID, "Bob", "bob"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	signInStarted := time.Now().UTC().Add(-time.Second)
+	plainDone := make(chan error, 1)
+	s.sessionSaveHook = func(tx *sql.Tx) {
+		go func() {
+			plainDone <- s.SaveSession(ctx, uid, []byte("mtproto-session"), tgID, "Bob", "bob")
+		}()
+		// Return once the plain save waits on this transaction: on its
+		// users-row lock, or, with the old order, on its onboarding stamp
+		// after it already revoked the active row.
+		if err := waitBlockedBy(ctx, s, tx); err != nil {
+			t.Errorf("plain save never queued behind the sign-in: %v", err)
+		}
+	}
+	defer func() { s.sessionSaveHook = nil }()
+
+	signInErr := s.SaveSessionForSignIn(ctx, uid, []byte("mtproto-session"), tgID, "Bob", "bob", signInStarted)
+	plainErr := <-plainDone
+	if signInErr != nil {
+		t.Fatalf("sign-in save: %v", signInErr)
+	}
+	if plainErr != nil {
+		t.Fatalf("plain save queued behind the sign-in: %v", plainErr)
+	}
+	var active int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`, uid).Scan(&active); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("%d active telegram_accounts rows, want 1", active)
 	}
 }

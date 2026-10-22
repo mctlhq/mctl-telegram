@@ -51,8 +51,9 @@ type Store struct {
 	// deletion marker is written and before the commit. Tests only.
 	deleteMarkerHook func()
 	// sessionSaveHook, when set, runs inside SaveSessionForSignIn after the
-	// users-row lock and the deletion check. Tests only.
-	sessionSaveHook func()
+	// users-row lock and the deletion check, with the save's transaction.
+	// Tests only.
+	sessionSaveHook func(tx *sql.Tx)
 
 	// outbox, when set, derives an event_outbox row for each ingested event
 	// (see WithEventOutbox). nil disables the outbox entirely.
@@ -738,6 +739,8 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 // mode the success path's own users update (stampOnboardingCompleted)
 // needs, so the transaction never upgrades a share lock with a delete
 // queued on the same row.
+// Plain SaveSession takes the same lock first, so a CLI login and an enable
+// flow of one user lock users and telegram_accounts in the same order.
 // A zero signInStartedAt is an error, not "never deleted".
 func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
 	if signInStartedAt.IsZero() {
@@ -754,30 +757,31 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		return fmt.Errorf("encrypt session: %w", err)
 	}
 	checkDeletion := !signInStartedAt.IsZero()
-	pg := false
-	if checkDeletion {
-		// Resolve the dialect before BeginTx: the probe needs a second
-		// pooled connection and would deadlock on single-connection SQLite.
-		if pg, err = s.postgresDialect(ctx); err != nil {
-			return fmt.Errorf("save session: %w", err)
-		}
+	// Resolve the dialect before BeginTx: the probe needs a second pooled
+	// connection and would deadlock on single-connection SQLite.
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return fmt.Errorf("save session: %w", err)
+	}
+	lock := ""
+	if pg {
+		lock = " FOR NO KEY UPDATE"
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// On Postgres both paths through saveSession lock the users row before
+	// they touch telegram_accounts: the sign-in path in accountDeletedSince,
+	// the plain path in the else branch below.
 	if checkDeletion {
-		lock := ""
-		if pg {
-			lock = " FOR NO KEY UPDATE"
-		}
 		deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
 		if err != nil {
 			return fmt.Errorf("save session: %w", err)
 		}
 		if s.sessionSaveHook != nil {
-			s.sessionSaveHook()
+			s.sessionSaveHook(tx)
 		}
 		if deleted {
 			if _, err := tx.ExecContext(ctx,
@@ -790,6 +794,14 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 				return fmt.Errorf("save session: commit drop: %w", err)
 			}
 			return ErrAccountDeletedSinceGrant
+		}
+	} else if pg {
+		// stampOnboardingCompleted updates users after the revoke below, so
+		// without this lock a plain save would lock telegram_accounts then
+		// users while a SaveSessionForSignIn of the same user locks users
+		// then telegram_accounts, and the two would deadlock (40P01).
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1`+lock, userID); err != nil {
+			return fmt.Errorf("save session: lock user: %w", err)
 		}
 	}
 	// The mode check IS the revoke: one statement, RETURNING the mode of every
