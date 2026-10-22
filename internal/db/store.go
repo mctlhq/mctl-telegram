@@ -1059,11 +1059,22 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// rather than "not_supplied" (which would falsely claim Telegram never
 	// sent these names).
 	//
+	// telegram_username is cleared for the same reason: when Telegram sends
+	// no username, sign-in stores the display name there (see
+	// EnsureUserByTelegramID). A later sign-in fills both in again.
+	// telegram_login_id stays: it is the key a later sign-in and the
+	// worker-token revocations below are matched on.
+	//
 	// account_deleted_at marks the delete for the authorization-code
-	// exchange, which refuses a code issued before it.
+	// exchange, which refuses a code issued before it. Every revocation in
+	// this delete is stamped with this one now, taken after the users-row
+	// lock. A code issued between this read and the commit still post-dates
+	// the marker and can be exchanged; it was issued while the account
+	// existed, and the session it would act on is gone with the commit.
+	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE users SET telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
-		userID, time.Now().UTC(),
+		`UPDATE users SET telegram_username = NULL, telegram_first_name = NULL, telegram_last_name = NULL, telegram_display_name = NULL, identity_captured_at = NULL, last_seen_at = NULL, account_deleted_at = $2 WHERE id = $1`,
+		userID, now,
 	); err != nil {
 		return 0, fmt.Errorf("delete account: clear identity fields: %w", err)
 	}
@@ -1071,7 +1082,7 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// Revoke every OAuth refresh-token family in the same transaction. The
 	// users row survives deletion, so the oauth_refresh_tokens ON DELETE
 	// CASCADE never fires; without this, connected clients keep rotating.
-	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, time.Now().UTC())
+	revoked, err := revokeUserRefreshTokens(ctx, tx, userID, ReasonAccountDeleted, now)
 	if err != nil {
 		return 0, fmt.Errorf("delete account: revoke oauth refresh tokens: %w", err)
 	}
@@ -1092,7 +1103,6 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	// single writer), so only deletes of two users that share a Telegram id
 	// can race to insert one row each; the cache keeps only the newest
 	// revocation per id.
-	now := time.Now().UTC()
 	for _, tgID := range tgIDs {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE worker_token_revocations SET revoked_at = $1

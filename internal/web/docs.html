@@ -213,7 +213,7 @@
         <tr>
           <td><code>users</code></td>
           <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
-          <td>Until you call <code>delete_telegram_account</code> (cascades).</td>
+          <td>The row is kept after <code>delete_telegram_account</code>, which clears the username, the names and the last-seen time. What stays is the Telegram id that a later sign-in is matched on, the access tier, when the account was created and onboarded, and the time of the delete (<code>account_deleted_at</code>), which stops an authorization code issued before the delete from being exchanged after it.</td>
         </tr>
         <tr>
           <td><code>telegram_accounts<wbr>.session_encrypted</code></td>

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"testing"
@@ -85,6 +86,31 @@ func TestHardDeleteAccount_RevokesWorkerTokensAndDevices(t *testing.T) {
 		}
 		if !workerTokenLive(t, s, bobID, issued) {
 			t.Error("another user's worker token was revoked")
+		}
+		var aliceName, bobName sql.NullString
+		if err := s.DB.QueryRowContext(ctx, `SELECT telegram_username FROM users WHERE id = $1`, alice).Scan(&aliceName); err != nil {
+			t.Fatalf("read alice username: %v", err)
+		}
+		if err := s.DB.QueryRowContext(ctx, `SELECT telegram_username FROM users WHERE id = $1`, bob).Scan(&bobName); err != nil {
+			t.Fatalf("read bob username: %v", err)
+		}
+		if aliceName.Valid && aliceName.String != "" {
+			t.Errorf("alice telegram_username = %q after the delete, want it cleared", aliceName.String)
+		}
+		if bobName.String != "bob" {
+			t.Errorf("another user's telegram_username = %q, want it kept", bobName.String)
+		}
+		// One delete, one timestamp: the marker the code exchange checks and
+		// the worker-token revocation carry the same moment.
+		var sameMoment int
+		if err := s.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM users u JOIN worker_token_revocations w
+			   ON w.telegram_id = $2 AND w.jti IS NULL AND w.revoked_at = u.account_deleted_at
+			 WHERE u.id = $1`, alice, aliceLogin).Scan(&sameMoment); err != nil {
+			t.Fatalf("compare delete timestamps: %v", err)
+		}
+		if sameMoment != 1 {
+			t.Error("account_deleted_at and the worker-token revocation carry different times")
 		}
 		// A credential minted after the delete (a reconnect) still works.
 		for _, id := range []int64{aliceLogin, aliceSession} {
