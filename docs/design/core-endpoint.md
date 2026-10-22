@@ -118,9 +118,9 @@ implementation ships**, because until then that URL is the full surface.
    user connect to the same URL and get the same `tools/list`; the profile
    comes from the resource, never from the account. What may differ is
    the outcome of a call that the send gate decides (the reviewer/demo
-   account is preview-only for `send_reply`, core-profiles "As
-   implemented"), which is behaviour behind an unchanged surface, not a
-   different surface.
+   account may deliver `send_reply` only to a peer listed in
+   `DEMO_REVIEWER_WRITE_PEERS`, core-profiles "As implemented"), which is
+   behaviour behind an unchanged surface, not a different surface.
 
 6. **Town is not migrated automatically.** Town keeps connecting to `/mcp`
    with its client binding (core-profiles rollout step 4). Moving Town to
