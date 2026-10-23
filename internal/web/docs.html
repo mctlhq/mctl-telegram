@@ -39,7 +39,7 @@
     <ol class="steps">
       <li><strong>Claude</strong> (claude.ai, desktop, mobile): <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">Customize &#8594; Connectors</a> &#8594; <em>Add custom connector</em>, MCP server URL <code class="url">{{.MCPURL}}</code>, default sign-in settings. Team and Enterprise Owners add it under <em>Organization settings &#8594; Connectors</em>. Step by step: <a href="/#claude">Connect in Claude</a>.</li>
       <li><strong>Claude Code:</strong> <code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code>, then <code>/mcp</code> to sign in.</li>
-      <li id="chatgpt-setup"><strong>ChatGPT, Cursor, VS Code, Windsurf and other clients:</strong> add <code class="url">{{.MCPURL}}</code> as a remote MCP server with OAuth. Per-client notes: <a href="/#connect">Other MCP clients</a>. MCTL is not listed in the ChatGPT app directory; adding it by URL is the supported path.</li>
+      <li id="chatgpt-setup"><strong>ChatGPT and other clients:</strong> add <code class="url">{{.MCPURL}}</code> as a remote MCP server with OAuth. Per-client notes: <a href="/#connect">Other MCP clients</a>. MCTL is not listed in the ChatGPT app directory; adding it by URL is the supported path. Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.</li>
     </ol>
     <h3>OAuth</h3>
     <ul class="ctrl">

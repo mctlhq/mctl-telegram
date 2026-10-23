@@ -1,6 +1,7 @@
 package web
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -158,8 +159,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
-		"Your Telegram,",
-		"inside your AI assistant",
+		"inside Claude</span></h1>",
 		"Connect in Claude",
 		`href="#claude"`,
 		`id="claude"`,
@@ -355,5 +355,55 @@ func TestDocs_NoSubmissionChecklist(t *testing.T) {
 		if strings.Contains(body, banned) {
 			t.Fatalf("/docs still contains %q", banned)
 		}
+	}
+}
+
+// TestSendGateCopy_PreviewVsError pins the send-gate wording on every page that
+// restates it: only send_message and send_media return a dry-run preview; the
+// other write tools return a tool error (internal/mcp/tools.go). An earlier
+// revision claimed every write tool returned a preview.
+func TestSendGateCopy_PreviewVsError(t *testing.T) {
+	render := func(h http.HandlerFunc, path string) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		return w.Body.String()
+	}
+	pages := map[string]string{
+		"/":         render(Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true), "/"),
+		"/security": render(Security("https://tg.mctl.ai", true), "/security"),
+		"/terms":    render(Terms("https://tg.mctl.ai", true), "/terms"),
+	}
+	for path, body := range pages {
+		if !strings.Contains(body, "<code>send_message</code> and <code>send_media</code> return a") {
+			t.Errorf("%s: preview claim is not scoped to send_message and send_media", path)
+		}
+		for _, banned := range []string{"write tools return a preview", "write tools such as <code>send_message</code> return a preview"} {
+			if strings.Contains(body, banned) {
+				t.Errorf("%s: still contains %q", path, banned)
+			}
+		}
+	}
+	if !strings.Contains(pages["/security"], "returns a tool error naming the condition") {
+		t.Error("/security: the error path for the other write tools is not stated")
+	}
+}
+
+// TestLanding_UntestedClientsLabelled keeps support claims to clients with a
+// verified sign-in against tg.mctl.ai; the rest carry "not yet tested".
+func TestLanding_UntestedClientsLabelled(t *testing.T) {
+	w := httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	body := w.Body.String()
+	for _, label := range []string{
+		"<strong>Cursor</strong> (not yet tested)",
+		"<strong>VS Code</strong> (not yet tested)",
+		"<strong>Windsurf and others</strong> (not yet tested)",
+	} {
+		if !strings.Contains(body, label) {
+			t.Errorf("landing missing %q", label)
+		}
+	}
+	if strings.Contains(body, "It also works in ChatGPT, Cursor, VS Code") {
+		t.Error("landing still claims untested clients work")
 	}
 }
