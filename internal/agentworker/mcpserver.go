@@ -2,6 +2,7 @@ package agentworker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -37,6 +38,9 @@ type JobContext struct {
 	Attempt        int
 	EventID        string
 	ConversationID int64
+	// SourceEventIDs lists every event of a coalesced turn, in arrival
+	// order. Empty or a single id means a one-event job.
+	SourceEventIDs []string
 }
 
 // ServerName is the MCP server name every worker-spawned Claude invocation
@@ -116,7 +120,33 @@ func (b *toolBuilder) getEvent() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		if err != nil {
 			return toolErr(err), nil
 		}
-		return jsonResult(ev)
+		if len(b.job.SourceEventIDs) <= 1 {
+			return jsonResult(ev)
+		}
+		// A coalesced turn: return every event in arrival order. The head
+		// event also keeps the old top-level fields.
+		all := make([]any, 0, len(b.job.SourceEventIDs))
+		for _, id := range b.job.SourceEventIDs {
+			if id == b.job.EventID {
+				all = append(all, ev)
+				continue
+			}
+			other, err := b.api.GetEvent(ctx, id)
+			if err != nil {
+				return toolErr(err), nil
+			}
+			all = append(all, other)
+		}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			return toolErr(err), nil
+		}
+		merged := map[string]any{}
+		if err := json.Unmarshal(raw, &merged); err != nil {
+			return toolErr(err), nil
+		}
+		merged["events"] = all
+		return jsonResult(merged)
 	}
 	return tool, handler
 }

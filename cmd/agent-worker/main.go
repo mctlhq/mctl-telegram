@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -108,7 +109,11 @@ func run() error {
 		Metrics:      m,
 	}
 	health := &agentworker.Health{}
-	worker := agentworker.NewWorker(client, invoker).WithHealth(health)
+	concurrency, err := envConcurrency("AGENT_WORKER_CONCURRENCY")
+	if err != nil {
+		return err
+	}
+	worker := agentworker.NewWorker(client, invoker).WithConcurrency(concurrency).WithHealth(health)
 
 	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
 	if healthAddr == "" {
@@ -205,6 +210,9 @@ func runMCPServe() error {
 		EventID:        os.Getenv("AGENT_JOB_EVENT_ID"),
 		ConversationID: conversationID,
 	}
+	if raw := os.Getenv("AGENT_JOB_SOURCE_EVENT_IDS"); raw != "" {
+		job.SourceEventIDs = strings.Split(raw, ",")
+	}
 	srv := agentworker.NewMCPServer(client, job)
 	return mcpserver.ServeStdio(srv)
 }
@@ -231,6 +239,21 @@ func validateDomainID(id string) error {
 		return errors.New("AGENT_CREDENTIAL_DOMAIN_ID must match [A-Za-z0-9._:/-]{1,128}")
 	}
 	return nil
+}
+
+// envConcurrency reads the worker concurrency: unset gives 1, anything other
+// than an integer in 1..agentworker.MaxConcurrency is refused rather than
+// silently clamped.
+func envConcurrency(key string) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > agentworker.MaxConcurrency {
+		return 0, fmt.Errorf("%s must be an integer in 1..%d, got %q", key, agentworker.MaxConcurrency, raw)
+	}
+	return n, nil
 }
 
 // envFloat fails loudly on a set-but-unparseable value rather than silently

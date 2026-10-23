@@ -120,3 +120,13 @@ func (q *Queue) RequeueStale(ctx context.Context, visibility time.Duration) (req
 	}
 	return requeued, dead, err
 }
+
+// RouteUnclaimed forwards never-claimed jobs older than after to the operator
+// and counts them as routed. Called by the sweeper.
+func (q *Queue) RouteUnclaimed(ctx context.Context, after time.Duration) (int64, error) {
+	n, err := q.Store.RouteUnclaimedAgentJobs(ctx, after)
+	if err == nil {
+		q.count(db.JobRouted, int(n))
+	}
+	return n, err
+}

@@ -80,12 +80,24 @@ transport is in use.
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
 | `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. |
 | `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
+| `AGENT_WORKER_CONCURRENCY` | no | Jobs one worker process runs at once, an integer in 1..10 (default `1`; anything else refuses to start). The worker claims only as many jobs as it has free slots, and never runs two jobs of one conversation together. Each slot is one `claude` process, so memory, CPU and spend scale with it. |
 | `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
 | `AGENT_METRICS_ALLOW_CIDR` | no | Optional CIDR allowlist guarding `/metrics` (see below). Unset means open, matching `cmd/server`'s `METRICS_ALLOW_CIDR` default. A malformed value fails closed (every `/metrics` request gets 403), never silently open. |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
+and `AGENT_JOB_SOURCE_EVENT_IDS` (comma-joined, only for a coalesced turn)
 are internal — set only by the parent worker process on the `--mcp-serve`
 subprocess it spawns per job, never configured by an operator.
+
+### Turn coalescing: rollout order
+
+When the server runs with `AGENT_TURN_QUIET` set, a claim returns one job per
+turn: `turn_id` and `source_event_ids` (all events of the turn, head first, in
+arrival order) are added to the claim envelope, `event_id` stays the head's
+event, and the MCP `get_event` tool returns every turn event under `events`
+(plus the head's fields at the top level). A worker that predates these fields
+sees only the head event, so roll out the worker first, or keep
+`AGENT_TURN_QUIET` unset until every worker is upgraded.
 
 ### Metrics: `/metrics` on `AGENT_HEALTH_ADDR`
 

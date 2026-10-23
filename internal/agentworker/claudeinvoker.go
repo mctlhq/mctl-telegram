@@ -117,6 +117,18 @@ func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
 
 // buildMCPConfig returns the mcp-config for one job's `claude -p` run.
 func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
+	env := map[string]string{
+		"AGENT_API_BASE_URL": c.APIBaseURL,
+		"AGENT_API_TOKEN":    c.mcpToken(job),
+		"AGENT_JOB_ID":       fmt.Sprintf("%d", job.JobID),
+		"AGENT_JOB_ATTEMPT":  fmt.Sprintf("%d", job.Attempt),
+		"AGENT_JOB_EVENT_ID": job.EventID,
+		"AGENT_JOB_CONV_ID":  fmt.Sprintf("%d", job.ConversationID),
+	}
+	if len(job.SourceEventIDs) > 1 {
+		// Event ids contain no commas, so a plain join is unambiguous.
+		env["AGENT_JOB_SOURCE_EVENT_IDS"] = strings.Join(job.SourceEventIDs, ",")
+	}
 	return mcpConfig{MCPServers: map[string]mcpServerConfig{
 		ServerName: {
 			Command: c.Self,
@@ -128,14 +140,7 @@ func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 			// by Claude Code's MCP connection timeout) and eagerly includes
 			// all 11 tools in the first turn.
 			AlwaysLoad: true,
-			Env: map[string]string{
-				"AGENT_API_BASE_URL": c.APIBaseURL,
-				"AGENT_API_TOKEN":    c.mcpToken(job),
-				"AGENT_JOB_ID":       fmt.Sprintf("%d", job.JobID),
-				"AGENT_JOB_ATTEMPT":  fmt.Sprintf("%d", job.Attempt),
-				"AGENT_JOB_EVENT_ID": job.EventID,
-				"AGENT_JOB_CONV_ID":  fmt.Sprintf("%d", job.ConversationID),
-			},
+			Env:        env,
 		},
 	}}
 }

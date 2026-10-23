@@ -719,7 +719,7 @@ func TestBuildRoutedEnvelope_ReasonIsClosedAndAdditive(t *testing.T) {
 		t.Fatalf("envelope bytes changed:\n got %s\nwant %s", raw, golden)
 	}
 
-	for _, reason := range []string{db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure} {
+	for _, reason := range []string{db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure, db.RouteWorkerUnclaimed} {
 		env, err := BuildRoutedEnvelope(sampleEvent(), at, reason)
 		if err != nil {
 			t.Fatal(err)

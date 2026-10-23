@@ -35,6 +35,7 @@ const (
 	RoutePolicyDeny            = "policy_deny"
 	RoutePolicyRequireApproval = "policy_require_approval"
 	RouteWorkerFailure         = "worker_failure"
+	RouteWorkerUnclaimed       = "worker_unclaimed"
 )
 
 // WithOperatorRouting turns operator routing on or off. When on, ingest does
@@ -125,20 +126,85 @@ func (s *Store) insertRoutedOutboxTx(ctx context.Context, tx *sql.Tx, userID int
 }
 
 // routeJobEventTx forwards the source event of a job to the operator stream.
+// For a coalesced head it forwards every event of the turn: the head's own and
+// those of the members coalesced into it. First reason wins per event_id.
 func (s *Store) routeJobEventTx(ctx context.Context, tx *sql.Tx, jobID int64, reason string) (bool, error) {
 	if !s.operatorRouting || s.outbox == nil {
 		return false, nil
 	}
-	var userID int64
-	var eventID string
-	err := tx.QueryRowContext(ctx, `SELECT user_id, event_id FROM agent_jobs WHERE id = $1`, jobID).Scan(&userID, &eventID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	type src struct {
+		userID  int64
+		eventID string
 	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT user_id, event_id FROM agent_jobs WHERE id = $1 OR coalesced_into = $1 ORDER BY id`, jobID)
 	if err != nil {
 		return false, fmt.Errorf("load job for routing: %w", err)
 	}
-	return s.insertRoutedOutboxTx(ctx, tx, userID, eventID, reason)
+	var srcs []src
+	for rows.Next() {
+		var x src
+		if err := rows.Scan(&x.userID, &x.eventID); err != nil {
+			_ = rows.Close()
+			return false, fmt.Errorf("load job for routing: %w", err)
+		}
+		srcs = append(srcs, x)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, fmt.Errorf("load job for routing: %w", err)
+	}
+	_ = rows.Close()
+	var wroteAny bool
+	for _, x := range srcs {
+		wrote, err := s.insertRoutedOutboxTx(ctx, tx, x.userID, x.eventID, reason)
+		if err != nil {
+			return false, err
+		}
+		wroteAny = wroteAny || wrote
+	}
+	return wroteAny, nil
+}
+
+// RouteUnclaimedAgentJobs moves every pending job that was never claimed
+// (attempts = 0) and is older than after to terminal routed, and forwards its
+// source event to the operator stream with RouteWorkerUnclaimed. It does
+// nothing unless operator routing is on and after > 0. The status
+// compare-and-set serializes with ClaimAgentJobs on the row lock, so a job is
+// never both routed and claimed. An event already routed for another reason
+// keeps its first outbox row; its job still leaves pending. Returns the number
+// of jobs moved.
+func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration) (int64, error) {
+	if !s.operatorRouting || s.outbox == nil || after <= 0 {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin route unclaimed tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	ids, err := requeueTransition(ctx, tx,
+		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
+		  WHERE status = $4 AND attempts = 0 AND created_at < $5
+		 RETURNING id`,
+		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after))
+	if err != nil {
+		return 0, fmt.Errorf("route unclaimed agent jobs: %w", err)
+	}
+	var routed bool
+	for _, id := range ids {
+		wrote, err := s.routeJobEventTx(ctx, tx, id, RouteWorkerUnclaimed)
+		if err != nil {
+			return 0, err
+		}
+		routed = routed || wrote
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit route unclaimed tx: %w", err)
+	}
+	s.notifyOutbox(routed)
+	return int64(len(ids)), nil
 }
 
 // notifyOutbox wakes the relay after a commit that wrote a routed row.

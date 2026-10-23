@@ -329,12 +329,17 @@ invocation.
 
 ### Configuration reference
 
+New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, terminal) and `routed` (never-claimed job forwarded to the operator, terminal). They appear in `mctl_agent_jobs_total` and the queue gauges; dashboards that list statuses explicitly may need updating.
+
 | Variable/control | Default | Operational meaning |
 |---|---:|---|
 | `AGENT_ENABLED` | `false` | Mounts the Agent API and starts agent runtime components. It is not the emergency send cutoff. |
 | `AGENT_KILL_SWITCH` | `false` | Global server-side deny gate. Production values must explicitly set it; dark starts use `true`. |
 | `AGENT_RETENTION_DAYS` | `30` | Clears encrypted message-derived content after this many days. `0` means indefinite retention and is prohibited for production without a documented exception. |
 | `AGENT_JOB_VISIBILITY` | `5m` | Time before a processing claim is treated as stale and requeued/dead-lettered. Must exceed the worst expected model turn. |
+| `AGENT_TURN_QUIET` | `0` (off) | Turn-coalescing quiet window. When set (e.g. `3s`), a burst of messages in one conversation becomes one job; every reply waits at least this long. `AGENT_TURN_MAX_WAIT` (`15s`), `AGENT_TURN_MAX_MSGS` (`10`) and `AGENT_TURN_MAX_BYTES` (`16384`) bound a turn. Roll workers out before enabling. |
+| `AGENT_UNCLAIMED_ROUTE_AFTER` | `5m` | With `EVENTS_OPERATOR_ROUTING` on, a job no worker claimed within this time is moved to `routed` and forwarded to the operator stream with `routing_reason=worker_unclaimed`. Must exceed `AGENT_TURN_MAX_WAIT` when coalescing is on. Worst-case latency is this plus the 1m sweep interval. |
+| `AGENT_WORKER_CONCURRENCY` | `1` | Worker-side setting (see `docs/agent-worker.md`): jobs run at once, 1..10. |
 | `AGENT_APPROVAL_TTL` | `24h` | Maximum pending owner-approval lifetime. |
 | `AGENT_PROFILE_PATH` | unset | One-time legacy YAML import only. Remove it after the encrypted DB import is verified. |
 | `AGENT_PROFILE_OWNER_TG_ID` | `0` | Required only with the legacy import path; binds that file to one account. |

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 )
@@ -628,4 +629,39 @@ func TestLoginBotUsernameFromEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadAgentTurnAndUnclaimedSettings(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentTurnQuiet != 0 || cfg.AgentTurnMaxWait != 15*time.Second || cfg.AgentTurnMaxMsgs != 10 ||
+		cfg.AgentTurnMaxBytes != 16384 || cfg.AgentUnclaimedRouteAfter != 5*time.Minute {
+		t.Errorf("defaults = %v %v %v %v %v", cfg.AgentTurnQuiet, cfg.AgentTurnMaxWait,
+			cfg.AgentTurnMaxMsgs, cfg.AgentTurnMaxBytes, cfg.AgentUnclaimedRouteAfter)
+	}
+	for name, env := range map[string]map[string]string{
+		"max wait not below unclaimed": {"AGENT_TURN_QUIET": "3s", "AGENT_TURN_MAX_WAIT": "5m"},
+		"zero max msgs":                {"AGENT_TURN_QUIET": "3s", "AGENT_TURN_MAX_MSGS": "0"},
+		"zero max bytes":               {"AGENT_TURN_QUIET": "3s", "AGENT_TURN_MAX_BYTES": "0"},
+		"negative quiet":               {"AGENT_TURN_QUIET": "-1s"},
+		"routing without threshold":    {"EVENTS_OPERATOR_ROUTING": "true", "AGENT_UNCLAIMED_ROUTE_AFTER": "0s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for k, v := range env {
+				t.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() accepted an invalid combination")
+			}
+		})
+	}
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv("AGENT_TURN_QUIET", "3s")
+		cfg, err := Load()
+		if err != nil || cfg.AgentTurnQuiet != 3*time.Second {
+			t.Fatalf("cfg=%v err=%v", cfg.AgentTurnQuiet, err)
+		}
+	})
 }

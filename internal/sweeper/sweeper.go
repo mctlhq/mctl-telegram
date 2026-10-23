@@ -175,26 +175,32 @@ const AgentJobsSweeperInterval = time.Minute
 // their TTL expire. Like the other sweepers it is best-effort — the queue's
 // compare-and-set transitions are the authoritative gates, so a missed sweep
 // only delays recovery by a tick.
-func AgentJobs(ctx context.Context, q *queue.Queue, visibility, approvalTTL time.Duration) {
+func AgentJobs(ctx context.Context, q *queue.Queue, visibility, approvalTTL, unclaimedAfter time.Duration) {
 	ticker := time.NewTicker(AgentJobsSweeperInterval)
 	defer ticker.Stop()
-	agentJobsSweepOnce(ctx, q, visibility, approvalTTL)
+	agentJobsSweepOnce(ctx, q, visibility, approvalTTL, unclaimedAfter)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			agentJobsSweepOnce(ctx, q, visibility, approvalTTL)
+			agentJobsSweepOnce(ctx, q, visibility, approvalTTL, unclaimedAfter)
 		}
 	}
 }
 
-func agentJobsSweepOnce(ctx context.Context, q *queue.Queue, visibility, approvalTTL time.Duration) {
+func agentJobsSweepOnce(ctx context.Context, q *queue.Queue, visibility, approvalTTL, unclaimedAfter time.Duration) {
 	requeued, dead, err := q.RequeueStale(ctx, visibility)
 	if err != nil {
 		slog.Warn("agent job requeue sweep failed", "err", err)
 	} else if requeued > 0 || dead > 0 {
 		slog.Info("agent job sweep", "requeued", requeued, "dead_lettered", dead, "visibility", visibility)
+	}
+
+	if routed, err := q.RouteUnclaimed(ctx, unclaimedAfter); err != nil {
+		slog.Warn("agent job unclaimed routing sweep failed", "err", err)
+	} else if routed > 0 {
+		slog.Info("agent job sweep", "routed_unclaimed", routed, "after", unclaimedAfter)
 	}
 
 	expired, err := q.Store.ExpireStaleAgentActions(ctx, approvalTTL)

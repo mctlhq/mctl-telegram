@@ -67,7 +67,7 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 // reason is a fixed enum: no policy reason text or message content is added.
 func BuildRoutedEnvelope(ev db.IncomingEvent, occurredAt time.Time, routingReason string) (Envelope, error) {
 	switch routingReason {
-	case "", db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure:
+	case "", db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure, db.RouteWorkerUnclaimed:
 	default:
 		return Envelope{}, fmt.Errorf("unknown routing reason %q", routingReason)
 	}

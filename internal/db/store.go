@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"modernc.org/sqlite"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/turn"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
@@ -62,6 +63,10 @@ type Store struct {
 	outboxNotify func()
 	// operatorRouting: see WithOperatorRouting.
 	operatorRouting bool
+	// turnCfg, when non-nil, turns on claim-time turn coalescing (see
+	// WithTurnCoalescing). timeNow is a test hook for the clock.
+	turnCfg *turn.Config
+	timeNow func() time.Time
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,
