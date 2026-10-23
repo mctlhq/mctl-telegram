@@ -6,8 +6,8 @@
 [![Release](https://img.shields.io/github/v/release/mctlhq/mctl-telegram?display_name=tag)](https://github.com/mctlhq/mctl-telegram/releases)
 [![License](https://img.shields.io/github/license/mctlhq/mctl-telegram)](LICENSE)
 
-An unofficial third-party Telegram client, built on the Telegram API and
-not affiliated with Telegram: a remote MCP server that gives AI
+MCTL Assistant is an unofficial third-party connector using the Telegram
+API, not affiliated with Telegram: a remote MCP server that gives AI
 assistants access to a user's own Telegram account. It reads dialogs and
 messages, searches, and sends only when the user has explicitly allowed
 it. It runs in production at

@@ -1,0 +1,245 @@
+/* @mctlhq/css 0.15.0 — site.css. */
+/*
+ * Public-site layout: the one shell mctl.ai, docs.mctl.ai and tg.mctl.ai
+ * share. theme.css already carries the tokens (page width, gutter, header,
+ * wordmark, hero and section type); this sheet assembles them into the
+ * container, header, hero, section, card grid, reading column and footer, so
+ * the three sites stop each re-deriving the same box from the same numbers.
+ *
+ * Every class is prefixed `mctl-site-` and sets only the properties it owns,
+ * so it can sit next to a framework's own styles (Nuxt, VitePress) without a
+ * reset. Requires theme.css; global.css is optional, so every class whose
+ * size depends on its padding or border sets box-sizing itself rather than
+ * relying on global.css's universal border-box.
+ *
+ * Contract, measured at any viewport:
+ *   - content box: at most --site-content-width wide, centred, with
+ *     --site-gutter on both sides. The container's max-width therefore adds
+ *     both gutters back, because under border-box the padding counts inside
+ *     max-width (the bug tg.mctl.ai had before 0.15.0: brand one gutter in);
+ *   - the header brand, the hero, every section title and the card grid all
+ *     start on the content box's left edge;
+ *   - hero: text left, optional visual right; one column below 960px;
+ *   - long-form reading text is capped at --mctl-layout-prose-width;
+ *   - footer: full-bleed, centred.
+ */
+
+.mctl-site-container {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--site-content-width) + 2 * var(--site-gutter));
+  margin-inline: auto;
+  padding-inline: var(--site-gutter);
+}
+
+/* ===== Header ===== */
+.mctl-site-header {
+  box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: var(--site-header-height);
+  background: var(--site-header-bg);
+  -webkit-backdrop-filter: blur(var(--site-header-blur));
+  backdrop-filter: blur(var(--site-header-blur));
+  border-bottom: 1px solid var(--site-header-border);
+}
+
+.mctl-site-header__inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+}
+
+.mctl-site-brand {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto;
+  line-height: 1;
+  color: var(--surface-fg);
+  font-family: var(--font-display);
+  font-size: var(--site-wordmark-size);
+  font-weight: var(--site-wordmark-weight);
+  letter-spacing: var(--site-wordmark-tracking);
+  text-decoration: none;
+}
+
+.mctl-site-brand__accent {
+  color: var(--accent);
+  margin-right: var(--site-wordmark-accent-gap);
+}
+
+.mctl-site-nav {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-family: var(--font-display);
+  font-size: var(--site-nav-size);
+  font-weight: var(--site-nav-weight);
+}
+
+.mctl-site-nav a {
+  color: var(--surface-fg-muted);
+  text-decoration: none;
+}
+
+.mctl-site-nav a:hover,
+.mctl-site-nav a[aria-current='page'] {
+  color: var(--surface-fg);
+}
+
+/* ===== Hero ===== */
+.mctl-site-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  align-items: center;
+  gap: 48px;
+  padding-block: var(--mctl-layout-section-padding);
+  text-align: start;
+}
+
+/* Without a visual the text still keeps the left column's width rather than
+   stretching across the page, so its line length matches a hero that has one. */
+.mctl-site-hero__text {
+  grid-column: 1;
+  display: grid;
+  gap: var(--mctl-layout-stack);
+  justify-items: start;
+}
+
+.mctl-site-hero__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-hero-size);
+  font-weight: var(--text-hero-weight);
+  line-height: var(--text-hero-leading);
+  letter-spacing: var(--text-hero-tracking);
+  color: var(--surface-fg);
+}
+
+.mctl-site-hero__lede {
+  margin: 0;
+  font-size: var(--text-subtitle-size);
+  font-weight: var(--text-subtitle-weight);
+  line-height: var(--text-subtitle-leading);
+  letter-spacing: var(--text-subtitle-tracking);
+  color: var(--surface-fg-muted);
+}
+
+.mctl-site-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.mctl-site-hero__visual {
+  grid-column: 2;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+}
+
+@media (max-width: 959px) {
+  .mctl-site-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mctl-site-hero__visual {
+    grid-column: 1;
+    grid-row: 2;
+  }
+}
+
+/* ===== Sections ===== */
+.mctl-site-section {
+  padding-block: var(--mctl-layout-section-padding);
+}
+
+.mctl-site-section + .mctl-site-section {
+  padding-top: 0;
+}
+
+.mctl-site-section__title {
+  margin: 0 0 var(--mctl-layout-stack);
+  font-family: var(--font-display);
+  font-size: var(--text-section-size);
+  font-weight: var(--text-section-weight);
+  line-height: var(--text-section-leading);
+  letter-spacing: var(--text-section-tracking);
+  color: var(--surface-fg);
+  text-align: start;
+}
+
+.mctl-site-section__lede {
+  margin: 0 0 var(--mctl-layout-stack);
+  max-width: var(--mctl-layout-prose-width);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+  color: var(--surface-fg-muted);
+}
+
+/* ===== Card grid ===== */
+.mctl-site-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--mctl-layout-stack);
+}
+
+@media (max-width: 959px) {
+  .mctl-site-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 639px) {
+  .mctl-site-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ===== Reading column (security, privacy, terms, articles) ===== */
+.mctl-site-prose {
+  max-width: var(--mctl-layout-prose-width);
+}
+
+/* ===== Footer ===== */
+.mctl-site-footer {
+  padding-block: 48px;
+  background: color-mix(in srgb, var(--surface-elevated) 85%, transparent);
+  border-top: 1px solid var(--surface-line);
+  text-align: center;
+}
+
+.mctl-site-footer__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.mctl-site-footer__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px 32px;
+  font-family: var(--font-display);
+  font-size: var(--site-nav-size);
+}
+
+.mctl-site-footer__links a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+.mctl-site-footer__links a:hover {
+  color: var(--surface-fg);
+}
+
+.mctl-site-footer__copy {
+  margin: 0;
+  font-size: var(--text-caption-size);
+  color: var(--surface-fg-muted);
+}

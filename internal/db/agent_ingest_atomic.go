@@ -75,9 +75,15 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 	}
 
 	now := time.Now().UTC()
-	queued, err := s.insertOutboxTx(ctx, tx, ev, now)
-	if err != nil {
-		return 0, false, err
+	// With operator routing on, an event the worker will handle is not
+	// published here; routeJobEventTx forwards it only if the job fails or is
+	// denied. jobID is 0 when the job row already existed.
+	var queued bool
+	if !s.operatorRouting || jobID == 0 {
+		queued, err = s.insertOutboxTx(ctx, tx, ev, now)
+		if err != nil {
+			return 0, false, err
+		}
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE conversations

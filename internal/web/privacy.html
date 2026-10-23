@@ -18,9 +18,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -34,7 +35,7 @@
   <h2>Claude, ChatGPT and other MCP users</h2>
   <p>When you connect MCTL to Claude, ChatGPT, or another MCP client, the following data flows apply:</p>
   <ul>
-    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an unofficial third-party Telegram client built on the Telegram API, and an independent project: it is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
+    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is MCTL Assistant, an unofficial third-party connector using the Telegram API, and an independent project: it is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
     <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
     <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log. Accounts onboarded through <a href="/docs/local-bridge">Local Bridge</a> <code>activate</code> have no stored session blob here.</li>
     <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Sensitive body/payload fields are encrypted at rest with your derived key. Message/event bodies and terminal or inactive pre-send action content use the agent retention window below; executing action content remains until persisted-random-ID recovery reaches a terminal state.</li>
@@ -169,9 +170,10 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <h2>Contact</h2>
   <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Privacy inquiries: <strong><a href="mailto:privacy@mctl.ai">privacy@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>

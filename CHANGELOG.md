@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.91.0](https://github.com/mctlhq/mctl-telegram/compare/0.90.1...0.91.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-858-spike-runtime-mctl-agents-760-slice-1-co ([661eb6e](https://github.com/mctlhq/mctl-telegram/commit/661eb6e11cf4a8e5ce048dd2bc816a19688ecd3c))
+* **ui:** adopt the shared public-site layout from mctl-design 0.15.0 ([e6b401e](https://github.com/mctlhq/mctl-telegram/commit/e6b401ec4722338934bfe21a02a769f27ddf5769))
+
+## [0.90.1](https://github.com/mctlhq/mctl-telegram/compare/0.90.0...0.90.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **oauth:** log a flow that expired while queued as WARN, not ERROR ([0c1e0ec](https://github.com/mctlhq/mctl-telegram/commit/0c1e0ece03a5b3f000b5090dcb89718e229acb29))
+* **oauth:** supersede a parked enable_access flow across sessions ([f78c3fa](https://github.com/mctlhq/mctl-telegram/commit/f78c3fae2dc65d3f202faef90b817c71e66c3af1))
+
 ## [0.90.0](https://github.com/mctlhq/mctl-telegram/compare/0.89.0...0.90.0) (2026-10-23)
 
 

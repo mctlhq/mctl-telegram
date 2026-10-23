@@ -126,16 +126,16 @@ var enableHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + `</style>
 </head>
 <body>
-  <div class="wrap">
 ` + ui.TopbarLite + `
+  <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
 `
 
 var enableFoot = `    </div>
   </main>
-` + ui.FooterLite + `
   </div>
+` + ui.FooterLite + `
 </body>
 </html>`
 
@@ -282,7 +282,7 @@ var enablePermissionsTemplate = template.Must(template.New("enablePermissions").
       <button type="submit">Continue</button>
     </form>
     <p class="meta">You can change this permission later from the session management page.</p>
-    <p class="meta">MCTL is an unofficial Telegram client. Telegram can limit or freeze an account
+    <p class="meta">MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram can limit or freeze an account
        that sends spam-like traffic, whichever app sends it, so keep what your assistant sends
        personal and low-volume. <a href="/security#account-risk">More on this risk</a>.</p>
 ` + enableFoot))

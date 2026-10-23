@@ -395,16 +395,16 @@ var connectHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + `</style>
 </head>
 <body>
-  <div class="wrap">
 ` + ui.TopbarLite + `
+  <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
 `
 
 var connectFoot = `    </div>
   </main>
-` + ui.FooterLite + `
   </div>
+` + ui.FooterLite + `
 </body>
 </html>`
 
@@ -456,7 +456,7 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     <p>Your Telegram account is now connected to this MCP connector.</p>
     <p>To start using it with Claude, open the Claude.ai connector settings and add the MCP URL:</p>
     <p class="url">{{.MCPURL}}</p>
-    <p class="meta">A new session called &#8220;mctl Telegram Assistant&#8221; will appear in
+    <p class="meta">A new session called &#8220;MCTL Assistant&#8221; will appear in
        your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
        &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
        read your messages.</p>

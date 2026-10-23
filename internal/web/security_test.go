@@ -40,7 +40,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Prompt-injection content boundary",
 		"Session TTL",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
 		`<a href="/security" class="active">Security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
@@ -75,11 +75,11 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		`id="ai-use"`,
 		"never uses message content, or anything derived from it, to train",
 		"switch off any setting that lets the provider use your conversations",
-		"unofficial third-party Telegram client built on the Telegram API",
+		"MCTL Assistant, an unofficial third-party connector using the Telegram API",
 		"privacy@mctl.ai",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
 		`<a href="/privacy" class="active">Privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
@@ -147,7 +147,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"Terms of",
 		"not affiliated with, endorsed by, or operated by Telegram, OpenAI or Anthropic",
 		// Telegram API terms §2.2 and §1.5 (#852)
-		"unofficial third-party Telegram client: it uses the Telegram API",
+		"unofficial third-party connector using the Telegram API (MTProto)",
 		"must not use it to train or fine-tune AI models",
 		"your own",
 		"read-only by default",
@@ -155,7 +155,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"without warranties of any kind",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`<a href="/terms" class="active">Terms</a>`,
 	} {
 		if !strings.Contains(body, must) {
@@ -174,7 +174,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"inside Claude</span></h1>",
 		"Connect in Claude",
-		"unofficial third-party Telegram client that uses the Telegram API",
+		"MCTL Assistant · Unofficial third-party connector using the Telegram API",
 		`href="#claude"`,
 		`id="claude"`,
 		"Customize &#8594; Connectors",

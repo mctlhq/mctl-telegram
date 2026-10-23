@@ -7,19 +7,26 @@
 // The look follows the shared public site shell of mctl.ai and docs.mctl.ai
 // (mctl-design): full-width header with the accent-"M" wordmark, Title Case
 // nav in the display face, the BaseButton/BaseCard recipes, the docs table
-// style and the centred wordmark footer.
+// style and the centred wordmark footer. The layout boxes (header, container,
+// hero, section, card grid, reading column, footer) are the shared
+// .mctl-site-* classes from @mctlhq/css site.css, so the brand, hero, section
+// titles and cards start on the same edge as on mctl.ai and docs.mctl.ai.
+//
+// Page markup: the header and footer sit directly in <body>, full-bleed, and
+// the page content sits in <main class="mctl-site-container ...">. Long-form
+// pages put their content in .mctl-site-prose (the 720px reading width).
 //
 // Two tiers are provided:
 //   - "full"  — content pages (landing, docs, security, privacy). Loads
-//     ui.mctl.ai/<version>/{mctl,global}.css + Google Fonts as progressive
+//     ui.mctl.ai/<version>/{mctl,global,site}.css + Google Fonts as progressive
 //     enhancement and runs the light/dark toggle JS (the choice persists in
 //     localStorage; with nothing stored the page is dark, like the sibling
 //     sites), plus the self-hosted Umami page-view counter (AnalyticsScript).
 //     The mobile nav menu is CSS-only and works without JS.
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
-//     No external CSS/JS: same palette via inlined tokens (dark, since there is
-//     no script to read a stored choice). The tab icon is the only CDN fetch
+//     No external CSS/JS: same palette and layout via inlined tokens and the
+//     site.css mirror (dark, since there is no script to read a stored choice). The tab icon is the only CDN fetch
 //     (favicon-telegram.svg).
 package ui
 
@@ -33,6 +40,14 @@ var tokensCSS string
 
 //go:embed assets/components.css
 var componentsCSS string
+
+// siteCSS mirrors ui.mctl.ai/<DesignVersion>/site.css verbatim (its first line
+// names the version). It is the only layout source on the strict-CSP pages and
+// the fallback on content pages when the CDN is unreachable; there the CDN
+// copy is linked after it and wins.
+//
+//go:embed assets/site.css
+var siteCSS string
 
 //go:embed assets/prepaint.js
 var prepaintJS string
@@ -66,10 +81,11 @@ const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl
 const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" data-website-id="d4fa9d69-8b07-4d27-98e6-0b611eeaa707" data-domains="tg.mctl.ai"></script>`
 
 // DesignVersion is the published @mctlhq/css version every full-chrome page
-// loads. mctl.css and global.css are pinned together as a set; tokens.css
-// mirrors the same version's values for the strict-CSP pages and as a
-// fallback when the CDN is unreachable.
-const DesignVersion = "0.14.0"
+// loads. mctl.css, global.css and site.css are pinned together as a set;
+// tokens.css mirrors the same version's values and site.css is mirrored
+// verbatim, for the strict-CSP pages and as a fallback when the CDN is
+// unreachable.
+const DesignVersion = "0.15.0"
 
 // wordmark is the MCTL brand mark: accent "M" + "CTL", as LogoDefault.vue
 // (mctl.ai) and BrandMark.vue (docs.mctl.ai) draw it.
@@ -86,7 +102,7 @@ var defs = `
 {{end}}` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="MCTL">
+<meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">
@@ -95,19 +111,20 @@ var defs = `
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png">
-<style>` + tokensCSS + `</style>
+<style>` + tokensCSS + siteCSS + `</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/mctl.css">
 <link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/global.css">
+<link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/site.css">
 <script>` + prepaintJS + `</script>
 ` + AnalyticsScript + `
 <style>` + componentsCSS + `</style>{{end}}
 
-{{define "ui_topbar"}}<header class="topbar">
-    <div class="topbar-inner">
-    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+{{define "ui_topbar"}}<header class="mctl-site-header">
+    <div class="mctl-site-container mctl-site-header__inner">
+    <a class="mctl-site-brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     <input type="checkbox" id="site-nav-toggle" class="nav-toggle" aria-label="Open menu" aria-controls="site-nav">
     <label for="site-nav-toggle" class="nav-burger" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></label>
     <nav class="site-nav" id="site-nav" aria-label="Main">
@@ -128,9 +145,10 @@ var defs = `
     </div>
   </header>{{end}}
 
-{{define "ui_footer"}}<footer>
+{{define "ui_footer"}}<footer class="mctl-site-footer">
+    <div class="mctl-site-container mctl-site-footer__inner">
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
-    <nav class="links" aria-label="Footer">
+    <nav class="mctl-site-footer__links" aria-label="Footer">
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
       <a href="/platforms">Platforms</a>
@@ -142,8 +160,9 @@ var defs = `
       {{if .ShowManage}}<a href="/telegram/connect/manage">Manage</a>
       {{end}}<a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>
     </nav>
-    <p class="copy">© 2026 MCTL</p>
+    <p class="mctl-site-footer__copy">© 2026 MCTL</p>
     <p class="service">Service: <code>{{.PublicBaseURL}}</code></p>
+    </div>
   </footer>{{end}}
 
 {{define "ui_script"}}<script>` + toggleJS + `</script>{{end}}
@@ -152,7 +171,7 @@ var defs = `
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 ` + FaviconLink + `
-<style>` + tokensCSS + componentsCSS + `</style>{{end}}
+<style>` + tokensCSS + siteCSS + componentsCSS + `</style>{{end}}
 
 {{define "ui_topbar_lite"}}` + topbarLiteHTML + `{{end}}
 
@@ -162,29 +181,34 @@ var defs = `
 // topbarLiteHTML / footerLiteHTML are the static (no-JS) chrome markup for
 // strict-CSP pages. Exported via TopbarLite/FooterLite for callers that build
 // their HTML by string concatenation instead of the template defines.
-const topbarLiteHTML = `<header class="topbar">
-    <div class="topbar-inner">
-    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+const topbarLiteHTML = `<header class="mctl-site-header">
+    <div class="mctl-site-container mctl-site-header__inner">
+    <a class="mctl-site-brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     </div>
   </header>`
 
-const footerLiteHTML = `<footer>
+const footerLiteHTML = `<footer class="mctl-site-footer">
+    <div class="mctl-site-container mctl-site-footer__inner">
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
-    <nav class="links" aria-label="Footer">
+    <nav class="mctl-site-footer__links" aria-label="Footer">
       <a href="/">Home</a>
       <a href="/security">Security</a>
       <a href="/privacy">Privacy</a>
     </nav>
-    <p class="copy">© 2026 MCTL</p>
+    <p class="mctl-site-footer__copy">© 2026 MCTL</p>
+    </div>
   </footer>`
 
 // Exported building blocks for strict-CSP pages (OAuth flow) that compose their
 // HTML as plain strings under a CSP that forbids external CSS/JS. TokensCSS +
-// ComponentsCSS go inside one <style>; TopbarLite/FooterLite are the markup.
+// ComponentsCSS go inside one <style>; ComponentsCSS carries the site.css
+// mirror first, so the .mctl-site-* layout classes work there too.
+// TopbarLite/FooterLite are the markup; the page puts them directly in <body>
+// around <div class="mctl-site-container"><main class="auth-main">...</main></div>.
 // The theme is the design system's dark default (no script, no stored choice).
 var (
 	TokensCSS     = tokensCSS
-	ComponentsCSS = componentsCSS
+	ComponentsCSS = siteCSS + componentsCSS
 	TopbarLite    = topbarLiteHTML
 	FooterLite    = footerLiteHTML
 )

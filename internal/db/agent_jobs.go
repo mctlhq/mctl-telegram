@@ -472,9 +472,16 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, attempt int, 
 	if err := finishOpenAttempt(ctx, tx, jobID, status, note, now); err != nil {
 		return err
 	}
+	var routed bool
+	if status == JobFailed {
+		if routed, err = s.routeJobEventTx(ctx, tx, jobID, RouteWorkerFailure); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit complete tx: %w", err)
 	}
+	s.notifyOutbox(routed)
 	return nil
 }
 
@@ -563,9 +570,16 @@ func (s *Store) CompleteAgentJobWithResult(
 	if err := finishOpenAttempt(ctx, tx, jobID, status, note, now); err != nil {
 		return err
 	}
+	var routed bool
+	if status == JobFailed {
+		if routed, err = s.routeJobEventTx(ctx, tx, jobID, RouteWorkerFailure); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit complete-with-result tx: %w", err)
 	}
+	s.notifyOutbox(routed)
 	return nil
 }
 
@@ -656,9 +670,16 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	if err := finishOpenAttempt(ctx, tx, jobID, JobFailed, errMsg, now); err != nil {
 		return "", err
 	}
+	var routed bool
+	if status == JobDeadLetter {
+		if routed, err = s.routeJobEventTx(ctx, tx, jobID, RouteWorkerFailure); err != nil {
+			return "", err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit retry tx: %w", err)
 	}
+	s.notifyOutbox(routed)
 	return status, nil
 }
 
@@ -735,9 +756,18 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 			return 0, 0, fmt.Errorf("close stale attempts: %w", err)
 		}
 	}
+	var routed bool
+	for _, id := range deadIDs {
+		wrote, err := s.routeJobEventTx(ctx, tx, id, RouteWorkerFailure)
+		if err != nil {
+			return 0, 0, err
+		}
+		routed = routed || wrote
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit requeue tx: %w", err)
 	}
+	s.notifyOutbox(routed)
 	return int64(len(requeuedIDs)), int64(len(deadIDs)), nil
 }
 

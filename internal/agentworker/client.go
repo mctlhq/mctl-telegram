@@ -112,6 +112,9 @@ type JobEnvelope struct {
 	ConversationID int64  `json:"conversation_id,omitempty"`
 	Attempt        int    `json:"attempt"`
 	Deadline       string `json:"deadline"`
+	// JobToken is the conversation-bound credential for this job's MCP
+	// subprocess. Empty when the server does not issue job tokens.
+	JobToken string `json:"job_token,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.

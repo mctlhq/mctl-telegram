@@ -25,9 +25,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -103,7 +104,7 @@
   </ul>
 
   <h2 id="account-risk">Telegram account risk</h2>
-  <p>MCTL is an unofficial Telegram client. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
+  <p>MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
   <ul>
     <li><strong>The server does not retry a frozen account's refusals.</strong> The call fails with a clear error and is not repeated.</li>
     <li><strong>A frozen account can be appealed</strong> in the Telegram app, through <a href="https://t.me/spambot" target="_blank" rel="noopener">@SpamBot</a>, or at <code>recover@telegram.org</code>. Nothing on this server lifts a freeze.</li>
@@ -183,9 +184,10 @@
   <h2>Prompt-injection content boundary</h2>
   <p>Read tools wrap Telegram message bodies in <code>&lt;telegram-content origin="telegram" peer="redacted" untrusted="true"&gt;…&lt;/telegram-content&gt;</code> and escape literal closing tags inside message text. This is a signalling boundary for the MCP client, not a substitute for the server-side Communication Agent policy engine.</p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>
