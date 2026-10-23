@@ -5,9 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tgerr"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 )
 
 func TestFloodWaitSeconds(t *testing.T) {
@@ -152,8 +155,13 @@ func TestMtprotoErrResultPeerFlood(t *testing.T) {
 	if v, _ := envelope["error"].(string); v != "RISK_GATED" {
 		t.Errorf("error = %q, want %q", v, "RISK_GATED")
 	}
-	if v, ok := envelope["retry_after_seconds"].(float64); !ok || int(v) != 60 {
-		t.Errorf("retry_after_seconds = %v, want 60", envelope["retry_after_seconds"])
+	// The envelope must say when the server's write pause ends, and must
+	// not invite the retry that PEER_FLOOD bans accounts for (#849).
+	if v, ok := envelope["retry_after_seconds"].(float64); !ok || int(v) != int(audit.PeerFloodHold/time.Second) {
+		t.Errorf("retry_after_seconds = %v, want %d", envelope["retry_after_seconds"], int(audit.PeerFloodHold/time.Second))
+	}
+	if v, _ := envelope["action"].(string); !strings.HasPrefix(v, "Do not retry.") {
+		t.Errorf("action = %q, want it to start with %q", v, "Do not retry.")
 	}
 	if v, _ := envelope["message"].(string); v == "" {
 		t.Error("message must not be empty")
