@@ -15,6 +15,8 @@ on:
 
 permissions:
   contents: read
+  # Deleting the superseded cache entries below.
+  actions: write
 
 concurrency:
   group: go-cache
@@ -47,3 +49,19 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
           key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+      # Only the newest entry is ever restored, and the repository is at its
+      # cache quota, where every new entry makes GitHub evict something else
+      # (the docker layer cache included). Keep just the one saved above.
+      - name: delete superseded go-race caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main \
+            --key "go-race-${RUNNER_OS}-" --limit 100 --json key --jq '.[].key' |
+          while read -r key; do
+            if [ "$key" != "$KEEP" ]; then
+              gh cache delete "$key" --ref refs/heads/main --repo "$GITHUB_REPOSITORY"
+            fi
+          done

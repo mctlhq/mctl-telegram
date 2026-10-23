@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -145,5 +148,39 @@ func TestMigrateCachedLeavesAPopulatedDatabaseToMigrate(t *testing.T) {
 	}
 	if after := dumpSQLite(t, conn); !reflect.DeepEqual(before, after) {
 		t.Fatal("MigrateCached changed a database Migrate had already brought up to date")
+	}
+}
+
+// MigrateCached is exported so other packages' tests can use it, which means
+// it is also compiled into the binaries. This keeps it out of their code: a
+// production caller would hold a template database open for the life of the
+// process and skip the upgrade path Migrate is for.
+func TestMigrateCachedHasNoProductionCaller(t *testing.T) {
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name == ".git" || name == "vendor" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			filepath.Base(path) == "migrate_cached.go" {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(src), "MigrateCached(") {
+			t.Errorf("%s calls MigrateCached; production code must call Migrate", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
 }
