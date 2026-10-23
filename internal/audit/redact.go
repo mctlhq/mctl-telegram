@@ -16,12 +16,24 @@ import (
 // without false positives.
 var peerLike = regexp.MustCompile(`@[A-Za-z0-9_]{4,}|\+?\d{7,}`)
 
-// ScrubText masks Telegram peer identifiers (@handles, phone numbers) inside
+// quotedPeer matches a %q-quoted value right after the words internal/telegram
+// uses to introduce a caller-supplied peer: `peer %q`, `resolve %q`,
+// `could not resolve %q`, `InputPeer for %q`, `peer format: %q`. peerLike
+// alone misses these, because ResolvePeer accepts a username without its "@"
+// and strips the "@" before formatting `resolve %q` -- so a get_messages
+// refusal stored `resolve "some_handle"` in clear (live probe, 2026-10-23).
+// Masking the whole quoted value by its position closes the class instead of
+// one call site at a time. The body allows %q's backslash escapes.
+var quotedPeer = regexp.MustCompile(`\b(peer|resolve|for|format:)\s+"(?:[^"\\]|\\.)*"`)
+
+// ScrubText masks Telegram peer identifiers (@handles, phone numbers, and any
+// quoted value in a peer position, see quotedPeer) inside
 // arbitrary free text. It is used before mirroring tool-call error strings to
 // slog, where errors such as `peer "@username" not found` would otherwise leak
 // a raw dialog identifier into centralized logs. MTProto error codes and other
 // non-identifying text pass through unchanged.
 func ScrubText(s string) string {
+	s = quotedPeer.ReplaceAllString(s, `$1 "[redacted]"`)
 	return peerLike.ReplaceAllString(s, "[redacted]")
 }
 
