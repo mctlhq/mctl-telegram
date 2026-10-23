@@ -84,6 +84,14 @@ type Claims struct {
 	// minted before the claim existed carries. A name the MCP layer does not
 	// know is not "no profile": it gets nothing (internal/mcp/profiles.go).
 	Profile string `json:"prf,omitempty"`
+	// JobID, JobAttempt and ConversationID bind an "agent-job" credential to
+	// the one agent job (and its conversation) it was minted for. They are
+	// set only by agentapi at job claim; every other credential omits them,
+	// and tokens minted before they existed decode them as zero, which the
+	// agent API reads as "account-wide token".
+	JobID          int64 `json:"job_id,omitempty"`
+	JobAttempt     int   `json:"job_attempt,omitempty"`
+	ConversationID int64 `json:"conv_id,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -351,6 +359,9 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		DeviceID:         c.DeviceID,
 		ClientID:         c.ClientID,
 		Profile:          c.Profile,
+		JobID:            c.JobID,
+		JobAttempt:       c.JobAttempt,
+		ConversationID:   c.ConversationID,
 	}, nil
 }
 
@@ -390,7 +401,7 @@ const workerBridgeAudience = "mcp-worker-bridge"
 // token it already held: eviction dropped the socket, the reconnect skipped
 // the denylist entirely, and containment lasted until the token expired on
 // its own.
-var derivedAudiences = [...]string{"bridge", "agent"}
+var derivedAudiences = [...]string{"bridge", "agent", "agent-job"}
 
 // needsRevocationCheck reports whether Authenticate must consult the
 // revocation denylist for these claims. Three shapes qualify:

@@ -57,6 +57,9 @@ func (s *Server) handleConversationContext(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, "invalid conversation id")
 		return
 	}
+	if !s.enforceBinding(w, r, id, "get_conversation_context", convID, 0, 0) {
+		return
+	}
 	limit := 20
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -133,6 +136,9 @@ func (s *Server) handleGetLead(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logHandlerErr("get_lead", err)
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if !s.enforceBinding(w, r, id, "get_lead", lead.ConversationID, 0, 0) {
 		return
 	}
 	s.audit(r.Context(), id.UserID, "get_lead", "ok", "")

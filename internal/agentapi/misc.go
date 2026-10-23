@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -58,6 +59,15 @@ func (s *Server) handleRecruiterProfile(w http.ResponseWriter, r *http.Request) 
 	if err != nil || peerTGID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "invalid peer id")
 		return
+	}
+	if jobBound(id) {
+		// A job credential may only read the profile for its own
+		// conversation's peer.
+		conv, err := s.Store.GetConversation(r.Context(), id.UserID, id.ConversationID)
+		if err != nil || conv.PeerTGID != peerTGID {
+			s.denyBinding(w, r, id, "get_recruiter_profile", fmt.Sprintf("peer %d is not the peer of conv=%d", peerTGID, id.ConversationID))
+			return
+		}
 	}
 	if s.Profile == nil {
 		writeJSONError(w, http.StatusNotImplemented, "owner profile not configured")

@@ -2,11 +2,14 @@ package agentapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -28,6 +31,45 @@ type jobEnvelope struct {
 	// job sweeper could clobber a newer claim's outcome.
 	Attempt  int    `json:"attempt"`
 	Deadline string `json:"deadline"` // RFC3339; advisory, see Server.jobVisibility
+	// JobToken is a short-lived credential (aud "agent-job") bound to this
+	// job, attempt and conversation. Omitted when no signer is configured.
+	JobToken string `json:"job_token,omitempty"`
+}
+
+// jobTokenAudience is the aud of the per-job credential.
+const jobTokenAudience = "agent-job"
+
+// mintJobToken signs the job credential for a freshly claimed job. The TTL
+// ends at the claim deadline. The parent's jti and origin are inherited so
+// revoking the worker token revokes its job tokens. Returns "" when no signer
+// is configured or signing fails (the worker then falls back to its own
+// token, as before).
+func (s *Server) mintJobToken(parent *auth.Identity, j db.AgentJob) string {
+	// A parent without a Telegram id (shared-hmac) cannot be re-resolved to a
+	// user by the job-token verifier; keep the account token for it.
+	if s.jobTokenSigner == nil || parent.TelegramID == 0 {
+		return ""
+	}
+	ttl := time.Until(j.ClaimedAt.Add(s.jobVisibility))
+	if ttl <= 0 {
+		return ""
+	}
+	tok, err := s.jobTokenSigner.Mint(localjwt.Claims{
+		Subject:          parent.Subject,
+		TelegramID:       parent.TelegramID,
+		TelegramUsername: parent.TelegramUsername,
+		Audience:         []string{jobTokenAudience},
+		Jti:              parent.Jti,
+		OriginalIssuedAt: parent.OriginalIssuedAt,
+		JobID:            j.ID,
+		JobAttempt:       j.Attempts,
+		ConversationID:   j.ConversationID,
+	}, ttl)
+	if err != nil {
+		logHandlerErr("mint_job_token", err)
+		return ""
+	}
+	return tok
 }
 
 // handleLegacyEvents preserves the original GET endpoint during a rolling
@@ -47,6 +89,9 @@ func (s *Server) handleLegacyEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
+		return
+	}
+	if !s.requireAccountToken(w, r, id, "get_events") {
 		return
 	}
 	limit := 1
@@ -92,6 +137,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 					ConversationID: j.ConversationID,
 					Attempt:        j.Attempts,
 					Deadline:       j.ClaimedAt.Add(s.jobVisibility).UTC().Format(time.RFC3339),
+					JobToken:       s.mintJobToken(id, j),
 				})
 			}
 			s.audit(ctx, id.UserID, "get_events", "ok", "")
@@ -132,6 +178,14 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	if eventID == "" {
 		writeJSONError(w, http.StatusBadRequest, "event id required")
 		return
+	}
+	if jobBound(id) {
+		// A job credential may only read its own job's event.
+		job, jerr := s.Store.GetAgentJob(r.Context(), id.UserID, id.JobID)
+		if jerr != nil || job.EventID != eventID {
+			s.denyBinding(w, r, id, "get_event", fmt.Sprintf("event is not the event of job=%d", id.JobID))
+			return
+		}
 	}
 	ev, err := s.Store.GetIncomingEvent(r.Context(), id.UserID, eventID)
 	if errors.Is(err, db.ErrIncomingEventNotFound) {
@@ -186,6 +240,9 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid job id")
 		return
 	}
+	if !s.enforceBinding(w, r, id, "get_agent_job", 0, jobID, 0) {
+		return
+	}
 	job, err := s.Store.GetAgentJob(r.Context(), id.UserID, jobID)
 	if errors.Is(err, db.ErrAgentJobNotFound) {
 		writeJSONError(w, http.StatusNotFound, "job not found")
@@ -220,6 +277,9 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 	var req completeJobRequest
 	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !s.enforceBinding(w, r, id, "complete_agent_job", 0, jobID, req.Attempt) {
 		return
 	}
 	switch req.Status {
@@ -312,6 +372,9 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 	var req reportJobCostRequest
 	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !s.enforceBinding(w, r, id, "report_agent_job_cost", 0, jobID, req.Attempt) {
 		return
 	}
 	// RecordAgentJobCost fences on attempts = $5 with no status predicate, so

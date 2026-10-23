@@ -700,10 +700,21 @@ func main() {
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
+		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
+			agentProvider = chainProvider{agentProvider, jobProvider}
+		}
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
 		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
 		agentSrv.WithProfile(agentProfileProvider)
+		if cfg.OAUTHJWTSecret != "" {
+			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))
+			if err != nil {
+				slog.Error("agent: job token signer init failed; job tokens disabled", "err", err)
+			} else {
+				agentSrv.WithJobTokenSigner(jobSigner)
+			}
+		}
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
 		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m, resourceMeta)(agentMux))
@@ -1172,6 +1183,49 @@ func selectAgentIssuer(cfg *config.Config) string {
 	default:
 		return strings.TrimRight(cfg.PublicBaseURL, "/")
 	}
+}
+
+// chainProvider tries each provider in order and returns the first identity.
+// An anonymous result (nil, nil) means no credential was presented and is
+// returned as is; when every provider rejects a presented credential the
+// first provider's error is returned.
+type chainProvider []auth.Provider
+
+func (c chainProvider) Authenticate(r *http.Request) (*auth.Identity, error) {
+	var firstErr error
+	for _, p := range c {
+		id, err := p.Authenticate(r)
+		if err == nil {
+			return id, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
+}
+
+// selectAgentJobProvider builds the provider for the per-job "agent-job"
+// credentials minted by POST /api/agent/v1/jobs/claim. They are always signed
+// by this service under its own issuer, in every AUTH_MODE, so the verifier
+// does not depend on the mode. Returns nil when no signing secret is
+// configured, in which case no job token is ever minted either.
+func selectAgentJobProvider(cfg *config.Config, store *db.Store, revocationCache *localjwt.RevocationCache) auth.Provider {
+	if cfg.OAUTHJWTSecret == "" {
+		return nil
+	}
+	p, err := localjwt.NewProvider(store, localjwt.ProviderConfig{
+		Secret:           []byte(cfg.OAUTHJWTSecret),
+		ExpectedIssuer:   strings.TrimRight(cfg.PublicBaseURL, "/"),
+		ExpectedAudience: "agent-job",
+		AudienceRequired: true,
+		RevocationCache:  revocationCache,
+	})
+	if err != nil {
+		slog.Error("agent: job token provider init failed; job tokens disabled", "err", err)
+		return nil
+	}
+	return p
 }
 
 // selectAgentProvider builds an auth.Provider for /api/agent/v1/*. Behaves
