@@ -6,9 +6,11 @@
 [![Release](https://img.shields.io/github/v/release/mctlhq/mctl-telegram?display_name=tag)](https://github.com/mctlhq/mctl-telegram/releases)
 [![License](https://img.shields.io/github/license/mctlhq/mctl-telegram)](LICENSE)
 
-A remote MCP server that gives AI assistants access to a user's own
-Telegram account: read dialogs and messages, search, and send only when
-the user has explicitly allowed it. It runs in production at
+An unofficial third-party Telegram client, built on the Telegram API and
+not affiliated with Telegram: a remote MCP server that gives AI
+assistants access to a user's own Telegram account. It reads dialogs and
+messages, searches, and sends only when the user has explicitly allowed
+it. It runs in production at
 `https://tg.mctl.ai/mcp`. Claude is the client we test against —
 claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT can
 add it by URL. It is a standard remote MCP server with OAuth, so other
