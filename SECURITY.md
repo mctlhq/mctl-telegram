@@ -110,6 +110,7 @@ Real Telegram sends through `send_message` or `send_media` require **all** of:
 2. Identity has `telegram:messages:send` scope.
 3. `telegram_accounts.send_enabled = true` for that account (owner sets this via `set_send_consent` or `/telegram/connect/manage`).
 4. Per-peer send rate limit not exhausted (20 per hour to one peer), checked after the first three.
+5. No PEER_FLOOD write pause on the account. When Telegram answers any call from the account with `PEER_FLOOD` (its anti-spam verdict on the account), the call is not retried and writes that use the send budget are refused for one hour (`audit.PeerFloodHold`), for the background executor as well as MCP tools. The pause is held in memory per replica and does not survive a restart; deletes and other cleanup are not paused.
 
 The account configured as the demo/reviewer account (`DEMO_REVIEWER_*`) is checked ahead of every other condition. Its writes are refused with an error, never a preview, except `send_message` and `send_reply` to a test chat listed in `DEMO_REVIEWER_WRITE_PEERS`, and those still need every condition above. The list fails closed: when it is empty or unset, the reviewer can deliver nothing. Every other write tool (`send_media`, `edit_message`, `delete_messages`, `forward_messages`, `set_reaction`, `pin_message`, and the account, operator and broadcast tools) stays refused for that account. A tool added without an explicit decision is refused too (`internal/mcp/reviewer.go`).
 

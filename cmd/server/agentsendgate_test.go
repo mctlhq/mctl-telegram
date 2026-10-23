@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -76,6 +78,17 @@ func TestAgentSendGate_EnforcesGlobalScopeAndAccountGates(t *testing.T) {
 	gate.demoReviewerTGID = tgID
 	if err := gate.Allow(ctx, uid, 99); !errors.Is(err, errAgentSendGateDenied) {
 		t.Fatalf("demo reviewer err=%v, want gate denial", err)
+	}
+	gate.demoReviewerTGID = 0
+
+	// The background executor honours the PEER_FLOOD write pause too (#849).
+	gate.limiter = audit.NewRateLimiter(0)
+	if err := gate.Allow(ctx, uid, 99); err != nil {
+		t.Fatalf("gate with an idle limiter denied: %v", err)
+	}
+	gate.limiter.HoldWrites(uid, audit.PeerFloodHold)
+	if err := gate.Allow(ctx, uid, 99); !errors.Is(err, errAgentSendGateDenied) || !strings.Contains(err.Error(), "PEER_FLOOD") {
+		t.Fatalf("PEER_FLOOD hold err=%v, want gate denial naming it", err)
 	}
 }
 

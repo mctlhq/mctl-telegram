@@ -585,6 +585,8 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 		{"flood_premium_wait", tgerr.New(420, "FLOOD_PREMIUM_WAIT_3"), "flood_wait"},
 		{"flood_wait_wrapped", fmt.Errorf("history: %w", tgerr.New(420, "FLOOD_WAIT_5")), "flood_wait"},
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), "flood_wait"},
+		{"frozen_method", tgerr.New(420, "FROZEN_METHOD_INVALID"), "call_error"},
+		{"frozen_participant", tgerr.New(400, "FROZEN_PARTICIPANT_MISSING"), "call_error"},
 		{"bad_request", tgerr.New(400, "CHANNEL_INVALID"), "call_error"},
 		{"forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), "call_error"},
 		{"peer_not_accessible", fmt.Errorf("get_messages: %w", &peerNotAccessibleError{peer: "@nobody", code: "PEER_ID_INVALID"}), "call_error"},
@@ -646,4 +648,40 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 			t.Errorf("ok counter = %v, want 1", v)
 		}
 	})
+}
+
+// Every PEER_FLOOD that comes back through Borrow reaches the hook with the
+// borrowing user's id, and no other error does (#849).
+func TestBorrow_PeerFloodHook(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "peer-flood-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
+		uid, 555, []byte("blob"), now, now.Add(60*24*time.Hour),
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	var held []int64
+	p := NewClientPool(1, "hash", time.Minute, store).WithPeerFloodHook(func(u int64) { held = append(held, u) })
+	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	close(e.ready)
+	p.mu.Lock()
+	p.entries[uid] = e
+	p.mu.Unlock()
+
+	for _, callErr := range []error{nil, tgerr.New(420, "FLOOD_WAIT_5"), tgerr.New(400, "PEER_ID_INVALID")} {
+		_ = p.Borrow(ctx, uid, func(context.Context, *telegram.Client) error { return callErr })
+	}
+	if len(held) != 0 {
+		t.Fatalf("hook fired for a non-PEER_FLOOD error: %v", held)
+	}
+	_ = p.Borrow(ctx, uid, func(context.Context, *telegram.Client) error { return tgerr.New(400, "PEER_FLOOD") })
+	if len(held) != 1 || held[0] != uid {
+		t.Fatalf("hook calls = %v, want [%d]", held, uid)
+	}
 }
