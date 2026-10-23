@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.93.0](https://github.com/mctlhq/mctl-telegram/compare/0.92.2...0.93.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-872-feat-agent-760-slice-2-live-coalescing-b ([0503a6d](https://github.com/mctlhq/mctl-telegram/commit/0503a6de26d13875bfd51b4fc4fd6c0daae0732d))
+* **agents:** issue-872-feat-agent-760-slice-2-live-coalescing-b ([e981f24](https://github.com/mctlhq/mctl-telegram/commit/e981f24d3194ecd7b2d962aeabd20a2695b229d8))
+
+
+### Bug Fixes
+
+* **agents:** address P1/P2 codex findings on issue-872-feat-agent-760-slice-2-live-coalescing-b ([de15565](https://github.com/mctlhq/mctl-telegram/commit/de15565c0f2454bb3aaa3000219edfb509da19f0))
+* **agents:** route only claimable jobs as unclaimed, close test gaps ([be51234](https://github.com/mctlhq/mctl-telegram/commit/be5123410b012bba231d662cd9dcd9420b80d5c6))
+
 ## [0.92.2](https://github.com/mctlhq/mctl-telegram/compare/0.92.1...0.92.2) (2026-10-23)
 
 
