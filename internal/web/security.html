@@ -102,6 +102,14 @@
     <li>Audit retention is separate: <code>AUDIT_RETENTION_DAYS</code> defaults to 90 days and audit rows contain no message body.</li>
   </ul>
 
+  <h2 id="account-risk">Telegram account risk</h2>
+  <p>MCTL is an unofficial Telegram client. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
+  <ul>
+    <li><strong>The server does not retry a frozen account's refusals.</strong> The call fails with a clear error and is not repeated.</li>
+    <li><strong>A frozen account can be appealed</strong> in the Telegram app, through <a href="https://t.me/spambot" target="_blank" rel="noopener">@SpamBot</a>, or at <code>recover@telegram.org</code>. Nothing on this server lifts a freeze.</li>
+    <li><strong>Local Bridge keeps the traffic on your machine.</strong> In Local Bridge mode the MTProto connection leaves from your own device and IP address rather than the shared datacenter.</li>
+  </ul>
+
   <h2>Local Bridge mode</h2>
   <p>When an account is set to <code>mode='local'</code>, the MTProto session it uses lives on the user's machine rather than in the hosted session pool, and this server acts as a relay. Turning it on for a new account is self-service via the <code>mctl-telegram-local activate</code> CLI; migrating an existing hosted account into local mode still goes through an operator (<code>set_account_mode</code>). Setup is documented at <a href="/docs/local-bridge">/docs/local-bridge</a>.</p>
   <ul>
