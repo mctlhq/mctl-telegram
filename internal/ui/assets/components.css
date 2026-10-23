@@ -1,8 +1,14 @@
   /*
-   * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css).
-   * The landing keeps its own internal variable names but aliases them onto the
-   * mctl semantic tokens, so dark/light flips are handled by mctl.css's
-   * [data-theme] layer automatically. Accent is terracotta from the design system.
+   * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css,
+   * or the inline fallback in tokens.css). These pages keep their own short
+   * variable names but alias them onto the mctl semantic tokens, so dark/light
+   * flips are handled by the [data-theme] layer automatically. Accent is
+   * terracotta from the design system.
+   *
+   * The site shell (header, wordmark, footer, buttons, cards, tables, grid
+   * background) mirrors mctl.ai (mctl-web: AppHeader, LogoDefault, BaseButton,
+   * BaseCard, AppFooter) and docs.mctl.ai (mctl-docs: BrandMark, DocsFooter,
+   * custom.css tables), all built on the same --site-* / --text-* roles.
    */
   :root {
     --bg:            var(--surface-bg);
@@ -18,19 +24,20 @@
     --warn:          var(--status-warn);
     --danger:        var(--status-bad);
     --code-fg:       var(--accent-highlight);
-    --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
     --accent-2-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
     --warn-soft:     color-mix(in srgb, var(--warn) 14%, transparent);
-    --grid:          color-mix(in srgb, var(--surface-line) 80%, transparent);
-    color-scheme: dark;
   }
   :root[data-theme="light"] {
-    color-scheme: light;
-    --code-fg: var(--accent);
+    --code-fg: var(--accent-text);
   }
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
+  /* The header and footer break out of the 920px .wrap to the full viewport
+     width (100vw); clip, not hidden, so this never creates a scroll container
+     (which would break the sticky header) and the page can never be scrolled
+     sideways by a few pixels of scrollbar. */
+  html { overflow-x: clip; }
 
   body {
     font-family: var(--font-display), system-ui, -apple-system, sans-serif;
@@ -40,24 +47,23 @@
     background: var(--bg);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    background-image:
-      radial-gradient(circle at 1px 1px, var(--grid) 1px, transparent 0);
-    background-size: 28px 28px;
-    background-position: 0 0;
-    background-attachment: fixed;
     transition: background-color .2s, color .2s;
   }
 
-  /* Decorative top scanline */
+  /* Ambient background: the same faint 56px blueprint grid as mctl.ai, fixed
+     so it stays put while content scrolls, fading out toward the bottom. */
   body::before {
     content: "";
     position: fixed;
-    inset: 0 0 auto 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--accent) 30%, var(--accent-2) 70%, transparent);
-    opacity: .6;
-    z-index: 5;
+    inset: 0;
+    z-index: -1;
     pointer-events: none;
+    background-image:
+      linear-gradient(var(--site-grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--site-grid-line) 1px, transparent 1px);
+    background-size: 56px 56px, 56px 56px;
+    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 55%, transparent 100%);
+    mask-image: linear-gradient(180deg, #000 0%, #000 55%, transparent 100%);
   }
 
   .wrap {
@@ -66,42 +72,83 @@
     padding: 0 24px;
   }
 
-  /* ===== Top bar ===== */
+  /* ===== Site header (mctl.ai AppHeader) ===== */
+  /* Full-bleed bar: the markup sits inside .wrap, so it spans the viewport by
+     offsetting itself to the viewport's left edge. */
   .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    width: 100vw;
+    margin: 0 0 56px calc(50% - 50vw);
+    height: var(--site-header-height);
+    background: var(--site-header-bg);
+    -webkit-backdrop-filter: blur(var(--site-header-blur));
+    backdrop-filter: blur(var(--site-header-blur));
+    border-bottom: 1px solid var(--site-header-border);
+  }
+  .topbar-inner {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 18px 0;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 56px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    letter-spacing: .02em;
-    color: var(--text-dim);
+    gap: 16px;
+    height: 100%;
+    max-width: var(--site-content-width);
+    margin: 0 auto;
+    padding: 0 var(--site-gutter);
   }
+  .topbar a { border-bottom: 0; text-decoration: none; }
   .topbar .brand {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
-    color: var(--text);
-    font-weight: 600;
+    margin-right: auto;
   }
-  .topbar .meta {
+
+  /* Wordmark: accent "M" + "CTL" (LogoDefault.vue / BrandMark.vue). */
+  .wordmark {
     display: inline-flex;
     align-items: center;
-    gap: 16px;
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: var(--site-wordmark-size);
+    font-weight: var(--site-wordmark-weight);
+    letter-spacing: var(--site-wordmark-tracking);
+    line-height: 1;
+    color: var(--surface-fg);
   }
-  .topbar a {
-    color: var(--text-dim);
-    text-decoration: none;
-    transition: color .15s;
+  .wordmark-m {
+    color: var(--accent);
+    margin-right: var(--site-wordmark-accent-gap);
   }
-  .topbar a:hover { color: var(--text); }
-  .topbar a.active { color: var(--accent); }
-  .topbar a.gh-link {
-    display: inline-flex;
+
+  .site-nav {
+    display: flex;
     align-items: center;
+    gap: clamp(16px, 2vw, 28px);
   }
+  .site-nav a {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: var(--site-nav-size);
+    font-weight: var(--site-nav-weight);
+    color: var(--surface-fg-muted);
+    transition: color .2s ease;
+  }
+  .site-nav a:hover,
+  .site-nav a.active { color: var(--accent-text); }
+  .site-nav a.gh-link { display: inline-flex; align-items: center; }
+  .site-nav a.gh-link svg { width: 18px; height: 18px; }
+
+  /* CSS-only mobile menu: a visually hidden checkbox drives the panel, so the
+     menu works without JavaScript. Hidden on desktop. */
+  .nav-toggle {
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .nav-burger { display: none; }
 
   /* ===== Hero ===== */
   .hero {
@@ -119,37 +166,26 @@
     color: var(--text-dim);
     margin-bottom: 22px;
   }
-  /* The glow below bleeds 80px past .hero on each side; clip it at the
-     viewport so it cannot widen the page (phones scrolled sideways by up to
-     62px). clip, not hidden: it does not create a scroll container. */
-  html { overflow-x: clip; }
-  /* Hero ambient depth + staggered entrance */
-  .hero::before {
-    content: "";
-    position: absolute;
-    inset: -40px -80px -10px;
-    background:
-      radial-gradient(ellipse 56% 58% at 18% 42%, color-mix(in srgb, var(--accent) 9%, transparent), transparent),
-      radial-gradient(ellipse 44% 54% at 83% 66%, color-mix(in srgb, var(--accent-2) 5%, transparent), transparent);
-    pointer-events: none;
-    z-index: -1;
+  /* Entrance motion only when the user has not asked for less. It moves the
+     text but never fades it, so a paused or skipped animation (background tab,
+     thumbnail capture) can never leave the content invisible. */
+  @keyframes riseIn {
+    from { transform: translateY(12px); }
+    to   { transform: translateY(0); }
   }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(14px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  .hero .eyebrow { animation: fadeUp .45s cubic-bezier(.22,.68,0,1.2) .05s both; }
-  .hero h1       { animation: fadeUp .5s  cubic-bezier(.22,.68,0,1.2) .13s both; }
-  .hero .lead    { animation: fadeUp .5s  cubic-bezier(.22,.68,0,1.2) .22s both; }
-  @media (prefers-reduced-motion: reduce) {
-    .hero .eyebrow, .hero h1, .hero .lead, .cta-row, .hero .muted { animation: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .hero .eyebrow { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .05s backwards; }
+    .hero h1       { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .13s backwards; }
+    .hero .lead    { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .22s backwards; }
   }
   .status-dot {
     width: 8px; height: 8px;
     border-radius: 50%;
     background: var(--accent-2);
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent);
-    animation: pulse 2s infinite;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .status-dot { animation: pulse 2s infinite; }
   }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent); }
@@ -158,12 +194,13 @@
   }
   h1 {
     font-family: var(--font-display), system-ui, sans-serif;
-    font-size: clamp(28px, 4vw, 44px);
-    font-weight: 600;
-    line-height: 1.1;
-    letter-spacing: -.02em;
+    font-size: var(--text-docs-hero-size);
+    font-weight: var(--text-docs-hero-weight);
+    line-height: var(--text-docs-hero-leading);
+    letter-spacing: var(--text-docs-hero-tracking);
     margin: 0 0 16px;
     color: var(--text);
+    overflow-wrap: break-word;
   }
   h1 .accent { color: var(--accent); }
   h1 .slash { color: var(--muted); margin: 0 .15em; }
@@ -196,7 +233,7 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: .14em;
-    color: var(--warn);
+    color: var(--status-warn-text);
     margin-bottom: 8px;
   }
   .callout .tag::before {
@@ -209,26 +246,32 @@
 
   /* ===== Section headers ===== */
   section { margin-top: 64px; }
+  /* Article headings (privacy, security, platforms, terms, demo, docs). The
+     landing scales its .section-head h2 up to the --text-section role. */
+  h2 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: var(--text-prose-section-size);
+    font-weight: var(--text-prose-section-weight);
+    line-height: 1.3;
+    letter-spacing: -.01em;
+    color: var(--text);
+    margin: 48px 0 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
   .section-head {
     display: flex;
     align-items: baseline;
     gap: 16px;
     margin-bottom: 22px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--border);
   }
-  .section-head h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 22px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0;
-    letter-spacing: -.01em;
-  }
+  .section-head h2 { margin: 0; padding-bottom: 10px; flex: 1; }
 
   /* ===== Body content ===== */
   p { color: var(--text-dim); margin: 0 0 14px; text-wrap: pretty; }
-  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); transition: border-color .15s, color .15s; }
+  /* Content links only: chrome links (header, footer, buttons) reset the
+     underline themselves, so it never leaks into the nav. */
+  a { color: var(--accent-text); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); transition: border-color .15s, color .15s; }
   a:hover { border-bottom-color: var(--accent); }
 
   code, pre, .mono {
@@ -280,6 +323,55 @@
     border-radius: 0;
   }
 
+  /* ===== Buttons (mctl.ai BaseButton) ===== */
+  /* .cta-btn is the landing's name for the primary button; kept as an alias so
+     existing markup keeps working. Primary text is --accent-fg, which flips
+     with the theme (dark ink on dark, cream on light) and passes AA on both. */
+  .btn, .cta-btn, .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: var(--text-label-size);
+    font-weight: var(--mctl-typography-font-weight-medium);
+    line-height: 1.4;
+    padding: 8px 20px;
+    border: 1px solid var(--accent);
+    border-radius: var(--mctl-radius-md);
+    cursor: pointer;
+    text-decoration: none;
+    transition: background-color .2s ease, color .2s ease, border-color .2s ease;
+  }
+  .btn, .cta-btn { background: var(--accent); color: var(--accent-fg); }
+  .btn:hover, .cta-btn:hover { background: transparent; color: var(--accent-text); border-color: var(--accent); }
+  .btn-secondary { background: transparent; color: var(--accent-text); }
+  .btn-secondary:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .btn:focus-visible, .cta-btn:focus-visible, .btn-secondary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .btn:disabled, .cta-btn:disabled, .btn-secondary:disabled {
+    cursor: not-allowed;
+    opacity: .5;
+  }
+
+  /* ===== Cards (mctl.ai BaseCard) ===== */
+  /* Neutral hairline at rest; accent border + shadow on hover. */
+  .use-card, .trust-card, .faq-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    transition: border-color .3s ease, box-shadow .3s ease, transform .3s ease;
+  }
+  .use-card:hover, .trust-card:hover, .faq-item:hover {
+    border-color: var(--accent);
+    box-shadow: var(--shadow-md);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .use-card:hover { transform: translateY(-4px); }
+  }
+
   /* Ordered list — numbered chips */
   ol.steps {
     list-style: none;
@@ -296,7 +388,7 @@
     background: var(--surface);
     margin-bottom: 10px;
     color: var(--text-dim);
-    transition: border-color .15s, transform .15s;
+    transition: border-color .15s;
   }
   ol.steps > li:hover { border-color: var(--border-strong); }
   ol.steps > li::before {
@@ -308,7 +400,7 @@
     place-items: center;
     font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     border-radius: var(--mctl-radius-md);
@@ -339,9 +431,9 @@
   ul.ctrl > li:hover { background: var(--surface-2); }
   ul.ctrl > li strong { color: var(--text); font-weight: 600; display: inline-block; margin-right: 6px; }
 
-  /* ===== Tables ===== */
-  /* Horizontal-scroll wrapper so wide tables swipe within their own box on
-     narrow screens instead of widening the whole page. */
+  /* ===== Tables (docs.mctl.ai custom.css) ===== */
+  /* One table style for every page: .tbl (docs), bare tables inside
+     .table-scroll (privacy, security, platforms) and rendered guides (.doc). */
   .table-scroll {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -349,36 +441,33 @@
   }
   .table-scroll > table, .table-scroll > .tbl { margin: 0; }
 
-  .tbl {
+  .tbl, .table-scroll > table, .doc table {
     width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
-    margin: 16px 0 4px;
-    font-size: 13.5px;
-    border: 1px solid var(--border);
-    border-radius: var(--mctl-radius-lg);
-    overflow: hidden;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+    line-height: 1.55;
+    border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
   }
-  .tbl thead th {
+  .tbl th, .tbl td,
+  .table-scroll > table th, .table-scroll > table td,
+  .doc table th, .doc table td {
     text-align: left;
-    background: var(--surface-2);
-    padding: 10px 14px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .12em;
-    color: var(--muted);
-    font-weight: 500;
-    border-bottom: 1px solid var(--border);
-  }
-  .tbl tbody td {
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
     vertical-align: top;
-    color: var(--text-dim);
+    padding: 8px 16px;
+    border: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text);
   }
-  .tbl tbody tr:last-child td { border-bottom: 0; }
-  .tbl tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .tbl th, .table-scroll > table th, .doc table th {
+    font-weight: var(--mctl-typography-font-weight-semibold);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .tbl tbody tr:nth-child(2n),
+  .table-scroll > table tbody tr:nth-child(2n),
+  .doc table tbody tr:nth-child(2n) {
+    background: color-mix(in srgb, var(--accent) 3%, transparent);
+  }
   .tbl td code, .tbl th code {
     background: transparent;
     border: 0;
@@ -386,7 +475,7 @@
     color: var(--text);
     font-size: 13px;
   }
-  .tbl td:first-child code { color: var(--accent); font-weight: 500; }
+  .tbl td:first-child code { color: var(--accent-text); font-weight: 500; }
 
   /* ===== Pills / badges ===== */
   .badge, .pill {
@@ -406,7 +495,7 @@
   }
   .badge.mcp {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .badge.mcp::before {
@@ -417,12 +506,12 @@
   }
   .pill-read {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .pill-write {
-    background: var(--warn-soft);
-    color: var(--warn);
+    background: var(--status-warn-soft);
+    color: var(--status-warn-text);
     border-color: color-mix(in srgb, var(--warn) 30%, transparent);
   }
 
@@ -433,9 +522,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px; height: 28px;
+    width: 32px; height: 32px;
     border: 1px solid var(--border);
-    background: var(--surface);
+    background: transparent;
     color: var(--text-dim);
     border-radius: var(--mctl-radius-md);
     cursor: pointer;
@@ -448,37 +537,41 @@
     border-color: var(--border-strong);
     background: var(--surface-2);
   }
-  .theme-toggle svg { width: 14px; height: 14px; }
+  .theme-toggle svg { width: 15px; height: 15px; }
   /* data-theme is always set by the pre-paint script. */
   .theme-toggle .icon-sun  { display: none; }
   .theme-toggle .icon-moon { display: block; }
   :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
   :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
 
-  /* ===== Footer ===== */
+  /* ===== Site footer (mctl.ai AppFooter / docs.mctl.ai DocsFooter) ===== */
   footer {
-    margin: 80px 0 40px;
-    padding-top: 24px;
-    border-top: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: var(--muted);
+    width: 100vw;
+    margin: 96px 0 0 calc(50% - 50vw);
+    padding: 48px var(--site-gutter);
+    background: color-mix(in srgb, var(--surface-elevated) 85%, transparent);
+    border-top: 1px solid var(--surface-line);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    text-align: center;
+  }
+  footer .wordmark { font-size: 20px; }
+  footer .links {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 18px;
-    align-items: center;
-    justify-content: space-between;
+    justify-content: center;
+    gap: 12px 32px;
+    max-width: var(--site-content-width);
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 15px;
   }
-  footer .links {
-    display: inline-flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px 10px;
-  }
-  footer a { color: var(--text-dim); border-bottom-color: transparent; }
-  footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
-  footer .sep { color: var(--border-strong); }
-  footer code { font-size: 11px; background: transparent; border: 0; padding: 0; color: var(--text-dim); }
+  footer a { color: var(--accent-text); border-bottom: 0; text-decoration: none; transition: color .2s ease; }
+  footer a:hover { color: var(--text); }
+  footer .copy { margin: 0; font-size: var(--text-caption-size); color: var(--surface-fg-muted); }
+  footer .service { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  footer code { font-size: inherit; background: transparent; border: 0; padding: 0; color: inherit; }
 
   /* Inline helpers */
   /* A URL moves to the next line whole and is broken only when it is longer
@@ -486,22 +579,58 @@
      line end, e.g. "https://tg.mc" / "tl.ai/mcp". */
   .url { overflow-wrap: anywhere; }
 
-  /* Section anchor offset */
-  section { scroll-margin-top: 24px; }
+  /* Section anchor offset: clear the sticky header. */
+  section, h2[id] { scroll-margin-top: calc(var(--site-header-height) + 16px); }
+
+  /* ===== Mobile header: CSS-only menu below 768px ===== */
+  @media (max-width: 767px) {
+    .topbar { height: 64px; margin-bottom: 40px; }
+    .topbar-inner { gap: 10px; }
+    .nav-burger {
+      order: 3;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px; height: 32px;
+      border: 1px solid var(--border);
+      border-radius: var(--mctl-radius-md);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .nav-burger svg { width: 16px; height: 16px; }
+    .nav-toggle:focus-visible + .nav-burger { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .theme-toggle { order: 2; }
+    .site-nav {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0;
+      padding: 8px var(--site-gutter) 16px;
+      background: var(--surface-bg);
+      border-bottom: 1px solid var(--site-header-border);
+      box-shadow: var(--shadow-md);
+    }
+    .nav-toggle:checked ~ .site-nav { display: flex; }
+    .site-nav a { padding: 12px 0; font-size: 1rem; border-bottom: 1px solid var(--border); }
+    .site-nav a:last-child { border-bottom: 0; }
+    .site-nav a.gh-link { gap: 8px; }
+    .site-nav a.gh-link::after { content: "GitHub"; }
+  }
 
   /* Responsive */
   @media (max-width: 640px) {
     .wrap { padding: 0 18px; }
-    /* Let the topbar + nav wrap instead of overflowing the viewport. */
-    .topbar { flex-wrap: wrap; gap: 10px 0; }
-    .topbar .meta { flex-wrap: wrap; gap: 10px 12px; font-size: 11px; }
-    h1 { font-size: 28px; }
     .lead { font-size: 15px; }
-    .tbl { font-size: 12.5px; }
-    .tbl thead th, .tbl tbody td { padding: 8px 10px; }
+    h2 { font-size: 20px; }
+    .tbl, .table-scroll > table, .doc table { font-size: 13px; }
+    .tbl th, .tbl td,
+    .table-scroll > table th, .table-scroll > table td,
+    .doc table th, .doc table td { padding: 7px 10px; }
     ol.steps > li { padding: 12px 14px 12px 50px; }
-    /* Stack the footer so links form one tidy group above the resource line,
-       instead of space-between stretching them across the width. */
-    footer { flex-direction: column; align-items: flex-start; gap: 14px; }
-    footer .links { gap: 6px 12px; }
+    footer { margin-top: 72px; padding: 40px 18px; }
+    footer .links { gap: 10px 20px; }
   }

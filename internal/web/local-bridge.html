@@ -7,17 +7,8 @@
      The markup below is produced by goldmark from docs/local-bridge*.md, so
      these selectors are plain elements rather than page-specific classes. */
   .doc { max-width: 760px; }
-  .doc h1 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 34px; font-weight: 600; color: var(--text);
-    margin: 0 0 18px; letter-spacing: -.02em;
-  }
-  .doc h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 20px; font-weight: 600; color: var(--text);
-    margin: 44px 0 14px; padding-bottom: 10px;
-    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
-  }
+  /* h1/h2 and table styling come from the shared components.css. */
+  .doc h1 { margin: 0 0 18px; }
   .doc h3 {
     font-size: 16px; font-weight: 600; color: var(--text); margin: 28px 0 10px;
   }
@@ -43,15 +34,9 @@
     margin: 16px 0; padding: 2px 0 2px 16px;
     border-left: 3px solid var(--border); color: var(--text-dim);
   }
-  .doc table {
-    display: block; width: 100%; overflow-x: auto; border-collapse: collapse;
-    margin: 14px 0; font-size: 14px;
-  }
-  .doc td, .doc th {
-    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
-    vertical-align: top; color: var(--text-dim);
-  }
-  .doc th { font-weight: 600; color: var(--text); white-space: nowrap; }
+  /* Rendered markdown tables have no wrapper: scroll them in place. */
+  .doc table { display: block; overflow-x: auto; }
+  .doc th { white-space: nowrap; }
   .doc hr { border: 0; border-top: 1px solid var(--border); margin: 32px 0; }
   .doc-source { color: var(--text-dim); font-size: 13px; margin-top: 40px; }
 
@@ -81,12 +66,11 @@
   .doc-toc a {
     display: block; padding: 16px 18px;
     background: var(--surface); border: 1px solid var(--border);
-    border-top: 3px solid var(--accent);
     border-radius: var(--mctl-radius-lg);
     text-decoration: none; color: inherit;
+    transition: border-color .3s ease, box-shadow .3s ease;
   }
-  .doc-toc a.kind-support { border-top-color: var(--border-strong); }
-  .doc-toc a:hover { border-color: var(--accent); }
+  .doc-toc a:hover { border-color: var(--accent); box-shadow: var(--shadow-md); }
   .doc-toc .toc-label {
     display: block; font-family: var(--font-display), system-ui, sans-serif;
     font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px;
@@ -96,9 +80,6 @@
   }
 
   @media (max-width: 640px) {
-    .doc h1 { font-size: 26px; }
-    .doc h2 { font-size: 18px; }
-    .doc table { font-size: 13px; }
     .doc-toc { grid-template-columns: 1fr; }
   }
 </style>

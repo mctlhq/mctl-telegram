@@ -52,10 +52,9 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"every client's refresh tokens for that user, every worker token issued for the user's Telegram id, and every Local Bridge device",
 		"only if your client calls <code>/oauth/revoke</code>",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,
-		`<a href="/platforms" class="active">platforms</a>`,
+		`<a href="/platforms" class="active">Platforms</a>`,
 		// footer twin of the topbar entry
-		`<span class="sep">·</span>
-      <a href="/platforms">platforms</a>`,
+		`<a href="/platforms">Platforms</a>`,
 		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {

@@ -5,16 +5,23 @@
 // deliberately avoids importing oauth.
 //
 // Two tiers are provided:
+// The look follows the shared public site shell of mctl.ai and docs.mctl.ai
+// (mctl-design): full-width header with the accent-"M" wordmark, Title Case
+// nav in the display face, the BaseButton/BaseCard recipes, the docs table
+// style and the centred wordmark footer.
+//
+// Two tiers are provided:
 //   - "full"  — content pages (landing, docs, security, privacy). Loads
-//     ui.mctl.ai/<version>/mctl.css + Google Fonts as progressive enhancement and runs
-//     the light/dark toggle JS (the choice persists in localStorage;
-//     it defaults to the OS preference until the user flips it), plus the
-//     self-hosted Umami page-view counter (AnalyticsScript).
+//     ui.mctl.ai/<version>/{mctl,global}.css + Google Fonts as progressive
+//     enhancement and runs the light/dark toggle JS (the choice persists in
+//     localStorage; with nothing stored the page is dark, like the sibling
+//     sites), plus the self-hosted Umami page-view counter (AnalyticsScript).
+//     The mobile nav menu is CSS-only and works without JS.
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
-//     No external CSS/JS: same palette via inlined tokens, theme follows the OS
-//     via a prefers-color-scheme fallback baked into tokens.css. The tab icon
-//     is the only CDN fetch (favicon-telegram.svg).
+//     No external CSS/JS: same palette via inlined tokens (dark, since there is
+//     no script to read a stored choice). The tab icon is the only CDN fetch
+//     (favicon-telegram.svg).
 package ui
 
 import (
@@ -59,6 +66,16 @@ const FaviconLink = `<link rel="icon" type="image/svg+xml" href="https://ui.mctl
 // local runs out of the numbers; the website ID is public by design.
 const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" data-website-id="d4fa9d69-8b07-4d27-98e6-0b611eeaa707" data-domains="tg.mctl.ai"></script>`
 
+// DesignVersion is the published @mctlhq/css version every full-chrome page
+// loads. mctl.css and global.css are pinned together as a set; tokens.css
+// mirrors the same version's values for the strict-CSP pages and as a
+// fallback when the CDN is unreachable.
+const DesignVersion = "0.14.0"
+
+// wordmark is the MCTL brand mark: accent "M" + "CTL", as LogoDefault.vue
+// (mctl.ai) and BrandMark.vue (docs.mctl.ai) draw it.
+const wordmark = `<span class="wordmark"><span class="wordmark-m">M</span><span class="wordmark-ctl">CTL</span></span>`
+
 // Shared template defines. CSS/JS are concatenated in as literal template text
 // (they contain no {{ }} actions), so there is no escaping concern.
 var defs = `
@@ -82,58 +99,52 @@ var defs = `
 <style>` + tokensCSS + `</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://ui.mctl.ai/0.5.0/mctl.css">
+<link href="https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/mctl.css">
+<link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/global.css">
 <script>` + prepaintJS + `</script>
 ` + AnalyticsScript + `
 <style>` + componentsCSS + `</style>{{end}}
 
 {{define "ui_topbar"}}<header class="topbar">
-    <a class="brand" href="/">
-      <span>MCTL</span>
-    </a>
-    <nav class="meta">
-      <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>home</a>
-      <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>docs</a>
-      <a href="/platforms"{{if eq .NavActive "platforms"}} class="active"{{end}}>platforms</a>
-      <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>demo</a>
-      <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>security</a>
-      <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>privacy</a>
-      <a href="/terms"{{if eq .NavActive "terms"}} class="active"{{end}}>terms</a>
-      {{if .ShowManage}}<a href="/telegram/connect/manage"{{if eq .NavActive "manage"}} class="active"{{end}}>manage</a>{{end}}
+    <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+    <input type="checkbox" id="site-nav-toggle" class="nav-toggle" aria-label="Open menu" aria-controls="site-nav">
+    <label for="site-nav-toggle" class="nav-burger" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></label>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>Home</a>
+      <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>Docs</a>
+      <a href="/platforms"{{if eq .NavActive "platforms"}} class="active"{{end}}>Platforms</a>
+      <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>Demo</a>
+      <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>Security</a>
+      <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>Privacy</a>
+      <a href="/terms"{{if eq .NavActive "terms"}} class="active"{{end}}>Terms</a>
+      {{if .ShowManage}}<a href="/telegram/connect/manage"{{if eq .NavActive "manage"}} class="active"{{end}}>Manage</a>{{end}}
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener" aria-label="GitHub" title="GitHub" class="gh-link"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
-      <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
-        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
-        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
-      </button>
     </nav>
+    <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+    </button>
+    </div>
   </header>{{end}}
 
 {{define "ui_footer"}}<footer>
-    <div class="links">
-      <span class="brand-mark">MCTL</span>
-      <span class="sep">·</span>
-      <a href="/">home</a>
-      <span class="sep">·</span>
-      <a href="/docs">docs</a>
-      <span class="sep">·</span>
-      <a href="/platforms">platforms</a>
-      <span class="sep">·</span>
-      <a href="/security">security</a>
-      <span class="sep">·</span>
-      <a href="/privacy">privacy</a>
-      <span class="sep">·</span>
-      <a href="/terms">terms</a>
-      <span class="sep">·</span>
-      <a href="/demo">demo</a>
-      <span class="sep">·</span>
-      <a href="mailto:support@mctl.ai">support</a>
-      {{if .ShowManage}}<span class="sep">·</span>
-      <a href="/telegram/connect/manage">manage</a>{{end}}
-      <span class="sep">·</span>
-      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">source</a>
-    </div>
-    <span>service: <code>{{.PublicBaseURL}}</code></span>
+    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+    <nav class="links" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/docs">Docs</a>
+      <a href="/platforms">Platforms</a>
+      <a href="/demo">Demo</a>
+      <a href="/security">Security</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="mailto:support@mctl.ai">Support</a>
+      {{if .ShowManage}}<a href="/telegram/connect/manage">Manage</a>
+      {{end}}<a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <p class="copy">© 2026 MCTL</p>
+    <p class="service">Service: <code>{{.PublicBaseURL}}</code></p>
   </footer>{{end}}
 
 {{define "ui_script"}}<script>` + toggleJS + `</script>{{end}}
@@ -153,27 +164,25 @@ var defs = `
 // strict-CSP pages. Exported via TopbarLite/FooterLite for callers that build
 // their HTML by string concatenation instead of the template defines.
 const topbarLiteHTML = `<header class="topbar">
-    <a class="brand" href="/">
-      <span>MCTL</span>
-    </a>
+    <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+    </div>
   </header>`
 
 const footerLiteHTML = `<footer>
-    <div class="links">
-      <span class="brand-mark">MCTL</span>
-      <span class="sep">·</span>
-      <a href="/">home</a>
-      <span class="sep">·</span>
-      <a href="/security">security</a>
-      <span class="sep">·</span>
-      <a href="/privacy">privacy</a>
-    </div>
+    <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
+    <nav class="links" aria-label="Footer">
+      <a href="/">Home</a>
+      <a href="/security">Security</a>
+      <a href="/privacy">Privacy</a>
+    </nav>
+    <p class="copy">© 2026 MCTL</p>
   </footer>`
 
 // Exported building blocks for strict-CSP pages (OAuth flow) that compose their
 // HTML as plain strings under a CSP that forbids external CSS/JS. TokensCSS +
 // ComponentsCSS go inside one <style>; TopbarLite/FooterLite are the markup.
-// Theme follows the OS via the prefers-color-scheme fallback in tokens.css.
+// The theme is the design system's dark default (no script, no stored choice).
 var (
 	TokensCSS     = tokensCSS
 	ComponentsCSS = componentsCSS
@@ -181,34 +190,24 @@ var (
 	FooterLite    = footerLiteHTML
 )
 
-// AuthCSS styles the OAuth-flow card / primary button / step indicator using
-// the shared design tokens. Append it inside the same <style> as TokensCSS +
-// ComponentsCSS. The step indicator is .flow-steps (not the shared numbered
-// ol.steps) to avoid clashing with the component CSS inlined alongside it.
+// AuthCSS styles the OAuth-flow card / step indicator / form fields using the
+// shared design tokens. Append it inside the same <style> as TokensCSS +
+// ComponentsCSS. Buttons are the shared .btn / .btn-secondary from
+// components.css; only their in-card layout is set here. The step indicator is
+// .flow-steps (not the shared numbered ol.steps) to avoid clashing with the
+// component CSS inlined alongside it.
 const AuthCSS = `
   .auth-main { max-width: 520px; margin: 56px auto; }
   .card {
     background: var(--surface); border: 1px solid var(--border);
-    border-top: 2px solid var(--accent);
     border-radius: var(--mctl-radius-lg); padding: 32px 28px;
-    box-shadow: 0 4px 28px color-mix(in srgb, var(--accent) 5%, transparent);
+    box-shadow: var(--shadow-sm);
   }
-  .card h1 { font-family: var(--font-display), system-ui, sans-serif; font-size: 22px; font-weight: 600; margin: 0 0 12px; color: var(--text); }
+  .card h1 { font-family: var(--font-display), system-ui, sans-serif; font-size: 24px; font-weight: 700; line-height: 1.3; letter-spacing: -.01em; margin: 0 0 12px; color: var(--text); }
+  .card h2 { border-bottom: 0; padding-bottom: 0; }
+  .card h2:not([class]) { font-size: 17px; font-weight: 600; margin: 24px 0 8px; }
   .card p { margin: 8px 0; }
-  .btn {
-    display: inline-block; width: 100%; box-sizing: border-box; text-align: center;
-    margin-top: 20px; font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 15px; font-weight: 600; padding: 11px 16px; border: 0; cursor: pointer;
-    border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; text-decoration: none;
-  }
-  .btn:hover { filter: brightness(.92); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-  .btn-secondary {
-    display: inline-block; box-sizing: border-box; text-align: center; cursor: pointer;
-    font-family: var(--font-display), system-ui, sans-serif; font-size: 14px; font-weight: 600;
-    padding: 9px 16px; border-radius: var(--mctl-radius-md);
-    background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
-  }
-  .btn-secondary:hover { background: var(--surface-elevated); border-color: var(--accent); }
+  .card .btn { display: flex; width: 100%; margin-top: 20px; padding: 11px 16px; text-align: center; }
   input[type="text"], input[type="tel"], input[type="password"] {
     width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px;
     font-family: var(--font-mono); font-size: 14px;
@@ -218,8 +217,8 @@ const AuthCSS = `
   label { display: block; margin-top: 14px; font-size: 13px; color: var(--text-dim); }
   .flow-steps { display: flex; list-style: none; padding: 0; margin: 0 0 26px; gap: 0; }
   .flow-steps li { flex: 1; text-align: center; font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 10px 4px; border-bottom: 2px solid var(--border); color: var(--muted); transition: color .15s, border-color .15s; }
-  .flow-steps li.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
-  .error { background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); border-radius: var(--mctl-radius-md); padding: 10px 12px; font-size: 13px; color: var(--danger); margin: 12px 0; }
+  .flow-steps li.active { border-bottom-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .error { background: var(--status-bad-soft); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); border-radius: var(--mctl-radius-md); padding: 10px 12px; font-size: 13px; color: var(--status-bad-text); margin: 12px 0; }
   .meta { font-size: 13px; color: var(--muted); margin-top: 18px; }
   .url { font-family: var(--font-mono); font-size: 13px; word-break: break-all; color: var(--accent-highlight); }
 `

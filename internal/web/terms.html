@@ -3,21 +3,13 @@
 <head>
 {{template "ui_head" .}}
 <style>
-  /* Page-specific prose styling, built on the shared design tokens. */
-  h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 20px; font-weight: 600; color: var(--text);
-    margin: 44px 0 14px; padding-bottom: 10px;
-    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
-  }
+  /* Page-specific prose styling, built on the shared design tokens. Headings
+     (h2) and tables come from the shared components.css. */
   ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
   li { margin-bottom: 8px; line-height: 1.6; }
   li strong { color: var(--text); }
   p { color: var(--text-dim); line-height: 1.6; }
   p strong { color: var(--text); }
-  @media (max-width: 640px) {
-    h2 { font-size: 18px; }
-  }
 </style>
 </head>
 <body>

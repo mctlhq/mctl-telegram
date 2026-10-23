@@ -260,7 +260,7 @@ type demoChooserPage struct {
 const demoExtraCSS = `
   a.tg-btn { display:block; text-align:center; text-decoration:none; margin-top:16px;
              font-family: var(--font-display), system-ui, sans-serif; font-size:15px; font-weight:600;
-             padding:11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color:#0a0b0d; }
+             padding:11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   a.tg-btn:hover { filter: brightness(.92); }
   .divider { margin:22px 0 4px; font-size:12px; font-weight:600; text-transform:uppercase;
              letter-spacing:.05em; color: var(--text-dim); text-align:center; }
