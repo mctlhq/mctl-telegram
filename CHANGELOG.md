@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.88.3](https://github.com/mctlhq/mctl-telegram/compare/0.88.2...0.88.3) (2026-10-23)
+
+
+### Bug Fixes
+
+* **audit:** mask quoted peers that ScrubText missed ([6a8a73e](https://github.com/mctlhq/mctl-telegram/commit/6a8a73e4d86b7bdf87c36ec6c530a86323e57625))
+* **audit:** mask quoted peers that ScrubText missed ([59102fb](https://github.com/mctlhq/mctl-telegram/commit/59102fb2206c920c2d58ac0888ab3e251848eb44))
+
 ## [0.88.2](https://github.com/mctlhq/mctl-telegram/compare/0.88.1...0.88.2) (2026-10-22)
 
 
