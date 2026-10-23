@@ -93,7 +93,12 @@
     align-items: center;
     gap: 16px;
     height: 100%;
-    max-width: var(--site-content-width);
+    /* --site-content-width is the content width, gutters excluded (mctl.ai's
+       BaseContainer is 1440px with 20px padding). Under border-box the
+       padding counts inside max-width, so add both gutters back; otherwise
+       the brand sits one gutter further in than on mctl.ai and docs.mctl.ai
+       on viewports wider than the content width plus two gutters. */
+    max-width: calc(var(--site-content-width) + 2 * var(--site-gutter));
     margin: 0 auto;
     padding: 0 var(--site-gutter);
   }
