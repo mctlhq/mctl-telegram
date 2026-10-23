@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.92.2](https://github.com/mctlhq/mctl-telegram/compare/0.92.1...0.92.2) (2026-10-23)
+
+
+### Bug Fixes
+
+* **web:** update the Claude and ChatGPT connector steps ([214b3bf](https://github.com/mctlhq/mctl-telegram/commit/214b3bf69eabfc4d2c146512ec4373eb5cc6b097))
+
 ## [0.92.1](https://github.com/mctlhq/mctl-telegram/compare/0.92.0...0.92.1) (2026-10-23)
 
 
