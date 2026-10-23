@@ -51,7 +51,7 @@ func LoginQR(
 		UpdateHandler:  dispatcher,
 		DCList:         dcList(cfg.TestDC),
 		Device: gotdtelegram.DeviceConfig{
-			DeviceModel:    "mctl Telegram Assistant",
+			DeviceModel:    "MCTL Assistant",
 			SystemVersion:  "Linux",
 			AppVersion:     "1.0",
 			SystemLangCode: "en",

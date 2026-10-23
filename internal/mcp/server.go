@@ -359,7 +359,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		)
 	}
 	srv := mcpserver.NewMCPServer(
-		"MCTL",
+		"MCTL Assistant",
 		v,
 		opts...,
 	)

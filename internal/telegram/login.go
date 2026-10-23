@@ -122,7 +122,7 @@ func Login(
 		SessionStorage: sessStore,
 		DCList:         dcList(cfg.TestDC),
 		Device: telegram.DeviceConfig{
-			DeviceModel:    "mctl Telegram Assistant",
+			DeviceModel:    "MCTL Assistant",
 			SystemVersion:  "Linux",
 			AppVersion:     "1.0",
 			SystemLangCode: "en",

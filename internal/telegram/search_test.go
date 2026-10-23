@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -18,6 +19,8 @@ type fakeSearchInvoker struct {
 	lastGlobal *tg.MessagesSearchGlobalRequest
 	lastPeer   *tg.MessagesSearchRequest
 	result     *tg.MessagesMessages
+	// broadcastIDs are the channels ChannelsGetChannels reports as broadcast.
+	broadcastIDs map[int64]bool
 }
 
 func (f *fakeSearchInvoker) MessagesSearchGlobal(_ context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error) {
@@ -28,6 +31,17 @@ func (f *fakeSearchInvoker) MessagesSearchGlobal(_ context.Context, req *tg.Mess
 func (f *fakeSearchInvoker) MessagesSearch(_ context.Context, req *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error) {
 	f.lastPeer = req
 	return f.result, nil
+}
+
+// ChannelsGetChannels reports every channel as a megagroup unless
+// broadcastIDs lists it, so the existing per-peer tests keep searching.
+func (f *fakeSearchInvoker) ChannelsGetChannels(_ context.Context, id []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
+	out := &tg.MessagesChats{}
+	for _, ic := range id {
+		chID := ic.(*tg.InputChannel).ChannelID
+		out.Chats = append(out.Chats, &tg.Channel{ID: chID, Megagroup: !f.broadcastIDs[chID], Broadcast: f.broadcastIDs[chID]})
+	}
+	return out, nil
 }
 
 func fakeSearchResult() *tg.MessagesMessages {
@@ -220,5 +234,54 @@ func TestCheckSearchBound(t *testing.T) {
 				t.Fatalf("checkSearchBound(%v) err = %v, wantErr %v", tc.t, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestSearchPeer_BroadcastRefusedBeforeSearching(t *testing.T) {
+	f := &fakeSearchInvoker{result: fakeSearchResult(), broadcastIDs: map[int64]bool{8521: true}}
+	_, err := searchPeerWith(context.Background(), f, &tg.InputPeerChannel{ChannelID: 8521, AccessHash: 2}, SearchParams{Peer: "channel:8521", Query: "q", Limit: 10})
+	if !errors.Is(err, ErrBroadcastContent) {
+		t.Fatalf("err = %v, want ErrBroadcastContent", err)
+	}
+	if f.lastPeer != nil {
+		t.Error("messages.search was sent for a broadcast channel")
+	}
+}
+
+func TestSearchPeer_MegagroupSearched(t *testing.T) {
+	f := &fakeSearchInvoker{result: fakeSearchResult()}
+	if _, err := searchPeerWith(context.Background(), f, &tg.InputPeerChannel{ChannelID: 8522, AccessHash: 3}, SearchParams{Peer: "channel:8522", Query: "q", Limit: 10}); err != nil {
+		t.Fatalf("megagroup search: %v", err)
+	}
+	if f.lastPeer == nil {
+		t.Error("megagroup was not searched")
+	}
+}
+
+func TestSearchGlobal_DropsBroadcastHits(t *testing.T) {
+	res := &tg.MessagesMessages{
+		Messages: []tg.MessageClass{
+			&tg.Message{ID: 1, Message: "from Alice", PeerID: &tg.PeerUser{UserID: 8511}},
+			&tg.Message{ID: 2, Message: "channel post", PeerID: &tg.PeerChannel{ChannelID: 8521}},
+			&tg.Message{ID: 3, Message: "team chat", PeerID: &tg.PeerChannel{ChannelID: 8522}},
+			&tg.Message{ID: 4, Message: "unknown channel", PeerID: &tg.PeerChannel{ChannelID: 8523}},
+		},
+		Users: []tg.UserClass{&tg.User{ID: 8511, FirstName: "Alice"}},
+		Chats: []tg.ChatClass{
+			&tg.Channel{ID: 8521, Title: "News", Broadcast: true},
+			&tg.Channel{ID: 8522, Title: "Team", Megagroup: true},
+		},
+	}
+	f := &fakeSearchInvoker{result: res}
+	msgs, err := searchGlobalWith(context.Background(), f, SearchParams{Query: "q", Limit: 10})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var ids []int
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) != 2 || ids[0] != 1 || ids[1] != 3 {
+		t.Errorf("ids = %v, want [1 3]: broadcast and unknown-channel hits dropped, user and megagroup kept", ids)
 	}
 }

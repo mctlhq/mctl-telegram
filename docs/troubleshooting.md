@@ -479,8 +479,8 @@ Read tools usually keep working.
 
 Telegram has frozen the connected account
 ([Telegram docs](https://core.telegram.org/api/auth#frozen-accounts)),
-usually after its anti-spam system flagged the account's traffic. MCTL is an
-unofficial client, and on the hosted deployment every session reaches
+usually after its anti-spam system flagged the account's traffic. MCTL Assistant is
+an unofficial third-party connector, and on the hosted deployment every session reaches
 Telegram from the same datacenter, so an account that sends spam-like traffic
 through it is limited like one that does so from any other client.
 

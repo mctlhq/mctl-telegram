@@ -50,7 +50,9 @@ func (l MediaFileLocation) inputLocation() tg.InputFileLocationClass {
 // channels.getMessages (messages.getMessages cannot see channel messages);
 // everything else goes through messages.getMessages. Returns an error when
 // the message does not exist or carries no downloadable media (web pages,
-// contacts, locations, polls have MediaInfo but no file to fetch).
+// contacts, locations, polls have MediaInfo but no file to fetch). A broadcast
+// channel fails with ErrBroadcastContent before the message is fetched
+// (issue #851).
 func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, messageID int, cache *PeerCache, userID int64) (*MediaInfo, *MediaFileLocation, error) {
 	api := c.API()
 	inputPeer, err := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
@@ -70,7 +72,16 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 		}
 		inputPeer = fromDialogs
 	}
+	return prepareMediaRefWith(ctx, api, peerSpec, inputPeer, messageID)
+}
+
+// prepareMediaRefWith is PrepareMediaRef after peer resolution.
+func prepareMediaRefWith(ctx context.Context, api *tg.Client, peerSpec string, inputPeer tg.InputPeerClass, messageID int) (*MediaInfo, *MediaFileLocation, error) {
+	if err := refuseBroadcastPeer(ctx, api, peerSpec, inputPeer); err != nil {
+		return nil, nil, err
+	}
 	var result tg.MessagesMessagesClass
+	var err error
 	if ch, ok := inputPeer.(*tg.InputPeerChannel); ok {
 		result, err = api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 			Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
