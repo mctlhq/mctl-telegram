@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.91.0](https://github.com/mctlhq/mctl-telegram/compare/0.90.1...0.91.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-858-spike-runtime-mctl-agents-760-slice-1-co ([661eb6e](https://github.com/mctlhq/mctl-telegram/commit/661eb6e11cf4a8e5ce048dd2bc816a19688ecd3c))
+* **ui:** adopt the shared public-site layout from mctl-design 0.15.0 ([e6b401e](https://github.com/mctlhq/mctl-telegram/commit/e6b401ec4722338934bfe21a02a769f27ddf5769))
+
 ## [0.90.1](https://github.com/mctlhq/mctl-telegram/compare/0.90.0...0.90.1) (2026-10-23)
 
 
