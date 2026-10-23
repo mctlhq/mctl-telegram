@@ -2154,7 +2154,7 @@ const peerFloodHoldRefusal = "writes from this account are paused after Telegram
 // evaluateDirectSendLimiter: the PEER_FLOOD pause is Telegram's verdict,
 // everything else is this server's own budget.
 func limiterRefusalReason(refusal string) string {
-	if strings.HasPrefix(refusal, peerFloodHoldRefusal) {
+	if strings.Contains(refusal, peerFloodHoldRefusal) {
 		return ReasonTelegramError
 	}
 	return ReasonRateLimited

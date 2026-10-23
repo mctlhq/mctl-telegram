@@ -1698,7 +1698,7 @@ func TestDirectSendLimiter_PeerFloodHoldRefusesEveryRecipient(t *testing.T) {
 		if !strings.HasPrefix(reason, peerFloodHoldRefusal) || !strings.Contains(reason, "retry in about 60 min") {
 			t.Errorf("%s: refusal %q", peer, reason)
 		}
-		if got := classifyToolResultReason(mcplib.NewToolResultError(reason)); got != ReasonTelegramError {
+		if got := classifyToolResultReason(mcplib.NewToolResultError("edit blocked: " + reason)); got != ReasonTelegramError {
 			t.Errorf("%s: reason = %q, want %q", peer, got, ReasonTelegramError)
 		}
 	}

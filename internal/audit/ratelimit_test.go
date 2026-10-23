@@ -236,3 +236,21 @@ func TestWriteHold_PausesOneAccountUntilExpiry(t *testing.T) {
 		t.Fatalf("WriteHold(1) after expiry = %v, want 0", got)
 	}
 }
+
+// sweep drops expired holds, so an account that never writes again does not
+// keep its entry forever.
+func TestWriteHold_SweepDropsExpiredHolds(t *testing.T) {
+	r := NewRateLimiter(0)
+	base := time.Unix(1_700_000_000, 0)
+	r.now = func() time.Time { return base }
+	r.HoldWrites(1, PeerFloodHold)
+	r.HoldWrites(2, 2*PeerFloodHold)
+	r.mu.Lock()
+	r.sweep(base.Add(PeerFloodHold + sweepEvery))
+	_, kept1 := r.writeHolds[1]
+	_, kept2 := r.writeHolds[2]
+	r.mu.Unlock()
+	if kept1 || !kept2 {
+		t.Fatalf("after sweep: hold 1 kept=%v (want false), hold 2 kept=%v (want true)", kept1, kept2)
+	}
+}
