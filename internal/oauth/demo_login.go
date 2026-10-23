@@ -166,7 +166,7 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.LogToolCall(r.Context(), uid, "connect:demo_reviewer", "", "ok", "", "", "")
+	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: uid, Tool: "connect:demo_reviewer", Status: "ok"})
 	s.issueAuthCode(w, r, oauthCtx{
 		ClientID:      pending.ClientID,
 		RedirectURI:   pending.RedirectURI,

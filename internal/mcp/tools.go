@@ -2613,7 +2613,7 @@ func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
 	if rec.id != nil {
 		uid = rec.id.UserID
 	}
-	s.Store.LogToolCall(ctx, uid, rec.tool, rec.peer, rec.status, rec.errMsg, rec.callPath, rec.reason)
+	s.Store.LogToolCall(ctx, db.ToolCall{UserID: uid, Tool: rec.tool, PeerRedacted: rec.peer, Status: rec.status, ErrMsg: rec.errMsg, CallPath: rec.callPath, Reason: rec.reason})
 	if s.Metrics != nil && rec.hasElapsed && rec.feedsSLO() {
 		s.Metrics.ToolInvocationDuration.WithLabelValues(rec.tool).Observe(rec.elapsed.Seconds())
 		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.metricStatus()).Inc()

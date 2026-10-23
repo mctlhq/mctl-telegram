@@ -183,7 +183,7 @@ func (s *ManageServer) auditManage(r *http.Request, id *auth.Identity, tool stri
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	s.store.LogToolCall(ctx, id.UserID, tool, "", status, msg, "", "")
+	s.store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: tool, Status: status, ErrMsg: msg})
 }
 
 // notificationRow is one rendered checkbox on the dashboard.

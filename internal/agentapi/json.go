@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // writeJSON encodes body as the response, setting Content-Type and status
@@ -72,7 +73,7 @@ func (s *Server) audit(ctx context.Context, userID int64, tool, status, errMsg s
 	if s.Store == nil {
 		return
 	}
-	s.Store.LogToolCall(ctx, userID, tool, "", status, errMsg, "", "")
+	s.Store.LogToolCall(ctx, db.ToolCall{UserID: userID, Tool: tool, Status: status, ErrMsg: errMsg})
 }
 
 func logHandlerErr(tool string, err error) {

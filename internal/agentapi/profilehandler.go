@@ -192,7 +192,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 
 		if err := store.UpdateAgentProfileFields(ctx, targetUserID, update); err != nil {
 			logHandlerErr("admin.agent_profile.upsert", err)
-			store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "error", err.Error(), "", "")
+			store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "error", ErrMsg: err.Error()})
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent profile")
 			return
 		}
@@ -211,7 +211,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			return
 		}
 
-		store.LogToolCall(ctx, id.UserID, "admin.agent_profile.upsert", "", "ok", "", "", "")
+		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "ok"})
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,
 			"mode", p.Mode, "listener_enabled", p.ListenerEnabled, "autopilot_paused", p.AutopilotPaused)
