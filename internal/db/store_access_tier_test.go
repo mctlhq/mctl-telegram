@@ -235,7 +235,7 @@ func runGrantClientTierIfUnsetHeldNone(t *testing.T, ctx context.Context, dsn st
 		t.Skipf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := Migrate(ctx, conn); err != nil {
+	if err := MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	st := &Store{DB: conn}

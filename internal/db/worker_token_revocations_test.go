@@ -15,7 +15,7 @@ func newWorkerTokenRevocationTestStore(t *testing.T) *Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := Migrate(ctx, conn); err != nil {
+	if err := MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return &Store{DB: conn}

@@ -28,7 +28,7 @@ func newBotTestStore(t *testing.T) *db.Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db.NewStore(conn, nil)

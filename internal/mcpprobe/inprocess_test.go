@@ -42,7 +42,7 @@ func newInProcessTarget(t *testing.T) (string, string) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)
@@ -99,7 +99,7 @@ func newInProcessAppsTarget(t *testing.T, appsEnabled bool) (string, string) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)

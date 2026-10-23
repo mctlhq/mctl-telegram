@@ -48,9 +48,25 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/mctl_test?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # setup-go's own cache is keyed on go.sum alone, so it is restored but
+      # never re-saved while go.sum is unchanged: every run recompiled the
+      # whole module under -race. This job restores the cache go-cache.yml
+      # saves on every push to main (keyed per commit), which every PR can
+      # read, and saves nothing itself: PR-scoped caches are unreadable from
+      # other PRs and only push the repository past its cache quota.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.10"
+          cache: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-race-${{ runner.os }}-
       - run: go vet ./...
       - run: go build ./...
       # -race is not optional here: internal/bridge is a Hub of goroutines and
@@ -118,6 +134,17 @@ jobs:
             echo "::error::expected at least $expected Postgres-backed tests to pass, saw $passed"
             exit 1
           fi
+
+  # The release cross-compiles darwin/arm64 and windows/amd64. These builds
+  # ran at the end of `test`, adding about two and a half minutes to the
+  # required check; as their own job they run alongside it.
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
       - run: GOOS=darwin GOARCH=arm64 go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./cmd/local
 

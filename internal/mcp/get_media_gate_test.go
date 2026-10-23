@@ -27,7 +27,7 @@ func newGetMediaGateTestServer(t *testing.T) (*Server, int64) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
 	store := db.NewStore(conn, nil)
