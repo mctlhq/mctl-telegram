@@ -159,7 +159,7 @@ func TestInProcess_ModernPathAgainstRealHandler(t *testing.T) {
 		t.Fatalf("summary = %s\nsteps: %+v\nnegatives: %+v", report.Summary, report.Steps, report.Negatives)
 	}
 	if report.Server.Name != "MCTL Assistant" {
-		t.Errorf("server name = %q, want MCTL", report.Server.Name)
+		t.Errorf("server name = %q, want %q", report.Server.Name, "MCTL Assistant")
 	}
 	if len(report.Server.SupportedVersions) == 0 {
 		t.Error("server advertised no supported versions")
