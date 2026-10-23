@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  Source of internal/web/og.png, the 1200x630 card behind og:image and
+  twitter:image on tg.mctl.ai. Colours are the dark surface and terracotta
+  accent tokens from ui.mctl.ai (mctl-design); the badge is the geometry of
+  ui.mctl.ai/brand/favicon-telegram.svg.
+
+  The product name is MCTL Assistant (mctl-telegram#850), and the card says
+  it is an unofficial client: Telegram API ToS 2.3 keeps "Telegram" out of a
+  third-party app's name and asks that it not look official.
+
+  Render (needs network for the Onest font):
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless=new --hide-scrollbars --window-size=1200,630 \
+      --screenshot=internal/web/og.png docs/brand/og-card.html
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap">
+<style>
+  html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    background: #0a0b0d; color: #e6e7e9;
+    font-family: Onest, system-ui, sans-serif;
+    box-sizing: border-box; padding: 84px 82px 0;
+    position: relative;
+  }
+  .brand { display: flex; align-items: center; gap: 22px; }
+  .brand svg { width: 64px; height: 64px; }
+  .brand span { font-size: 34px; font-weight: 700; letter-spacing: 0.01em; }
+  .brand span b { font-weight: 500; color: #a4a8ae; }
+  h1 { margin: 98px 0 0; font-size: 76px; line-height: 1.12; font-weight: 700; letter-spacing: -0.01em; }
+  h1 em { font-style: normal; color: #e25a3c; }
+  p { margin: 26px 0 0; font-size: 27px; line-height: 1.45; color: #a4a8ae; max-width: 780px; }
+  footer {
+    position: absolute; left: 82px; right: 82px; bottom: 60px;
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 19px; color: #7d828b;
+  }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <svg viewBox="0 0 512 512" aria-hidden="true">
+      <defs>
+        <mask id="cut">
+          <path d="M256 60L435.263 158V354L256 452L76.7372 354V158L256 60Z" fill="#fff"/>
+          <text x="256" y="256" dy=".36em" text-anchor="middle" font-family="Onest, system-ui, sans-serif" font-weight="700" font-size="230" fill="#000">M</text>
+        </mask>
+      </defs>
+      <path d="M256 60L435.263 158V354L256 452L76.7372 354V158L256 60Z" fill="#e25a3c" mask="url(#cut)"/>
+    </svg>
+    <span>MCTL <b>Assistant</b></span>
+  </div>
+  <h1>Your Telegram,<br><em>inside your AI assistant</em></h1>
+  <p>Summarise chats, draft replies, and search your history &mdash; from Claude, ChatGPT, or any MCP client.</p>
+  <footer>
+    <span>Claude &middot; ChatGPT &middot; Cursor &middot; Windsurf</span>
+    <span>Unofficial client. Not affiliated with Telegram.</span>
+  </footer>
+</body>
+</html>
