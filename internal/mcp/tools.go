@@ -689,7 +689,7 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 			limit = evaluateCleanupLimiter
 		}
 		if blocked, r := limit(s.Limiter, id, peer); blocked {
-			s.auditRefusal(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
@@ -767,6 +767,16 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		if !canPin {
 			s.auditRefusal(ctx, id, "pin_message:blocked", telegram.RedactPeer(peer), errors.New(blockReason), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("pin blocked: " + blockReason), nil
+		}
+		// A pin debits no budget at confirm time, so the PEER_FLOOD pause is
+		// checked here directly. Unpinning only takes something back and
+		// stays allowed, like the cleanup budget.
+		if !unpin && s.Limiter != nil {
+			if left := s.Limiter.WriteHold(id.UserID); left > 0 {
+				r := peerFloodHoldRefusal + " — retry in " + retryAfterText(left) + "."
+				s.auditRefusal(ctx, id, "pin_message:paused", telegram.RedactPeer(peer), errors.New(r), startedAt, ReasonTelegramError)
+				return mcplib.NewToolResultError(r), nil
+			}
 		}
 		if _, cerr := s.Confirms.Consume(confID, id.UserID, HashPinPayload(peer, int64(messageID), unpin)); cerr != nil {
 			switch {
@@ -2140,6 +2150,16 @@ func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, p
 // classifies on it.
 const peerFloodHoldRefusal = "writes from this account are paused after Telegram's anti-spam system refused one of its calls (PEER_FLOOD)"
 
+// limiterRefusalReason is the audit reason for a refusal from
+// evaluateDirectSendLimiter: the PEER_FLOOD pause is Telegram's verdict,
+// everything else is this server's own budget.
+func limiterRefusalReason(refusal string) string {
+	if strings.HasPrefix(refusal, peerFloodHoldRefusal) {
+		return ReasonTelegramError
+	}
+	return ReasonRateLimited
+}
+
 // peerFloodHoldText renders audit.PeerFloodHold for the error catalog.
 var peerFloodHoldText = fmt.Sprintf("%d minutes", int(audit.PeerFloodHold/time.Minute))
 
@@ -2825,7 +2845,7 @@ Inputs (required):
 		}
 		peerRedacted := telegram.RedactPeer(peer)
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peer); blocked {
-			s.auditRefusal(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2883,7 +2903,7 @@ Inputs (required):
 		// Deleting reaches nobody, so it spends the cleanup budget, not the
 		// send budget: a caller who hit the send cap can still clean up.
 		if blocked, r := evaluateCleanupLimiter(s.Limiter, id, peer); blocked {
-			s.auditRefusal(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -2943,7 +2963,7 @@ Inputs (required):
 		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
 		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeer, len(messageIDs)); blocked {
-			s.auditRefusal(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {
@@ -3131,7 +3151,7 @@ Inputs (optional):
 			limit = evaluateCleanupLimiter
 		}
 		if blocked, r := limit(s.Limiter, id, peer); blocked {
-			s.auditRefusal(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		if s.Hub != nil {

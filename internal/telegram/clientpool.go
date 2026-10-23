@@ -332,6 +332,11 @@ func borrowCallResult(err error) string {
 	if sessionErrorFor(err) != nil {
 		return "error"
 	}
+	// Checked before the 420 test: FROZEN_METHOD_INVALID is a 420 but a
+	// refusal, not a flood wait.
+	if IsFrozenAccount(err) {
+		return "call_error"
+	}
 	var te *tgerr.Error
 	if (errors.As(err, &te) && te.Code == 420) || IsPeerFlood(err) {
 		return "flood_wait"

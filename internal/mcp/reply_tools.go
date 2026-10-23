@@ -257,7 +257,7 @@ Inputs (required):
 		// The rate limit is a refusal the user can wait out, so like the
 		// gate it runs before the draft is spent.
 		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, d.Target.Ref); blocked {
-			s.auditRefusal(ctx, id, "send_reply:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			s.auditRefusal(ctx, id, "send_reply:rate_limited", peerRedacted, errors.New(r), startedAt, limiterRefusalReason(r))
 			return mcplib.NewToolResultError(r), nil
 		}
 		// Consume is what makes the send single-shot: a concurrent

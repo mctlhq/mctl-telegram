@@ -585,6 +585,8 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 		{"flood_premium_wait", tgerr.New(420, "FLOOD_PREMIUM_WAIT_3"), "flood_wait"},
 		{"flood_wait_wrapped", fmt.Errorf("history: %w", tgerr.New(420, "FLOOD_WAIT_5")), "flood_wait"},
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), "flood_wait"},
+		{"frozen_method", tgerr.New(420, "FROZEN_METHOD_INVALID"), "call_error"},
+		{"frozen_participant", tgerr.New(400, "FROZEN_PARTICIPANT_MISSING"), "call_error"},
 		{"bad_request", tgerr.New(400, "CHANNEL_INVALID"), "call_error"},
 		{"forbidden", tgerr.New(403, "CHAT_WRITE_FORBIDDEN"), "call_error"},
 		{"peer_not_accessible", fmt.Errorf("get_messages: %w", &peerNotAccessibleError{peer: "@nobody", code: "PEER_ID_INVALID"}), "call_error"},

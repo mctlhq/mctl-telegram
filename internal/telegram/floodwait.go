@@ -17,6 +17,16 @@ func IsPeerFlood(err error) bool {
 	return err != nil && tgerr.Is(err, "PEER_FLOOD")
 }
 
+// IsFrozenAccount reports whether err is one of Telegram's refusals for a
+// frozen account (FROZEN_METHOD_INVALID, FROZEN_PARTICIPANT_MISSING; see
+// https://core.telegram.org/api/auth#frozen-accounts). Telegram answered,
+// so the session and the service work: it is a caller refusal, not an
+// outage, even though FROZEN_METHOD_INVALID arrives with code 420.
+func IsFrozenAccount(err error) bool {
+	var te *tgerr.Error
+	return errors.As(err, &te) && strings.HasPrefix(te.Type, "FROZEN_")
+}
+
 // FloodWaitSeconds extracts the wait duration (in seconds) encoded in a
 // Telegram FLOOD_WAIT_X or FLOOD_PREMIUM_WAIT_X MTProto error (both code 420).
 // Returns 0 when err is nil, is not a tgerr.Error, or is not a flood-wait

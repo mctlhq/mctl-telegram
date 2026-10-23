@@ -28,6 +28,9 @@ func TestIsCallerRefusal(t *testing.T) {
 		{"no_existing_dialog_wrapped", fmt.Errorf("draft: %w", ErrNoExistingDialog), true},
 		{"cannot_post", ErrCannotPost, true},
 		{"peer_deleted", ErrPeerDeleted, true},
+		// A frozen account's refusal is Telegram answering (#853).
+		{"frozen_method", tgerr.New(420, "FROZEN_METHOD_INVALID"), true},
+		{"frozen_participant_wrapped", fmt.Errorf("send: %w", tgerr.New(400, "FROZEN_PARTICIPANT_MISSING")), true},
 		// A reply that proves nothing about the caller, or that says the
 		// session itself is unhealthy, must keep counting against the SLI.
 		{"peer_flood", tgerr.New(400, "PEER_FLOOD"), false},

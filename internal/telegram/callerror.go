@@ -80,7 +80,7 @@ func IsCallerRefusal(err error) bool {
 	// server's own policy refusals, read off a getPeerDialogs reply that
 	// succeeded: the session worked, and the caller picked a conversation
 	// draft_reply will not use.
-	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) {
+	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) || IsFrozenAccount(err) {
 		return true
 	}
 	var te *tgerr.Error
