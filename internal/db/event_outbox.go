@@ -24,7 +24,28 @@ type OutboxRow struct {
 // the event kind is not published. It is injected (internal/events) rather than
 // imported so this package keeps no dependency on the transport, and it must
 // read identifiers only: the envelope is stored in plaintext.
-type OutboxBuilder func(ev IncomingEvent, occurredAt time.Time) (row OutboxRow, ok bool, err error)
+//
+// routingReason is empty for an ingest-time envelope and one of the Route*
+// constants for a routed one.
+type OutboxBuilder func(ev IncomingEvent, occurredAt time.Time, routingReason string) (row OutboxRow, ok bool, err error)
+
+// Closed set of reasons an event is forwarded to the operator stream when
+// operator routing is on.
+const (
+	RoutePolicyDeny            = "policy_deny"
+	RoutePolicyRequireApproval = "policy_require_approval"
+	RouteWorkerFailure         = "worker_failure"
+)
+
+// WithOperatorRouting turns operator routing on or off. When on, ingest does
+// not write an outbox row for an event that was enqueued as an agent job; the
+// row is written later, in the transaction that decides the job's fate, and
+// only for a deny, require_approval or worker failure. Off (the default)
+// publishes at ingest exactly as before.
+func (s *Store) WithOperatorRouting(on bool) *Store {
+	s.operatorRouting = on
+	return s
+}
 
 // WithEventOutbox enables the event outbox: every published incoming event gets
 // an event_outbox row in the same transaction that records it. Without it no
@@ -49,10 +70,14 @@ func (s *Store) WithEventOutboxNotify(fn func()) *Store {
 // and a rolled-back ingest leaves nothing to publish.
 // It reports whether a row was written, so callers wake the relay only then.
 func (s *Store) insertOutboxTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent, at time.Time) (bool, error) {
+	return s.insertOutboxReasonTx(ctx, tx, ev, at, "")
+}
+
+func (s *Store) insertOutboxReasonTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent, at time.Time, reason string) (bool, error) {
 	if s.outbox == nil {
 		return false, nil
 	}
-	row, ok, err := s.outbox(ev, at)
+	row, ok, err := s.outbox(ev, at, reason)
 	if err != nil {
 		return false, fmt.Errorf("build event envelope: %w", err)
 	}
@@ -73,6 +98,54 @@ func (s *Store) insertOutboxTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent
 		return false, fmt.Errorf("insert event outbox rows: %w", err)
 	}
 	return n == 1, nil
+}
+
+// insertRoutedOutboxTx forwards an event to the operator stream with a routing
+// reason, inside the caller's transaction. It reads identifiers only from the
+// incoming_events row (never the body) and is a no-op unless operator routing
+// is on. The unique event_id makes the first reason win. It reports whether a
+// row was written, so callers wake the relay after commit.
+func (s *Store) insertRoutedOutboxTx(ctx context.Context, tx *sql.Tx, userID int64, eventID, reason string) (bool, error) {
+	if !s.operatorRouting || s.outbox == nil {
+		return false, nil
+	}
+	ev := IncomingEvent{EventID: eventID, UserID: userID}
+	err := tx.QueryRowContext(ctx,
+		`SELECT kind, chat_tg_id, sender_tg_id, message_id
+		   FROM incoming_events WHERE event_id = $1 AND user_id = $2`,
+		eventID, userID,
+	).Scan(&ev.Kind, &ev.ChatTGID, &ev.SenderTGID, &ev.MessageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load event for routing: %w", err)
+	}
+	return s.insertOutboxReasonTx(ctx, tx, ev, time.Now().UTC(), reason)
+}
+
+// routeJobEventTx forwards the source event of a job to the operator stream.
+func (s *Store) routeJobEventTx(ctx context.Context, tx *sql.Tx, jobID int64, reason string) (bool, error) {
+	if !s.operatorRouting || s.outbox == nil {
+		return false, nil
+	}
+	var userID int64
+	var eventID string
+	err := tx.QueryRowContext(ctx, `SELECT user_id, event_id FROM agent_jobs WHERE id = $1`, jobID).Scan(&userID, &eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load job for routing: %w", err)
+	}
+	return s.insertRoutedOutboxTx(ctx, tx, userID, eventID, reason)
+}
+
+// notifyOutbox wakes the relay after a commit that wrote a routed row.
+func (s *Store) notifyOutbox(wrote bool) {
+	if wrote && s.outboxNotify != nil {
+		s.outboxNotify()
+	}
 }
 
 const outboxLeaseName = "relay"

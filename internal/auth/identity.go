@@ -53,6 +53,13 @@ type Identity struct {
 	// of a client with no binding). It is a property of the credential, like
 	// ClientID: never derive it from how the request carried the token.
 	Profile string
+	// JobID, JobAttempt and ConversationID are set for an agent job
+	// credential (audience "agent-job") and bind it to one job and its
+	// conversation (localjwt claims job_id, job_attempt, conv_id). Zero for
+	// every other credential, including the account-wide "agent" token.
+	JobID          int64
+	JobAttempt     int
+	ConversationID int64
 }
 
 func (i *Identity) HasScope(s string) bool {

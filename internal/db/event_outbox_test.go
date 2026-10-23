@@ -13,7 +13,7 @@ import (
 )
 
 // testOutboxBuilder stands in for internal/events: identifiers only.
-func testOutboxBuilder(ev IncomingEvent, _ time.Time) (OutboxRow, bool, error) {
+func testOutboxBuilder(ev IncomingEvent, _ time.Time, _ string) (OutboxRow, bool, error) {
 	if ev.Kind != EventKindPrivateMessage && ev.Kind != EventKindMessageEdit {
 		return OutboxRow{}, false, nil
 	}
@@ -109,7 +109,7 @@ func TestEventOutbox_DisabledWritesNothing(t *testing.T) {
 func TestEventOutbox_BuildFailureRollsBackTheIngest(t *testing.T) {
 	ctx := context.Background()
 	boom := errors.New("boom")
-	s := newTestStoreCrypted(t).WithEventOutbox(func(IncomingEvent, time.Time) (OutboxRow, bool, error) {
+	s := newTestStoreCrypted(t).WithEventOutbox(func(IncomingEvent, time.Time, string) (OutboxRow, bool, error) {
 		return OutboxRow{}, false, boom
 	})
 	uid := seedAgentUser(t, s, "owner")
