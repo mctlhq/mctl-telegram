@@ -1015,6 +1015,14 @@ func sqliteSchema() []string {
 			entry_id TEXT NOT NULL PRIMARY KEY,
 			digest_id TEXT NOT NULL
 		)`,
+		// Telegram DC stamp (issue #854): which datacenters, production or
+		// test, the sessions in this store belong to. One row; see
+		// EnsureDCMode.
+		`CREATE TABLE IF NOT EXISTS telegram_dc_mode (
+			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+			mode TEXT NOT NULL CHECK (mode IN ('production', 'test')),
+			stamped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 }
 
@@ -1286,6 +1294,11 @@ func pgSchema() []string {
 		`CREATE TABLE IF NOT EXISTS product_update_entry_owners (
 			entry_id TEXT NOT NULL PRIMARY KEY,
 			digest_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS telegram_dc_mode (
+			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+			mode TEXT NOT NULL CHECK (mode IN ('production', 'test')),
+			stamped_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
 	}
 }

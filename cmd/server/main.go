@@ -85,6 +85,10 @@ func main() {
 		slog.Error("boot guard", "err", err)
 		os.Exit(1)
 	}
+	if err := checkTestDC(cfg); err != nil {
+		slog.Error("boot guard", "err", err)
+		os.Exit(1)
+	}
 	// The bot-start bridge authenticator is validated here, before anything
 	// is opened or any background worker starts, so a set but unusable
 	// BOT_START_BRIDGE_TOKEN exits without skipping a shutdown tail. The
@@ -98,6 +102,7 @@ func main() {
 		"auth_mode", cfg.AuthMode,
 		"auth_required", cfg.AuthRequired,
 		"allow_send", cfg.AllowSend,
+		"telegram_test_dc", cfg.TGTestDC,
 		"mcp_path", cfg.MCPPath,
 		"addr", cfg.Addr,
 		"allowed_origins", cfg.AllowedOrigins,
@@ -139,6 +144,12 @@ func main() {
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m).
 		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
+	// Before any client exists: a pool pointed at the wrong Telegram DCs
+	// would revoke every stored session it touched (issue #854).
+	if err := store.EnsureDCMode(ctx, db.DCModeFor(cfg.TGTestDC)); err != nil {
+		slog.Error("telegram dc mode", "err", err)
+		os.Exit(1)
+	}
 	// Runs after Migrate on purpose. Migrate owns the re-arm direction — an
 	// identity dropped from the list is no longer excluded from its backfill,
 	// so it gets its deadline back — while this clears the deadline for rows
@@ -206,6 +217,7 @@ func main() {
 	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).
 		WithMaxSessions(cfg.TelegramMaxSessions).
 		WithGlobalMiddleware(globalTGLimiter).
+		WithTestDC(cfg.TGTestDC).
 		WithPeerFloodHook(func(userID int64) { limiter.HoldWrites(userID, audit.PeerFloodHold) }).
 		WithMetrics(m).
 		WithAgentRuntime(agentListener)
@@ -526,7 +538,7 @@ func main() {
 		// Share the api_id-wide limiter with the interactive login client so a
 		// first-time connect (auth.sendCode) — the most flood-sensitive call on
 		// the shared TG_API_ID — throttles against the same budget as the pool.
-		oauthSrv.WithLoginConfig(telegram.LoginConfig{GlobalMiddleware: globalTGLimiter})
+		oauthSrv.WithLoginConfig(telegram.LoginConfig{GlobalMiddleware: globalTGLimiter, TestDC: cfg.TGTestDC})
 		// Browser-based Telegram account onboarding. Only meaningful when the
 		// OAuth issuer is active (local-jwt mode); returns 404 otherwise.
 		// Identifier is the same provider /mcp and friends authenticate

@@ -50,6 +50,14 @@ func checkBootGuard(cfg *config.Config) error {
 		cfg.Addr, cfg.Environment, strings.Join(problems, "; "))
 }
 
+// checkTestDC refuses TG_TEST_DC=true unless ENV names a local or test tier
+// explicitly (issue #854); see config.CheckTestDC, which cmd/login shares.
+// An empty ENV is not enough here, although checkBootGuard accepts it as
+// local: the production deployment leaves ENV unset.
+func checkTestDC(cfg *config.Config) error {
+	return config.CheckTestDC(cfg)
+}
+
 // insecureAuth reports whether cfg grants the local-dev auth bypass: either
 // AUTH_MODE is (case-insensitively) "local-dev", which unconditionally
 // returns a fixed platform-admin identity for every request
@@ -72,7 +80,7 @@ func insecureAuth(cfg *config.Config) bool {
 // ENCRYPTION_KEY — the loopback bind is the only thing between it and an
 // exposed admin bypass. Real deployments must set ENV; the intentionality of
 // this gap is pinned by TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed.
-var localEnvNames = []string{"", "local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+var localEnvNames = append([]string{""}, config.LocalTiers...)
 
 // isLocalEnv reports whether env names a local development tier, compared
 // case-insensitively after trimming surrounding whitespace (consistent with

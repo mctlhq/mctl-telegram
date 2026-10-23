@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -451,6 +452,7 @@ func runLogin(args []string) {
 
 	tgID, displayName, username, err := tg.Login(
 		ctx, cfg.APIID, cfg.APIHash, store, uid, *phone, askCode, askPassword,
+		tg.LoginConfig{TestDC: localTestDC()},
 	)
 	if err != nil {
 		die(fmt.Errorf("login: %w", err))
@@ -673,7 +675,8 @@ func serveDaemon(parent context.Context) error {
 	store, closeDB, uid := openLocalStore(ctx, keyHex)
 	defer closeDB()
 
-	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store)
+	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store).
+		WithTestDC(localTestDC())
 	defer pool.Shutdown()
 
 	// Graceful shutdown on SIGINT/SIGTERM. Registered here, after the
@@ -709,6 +712,14 @@ func serveDaemon(parent context.Context) error {
 var errNoServerConfigured = errors.New("no server configured -- run `mctl-telegram-local activate --server <url>` (or `connect --server <url> --token <t>`) first")
 
 // ---- helpers -------------------------------------------------------------
+
+// localTestDC reports whether TG_TEST_DC points this bridge at Telegram's
+// test datacenters (issue #854), parsed exactly as cmd/server and cmd/login
+// parse it. The bridge needs no ENV guard: its store is its own local file,
+// never the hosted database.
+func localTestDC() bool {
+	return config.TestDCFromEnv()
+}
 
 // openLocalStore opens (or creates) the local SQLite DB at the standard path,
 // migrates the schema, and returns a *db.Store, a close function, and the
@@ -748,6 +759,10 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 	}
 
 	store := db.NewStore(rawDB, cryp)
+	if err := store.EnsureDCMode(ctx, db.DCModeFor(localTestDC())); err != nil {
+		_ = rawDB.Close()
+		die(err)
+	}
 
 	// Seed the single local user row.
 	uid, err := store.EnsureUser(ctx, "local", "", "local-bridge")

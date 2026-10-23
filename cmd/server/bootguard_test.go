@@ -189,3 +189,29 @@ func TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed(t *testing.T) {
 		t.Fatal("unset ENV on a public bind with local-dev auth must be fatal")
 	}
 }
+
+func TestCheckTestDC(t *testing.T) {
+	cases := []struct {
+		env    string
+		testDC bool
+		ok     bool
+	}{
+		{env: "", testDC: false, ok: true},
+		{env: "production", testDC: false, ok: true},
+		// The production deployment leaves ENV unset, so an empty ENV must
+		// not be read as local here.
+		{env: "", testDC: true, ok: false},
+		{env: "  ", testDC: true, ok: false},
+		{env: "production", testDC: true, ok: false},
+		{env: "staging", testDC: true, ok: false},
+		{env: "local", testDC: true, ok: true},
+		{env: "Test", testDC: true, ok: true},
+		{env: "ci", testDC: true, ok: true},
+	}
+	for _, c := range cases {
+		err := checkTestDC(&config.Config{Environment: c.env, TGTestDC: c.testDC})
+		if (err == nil) != c.ok {
+			t.Errorf("checkTestDC(ENV=%q, TG_TEST_DC=%v) = %v, want ok=%v", c.env, c.testDC, err, c.ok)
+		}
+	}
+}

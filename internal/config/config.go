@@ -78,12 +78,17 @@ type Config struct {
 	WorkerTokenRevocationCacheTTL time.Duration
 	TGAPIID                       int
 	TGAPIHash                     string
-	EncryptionKey                 []byte
-	AllowSend                     bool
-	IdleClientTimeout             time.Duration
-	RateLimitPerUser              int
-	AuditRetentionDays            int
-	LogLevel                      string
+	// TGTestDC points every MTProto client at Telegram's test datacenters
+	// (TG_TEST_DC, issue #854). cmd/server refuses it unless ENV names a
+	// local or test tier explicitly, and every process checks the store's DC
+	// stamp before opening a session.
+	TGTestDC           bool
+	EncryptionKey      []byte
+	AllowSend          bool
+	IdleClientTimeout  time.Duration
+	RateLimitPerUser   int
+	AuditRetentionDays int
+	LogLevel           string
 	// Telegram-native OAuth (local-jwt mode):
 	TelegramLoginBotToken string // bot token used to send the daily new-client digest
 	// TelegramLoginBotUsername is the login bot's @username (no "@"), used to
@@ -436,6 +441,7 @@ func Load() (*Config, error) {
 		OAUTHJWTAudReq:                envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		WorkerTokenRevocationCacheTTL: envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
 		TGAPIHash:                     os.Getenv("TG_API_HASH"),
+		TGTestDC:                      TestDCFromEnv(),
 		AllowSend:                     envBool("ALLOW_SEND", false),
 		IdleClientTimeout:             envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
 		RateLimitPerUser:              envInt("RATE_LIMIT_PER_USER", 30),
@@ -716,6 +722,43 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// TestDCFromEnv reads TG_TEST_DC the way every binary must (issue #854):
+// cmd/server and cmd/login through Load, the Local Bridge directly. An
+// unrecognised value is production, the safe reading for a flag whose wrong
+// value revokes sessions.
+func TestDCFromEnv() bool {
+	return envBool("TG_TEST_DC", false)
+}
+
+// LocalTiers are the ENV values that explicitly name a developer machine or a
+// test tier. cmd/server's boot guard builds its list from this one (adding
+// the empty string), so the two cannot drift. TG_TEST_DC accepts only these:
+// the production deployment leaves ENV unset, so an empty value proves
+// nothing about the tier.
+var LocalTiers = []string{"local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+
+// CheckTestDC refuses TG_TEST_DC=true unless ENV names a local or test tier
+// explicitly, compared case-insensitively. Every process that writes or opens
+// stored sessions calls it before opening the store: cmd/server and
+// cmd/login, whose store may be the production database. A test-DC process
+// on that store would revoke every session it touched (cmd/server), or stamp
+// a still-empty production store test so production refuses to boot
+// (cmd/login). The store's DC stamp (db.Store.EnsureDCMode) is the second,
+// independent check.
+func CheckTestDC(cfg *Config) error {
+	if !cfg.TGTestDC {
+		return nil
+	}
+	env := strings.TrimSpace(cfg.Environment)
+	for _, name := range LocalTiers {
+		if strings.EqualFold(env, name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing to start: TG_TEST_DC=true needs ENV set to a local or test tier (%s), got ENV=%q",
+		strings.Join(LocalTiers, ", "), cfg.Environment)
 }
 
 func envBool(key string, def bool) bool {

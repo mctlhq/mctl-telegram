@@ -46,18 +46,9 @@ func LoginQR(
 	dispatcher := tg.NewUpdateDispatcher()
 	loggedIn := qrlogin.OnLoginToken(dispatcher)
 
-	client := gotdtelegram.NewClient(apiID, apiHash, gotdtelegram.Options{
-		SessionStorage: sessStore,
-		UpdateHandler:  dispatcher,
-		Device: gotdtelegram.DeviceConfig{
-			DeviceModel:    "MCTL Assistant",
-			SystemVersion:  "Linux",
-			AppVersion:     "1.0",
-			SystemLangCode: "en",
-			LangCode:       "en",
-		},
-		Middlewares: loginMiddlewares(cfg),
-	})
+	opts := loginClientOptions(sessStore, cfg)
+	opts.UpdateHandler = dispatcher
+	client := gotdtelegram.NewClient(apiID, apiHash, opts)
 
 	runErr := client.Run(ctx, func(ctx context.Context) error {
 		qr := qrlogin.NewQR(client.API(), apiID, apiHash, qrlogin.Options{
