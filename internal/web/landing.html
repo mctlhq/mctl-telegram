@@ -417,7 +417,7 @@
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you allow it. When you connect, MCTL asks whether to give <em>Read only</em> (the default) or <em>Read + send</em> access. With sending off (<code>send_enabled=false</code>), write tools return a preview (<code>sent=false</code>) instead of delivering. You can change your choice later with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}. A real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
+        <dd>Only if you allow it. When you connect, MCTL asks whether to give <em>Read only</em> (the default) or <em>Read + send</em> access. With sending off (<code>send_enabled=false</code>), <code>send_message</code> and <code>send_media</code> return a preview (<code>sent=false</code>) instead of delivering, and the other write tools (edit, delete, forward, react, pin) refuse with an error. You can change your choice later with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}. A real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
         <dt>What does my AI assistant see?</dt>

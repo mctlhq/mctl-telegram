@@ -44,7 +44,7 @@
     <h3>OAuth</h3>
     <ul class="ctrl">
       <li><strong>Discovery:</strong> MCTL is its own authorization server. Clients find it through <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
-      <li><strong>Client registration:</strong> Client ID Metadata Documents (CIMD — what Claude uses by default) and Dynamic Client Registration are both supported, so no client ID or secret has to be entered by hand. Authorization code with PKCE <code>S256</code> only. Platforms that connect many users: see <a href="/platforms">/platforms</a>.</li>
+      <li><strong>Client registration:</strong> tg.mctl.ai supports both Client ID Metadata Documents (CIMD — what Claude uses by default) and Dynamic Client Registration, so no client ID or secret has to be entered by hand. A self-hosted deployment advertises CIMD only when it is enabled; <a href="/platforms">/platforms</a> shows this deployment's live setting. Authorization code with PKCE <code>S256</code> only. Platforms that connect many users: see <a href="/platforms">/platforms</a>.</li>
     </ul>
     <h3 id="first-login">First sign-in</h3>
     <ol class="steps">
@@ -78,7 +78,7 @@
         <tr><td><code>draft_reply</code>, <code>send_reply</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:send</code></td><td>Only on connections bound to the restricted <code>core-reply</code> profile. <code>draft_reply</code> sends nothing and returns the exact recipient and text; <code>send_reply</code> takes only the server-issued confirmation and sends once.</td></tr>
         <tr><td><code>get_my_identity</code>, <code>get_my_send_status</code>, <code>get_my_audit_log</code></td><td><span class="pill pill-read">read</span></td><td>any signed-in connection</td><td>Who you are signed in as, whether a send would really be delivered, and your own audit log.</td></tr>
         <tr><td><code>set_send_consent</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Turn real sending on or off for your own account.</td></tr>
-        <tr><td><code>get_my_notification_preferences</code>, <code>set_my_notification_preferences</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Product update, maintenance and security notices from the login bot.</td></tr>
+        <tr><td><code>get_my_notification_preferences</code>, <code>set_my_notification_preferences</code></td><td><span class="pill pill-read">read</span> <span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Product update, maintenance and security notices from the login bot.</td></tr>
         <tr><td><code>disconnect_telegram_account</code>, <code>delete_telegram_account</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Soft revoke or hard delete — see <a href="#controls">Your controls</a>.</td></tr>
         <tr><td><code>revoke_local_bridge_device</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Revoke one of your Local Bridge devices and evict a live daemon. See <a href="/docs/local-bridge/owner">owner controls</a>.</td></tr>
       </tbody>
@@ -94,7 +94,8 @@
     </div>
     <p>
       Scopes come from your Telegram identity. On tg.mctl.ai registration is open, so every
-      signed-in user is in the <code>client</code> tier and gets the scopes below for their
+      signed-in user is in the <code>client</code> tier (a self-hosted deployment may instead
+      require an operator grant, see below) and gets the scopes below for their
       <em style="color: var(--text)">own</em> account. A client asks for a subset by naming
       scopes in the authorization request; omitting <code>scope</code> grants the full
       entitled set. Administrative scopes cannot be requested.
