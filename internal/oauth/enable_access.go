@@ -256,6 +256,14 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 				// they keep the ERROR arm with the underlying err.
 				slog.Warn("enable: onboarding abandoned",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
+			case isAbandonment(lf.err) && lf.step == "queued":
+				// The flow's own CodeTTL ran out while it was still waiting
+				// for the uid mutex, with no supersession recorded: it never
+				// contacted the database or Telegram, so there is no failure
+				// to report, only a slot that was never reached. WARN like the
+				// walked-away case, not ERROR.
+				slog.Warn("enable: login flow expired before it started",
+					"uid", uid, "elapsed", elapsed)
 			default:
 				slog.Error("enable: telegram login failed",
 					"uid", uid, "want_tg_id", wantTgID,
@@ -282,6 +290,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// exactly the goroutine that would otherwise send the stray login
 		// code the user never asked for.
 		if cErr := bgCtx.Err(); cErr != nil {
+			lf.step = "queued"
 			lf.err = cErr
 			return
 		}

@@ -193,3 +193,35 @@ func TestEnableAccess_SendCodeTimeout_CancelsFlow(t *testing.T) {
 		t.Errorf("step = %v, want stepPhone after the timeout form", es.step)
 	}
 }
+
+// TestStartLoginFlow_CodeTTLWhileQueuedLogsWarnNotError pins the review nit
+// on #861: a flow whose CodeTTL expires while it is still queued on the uid
+// mutex never ran anything, so it must not log "telegram login failed".
+func TestStartLoginFlow_CodeTTLWhileQueuedLogsWarnNotError(t *testing.T) {
+	buf := captureEnableLog(t)
+	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 100 * time.Millisecond })
+	srv.loginFn = stubLoginParksAtCode()
+
+	parked := make(chan struct{})
+	srv.loginFlowParked = sync.OnceFunc(func() { close(parked) })
+	ul := srv.uidLoginMutex(1)
+	ul.Lock()
+	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
+	select {
+	case <-parked:
+	case <-time.After(2 * time.Second):
+		ul.Unlock()
+		t.Fatal("flow never queued on the uid mutex")
+	}
+	time.Sleep(200 * time.Millisecond) // let CodeTTL expire while queued
+	ul.Unlock()
+	waitForFlowDone(t, lf, 2*time.Second)
+
+	line := buf.String()
+	if !strings.Contains(line, "enable: login flow expired before it started") {
+		t.Errorf("expected the WARN never-started line; log:\n%s", line)
+	}
+	if strings.Contains(line, "enable: telegram login failed") {
+		t.Errorf("a flow that never started must not log the ERROR line; log:\n%s", line)
+	}
+}
