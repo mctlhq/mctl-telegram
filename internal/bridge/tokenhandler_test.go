@@ -24,7 +24,7 @@ func tokenHandlerStore(t *testing.T) *db.Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(context.Background(), conn); err != nil {
+	if err := db.MigrateCached(context.Background(), conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return &db.Store{DB: conn}

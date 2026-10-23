@@ -21,7 +21,7 @@ func newTestStore(t *testing.T) *db.Store {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.Migrate(context.Background(), rawDB); err != nil {
+	if err := db.MigrateCached(context.Background(), rawDB); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	c, _ := crypto.New(nil)

@@ -28,7 +28,7 @@ func openMigrated(t *testing.T, dsn string) *sql.DB {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := Migrate(context.Background(), conn); err != nil {
+	if err := MigrateCached(context.Background(), conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return conn

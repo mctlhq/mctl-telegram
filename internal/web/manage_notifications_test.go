@@ -31,7 +31,7 @@ func newIsolatedManageServer(t *testing.T) (*ManageServer, *db.Store) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)

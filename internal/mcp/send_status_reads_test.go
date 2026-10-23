@@ -81,7 +81,7 @@ func newCountingStore(t *testing.T, dsn string) (*db.Store, *int32) {
 	var n int32
 	conn := sql.OpenDB(countingConnector{inner: inner, n: &n})
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(context.Background(), conn); err != nil {
+	if err := db.MigrateCached(context.Background(), conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return &db.Store{DB: conn}, &n

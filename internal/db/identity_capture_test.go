@@ -374,7 +374,7 @@ func newPostgresTestStore(t *testing.T, dsn string) *Store {
 		t.Skipf("postgres not available: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := Migrate(ctx, conn); err != nil {
+	if err := MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate postgres: %v", err)
 	}
 	c, err := crypto.New(makeKey())

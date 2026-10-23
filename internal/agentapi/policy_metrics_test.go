@@ -28,7 +28,7 @@ func newHarnessWithMetrics(t *testing.T) (*testHarness, *metrics.Registry) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(ctx, conn); err != nil {
+	if err := db.MigrateCached(ctx, conn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	crypt, err := crypto.New(testCryptKey())
