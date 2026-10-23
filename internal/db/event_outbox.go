@@ -187,8 +187,13 @@ func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration
 	ids, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
 		  WHERE status = $4 AND attempts = 0 AND created_at < $5
+			    AND NOT EXISTS (
+			        SELECT 1 FROM agent_jobs p
+			         WHERE p.conversation_id = agent_jobs.conversation_id
+			           AND (p.status = $6 OR (p.status = $4 AND p.id < agent_jobs.id))
+			    )
 		 RETURNING id`,
-		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after))
+		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after), JobProcessing)
 	if err != nil {
 		return 0, fmt.Errorf("route unclaimed agent jobs: %w", err)
 	}

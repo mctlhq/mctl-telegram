@@ -326,3 +326,24 @@ func TestRouteUnclaimed_SkipsClaimedAndKeepsFirstReason(t *testing.T) { // T3.2,
 		t.Fatalf("outbox rows = %d, want 1 (first reason wins)", n)
 	}
 }
+
+func TestRouteUnclaimed_SkipsFollowerBehindProcessingHead(t *testing.T) {
+	f := newTurnFixture(t, nil)
+	head := f.ingest(t, 555, 10, 5, 0)
+	follower := f.ingest(t, 555, 11, 5, time.Second)
+	if _, err := f.s.DB.Exec(`UPDATE agent_jobs SET created_at = $1`, time.Now().UTC().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	got := f.claim(t, 1)
+	if len(got) != 1 || got[0].EventID != head {
+		t.Fatalf("claim = %+v", got)
+	}
+	f.s.operatorRouting = true
+	if n, err := f.s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil || n != 0 {
+		t.Fatalf("sweep with processing head: %d %v", n, err)
+	}
+	if st, _ := f.status(t, follower); st != JobPending {
+		t.Fatalf("follower status = %s, want pending", st)
+	}
+}
