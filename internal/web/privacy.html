@@ -18,9 +18,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -168,9 +169,10 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <h2>Contact</h2>
   <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Privacy inquiries: <strong><a href="mailto:privacy@mctl.ai">privacy@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. Code is open source at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>

@@ -395,16 +395,16 @@ var connectHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + `</style>
 </head>
 <body>
-  <div class="wrap">
 ` + ui.TopbarLite + `
+  <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
 `
 
 var connectFoot = `    </div>
   </main>
-` + ui.FooterLite + `
   </div>
+` + ui.FooterLite + `
 </body>
 </html>`
 
