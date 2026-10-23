@@ -15,6 +15,7 @@ func testPlatformFacts() PlatformFacts {
 		MediaUploadBytes:   20 << 20,
 		BulkMediaBytes:     8 << 20,
 		PeerSendCap:        20,
+		PeerCleanupCap:     60,
 		PeerWindow:         time.Hour,
 		AccessTokenTTL:     time.Hour,
 		RefreshTokenTTL:    720 * time.Hour,
@@ -80,10 +81,12 @@ func TestPlatforms_LimitsComeFromConfig(t *testing.T) {
 	f.RegisterRatePerMin = 7
 	f.MediaUploadBytes = 3 << 20
 	f.BulkMediaBytes = 6 << 20
+	f.PeerCleanupCap = 55
 	body := renderPlatforms(t, f)
 	for _, must := range []string{
 		"45 per minute",
 		"20 per hour",
+		"55 per hour",
 		"7 attempts per minute",
 		"3 MiB per file",
 		"6 MiB in total",
