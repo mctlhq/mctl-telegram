@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.89.0](https://github.com/mctlhq/mctl-telegram/compare/0.88.3...0.89.0) (2026-10-23)
+
+
+### Features
+
+* **web:** align public pages with the mctl-design 0.14 site shell ([203dc63](https://github.com/mctlhq/mctl-telegram/commit/203dc63b56a7c50775c514ad004cd25f28e5bed0))
+* **web:** align public pages with the mctl-design 0.14 site shell ([801e3e3](https://github.com/mctlhq/mctl-telegram/commit/801e3e364f1f25863a2e464ef0bc8683718b92d9))
+* **web:** put Claude first and refresh setup instructions on all pages ([e790ebf](https://github.com/mctlhq/mctl-telegram/commit/e790ebfeaefd60f281e233babbcafe630c28254f))
+* **web:** put Claude first and refresh setup instructions on all pages ([94eafed](https://github.com/mctlhq/mctl-telegram/commit/94eafedec8265c8673fa0edc525ee0a251713e38))
+
+
+### Bug Fixes
+
+* **ui:** drop the desktop menu checkbox from the tab order ([97b834e](https://github.com/mctlhq/mctl-telegram/commit/97b834e042f6a3b0885a6d820b69d0c0a6fb5d4b))
+* **ui:** keep ul.ctrl items inside a phone viewport ([527e6e9](https://github.com/mctlhq/mctl-telegram/commit/527e6e93f1ba603eab95e0899c425ea1a7620d17))
+* **web:** address review on Claude-first pages ([181178c](https://github.com/mctlhq/mctl-telegram/commit/181178c7f0bab683f2ac11ab61d3e3d4fd4d2a27))
+* **web:** label untested MCP clients and pin send-gate copy ([ef10f51](https://github.com/mctlhq/mctl-telegram/commit/ef10f51ffd711c7a6ddd5b60a82f8ba090d94d98))
+
 ## [0.88.3](https://github.com/mctlhq/mctl-telegram/compare/0.88.2...0.88.3) (2026-10-23)
 
 
