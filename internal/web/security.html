@@ -25,9 +25,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -183,9 +184,10 @@
   <h2>Prompt-injection content boundary</h2>
   <p>Read tools wrap Telegram message bodies in <code>&lt;telegram-content origin="telegram" peer="redacted" untrusted="true"&gt;…&lt;/telegram-content&gt;</code> and escape literal closing tags inside message text. This is a signalling boundary for the MCP client, not a substitute for the server-side Communication Agent policy engine.</p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>

@@ -88,9 +88,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <article class="doc">
     <nav class="doc-nav" aria-label="Local Bridge guide">
@@ -118,9 +119,10 @@
     </p>
   </article>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>

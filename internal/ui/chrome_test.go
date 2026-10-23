@@ -18,19 +18,26 @@ func render(t *testing.T, name, page string, data Data) string {
 
 func TestFullChrome(t *testing.T) {
 	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head>` +
-		`<body><div class="wrap">{{template "ui_topbar" .}}<main></main>{{template "ui_footer" .}}</div>{{template "ui_script" .}}</body></html>`
+		`<body>{{template "ui_topbar" .}}<main class="mctl-site-container"></main>{{template "ui_footer" .}}{{template "ui_script" .}}</body></html>`
 	out := render(t, "full", page, Data{Title: "T", NavActive: "docs", PublicBaseURL: "https://tg.mctl.ai"})
 
 	for _, s := range []string{
-		`class="topbar"`,
-		"ui.mctl.ai/0.14.0/mctl.css",
-		// global.css is pinned as a set with mctl.css.
-		"ui.mctl.ai/0.14.0/global.css",
+		// Shared public-site shell (site.css): full-bleed header and footer,
+		// their content in the one container the page content uses.
+		`<header class="mctl-site-header">`,
+		`<div class="mctl-site-container mctl-site-header__inner">`,
+		`<a class="mctl-site-brand" href="/"`,
+		`<footer class="mctl-site-footer">`,
+		`<div class="mctl-site-container mctl-site-footer__inner">`,
+		`<nav class="mctl-site-footer__links"`,
+		"ui.mctl.ai/0.15.0/mctl.css",
+		// global.css and site.css are pinned as a set with mctl.css.
+		"ui.mctl.ai/0.15.0/global.css",
+		"ui.mctl.ai/0.15.0/site.css",
 		"family=Onest:wght@300;400;500;600;700;800",
 		"Instrument+Serif",
 		"JetBrains+Mono",
 		"ui.mctl.ai/brand/favicon-telegram.svg",
-		"<footer>",
 		"https://tg.mctl.ai",
 		`<a href="/docs" class="active">Docs</a>`,
 		// CSS-only mobile menu: works without JS.
@@ -83,7 +90,7 @@ func TestStylesheetIsVersionPinned(t *testing.T) {
 
 func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 	page := `<!doctype html><html lang="en"><head>{{template "ui_head_lite" .}}</head>` +
-		`<body><div class="wrap">{{template "ui_topbar_lite" .}}{{template "ui_footer_lite" .}}</div></body></html>`
+		`<body>{{template "ui_topbar_lite" .}}<div class="mctl-site-container"></div>{{template "ui_footer_lite" .}}</body></html>`
 	out := render(t, "lite", page, Data{Title: "L"})
 
 	for _, bad := range []string{"mctl.css", "fonts.googleapis.com", "<script", "stats.mctl.ai", `href="/favicon.svg"`, "accent-swatch", "accent-picker"} {
@@ -94,8 +101,16 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 	if !strings.Contains(out, "ui.mctl.ai/brand/favicon-telegram.svg") {
 		t.Error("lite page missing CDN favicon")
 	}
-	if !strings.Contains(out, `class="topbar"`) {
-		t.Error("lite page missing topbar")
+	for _, s := range []string{`<header class="mctl-site-header">`, `<footer class="mctl-site-footer">`} {
+		if !strings.Contains(out, s) {
+			t.Errorf("lite page missing %q", s)
+		}
+	}
+	// No external CSS here, so the site.css layout classes must be inlined.
+	for _, s := range []string{".mctl-site-container {", ".mctl-site-header {", ".mctl-site-footer {"} {
+		if !strings.Contains(out, s) {
+			t.Errorf("lite page must inline the site.css mirror; missing %q", s)
+		}
 	}
 	if !strings.Contains(out, "'Onest'") {
 		t.Error("lite fallback tokens must use Onest")
@@ -204,5 +219,36 @@ func TestNavToggleHiddenOnDesktop(t *testing.T) {
 	m := strings.Index(componentsCSS, "@media (max-width: 767px)")
 	if m < 0 || !strings.Contains(componentsCSS[m:], ".nav-toggle {\n      display: block;") {
 		t.Fatal(".nav-toggle must be re-enabled (visually hidden) inside the mobile query")
+	}
+}
+
+// The inlined site.css mirror must be the same version the content pages link
+// from the CDN; otherwise strict-CSP pages and a CDN outage would lay out
+// differently from the pinned sheet. The published file's first line names
+// its version.
+func TestSiteCSSMirrorMatchesPinnedVersion(t *testing.T) {
+	first := siteCSS[:strings.Index(siteCSS, "\n")]
+	if want := "/* @mctlhq/css " + DesignVersion + " — site.css. */"; first != want {
+		t.Fatalf("assets/site.css header = %q, want %q (refresh the mirror with the pin)", first, want)
+	}
+	if !strings.Contains(ComponentsCSS, siteCSS) {
+		t.Fatal("ComponentsCSS (strict-CSP pages) must carry the site.css mirror")
+	}
+}
+
+// The content box is 1400px plus a 20px gutter on each side, the same edge as
+// mctl.ai and docs.mctl.ai. The old 920px .wrap (an 872px column) and the
+// 100vw header/footer breakout it needed must not come back.
+func TestNoLocalPageWrap(t *testing.T) {
+	for _, bad := range []string{".wrap {", "100vw", ".topbar {", "max-width: 920px"} {
+		if strings.Contains(componentsCSS, bad) {
+			t.Errorf("components.css still has the pre-0.15 page box %q", bad)
+		}
+	}
+	if !strings.Contains(tokensCSS, "--site-content-width: 1400px;") || !strings.Contains(tokensCSS, "--site-gutter: 20px;") {
+		t.Error("fallback tokens must carry the 1400px content width and 20px gutter")
+	}
+	if !strings.Contains(tokensCSS, "--mctl-layout-prose-width: 720px;") {
+		t.Error("fallback tokens must carry the 720px prose width site.css reads")
 	}
 }

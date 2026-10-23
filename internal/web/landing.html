@@ -6,37 +6,12 @@
   /* Landing-only styles. Buttons (.cta-btn, .btn-secondary) and the card
      recipe (.use-card, .trust-card, .faq-item) are shared in components.css. */
 
-  /* Public type roles, as on mctl.ai: hero and section titles. */
-  .hero h1 {
-    font-size: var(--text-hero-size);
-    font-weight: var(--text-hero-weight);
-    line-height: var(--text-hero-leading);
-    letter-spacing: var(--text-hero-tracking);
-  }
-  .section-head h2 {
-    font-size: var(--text-section-size);
-    font-weight: var(--text-section-weight);
-    line-height: var(--text-section-leading);
-    letter-spacing: var(--text-section-tracking);
-    border-bottom: 0;
-    padding-bottom: 0;
-  }
+  /* Layout (hero, section titles, card grid) is site.css: .mctl-site-*. */
 
-  .cta-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 32px;
-  }
+  /* Inside the hero text stack the grid gap spaces the items. */
+  .mctl-site-hero__text > * { margin: 0; }
 
   /* Use-case cards */
-  .card-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 20px;
-    margin: 0;
-  }
   .use-card { padding: 20px; }
   .use-card .card-icon {
     width: 36px; height: 36px;
@@ -149,39 +124,36 @@
 
   /* Landing entrance motion (keyframes in components.css): moves, never fades. */
   @media (prefers-reduced-motion: no-preference) {
-    .cta-row     { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .32s backwards; }
-    .hero .muted { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .40s backwards; }
+    .mctl-site-hero__actions { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .32s backwards; }
+    .mctl-site-hero .muted   { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .40s backwards; }
   }
 
   /* Responsive — landing-specific only; shared breakpoints live in components.css */
-  @media (max-width: 760px) {
-    .card-grid { grid-template-columns: repeat(2, 1fr); }
-  }
   @media (max-width: 640px) {
-    .card-grid { grid-template-columns: 1fr; }
     .flow-diagram { flex-direction: column; }
     .flow-arrow { transform: rotate(90deg); padding: 4px 0; }
-    .cta-row { flex-direction: column; align-items: flex-start; }
+    .mctl-site-hero__actions { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main>
 
   <!-- ============ Hero ============ -->
-  <section class="hero" style="margin-top: 0;">
+  <section class="mctl-site-container mctl-site-hero">
+    <div class="mctl-site-hero__text">
     <div class="eyebrow">
       <span class="status-dot" aria-hidden="true"></span>
       <span>Remote MCP Server · tg.mctl.ai</span>
     </div>
-    <h1>Your authorized Telegram account,<br><span class="accent">inside Claude</span></h1>
-    <p class="lead">
+    <h1 class="mctl-site-hero__title">Your authorized Telegram account,<br><span class="accent">inside Claude</span></h1>
+    <p class="mctl-site-hero__lede">
       Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarise chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
     </p>
-    <div class="cta-row">
+    <div class="mctl-site-hero__actions">
       <a class="cta-btn" href="#claude">Connect in Claude</a>
       <a class="btn-secondary" href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">Open Claude connectors</a>
       <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
@@ -192,14 +164,13 @@
       <a href="mailto:support@mctl.ai">support@mctl.ai</a>
       · Want the session on your own machine? <a href="/docs/local-bridge">Local Bridge</a>
     </p>
+    </div>
   </section>
 
   <!-- ============ Use cases ============ -->
-  <section id="use-cases">
-    <div class="section-head">
-      <h2>What you can do</h2>
-    </div>
-    <div class="card-grid">
+  <section id="use-cases" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">What you can do</h2>
+    <div class="mctl-site-grid">
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
         <h3>Summarise unread chats</h3>
@@ -234,10 +205,8 @@
   </section>
 
   <!-- ============ How it works ============ -->
-  <section id="how-it-works">
-    <div class="section-head">
-      <h2>How it works</h2>
-    </div>
+  <section id="how-it-works" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">How it works</h2>
     <div class="flow-diagram">
       <div class="flow-node">
         <span class="node-name">Claude</span>
@@ -262,10 +231,8 @@
   </section>
 
   <!-- ============ Claude ============ -->
-  <section id="claude">
-    <div class="section-head">
-      <h2>Connect in Claude</h2>
-    </div>
+  <section id="claude" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Connect in Claude</h2>
     <ol class="steps">
       <li>On <a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> or in the Claude desktop app, open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener"><strong>Customize &#8594; Connectors</strong></a> and choose <strong>Add custom connector</strong>.</li>
       <li>Name it <code>MCTL</code> and set the MCP server URL to <code class="url">{{.MCPURL}}</code>. Keep the default sign-in settings: Claude registers itself with this server, so there is no client ID or secret to enter. Click <strong>Add</strong>.</li>
@@ -283,10 +250,8 @@
   </section>
 
   <!-- ============ Other clients ============ -->
-  <section id="connect">
-    <div class="section-head">
-      <h2>Other MCP clients</h2>
-    </div>
+  <section id="connect" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Other MCP clients</h2>
     <p>MCTL is a standard remote MCP server with OAuth: add <code class="url">{{.MCPURL}}</code>, sign in with Telegram once, and pick read-only or read and send. Claude is the client we test against; the clients marked <em>not yet tested</em> below have no verified sign-in against tg.mctl.ai, so treat their snippets as a starting point.</p>
     <ul class="ctrl">
       <li id="chatgpt"><strong>ChatGPT:</strong> add a custom MCP server by URL in ChatGPT on the web (under <em>Settings &#8594; Apps</em>; some plans need <em>Developer Mode</em> turned on first) and choose <strong>OAuth</strong>. Which plans can add custom servers is set by OpenAI — see their <a href="https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt" target="_blank" rel="noopener">Developer Mode &amp; MCP apps guide</a>. MCTL is not listed in the ChatGPT app directory; the by-URL path is the supported one.</li>
@@ -299,10 +264,8 @@
   </section>
 
   <!-- ============ Data at a glance ============ -->
-  <section id="data">
-    <div class="section-head">
-      <h2>Data at a glance</h2>
-    </div>
+  <section id="data" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Data at a glance</h2>
     <div class="trust-card">
       <ul>
         <li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account and audit metadata without message text. When Communication Agent is enabled, relevant incoming message/event content and proposed action payloads are also stored encrypted at rest.</li>
@@ -314,10 +277,8 @@
   </section>
 
   <!-- ============ Trust ============ -->
-  <section id="trust">
-    <div class="section-head">
-      <h2>Our trust model</h2>
-    </div>
+  <section id="trust" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Our trust model</h2>
     <div class="trust-card">
       <p>MCTL holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
       <ul>
@@ -336,10 +297,8 @@
   </section>
 
   <!-- ============ Local Bridge ============ -->
-  <section id="local-bridge">
-    <div class="section-head">
-      <h2>Keep the session on your machine</h2>
-    </div>
+  <section id="local-bridge" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Keep the session on your machine</h2>
     <div class="trust-card">
       <p>
         <strong>Local Bridge</strong> (beta) is the self-service path where the Telegram session
@@ -361,10 +320,8 @@
   </section>
 
   <!-- ============ FAQ ============ -->
-  <section id="faq">
-    <div class="section-head">
-      <h2>Common questions</h2>
-    </div>
+  <section id="faq" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Common questions</h2>
     <dl class="faq-list">
       <div class="faq-item">
         <dt>Which AI assistants does this work with?</dt>
@@ -402,10 +359,8 @@
   </section>
 
   <!-- ============ Support ============ -->
-  <section id="support">
-    <div class="section-head">
-      <h2>Support and publisher</h2>
-    </div>
+  <section id="support" class="mctl-site-container mctl-site-section">
+    <h2 class="mctl-site-section__title">Support and publisher</h2>
     <div class="trust-card">
       <ul>
         <li><strong>Publisher:</strong> mctl</li>
@@ -417,9 +372,9 @@
     </div>
   </section>
 
-  {{template "ui_footer" .}}
+</main>
 
-</div>
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 <script>

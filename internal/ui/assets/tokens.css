@@ -5,7 +5,7 @@
    * loads it is sourced AFTER this block and overrides every token (equal
    * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.14.0, which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.15.0, which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
    * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA
@@ -60,6 +60,11 @@
     --site-nav-size: 0.95rem;
     --site-nav-weight: 500;
 
+    /* Layout roles site.css reads (container, hero, sections, prose). */
+    --mctl-layout-prose-width: 720px;
+    --mctl-layout-section-padding: clamp(72px, 9vw, 132px);
+    --mctl-layout-stack: 24px;
+
     /* Public type roles. */
     --text-hero-size: clamp(35.2px, 4.5vw, 68px);
     --text-hero-weight: 800;
@@ -75,6 +80,12 @@
     --text-section-tracking: -0.02em;
     --text-prose-section-size: 24px;
     --text-prose-section-weight: 700;
+    --text-subtitle-size: clamp(18px, 1.7vw, 24px);
+    --text-subtitle-weight: 400;
+    --text-subtitle-leading: 1.6;
+    --text-subtitle-tracking: 0;
+    --text-body-size: 16px;
+    --text-body-leading: 1.6;
     --text-label-size: 15.2px;
     --text-caption-size: 13px;
   }
